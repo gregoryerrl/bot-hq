@@ -4,17 +4,16 @@
 //! system prompt from CL, spawns Brian + Rain, kicks off the duo event pumps,
 //! and registers the session in `AppState`.
 
-use crate::agents::{
-    spawn_supervised_agent, AgentHandle, OutgoingUserMessage, RetryPolicy, SpawnConfig,
-};
-use crate::core::broadcast::with_phase_envelope;
+use crate::agents::{spawn_supervised_agent, AgentHandle, RetryPolicy, SpawnConfig};
 use crate::core::duo::{pump_agent, DuoConfig};
 use crate::core::ipav::{IpavPhase, IpavState};
 use crate::paths::Paths;
 use crate::signaling::{
     default_user_settings_paths, load_user_mcp_servers, mcp_config_json, SignalingBridge,
 };
-use crate::storage::{AgentConfig, Author, ClIndexEntry, Session, Storage};
+use crate::storage::{
+    AgentConfig, Author, ClIndexEntry, Envelope, MessageKind, PersistedMessage, Session, Storage,
+};
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -62,6 +61,20 @@ pub struct SessionAgent {
     pub slug: String,
     pub turn_position: i64,
     pub handle: AgentHandle,
+}
+
+impl SessionAgent {
+    /// Write a persisted row to this participant's stdin; `false` if its input
+    /// pump is gone.
+    ///
+    /// Taking a `&PersistedMessage` is the point of B5 Task 2: the bytes are
+    /// [`PersistedMessage::wire`], so an agent cannot read anything the user
+    /// cannot. A caller that wants to decorate the text decorates the ROW —
+    /// `post_to_channel` takes the envelope — and the decoration is recorded
+    /// with the body it belongs to.
+    pub async fn deliver(&self, msg: &PersistedMessage) -> bool {
+        self.handle.input().deliver(msg).await
+    }
 }
 
 /// A live session — the handles owned by `AppState`.
@@ -126,12 +139,15 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    /// Fan a wire message to every agent's stdin. Send errors are ignored: a
-    /// closed input channel means the subprocess is already gone, which this
-    /// caller can't remediate.
-    pub async fn send_to_all(&self, msg: crate::agents::OutgoingUserMessage) {
+    /// Fan one persisted row out to every agent's stdin. Send failures are
+    /// ignored: a closed input channel means the subprocess is already gone,
+    /// which this caller can't remediate.
+    ///
+    /// One row, N deliveries — the receipt is borrowed, so fan-out never means
+    /// re-posting the same text once per recipient.
+    pub async fn send_to_all(&self, msg: &PersistedMessage) {
         for agent in &self.participants {
-            let _ = agent.handle.input_tx.send(msg.clone()).await;
+            agent.deliver(msg).await;
             self.activity.set_busy_slug(&agent.slug, true);
         }
     }
@@ -173,7 +189,7 @@ impl SessionHandle {
     pub fn is_stale(&self) -> bool {
         self.participants
             .iter()
-            .any(|a| a.handle.input_tx.is_closed())
+            .any(|a| a.handle.input().is_closed())
     }
 }
 
@@ -684,6 +700,12 @@ async fn spawn_session_handle(
     bridge
         .register_session_activity(session.id.clone(), Arc::downgrade(&activity))
         .await;
+    // The out-of-band tray answer posts its row inside the bridge, and that row
+    // has to carry the phase envelope the agent will read — so the bridge needs
+    // to be able to read this session's phase.
+    bridge
+        .register_session_phase(session.id.clone(), Arc::downgrade(&ipav))
+        .await;
 
     // Per-agent pumps need to be spawned BEFORE we move the handles, so we
     // pull the receivers + input senders here. The handles keep their other
@@ -694,7 +716,7 @@ async fn spawn_session_handle(
 
     // Rain (optional): pull its receiver + input sender when present.
     let mut rain_handle = rain;
-    let rain_input = rain_handle.as_ref().map(|r| r.input_tx.clone());
+    let rain_input = rain_handle.as_ref().map(|r| r.input().clone());
     let rain_events = rain_handle
         .as_mut()
         .map(|r| std::mem::replace(&mut r.event_rx, tokio::sync::mpsc::channel(1).1));
@@ -743,7 +765,7 @@ async fn spawn_session_handle(
                 activity: Some(Arc::clone(&activity)),
                 open_blocking,
                 ipav: Arc::clone(&ipav),
-                brian_input: brian_handle.input_tx.clone(),
+                brian_input: brian_handle.input().clone(),
                 rain_input: Some(rain_in.clone()),
             };
             let task = tokio::spawn(crate::core::run_router(deps, router_rx));
@@ -779,7 +801,7 @@ async fn spawn_session_handle(
         participant_id: roster_row(&roster, "brian").map(|p| p.id),
         // A3a: Brian's own stdin, so the pump can self-nudge him if he mutates
         // before the Apply phase.
-        self_input_tx: Some(brian_handle.input_tx.clone()),
+        self_input_tx: Some(brian_handle.input().clone()),
         ..DuoConfig::new(session_id_clone, Author::Brian)
     };
     tokio::spawn(async move {
@@ -838,7 +860,7 @@ async fn spawn_session_handle(
         router_watch,
         crate::core::watchdog::IdleWatch {
             storage: storage.clone(),
-            brian_input_tx: brian_handle.input_tx.clone(),
+            brian_input_tx: brian_handle.input().clone(),
             ipav: Arc::clone(&ipav),
             user_broadcasts: Arc::clone(&user_broadcasts),
             working: Arc::clone(&working),
@@ -854,13 +876,36 @@ async fn spawn_session_handle(
     // with conventions already loaded.
     if is_first_spawn && storage.adherence_nudges_enabled().await {
         if let Some(nudge) = cl_opener_nudge(project.as_deref()) {
-            let wire = with_phase_envelope(IpavPhase::Investigate, &nudge);
-            let _ = brian_handle
-                .input_tx
-                .send(OutgoingUserMessage::text(wire.clone()))
-                .await;
-            if let Some(r) = rain_handle.as_ref() {
-                let _ = r.input_tx.send(OutgoingUserMessage::text(wire)).await;
+            // One row, both agents. `Investigate` is the same constant this
+            // site always wrapped the nudge in — it runs only on a first spawn,
+            // which is a session's first phase by definition — so the wire is
+            // unchanged; what is new is that the tag is part of the row the
+            // user can see, rather than something added on the way out.
+            match storage
+                .post_to_channel(
+                    session.id.as_str(),
+                    "system",
+                    None,
+                    MessageKind::SystemNotice.as_str(),
+                    nudge,
+                    Some(Envelope::phase(IpavPhase::Investigate.name())),
+                )
+                .await
+            {
+                Ok(opener) => {
+                    bridge.notify_message_persisted(
+                        Arc::from(session.id.as_str()),
+                        opener.message_id(),
+                    );
+                    brian_handle.input().deliver(&opener).await;
+                    if let Some(r) = rain_handle.as_ref() {
+                        r.input().deliver(&opener).await;
+                    }
+                }
+                // The nudge is a convenience — the prompt-side opener still
+                // pages the CL. Losing it must not fail a session open.
+                Err(e) => warn!(session_id = %session.id, error = %e,
+                                "CL-opener nudge not persisted; not delivered"),
             }
         }
     }
@@ -894,8 +939,8 @@ async fn spawn_session_handle(
 /// session targeting `project`, or `None` for a repo-less / `_globals` session
 /// (no project conventions to page in). Distinct from the system-prompt CL
 /// INDEX primer (layer 2b, `render_cl_primer`) — this is a runtime stdin nudge
-/// delivered to each agent. Pure so it's unit-testable; the caller wraps it in
-/// the phase envelope before sending.
+/// delivered to each agent. Pure so it's unit-testable; the caller posts it as a
+/// `system` row carrying the phase envelope, and delivers that row.
 fn cl_opener_nudge(project: Option<&str>) -> Option<String> {
     let name = project.filter(|p| !p.is_empty() && *p != "_globals")?;
     Some(format!(
@@ -1346,6 +1391,73 @@ mod tests {
         let (ctx, _crx) = tokio::sync::mpsc::channel(1);
         let (ktx, _krx) = tokio::sync::oneshot::channel();
         AgentHandle::from_parts(name.to_string(), erx, itx, ctx, ktx)
+    }
+
+    #[tokio::test]
+    async fn sending_to_a_participant_requires_a_persisted_row() {
+        // The wire body must be a pure function of the ROW: body + rendered
+        // envelope. Before B5 Task 2 the host paths mutated the string after
+        // persistence, which is exactly why what an agent read was invisible to
+        // the user. This is the pin that it cannot happen again through
+        // `deliver`: there is no argument here that is not the row.
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "t", None).await.unwrap();
+        let (itx, mut irx) = tokio::sync::mpsc::channel(4);
+        let agent = SessionAgent {
+            participant_id: None,
+            slug: "brian".into(),
+            turn_position: 0,
+            handle: {
+                let (_etx, erx) = tokio::sync::mpsc::channel(1);
+                let (ctx, _crx) = tokio::sync::mpsc::channel(1);
+                let (ktx, _krx) = tokio::sync::oneshot::channel();
+                AgentHandle::from_parts("brian".to_string(), erx, itx, ctx, ktx)
+            },
+        };
+
+        // The only thing `deliver` may be handed: a receipt for a row that
+        // exists. Its envelope is metadata, not a pre-rendered prefix, so the
+        // wire is produced HERE rather than baked in at post time.
+        let receipt = storage
+            .post_to_channel(
+                "s1",
+                "system",
+                None,
+                crate::storage::MessageKind::SystemNotice.as_str(),
+                "declare state",
+                Some(
+                    crate::storage::Envelope::phase("Apply")
+                        .with_open_blocking(2)
+                        .with_system_prefix("[System: previous turn interrupted]"),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(agent.deliver(&receipt).await, "stdin is open");
+
+        let wire = irx.recv().await.unwrap().message.content;
+        assert_eq!(
+            wire,
+            crate::storage::render_wire(receipt.envelope(), receipt.body()),
+            "the wire is the renderer's output and nothing else"
+        );
+        // Spelled out too, so a renderer change that keeps both sides in step
+        // still has to justify the bytes an agent actually reads.
+        assert_eq!(
+            wire,
+            "[PHASE: Apply]\n⚠ 2 unresolved EYES blocking finding(s) — run \
+             check_open_findings and disposition each (fix/rebut) before you \
+             commit.\n[System: previous turn interrupted]\ndeclare state"
+        );
+        // And the row carries every byte of it: body + envelope, nothing added
+        // between the INSERT and the write to stdin.
+        let row = &storage.channel_after("s1", 0).await.unwrap()[0];
+        assert_eq!(row.id, receipt.message_id());
+        assert_eq!(
+            wire,
+            crate::storage::render_wire(row.envelope.as_ref(), &row.content),
+            "recorded == delivered, re-derived from the stored row"
+        );
     }
 
     fn stub_participant(id: i64, slug: &str, turn_position: i64) -> crate::storage::Participant {

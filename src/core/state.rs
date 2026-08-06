@@ -1,14 +1,13 @@
 //! `AppState`: top-level handle the UI layer holds.
 
-use crate::agents::OutgoingUserMessage;
-use crate::core::broadcast::{broadcast_user_message, with_phase_envelope};
+use crate::core::broadcast::broadcast_user_message;
 use crate::core::ipav::IpavPhase;
 use crate::core::session::{
     open_session, spawn_existing_session, OpenSessionRequest, SessionAgent, SessionHandle,
 };
 use crate::paths::Paths;
 use crate::signaling::{ExternalServer, SignalingBridge, SignalingEvent, SignalingServer};
-use crate::storage::{Author, MessageKind, Session, Storage};
+use crate::storage::{Author, MessageKind, PersistedMessage, Session, Storage};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -90,7 +89,7 @@ enum DeliverStep {
 /// unit-tested without a live session.
 #[derive(Debug, PartialEq, Eq)]
 enum TrayWakeStep {
-    /// The duo is paused: stash the wire for the next `broadcast` (Send /
+    /// The duo is paused: stash the receipt for the next `broadcast` (Send /
     /// Resume) instead of delivering. No interrupt — nothing is being
     /// delivered, and a tray answer must not release a deliberate pause.
     StashForResume,
@@ -138,10 +137,17 @@ pub struct AppState {
     pending_reconcile: Mutex<HashSet<String>>,
     /// Out-of-band wakes (answered tray questions) that arrived while the
     /// session was PAUSED — an answer must not restart a paused duo, but it
-    /// must not be lost either. `resolve_choice` stashes the wire body here
+    /// must not be lost either. `resolve_choice` stashes the RECEIPT here
     /// instead of waking stdin; the next `broadcast` (a user Send / Resume)
     /// drains it to both agents after the user's message.
-    pending_paused_wakes: Mutex<std::collections::HashMap<String, Vec<String>>>,
+    ///
+    /// Receipts rather than wire strings (B5 Task 2): `send_to_all` takes one,
+    /// and the row is already written by the time an answer is stashed. The
+    /// drain produces the same bytes the old code froze here — same body, same
+    /// envelope, both fixed at post time — but re-derives them from the row
+    /// instead of carrying a copy, so a held wake cannot drift from what the
+    /// chat shows.
+    pending_paused_wakes: Mutex<std::collections::HashMap<String, Vec<PersistedMessage>>>,
     /// Per-session PTY terminals (Terminal subtab). Lazily spawned on first
     /// `terminal_open`, killed on `close_session`. Shared as an `Arc` so the
     /// signaling bridge's MCP handlers can reach the same PTYs.
@@ -764,11 +770,10 @@ impl AppState {
         for agent in handle.agents() {
             agent.handle.interrupt("user-preempt");
         }
-        let recipients: Vec<(&str, &tokio::sync::mpsc::Sender<crate::agents::OutgoingUserMessage>)> =
-            handle
-                .agents()
-                .map(|a| (a.slug.as_str(), &a.handle.input_tx))
-                .collect();
+        let recipients: Vec<(&str, &crate::agents::ParticipantInput)> = handle
+            .agents()
+            .map(|a| (a.slug.as_str(), a.handle.input()))
+            .collect();
         let id = broadcast_user_message(
             &self.storage,
             session_id,
@@ -808,10 +813,8 @@ impl AppState {
             .await
             .remove(session_id)
             .unwrap_or_default();
-        for wire in held_wakes {
-            handle
-                .send_to_all(crate::agents::OutgoingUserMessage::text(wire))
-                .await;
+        for wake in &held_wakes {
+            handle.send_to_all(wake).await;
         }
         flush_held(handle.router.as_ref().map(|r| &r.tx), session_id);
         Ok(())
@@ -841,20 +844,23 @@ impl AppState {
         }
 
         handle.ipav.lock().await.advance(target);
-        let notice = target.transition_notice().to_string();
 
-        // Synthetic phase-change message in storage. The receipt is KEPT: what
-        // gets wired at the bottom of this block is `notice` itself, byte for
-        // byte — `transition_notice()` already carries its own `[PHASE: X]`, so
-        // unlike the broadcast and tray paths there is no envelope, banner or
-        // prefix applied downstream. This is therefore the one host-authored
-        // site where the persisted row IS the wire, and when Task 2 makes
-        // `input_tx` take a `PersistedMessage` it can be handed straight over.
-        // Dropping the receipt here would mean reverting to `insert_message` or
-        // re-reading the row — the exact cost the convergence exists to avoid.
+        // Synthetic phase-change message in storage. No envelope: the wire is
+        // the notice byte for byte, because `transition_notice()` already
+        // carries its own `[PHASE: X]` and a phase envelope would double-tag it.
+        // The one host-authored site where the row needed no reordering to
+        // become the wire — the receipt goes straight to HANDS below.
+        //
+        // The `&'static str` goes in directly; it used to be pre-`to_string`d
+        // because the wire moved the owned copy, and that consumer is gone.
         let persisted = self
             .storage
-            .insert_message(session_id, Author::User, MessageKind::PhaseChange, &notice)
+            .insert_message(
+                session_id,
+                Author::User,
+                MessageKind::PhaseChange,
+                target.transition_notice(),
+            )
             .await?;
         self.bridge
             .notify_message_persisted(Arc::from(session_id), persisted.message_id());
@@ -874,11 +880,7 @@ impl AppState {
         // it. Provider-limit peer notices still wake her deliberately — that is a
         // different path and stays.
         if let Some(hands) = handle.hands() {
-            let _ = hands
-                .handle
-                .input_tx
-                .send(OutgoingUserMessage::text(notice))
-                .await;
+            hands.deliver(&persisted).await;
         }
 
         // A2 (adherence): the peer-ack the prompts don't mechanically enforce.
@@ -889,11 +891,31 @@ impl AppState {
             && self.storage.adherence_nudges_enabled().await
         {
             if let Some(hands) = handle.hands() {
-                let _ = hands
-                    .handle
-                    .input_tx
-                    .send(OutgoingUserMessage::text(Self::APPLY_ENTRY_NUDGE.to_string()))
-                    .await;
+                // Its own `system` row (0044: host injections, NULL participant).
+                // It cannot ride the phase-change row above — that one is the
+                // user-visible "advanced to Apply" notice and this is a separate
+                // instruction to one agent, so two messages means two rows.
+                match self
+                    .storage
+                    .post_to_channel(
+                        session_id,
+                        "system",
+                        None,
+                        MessageKind::SystemNotice.as_str(),
+                        Self::APPLY_ENTRY_NUDGE,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(nudge) => {
+                        self.bridge
+                            .notify_message_persisted(Arc::from(session_id), nudge.message_id());
+                        hands.deliver(&nudge).await;
+                    }
+                    // A missed nudge is a softer failure than a failed phase
+                    // advance, so it warns rather than aborting the transition.
+                    Err(e) => tracing::warn!(?e, session_id, "apply-entry nudge not persisted"),
+                }
             }
         }
         // A phase advance clears `awaiting` (above), so it must also release what
@@ -1020,22 +1042,30 @@ impl AppState {
             }
         }
         // Only the timed-out fallback needs us to wake the duo subprocess. The
-        // OOB message is already in storage (bridge wrote it). To actually wake
-        // the duo so they read + act on it, also: (1) clear the awaiting-user
-        // halt so the duo pump resumes peer-forwarding, (2) push the body
-        // through both agents' input_tx so their stdin receives a wake message.
-        // We deliberately do NOT call broadcast_user_message (which re-inserts)
-        // — the storage row already exists. Delivered + StaleGateNeedsConfirm
-        // need no wake (the agent is live, or nothing ran).
-        if let ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body } = &outcome {
+        // OOB message is already in storage (bridge wrote it, envelope and all).
+        // To actually wake the duo so they read + act on it, also: (1) clear the
+        // awaiting-user halt so the duo pump resumes peer-forwarding, (2) deliver
+        // the receipt so their stdin receives a wake message. We deliberately do
+        // NOT call broadcast_user_message (which re-inserts) — the storage row
+        // already exists. Delivered + StaleGateNeedsConfirm need no wake (the
+        // agent is live, or nothing ran).
+        //
+        // `receipt: None` means the answer was never recorded (no storage wired,
+        // or the insert failed). Nothing is delivered then: an unrecorded message
+        // is not delivered, which is the whole of B5 Task 2. The pick is still
+        // flipped in the tray and the user still sees their own answer there.
+        if let ResolveOutcome::AgentReceiverDroppedFellBack {
+            session_id,
+            receipt: Some(receipt),
+            ..
+        } = &outcome
+        {
             let sessions = self.sessions.lock().await;
             if let Some(handle) = sessions.get(session_id) {
                 self.clear_awaiting(handle, session_id).await;
-                let phase = handle.ipav.lock().await.current_phase;
-                let wire = with_phase_envelope(phase, body);
                 // PAUSED gate: an answered tray question must not restart a
                 // paused duo (the user may be triaging their tray while this
-                // session stays parked). Stash the wire; the next `broadcast`
+                // session stays parked). Stash the receipt; the next `broadcast`
                 // (Send / Resume) delivers it behind the user's message.
                 match Self::tray_wake_step(handle.activity.holds_wakes()) {
                     TrayWakeStep::StashForResume => {
@@ -1044,7 +1074,7 @@ impl AppState {
                             .await
                             .entry(session_id.clone())
                             .or_default()
-                            .push(wire);
+                            .push(receipt.clone());
                     }
                     TrayWakeStep::PreemptAndDeliver => {
                         // Human preemption, same spine as `broadcast` (issues.md
@@ -1063,9 +1093,7 @@ impl AppState {
                         for agent in handle.agents() {
                             agent.handle.interrupt("tray-answer-preempt");
                         }
-                        handle
-                            .send_to_all(crate::agents::OutgoingUserMessage::text(wire))
-                            .await;
+                        handle.send_to_all(receipt).await;
                         // Answering a tray card ends the halt just as a typed
                         // message does, so release what the router held behind
                         // it — AFTER the answer itself, so the peer's held

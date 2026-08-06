@@ -1,7 +1,7 @@
 //! Per-agent event pump. Persists agent events to storage, fans text chunks
 //! out to the peer with the IPAV buffer rule.
 
-use crate::agents::{AgentEvent, AgentHealth, OutgoingUserMessage};
+use crate::agents::{AgentEvent, AgentHealth};
 use crate::core::activity::ActivityTracker;
 use crate::core::ipav::{IpavPhase, IpavState};
 use crate::core::router::RouterCommand;
@@ -68,7 +68,7 @@ pub struct DuoConfig {
     /// path), for A3a self-nudges — e.g. nudging Brian when he mutates during
     /// Investigate/Plan. `None` disables self-nudging (Rain; tests that don't
     /// need it). Set only for Brian's pump at spawn.
-    pub self_input_tx: Option<mpsc::Sender<OutgoingUserMessage>>,
+    pub self_input_tx: Option<crate::agents::ParticipantInput>,
     /// Per-session activity tracker (interrupt redesign, Batch 2). The pump
     /// clears this agent's `busy` on `TurnComplete`/`Exited`, and sets the
     /// PEER's `busy` when it forwards a chunk. `None` in tests / solo configs
@@ -301,15 +301,39 @@ pub async fn pump_agent(
                         if matches!(phase, IpavPhase::Investigate | IpavPhase::Plan)
                             && storage.adherence_nudges_enabled().await
                         {
-                            let _ = tx
-                                .send(OutgoingUserMessage::text(
+                            // Host-authored, so it posts as `system` with a NULL
+                            // participant: it is not Brian's turn output even
+                            // though it lands on Brian's stdin. No envelope —
+                            // this site never wrapped the text, and B5 Task 2 is
+                            // a plumbing change, not a prompt change.
+                            match storage
+                                .post_to_channel(
+                                    cfg.session_id.clone(),
+                                    "system",
+                                    None,
+                                    MessageKind::SystemNotice.as_str(),
                                     "🔔 You're editing files before the Apply phase. Per IPAV, \
                                      mutations belong in Apply — call advance_phase(\"Apply\") \
                                      first, or note why this edit is intentional. (One-time \
                                      reminder.)",
-                                ))
-                                .await;
-                            mutate_nudged = true;
+                                    None,
+                                )
+                                .await
+                            {
+                                Ok(m) => {
+                                    cfg.notify_persisted(m.message_id());
+                                    tx.deliver(&m).await;
+                                    // Burnt on a successful POST, and a failed
+                                    // delivery still burns it — same as before,
+                                    // when the send's error was discarded. A
+                                    // dead stdin is not something the next Edit
+                                    // would fix.
+                                    mutate_nudged = true;
+                                }
+                                // Not burnt: nothing was recorded and nothing
+                                // was sent, so the one-shot is still unspent.
+                                Err(e) => warn!(?e, "persisting the pre-Apply mutation nudge"),
+                            }
                         }
                     }
                 }
@@ -1204,7 +1228,7 @@ mod tests {
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let (self_tx, mut self_rx) = mpsc::channel(8);
         let cfg = DuoConfig {
-            self_input_tx: Some(self_tx),
+            self_input_tx: Some(crate::agents::ParticipantInput::new(self_tx)),
             ..fast_cfg(Author::Brian)
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
@@ -1233,7 +1257,7 @@ mod tests {
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let (self_tx, mut self_rx) = mpsc::channel(8);
         let cfg = DuoConfig {
-            self_input_tx: Some(self_tx),
+            self_input_tx: Some(crate::agents::ParticipantInput::new(self_tx)),
             ..fast_cfg(Author::Brian)
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));

@@ -14,7 +14,7 @@
 //! extends later; the data-structure generalization (a peer map + a forward-policy
 //! trait) is built against a real use case, not speculatively.
 
-use crate::agents::OutgoingUserMessage;
+use crate::agents::ParticipantInput;
 use crate::core::activity::ActivityTracker;
 use crate::core::broadcast::peer_forward_message;
 use crate::core::ipav::IpavState;
@@ -104,17 +104,17 @@ pub struct RouterDeps {
     /// is precisely the failure this exists to end. `None` in tests that don't
     /// assert telemetry.
     pub storage: Option<crate::storage::Storage>,
-    /// Brian's stdin sender (peer target when Rain speaks).
-    pub brian_input: mpsc::Sender<OutgoingUserMessage>,
-    /// Rain's stdin sender (peer target when Brian speaks). `None` = solo; the
+    /// Brian's stdin (peer target when Rain speaks).
+    pub brian_input: ParticipantInput,
+    /// Rain's stdin (peer target when Brian speaks). `None` = solo; the
     /// pump never emits a Forward in solo mode, so the router isn't spawned then.
-    pub rain_input: Option<mpsc::Sender<OutgoingUserMessage>>,
+    pub rain_input: Option<ParticipantInput>,
 }
 
 impl RouterDeps {
     /// The stdin sender for `author` — the peer-resolution target. Named 2-agent
     /// resolution; the seam an N-agent peer map replaces later.
-    fn input_for(&self, author: Author) -> Option<&mpsc::Sender<OutgoingUserMessage>> {
+    fn input_for(&self, author: Author) -> Option<&ParticipantInput> {
         match author {
             Author::Brian => Some(&self.brian_input),
             Author::Rain => self.rain_input.as_ref(),
@@ -648,11 +648,21 @@ const VOLLEY_SIMILAR_BREAK: u32 = 2;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::OutgoingUserMessage;
     use crate::core::ipav::IpavState;
 
+    /// One participant's stdin, plus the receiver a test counts forwards on.
+    /// Capacity is uniform (512) rather than per-test: the old sizes were
+    /// incidental, and a forward the router dropped for want of buffer would
+    /// look exactly like a forward the ladder suppressed.
+    fn stub_input() -> (ParticipantInput, mpsc::Receiver<OutgoingUserMessage>) {
+        let (tx, rx) = mpsc::channel(512);
+        (ParticipantInput::new(tx), rx)
+    }
+
     fn deps(
-        brian_input: mpsc::Sender<OutgoingUserMessage>,
-        rain_input: Option<mpsc::Sender<OutgoingUserMessage>>,
+        brian_input: ParticipantInput,
+        rain_input: Option<ParticipantInput>,
         awaiting: Arc<AtomicBool>,
         counter: Arc<AtomicU32>,
     ) -> RouterDeps {
@@ -714,8 +724,8 @@ mod tests {
     async fn hard_cap_breaks_after_cap() {
         // Distinct bodies so convergence never trips first — the cap is the sole
         // reason forwarding stops. All from Brian → all land on Rain's channel.
-        let (btx, brx) = mpsc::channel(512);
-        let (rtx, rrx) = mpsc::channel(512);
+        let (btx, brx) = stub_input();
+        let (rtx, rrx) = stub_input();
         let counter = Arc::new(AtomicU32::new(0));
         let d = deps(btx, Some(rtx), Arc::new(AtomicBool::new(false)), counter);
         let cmds: Vec<_> = (0..(VOLLEY_HARD_CAP + 3))
@@ -736,8 +746,8 @@ mod tests {
         // forward-1 streak 0 (fwd), forward-2 streak 1 (fwd), forward-3 streak 2 →
         // BREAK. Exactly 2 forwards reach a peer. A per-author detector would never
         // build a cross-agent streak here and would run to the hard-cap.
-        let (btx, brx) = mpsc::channel(64);
-        let (rtx, rrx) = mpsc::channel(64);
+        let (btx, brx) = stub_input();
+        let (rtx, rrx) = stub_input();
         let counter = Arc::new(AtomicU32::new(0));
         let d = deps(btx, Some(rtx), Arc::new(AtomicBool::new(false)), counter);
         let cmds = vec![
@@ -761,8 +771,8 @@ mod tests {
         // substantive content each turn, even on the same topic) must NEVER trip the
         // single-stream convergence breaker. Each consecutive pair is well below the
         // 0.85 threshold → the streak resets every turn → all forwards reach a peer.
-        let (btx, brx) = mpsc::channel(64);
-        let (rtx, rrx) = mpsc::channel(64);
+        let (btx, brx) = stub_input();
+        let (rtx, rrx) = stub_input();
         let counter = Arc::new(AtomicU32::new(0));
         let d = deps(btx, Some(rtx), Arc::new(AtomicBool::new(false)), counter);
         let cmds = vec![
@@ -782,8 +792,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn awaiting_suppresses_forward() {
         // While the await-halt flag is set, no forward reaches the peer.
-        let (btx, brx) = mpsc::channel(8);
-        let (rtx, rrx) = mpsc::channel(8);
+        let (btx, brx) = stub_input();
+        let (rtx, rrx) = stub_input();
         let awaiting = Arc::new(AtomicBool::new(true));
         let counter = Arc::new(AtomicU32::new(0));
         let d = deps(btx, Some(rtx), awaiting, Arc::clone(&counter));
@@ -803,8 +813,8 @@ mod tests {
         // or the transport had eaten the message, because a drop left no trace
         // anywhere — not for the sender, the receiver, or the user.
         let storage = crate::storage::Storage::memory().await.unwrap();
-        let (btx, _brx) = mpsc::channel(64);
-        let (rtx, _rrx) = mpsc::channel(64);
+        let (btx, _brx) = stub_input();
+        let (rtx, _rrx) = stub_input();
         let mut d = deps(
             btx,
             Some(rtx),
@@ -837,8 +847,8 @@ mod tests {
         // Only losses are recorded — the delivery path must not acquire storage
         // at all, which is why `open_blocking` exists as a lock-free cache.
         let storage = crate::storage::Storage::memory().await.unwrap();
-        let (btx, _brx) = mpsc::channel(64);
-        let (rtx, _rrx) = mpsc::channel(64);
+        let (btx, _brx) = stub_input();
+        let (rtx, _rrx) = stub_input();
         let mut d = deps(
             btx,
             Some(rtx),
@@ -865,8 +875,8 @@ mod tests {
         // it was being asked to act on, while the user could read it on screen.
         //
         // It must now be HELD and replayed, exactly like the pause path.
-        let (btx, _brx) = mpsc::channel(64);
-        let (rtx, mut rrx) = mpsc::channel(64);
+        let (btx, _brx) = stub_input();
+        let (rtx, mut rrx) = stub_input();
         let awaiting = Arc::new(AtomicBool::new(true));
         let d = deps(
             btx,
@@ -910,8 +920,8 @@ mod tests {
     async fn peer_ack_suppresses_and_doesnt_count() {
         // A peer_ack forward is suppressed and does NOT bump the counter; the next
         // (normal) forward goes through and counts as the first.
-        let (btx, brx) = mpsc::channel(8);
-        let (rtx, rrx) = mpsc::channel(8);
+        let (btx, brx) = stub_input();
+        let (rtx, rrx) = stub_input();
         let counter = Arc::new(AtomicU32::new(0));
         let d = deps(btx, Some(rtx), Arc::new(AtomicBool::new(false)), Arc::clone(&counter));
         let cmds = vec![
@@ -937,8 +947,8 @@ mod tests {
         // Archive study 2026-07-27: an agent posted a full 3-point plan review
         // and called peer_ack in the same turn — the review was silently
         // destroyed. A substantive turn must forward despite the ack, tagged.
-        let (btx, mut brx) = mpsc::channel(8);
-        let (rtx, rrx) = mpsc::channel(8);
+        let (btx, mut brx) = stub_input();
+        let (rtx, rrx) = stub_input();
         let counter = Arc::new(AtomicU32::new(0));
         let d = deps(btx, Some(rtx), Arc::new(AtomicBool::new(false)), Arc::clone(&counter));
         let review = "Plan review: (1) the `protected` flag is missing on the three \
@@ -979,8 +989,8 @@ mod tests {
         // The turn shape that ENDS a volley: agreement plus the single reason
         // for it. Well over the length proxy, but the agent has asserted this is
         // its closing statement — so it must NOT wake the peer. Feedback #6.
-        let (btx, mut brx) = mpsc::channel(8);
-        let (rtx, rrx) = mpsc::channel(8);
+        let (btx, mut brx) = stub_input();
+        let (rtx, rrx) = stub_input();
         let counter = Arc::new(AtomicU32::new(0));
         let d = deps(btx, Some(rtx), Arc::new(AtomicBool::new(false)), Arc::clone(&counter));
         let closing = "Agreed — and the reason I'm confident is that the drift-check \
@@ -1021,8 +1031,8 @@ mod tests {
         // Regression pin for the 2026-07-27 bug (four reviews destroyed): adding
         // `final` must not weaken the DEFAULT. Same body as the test above, with
         // the flag omitted — this one has to reach the peer.
-        let (btx, mut brx) = mpsc::channel(8);
-        let (rtx, rrx) = mpsc::channel(8);
+        let (btx, mut brx) = stub_input();
+        let (rtx, rrx) = stub_input();
         let counter = Arc::new(AtomicU32::new(0));
         let d = deps(btx, Some(rtx), Arc::new(AtomicBool::new(false)), Arc::clone(&counter));
         let closing = "Agreed — and the reason I'm confident is that the drift-check \
@@ -1059,8 +1069,8 @@ mod tests {
         // deliver. Drives `route_forward` directly so the flag toggles
         // deterministically between forwards (no task/channel race).
         // Brian-origin forwards land on RAIN's channel (peer = Rain).
-        let (btx, _brx) = mpsc::channel(64);
-        let (rtx, mut rrx) = mpsc::channel(64);
+        let (btx, _brx) = stub_input();
+        let (rtx, mut rrx) = stub_input();
         let reset = Arc::new(AtomicBool::new(false));
         let mut d = deps(
             btx,
@@ -1100,8 +1110,8 @@ mod tests {
         // returns before the convergence stage, so it exercises the same
         // invariant on a path that still exists.
         // Brian-origin forwards land on RAIN's channel (peer = Rain).
-        let (btx, _brx) = mpsc::channel(64);
-        let (rtx, mut rrx) = mpsc::channel(64);
+        let (btx, _brx) = stub_input();
+        let (rtx, mut rrx) = stub_input();
         let reset = Arc::new(AtomicBool::new(true));
         let awaiting = Arc::new(AtomicBool::new(false));
         let mut d = deps(btx, Some(rtx), Arc::clone(&awaiting), Arc::new(AtomicU32::new(0)));
@@ -1131,8 +1141,8 @@ mod tests {
     async fn counters_track_per_direction_on_delivery() {
         // Delivered forwards bump the matching direction counter; a suppressed one
         // does not (the bump is after the actual send).
-        let (btx, _brx) = mpsc::channel(64);
-        let (rtx, _rrx) = mpsc::channel(64);
+        let (btx, _brx) = stub_input();
+        let (rtx, _rrx) = stub_input();
         let b2r = Arc::new(AtomicU64::new(0));
         let r2b = Arc::new(AtomicU64::new(0));
         let awaiting = Arc::new(AtomicBool::new(false));
@@ -1160,8 +1170,8 @@ mod tests {
         // the loop — but the message has to survive it.
         let storage = crate::storage::Storage::memory().await.unwrap();
         storage.create_session("s1", "One", None).await.unwrap();
-        let (btx, _brx) = mpsc::channel(64);
-        let (rtx, mut rrx) = mpsc::channel(64);
+        let (btx, _brx) = stub_input();
+        let (rtx, mut rrx) = stub_input();
         let counter = Arc::new(AtomicU32::new(0));
         let mut d = deps(
             btx,
@@ -1220,8 +1230,8 @@ mod tests {
     async fn a_runaway_keeps_only_the_newest_capped_forward_per_agent() {
         // Holding a runaway is only safe because the queue cannot grow: each
         // agent has exactly one slot and a newer forward overwrites it.
-        let (btx, _brx) = mpsc::channel(64);
-        let (rtx, mut rrx) = mpsc::channel(64);
+        let (btx, _brx) = stub_input();
+        let (rtx, mut rrx) = stub_input();
         let counter = Arc::new(AtomicU32::new(VOLLEY_HARD_CAP));
         let d = deps(
             btx,
@@ -1270,8 +1280,8 @@ mod tests {
         // means.
         let storage = crate::storage::Storage::memory().await.unwrap();
         storage.create_session("s1", "One", None).await.unwrap();
-        let (btx, _brx) = mpsc::channel(64);
-        let (rtx, _rrx) = mpsc::channel(64);
+        let (btx, _brx) = stub_input();
+        let (rtx, _rrx) = stub_input();
         let awaiting = Arc::new(AtomicBool::new(true)); // parked question → hold
         let mut d = deps(btx, Some(rtx), awaiting, Arc::new(AtomicU32::new(0)));
         d.storage = Some(storage.clone());
@@ -1302,8 +1312,8 @@ mod tests {
         // stop meaning "a message was lost".
         let storage = crate::storage::Storage::memory().await.unwrap();
         storage.create_session("s1", "One", None).await.unwrap();
-        let (btx, _brx) = mpsc::channel(64);
-        let (rtx, mut rrx) = mpsc::channel(64);
+        let (btx, _brx) = stub_input();
+        let (rtx, mut rrx) = stub_input();
         let awaiting = Arc::new(AtomicBool::new(true));
         let mut d = deps(
             btx,
@@ -1349,8 +1359,8 @@ mod tests {
         // the final delivered count is 1 either way, and the second FlushHeld
         // finds the queue empty).
         use crate::signaling::SignalingBridge;
-        let (btx, _brx) = mpsc::channel(64);
-        let (rtx, mut rrx) = mpsc::channel(64);
+        let (btx, _brx) = stub_input();
+        let (rtx, mut rrx) = stub_input();
         let bridge = SignalingBridge::new();
         let tracker = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), bridge);
         let mut d = deps(

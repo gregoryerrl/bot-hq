@@ -10,7 +10,7 @@
 use crate::core::activity::{ActivityTracker, SessionActivity};
 use crate::core::ipav::IpavState;
 use crate::signaling::SignalingBridge;
-use crate::storage::{Author, MessageKind, Storage};
+use crate::storage::{Author, Envelope, MessageKind, Storage};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -159,7 +159,7 @@ pub struct IdleWatch {
     pub storage: Storage,
     /// HANDS' stdin — the nudge goes to Brian only (EYES has no state-declaring
     /// verbs; her settles resolve to whatever Brian flags).
-    pub brian_input_tx: tokio::sync::mpsc::Sender<crate::agents::OutgoingUserMessage>,
+    pub brian_input_tx: crate::agents::ParticipantInput,
     pub ipav: Arc<tokio::sync::Mutex<IpavState>>,
     /// Bumped by `AppState::broadcast` on every user prompt. In-memory on
     /// purpose: a storage count races the first poll at session start.
@@ -354,10 +354,11 @@ async fn deliver_idle_nudge(
         a reason (halt / mark_awaiting_user); or ask to close if the task is done. Never \
         invent a direction or new work to satisfy this nudge — if no user-given \
         direction exists, the right response IS the question: ask which direction.]";
-    // The receipt is dropped: this site persists NOTICE (what the user reads in
-    // the chat) and wires NUDGE (what Brian reads) — two different strings by
-    // design, plus a phase envelope on top. The strongest form of the body
-    // divergence, so there is no send here this row could authorize as written.
+    // TWO rows, because this site says two different things. NOTICE is the
+    // one-line summary the user reads in the chat; NUDGE is the instruction
+    // Brian reads. Before B5 Task 2 only NOTICE was recorded and NUDGE went
+    // straight to stdin, so the chat's account of what the watchdog sent was
+    // short by the entire instruction — the widest of the divergences.
     match idle_watch
         .storage
         .insert_message(session_id, Author::User, MessageKind::SystemNotice, NOTICE)
@@ -368,13 +369,32 @@ async fn deliver_idle_nudge(
                         "idle watchdog: failed to persist system notice"),
     }
     let phase = idle_watch.ipav.lock().await.current_phase;
-    let wire = crate::core::broadcast::with_phase_envelope(phase, NUDGE);
-    if idle_watch
-        .brian_input_tx
-        .send(crate::agents::OutgoingUserMessage::text(wire))
+    // Host-authored, so `origin = 'system'` with a NULL participant (0044): the
+    // nudge is nobody's turn output and there is no `system` roster row to
+    // attribute it to.
+    let nudge = match idle_watch
+        .storage
+        .post_to_channel(
+            session_id,
+            "system",
+            None,
+            MessageKind::SystemNotice.as_str(),
+            NUDGE,
+            Some(Envelope::phase(phase.name())),
+        )
         .await
-        .is_ok()
     {
+        Ok(m) => m,
+        // No row, no wire. The chip is already up and NOTICE may already be in
+        // the chat, so the user still sees that the session stalled.
+        Err(e) => {
+            warn!(session_id = %session_id, error = %e,
+                  "idle watchdog: nudge not persisted; not delivered");
+            return;
+        }
+    };
+    bridge.notify_message_persisted(Arc::from(session_id), nudge.message_id());
+    if idle_watch.brian_input_tx.deliver(&nudge).await {
         // Mirror the dispatch sites: input sent → HANDS is mid-turn, so the
         // session reads Busy (and the chip clears) while he declares state.
         activity.set_busy(Author::Brian, true);
@@ -502,5 +522,48 @@ mod tests {
         // even if the agent looks stalled by the silence heuristic.
         assert_eq!(stall_decision(true, 0, PAST, Some("retrying"), T), None);
         assert_eq!(stall_decision(true, 0, PAST, Some("dead"), T), None);
+    }
+
+    #[tokio::test]
+    async fn the_idle_nudge_writes_the_notice_and_the_nudge_as_two_rows() {
+        // This site says two different things: NOTICE is the user's one-line
+        // summary, NUDGE is Brian's instruction. Before B5 Task 2 only NOTICE
+        // was recorded and NUDGE went straight to stdin, so the chat's account
+        // of what the watchdog sent was incomplete by the whole instruction.
+        let storage = Storage::memory().await.unwrap();
+        storage.create_session("s1", "t", None).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let ipav = Arc::new(tokio::sync::Mutex::new(IpavState::default()));
+        ipav.lock().await.advance(crate::core::ipav::IpavPhase::Apply);
+        let idle_watch = IdleWatch {
+            storage: storage.clone(),
+            brian_input_tx: crate::agents::ParticipantInput::new(tx),
+            ipav,
+            user_broadcasts: Arc::new(AtomicU64::new(1)),
+            working: Arc::new(Mutex::new(None)),
+        };
+        let bridge = SignalingBridge::new();
+        let activity =
+            ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), Arc::clone(&bridge));
+        deliver_idle_nudge("s1", &idle_watch, &activity, &bridge).await;
+
+        let rows = storage.channel_after("s1", 0).await.unwrap();
+        assert_eq!(rows.len(), 2, "NOTICE and NUDGE are separate messages");
+        assert_eq!(rows[0].origin, "user", "the notice reads as a chat message");
+        assert!(rows[0].content.starts_with("Session idled"));
+        // The nudge is host-authored: `system` origin, no participant (0044).
+        assert_eq!(rows[1].origin, "system");
+        assert!(rows[1].participant_id.is_none());
+
+        // And Brian read exactly the nudge row, phase envelope included — the
+        // same bytes the deleted `with_phase_envelope(phase, NUDGE)` produced
+        // here inline, now re-derived from the row instead.
+        let wire = rx.recv().await.expect("nudge delivered").message.content;
+        assert_eq!(
+            wire,
+            crate::storage::render_wire(rows[1].envelope.as_ref(), &rows[1].content)
+        );
+        assert!(wire.starts_with("[PHASE: Apply]\n[System: this session went idle"));
+        assert!(rx.try_recv().is_err(), "the NOTICE is not wired to anyone");
     }
 }

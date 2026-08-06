@@ -2,37 +2,36 @@
 //!
 //! Lives separately so it can be mocked in tests.
 
-use crate::agents::OutgoingUserMessage;
+use crate::agents::ParticipantInput;
 use crate::core::ipav::IpavPhase;
-use crate::storage::{Author, MessageKind, Storage};
+use crate::storage::{render_wire, Author, Envelope, MessageKind, Storage};
 use anyhow::Result;
-use tokio::sync::mpsc;
 use tracing::warn;
 
-/// Prefix every outgoing stdin payload with the active IPAV phase so the
-/// agent re-encounters it on each turn. Storage keeps the raw text — the
-/// envelope is wire-only.
-pub fn with_phase_envelope(phase: IpavPhase, body: &str) -> String {
-    format!("[PHASE: {}]\n{body}", phase.name())
-}
-
-/// Like [`with_phase_envelope`] but also prepends a persistent EYES-findings
-/// banner when `open_blocking > 0`, so it rides every turn (it can't scroll
-/// away) until the findings are dispositioned — the salience half of the
-/// EYES-sign-off gate (post-mortem §5.2). `open_blocking == 0` delegates to the
-/// plain envelope, so there's zero overhead in the common (nothing-open) case.
+/// The IPAV phase tag plus a persistent EYES-findings banner when
+/// `open_blocking > 0`, so the banner rides every turn (it can't scroll away)
+/// until the findings are dispositioned — the salience half of the
+/// EYES-sign-off gate (post-mortem §5.2). `open_blocking == 0` renders the
+/// plain phase envelope, so there's zero overhead in the common case.
+///
+/// Builds an [`Envelope`] and hands it to [`render_wire`] rather than
+/// formatting the tag itself. There must be exactly one place that decides how
+/// a phase tag is spelled: every other wire is now rendered from a receipt
+/// through `render_wire`, so a second spelling here would mean the peer forward
+/// and the user broadcast disagreed about what an agent's stdin looks like, and
+/// only one of them would show up in the chat.
+///
+/// The sole production caller is [`peer_forward_message`] — the one wire that
+/// still carries a string with no row of its own. Everything else supplies its
+/// `Envelope` to `post_to_channel` and lets the receipt render it.
 pub fn with_phase_and_findings_envelope(
     phase: IpavPhase,
     open_blocking: usize,
     body: &str,
 ) -> String {
-    if open_blocking == 0 {
-        return with_phase_envelope(phase, body);
-    }
-    format!(
-        "[PHASE: {}]\n⚠ {open_blocking} unresolved EYES blocking finding(s) — run \
-         check_open_findings and disposition each (fix/rebut) before you commit.\n{body}",
-        phase.name()
+    render_wire(
+        Some(&Envelope::phase(phase.name()).with_open_blocking(open_blocking)),
+        body,
     )
 }
 
@@ -49,56 +48,72 @@ pub async fn broadcast_user_message(
     // Every live participant, as `(slug, stdin)`. B4b: was a `brian_input` +
     // `Option<rain_input>` pair. The slug rides along so the per-agent delivery
     // warning below can still name WHICH agent missed the message.
-    recipients: &[(&str, &mpsc::Sender<OutgoingUserMessage>)],
+    recipients: &[(&str, &ParticipantInput)],
 ) -> Result<i64> {
-    // The receipt is dropped here, for now. The wire fanned out below is NOT
-    // the persisted body — storage keeps the raw user text while the wire adds
-    // `system_prefix` and a phase/findings envelope — so handing this receipt
-    // to a send would misdescribe what the agent receives. That is a
-    // sequencing statement, not a design one: `post_to_channel` already takes
-    // an `envelope` and `PersistedMessage` already exposes `envelope()`,
-    // precisely so decoration can ride the receipt rather than be invented
-    // after the insert. Threading it through this path is Task 2's job.
-    let id = storage
-        .insert_message(session_id, Author::User, MessageKind::Text, text)
-        .await?
-        .message_id();
+    // REORDERED (B5 Task 2): the banner count is read BEFORE the insert, because
+    // it is part of what the agent will read and the row has to record that. It
+    // used to be read after, and the wire was assembled from it afterwards —
+    // which is exactly how storage ended up holding the raw user text while the
+    // agent read something else.
+    //
+    // The move is inert: this is a read of the findings tables, and the insert
+    // it now precedes writes only to `messages`.
+    //
     // Ride the open-blocking-findings banner on every user turn (fail-safe 0 on
     // any query error — the banner is salience, not a gate).
     let open_blocking = storage
         .count_open_blocking_findings(session_id)
         .await
         .unwrap_or(0) as usize;
-    let wire_body = match system_prefix {
-        Some(p) => format!("{p}\n{text}"),
-        None => text.to_string(),
-    };
-    let wire = with_phase_and_findings_envelope(phase, open_blocking, &wire_body);
-    let msg = OutgoingUserMessage::text(wire);
+    let mut envelope = Envelope::phase(phase.name()).with_open_blocking(open_blocking);
+    if let Some(prefix) = system_prefix {
+        envelope = envelope.with_system_prefix(prefix);
+    }
+    // `origin = "user"` + no slug: what `insert_message(Author::User, ..)`
+    // resolves to. Called directly only because the legacy wrapper has nowhere
+    // to put an envelope.
+    let persisted = storage
+        .post_to_channel(
+            session_id,
+            "user",
+            None,
+            MessageKind::Text.as_str(),
+            text,
+            Some(envelope),
+        )
+        .await?;
     // Fan out to every agent. The message is persisted (above) regardless, but
-    // a send error means that agent's input pump has exited (stdin gone) and
-    // the agent won't SEE this message. Previously swallowed with `let _`,
+    // a failed delivery means that agent's input pump has exited (stdin gone)
+    // and the agent won't SEE this message. Previously swallowed with `let _`,
     // which is precisely how the #4 user→HANDS desync stayed invisible: a
     // failed send to Brian while Rain's succeeded looked like nothing wrong.
     // Log per agent so the asymmetry is diagnosable.
     for (slug, input) in recipients {
-        if let Err(e) = input.send(msg.clone()).await {
-            warn!(agent = %slug, error = %e, "user broadcast not delivered (input pump closed)");
+        if !input.deliver(&persisted).await {
+            warn!(agent = %slug, "user broadcast not delivered (input pump closed)");
         }
     }
-    Ok(id)
+    Ok(persisted.message_id())
 }
 
 /// Forward a peer's prose chunk into an agent's stdin. Called by
 /// `core::router::route_forward` once the forward ladder decides to forward.
 /// The message is rendered as if from the user but tagged so the agent knows
 /// who said it.
+///
+/// **The one wire B5 Task 2 did not gate on a receipt.** The text IS persisted —
+/// the author's pump wrote it as that agent's own row before the router ever
+/// saw it — but the router is handed the string, not the receipt, so gating
+/// here means threading a `PersistedMessage` through `RouterCommand` and
+/// re-homing the peer tag into the envelope. That is the turn sequencer's work.
+/// Until then this is the only caller of `ParticipantInput::send_unrouted`, and
+/// the peer tag below is still invisible string mutation.
 pub async fn peer_forward_message(
     peer_author: Author,
     text: &str,
     phase: IpavPhase,
     open_blocking: usize,
-    input_tx: &mpsc::Sender<OutgoingUserMessage>,
+    input_tx: &ParticipantInput,
 ) {
     let prefix = match peer_author {
         Author::Brian => "[PEER MESSAGE — from Brian (HANDS), not the user]\n",
@@ -107,25 +122,33 @@ pub async fn peer_forward_message(
     };
     let inner = format!("{prefix}{text}");
     let wire = with_phase_and_findings_envelope(phase, open_blocking, &inner);
-    // A send error means this agent's input pump has exited (stdin gone) and it
+    // A send failure means this agent's input pump has exited (stdin gone) and it
     // won't SEE the peer's message. Mirrors broadcast_user_message: log per agent
     // so a one-sided peer-forward loss is diagnosable instead of silent (the same
     // invisible-desync failure mode, on the peer path).
-    if let Err(e) = input_tx.send(OutgoingUserMessage::text(wire)).await {
-        warn!(agent = ?peer_author, error = %e, "peer forward not delivered (input pump closed)");
+    if !input_tx.send_unrouted(wire).await {
+        warn!(agent = ?peer_author, "peer forward not delivered (input pump closed)");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::OutgoingUserMessage;
+    use tokio::sync::mpsc;
+
+    /// One participant's stdin, plus the receiver a test reads the wire from.
+    fn stub_input() -> (ParticipantInput, mpsc::Receiver<OutgoingUserMessage>) {
+        let (tx, rx) = mpsc::channel(8);
+        (ParticipantInput::new(tx), rx)
+    }
 
     #[tokio::test]
     async fn broadcast_persists_raw_and_envelopes_wire() {
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "test", None).await.unwrap();
-        let (btx, mut brx) = mpsc::channel(8);
-        let (rtx, mut rrx) = mpsc::channel(8);
+        let (btx, mut brx) = stub_input();
+        let (rtx, mut rrx) = stub_input();
         broadcast_user_message(
             &s,
             "s1",
@@ -144,9 +167,18 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(
             msgs[0].content, "hello",
-            "storage keeps raw text, no envelope"
+            "the BODY is still the raw user text"
         );
         assert_eq!(msgs[0].author, "user");
+        // …and the decoration is now recorded beside it, so re-rendering the
+        // stored row reproduces both agents' stdin byte for byte. Before B5
+        // Task 2 the row said only "hello" and the `[PHASE: Apply]` the agents
+        // read existed nowhere the user could see it.
+        let row = &s.channel_after("s1", 0).await.unwrap()[0];
+        assert_eq!(
+            render_wire(row.envelope.as_ref(), &row.content),
+            bm.message.content
+        );
     }
 
     #[tokio::test]
@@ -157,8 +189,8 @@ mod tests {
         let s = Storage::memory().await.unwrap();
         s.create_session("sess-a", "a", None).await.unwrap();
         s.create_session("sess-b", "b", None).await.unwrap();
-        let (btx, _brx) = mpsc::channel(8);
-        let (rtx, _rrx) = mpsc::channel(8);
+        let (btx, _brx) = stub_input();
+        let (rtx, _rrx) = stub_input();
         broadcast_user_message(
             &s,
             "sess-a",
@@ -187,7 +219,7 @@ mod tests {
         // and it's persisted exactly once — no panic on the absent peer.
         let s = Storage::memory().await.unwrap();
         s.create_session("solo", "test", None).await.unwrap();
-        let (btx, mut brx) = mpsc::channel(8);
+        let (btx, mut brx) = stub_input();
         broadcast_user_message(&s, "solo", "hi", IpavPhase::Apply, None, &[("brian", &btx)])
             .await
             .unwrap();
@@ -198,7 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn peer_forward_envelopes_then_author_tags() {
-        let (tx, mut rx) = mpsc::channel(8);
+        let (tx, mut rx) = stub_input();
         peer_forward_message(Author::Rain, "concerns?", IpavPhase::Plan, 0, &tx).await;
         let m = rx.recv().await.unwrap();
         assert!(
@@ -216,7 +248,7 @@ mod tests {
         // 0 open → identical to the plain phase envelope (zero overhead).
         assert_eq!(
             with_phase_and_findings_envelope(IpavPhase::Apply, 0, "hi"),
-            with_phase_envelope(IpavPhase::Apply, "hi")
+            "[PHASE: Apply]\nhi"
         );
         // >0 → a ⚠ banner rides between the phase tag and the body.
         let w = with_phase_and_findings_envelope(IpavPhase::Apply, 2, "hi");
@@ -241,7 +273,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let (btx, mut brx) = mpsc::channel(8);
+        let (btx, mut brx) = stub_input();
         broadcast_user_message(&s, "s1", "go", IpavPhase::Verify, None, &[("brian", &btx)])
             .await
             .unwrap();
@@ -266,7 +298,7 @@ mod tests {
         // chat history stays clean.
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "test", None).await.unwrap();
-        let (btx, mut brx) = mpsc::channel(8);
+        let (btx, mut brx) = stub_input();
         broadcast_user_message(
             &s,
             "s1",

@@ -19,6 +19,6 @@ pub use prompts::role_for;
 pub use roles::AgentRole;
 pub use protocol::{OutgoingUserMessage, StreamEvent};
 pub use spawn::{
-    spawn_agent, spawn_supervised_agent, AgentEvent, AgentHandle, AgentHealth, RetryPolicy,
-    SpawnConfig,
+    spawn_agent, spawn_supervised_agent, AgentEvent, AgentHandle, AgentHealth, ParticipantInput,
+    RetryPolicy, SpawnConfig,
 };

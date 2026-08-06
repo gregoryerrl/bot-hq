@@ -8,7 +8,7 @@
 
 use super::util::{oob_resolution_body, outcome_from_picked, parse_tray_ts};
 use super::*;
-use crate::storage::{Author, MessageKind};
+use crate::storage::MessageKind;
 use uuid::Uuid;
 
 /// A pending gated command older than this (seconds) gets a confirm step on
@@ -595,9 +595,10 @@ impl SignalingBridge {
     /// reopened `None`). Builds the synthetic user message, runs any approved
     /// gated command when `flipped` (the atomic exactly-once already won),
     /// invalidates the bell / tray via `ChoiceResolved`, and returns
-    /// `AgentReceiverDroppedFellBack` so `CoreAppState::resolve_choice` wakes the
-    /// live (respawned) subprocess via stdin. The callers differ only in where
-    /// `session_id` / `agent` / `question` / `command_text` come from.
+    /// `AgentReceiverDroppedFellBack` — carrying the RECEIPT — so
+    /// `CoreAppState::resolve_choice` can wake the live (respawned) subprocess
+    /// via stdin. The callers differ only in where `session_id` / `agent` /
+    /// `question` / `command_text` come from.
     #[allow(clippy::too_many_arguments)]
     async fn deliver_oob(
         &self,
@@ -626,21 +627,48 @@ impl SignalingBridge {
             self.maybe_run_gated(&session_id, command_text, &picked, &mut body)
                 .await;
         }
-        // The receipt is dropped, for now. `body` is persisted raw, but what
-        // reaches an agent is `with_phase_envelope(phase, body)`, applied in
-        // `CoreAppState::resolve_choice` after this returns — so the receipt
-        // does not describe the wire. Sequencing, not a design conclusion:
-        // `post_to_channel` takes an `envelope` and `PersistedMessage` exposes
-        // `envelope()` so that decoration can ride the receipt instead of being
-        // applied downstream. Task 2 threads it through.
-        let inserted_id = {
+        // The phase is read HERE, not in `CoreAppState::resolve_choice` where it
+        // used to be. The envelope is part of the row, so it has to be known
+        // before the INSERT; reading it after and prepending it to the wire is
+        // precisely how this path came to record one thing and deliver another.
+        //
+        // The alternative — carry the receipt out and let core apply the phase —
+        // cannot work: a receipt is immutable, so core would either wire the
+        // undecorated body (dropping `[PHASE: X]` from what the agent reads) or
+        // write a second row for one answer. So the lookup moves to the bridge
+        // instead, which the per-session Weak registry already had a pattern for.
+        //
+        // It also costs core nothing it was relying on: core read the phase
+        // microseconds later under the sessions lock, so the only observable
+        // difference is a concurrent `advance_phase` landing in that window,
+        // where taking the post-time phase is the correct one — it is the phase
+        // the row says the agent was told.
+        let envelope = self
+            .current_session_phase(&session_id)
+            .await
+            .map(|phase| crate::storage::Envelope::phase(phase.name()));
+        let receipt = {
             let storage_guard = self.storage.lock().await;
             match storage_guard.as_ref() {
                 Some(storage) => match storage
-                    .insert_message(session_id.as_str(), Author::User, MessageKind::Text, &body)
+                    .post_to_channel(
+                        session_id.as_str(),
+                        // `origin = "user"` + no slug: the OOB replay is the
+                        // user's own answer, not a host injection, and this is
+                        // what `insert_message(Author::User, ..)` resolved to
+                        // before the envelope forced the direct call.
+                        "user",
+                        None,
+                        MessageKind::Text.as_str(),
+                        // Borrowed, not moved: `body` is returned to the caller
+                        // too (see the outcome's field doc). One copy, exactly
+                        // as the `&body` this replaced.
+                        body.as_str(),
+                        envelope,
+                    )
                     .await
                 {
-                    Ok(m) => Some(m.message_id()),
+                    Ok(m) => Some(m),
                     Err(e) => {
                         tracing::warn!(
                             ?e,
@@ -660,8 +688,8 @@ impl SignalingBridge {
                 }
             }
         };
-        if let Some(id) = inserted_id {
-            self.notify_message_persisted(Arc::from(session_id.as_str()), id);
+        if let Some(receipt) = &receipt {
+            self.notify_message_persisted(Arc::from(session_id.as_str()), receipt.message_id());
         }
         // Without this the row flips to `answered` in the DB but the cached
         // pending counts (bell + tray) never invalidate.
@@ -669,7 +697,11 @@ impl SignalingBridge {
             choice_id: choice_id.to_string(),
             picked,
         });
-        ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body }
+        ResolveOutcome::AgentReceiverDroppedFellBack {
+            session_id,
+            body,
+            receipt,
+        }
     }
 
     /// `(command, answered_at)` for gated commands in this session APPROVED
@@ -950,7 +982,7 @@ mod tests {
         // the OOB path: a synthetic user message + awaiting cleared.
         let outcome = bridge.resolve_choice(&choice_id, "Yes".into()).await.unwrap();
         match outcome {
-            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body } => {
+            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body, .. } => {
                 assert_eq!(session_id, "s1");
                 assert!(
                     body.contains("User picked:") && body.contains("Yes"),
@@ -967,6 +999,70 @@ mod tests {
         assert!(msgs
             .iter()
             .any(|m| m.content.contains("(out-of-band)") && m.content.contains("Yes")));
+    }
+
+    #[tokio::test]
+    async fn the_oob_answer_records_the_phase_it_will_be_delivered_with() {
+        // B5 Task 2 moved the phase lookup here from `CoreAppState::resolve_choice`,
+        // which used to prepend `[PHASE: X]` to the wire AFTER this row was
+        // written — so the row said one thing and the agent read another.
+        //
+        // The wire must be unchanged: `[PHASE: Plan]\n<replay body>`, exactly
+        // what `with_phase_envelope(phase, body)` produced downstream before.
+        use crate::core::ipav::{IpavPhase, IpavState};
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        let ipav = Arc::new(tokio::sync::Mutex::new(IpavState::default()));
+        ipav.lock().await.advance(IpavPhase::Plan);
+        bridge
+            .register_session_phase("s1".into(), Arc::downgrade(&ipav))
+            .await;
+        storage
+            .insert_tray_entry(
+                "s1",
+                "cid-phase",
+                "brian",
+                crate::storage::QuestionKind::Choice,
+                "Pick something?",
+                Some(&["A".to_string(), "B".to_string()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let outcome = bridge.resolve_choice("cid-phase", "A".into()).await.unwrap();
+        let ResolveOutcome::AgentReceiverDroppedFellBack { body, receipt, .. } = outcome else {
+            panic!("expected the OOB fallback path");
+        };
+        let receipt = receipt.expect("storage is wired, so the answer became a row");
+        assert_eq!(receipt.body(), body, "the receipt is for THIS answer");
+        assert_eq!(receipt.wire(), format!("[PHASE: Plan]\n{body}"));
+
+        // Unregistering (session closed) is the honest degradation: no phase is
+        // known, so the row records — and the agent would read — an untagged
+        // body rather than a phase the session may have left.
+        drop(ipav);
+        storage
+            .insert_tray_entry(
+                "s1",
+                "cid-closed",
+                "brian",
+                crate::storage::QuestionKind::Choice,
+                "Pick again?",
+                Some(&["A".to_string()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let outcome = bridge.resolve_choice("cid-closed", "A".into()).await.unwrap();
+        let ResolveOutcome::AgentReceiverDroppedFellBack { body, receipt, .. } = outcome else {
+            panic!("expected the OOB fallback path");
+        };
+        assert_eq!(receipt.unwrap().wire(), body);
     }
 
     #[tokio::test]
@@ -1131,7 +1227,7 @@ mod tests {
             .await
             .expect("reopened-session resolve should fall back, not error");
         match outcome {
-            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body } => {
+            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body, .. } => {
                 assert_eq!(session_id, "s-reopen");
                 assert!(body.contains("Ship it?"), "body: {body}");
                 assert!(body.contains("Yes"), "body: {body}");
@@ -1251,7 +1347,7 @@ mod tests {
         // Verify we surfaced the wake info to the caller so CoreAppState can
         // route the body through input_tx and actually unblock the subprocess.
         match outcome {
-            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body } => {
+            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body, .. } => {
                 assert_eq!(session_id, "s-fallback");
                 assert!(body.contains("User picked:"));
                 assert!(body.contains("A"));

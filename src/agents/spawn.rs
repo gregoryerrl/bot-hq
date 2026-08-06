@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 use crate::agents::events;
 use crate::agents::input;
 use crate::agents::protocol::{ControlRequest, OutgoingUserMessage};
-use crate::storage::AgentConfig;
+use crate::storage::{AgentConfig, PersistedMessage};
 
 /// Global registry of live claude-code child PIDs. Updated by
 /// `spawn_agent` (insert) and the lifecycle task (remove on exit). Read
@@ -262,11 +262,78 @@ pub struct SpawnConfig {
     pub session_ultracode: Option<bool>,
 }
 
+/// One participant's stdin, reachable only with a receipt.
+///
+/// The sender is private and the public way in is [`deliver`](Self::deliver),
+/// which takes a [`PersistedMessage`]. That is the whole point of the type:
+/// before B5 Task 2 the host paths pushed a `String` at an agent with no row
+/// behind it, so what the agent read was invisible to the user, and nothing but
+/// discipline stopped the next one. Now the argument has to be proof of a row.
+///
+/// A `ParticipantInput` built from a channel of your own is harmless — it
+/// writes to that channel, not to an agent. The only senders that reach a live
+/// subprocess come from [`spawn_agent`] / the native loop.
+#[derive(Clone)]
+pub struct ParticipantInput {
+    tx: mpsc::Sender<OutgoingUserMessage>,
+}
+
+impl ParticipantInput {
+    pub(crate) fn new(tx: mpsc::Sender<OutgoingUserMessage>) -> Self {
+        Self { tx }
+    }
+
+    /// Write a persisted row to this participant's stdin. Returns whether it
+    /// landed: `false` means the input pump has exited (the subprocess is gone),
+    /// which no caller here can remediate — but several want to log or skip a
+    /// busy-flag flip, so it is reported rather than swallowed.
+    ///
+    /// The wire is [`PersistedMessage::wire`] and nothing else. A caller with
+    /// something to add to the text has to add it to the ROW, before the insert.
+    pub async fn deliver(&self, msg: &PersistedMessage) -> bool {
+        self.tx
+            .send(OutgoingUserMessage::text(msg.wire()))
+            .await
+            .is_ok()
+    }
+
+    /// The one remaining string wire: `core::broadcast::peer_forward_message`,
+    /// which carries an agent's OWN already-persisted output to its peer.
+    ///
+    /// It is not receipt-gated because the receipt it would need belongs to the
+    /// AUTHOR's row, which the pump mints and the router never sees — threading
+    /// it through `RouterCommand` is the turn sequencer's work. Deliberately
+    /// named to be greppable: `send_unrouted` is the audit list of text that
+    /// reaches a participant without a row of its own.
+    pub(crate) async fn send_unrouted(&self, wire: String) -> bool {
+        self.tx.send(OutgoingUserMessage::text(wire)).await.is_ok()
+    }
+
+    /// True once the receiving half is gone — a permanent API error or an
+    /// exhausted retry budget drops the supervisor's receiver.
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
+    /// Hand an already-authored message to the CURRENT incarnation. Private to
+    /// this module because it is supervisor plumbing, not a send: the message
+    /// was authored (and, if it came through `deliver`, recorded) one channel
+    /// upstream, and `supervise` is only re-pointing it at the live child.
+    async fn relay(
+        &self,
+        msg: OutgoingUserMessage,
+    ) -> Result<(), mpsc::error::SendError<OutgoingUserMessage>> {
+        self.tx.send(msg).await
+    }
+}
+
 /// Driver handle for one running agent subprocess.
 pub struct AgentHandle {
     pub name: String,
     pub event_rx: mpsc::Receiver<AgentEvent>,
-    pub input_tx: mpsc::Sender<OutgoingUserMessage>,
+    /// Private so the only way to this agent's stdin is [`AgentHandle::input`],
+    /// which hands back a [`ParticipantInput`] — receipt-gated by construction.
+    input_tx: ParticipantInput,
     /// Out-of-band stdin channel for `control_request` interrupts (the cancel
     /// path). Separate from `input_tx` so an interrupt preempts queued user
     /// messages, exactly as the binary's control protocol expects.
@@ -291,10 +358,16 @@ impl AgentHandle {
         Self {
             name,
             event_rx,
-            input_tx,
+            input_tx: ParticipantInput::new(input_tx),
             control_tx,
             kill_tx: Some(kill_tx),
         }
+    }
+
+    /// This agent's stdin. Clone it to hand a long-lived task (the router, the
+    /// idle watchdog) its own way in — every clone is still receipt-gated.
+    pub fn input(&self) -> &ParticipantInput {
+        &self.input_tx
     }
 
     /// Best-effort kill. Idempotent (subsequent calls no-op).
@@ -424,7 +497,7 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     Ok(AgentHandle {
         name: cfg.agent_name,
         event_rx,
-        input_tx,
+        input_tx: ParticipantInput::new(input_tx),
         control_tx,
         kill_tx: Some(kill_tx),
     })
@@ -498,7 +571,7 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
     Ok(AgentHandle {
         name,
         event_rx: out_event_rx,
-        input_tx: out_input_tx,
+        input_tx: ParticipantInput::new(out_input_tx),
         control_tx: out_control_tx,
         kill_tx: Some(kill_tx),
     })
@@ -535,7 +608,7 @@ async fn supervise<S, Fut>(
         if let Some(nudge) = pending_nudge.take() {
             let _ = incarnation
                 .input_tx
-                .send(OutgoingUserMessage::text(nudge))
+                .relay(OutgoingUserMessage::text(nudge))
                 .await;
         }
 
@@ -570,7 +643,7 @@ async fn supervise<S, Fut>(
                 msg = out_input_rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            if let Err(e) = incarnation.input_tx.send(msg).await {
+                            if let Err(e) = incarnation.input_tx.relay(msg).await {
                                 // The incarnation's stdin pump has died (its
                                 // receiver dropped), so the child is now deaf to
                                 // ALL input — yet its event channel can stay open
@@ -1413,7 +1486,7 @@ mod tests {
         let handle = AgentHandle {
             name: "fake".into(),
             event_rx: ev_rx,
-            input_tx: in_tx,
+            input_tx: ParticipantInput::new(in_tx),
             control_tx,
             kill_tx: Some(kill_tx),
         };

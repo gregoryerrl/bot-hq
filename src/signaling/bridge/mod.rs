@@ -25,7 +25,7 @@
 
 use crate::core::activity::ActivityTracker;
 use crate::policy::{Policy, ViolationKind, ViolationsLog};
-use crate::storage::Storage;
+use crate::storage::{PersistedMessage, Storage};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -63,14 +63,29 @@ pub struct ClRescanReport {
 /// fallback (`AgentReceiverDroppedFellBack`) means the agent's tool call
 /// already client-side timed out, so the bridge persisted an out-of-band
 /// `user` message into session storage; the caller (typically
-/// `CoreAppState::resolve_choice`) is responsible for **also** sending
-/// that body through the duo's input channels so the agent's subprocess
+/// `CoreAppState::resolve_choice`) is responsible for **also** delivering
+/// that row through the duo's input channels so the agent's subprocess
 /// wakes up and sees it (clearing the awaiting flag alone won't deliver
 /// — the agent is blocked on stdin and needs an actual stdin write).
 #[derive(Debug, Clone)]
 pub enum ResolveOutcome {
     Delivered,
-    AgentReceiverDroppedFellBack { session_id: String, body: String },
+    AgentReceiverDroppedFellBack {
+        session_id: String,
+        /// What the answer SAYS — the composed replay text, before the phase
+        /// envelope. Retained beside the receipt because it is meaningful even
+        /// when nothing was recorded, and because it is what the composition
+        /// tests assert on; when `receipt` is `Some` this is its `body()`.
+        body: String,
+        /// The row that authorizes wiring it, envelope included.
+        ///
+        /// `None` when the bridge had no storage or the insert failed. The
+        /// caller then delivers nothing: B5 Task 2's invariant is that a
+        /// message with no row does not reach an agent, and this is the one
+        /// path where that changes behaviour — it used to wake the agent with
+        /// text that existed nowhere else.
+        receipt: Option<PersistedMessage>,
+    },
     /// The pick would EXECUTE a gated command (action_gate / ToolBlocklist)
     /// whose requesting agent has moved on (client-side MCP timeout / restart),
     /// and the caller did not pass `confirm_stale`. NOTHING was flipped or
@@ -296,6 +311,22 @@ pub struct SignalingBridge {
     /// cycle and leak the tracker past session close; `upgrade()` returns None
     /// after close → a silent no-op.
     session_activity: Mutex<HashMap<String, Weak<ActivityTracker>>>,
+    /// session_id → Weak ref to the session's IPAV state.
+    ///
+    /// Registered for exactly one reader: `deliver_oob` needs the current phase
+    /// to put in the ENVELOPE of the out-of-band answer it posts. Before B5
+    /// Task 2 the phase was applied in `CoreAppState::resolve_choice` after the
+    /// row was already written, so the row and the agent's stdin disagreed by a
+    /// `[PHASE: X]` line. The envelope has to be known at post time, so the
+    /// phase has to be readable where the post happens.
+    ///
+    /// Weak, but NOT for `session_activity`'s reason — nothing here cycles, the
+    /// IPAV state holds no bridge ref. It is Weak so that a session whose handle
+    /// is dropped without a clean `unregister_session` (crash-reap, a close path
+    /// that missed) leaves a dead ref rather than pinning its phase state for the
+    /// process lifetime; `upgrade()` then returns None and the envelope goes out
+    /// untagged. `unregister_session` still removes the entry on the normal path.
+    session_phase: Mutex<HashMap<String, Weak<Mutex<crate::core::ipav::IpavState>>>>,
     /// Storage handle for out-of-band message injection. Set once via
     /// `set_storage` at startup. When a `resolve_choice` lands after the
     /// agent's blocking `ask_user_choice` tool call already client-side
@@ -375,6 +406,7 @@ impl SignalingBridge {
             session_projects: Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
             session_activity: Mutex::new(HashMap::new()),
+            session_phase: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
             terminals: std::sync::OnceLock::new(),
@@ -523,6 +555,29 @@ impl SignalingBridge {
         self.session_activity.lock().await.insert(session_id, tracker);
     }
 
+    /// Hand the bridge a Weak ref to the session's IPAV state — see the
+    /// `session_phase` field for why the bridge needs to read a phase at all.
+    pub async fn register_session_phase(
+        &self,
+        session_id: String,
+        ipav: Weak<Mutex<crate::core::ipav::IpavState>>,
+    ) {
+        self.session_phase.lock().await.insert(session_id, ipav);
+    }
+
+    /// The session's current IPAV phase, or `None` if it was never registered
+    /// (headless / tests) or has since closed. A `None` means the envelope goes
+    /// out without a phase tag, which is honest: nothing knows what phase a dead
+    /// session is in, and the row then records the untagged wire it will get.
+    pub async fn current_session_phase(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::core::ipav::IpavPhase> {
+        let ipav = self.session_phase.lock().await.get(session_id)?.upgrade()?;
+        let phase = ipav.lock().await.current_phase;
+        Some(phase)
+    }
+
     /// Register a session's open-blocking-findings count cache and return the
     /// shared `Arc` the router reads LOCK-FREE per forward. Seeds from storage so a
     /// re-spawned session with pre-existing findings starts at the right value (not
@@ -576,6 +631,7 @@ impl SignalingBridge {
             .unwrap_or_else(|p| p.into_inner())
             .remove(session_id);
         self.session_activity.lock().await.remove(session_id);
+        self.session_phase.lock().await.remove(session_id);
         self.session_close_gate.lock().await.remove(session_id);
         self.agent_health
             .lock()
