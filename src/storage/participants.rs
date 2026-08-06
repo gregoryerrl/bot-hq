@@ -438,11 +438,66 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
     }
 }
 
+/// Proof that a row exists. The constructor is private to this module and is
+/// called ONLY by the insert paths, so a value of this type cannot be
+/// fabricated — which is what makes "wire without a row" a compile error
+/// rather than a discipline.
+///
+/// Six code paths today write a string straight to an agent's stdin with no
+/// persisted row, so what the agent read is invisible to the user. Once the
+/// send path takes a `PersistedMessage` instead of a `&str`, "wire something
+/// that was never recorded" stops being a rule someone has to remember and
+/// becomes a thing that does not compile.
+///
+/// The private fields are the enforcement, not a convention — forging one
+/// outside this module is rejected by the compiler (`E0451`). Note that
+/// `compile_fail` asserts only THAT the snippet fails, not why: stable rustdoc
+/// ignores a `compile_fail,E0451` error code (verified — a deliberately wrong
+/// code still passes), so if this ever stops testing privacy it will do so
+/// silently. Re-check by deleting `compile_fail` and reading the real error.
+///
+/// ```compile_fail
+/// use bot_hq::storage::PersistedMessage;
+///
+/// // Nothing was inserted, so there is no row to be proof of. The struct
+/// // literal cannot name the fields: they are private to
+/// // `storage::participants`, which is the whole point of the type.
+/// let forged = PersistedMessage {
+///     message_id: 1,
+///     body: "never persisted".to_string(),
+///     envelope: None,
+/// };
+/// ```
+#[derive(Debug, Clone)]
+pub struct PersistedMessage {
+    message_id: i64,
+    body: String,
+    envelope: Option<String>,
+}
+
+impl PersistedMessage {
+    pub fn message_id(&self) -> i64 {
+        self.message_id
+    }
+
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    pub fn envelope(&self) -> Option<&str> {
+        self.envelope.as_deref()
+    }
+}
+
 impl Storage {
     /// Post to the session channel — the write half of "the channel is the
     /// transport". Every wire into a participant goes through here, including
     /// host-authored injections (`origin = "system"`), which today are written
     /// straight to stdin and never recorded at all.
+    ///
+    /// Returns a [`PersistedMessage`] rather than a bare id: the receipt IS the
+    /// permission to wire the text, so the send path can demand one and no
+    /// caller can hand it a string that never became a row.
     ///
     /// Writes the legacy `author` column too, so readers that have not migrated
     /// yet keep working (migration revision 3). `system` rows are stored as
@@ -456,7 +511,7 @@ impl Storage {
         kind: &str,
         content: &str,
         envelope: Option<&str>,
-    ) -> Result<i64> {
+    ) -> Result<PersistedMessage> {
         let participant_id = match (origin, participant_slug) {
             ("participant", Some(slug)) => {
                 self.participant_by_slug(session_id, slug).await?.map(|p| p.id)
@@ -484,7 +539,13 @@ impl Storage {
         .await
         .with_context(|| format!("posting to channel for {session_id}"))?
         .last_insert_rowid();
-        Ok(id)
+        // The ONLY place a `PersistedMessage` is minted, and it is downstream of
+        // the INSERT — the row is what the value proves.
+        Ok(PersistedMessage {
+            message_id: id,
+            body: content.to_string(),
+            envelope: envelope.map(str::to_string),
+        })
     }
 
     /// Everything in the channel after `after_id`, oldest first — the read half.
@@ -716,9 +777,9 @@ mod tests {
         // she was not "forwarded". Context completeness is structural.
         let unread = s.unread_for_participant(r).await.unwrap();
         assert_eq!(unread.len(), 2);
-        assert_eq!(unread[0].id, m1);
+        assert_eq!(unread[0].id, m1.message_id());
         assert_eq!(unread[0].origin, "user");
-        assert_eq!(unread[1].id, m2);
+        assert_eq!(unread[1].id, m2.message_id());
         assert_eq!(unread[1].participant_id, Some(b), "attributed to its author");
         assert_eq!(
             unread[1].envelope.as_deref(),
@@ -727,7 +788,7 @@ mod tests {
         );
 
         // After reading, the cursor advances and the backlog empties.
-        s.advance_cursor(r, m2).await.unwrap();
+        s.advance_cursor(r, m2.message_id()).await.unwrap();
         assert!(s.unread_for_participant(r).await.unwrap().is_empty());
 
         // Brian, who never read, still has both — cursors are per participant.
@@ -791,14 +852,14 @@ mod tests {
         // are already persisted.
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
-        let id = s
+        let pm = s
             .post_to_channel("s1", "system", None, "system_notice",
                              "[System: your previous turn was force-interrupted]", None)
             .await
             .unwrap();
         let rows = s.channel_after("s1", 0).await.unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].id, pm.message_id());
         assert_eq!(rows[0].origin, "system");
         assert!(rows[0].participant_id.is_none());
         // And the legacy read path still sees it, unchanged.
@@ -894,6 +955,22 @@ mod tests {
         let rows = s.channel_after("s1", 0).await.unwrap();
         assert_eq!(rows[0].participant_id, Some(roster[0].id));
         assert_eq!(rows[0].origin, "participant");
+    }
+
+    #[tokio::test]
+    async fn a_persisted_message_carries_the_row_it_came_from() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+        let pm = s
+            .post_to_channel("s1", "participant", Some("brian"), "text", "work", None)
+            .await
+            .unwrap();
+        assert!(pm.message_id() > 0, "a PersistedMessage is proof of a row");
+        assert_eq!(pm.body(), "work");
+        let rows = s.channel_after("s1", 0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, pm.message_id());
     }
 
     #[tokio::test]
