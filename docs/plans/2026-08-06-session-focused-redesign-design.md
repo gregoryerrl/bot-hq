@@ -61,16 +61,53 @@ Exactly one participant holds the turn.
 Observers are skipped rather than given a no-op turn: a wake that cannot produce
 output by construction is pure waste.
 
-**What this deletes:** the volley-breakers (order is fixed, not emergent), the
-wake-rule configuration layer, per-message addressing, and `core/router.rs`'s
-bilateral routing — there is no routing, only a ring.
+**What this deletes:** the wake-rule configuration layer, per-message addressing,
+`core/router.rs`'s bilateral routing (there is no routing, only a ring), and the
+**L2 hard-cap** — that breaker exists for *emergent ping-pong ordering*, which a
+fixed ring makes impossible.
 
-### ⛔ OPEN — Q2: round termination
+**What survives, contrary to an earlier claim in this doc:** repetition
+detection. A single participant can still spin — producing near-identical output
+round after round — which a fixed order does nothing to prevent. The existing
+convergence detector (Jaccard similarity) is repurposed as **spin detection over
+one participant's output across rounds**. A round cap alone would be the wrong
+instrument: it punishes long-but-productive work as a false positive.
 
-When a full round completes, does the cycle (A) yield to the user, (B) loop
-until a participant declares done, or (C) loop with a visible round budget?
-Parked with the user. Recommendation: **C** — B's autonomy without B's runaway,
-and unlike A it does not make the user the pump for ordinary multi-step work.
+## Section 1b — Round termination ✅ VALIDATED (user-authored; derived from vision.md)
+
+**Consensus halt.** The cycle continues until every active participant agrees
+there is nothing left to do.
+
+- Each participant, at turn end, either produces substantive output or declares
+  **done**.
+- When ALL active participants have declared done **consecutively**, the session
+  halts and yields to the user.
+- **Any substantive output resets the tally** — a stale "done" cannot accumulate
+  into a false arrival. (Mirrors the existing `convergence_reset` flag.)
+- Observers and on-demand participants are skipped in rotation, so **they do not
+  vote**. Otherwise 1 active + 3 observers would need 4 yields to halt.
+- **A parked question halts immediately and unilaterally** — it is a yield, not
+  a vote. A participant blocking on the user stops the cycle regardless of what
+  the others would have done.
+
+**Why this and not a round budget** (the recommendation this replaces): vision.md
+says *"the first prompt sets the destination, not the arrival"* and *"in
+principle the user can tell the agents to drive to the destination alone."* A
+budget is the car pulling over every N miles to ask permission to continue —
+exactly the "user becomes the pump" failure the vision rejects. The AI-car has
+two stopping conditions and the consensus model reproduces both:
+
+| vision concept | mechanism |
+|---|---|
+| **arrival** | all active participants declare done |
+| **obstacle / junction** | a participant parks a question → immediate halt, surfaced in the tray |
+| **driving** | anyone still producing work |
+
+**Backstops** (safety nets, not checkpoints):
+1. **Spin detection** (primary) — repetition across rounds by one participant is
+   an obstacle, surfaced like any other.
+2. **Round cap** (crude second net) — high enough to be invisible in normal use;
+   visible and user-overridable per session.
 
 ---
 
@@ -133,15 +170,39 @@ and `session-policies/<sid>.yaml`.)
 3. **Explain configurations** — no execution capability = observer; execution
    without `AskUser` = a silent worker that can never surface a question.
 
-### ⛔ OPEN — queued product decisions
-- Designated vs derived reviewer (does the gate care WHICH participant filed?)
-- Roles fixed at create vs reassignable mid-session
-- Does a role carry a default model?
-- Upper bound on N
+**Decided without needing a user call:**
+- A role **may carry an optional default model**, overridable at invite. Cheap,
+  and it makes a role a complete recipe rather than half of one.
+- **No hard cap on N.** The create flow warns past ~5 rather than forbidding it;
+  an arbitrary limit is a guess, a warning is information.
+- **Turn order and role assignment are fixed at session create.** Reordering and
+  reassignment are additive later; building them now costs UI for an
+  undemonstrated need.
+
+### Section 2b — Review authority ✅ VALIDATED
+
+**Derived, with the existing severity distinction.** Any participant holding
+`FileFinding` may file; a finding is `blocking` or `advisory`; only `blocking`
+gates the commit. No designation concept enters the schema.
+
+This is the smallest possible generalisation: `eyes_flag` already carries a
+blocking flag and the gate already enforces it, so N-way needs **no new
+concept** — only the gate's query changes from "Rain's findings" to "any
+participant's blocking findings, unresolved."
+
+A participant that files noise is a **role-configuration** problem (don't grant
+`FileFinding`), not a gate problem. The one case this deliberately does not
+express: letting an experimental participant file *blocking* findings while
+denying it the power to block. If that need ever appears, a designation concept
+can be added — but it is not built on speculation.
+
+Relationship constraints are unchanged and are enforced per-object, not by role:
+`disposition_finding` requires "not the author"; `approve_finding` requires "is
+the author".
 
 ---
 
-## Section 3 — Channel transport ⏳ DRAFTED, NOT YET VALIDATED
+## Section 3 — Channel transport ⏳ AWAITING VALIDATION
 
 - One session channel. Participants read it via `participant_cursors`; delivery
   is a cursor advance, making it an auditable fact.
@@ -165,6 +226,18 @@ and `session-policies/<sid>.yaml`.)
   (`open_blocking` is a lock-free cache for exactly that). A write per delivery
   must be benchmarked.
 
+**The turn sequencer replaces per-participant reactive tasks.** Because exactly
+one participant acts at a time, there is no fan-out: when a turn completes, the
+sequencer picks the next active participant, hands it every unread row, and
+waits. One loop, not N reactive tasks — simpler than the model drafted before
+the turn cycle was settled.
+
+**What the user sees.** The roster shows, per participant: turn position, whether
+it holds the turn, cursor lag (how far behind the channel it is), its capability
+set, and its last vote (done / working). "Waiting on participant 3" becomes a
+rendered state rather than a gap between events — which was the original
+complaint.
+
 ---
 
 ## Section 4 — Migration ⏳ DRAFTED, NOT YET VALIDATED
@@ -181,6 +254,29 @@ already dry-run-proven and its guards proven to abort; that evidence survives.
 is dead after B1. If any path still reads them, that is split brain.
 
 ---
+
+## Section 5 — Re-triage of the deferred bundle
+
+PLAN.md defers three items **behind the Rain-plugin migration**. That gate no
+longer exists (roles delete the migration outright), so each needs re-filing:
+
+| item | verdict |
+|---|---|
+| **#26** held-forward flush (`held_late` ×12/day) | **DISSOLVES.** The channel model has no held forwards — cursors either advance or visibly do not. The bug class cannot be expressed. |
+| **#30** duplicate spawn warmup | **SURVIVES, reshaped.** Becomes "invite creates a duplicate participant"; re-file against the participant model rather than the spawn path. |
+| peer-wait watchdog misclassification | **DISSOLVES.** A participant awaiting its turn is *waiting* — a visible roster state, not silence to be inferred from. The watchdog reads turn position instead of guessing. |
+
+## Issues this redesign closes as a side effect
+
+- **#5 — "EYES has no user channel", flagged needs-user-decision.** Resolves
+  without a decision: addressing the user becomes the `AskUser` capability, so
+  it is a per-role toggle rather than an architectural fork.
+- **`close_session` ungated** (the live gap found this session): becomes the
+  `CloseSession` capability.
+- **The idle watchdog's false NEEDS DIRECTION**: superseded by turn position.
+- **Six invisible injection points**: closed by the `system` participant plus
+  the `PersistedMessage` newtype, which makes "wire without a row" a compile
+  error.
 
 ## Consequences beyond the redesign
 
