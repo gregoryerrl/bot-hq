@@ -3,11 +3,34 @@
 //!
 //! The shape it is being built toward: exactly one participant holds the turn.
 //! When that turn ends the sequencer picks the next active participant
-//! ([`Storage::next_active_participant`]), hands it every channel row past its
-//! cursor ([`Storage::unread_for_participant`]), and waits. The cycle ends by
+//! ([`Storage::next_active_participant`]), hands it every unread row
+//! ([`Storage::unread_for_participant`]), and waits. The cycle ends by
 //! consensus — every active participant has voted done
 //! ([`Storage::all_active_voted_done`]) — or immediately, when a participant
 //! parks a question for the user.
+//!
+//! ## Those three helpers are seams, not working code
+//!
+//! Read the paragraph above as the target. All three have defects that the next
+//! task fixes before it builds on them, and each was reproduced against
+//! `Storage::memory()` rather than inferred from reading:
+//!
+//! - `unread_for_participant` is `channel_after` with no author filter, so it
+//!   returns the participant's OWN rows. A participant handed its backlog reads
+//!   its own last turn back as fresh input. "Every unread row" above is the
+//!   design's wording and the goal; it is not what the helper does today.
+//! - `next_active_participant` advances on `turn_position > pos` — strictly
+//!   greater — while 0044 constrains only `UNIQUE (session_id, slug)`. Nothing
+//!   stops two active participants sharing a position, and the column DEFAULTs
+//!   to 0. With actives at positions 0, 0 and 1 the observed ring is
+//!   `a, c, a, c, a, c`: the second participant at 0 is never scheduled. It is
+//!   still `enabled` and `active`, so consensus keeps requiring a vote it can
+//!   never be given the turn to cast. **"The cycle ends by consensus" is
+//!   unreachable in a roster the schema permits.**
+//! - With no active participants at all, `next_active_participant` yields `None`
+//!   and `all_active_voted_done` yields `false`. Neither answer is "done", so a
+//!   loop that treats the two as a pair spins; the empty roster needs its own
+//!   branch rather than falling through either path.
 //!
 //! **What is in this file is the skeleton: the loop and its lifecycle, and
 //! nothing else.** No ring advance, no consensus, no delivery — each of those
@@ -41,12 +64,20 @@
 //! session id at all, so `deliver` has nothing on hand to compare a receipt
 //! against.
 //!
-//! The sequencer delivers to ONE participant rather than fanning out, so
-//! reaching for `SessionAgent::deliver` would step around the only guard in the
-//! system. The intended fix is a per-participant entry point on `SessionHandle`
-//! — which does know both ids — with the comparison itself factored into one
-//! private helper that both it and `send_to_all` call. The check then gains a
-//! second caller instead of a copy.
+//! The sequencer delivers to ONE participant rather than fanning out, and there
+//! are TWO reachable ways to do that without the compare. `SessionAgent::deliver`
+//! is the obvious one. The second survives making the first private:
+//! `SessionAgent.handle` is `pub`, `AgentHandle::input()` is `pub` and
+//! `ParticipantInput::deliver` is `pub`, so `agent.handle.input().deliver(&msg)`
+//! reaches the same stdin through three public hops. Both routes are
+//! receipt-gated — neither takes a string — but receipt-gated is not
+//! scope-gated, and the scope compare is exactly what gets stepped around. The
+//! delivery task has to close both, not just the named method.
+//!
+//! The intended fix is a per-participant entry point on `SessionHandle` — which
+//! does know both ids — with the comparison itself factored into one private
+//! helper that both it and `send_to_all` call. The check then gains a second
+//! caller instead of a copy.
 //!
 //! What that must not become is a compare written here. This module will hold
 //! both a receipt and a session id, so the check would type-check locally, and
@@ -72,7 +103,6 @@
 //! delivery implementation, which is how the ladder being replaced acquired its
 //! own.
 
-use crate::signaling::SignalingBridge;
 use crate::storage::Storage;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -81,15 +111,20 @@ use tracing::debug;
 /// What the sequencer task needs, cloned from the session's own state at spawn
 /// — the same arrangement [`RouterDeps`](crate::core::RouterDeps) uses.
 ///
-/// The skeleton reads only `session_id`, for its log lines. The other two are
-/// named now because the tasks that follow need them (`storage` for the ring,
-/// the cursors and the votes; `bridge` for the turn-transition emits) and
-/// threading a field in one task at a time churns every construction site. That
-/// is the whole justification — so if one of those tasks lands without touching
-/// a field here, the field should come out rather than sit here unread.
+/// Two fields, and nothing carried on spec. The skeleton reads only
+/// `session_id`, for its log lines; `storage` is here because the ring, the
+/// cursors and the votes all live there, so the next task cannot be written
+/// without it.
 ///
-/// Nothing else belongs here yet. In particular there is no `SessionHandle` and
-/// no participant stdin: see the delivery note in the module doc.
+/// A `bridge` handle was in the first draft, on the argument that naming fields
+/// early saves churning construction sites later. That argument does not hold
+/// here: there is exactly one construction site — the test helper below — and no
+/// task in this batch names a consumer for it. `pub` fields on a `pub` struct
+/// never trip `dead_code`, so a field added early would sit unread with nothing
+/// to flag it. Add one when a task actually needs it.
+///
+/// In particular there is no `SessionHandle` and no participant stdin: see the
+/// delivery note in the module doc.
 pub struct SequencerDeps {
     /// The session whose turn cycle this task runs. Every ring, cursor and
     /// consensus query is scoped by it.
@@ -97,8 +132,6 @@ pub struct SequencerDeps {
     /// The channel is the transport: rows, cursors, done votes and the roster
     /// all live in storage, so this is where a turn's context comes from.
     pub storage: Storage,
-    /// Event surface back to the UI.
-    pub bridge: Arc<SignalingBridge>,
 }
 
 /// A wake for the sequencer.
@@ -174,7 +207,6 @@ mod tests {
         SequencerDeps {
             session_id: "s1".into(),
             storage: Storage::memory().await.unwrap(),
-            bridge: SignalingBridge::new(),
         }
     }
 
