@@ -603,6 +603,10 @@ impl Storage {
                            WHERE session_id = ?1 AND slug = ?3) END, \
                      ?2, ?4, ?5, ?6, ?7, ?8)",
         )
+        // Bind order is NOT column order — `?3` appears only inside the CASE,
+        // so position no longer tells you the target. The binds below are, in
+        // order: ?1 session_id, ?2 origin, ?3 participant_slug, ?4 kind,
+        // ?5 content, ?6 envelope, ?7 author, ?8 created_at.
         .bind(&*session_id)
         .bind(origin)
         .bind(participant_slug)
@@ -892,11 +896,21 @@ mod tests {
         // of that change. A test that only passed afterwards would be pinning
         // the refactor rather than the behaviour.
         //
-        // Four cases, because each is a way the resolution can be wrong:
+        // Five cases, because each is a way the resolution can be wrong:
         // a known slug resolves; an unknown one degrades to NULL and STILL
         // writes the row (an agent's output vanishing is far worse than one
         // that is unattributed); resolution is scoped to the session, not
-        // global; and a non-participant origin never resolves at all.
+        // global; a non-participant origin never resolves at all; and
+        // `("participant", None)` resolves to NULL.
+        //
+        // That last case is the one whose MECHANISM changed. The old form
+        // matched it in Rust — `("participant", Some(slug))` was the only arm
+        // that looked anything up, so a bare `None` fell to `_ => None`. The
+        // new form rests on SQL three-valued logic instead: `slug = NULL` is
+        // NULL, never true, so the subquery matches no row and yields NULL.
+        // Same answer, different machinery, and nothing in the signature stops
+        // a caller writing it — so it is pinned rather than left to be
+        // re-derived.
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
         s.create_session("s2", "t", None).await.unwrap();
@@ -918,13 +932,17 @@ mod tests {
             .post_to_channel("s1", "system", Some("brian"), "system_notice", "notice", None)
             .await
             .unwrap();
+        let slugless = s
+            .post_to_channel("s1", "participant", None, "text", "anonymous", None)
+            .await
+            .unwrap();
         let elsewhere = s
             .post_to_channel("s2", "participant", Some("brian"), "text", "hers", None)
             .await
             .unwrap();
 
         let rows = s.channel_after("s1", 0).await.unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].id, known.message_id());
         assert_eq!(rows[0].participant_id, Some(brian1), "a known slug resolves");
         assert_eq!(rows[1].id, unknown.message_id());
@@ -935,6 +953,13 @@ mod tests {
             rows[2].participant_id, None,
             "only a participant origin resolves, even handed a live slug"
         );
+        assert_eq!(rows[3].id, slugless.message_id());
+        assert_eq!(
+            rows[3].participant_id, None,
+            "a participant origin with no slug resolves to NULL — `slug = NULL` \
+             is NULL, not a match"
+        );
+        assert_eq!(rows[3].content, "anonymous", "and that row is written too");
 
         let other = s.channel_after("s2", 0).await.unwrap();
         assert_eq!(other.len(), 1);

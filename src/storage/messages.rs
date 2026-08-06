@@ -26,16 +26,35 @@ impl Storage {
     /// The `Author` → `(origin, participant_slug)` map is total and lossless:
     /// `Author` has no `system` variant, and 0044 seeded participants on
     /// exactly the identity `slug == author`, so the slug IS the legacy author
-    /// string rather than a translation of it. `author`, `origin`,
-    /// `participant_id` and the RFC3339-Z timestamp are all written exactly as
-    /// this method wrote them before — `every_legacy_message_query_still_works_after_0044`
-    /// and `the_legacy_write_path_now_populates_the_new_columns` are the pins.
+    /// string rather than a translation of it.
+    ///
+    /// **What changed and what did not.** `author`, `origin` and the RFC3339-Z
+    /// timestamp are written with the same values as before. `participant_id`
+    /// is written with the same values but by a DIFFERENT SHAPE, and the shape
+    /// changed for every user row, not just a hypothetical one: the old SQL ran
+    /// its subquery unconditionally, so an `Author::User` row looked up
+    /// `slug = 'user'` on every insert and got NULL back because no such row
+    /// existed. The new form does not look at all — `origin = 'user'` fails the
+    /// CASE guard. The two therefore agree on every database reachable today,
+    /// and would disagree only if some `session_participants` row carried
+    /// `slug = 'user'`: the old form would attribute the user's own message to
+    /// it, the new form still writes NULL. Nothing creates such a row and no
+    /// CHECK forbids one, so this is a real if currently unreachable
+    /// difference, and the new behaviour is the defensible one.
+    ///
+    /// `every_legacy_message_query_still_works_after_0044` and
+    /// `the_legacy_write_path_now_populates_the_new_columns` are the pins.
+    ///
+    /// `content` and `session_id` mirror [`Storage::post_to_channel`]'s own
+    /// generics rather than narrowing them: this fires per chunk, the layer
+    /// below can take ownership, and a narrower wrapper would force a body copy
+    /// and a session-id allocation at a boundary where both sides could move.
     pub async fn insert_message(
         &self,
-        session_id: &str,
+        session_id: impl Into<std::sync::Arc<str>>,
         author: Author,
         kind: MessageKind,
-        content: &str,
+        content: impl Into<String>,
     ) -> Result<PersistedMessage> {
         let (origin, slug) = match author {
             Author::User => ("user", None),
@@ -43,27 +62,6 @@ impl Storage {
         };
         self.post_to_channel(session_id, origin, slug, kind.as_str(), content, None)
             .await
-    }
-
-    /// [`Storage::insert_message`] for the call sites that genuinely only want
-    /// the row id: the `notify_message_persisted` emitters (phase advance, the
-    /// idle-watchdog notice, the tray's out-of-band answer and phase request)
-    /// and the user broadcast, which returns an id to its own callers. They
-    /// persist a row and wire their text by a separate route, so a receipt
-    /// there would be carried past its purpose. Everything on the path B5 makes
-    /// receipt-gated — the duo pump's per-chunk writes — calls
-    /// `insert_message` and keeps the receipt.
-    pub async fn insert_message_id(
-        &self,
-        session_id: &str,
-        author: Author,
-        kind: MessageKind,
-        content: &str,
-    ) -> Result<i64> {
-        Ok(self
-            .insert_message(session_id, author, kind, content)
-            .await?
-            .message_id())
     }
 
     /// True if `author` posted any message in `session_id` with `created_at`
@@ -232,13 +230,18 @@ mod tests {
         assert_eq!(pm.body(), rows[0].content);
         assert_eq!(pm.envelope(), None, "the legacy shape carries no envelope");
 
-        // And the id-only shim is the same write, just discarding the receipt.
-        let id = s
-            .insert_message_id("s1", Author::User, MessageKind::Text, "reply")
+        // A user row takes the other arm of the `Author` map and still returns
+        // a receipt for its own row — there is no receipt-less variant to fall
+        // through to, which is the point of deleting the id-only shim: it took
+        // the same argument list, so swapping it in would have compiled
+        // silently and dropped the receipt with no diagnostic.
+        let user = s
+            .insert_message("s1", Author::User, MessageKind::Text, "reply")
             .await
             .unwrap();
         let rows = s.messages_for_session("s1", None).await.unwrap();
-        assert_eq!(rows[1].id, id);
+        assert_eq!(rows[1].id, user.message_id());
         assert_eq!(rows[1].author, "user");
+        assert_eq!(user.body(), "reply");
     }
 }

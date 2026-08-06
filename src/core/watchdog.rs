@@ -354,12 +354,16 @@ async fn deliver_idle_nudge(
         a reason (halt / mark_awaiting_user); or ask to close if the task is done. Never \
         invent a direction or new work to satisfy this nudge — if no user-given \
         direction exists, the right response IS the question: ask which direction.]";
+    // The receipt is dropped: this site persists NOTICE (what the user reads in
+    // the chat) and wires NUDGE (what Brian reads) — two different strings by
+    // design, plus a phase envelope on top. The strongest form of the body
+    // divergence, so there is no send here this row could authorize as written.
     match idle_watch
         .storage
-        .insert_message_id(session_id, Author::User, MessageKind::SystemNotice, NOTICE)
+        .insert_message(session_id, Author::User, MessageKind::SystemNotice, NOTICE)
         .await
     {
-        Ok(id) => bridge.notify_message_persisted(Arc::from(session_id), id),
+        Ok(m) => bridge.notify_message_persisted(Arc::from(session_id), m.message_id()),
         Err(e) => warn!(session_id = %session_id, error = %e,
                         "idle watchdog: failed to persist system notice"),
     }

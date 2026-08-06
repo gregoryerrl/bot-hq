@@ -626,14 +626,21 @@ impl SignalingBridge {
             self.maybe_run_gated(&session_id, command_text, &picked, &mut body)
                 .await;
         }
+        // The receipt is dropped, for now. `body` is persisted raw, but what
+        // reaches an agent is `with_phase_envelope(phase, body)`, applied in
+        // `CoreAppState::resolve_choice` after this returns — so the receipt
+        // does not describe the wire. Sequencing, not a design conclusion:
+        // `post_to_channel` takes an `envelope` and `PersistedMessage` exposes
+        // `envelope()` so that decoration can ride the receipt instead of being
+        // applied downstream. Task 2 threads it through.
         let inserted_id = {
             let storage_guard = self.storage.lock().await;
             match storage_guard.as_ref() {
                 Some(storage) => match storage
-                    .insert_message_id(&session_id, Author::User, MessageKind::Text, &body)
+                    .insert_message(session_id.as_str(), Author::User, MessageKind::Text, &body)
                     .await
                 {
-                    Ok(id) => Some(id),
+                    Ok(m) => Some(m.message_id()),
                     Err(e) => {
                         tracing::warn!(
                             ?e,
@@ -868,16 +875,21 @@ impl SignalingBridge {
             if let Some(storage) = storage_guard.as_ref() {
                 let author =
                     crate::storage::Author::parse(&agent).unwrap_or(crate::storage::Author::User);
+                // The receipt is dropped: this row records the agent's request,
+                // and the only thing done with `body` afterwards is
+                // `emit_halt_row` — a UI event, not a wire into any agent's
+                // stdin. There is no send on this path for a receipt to gate.
                 match storage
-                    .insert_message_id(
-                        &session_id,
+                    .insert_message(
+                        session_id.as_str(),
                         author,
                         crate::storage::MessageKind::Text,
                         &body,
                     )
                     .await
                 {
-                    Ok(id) => self.notify_message_persisted(Arc::from(session_id.as_str()), id),
+                    Ok(m) => self
+                        .notify_message_persisted(Arc::from(session_id.as_str()), m.message_id()),
                     Err(e) => {
                         tracing::warn!(?e, "request_phase_advance insert_message failed")
                     }

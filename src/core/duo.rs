@@ -245,7 +245,12 @@ pub async fn pump_agent(
         match event {
             AgentEvent::Text(text) => {
                 match storage
-                    .insert_message(&cfg.session_id, cfg.author, MessageKind::Text, &text)
+                    // `text` is read again below (limit detection, buffer), so
+                    // this one borrows; the tool payloads further down move.
+                    // The session id is an `Arc<str>` clone — a refcount bump,
+                    // not the per-chunk allocation `&*cfg.session_id` would
+                    // have cost once the parameter stopped being `&str`.
+                    .insert_message(cfg.session_id.clone(), cfg.author, MessageKind::Text, &text)
                     .await
                 {
                     Ok(m) => cfg.notify_persisted(m.message_id()),
@@ -315,11 +320,14 @@ pub async fn pump_agent(
                 })
                 .unwrap_or_else(|_| "{}".to_string());
                 match storage
+                    // `payload` MOVES: it is not read again, and a tool_use
+                    // input can be large. Borrowing here would copy the whole
+                    // body into the receipt on every tool call.
                     .insert_message(
-                        &cfg.session_id,
+                        cfg.session_id.clone(),
                         cfg.author,
                         MessageKind::ToolUse,
-                        &payload,
+                        payload,
                     )
                     .await
                 {
@@ -351,11 +359,13 @@ pub async fn pump_agent(
                 })
                 .unwrap_or_else(|_| "{}".to_string());
                 match storage
+                    // `payload` MOVES — same reason, and this is the biggest
+                    // body of the three: a tool result can carry a whole file.
                     .insert_message(
-                        &cfg.session_id,
+                        cfg.session_id.clone(),
                         cfg.author,
                         MessageKind::ToolResult,
-                        &payload,
+                        payload,
                     )
                     .await
                 {
@@ -574,7 +584,9 @@ pub async fn pump_agent(
                 // unbounded error-spam loop documented in that branch. The user
                 // needs to see this; the peer does not.
                 match storage
-                    .insert_message(&cfg.session_id, cfg.author, MessageKind::Text, &msg)
+                    // `msg` MOVES — the `warn!` above already consumed what it
+                    // needed and nothing reads it after this.
+                    .insert_message(cfg.session_id.clone(), cfg.author, MessageKind::Text, msg)
                     .await
                 {
                     Ok(m) => cfg.notify_persisted(m.message_id()),

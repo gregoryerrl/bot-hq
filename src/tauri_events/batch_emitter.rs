@@ -167,7 +167,7 @@ mod tests {
         let s = Storage::memory().await.unwrap();
         s.create_session(session_id, "test", None).await.unwrap();
         for c in contents {
-            s.insert_message(session_id, Author::Brian, MessageKind::Text, c)
+            s.insert_message(session_id, Author::Brian, MessageKind::Text, *c)
                 .await
                 .unwrap();
         }

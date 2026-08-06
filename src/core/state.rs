@@ -843,13 +843,21 @@ impl AppState {
         handle.ipav.lock().await.advance(target);
         let notice = target.transition_notice().to_string();
 
-        // Synthetic phase-change message in storage.
-        let id = self
+        // Synthetic phase-change message in storage. The receipt is KEPT: what
+        // gets wired at the bottom of this block is `notice` itself, byte for
+        // byte — `transition_notice()` already carries its own `[PHASE: X]`, so
+        // unlike the broadcast and tray paths there is no envelope, banner or
+        // prefix applied downstream. This is therefore the one host-authored
+        // site where the persisted row IS the wire, and when Task 2 makes
+        // `input_tx` take a `PersistedMessage` it can be handed straight over.
+        // Dropping the receipt here would mean reverting to `insert_message` or
+        // re-reading the row — the exact cost the convergence exists to avoid.
+        let persisted = self
             .storage
-            .insert_message_id(session_id, Author::User, MessageKind::PhaseChange, &notice)
+            .insert_message(session_id, Author::User, MessageKind::PhaseChange, &notice)
             .await?;
         self.bridge
-            .notify_message_persisted(Arc::from(session_id), id);
+            .notify_message_persisted(Arc::from(session_id), persisted.message_id());
         // Fed to HANDS's stdin so it lands as a natural prompt.
         //
         // NOT to EYES (issues.md #8). Waking the reviewer on a phase transition
