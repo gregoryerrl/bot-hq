@@ -14,6 +14,7 @@
 //! from starting life with an empty roster.
 
 use super::*;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Role {
@@ -438,23 +439,32 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
     }
 }
 
-/// Proof that a row exists. The constructor is private to this module and is
-/// called ONLY by the insert paths, so a value of this type cannot be
-/// fabricated — which is what makes "wire without a row" a compile error
-/// rather than a discipline.
+/// A receipt for one channel row, minted by — and only by — the INSERT in
+/// [`Storage::post_to_channel`].
 ///
-/// Six code paths today write a string straight to an agent's stdin with no
-/// persisted row, so what the agent read is invisible to the user. Once the
-/// send path takes a `PersistedMessage` instead of a `&str`, "wire something
-/// that was never recorded" stops being a rule someone has to remember and
-/// becomes a thing that does not compile.
+/// **This is the enabling half, not a closed gate.** Nothing consumes a
+/// `PersistedMessage` yet, and all six of the paths that write a string
+/// straight to an agent's stdin with no persisted row are still open, so what
+/// those agents read remains invisible to the user. The type exists now so that
+/// B5 Task 2 can change the send path to take one instead of a `&str`; at that
+/// point "wire something that was never recorded" stops being a discipline and
+/// becomes a compile error. Until Task 2 lands, that is the plan, not yet a
+/// property of the system.
 ///
-/// The private fields are the enforcement, not a convention — forging one
-/// outside this module is rejected by the compiler (`E0451`). Note that
-/// `compile_fail` asserts only THAT the snippet fails, not why: stable rustdoc
-/// ignores a `compile_fail,E0451` error code (verified — a deliberately wrong
-/// code still passes), so if this ever stops testing privacy it will do so
-/// silently. Re-check by deleting `compile_fail` and reading the real error.
+/// What IS true today: the value cannot be forged. There is exactly ONE
+/// construction site, immediately downstream of that INSERT, and the fields are
+/// private to this module. Note the scope of that claim — it covers
+/// `post_to_channel`, not every write to `messages`. [`Storage::insert_message`]
+/// is a second live insert path into the same table: it returns a bare `i64`,
+/// mints no receipt, and is what the duo pump uses on every chunk. Whether the
+/// two paths converge is a B5 Task 2 decision, deliberately not settled here.
+///
+/// `Clone` is deliberate. Fan-out hands one row to N agents by reference, so a
+/// clone is never what reaches the wire; consuming by move would instead push
+/// callers into re-posting the same text once per recipient.
+///
+/// The private fields are the enforcement, not a convention — forging one from
+/// outside this module is rejected (`E0451`):
 ///
 /// ```compile_fail
 /// use bot_hq::storage::PersistedMessage;
@@ -464,13 +474,35 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 /// // `storage::participants`, which is the whole point of the type.
 /// let forged = PersistedMessage {
 ///     message_id: 1,
+///     session_id: "s1".into(),
 ///     body: "never persisted".to_string(),
 ///     envelope: None,
 /// };
 /// ```
+///
+/// Two ways that block can rot. It asserts only THAT the snippet fails, never
+/// why — stable rustdoc ignores a `compile_fail,E0451` error code (verified: a
+/// deliberately wrong code still passes), so re-check the reason by deleting
+/// `compile_fail` and reading the real error. And a rename or a moved `pub use`
+/// would leave it passing for the wrong reason; the companion doctest below
+/// fails loudly if the path stops resolving.
+///
+/// ```
+/// use bot_hq::storage::PersistedMessage;
+/// fn _wire(_receipt: &PersistedMessage) {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct PersistedMessage {
     message_id: i64,
+    /// The channel this receipt is valid for. A receipt without a scope is
+    /// forgeable ACROSS sessions: after Task 2,
+    /// `session_a_handle.send_to_all(receipt_from_session_b)` would compile and
+    /// wire another session's text into these agents, with the row sitting in
+    /// the wrong channel — the exact class of bug this type exists to rule out.
+    ///
+    /// `Arc<str>` rather than `String` to match `DuoConfig::session_id` and the
+    /// `MessagePersisted` / `BatchEmitter` threading this will flow into.
+    session_id: Arc<str>,
     body: String,
     envelope: Option<String>,
 }
@@ -478,6 +510,11 @@ pub struct PersistedMessage {
 impl PersistedMessage {
     pub fn message_id(&self) -> i64 {
         self.message_id
+    }
+
+    /// The channel this receipt authorizes delivery into — see the field.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     pub fn body(&self) -> &str {
@@ -509,9 +546,23 @@ impl Storage {
         origin: &str,
         participant_slug: Option<&str>,
         kind: &str,
-        content: &str,
-        envelope: Option<&str>,
+        content: impl Into<String>,
+        envelope: Option<String>,
     ) -> Result<PersistedMessage> {
+        // Both taken by value and MOVED into the receipt at the bottom. This
+        // fires per Text / ToolUse / ToolResult chunk and a tool result can
+        // carry a whole file, so copying the body into the receipt would be a
+        // full-body heap copy per post. `Arc<str>` would not help —
+        // `Arc::from(&str)` allocates and copies exactly as `to_string()` does,
+        // and delivery is by reference, so nothing ever clones the body.
+        //
+        // `content` is `impl Into<String>` so `&str` callers stay ergonomic and
+        // `String` callers pay nothing. `envelope` is a plain `Option<String>`
+        // on purpose: `Option<impl Into<String>>` cannot infer a bare `None`
+        // (E0283), which would force a turbofish at every call site that omits
+        // an envelope — and envelopes are small JSON metadata, so the hot-path
+        // argument that motivates the generic on `content` does not apply.
+        let content: String = content.into();
         let participant_id = match (origin, participant_slug) {
             ("participant", Some(slug)) => {
                 self.participant_by_slug(session_id, slug).await?.map(|p| p.id)
@@ -532,19 +583,21 @@ impl Storage {
         .bind(participant_id)
         .bind(origin)
         .bind(kind)
-        .bind(content)
-        .bind(envelope)
+        .bind(content.as_str())
+        .bind(envelope.as_deref())
         .bind(legacy_author)
         .execute(&self.pool)
         .await
         .with_context(|| format!("posting to channel for {session_id}"))?
         .last_insert_rowid();
-        // The ONLY place a `PersistedMessage` is minted, and it is downstream of
-        // the INSERT — the row is what the value proves.
+        // The one and only place a `PersistedMessage` is minted, and it sits
+        // downstream of the INSERT — the row is what the value proves. Body and
+        // envelope MOVE in here; only the (short) session id is copied.
         Ok(PersistedMessage {
             message_id: id,
-            body: content.to_string(),
-            envelope: envelope.map(str::to_string),
+            session_id: Arc::from(session_id),
+            body: content,
+            envelope,
         })
     }
 
@@ -771,7 +824,7 @@ mod tests {
         let m1 = s.post_to_channel("s1", "user", None, "text", "do the thing", None)
             .await.unwrap();
         let m2 = s.post_to_channel("s1", "participant", Some("brian"), "text", "done",
-                                   Some(r#"{"phase":"Apply"}"#)).await.unwrap();
+                                   Some(r#"{"phase":"Apply"}"#.to_string())).await.unwrap();
 
         // Rain has read nothing yet, so both are unread — including the message
         // she was not "forwarded". Context completeness is structural.
@@ -959,18 +1012,36 @@ mod tests {
 
     #[tokio::test]
     async fn a_persisted_message_carries_the_row_it_came_from() {
+        // B5 Task 2 renders the wire FROM the receipt and never re-reads the
+        // row, so the assertions below compare the receipt against the
+        // PERSISTED row rather than against the arguments it was built from.
+        // Checking it against the arguments would pass by construction; the
+        // property that matters is that the two cannot diverge, because a
+        // divergence makes the row a lie — the user's record and the agent's
+        // actual input would silently disagree, which is the exact failure
+        // this type exists to rule out.
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
         s.ensure_session_roster("s1").await.unwrap();
         let pm = s
-            .post_to_channel("s1", "participant", Some("brian"), "text", "work", None)
+            .post_to_channel("s1", "participant", Some("brian"), "text", "work",
+                             Some(r#"{"phase":"Apply"}"#.to_string()))
             .await
             .unwrap();
         assert!(pm.message_id() > 0, "a PersistedMessage is proof of a row");
-        assert_eq!(pm.body(), "work");
+        // The scope is part of the receipt: without it, Task 2's
+        // `session_a.send_to_all(receipt_from_session_b)` would compile.
+        assert_eq!(pm.session_id(), "s1", "a receipt is scoped to its channel");
+
         let rows = s.channel_after("s1", 0).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, pm.message_id());
+        assert_eq!(pm.body(), rows[0].content, "receipt body IS the persisted body");
+        assert_eq!(
+            pm.envelope(),
+            rows[0].envelope.as_deref(),
+            "receipt envelope IS the persisted envelope"
+        );
     }
 
     #[tokio::test]
