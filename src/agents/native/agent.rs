@@ -994,7 +994,12 @@ pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     ));
 
     Ok(AgentHandle::from_parts(
-        name, event_rx, input_tx, control_tx, kill_tx,
+        name,
+        cfg.session_id.as_str(),
+        event_rx,
+        input_tx,
+        control_tx,
+        kill_tx,
     ))
 }
 

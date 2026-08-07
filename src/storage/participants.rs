@@ -922,16 +922,9 @@ impl PersistedMessage {
     /// Costs a clone of the body: the caller owns the row and may still need it,
     /// and this is the read path, not the per-chunk write path the module doc
     /// guards against copying on.
-    // Dead until the turn sequencer lands — that is the point of adding it now.
-    // Task 5 hands each participant its backlog as rows, and discovering there
-    // was no way to make a receipt from one WHILE building it would have meant
-    // reaching for `send_unrouted` or widening `deliver` under deadline. The
-    // round-trip test below is what keeps it honest in the meantime.
-    //
-    // The attribute comes OFF with the first real caller. If Task 5 lands
-    // without needing it, this method is not load-bearing and should go rather
-    // than sit here suppressing its own warning forever.
-    #[allow(dead_code)]
+    // The `#[allow(dead_code)]` this carried while it waited for a caller is
+    // gone, as its own note said it would be: `core::sequencer::deliver_backlog`
+    // is that caller, and the method is load-bearing rather than speculative.
     pub(crate) fn from_row(row: &ChannelMessage) -> Self {
         Self {
             message_id: row.id,

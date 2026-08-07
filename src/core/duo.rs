@@ -1273,7 +1273,7 @@ mod tests {
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let (self_tx, mut self_rx) = mpsc::channel(8);
         let cfg = DuoConfig {
-            self_input_tx: Some(crate::agents::ParticipantInput::new(self_tx)),
+            self_input_tx: Some(crate::agents::ParticipantInput::new("s1", self_tx)),
             ..fast_cfg(Author::Brian)
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
@@ -1302,7 +1302,7 @@ mod tests {
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let (self_tx, mut self_rx) = mpsc::channel(8);
         let cfg = DuoConfig {
-            self_input_tx: Some(crate::agents::ParticipantInput::new(self_tx)),
+            self_input_tx: Some(crate::agents::ParticipantInput::new("s1", self_tx)),
             ..fast_cfg(Author::Brian)
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));

@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -262,7 +263,8 @@ pub struct SpawnConfig {
     pub session_ultracode: Option<bool>,
 }
 
-/// One participant's stdin, reachable only with a receipt.
+/// One participant's stdin, reachable only with a receipt for a row in THIS
+/// participant's session.
 ///
 /// The sender is private and the public way in is [`deliver`](Self::deliver),
 /// which takes a [`PersistedMessage`]. That is the whole point of the type:
@@ -275,22 +277,78 @@ pub struct SpawnConfig {
 /// subprocess come from [`spawn_agent`] / the native loop.
 #[derive(Clone)]
 pub struct ParticipantInput {
+    /// The session whose rows this stdin accepts — see [`deliver`](Self::deliver).
+    ///
+    /// `Arc<str>` to match [`PersistedMessage::session_id`], so the compare is
+    /// against the same representation and a clone of this input (the router,
+    /// the watchdog and the turn sequencer each hold one) is a refcount bump.
+    session_id: Arc<str>,
     tx: mpsc::Sender<OutgoingUserMessage>,
 }
 
 impl ParticipantInput {
-    pub(crate) fn new(tx: mpsc::Sender<OutgoingUserMessage>) -> Self {
-        Self { tx }
+    pub(crate) fn new(
+        session_id: impl Into<Arc<str>>,
+        tx: mpsc::Sender<OutgoingUserMessage>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            tx,
+        }
     }
 
     /// Write a persisted row to this participant's stdin. Returns whether it
-    /// landed: `false` means the input pump has exited (the subprocess is gone),
-    /// which no caller here can remediate — but several want to log or skip a
-    /// busy-flag flip, so it is reported rather than swallowed.
+    /// landed: `false` means either the receipt was for another session or the
+    /// input pump has exited (the subprocess is gone). Neither is something a
+    /// caller here can remediate — but several want to log or skip a busy-flag
+    /// flip, so it is reported rather than swallowed.
     ///
     /// The wire is [`PersistedMessage::wire`] and nothing else. A caller with
     /// something to add to the text has to add it to the ROW, before the insert.
+    ///
+    /// ## The session-scope check lives here, and only here
+    ///
+    /// A receipt carries the session its row was written into, and delivering it
+    /// into a DIFFERENT session's agent wires one session's text into another's
+    /// process while the row sits in the wrong channel. The check used to sit on
+    /// `SessionHandle::send_to_all`, which was the only caller that knew both
+    /// ids — and that left two receipt-carrying routes past it:
+    /// `SessionAgent::deliver`, and the three-hop
+    /// `agent.handle.input().deliver(&receipt)` reachable through three `pub`
+    /// items. Receipt-gated is not scope-gated, and those two were receipt-gated
+    /// only.
+    ///
+    /// Both of those routes END here, so this is the narrow point: give the
+    /// stdin its own session id and every receipt-carrying write is compared,
+    /// with one copy of the comparison. `send_to_all` now delegates rather than
+    /// pre-checking.
+    ///
+    /// Be exact about the size of the claim. Within this type there are three
+    /// writes to `tx` — this one, [`send_unrouted`](Self::send_unrouted) and the
+    /// private `relay` — so what holds is: **every write to a participant's
+    /// stdin that carries a receipt is scope-checked.** `send_unrouted` takes a
+    /// bare `String` and has no session to check it against; that is the
+    /// peer-forward hole B5 already tracks, and it is untouched here. And this
+    /// is a check on the receipt, not on the channel: nothing stops in-crate
+    /// code building a `ParticipantInput` around some other agent's sender with
+    /// a session id of its choosing — what is ruled out is a receipt from
+    /// session B reaching an input constructed for session A.
+    ///
+    /// Drops rather than panics, and warns. A mismatch is a routing bug in the
+    /// caller; the containment that matters is that the wrong agent does not
+    /// read it, and killing the process on top of that helps nobody. It cannot
+    /// pass silently: the row is already written, so the text is still in its
+    /// own channel and the warning names both sides.
     pub async fn deliver(&self, msg: &PersistedMessage) -> bool {
+        if msg.session_id() != &*self.session_id {
+            warn!(
+                session = %self.session_id,
+                receipt_session = %msg.session_id(),
+                message_id = msg.message_id(),
+                "refusing to deliver a receipt from another session"
+            );
+            return false;
+        }
         self.tx
             .send(OutgoingUserMessage::text(msg.wire()))
             .await
@@ -363,8 +421,15 @@ impl AgentHandle {
     /// subprocess. Nothing downstream distinguishes the two — the handle is a
     /// pure channel struct — so the native path plugs into `supervise` and the
     /// duo pump unchanged. `kill_tx` stays private, hence this constructor.
+    ///
+    /// `session_id` is the session this agent belongs to, and it is what
+    /// [`ParticipantInput::deliver`] compares a receipt against. It is a
+    /// parameter rather than something read off the channels because the
+    /// channels carry no identity — the caller (`agents::native`, which has
+    /// `cfg.session_id`) is the last place that knows.
     pub fn from_parts(
         name: String,
+        session_id: impl Into<Arc<str>>,
         event_rx: mpsc::Receiver<AgentEvent>,
         input_tx: mpsc::Sender<OutgoingUserMessage>,
         control_tx: mpsc::Sender<ControlRequest>,
@@ -373,14 +438,17 @@ impl AgentHandle {
         Self {
             name,
             event_rx,
-            input_tx: ParticipantInput::new(input_tx),
+            input_tx: ParticipantInput::new(session_id, input_tx),
             control_tx,
             kill_tx: Some(kill_tx),
         }
     }
 
     /// This agent's stdin. Clone it to hand a long-lived task (the router, the
-    /// idle watchdog) its own way in — every clone is still receipt-gated.
+    /// idle watchdog, the turn sequencer) its own way in — every clone carries
+    /// the session id with it, so a clone is still scope-checked as well as
+    /// receipt-gated. Those are two different guarantees: see
+    /// [`ParticipantInput::deliver`].
     pub fn input(&self) -> &ParticipantInput {
         &self.input_tx
     }
@@ -512,7 +580,7 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     Ok(AgentHandle {
         name: cfg.agent_name,
         event_rx,
-        input_tx: ParticipantInput::new(input_tx),
+        input_tx: ParticipantInput::new(cfg.session_id, input_tx),
         control_tx,
         kill_tx: Some(kill_tx),
     })
@@ -570,6 +638,10 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
 
     let name = cfg.agent_name.clone();
+    // Cloned before `cfg` moves into `supervise`. The OUTER handle's stdin is
+    // what every caller holds — each respawned incarnation is bridged onto it —
+    // so this is the input whose session id has to be right.
+    let session_id: Arc<str> = Arc::from(cfg.session_id.as_str());
     let first = spawn_agent(cfg.clone()).await?;
 
     tokio::spawn(supervise(
@@ -586,7 +658,7 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
     Ok(AgentHandle {
         name,
         event_rx: out_event_rx,
-        input_tx: ParticipantInput::new(out_input_tx),
+        input_tx: ParticipantInput::new(session_id, out_input_tx),
         control_tx: out_control_tx,
         kill_tx: Some(kill_tx),
     })
@@ -1188,6 +1260,44 @@ mod tests {
     use crate::storage::AgentConfig;
     use std::path::Path;
 
+    #[tokio::test]
+    async fn a_receipt_from_another_session_never_reaches_stdin() {
+        // The check used to live on `SessionHandle::send_to_all`, which left
+        // `SessionAgent::deliver` and `agent.handle.input().deliver(&receipt)`
+        // as receipt-gated but NOT scope-gated routes to the same stdin. Both
+        // end here, so this is the test that covers all three.
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s-a", "a", None).await.unwrap();
+        storage.create_session("s-b", "b", None).await.unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        let input = ParticipantInput::new("s-a", tx);
+
+        let kind = crate::storage::MessageKind::Text.as_str();
+        let from_b = storage
+            .post_to_channel("s-b", "user", None, kind, "meant for the other session", None)
+            .await
+            .unwrap();
+        assert!(
+            !input.deliver(&from_b).await,
+            "a receipt from another session is refused, and the refusal is reported"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "session A's agent must not read session B's row"
+        );
+
+        // A scope check, not a blanket refusal: this input's own session lands.
+        let from_a = storage
+            .post_to_channel("s-a", "user", None, kind, "meant for this session", None)
+            .await
+            .unwrap();
+        assert!(input.deliver(&from_a).await);
+        assert_eq!(
+            rx.try_recv().unwrap().message.content,
+            "meant for this session"
+        );
+    }
+
     fn cfg() -> SpawnConfig {
         SpawnConfig {
             agent_name: "brian".into(),
@@ -1501,7 +1611,7 @@ mod tests {
         let handle = AgentHandle {
             name: "fake".into(),
             event_rx: ev_rx,
-            input_tx: ParticipantInput::new(in_tx),
+            input_tx: ParticipantInput::new("test-session", in_tx),
             control_tx,
             kill_tx: Some(kill_tx),
         };

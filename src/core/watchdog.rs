@@ -537,7 +537,7 @@ mod tests {
         ipav.lock().await.advance(crate::core::ipav::IpavPhase::Apply);
         let idle_watch = IdleWatch {
             storage: storage.clone(),
-            brian_input_tx: crate::agents::ParticipantInput::new(tx),
+            brian_input_tx: crate::agents::ParticipantInput::new("s1", tx),
             ipav,
             user_broadcasts: Arc::new(AtomicU64::new(1)),
             working: Arc::new(Mutex::new(None)),

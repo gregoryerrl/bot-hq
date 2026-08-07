@@ -657,7 +657,7 @@ mod tests {
     /// look exactly like a forward the ladder suppressed.
     fn stub_input() -> (ParticipantInput, mpsc::Receiver<OutgoingUserMessage>) {
         let (tx, rx) = mpsc::channel(512);
-        (ParticipantInput::new(tx), rx)
+        (ParticipantInput::new("s1", tx), rx)
     }
 
     fn deps(

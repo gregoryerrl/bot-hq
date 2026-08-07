@@ -175,17 +175,25 @@ mod tests {
     use tokio::sync::mpsc;
 
     /// One participant's stdin, plus the receiver a test reads the wire from.
-    fn stub_input() -> (ParticipantInput, mpsc::Receiver<OutgoingUserMessage>) {
+    ///
+    /// `session_id` is a parameter and not a constant because
+    /// [`ParticipantInput::deliver`] compares it against the receipt's: an input
+    /// built for a session the test does not broadcast into refuses every wire
+    /// and the receiver goes quiet. Hardcoding `"s1"` here did exactly that to
+    /// `broadcast_solo_delivers_to_brian_only`, whose session is `solo` — and
+    /// because the assertion was a bare `recv().await` with a live sender still
+    /// in scope, it hung instead of failing.
+    fn stub_input(session_id: &str) -> (ParticipantInput, mpsc::Receiver<OutgoingUserMessage>) {
         let (tx, rx) = mpsc::channel(8);
-        (ParticipantInput::new(tx), rx)
+        (ParticipantInput::new(session_id, tx), rx)
     }
 
     #[tokio::test]
     async fn broadcast_persists_raw_and_envelopes_wire() {
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "test", None).await.unwrap();
-        let (btx, mut brx) = stub_input();
-        let (rtx, mut rrx) = stub_input();
+        let (btx, mut brx) = stub_input("s1");
+        let (rtx, mut rrx) = stub_input("s1");
         broadcast_user_message(
             &s,
             "s1",
@@ -226,8 +234,8 @@ mod tests {
         let s = Storage::memory().await.unwrap();
         s.create_session("sess-a", "a", None).await.unwrap();
         s.create_session("sess-b", "b", None).await.unwrap();
-        let (btx, _brx) = stub_input();
-        let (rtx, _rrx) = stub_input();
+        let (btx, _brx) = stub_input("sess-a");
+        let (rtx, _rrx) = stub_input("sess-a");
         broadcast_user_message(
             &s,
             "sess-a",
@@ -256,7 +264,7 @@ mod tests {
         // and it's persisted exactly once — no panic on the absent peer.
         let s = Storage::memory().await.unwrap();
         s.create_session("solo", "test", None).await.unwrap();
-        let (btx, mut brx) = stub_input();
+        let (btx, mut brx) = stub_input("solo");
         broadcast_user_message(&s, "solo", "hi", IpavPhase::Apply, None, &[("brian", &btx)])
             .await
             .unwrap();
@@ -267,7 +275,10 @@ mod tests {
 
     #[tokio::test]
     async fn peer_forward_envelopes_then_author_tags() {
-        let (tx, mut rx) = stub_input();
+        // `peer_forward_message` writes through `send_unrouted`, which carries
+        // no receipt and so has no session to be checked against; the id here is
+        // therefore arbitrary.
+        let (tx, mut rx) = stub_input("s1");
         peer_forward_message(Author::Rain, "concerns?", IpavPhase::Plan, 0, &tx).await;
         let m = rx.recv().await.unwrap();
         assert!(
@@ -310,7 +321,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let (btx, mut brx) = stub_input();
+        let (btx, mut brx) = stub_input("s1");
         broadcast_user_message(&s, "s1", "go", IpavPhase::Verify, None, &[("brian", &btx)])
             .await
             .unwrap();
@@ -335,7 +346,7 @@ mod tests {
         // chat history stays clean.
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "test", None).await.unwrap();
-        let (btx, mut brx) = stub_input();
+        let (btx, mut brx) = stub_input("s1");
         broadcast_user_message(
             &s,
             "s1",

@@ -64,14 +64,20 @@ pub struct SessionAgent {
 }
 
 impl SessionAgent {
-    /// Write a persisted row to this participant's stdin; `false` if its input
-    /// pump is gone.
+    /// Write a persisted row to this participant's stdin; `false` if the receipt
+    /// is for another session or the input pump is gone.
     ///
     /// Taking a `&PersistedMessage` is the point of B5 Task 2: the bytes are
     /// [`PersistedMessage::wire`], so an agent cannot read anything the user
     /// cannot. A caller that wants to decorate the text decorates the ROW —
     /// `post_to_channel` takes the envelope — and the decoration is recorded
     /// with the body it belongs to.
+    ///
+    /// This used to be a documented way AROUND the session-scope compare, which
+    /// lived on [`SessionHandle::send_to_all`]. It is not one any more: the
+    /// compare sits on
+    /// [`ParticipantInput::deliver`](crate::agents::ParticipantInput::deliver),
+    /// one hop below, so this method inherits it rather than skipping it.
     pub async fn deliver(&self, msg: &PersistedMessage) -> bool {
         self.handle.input().deliver(msg).await
     }
@@ -146,32 +152,26 @@ impl SessionHandle {
     /// One row, N deliveries — the receipt is borrowed, so fan-out never means
     /// re-posting the same text once per recipient.
     ///
-    /// **Enforces the receipt's session scope.** The scope has been a field on
-    /// `PersistedMessage` since Task 2, but until now nothing compared it to
-    /// anything, so `session_a.send_to_all(receipt_from_session_b)` compiled and
-    /// ran — wiring another session's text into these agents while the row sat
-    /// in the wrong channel. This is the only place that holds both ids, so this
-    /// is where the comparison belongs; `deliver` sees one participant and has
-    /// nothing to check against.
+    /// **The receipt's session scope is enforced, but no longer here.** This
+    /// method held the system's only receipt-session compare for one batch, and
+    /// that placement left two receipt-carrying routes past it —
+    /// [`SessionAgent::deliver`] and the three-hop
+    /// `agent.handle.input().deliver(&receipt)`. Both END at
+    /// [`ParticipantInput::deliver`](crate::agents::ParticipantInput::deliver),
+    /// so the compare moved down to that one narrow point and this call is now
+    /// one of its callers rather than a second copy of it.
     ///
-    /// Drops rather than panics. A mismatch is a routing bug in the caller, and
-    /// the containment that matters is that the wrong agents do not read it —
-    /// killing the session on top of that helps nobody. It cannot pass silently:
-    /// the row is already written, so the text is still in its own channel and
-    /// the warning names both sides.
+    /// The consequence here is the busy flag. `deliver` returns `false` for a
+    /// receipt from another session exactly as it does for a dead stdin, and
+    /// marking an agent busy in either case wedges the chat-input lock: nothing
+    /// was written, so no `TurnComplete` will arrive to clear it. Busy is
+    /// therefore set only for a delivery that landed. That is a behaviour change
+    /// for the dead-stdin case, which used to be marked busy and never cleared.
     pub async fn send_to_all(&self, msg: &PersistedMessage) {
-        if msg.session_id() != self.id {
-            warn!(
-                session = %self.id,
-                receipt_session = %msg.session_id(),
-                message_id = msg.message_id(),
-                "refusing to deliver a receipt from another session"
-            );
-            return;
-        }
         for agent in &self.participants {
-            agent.deliver(msg).await;
-            self.activity.set_busy_slug(&agent.slug, true);
+            if agent.deliver(msg).await {
+                self.activity.set_busy_slug(&agent.slug, true);
+            }
         }
     }
 
@@ -1413,7 +1413,7 @@ mod tests {
         let (itx, _irx) = tokio::sync::mpsc::channel(1);
         let (ctx, _crx) = tokio::sync::mpsc::channel(1);
         let (ktx, _krx) = tokio::sync::oneshot::channel();
-        AgentHandle::from_parts(name.to_string(), erx, itx, ctx, ktx)
+        AgentHandle::from_parts(name.to_string(), "s1", erx, itx, ctx, ktx)
     }
 
     /// A `SessionHandle` with one agent whose stdin the caller can read.
@@ -1437,7 +1437,7 @@ mod tests {
                     let (_etx, erx) = tokio::sync::mpsc::channel(1);
                     let (ctx, _crx) = tokio::sync::mpsc::channel(1);
                     let (ktx, _krx) = tokio::sync::oneshot::channel();
-                    AgentHandle::from_parts("brian".to_string(), erx, itx, ctx, ktx)
+                    AgentHandle::from_parts("brian".to_string(), id, erx, itx, ctx, ktx)
                 },
             }],
             awaiting: Arc::clone(&awaiting),
@@ -1457,7 +1457,10 @@ mod tests {
         // The receipt has carried a session id since Task 2, but for one batch
         // nothing compared it — so this call compiled AND delivered, wiring
         // session B's text into session A's agents while the row sat in B's
-        // channel. `send_to_all` is the earliest point that knows both ids.
+        // channel. The compare now lives one hop down, on
+        // `ParticipantInput::deliver`, which is where the routes AROUND
+        // `send_to_all` also terminate; this test stays because fan-out is the
+        // caller that has to keep inheriting it.
         let storage = crate::storage::Storage::memory().await.unwrap();
         storage.create_session("s-a", "a", None).await.unwrap();
         storage.create_session("s-b", "b", None).await.unwrap();
@@ -1479,6 +1482,16 @@ mod tests {
         assert!(
             a_rx.try_recv().is_err(),
             "session A's agent must not read session B's row"
+        );
+        // And the refused fan-out leaves the chat input alone. Marking an agent
+        // busy for a write that never happened wedges the lock: no `TurnComplete`
+        // is coming to clear it. This is what `send_to_all` gaining a `deliver`
+        // return value buys, and it was wrong before the check moved down too —
+        // the old early-return skipped the busy flip only because it skipped the
+        // whole loop.
+        assert!(
+            !a.activity.is_busy_slug("brian"),
+            "a refused receipt must not mark the agent busy"
         );
 
         // The guard is a scope check, not a blanket refusal: A's own row lands.
@@ -1518,7 +1531,7 @@ mod tests {
                 let (_etx, erx) = tokio::sync::mpsc::channel(1);
                 let (ctx, _crx) = tokio::sync::mpsc::channel(1);
                 let (ktx, _krx) = tokio::sync::oneshot::channel();
-                AgentHandle::from_parts("brian".to_string(), erx, itx, ctx, ktx)
+                AgentHandle::from_parts("brian".to_string(), "s1", erx, itx, ctx, ktx)
             },
         };
 
