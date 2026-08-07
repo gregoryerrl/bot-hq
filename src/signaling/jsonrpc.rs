@@ -309,11 +309,23 @@ async fn call_tool(
         }
         "declare_working" => {
             let reason = arg_required_str(&args, "reason")?;
+            // Upper bound is 3600, not 1800: a HANDS agent orchestrating
+            // subagents cannot re-declare mid-wait, because nothing wakes it
+            // until the subagent returns. Measured on 2026-08-07 during the B5
+            // batch — a single implementer ran 2652s, so the old 1800s ceiling
+            // guaranteed the declaration expired before the work finished, and
+            // the watchdog nudged into a genuinely-working session. One such
+            // nudge killed a subagent mid-task.
+            //
+            // The TTL still exists and still matters: a dead background task
+            // surfaces as the nudge within one poll of expiry. This widens the
+            // ceiling to cover observed durations with headroom; it does not
+            // make a declaration permanent.
             let secs = args
                 .get("expected_seconds")
                 .and_then(Value::as_f64)
                 .unwrap_or(600.0)
-                .clamp(30.0, 1800.0);
+                .clamp(30.0, 3600.0);
             let ttl = std::time::Duration::from_secs_f64(secs);
             match bridge
                 .declare_working(&caller.session_id, &reason, ttl)
