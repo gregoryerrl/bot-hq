@@ -62,12 +62,12 @@
 //! Cloned stdin is what the router and the idle watchdog already hold for the
 //! same reason.
 //!
-//! ## "Recorded but not delivered" ends on the turn path
+//! ## The forward ladder does not survive onto the turn path
 //!
 //! `router::route_forward` can drop a forward (convergence) or hold one (the
 //! hard cap) AFTER its row is written, so today's chat can show a row that no
-//! peer ever read. **This loop does not inherit that.** Every row past a
-//! participant's cursor is handed to it when its turn comes, and
+//! peer ever read. **This loop does not inherit that ladder.** Every row past a
+//! participant's cursor is offered to it when its turn comes, and
 //! [`Storage::commit_delivery`] records each one with no withheld reason.
 //!
 //! That is a consequence of the model, not a policy bolted onto it. The ladder
@@ -81,11 +81,52 @@
 //! may withhold a row later; that is what the column is for. This path writes
 //! `None` for every row, and nothing on it withholds today.
 //!
-//! One case remains where a row is recorded and not read, and it is handled
-//! rather than ignored: a participant whose stdin is gone. [`deliver_backlog`]
-//! commits only the prefix that actually reached the channel, so the cursor
-//! never moves past a row the agent did not get. Cursors do not rewind, so
-//! committing optimistically would lose those rows permanently.
+//! ### What is recorded is the ENQUEUE, not the read
+//!
+//! An earlier draft of this section said "recorded but not delivered" ENDS
+//! here. It does not, and the overstatement is worth naming because four later
+//! tasks read this file as spec.
+//! [`ParticipantInput::deliver`](crate::agents::ParticipantInput::deliver)
+//! returns `true` once the row is in the participant's stdin channel — a
+//! 64-slot buffer in front of the process — and this loop commits the delivery
+//! on that. Three gaps follow, none of them closed here:
+//!
+//! - a row still sitting in that buffer when `agents::spawn::supervise` tears
+//!   its incarnation down is discarded, and the cursor is already past it.
+//!   Cursors do not rewind, so those rows are gone;
+//! - a participant with no stdin at all gets nothing. This one IS handled:
+//!   [`deliver_backlog`] commits only the prefix that actually reached the
+//!   channel, so the cursor never moves past a row the agent did not get;
+//! - a failed [`Storage::commit_delivery`] leaves the cursor behind rows that
+//!   already went out, so the next turn hands them over a second time. The
+//!   storage layer expects this — the delivery INSERT is `OR IGNORE` on
+//!   `(participant_id, message_id)`, so the record is idempotent — but the
+//!   participant reads the rows twice.
+//!
+//! So the claim this path supports is: it withholds nothing, and it records
+//! what it handed to the transport. "The agent read it" is a stronger statement
+//! than anything here establishes.
+//!
+//! ## A participant with no stdin freezes the cycle
+//!
+//! [`SequencerDeps::inputs`] can be missing a participant that is in the ring —
+//! `SessionAgent::participant_id` is `None` whenever the roster read failed at
+//! spawn. Handing that participant the turn delivers nothing, and no
+//! [`SequencerCommand::TurnComplete`] can come back from a process that was
+//! given no input, so **the cycle stops there**. Nothing in this file recovers
+//! from that on its own: auto-advancing past an unreachable participant is a
+//! recovery policy and belongs with spin detection.
+//!
+//! What is here is the way OUT of it that does not need a policy —
+//! [`SequencerCommand::ParticipantJoined`] supplies the missing stdin, and if
+//! the turn is already sitting on that participant its backlog is delivered
+//! immediately. That is also the only way a participant invited AFTER the task
+//! spawned can ever be reached, since [`run_sequencer`] owns its
+//! [`SequencerDeps`] and nothing else can write to the map.
+//!
+//! Consensus (a later task) needs every active participant to vote done, and a
+//! participant that never receives input never votes — so a ring member with no
+//! stdin has to become reachable, not merely be stepped over.
 //!
 //! ## How far a turn reads
 //!
@@ -105,10 +146,36 @@
 //! at least one row, and an empty batch reports `more == false`.
 //! [`MAX_TURN_BATCHES`] is a liveness bound for the other case — a writer
 //! appending faster than the drain — not the termination argument.
+//!
+//! ## The drain does not hold the command channel shut
+//!
+//! Draining is the longest thing this loop does: up to [`MAX_TURN_BATCHES`] ×
+//! [`UNREAD_BATCH_LIMIT`](crate::storage::UNREAD_BATCH_LIMIT) writes into a
+//! 64-slot stdin channel that PARKS when full. Awaited plainly, a participant
+//! whose process has stopped reading would wedge the whole session's sequencer
+//! inside one `deliver` with no way to reach it — session teardown included.
+//!
+//! So each row is written under a `select!` against the command channel, and
+//! two things end a drain early:
+//!
+//! - the control channel CLOSING, which is session end. A teardown must not
+//!   wait on a wedged agent's stdin;
+//! - a [`SequencerCommand::UserMessage`], which resets the ring and therefore
+//!   supersedes the turn being fed. This is the user's way out of a wedged
+//!   participant, and it costs nothing correctness-wise: the rows that did not
+//!   land stay past the cursor and are offered again when the ring returns.
+//!
+//! Every OTHER command is taken off the channel and deferred, so a sender never
+//! parks behind a drain, and then handled in arrival order once the drain
+//! finishes. Deferring rather than acting is what keeps "when your turn comes
+//! you have read everything you had not read" true — acting on a `TurnComplete`
+//! mid-drain would hand the turn over with rows undelivered, which is the
+//! deferral this section rejects. Preemption proper (a parked question, a
+//! pause) is tasks 7 and 9, and the `select!` is where they attach.
 
 use crate::agents::ParticipantInput;
 use crate::storage::{Participant, PersistedMessage, Storage};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -120,11 +187,23 @@ use tracing::{debug, warn};
 /// termination does not cover: a writer appending rows faster than the drain
 /// consumes them would otherwise hold the turn open indefinitely.
 ///
-/// 32 × 200 = 6,400 rows. The largest channel in the live database is 3,585
-/// rows, so no real backlog reaches this; hitting it means something is
-/// producing during a turn, which is worth the `warn!` it gets. The remainder
-/// then arrives on this participant's next turn — the deferral the module doc
-/// rejects as a policy, used here only as a backstop.
+/// 32 × 200 = 6,400 rows. **Measured 2026-08-07** against the live database:
+/// the largest single channel holds 4,719 rows, which is 74% of this cap — not
+/// the comfortable margin the figure this doc carried first (3,585, measured
+/// some weeks earlier) implied. Re-measure before treating the headroom as
+/// real; the number moves, and four later tasks read this file as spec:
+///
+/// ```sql
+/// SELECT MAX(c) FROM (SELECT COUNT(*) c FROM messages GROUP BY session_id);
+/// ```
+///
+/// Reaching the cap is therefore no longer only "something is producing during
+/// a turn". It is one long-lived session away, and what happens there is
+/// covered by
+/// `the_batch_cap_hands_over_with_the_remainder_still_past_the_cursor`: the
+/// drain stops, the turn is handed over, and the remainder arrives on this
+/// participant's next turn — the deferral the module doc rejects as a policy,
+/// used here only as a backstop, with a `warn!` to say it happened.
 const MAX_TURN_BATCHES: usize = 32;
 
 /// What the sequencer task needs, cloned from the session's own state at spawn
@@ -142,13 +221,19 @@ pub struct SequencerDeps {
     /// scope-check section of the module doc for why the task cannot hold the
     /// handle, and why holding stdin still gets the session-scope compare.
     ///
-    /// A participant in the ring but ABSENT from this map is one that has no
-    /// live process behind it: `SessionAgent::participant_id` is `None`
-    /// whenever the roster read failed at spawn, and a participant invited
-    /// after spawn has no entry either. [`deliver_backlog`] warns and delivers
-    /// nothing; it does not skip ahead in the ring, because auto-advancing past
-    /// an unreachable agent is a recovery policy and belongs with spin
-    /// detection.
+    /// **The key is not checked against the input.** The scope compare inside
+    /// `deliver` is on the SESSION, so filing participant A's stdin under
+    /// participant B's id inside one session is silent: B's turn would be read
+    /// by A, and every row would pass the check. Nothing here can catch that —
+    /// a `ParticipantInput` carries a session id and no participant id — so it
+    /// is a build-time obligation on whoever assembles this map.
+    ///
+    /// A participant in the ring but ABSENT from the map has no live process
+    /// behind it: `SessionAgent::participant_id` is `None` whenever the roster
+    /// read failed at spawn. [`deliver_backlog`] warns and delivers nothing,
+    /// and it does not skip ahead in the ring — see "a participant with no
+    /// stdin freezes the cycle" in the module doc for what that costs and for
+    /// the way out, which is [`SequencerCommand::ParticipantJoined`].
     pub inputs: HashMap<i64, ParticipantInput>,
 }
 
@@ -159,35 +244,68 @@ pub struct SequencerDeps {
 /// Carrying the text in the command instead would put a second copy of it in
 /// flight with no row identity behind it — the thing this batch's receipt work
 /// removed.
+///
+/// [`ParticipantJoined`](Self::ParticipantJoined) carries a
+/// [`ParticipantInput`] and is not an exception to that: an stdin is the
+/// capability to write to a process, not a message, and it carries no text.
 #[derive(Debug)]
 pub enum SequencerCommand {
-    /// The participant holding the turn finished it — advance the ring.
+    /// The turn identified by `epoch` finished — advance the ring.
     ///
-    /// **Carries WHOSE turn ended**, and the sequencer ignores a completion
-    /// that does not name the current holder. The sequencer does know whose
-    /// turn it handed out, which is exactly why the id is needed: it is the
-    /// only way to tell the live completion from a superseded one.
+    /// **Both fields are the guard, and the epoch is the load-bearing one.**
+    /// The sequencer stamps a fresh `epoch` on every handover
+    /// ([`hand_over`]) and accepts a completion only when both fields match the
+    /// turn in flight.
     ///
-    /// The reachable producer of a superseded completion is a user message. A
-    /// user message resets the ring to its first place while the previous
-    /// holder is still mid-turn; that turn then ends and its completion arrives
-    /// behind the reset. Payload-free, it would advance the ring off the
-    /// participant that was just woken — two agents holding a turn at once,
-    /// which is the one invariant this loop exists to keep. Pause/Resume adds a
-    /// second producer once it is implemented, and a supervisor that respawns
-    /// an agent mid-turn a third.
+    /// `participant_id` alone is not enough, and the case it misses is the
+    /// commonest one there is. A user message resets the ring to its first
+    /// place while the previous holder is still mid-turn. When that holder IS
+    /// the first place in the ring — the ordinary "user interjects while the
+    /// first agent works" — the reset re-wakes the same participant, so the
+    /// stale completion names the current holder, passes an identity check, and
+    /// steps the ring off a participant that was woken half a second ago. Two
+    /// agents on a turn at once, which is the one invariant this loop exists to
+    /// keep. `a_completion_from_a_turn_the_user_restarted_is_discarded` is that
+    /// case; with the epoch compare removed it fails.
     ///
-    /// It cost nothing to add: there were no send sites when it was added, and
-    /// the tests below are the first.
-    TurnComplete { participant_id: i64 },
+    /// A user message is the reachable producer today. Pause/Resume adds a
+    /// second once it is implemented, and a supervisor that respawns an agent
+    /// mid-turn a third.
+    ///
+    /// **Where a sender gets the epoch is not solved here.** The sequencer
+    /// mints it at handover, and it has to travel out with the turn and come
+    /// back on the completion. Nothing spawns this loop yet, so nothing carries
+    /// it yet; the tests below are the only senders, and wiring the round trip
+    /// belongs with the task that spawns the loop.
+    TurnComplete { participant_id: i64, epoch: u64 },
     /// The user posted to the channel. Resets the cycle to the first active
     /// participant and hands it the turn.
+    ///
+    /// Also the one command that cuts a drain short — see "the drain does not
+    /// hold the command channel shut" in the module doc.
     UserMessage,
+    /// A participant's stdin, arriving after the task was spawned.
+    ///
+    /// The map in [`SequencerDeps`] is owned by [`run_sequencer`], so this is
+    /// the only way to add to it: a participant invited mid-session, or one
+    /// whose roster read failed at spawn and left it unreachable. Replaces any
+    /// existing entry for the id, which is what a respawn needs.
+    ///
+    /// If the turn is already sitting on this participant, its backlog goes out
+    /// on arrival — the turn was handed to it and could not be delivered, and
+    /// this is when it becomes deliverable. The ring does NOT move: no turn
+    /// ended.
+    ParticipantJoined {
+        participant_id: i64,
+        input: ParticipantInput,
+    },
     /// Stop: hold the cycle where it stands, hand out no further turns.
     ///
     /// Still a no-op. Implementing it is a later task; what is in place for it
-    /// is [`TurnComplete`](Self::TurnComplete)'s holder check, without which a
-    /// turn finishing during a pause would advance the ring on resume.
+    /// is [`TurnComplete`](Self::TurnComplete)'s epoch, without which a turn
+    /// finishing during a pause would advance the ring on resume. Note that a
+    /// pause cannot yet cut a drain short either — only a user message and the
+    /// channel closing do — so task 9 attaches to the same `select!`.
     Pause,
     /// Release a [`Pause`](Self::Pause) and continue the cycle. Still a no-op.
     Resume,
@@ -203,31 +321,48 @@ pub enum SequencerCommand {
 /// #20's other half — `RouterControl::drop` aborting the task outright — has no
 /// counterpart here yet, because nothing holds a sequencer handle to drop. It
 /// belongs with the control struct that wires this into a session.
-pub async fn run_sequencer(deps: SequencerDeps, mut rx: mpsc::Receiver<SequencerCommand>) {
+pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<SequencerCommand>) {
     debug!(session = %deps.session_id, "sequencer: started");
-    // Who holds the turn. `None` is "the cycle has not started", which is also
+    // The turn in flight. `None` is "the cycle has not started", which is also
     // what `next_active_participant` reads as "reset to the front".
     let mut holder: Option<Participant> = None;
-    while let Some(cmd) = rx.recv().await {
+    // Which turn that is. Bumped by every ring step, so a completion minted
+    // before the step cannot be mistaken for one minted after it — including
+    // when the step lands on the same participant. See `TurnComplete`.
+    let mut epoch: u64 = 0;
+    // Commands a drain took off `rx` without acting on them. Drained BEFORE
+    // `recv`, so arrival order is preserved end to end.
+    let mut deferred: VecDeque<SequencerCommand> = VecDeque::new();
+    loop {
+        let cmd = match deferred.pop_front() {
+            Some(cmd) => cmd,
+            None => match rx.recv().await {
+                Some(cmd) => cmd,
+                None => break,
+            },
+        };
         match cmd {
-            SequencerCommand::TurnComplete { participant_id } => {
-                // Only the participant that HOLDS the turn can end it: a
-                // completion naming anyone else does not describe the turn in
-                // flight, and with no holder there is no turn in flight at all.
-                // Why that matters is in the variant doc. That it is
-                // load-bearing was measured, not argued — with this condition
-                // replaced by `true`,
-                // `a_completion_from_a_superseded_turn_does_not_advance_the_ring`
-                // fails with B re-woken behind A: two participants on a turn at
-                // once.
-                if holder.as_ref().is_some_and(|h| h.id == participant_id) {
-                    holder = hand_over(&deps, holder.as_ref()).await;
+            SequencerCommand::TurnComplete {
+                participant_id,
+                epoch: completed,
+            } => {
+                // The completion has to name the turn in flight: the same
+                // participant AND the same turn. Either half alone lets a stale
+                // completion through — see the variant doc for which case each
+                // one misses.
+                let live = completed == epoch
+                    && holder.as_ref().is_some_and(|h| h.id == participant_id);
+                if live {
+                    advance_turn(&deps, &mut rx, &mut holder, &mut epoch, &mut deferred, false)
+                        .await;
                 } else {
                     debug!(
                         session = %deps.session_id,
                         participant_id,
+                        completed,
+                        epoch,
                         holder = ?holder.as_ref().map(|h| h.id),
-                        "sequencer: completion from a participant that does not hold the turn"
+                        "sequencer: completion does not name the turn in flight; discarded"
                     );
                 }
             }
@@ -235,9 +370,29 @@ pub async fn run_sequencer(deps: SequencerDeps, mut rx: mpsc::Receiver<Sequencer
                 // The user speaking resets the cycle to the front of the
                 // rotation, whoever held the turn — `None` is what
                 // `next_active_participant` reads as "reset". The previous
-                // holder's turn is not cancelled here; nothing stops it, and its
-                // completion is discarded by the check above when it arrives.
-                holder = hand_over(&deps, None).await;
+                // holder's turn is not cancelled; nothing here can stop it. What
+                // happens instead is that the epoch moves, so its completion is
+                // discarded when it arrives.
+                advance_turn(&deps, &mut rx, &mut holder, &mut epoch, &mut deferred, true).await;
+            }
+            SequencerCommand::ParticipantJoined {
+                participant_id,
+                input,
+            } => {
+                let replaced = deps.inputs.insert(participant_id, input).is_some();
+                debug!(
+                    session = %deps.session_id,
+                    participant_id,
+                    replaced,
+                    "sequencer: participant stdin registered"
+                );
+                // The turn may already be sitting on this participant, unable to
+                // be delivered — that is the frozen cycle the module doc
+                // describes. It is deliverable now. The ring does not move and
+                // the epoch does not change: no turn ended, one finally started.
+                if let Some(to) = holder.as_ref().filter(|h| h.id == participant_id) {
+                    deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut deferred).await;
+                }
             }
             SequencerCommand::Pause => {
                 debug!(session = %deps.session_id, "sequencer: Pause (no-op)");
@@ -250,12 +405,62 @@ pub async fn run_sequencer(deps: SequencerDeps, mut rx: mpsc::Receiver<Sequencer
     debug!(session = %deps.session_id, "sequencer: control channel closed; exiting");
 }
 
-/// Step the ring past `current` and wake whoever is next. Returns the new
-/// holder.
+/// Step the ring, stamp the new turn, and deliver its backlog.
+///
+/// `reset` is a user message: the ring goes back to its first place instead of
+/// one past the current holder.
+///
+/// Takes `reset` rather than the current participant because `holder` is behind
+/// a `&mut` here — the caller cannot lend it out and have it written back in
+/// the same call.
+async fn advance_turn(
+    deps: &SequencerDeps,
+    rx: &mut mpsc::Receiver<SequencerCommand>,
+    holder: &mut Option<Participant>,
+    epoch: &mut u64,
+    deferred: &mut VecDeque<SequencerCommand>,
+    reset: bool,
+) {
+    let current = if reset { None } else { holder.as_ref() };
+    match hand_over(deps, current).await {
+        // The ring could not be read. Keeping the holder AND the epoch is what
+        // makes the retry in `hand_over`'s comment real: the same holder's
+        // completion still matches, so it re-attempts the step. Overwriting
+        // `holder` with `None` here instead would strand the cycle — every
+        // later completion would fail the guard above, and nothing but another
+        // user message would ever move it again.
+        Handover::Held => {}
+        Handover::To(next) => {
+            *holder = next;
+            // Every step, including a reset that lands on the same participant.
+            // That case is exactly why the epoch exists.
+            *epoch += 1;
+            if let Some(to) = holder.as_ref() {
+                deliver_backlog(deps, to, rx, MAX_TURN_BATCHES, deferred).await;
+            }
+        }
+    }
+}
+
+/// Where a ring step landed.
+enum Handover {
+    /// The turn moved. `None` inside means nobody is active — "nobody to wake",
+    /// and NOT a consensus test; see the module doc.
+    To(Option<Participant>),
+    /// The rotation could not be read, so the turn stays exactly where it was —
+    /// holder and epoch both. A separate variant rather than echoing the
+    /// current holder back, because the caller cannot tell those apart on the
+    /// reset path: a user message passes `None` as the current holder, so
+    /// "unchanged" and "reset to nobody" would be the same value.
+    Held,
+}
+
+/// Step the ring past `current`. Delivery is the caller's next move, not this
+/// function's, so a failed step cannot half-deliver.
 ///
 /// `current == None` resets to the front of the rotation, which is what a user
 /// message does.
-async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Option<Participant> {
+async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Handover {
     let next = match deps
         .storage
         .next_active_participant(&deps.session_id, current)
@@ -265,45 +470,69 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Optio
         // The ring is a roster read, so a failure here is a storage problem,
         // not an empty rotation. Holding the turn where it is keeps the two
         // apart: a later completion from the same holder retries the step,
-        // whereas returning `None` would silently look like "nobody is active"
-        // and reset the cycle on the next user message.
+        // whereas reporting "nobody is active" would reset the cycle on the
+        // next user message. `Held` is what makes that retry reachable — see
+        // `advance_turn`, which leaves the epoch alone for it.
         Err(e) => {
             warn!(
                 session = %deps.session_id,
                 error = %e,
                 "sequencer: ring read failed; holding the turn where it is"
             );
-            return current.cloned();
+            return Handover::Held;
         }
     };
-    let Some(next) = next else {
+    if next.is_none() {
         // Nobody active. NOT a consensus test — see the module doc; consensus
         // is `all_active_voted_done` and is a later task.
         debug!(
             session = %deps.session_id,
             "sequencer: no active participant to hand the turn to"
         );
-        return None;
-    };
-    deliver_backlog(deps, &next).await;
-    Some(next)
+    }
+    Handover::To(next)
+}
+
+/// Why a drain stopped before the end of its page.
+enum Stop {
+    /// A user message arrived: the ring is about to reset, so the turn being
+    /// fed is superseded. Already pushed onto the deferred queue.
+    Superseded,
+    /// The control channel closed — session end.
+    SessionEnd,
+    /// `deliver` returned `false`.
+    Unreachable,
 }
 
 /// Hand `to` everything it has not read, and record what it got.
 ///
 /// Drains rather than delivering one batch — see "how far a turn reads" in the
 /// module doc.
-async fn deliver_backlog(deps: &SequencerDeps, to: &Participant) {
+/// `max_batches` is [`MAX_TURN_BATCHES`] on every production path; it is a
+/// parameter so the cap's own behaviour can be exercised without a 6,401-row
+/// fixture.
+///
+/// Commands that arrive mid-drain go onto `deferred` — see "the drain does not
+/// hold the command channel shut" in the module doc for which two end the drain
+/// and which are merely set aside.
+async fn deliver_backlog(
+    deps: &SequencerDeps,
+    to: &Participant,
+    rx: &mut mpsc::Receiver<SequencerCommand>,
+    max_batches: usize,
+    deferred: &mut VecDeque<SequencerCommand>,
+) {
     let Some(input) = deps.inputs.get(&to.id) else {
         warn!(
             session = %deps.session_id,
             participant_id = to.id,
             slug = %to.slug,
-            "sequencer: the participant holding the turn has no stdin; delivering nothing"
+            "sequencer: the participant holding the turn has no stdin; delivering nothing \
+             and the cycle stops here until one arrives"
         );
         return;
     };
-    for _ in 0..MAX_TURN_BATCHES {
+    for _ in 0..max_batches {
         let page = match deps.storage.unread_for_participant(to.id).await {
             Ok(page) => page,
             Err(e) => {
@@ -319,23 +548,55 @@ async fn deliver_backlog(deps: &SequencerDeps, to: &Participant) {
         if page.rows.is_empty() {
             return;
         }
-        // `from_row` is what makes a row READ BACK deliverable: receipts are
-        // otherwise minted only by the INSERT, and every row written before a
-        // restart is only ever available this way.
         let mut landed: Vec<(i64, Option<&str>)> = Vec::with_capacity(page.rows.len());
-        for row in &page.rows {
-            if !input.deliver(&PersistedMessage::from_row(row)).await {
-                break;
+        let mut stop: Option<Stop> = None;
+        'rows: for row in &page.rows {
+            // `from_row` is what makes a row READ BACK deliverable: receipts are
+            // otherwise minted only by the INSERT, and every row written before
+            // a restart is only ever available this way. Built once per row
+            // rather than inside the retry below, because it clones the body.
+            let receipt = PersistedMessage::from_row(row);
+            loop {
+                tokio::select! {
+                    // Commands first. Both futures here are cancel-safe —
+                    // `recv` by documentation, and a dropped `Sender::send`
+                    // enqueues nothing — so the losing branch costs at most a
+                    // re-attempt of the same row, never a half-written one.
+                    // Biased so a command already waiting always wins: the
+                    // whole point is that a full stdin cannot hide it.
+                    biased;
+                    cmd = rx.recv() => match cmd {
+                        Some(cmd @ SequencerCommand::UserMessage) => {
+                            deferred.push_back(cmd);
+                            stop = Some(Stop::Superseded);
+                            break 'rows;
+                        }
+                        // Set aside and re-attempt this row. Deferring rather
+                        // than acting is what keeps the drain-before-handover
+                        // rule true.
+                        Some(cmd) => deferred.push_back(cmd),
+                        None => {
+                            stop = Some(Stop::SessionEnd);
+                            break 'rows;
+                        }
+                    },
+                    landed_ok = input.deliver(&receipt) => {
+                        if !landed_ok {
+                            stop = Some(Stop::Unreachable);
+                            break 'rows;
+                        }
+                        // `None` = delivered. Nothing on the turn path
+                        // withholds; see the module doc.
+                        landed.push((row.id, None));
+                        break;
+                    }
+                }
             }
-            // `None` = delivered. Nothing on the turn path withholds; see the
-            // module doc.
-            landed.push((row.id, None));
         }
-        let short = landed.len() < page.rows.len();
-        // Committing only the PREFIX that landed is what keeps "recorded but
-        // not delivered" off this path. The cursor moves to the highest id in
-        // whatever is passed here and never rewinds, so committing the whole
-        // page after a failed write would lose the undelivered tail forever.
+        // Committing only the PREFIX that landed is what keeps the cursor from
+        // outrunning the transport. It moves to the highest id in whatever is
+        // passed here and never rewinds, so committing the whole page after a
+        // short write would lose the tail forever.
         if let Err(e) = deps.storage.commit_delivery(to.id, &landed).await {
             warn!(
                 session = %deps.session_id,
@@ -345,16 +606,61 @@ async fn deliver_backlog(deps: &SequencerDeps, to: &Participant) {
             );
             return;
         }
-        if short {
-            warn!(
-                session = %deps.session_id,
-                participant_id = to.id,
-                slug = %to.slug,
-                delivered = landed.len(),
-                of = page.rows.len(),
-                "sequencer: stdin closed mid-batch; the rest stays past the cursor"
-            );
-            return;
+        match stop {
+            None => {}
+            Some(Stop::Superseded) => {
+                debug!(
+                    session = %deps.session_id,
+                    participant_id = to.id,
+                    delivered = landed.len(),
+                    of = page.rows.len(),
+                    "sequencer: a user message superseded this turn mid-drain"
+                );
+                return;
+            }
+            Some(Stop::SessionEnd) => {
+                debug!(
+                    session = %deps.session_id,
+                    participant_id = to.id,
+                    delivered = landed.len(),
+                    of = page.rows.len(),
+                    "sequencer: session ended mid-drain"
+                );
+                return;
+            }
+            Some(Stop::Unreachable) => {
+                // `deliver` returns `false` for two unrelated reasons — a dead
+                // input pump, and a receipt from another session — and this
+                // warning named only the first for a while, so a routing bug
+                // would have read as a dead pipe. `is_closed` separates them.
+                //
+                // It is a second look, not the same observation: the channel
+                // can close between the refusal and this check, which would
+                // report a scope refusal as a closed pipe. That direction is
+                // harmless; the reverse cannot happen, because a closed sender
+                // never re-opens.
+                if input.is_closed() {
+                    warn!(
+                        session = %deps.session_id,
+                        participant_id = to.id,
+                        slug = %to.slug,
+                        delivered = landed.len(),
+                        of = page.rows.len(),
+                        "sequencer: stdin closed mid-batch; the rest stays past the cursor"
+                    );
+                } else {
+                    warn!(
+                        session = %deps.session_id,
+                        participant_id = to.id,
+                        slug = %to.slug,
+                        delivered = landed.len(),
+                        of = page.rows.len(),
+                        "sequencer: a row was refused mid-batch with stdin still open — the \
+                         receipt is out of this participant's session scope"
+                    );
+                }
+                return;
+            }
         }
         if !page.more {
             return;
@@ -363,7 +669,7 @@ async fn deliver_backlog(deps: &SequencerDeps, to: &Participant) {
     warn!(
         session = %deps.session_id,
         participant_id = to.id,
-        batches = MAX_TURN_BATCHES,
+        batches = max_batches,
         "sequencer: backlog still not drained at the batch cap; the rest waits for the next turn"
     );
 }
@@ -385,12 +691,18 @@ mod tests {
     /// `recv()` needs.
     const DEADLINE: Duration = Duration::from_secs(2);
 
-    /// Every stubbed participant's stdin buffer.
+    /// How long a negative assertion waits before believing the silence.
+    /// Short — it is paid on every `quiet()` call — but well past the
+    /// in-process delivery these tests measure in microseconds.
+    const QUIET: Duration = Duration::from_millis(250);
+
+    /// The default stubbed stdin buffer.
     ///
-    /// Sized above the largest backlog any test here posts (201 rows), because
-    /// `deliver` PARKS on a full channel: a delivery that stalled for want of
-    /// buffer would deadlock the sequencer, and the test would report a
-    /// deadline rather than the wrong count it is actually looking for.
+    /// Sized above the largest backlog these tests post (201 rows) so that a
+    /// test about ring order is not also a test about back-pressure. That is a
+    /// convenience, not an assumption the loop makes: production stdin is 64
+    /// slots, and [`ring_sized`] is used by the tests that care what happens
+    /// when a drain runs out of buffer.
     const STDIN_CAPACITY: usize = 512;
 
     /// One stubbed participant: its roster id and the stdin a test reads.
@@ -412,6 +724,24 @@ mod tests {
                 out.push(m.message.content);
             }
             out
+        }
+
+        /// Assert nothing arrives within a bounded window, **with the control
+        /// channel still open**.
+        ///
+        /// `drain()` cannot express this and the difference is load-bearing.
+        /// `drain` is only valid after the task exits, and closing the control
+        /// channel is itself what aborts an in-flight drain — the select is
+        /// biased on commands, so a closed `rx` wins every iteration. A test
+        /// that drops `tx` and then finds an empty seat therefore cannot tell
+        /// "the sequencer refused to wake this participant" from "the wake was
+        /// cut short by the close", and a guard asserted that way passes with
+        /// the guard removed. Waiting while the channel is open is what makes
+        /// the silence mean something.
+        async fn quiet(&mut self) {
+            if let Ok(Some(m)) = tokio::time::timeout(QUIET, self.rx.recv()).await {
+                panic!("expected no wire, got {:?}", m.message.content);
+            }
         }
 
         /// Wait for exactly `n` wires, then assert nothing else is queued.
@@ -520,22 +850,32 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
         // The user message resets the ring to its first place, so A takes the
-        // turn; then A finishes it.
+        // turn; then A finishes it. Each wake is awaited before the next command
+        // goes in: the drain selects commands first and biased, so a closed
+        // control channel wins every iteration and would stop the drain before a
+        // row landed.
         send(&tx, SequencerCommand::UserMessage).await;
-        send(&tx, SequencerCommand::TurnComplete { participant_id: a }).await;
-        drop(tx);
-        assert!(exited(task).await);
-
         assert_eq!(
-            seats[0].drain(),
+            seats[0].expect(2).await,
             vec!["user one", "host note"],
             "A read the channel, but not its own last turn back as fresh input"
         );
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+            },
+        )
+        .await;
         assert_eq!(
-            seats[1].drain(),
+            seats[1].expect(3).await,
             vec!["user one", "host note", "a's last turn"],
             "the turn steps to the next PLACE in the rotation, carrying every unread row"
         );
+        drop(tx);
+        assert!(exited(task).await);
+
         assert_eq!(
             seats[2].drain(),
             nothing(),
@@ -558,8 +898,26 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
+        // Await each wake before sending the next command. The drain selects
+        // commands FIRST and biased, so a control channel that is already closed
+        // wins every iteration and stops the drain before a row lands — firing
+        // everything up front and dropping `tx` would assert against a delivery
+        // the sequencer correctly refused to make.
         send(&tx, SequencerCommand::UserMessage).await;
-        send(&tx, SequencerCommand::TurnComplete { participant_id: a }).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+            },
+        )
+        .await;
+        assert_eq!(
+            seats[2].expect(1).await,
+            vec!["go"],
+            "the turn steps OVER the observer to the next active participant"
+        );
         drop(tx);
         assert!(exited(task).await);
 
@@ -567,11 +925,6 @@ mod tests {
             seats[1].drain(),
             nothing(),
             "the observer sits between A and B in the rotation and must not be woken"
-        );
-        assert_eq!(
-            seats[2].drain(),
-            vec!["go"],
-            "the turn steps OVER the observer to the next active participant"
         );
     }
 
@@ -590,7 +943,7 @@ mod tests {
         let task = tokio::spawn(run_sequencer(deps, rx));
         send(&tx, SequencerCommand::UserMessage).await;
         assert_eq!(seats[0].expect(1).await, vec!["r1"]);
-        send(&tx, SequencerCommand::TurnComplete { participant_id: a }).await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1 }).await;
         assert_eq!(seats[1].expect(1).await, vec!["r1"], "B now holds the turn");
 
         // The user speaks over B's turn. Waiting on A's wake is what makes the
@@ -600,7 +953,7 @@ mod tests {
         assert_eq!(seats[0].expect(1).await, vec!["r2"], "the ring reset to A");
 
         // B's turn ends, late.
-        send(&tx, SequencerCommand::TurnComplete { participant_id: b }).await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: b, epoch: 2 }).await;
         drop(tx);
         assert!(exited(task).await);
 
@@ -610,6 +963,69 @@ mod tests {
             "the superseded completion advanced nothing: B was not re-woken behind A"
         );
         assert_eq!(seats[0].drain(), nothing(), "and A was not woken twice");
+    }
+
+    #[tokio::test]
+    async fn a_completion_from_a_turn_the_user_restarted_is_discarded() {
+        // The case `participant_id` alone CANNOT catch, and the commonest one
+        // there is: the user interjects while the FIRST participant is mid-turn,
+        // so the reset re-wakes that same participant. The stale completion then
+        // names the live holder and passes an identity check — stepping the ring
+        // off a participant woken moments ago, which puts two agents on a turn at
+        // once. Only the epoch separates the two turns.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "r1").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        assert_eq!(seats[0].expect(1).await, vec!["r1"]);
+
+        // The user speaks over A's own turn. The ring resets to its first place,
+        // which IS A — same participant, new turn. Waiting on the wake is what
+        // makes the ordering below a fact rather than a race.
+        post(&storage, "user", None, "r2").await;
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 2, A again
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["r2"],
+            "the reset re-woke the SAME participant — the whole point of this case"
+        );
+
+        // A's first turn ends, late, carrying the epoch it was handed.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+            },
+        )
+        .await;
+        // Proven with the channel still OPEN. Dropping `tx` here instead would
+        // abort any delivery the guard wrongly allowed, and an empty seat would
+        // then prove nothing — this test passed with the epoch compare removed
+        // until it was written this way.
+        seats[1].quiet().await;
+
+        // And the live turn is untouched: completing THAT epoch does advance,
+        // so the silence above was the guard working rather than the ring being
+        // stuck.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 2,
+            },
+        )
+        .await;
+        assert_eq!(
+            seats[1].expect(2).await,
+            vec!["r1", "r2"],
+            "the live completion steps the ring the stale one could not"
+        );
+        drop(tx);
+        assert!(exited(task).await);
     }
 
     #[tokio::test]
@@ -632,12 +1048,22 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
+        // Each wake awaited before the next command: the drain selects commands
+        // first and biased, so a closed control channel would stop it mid-batch.
         send(&tx, SequencerCommand::UserMessage).await;
-        send(&tx, SequencerCommand::TurnComplete { participant_id: a }).await;
+        let _ = seats[0].expect(overflow).await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+            },
+        )
+        .await;
+        let got = seats[1].expect(overflow).await;
         drop(tx);
         assert!(exited(task).await);
 
-        let got = seats[1].drain();
         assert_eq!(got.len(), overflow, "every unread row, not the first batch");
         assert_eq!(got.first().map(String::as_str), Some("row 0"));
         assert_eq!(
@@ -673,17 +1099,32 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
+        // A's wake is awaited before the completion goes in — the drain selects
+        // commands first and biased, so a closed control channel would stop the
+        // drain and this test's "delivery is live" anchor would be the thing
+        // that broke, not B's missing stdin.
         send(&tx, SequencerCommand::UserMessage).await;
-        send(&tx, SequencerCommand::TurnComplete { participant_id: a }).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "delivery is live in this run"
+        );
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+            },
+        )
+        .await;
         drop(tx);
         assert!(exited(task).await);
 
-        // A's wire first, and it is not decoration: without it this test passed
-        // for a whole session against a sequencer that delivered NOTHING to
-        // anyone. B receiving nothing has to mean "B has no stdin", and the only
-        // way to say that is to show the same run delivering to a seat that has
-        // one.
-        assert_eq!(seats[0].drain(), vec!["go"], "delivery is live in this run");
+        // A's wire is asserted ABOVE, before the completion is sent, and it is
+        // not decoration: without it this test passed for a whole session
+        // against a sequencer that delivered NOTHING to anyone. B receiving
+        // nothing has to mean "B has no stdin", and the only way to say that is
+        // to show the same run delivering to a seat that has one.
         assert_eq!(seats[1].drain(), nothing());
         assert_eq!(
             storage.cursor_for(b).await.unwrap(),
@@ -703,7 +1144,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
         for cmd in [
-            SequencerCommand::TurnComplete { participant_id: a },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 0 },
             SequencerCommand::UserMessage,
             SequencerCommand::Pause,
             SequencerCommand::Resume,

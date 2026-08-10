@@ -275,7 +275,7 @@ pub struct SpawnConfig {
 /// A `ParticipantInput` built from a channel of your own is harmless — it
 /// writes to that channel, not to an agent. The only senders that reach a live
 /// subprocess come from [`spawn_agent`] / the native loop.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ParticipantInput {
     /// The session whose rows this stdin accepts — see [`deliver`](Self::deliver).
     ///
