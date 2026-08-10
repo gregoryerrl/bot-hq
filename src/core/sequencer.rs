@@ -166,10 +166,12 @@
 //! The reset's own two halves are pinned separately —
 //! `a_user_message_resets_the_cycle_to_the_first_participant` for the ring, on a
 //! ring of three so a rewind is distinguishable from a step, and
-//! `a_user_message_over_a_live_turn_clears_the_tally` for the votes. The second
-//! of those is the only test that reaches the clear with a holder still in
-//! flight, which is the one condition under which `current.is_none()` and
-//! `holder.is_none()` differ. `the_reset_survives_a_turn_that_produced_nothing`
+//! `a_user_message_over_a_live_turn_clears_the_tally` for the votes. Plenty of
+//! tests here reach the clear with a holder still in flight — that is the one
+//! condition under which `current.is_none()` and `holder.is_none()` differ — but
+//! they arrive with an EMPTY tally, so the narrowing is invisible to them. The
+//! second test above is the one that gets there with a vote standing, and can
+//! therefore see it. `the_reset_survives_a_turn_that_produced_nothing`
 //! then carries the router's #13: after the restart, a turn that produces no
 //! output must not be able to complete a tally holding a pre-message vote, or
 //! the first real post after the user spoke is silenced by a participant that is
@@ -809,25 +811,34 @@ async fn advance_turn(
         // cleared but whose ring never went back to the front — and the previous
         // holder's completion is still live, so the retry it triggers is a STEP
         // from where the turn already was, not a second attempt at the reset.
-        // Nothing is lost by that: every cursor is still behind the user's row,
-        // so whoever is woken next reads it. What is lost is that the FRONT of
-        // the ring reads it first, and one vote from a pre-message turn lands in
-        // the tally that was just cleared for that message.
+        //
+        // **A lap can be lost, and the way it is lost is this file's own hazard
+        // reached down a second path.** An earlier draft priced this as a
+        // misordering — every cursor is still behind the user's row, so whoever
+        // is woken next reads it — and that is not the whole cost. On a
+        // SUCCESSFUL reset the epoch moves, so the previous holder's completion
+        // is discarded vote and all. On a held one it does not, so that
+        // completion is accepted and its `done: true` — an opinion about a turn
+        // that ended before the user spoke — is recorded into the tally the
+        // reset just emptied. One more done vote and the cycle arrives, with the
+        // participant that was mid-turn never woken for the message that was
+        // supposed to restart it. `advance_turn` can empty a tally; it cannot
+        // un-live a turn in flight.
         //
         // So a failed reset is NOT a reset. It is deliberately the safe half of
-        // one, and both alternatives are worse. Clearing only after a successful
-        // hand-over leaves stale votes standing across a user message, which is
-        // the false arrival this file exists to prevent. Halting instead — the
-        // two lines of [`halt`] — parks the session on a transient storage error
-        // with nothing to tell the user it has yielded (see the notification gap
-        // in the module doc), where this shape only misorders one lap of a ring
-        // that keeps moving.
+        // one, and both alternatives are still worse. Clearing only after a
+        // successful hand-over leaves stale votes standing across a user message
+        // on EVERY held reset rather than one, which is the false arrival this
+        // file exists to prevent. Halting instead — the two lines of [`halt`] —
+        // parks the session on a transient storage error with nothing to tell
+        // the user it has yielded (see the notification gap in the module doc),
+        // where this shape costs one lap of a ring that keeps moving.
         //
-        // **Unpinned by any test, and not pinnable from here.** Reaching it needs
-        // `next_active_participant` to return `Err`, which needs a broken pool,
-        // and `Storage` keeps its pool private to `storage`. Moving the clear
-        // into the `To` arm below leaves the whole suite green — measured, not
-        // assumed. Read the paragraph above as reasoning, not as coverage.
+        // **Pinned**, by `a_failed_reset_clears_the_tally_but_leaves_the_turn_in_flight`
+        // — both halves, and the lost lap. An earlier draft called this
+        // unreachable from a test on the grounds that `Storage`'s pool is
+        // private; the field is, but `Storage::pool` hands it out. See that test
+        // for how the ring read is broken without breaking the clear.
         Handover::Held => {}
         Handover::To(next) => {
             *holder = next;
@@ -1640,10 +1651,13 @@ mod tests {
         // and there it fails as a wake that never came, which reads as the epoch
         // guard rather than as the ring.
         //
-        // The middle seat is what this test alone holds. A rewind that is correct
-        // from the FRONT and merely steps from anywhere else passes every other
-        // test in the file, including that one — its reset lands while A holds —
-        // and fails here.
+        // The middle seat is what this test holds. A rewind that is correct from
+        // the FRONT and merely steps from anywhere else passes every test that
+        // was here before this one — including that one, whose reset lands while
+        // A holds. `a_failed_reset_clears_the_tally_but_leaves_the_turn_in_flight`
+        // notices it too, but as an uncleared tally: that narrowing takes
+        // `current` away from the clear as well, so it fails on a vote. This is
+        // the only test that fails on the RING.
         let (deps, storage, mut seats) =
             ring(&[("a", "active"), ("b", "active"), ("c", "active")]).await;
         let a = seats[0].id;
@@ -1888,8 +1902,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_user_message_over_a_live_turn_clears_the_tally() {
-        // Router-inventory #12's vote half, on the path the existing coverage
-        // does not reach. The clear itself is pinned twice already —
+        // Router-inventory #12's vote half, in the state the existing coverage
+        // cannot observe. The clear itself is pinned twice already —
         // `the_cycle_halts_when_every_active_participant_votes_done` and
         // `a_parked_question_halts_the_cycle_unilaterally` both go red without
         // it — but both reset a HALTED cycle, where the holder is already gone.
@@ -1897,9 +1911,17 @@ mod tests {
         // both stay green — measured — which makes "the user's message clears the
         // tally" true only of a user who waited for the session to fall silent.
         //
-        // Here the user speaks over a turn still in flight. The vote left
-        // standing is B's and the participant woken is A, so the clear also has
-        // to be session-wide rather than a reset of whoever is being woken.
+        // **Reaching a live holder is not the rare part; arriving with a vote
+        // standing is.** Several tests here already reset over a holder still in
+        // flight — `a_completion_from_a_turn_the_user_restarted_is_discarded`
+        // and `a_completion_from_a_superseded_turn_does_not_advance_the_ring`
+        // among them — and every one of them gets there with an EMPTY tally, so
+        // the narrowing changes nothing they could see. Here the user speaks
+        // over a live turn with B's done standing.
+        //
+        // The vote left standing is B's and the participant woken is A, so the
+        // clear also has to be session-wide rather than a reset of whoever is
+        // being woken.
         let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
         let (a, b) = (seats[0].id, seats[1].id);
         post(&storage, "user", None, "go").await;
@@ -2038,9 +2060,12 @@ mod tests {
         );
 
         // And the first real post after the user's message reaches its peer,
-        // which is the thing the stale vote would have silenced. Not a restatement
-        // of the line above: that one says B was woken, this one says the output
-        // of the turn it was woken for got out.
+        // which is the thing the stale vote would have silenced. **Kept for the
+        // shape, not for coverage, and worth being plain about:** it is an
+        // ordinary ring step, already pinned by
+        // `a_completed_turn_wakes_exactly_one_participant`, and under every
+        // mutation this test catches the run dies at the `expect(2)` above, so
+        // these lines never execute. They finish the sentence the name makes.
         post(&storage, "participant", Some("b"), "b's answer").await;
         send(
             &tx,
@@ -2051,6 +2076,104 @@ mod tests {
             seats[0].expect(1).await,
             vec!["b's answer"],
             "epoch 6 — the first real post after the user spoke came back round to A"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_failed_reset_clears_the_tally_but_leaves_the_turn_in_flight() {
+        // What a user message does when the ring read under it FAILS —
+        // [`Handover::Held`] on the reset path. The clear runs before the read,
+        // so the two halves of a reset come apart: the votes go, the ring does
+        // not rewind, and the turn that was in flight stays in flight.
+        //
+        // This was documented as unreachable from a test. It is not: `Storage`
+        // hands out its pool, and the two statements do not need the same
+        // columns — `next_active_participant` selects `PARTICIPANT_COLUMNS`
+        // while `clear_done_votes` is a bare `UPDATE ... SET done_vote = 0`, so
+        // renaming a column only the SELECT names breaks the ring read alone.
+        // Without this, moving the clear into the `Handover::To` arm below —
+        // which is the shape that makes a failed reset clear nothing — passes
+        // the whole suite.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        // A's done vote — the tally the user's message has to clear.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: true },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2, B holds");
+
+        // Break the ring read, and only it.
+        sqlx::query("ALTER TABLE session_participants RENAME COLUMN display_name TO dn_x")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+
+        post(&storage, "user", None, "u2").await;
+        send(&tx, SequencerCommand::UserMessage).await;
+        // Nothing was handed out, so there is no wire to synchronise on: the
+        // silence IS the failed half. A has `u2` past its cursor, so a rewind
+        // that had happened would have delivered it here.
+        seats[0].quiet().await;
+        // Read back with raw SQL — `participants_for_session` selects the column
+        // this test renamed.
+        let voted: (i64,) =
+            sqlx::query_as("SELECT done_vote FROM session_participants WHERE id = ?")
+                .bind(a)
+                .fetch_one(storage.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            voted.0, 0,
+            "the tally is emptied BEFORE the ring is read, so a read that failed still \
+             cleared it"
+        );
+
+        // The failure was transient. What it left behind is not: the epoch never
+        // moved, so B's pre-message turn is still the turn in flight.
+        sqlx::query("ALTER TABLE session_participants RENAME COLUMN dn_x TO display_name")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: true },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["u2"],
+            "B's completion was ACCEPTED — a successful reset would have moved the epoch \
+             and discarded it, vote and all"
+        );
+
+        // And here is what that costs, which is #13's hazard reached down the
+        // other path: B's vote was cast about a turn that ended before the user
+        // spoke, and it counts. A's done makes two of two.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: true },
+        )
+        .await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        assert!(
+            storage.all_active_voted_done("s1").await.unwrap(),
+            "the cycle arrived on a vote cast before the user's message"
+        );
+        assert!(
+            !storage.unread_for_participant(b).await.unwrap().rows.is_empty(),
+            "and B never read the message that was supposed to restart the cycle — one \
+             lap lost, which is the price of holding the turn rather than halting"
         );
         drop(tx);
         assert!(exited(task).await);
