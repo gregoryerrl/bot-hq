@@ -9,6 +9,87 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-11 — B5 in progress: the turn sequencer exists, `router.rs` is still live (HANDOFF)
+
+**Status: 14 of 18 tasks done, 41 commits (`3c8c90a..b07563c`). Nothing in the
+system behaves differently yet** — the sequencer is built but nothing spawns it,
+and `core/router.rs` still routes every peer forward. Everything through task 13
+is additive; task 14 is the first irreversible one.
+
+Plan: [`docs/plans/2026-08-06-b5-channel-and-sequencer.md`](docs/plans/2026-08-06-b5-channel-and-sequencer.md).
+Acceptance criterion: [`docs/plans/2026-08-06-router-behaviour-inventory.md`](docs/plans/2026-08-06-router-behaviour-inventory.md).
+
+### Done
+
+| task | what landed |
+|---|---|
+| 1, 1b | `PersistedMessage` — a receipt mintable only by a row insert or `from_row`; the two `messages` insert paths converged so exactly one `INSERT INTO messages` exists |
+| 2 | **the payoff**: a participant's stdin is private, so text cannot reach an agent without a persisted row. Six invisible host injections became rows |
+| 3 | subsumed by 2, verified by sweep (`send_unrouted` has one call site; zero raw `input_tx.send`) |
+| 4, 4b | sequencer skeleton — which, as first consumer, found **five defects in already-shipped storage helpers**, fixed in 4b with migration `0045` |
+| 5 | ring advance + backlog delivery |
+| 6 | consensus halt |
+| 7 | parked-question preemption |
+| 8 | user-message cycle reset (inventory #12, #13) |
+| 9 | pause holds wakes (inventory #19) |
+| 10 | Jaccard helpers moved out of `router.rs`, verbatim |
+
+`src/core/sequencer.rs`: 35 tests. Full suite: 1091 lib + 66 integration.
+
+### Left
+
+- **11 — spin detection** (inventory #2 and its false-positive guard #3). Was
+  in flight; the subagent died after ~3h having written nothing. Nothing to
+  recover, start clean.
+- **12** — `peer_ack` → done-votes (inventory #8, #9, #10, #11).
+- **13** — withheld-delivery rows, **plus the perf benchmark the inventory
+  demands**: the old delivery path never touched storage, and the channel model
+  puts a write back on it. "Measured, not assumed" is an acceptance criterion.
+- **14 — delete `router.rs`. THE ONLY IRREVERSIBLE TASK**, gated on walking all
+  20 inventory rows: every PRESERVED row needs a named green test, every
+  DISSOLVED row needs the structure that makes it impossible to actually exist,
+  every DROPPED row needs its written reason re-confirmed.
+- **15** — live smoke. Constraint 0 says parity is verified against a real
+  session, "not just 'it compiles'", with **serialisation asserted from
+  `activity_events`** (today's rows show `busy | 1 | 1`; after B5 they must not).
+- **16** — the `system_notice` render lane is sized for a one-line notice and
+  now carries five host injections, one ~450 chars. Frontend, B8 territory.
+
+### Three things the next session should not have to rediscover
+
+1. **`VOLLEY_SIMILARITY_THRESHOLD` is shared with live code.** `router.rs`'s
+   convergence breaker uses it, so **`0.85` cannot be retuned until task 14
+   deletes that file.** Spin detection should mint its own constant rather than
+   inherit it by inertia. Its docs still say "forward"/"convergence" — router
+   concepts the sequencer's own module doc says do not exist on the turn path.
+2. **Mutation M7 is a live tripwire.** Swapping `advance_turn`'s
+   `current.is_none()` for `reset` currently changes nothing, *because every
+   `None` holder today means a genuine restart*. If spin detection (or anything
+   else) clears the holder without passing `reset`, that equivalence dies and
+   **every recovery silently clears the consensus tally**. Re-measure M7 after
+   task 11; if it broke, change the condition in the same commit.
+3. **A `UserMessage` releases a pause** (host contract: `state.rs:737`,
+   `activity.rs:217`, and `resume_session` is a `broadcast`, so the Resume
+   button IS a user message). Three non-human writers mint `origin = "user"`
+   rows — `advance_phase`, the watchdog's idle NOTICE, and
+   `request_phase_advance`'s slug fallback — and **`advance_phase` does not flip
+   the pause latch**. A producer of `UserMessage` must either flip it or not be
+   minted from a non-human writer.
+
+### What this arc cost, honestly
+
+Six days, and the review layer found something real in **every single round** —
+including in the fixes to earlier findings, twice. The recurring defect was not
+in the code: it was **claims written by someone who had just verified something
+adjacent to the claim**. Sixteen instances. A doc naming a regression test that
+did not exist; a test that passed with its own guard removed; a "cannot be
+tested" sentence standing guard over a surviving mutation, killed as soon as
+someone wrote the probe; a migration predicate reading `enabled = 1` while the
+code filtered `enabled != 0`. Every one was caught by a different agent than the
+one that wrote it, and never by its author's own re-read.
+
+Full detail in `~/.bot-hq/library/projects/bot-hq/learnings-2026-08-07-b5-channel-batch.md`.
+
 ## 2026-08-06 — rc3 begins: the session-focused redesign (design, B0–B4a, migration 0044 verified live)
 
 **This arc is `1.0.0-rc3`.** rc2 was the harness as built — agent-focused, with
