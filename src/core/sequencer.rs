@@ -163,6 +163,18 @@
 //! `done: true` of the restarted cycle to STEP the ring rather than complete a
 //! tally of two.
 //!
+//! The reset's own two halves are pinned separately —
+//! `a_user_message_resets_the_cycle_to_the_first_participant` for the ring, on a
+//! ring of three so a rewind is distinguishable from a step, and
+//! `a_user_message_over_a_live_turn_clears_the_tally` for the votes. The second
+//! of those is the only test that reaches the clear with a holder still in
+//! flight, which is the one condition under which `current.is_none()` and
+//! `holder.is_none()` differ. `the_reset_survives_a_turn_that_produced_nothing`
+//! then carries the router's #13: after the restart, a turn that produces no
+//! output must not be able to complete a tally holding a pre-message vote, or
+//! the first real post after the user spoke is silenced by a participant that is
+//! never woken.
+//!
 //! **Mechanically the halt is: no holder, no live epoch, and the loop goes back
 //! to `recv`.** It emits nothing and marks nothing extra. Three consequences,
 //! and the third is a gap:
@@ -754,10 +766,20 @@ async fn advance_turn(
     // `reset = false` is reached from exactly one place — inside `if live`,
     // which requires `holder.is_some()` — so `current` is always `Some` there,
     // and `current.is_none()` is true exactly when `reset` is. Swap the
-    // condition for `reset` and the suite stays green. This is kept as the
-    // defensive shape, not because it covers a case that exists: it is the
-    // right form for the second restart path tasks 8/9 add, and it costs
-    // nothing now. Do not read it as pinning a reachable behaviour.
+    // condition for `reset` and the suite stays green — re-measured against the
+    // reset tests below, which did not change it. This is kept as the defensive
+    // shape, not because it covers a case that exists: it is the right form for
+    // a second restart path, and it costs nothing now. Do not read it as pinning
+    // a reachable behaviour, and do not read the task numbers an earlier draft
+    // gave here as a schedule — task 8 owned the user-message reset and added no
+    // second path; a pause (task 9) or spin detection (task 11) may.
+    //
+    // What IS pinned is the other narrowing. `holder.is_none()` looks equivalent
+    // and is not: a user message resets a LIVE cycle too, where the holder is
+    // `Some` and only `current` is `None`. Both halt tests reset from a halted
+    // cycle, so both stay green under that swap;
+    // `a_user_message_over_a_live_turn_clears_the_tally` and
+    // `the_reset_survives_a_turn_that_produced_nothing` are the two that fail.
     //
     // A failure warns and continues, like the other storage faults on this
     // path. It is the one that leans the wrong way — stale votes can only make
@@ -780,6 +802,32 @@ async fn advance_turn(
         // `holder` with `None` here instead would strand the cycle — every
         // later completion would fail the guard above, and nothing but another
         // user message would ever move it again.
+        //
+        // **On the reset path this leaves a user message half-applied, and that
+        // is a decision rather than an oversight.** The tally is emptied above,
+        // BEFORE the ring is read, so a failed read gives a cycle whose votes are
+        // cleared but whose ring never went back to the front — and the previous
+        // holder's completion is still live, so the retry it triggers is a STEP
+        // from where the turn already was, not a second attempt at the reset.
+        // Nothing is lost by that: every cursor is still behind the user's row,
+        // so whoever is woken next reads it. What is lost is that the FRONT of
+        // the ring reads it first, and one vote from a pre-message turn lands in
+        // the tally that was just cleared for that message.
+        //
+        // So a failed reset is NOT a reset. It is deliberately the safe half of
+        // one, and both alternatives are worse. Clearing only after a successful
+        // hand-over leaves stale votes standing across a user message, which is
+        // the false arrival this file exists to prevent. Halting instead — the
+        // two lines of [`halt`] — parks the session on a transient storage error
+        // with nothing to tell the user it has yielded (see the notification gap
+        // in the module doc), where this shape only misorders one lap of a ring
+        // that keeps moving.
+        //
+        // **Unpinned by any test, and not pinnable from here.** Reaching it needs
+        // `next_active_participant` to return `Err`, which needs a broken pool,
+        // and `Storage` keeps its pool private to `storage`. Moving the clear
+        // into the `To` arm below leaves the whole suite green — measured, not
+        // assumed. Read the paragraph above as reasoning, not as coverage.
         Handover::Held => {}
         Handover::To(next) => {
             *holder = next;
@@ -1579,6 +1627,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_user_message_resets_the_cycle_to_the_first_participant() {
+        // Router-inventory #12's ring half. The reset is a REWIND, and a rewind
+        // is only distinguishable from a step in the MIDDLE of a ring: this one
+        // is three deep with the turn parked on B, so back-to-the-front lands on
+        // A and one-more-place lands on C.
+        //
+        // Every other reset in this file runs on a ring of two, where the step
+        // from B and the rewind to A are the same participant. Ignore `reset`
+        // entirely and, of the tests that were here before this one, only
+        // `a_completion_from_a_turn_the_user_restarted_is_discarded` notices —
+        // and there it fails as a wake that never came, which reads as the epoch
+        // guard rather than as the ring.
+        //
+        // The middle seat is what this test alone holds. A rewind that is correct
+        // from the FRONT and merely steps from anywhere else passes every other
+        // test in the file, including that one — its reset lands while A holds —
+        // and fails here.
+        let (deps, storage, mut seats) =
+            ring(&[("a", "active"), ("b", "active"), ("c", "active")]).await;
+        let a = seats[0].id;
+        let c = seats[2].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        // Each wake is awaited before the next command goes in: the drain selects
+        // commands first and biased, so anything sent ahead of a wake can cut
+        // short the drain that would have produced it.
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        assert_eq!(
+            seats[1].expect(1).await,
+            vec!["go"],
+            "epoch 2 — the turn is now parked in the middle of the ring"
+        );
+
+        // The user speaks over B's turn. The row is posted BEFORE the command,
+        // which is what makes the wire below a fact rather than a race.
+        post(&storage, "user", None, "u2").await;
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["u2"],
+            "the ring went back to its FIRST place, not on to the place after B"
+        );
+
+        // C is where a plain step would have landed, and both rows are still
+        // past its cursor — so its silence is the rewind rather than an empty
+        // backlog. With the control channel still OPEN: dropping `tx` first
+        // would abort a delivery a stepping loop had already begun.
+        assert!(
+            !storage.unread_for_participant(c).await.unwrap().rows.is_empty(),
+            "the silence has to be the rewind, not an empty backlog"
+        );
+        seats[2].quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
     async fn the_cycle_halts_when_every_active_participant_votes_done() {
         // The cycle runs until every ACTIVE participant agrees there is nothing
         // left to do. Two actives here, so it takes two done votes with no
@@ -1768,6 +1881,176 @@ mod tests {
             storage.all_active_voted_done("s1").await.unwrap(),
             "two consecutive done votes, and B's unread `host note` proves the silence \
              is the halt rather than an empty backlog"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_user_message_over_a_live_turn_clears_the_tally() {
+        // Router-inventory #12's vote half, on the path the existing coverage
+        // does not reach. The clear itself is pinned twice already —
+        // `the_cycle_halts_when_every_active_participant_votes_done` and
+        // `a_parked_question_halts_the_cycle_unilaterally` both go red without
+        // it — but both reset a HALTED cycle, where the holder is already gone.
+        // So `current.is_none()` could be narrowed to `holder.is_none()` and
+        // both stay green — measured — which makes "the user's message clears the
+        // tally" true only of a user who waited for the session to fall silent.
+        //
+        // Here the user speaks over a turn still in flight. The vote left
+        // standing is B's and the participant woken is A, so the clear also has
+        // to be session-wide rather than a reset of whoever is being woken.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2, B holds");
+
+        // A row for A to be woken by, and then B's done vote — the tally the
+        // user's message has to clear.
+        post(&storage, "user", None, "note for a").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: true },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["note for a"],
+            "one done vote of two is not consensus — epoch 3, A holds"
+        );
+        let roster = storage.participants_for_session("s1").await.unwrap();
+        assert!(
+            roster.iter().find(|p| p.id == b).unwrap().done_vote,
+            "B's vote is standing with A mid-turn — the premise of this test"
+        );
+
+        // The user speaks over A's LIVE turn. Awaiting the wake is also what
+        // orders the read below: the tally is emptied before `hand_over`, so a
+        // wire that has arrived is a clear that has committed.
+        post(&storage, "user", None, "u2").await;
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["u2"],
+            "epoch 4 — the cycle restarted at the front with A still holding"
+        );
+
+        // Asserted on the VOTE rather than on consensus: A has never voted, so
+        // `all_active_voted_done` is `false` on both sides of this line and
+        // would not tell a cleared tally from a standing one. What that costs is
+        // the behavioural half — the arrival a stale vote buys too early — and
+        // that is `the_reset_survives_a_turn_that_produced_nothing` below.
+        let roster = storage.participants_for_session("s1").await.unwrap();
+        assert!(
+            !roster.iter().find(|p| p.id == b).unwrap().done_vote,
+            "the user's message cleared a vote cast before it, with a turn still in flight"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn the_reset_survives_a_turn_that_produced_nothing() {
+        // Router-inventory #13 (`convergence_reset_survives_a_suppressed_forward`)
+        // carried onto the turn path. There the reset was a FLAG with a
+        // consumption point, and the hazard was an event producing no output
+        // burning it before the forward that needed it — which is why the router
+        // consumes it at the convergence stage rather than at the top.
+        //
+        // This loop has no flag: `advance_turn` empties the tally at the restart
+        // itself, so there is nothing for a later event to burn and the property
+        // holds by construction. **Which makes this a regression lock rather than
+        // a guard test, and it earns no mutation of its own.** Every mutation it
+        // catches — the clear deleted, narrowed to `holder.is_none()`, made
+        // per-participant, or DEFERRED to the next advance the way the router's
+        // flag is — is caught by `a_user_message_over_a_live_turn_clears_the_tally`
+        // as well, and all but the narrowing by the two halt tests too. Measured,
+        // including the deferral, which is the router's own shape.
+        //
+        // What it adds is the failure MODE, and that is the whole of #13's point.
+        // The test above catches a stale vote as a stored `done_vote`; the same
+        // vote here is a participant that is never woken and a real post that
+        // never gets out — which is what "a stale streak silences the first post
+        // after a user message" meant when the router had to be careful about it.
+        //
+        // The shape: a done vote stands, the user speaks, and the FIRST turn of
+        // the restarted cycle produces nothing at all — no row, and `done: true`.
+        // With the pre-message vote still standing that empty turn completes a
+        // tally of two, and the cycle halts with B never woken, so B's first real
+        // post after the user's message never happens.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2, B holds");
+
+        // The vote the user's message has to make stale, and a row for A to be
+        // woken by when the ring comes back round.
+        post(&storage, "user", None, "note for a").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: true },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["note for a"],
+            "one done vote of two is not consensus — epoch 3, A holds"
+        );
+
+        // The user speaks.
+        post(&storage, "user", None, "u2").await;
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["u2"], "epoch 4, the cycle restarted");
+
+        // A's turn produces NOTHING — it writes no row and ends `done: true`.
+        // One vote of two, so the ring steps; with B's pre-message vote still
+        // standing it is two of two and B is never woken at all.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 4, done: true },
+        )
+        .await;
+        assert_eq!(
+            seats[1].expect(2).await,
+            vec!["note for a", "u2"],
+            "the reset outlived a turn that produced nothing — and the user's row reached \
+             B undiminished by it"
+        );
+
+        // And the first real post after the user's message reaches its peer,
+        // which is the thing the stale vote would have silenced. Not a restatement
+        // of the line above: that one says B was woken, this one says the output
+        // of the turn it was woken for got out.
+        post(&storage, "participant", Some("b"), "b's answer").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 5, done: false },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["b's answer"],
+            "epoch 6 — the first real post after the user spoke came back round to A"
         );
         drop(tx);
         assert!(exited(task).await);
