@@ -325,14 +325,40 @@ impl ParticipantInput {
     ///
     /// Be exact about the size of the claim. Within this type there are three
     /// writes to `tx` — this one, [`send_unrouted`](Self::send_unrouted) and the
-    /// private `relay` — so what holds is: **every write to a participant's
-    /// stdin that carries a receipt is scope-checked.** `send_unrouted` takes a
-    /// bare `String` and has no session to check it against; that is the
-    /// peer-forward hole B5 already tracks, and it is untouched here. And this
-    /// is a check on the receipt, not on the channel: nothing stops in-crate
-    /// code building a `ParticipantInput` around some other agent's sender with
-    /// a session id of its choosing — what is ruled out is a receipt from
-    /// session B reaching an input constructed for session A.
+    /// private [`relay`](Self::relay) — so what holds is: **every write to a
+    /// participant's stdin that carries a receipt is scope-checked.** The other
+    /// two carry no receipt and put no row on record: `send_unrouted` takes a
+    /// bare `String` and has no session to check it against (the peer-forward
+    /// hole B5 already tracks), and `relay` has one call site that authors its
+    /// own text — see `relay`'s doc. **Two unrecorded stdin writes, not one.**
+    /// Neither is touched here.
+    ///
+    /// And this is a check on the receipt, not on the channel. Two capabilities
+    /// have to be told apart, because they are not equally reachable:
+    ///
+    /// - **Minting an input under a session id of your choosing** is reachable
+    ///   from OUTSIDE this crate, not just in-crate as this paragraph used to
+    ///   say. `ParticipantInput::new` is `pub(crate)`, but
+    ///   [`AgentHandle::from_parts`] is `pub`, re-exported from `crate::agents`,
+    ///   takes the session id as a plain parameter, and
+    ///   [`AgentHandle::input`] hands the result back — so any consumer of the
+    ///   `bot_hq` lib target (`tests/` included) can mint one. Compiled and run
+    ///   as an integration test before this was written; it needs no
+    ///   `pub(crate)` item.
+    /// - **Pointing that input at a LIVE agent's stdin** additionally needs that
+    ///   agent's raw `Sender<OutgoingUserMessage>`, and no public API returns
+    ///   one: the field on this type is private, so is `AgentHandle::input_tx`,
+    ///   and no function anywhere in the crate has that sender as a return type.
+    ///   The senders that reach a subprocess are created inside [`spawn_agent`],
+    ///   `spawn_supervised_agent` and `agents::native`, so misfiling one stays a
+    ///   build-time obligation on those three — the same obligation
+    ///   [`crate::core::sequencer::SequencerDeps::inputs`] carries for its map
+    ///   keys.
+    ///
+    /// So an outside forge writes into its own channel (harmless, as the type
+    /// doc says); an in-crate one can write into another agent's. What this
+    /// check rules out, in both cases, is a receipt from session B reaching an
+    /// input constructed for session A.
     ///
     /// Drops rather than panics, and warns. A mismatch is a routing bug in the
     /// caller; the containment that matters is that the wrong agent does not
@@ -388,10 +414,28 @@ impl ParticipantInput {
         self.tx.is_closed()
     }
 
-    /// Hand an already-authored message to the CURRENT incarnation. Private to
-    /// this module because it is supervisor plumbing, not a send: the message
-    /// was authored (and, if it came through `deliver`, recorded) one channel
-    /// upstream, and `supervise` is only re-pointing it at the live child.
+    /// Hand a message to the CURRENT incarnation. Private to this module
+    /// because it is supervisor plumbing, not a send.
+    ///
+    /// **Only one of its two call sites is re-pointing, though — this doc said
+    /// both were.** They differ in exactly the way that matters for whether the
+    /// text is on record:
+    ///
+    /// - the bridge in [`supervise`]'s select, which forwards whatever came off
+    ///   `out_input_rx`. That message WAS authored one channel upstream, and if
+    ///   it arrived via [`deliver`](Self::deliver) it has a row behind it. Pure
+    ///   re-pointing;
+    /// - the `pending_nudge` write at the top of `supervise`'s outer loop. That
+    ///   string is authored INSIDE `supervise`, where the transient-API retry
+    ///   sets it, and nothing in this file writes it to storage — `supervise`
+    ///   holds no `Storage` at all. So the resumed child reads a `[bot-hq]`
+    ///   instruction that appears in no channel and no transcript.
+    ///
+    /// That makes the nudge the SECOND ungated, unrecorded write to a
+    /// participant's stdin, alongside [`send_unrouted`](Self::send_unrouted) —
+    /// see the size-of-the-claim paragraph on [`deliver`](Self::deliver).
+    /// Recording it means giving `supervise` a way to write a row, which it has
+    /// no dependency on today; it is noted here rather than fixed.
     async fn relay(
         &self,
         msg: OutgoingUserMessage,
