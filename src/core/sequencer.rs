@@ -1030,11 +1030,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_backlog_past_the_batch_limit_is_drained_before_the_turn_is_handed_over() {
-        // `ChannelPage::more` is a normal outcome, not an edge case — 266 of
-        // 382 live sessions hold more rows than one batch. Leaving the rest for
-        // next time would start a turn on context the participant is already
-        // known to be missing, and the newest rows would arrive a full lap of
-        // the ring later.
+        // `ChannelPage::more` is a normal outcome, not an edge case — 268 of
+        // 384 live sessions held more rows than one batch when this was measured
+        // (2026-08-10). The figure drifts; the shape does not, and it only ever
+        // drifts upward. Leaving the rest for next time would start a turn on
+        // context the participant is already known to be missing, and the newest
+        // rows would arrive a full lap of the ring later.
         let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
         let (a, b) = (seats[0].id, seats[1].id);
         let overflow = UNREAD_BATCH_LIMIT as usize + 1;
