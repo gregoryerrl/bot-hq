@@ -171,6 +171,22 @@ pub async fn peer_forward_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `recv()` with a deadline.
+    ///
+    /// A bare `rx.recv().await` turns a regression into a HANG rather than a
+    /// failure: the test waits forever for a wire the broken code never sends,
+    /// and prints nothing. This batch produced two — one wedged a run for seven
+    /// minutes, and one hung `cargo test` outright when a session-id mismatch
+    /// made a scope check refuse every wire. Both would have been a clean
+    /// failure in seconds through this.
+    async fn next_wire<T>(rx: &mut tokio::sync::mpsc::Receiver<T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected a wire within 2s; none arrived")
+            .expect("the sender was dropped before a wire arrived")
+    }
+
     use crate::agents::OutgoingUserMessage;
     use tokio::sync::mpsc;
 
@@ -204,8 +220,8 @@ mod tests {
         )
             .await
             .unwrap();
-        let bm = brx.recv().await.unwrap();
-        let rm = rrx.recv().await.unwrap();
+        let bm = next_wire(&mut brx).await;
+        let rm = next_wire(&mut rrx).await;
         assert_eq!(bm.message.content, "[PHASE: Apply]\nhello");
         assert_eq!(rm.message.content, "[PHASE: Apply]\nhello");
         let msgs = s.messages_for_session("s1", None).await.unwrap();
@@ -268,7 +284,7 @@ mod tests {
         broadcast_user_message(&s, "solo", "hi", IpavPhase::Apply, None, &[("brian", &btx)])
             .await
             .unwrap();
-        let bm = brx.recv().await.unwrap();
+        let bm = next_wire(&mut brx).await;
         assert_eq!(bm.message.content, "[PHASE: Apply]\nhi");
         assert_eq!(s.messages_for_session("solo", None).await.unwrap().len(), 1);
     }
@@ -280,7 +296,7 @@ mod tests {
         // therefore arbitrary.
         let (tx, mut rx) = stub_input("s1");
         peer_forward_message(Author::Rain, "concerns?", IpavPhase::Plan, 0, &tx).await;
-        let m = rx.recv().await.unwrap();
+        let m = next_wire(&mut rx).await;
         assert!(
             m.message
                 .content
@@ -325,7 +341,7 @@ mod tests {
         broadcast_user_message(&s, "s1", "go", IpavPhase::Verify, None, &[("brian", &btx)])
             .await
             .unwrap();
-        let bm = brx.recv().await.unwrap();
+        let bm = next_wire(&mut brx).await;
         assert!(
             bm.message
                 .content
@@ -357,7 +373,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let bm = brx.recv().await.unwrap();
+        let bm = next_wire(&mut brx).await;
         assert!(
             bm.message
                 .content

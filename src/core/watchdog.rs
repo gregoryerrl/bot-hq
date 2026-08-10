@@ -405,6 +405,22 @@ async fn deliver_idle_nudge(
 mod tests {
     use super::*;
 
+    /// `recv()` with a deadline.
+    ///
+    /// A bare `rx.recv().await` turns a regression into a HANG rather than a
+    /// failure: the test waits forever for a wire the broken code never sends,
+    /// and prints nothing. This batch produced two — one wedged a run for seven
+    /// minutes, and one hung `cargo test` outright when a session-id mismatch
+    /// made a scope check refuse every wire. Both would have been a clean
+    /// failure in seconds through this.
+    async fn next_wire<T>(rx: &mut tokio::sync::mpsc::Receiver<T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected a wire within 2s; none arrived")
+            .expect("the sender was dropped before a wire arrived")
+    }
+
+
     #[test]
     fn liveness_touch_and_tools() {
         let l = AgentLiveness::new();
@@ -558,7 +574,7 @@ mod tests {
         // And Brian read exactly the nudge row, phase envelope included — the
         // same bytes the deleted `with_phase_envelope(phase, NUDGE)` produced
         // here inline, now re-derived from the row instead.
-        let wire = rx.recv().await.expect("nudge delivered").message.content;
+        let wire = next_wire(&mut rx).await.message.content;
         assert_eq!(
             wire,
             crate::storage::render_wire(rows[1].envelope.as_ref(), &rows[1].content)
