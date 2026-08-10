@@ -8,10 +8,9 @@
 //! done ([`Storage::all_active_voted_done`]) — or immediately, when a
 //! participant parks a question for the user.
 //!
-//! **What is implemented is the ring advance, the delivery and both halts —
-//! consensus, and a parked question.** Spin detection is a later task and is NOT
-//! here; [`SequencerCommand::Pause`] and [`SequencerCommand::Resume`] are still
-//! accepted-and-logged. Nothing spawns this yet, so no session behaves
+//! **What is implemented is the ring advance, the delivery, both halts —
+//! consensus, and a parked question — and the pause.** Spin detection is a later
+//! task and is NOT here. Nothing spawns this yet, so no session behaves
 //! differently because it exists.
 //!
 //! ## What the storage helpers guarantee
@@ -315,7 +314,7 @@
 //! inside one `deliver` with no way to reach it — session teardown included.
 //!
 //! So each row is written under a `select!` against the command channel, and
-//! three things end a drain early:
+//! four things end a drain early:
 //!
 //! - the control channel CLOSING, which is session end. A teardown must not
 //!   wait on a wedged agent's stdin;
@@ -324,9 +323,15 @@
 //!   participant, and it costs nothing correctness-wise: the rows that did not
 //!   land stay past the cursor and are offered again when the ring returns;
 //! - a [`SequencerCommand::QuestionParked`], which halts the cycle, so there is
-//!   no longer a turn to feed.
+//!   no longer a turn to feed;
+//! - a [`SequencerCommand::Pause`], which stops the cycle where it stands. Same
+//!   ledger as the park, traced rather than inherited from it: the prefix that
+//!   landed is committed, the remainder stays past the cursor, and
+//!   [`SequencerCommand::Resume`] re-drains from there.
+//!   `a_pause_stops_the_drain_rather_than_finishing_it` asserts both the cursor
+//!   and the remainder.
 //!
-//! **The third one stops the drain rather than letting it finish, and both were
+//! **The park stops the drain rather than letting it finish, and both were
 //! available.** Stopping costs the rows already read but not delivered — which
 //! is not a loss, because [`Storage::commit_delivery`] records only the prefix
 //! that landed, so the remainder stays past the cursor exactly as it does for a
@@ -352,10 +357,169 @@
 //! finishes. Deferring rather than acting is what keeps "when your turn comes
 //! you have read everything you had not read" true — acting on a `TurnComplete`
 //! mid-drain would hand the turn over with rows undelivered, which is the
-//! deferral this section rejects. The two that END a drain are deferred as well,
-//! not acted on here: the drain sets `stop` and returns, and the loop applies
-//! the reset or the halt in arrival order. A pause is task 9 and attaches at the
-//! same `select!`.
+//! deferral this section rejects. The ones that END a drain are deferred as
+//! well, not acted on here: the drain sets `stop` and returns, and the loop
+//! applies the reset, the halt or the pause itself.
+//!
+//! **Arrival order has exactly one exception, and it is the pause.** A
+//! [`SequencerCommand::Pause`] goes on the FRONT of the deferred queue; every
+//! other deferral goes on the back. The case is a `TurnComplete` that the drain
+//! set aside a moment before reading the pause: dispatched in arrival order it
+//! steps the ring and starts a fresh turn in a session the user has just
+//! stopped. For the park, the section above prices the same shape at one extra
+//! wake and accepts it, because a park is a fact the loop is TOLD about — a
+//! human is already blocking, and their answer is what ends both the wake and
+//! the halt. A pause is an INSTRUCTION, and nothing ends the extra turn but a
+//! Resume the user has not sent yet. `a_pause_stops_the_drain_rather_than_finishing_it`
+//! pins the queue order and
+//! `a_completion_deferred_ahead_of_a_pause_hands_out_no_turn` pins what it buys.
+//!
+//! ## A pause holds wakes; it does not end a turn
+//!
+//! [`SequencerCommand::Pause`] carries router-inventory #19
+//! (`paused_holds_forwards_and_flush_delivers_exactly_once`) onto the turn path,
+//! and the two halves land very differently. The router held a LIST of forwards
+//! and its flush had to hand each one over exactly once; this loop holds a FLAG
+//! and reads a CURSOR, so exactly-once needs no bookkeeping at all —
+//! [`Storage::commit_delivery`] moves the cursor to the highest id in the prefix
+//! that landed and never rewinds, so re-reading it on resume offers each unread
+//! row once and no more. What has to be BUILT is the other half, the one #19
+//! names as the property that must survive: **a paused session must not wake the
+//! next participant.**
+//!
+//! **A pause is not a [`halt`], and the two must not share that helper.** `halt`
+//! is `*holder = None; *epoch += 1;` — it ENDS the turn, and four things break
+//! if a pause is written that way:
+//!
+//! - `*holder = None` ends the turn, so the paused participant's own completion
+//!   fails [`TurnComplete`](SequencerCommand::TurnComplete)'s identity compare
+//!   and its work is DISCARDED rather than held;
+//! - `*epoch += 1` fails the same guard by the other half;
+//! - `None` is what the ring reads as "reset to the front", so a resume would
+//!   REWIND instead of resuming where it stood;
+//! - [`advance_turn`] keys its tally clear on `current.is_none()`, which is
+//!   equivalent to `reset` today only because every `None` holder means a
+//!   genuine restart. A halt-shaped pause breaks that equivalence — on resume
+//!   `current.is_none()` would be true with `reset` false — so every resume
+//!   would silently empty the tally. The one defensive line in this file that
+//!   costs nothing would become a live bug.
+//!
+//! So what a pause touches is a `paused` flag local to [`run_sequencer`];
+//! `holder` and `epoch` are left exactly as they stand. The fourth bullet is
+//! therefore still hypothetical after this task: `advance_turn` is reached with
+//! `reset = false` only from inside `if live`, which requires a holder, so
+//! `current.is_none()` and `reset` remain the same condition — re-measured, and
+//! see the comment on the clear.
+//!
+//! While the flag is set every command except the three below is HELD: kept in
+//! arrival order, neither acted on nor discarded. Holding rather than dropping
+//! is what makes "a pause keeps the turn in flight" mean something — the
+//! completion of a turn that ended during the pause is exactly the thing that
+//! must not be thrown away — and
+//! `a_paused_session_does_not_wake_the_next_participant` asserts both, the
+//! silence and then the release that hands the same completion back to the loop.
+//! **The order they come back in is load-bearing**, not tidiness: see
+//! [`release_held`] for the pair whose misordering hands out a turn with a human
+//! still blocking.
+//!
+//! ### What releases a pause: a user message, and also `Resume`
+//!
+//! **The steer is the release, and it is the one the app already ships.** Three
+//! shipped sites say so and this loop follows them rather than inventing a
+//! fourth: `state`'s user-message path calls `set_paused(false)` under the
+//! comment "a user message is the steer";
+//! [`ActivityTracker::set_paused`](crate::core::activity::ActivityTracker::set_paused)
+//! documents the latch as cleared by "Resume, a user Send (steer), or a
+//! supersede"; and `AppState::resume_session` — the Paused bar's Resume button,
+//! the only resume affordance the UI has — is implemented as a broadcast of
+//! `RESUME_NOTICE`. So on today's wiring the Resume BUTTON arrives here as a
+//! [`UserMessage`](SequencerCommand::UserMessage) and nothing mints
+//! [`Resume`](SequencerCommand::Resume) at all: hold the user message and the
+//! pause is unreleasable, with the bar that offers the only way out gone from
+//! the UI the moment `ActivityTracker` reads unpaused. Both role prompts also
+//! tell the agents that "the bridge halts the duo until the next user message";
+//! holding it would make that promise false.
+//!
+//! That is not a hole in inventory #19 either. The router's pause held PEER
+//! FORWARDS, and a user Send was always its release — "a paused session must not
+//! wake the next participant" is about the turn path, not about a human
+//! steering. `a_user_message_releases_a_pause_and_wakes_the_ring` pins the
+//! release; `a_paused_session_does_not_wake_the_next_participant` pins the turn
+//! path it does not weaken.
+//!
+//! **So there are two sources of truth for "paused" now** — this flag and
+//! `ActivityTracker`'s latch — and they are meant to agree, on the same three
+//! events. Whoever mints these commands is the code that already flips the
+//! latch, and keeping them in step is that task's obligation; nothing here can
+//! check it.
+//!
+//! [`Resume`](SequencerCommand::Resume) is KEPT even though nothing mints it
+//! today. It is the explicit release for a resume that carries no message, which
+//! is what the wiring task needs if `resume_session` is ever split off
+//! `broadcast` — and it is the only release that also finishes the delivery the
+//! pause cut short, since a user message resets the ring instead. Neither
+//! release hands out a turn of its own: a halted cycle has no holder, so it
+//! stays halted and a user message restarts it exactly as it always did. That is
+//! the third state a pause can arrive in, after "a turn in flight" and
+//! "mid-drain", and `a_pause_over_a_halted_cycle_hands_out_no_turn_on_resume`
+//! locks it.
+//!
+//! Both releases take effect where the command is READ, not where it is
+//! dispatched — the same rule as the drain's pause deferral. A user message off
+//! the DEFERRED queue was read earlier, so it cannot release a pause that
+//! arrived after it; `a_pause_behind_a_user_message_still_holds_the_cycle` is
+//! that case, and without the distinction a Stop pressed after a message is
+//! silently cancelled.
+//!
+//! ### One mutation of the replay survives, and where it hides
+//!
+//! [`release_held`] splices the held queue AHEAD of whatever is already
+//! deferred. Splicing it BEHIND instead leaves every test in this file green,
+//! and that is worth stating precisely rather than filing as "narrow": it is a
+//! real defect, not an equivalent form.
+//!
+//! It hides because the two agree whenever `deferred` is empty, which is every
+//! ordinary state. `held` is non-empty only while paused; the loop drains
+//! `deferred` completely before it calls `recv` again; and a drain only ever
+//! runs unpaused. So the release almost always concatenates with nothing.
+//!
+//! The exception needs a drain to set commands aside and THEN stop on a pause,
+//! with a [`Resume`](SequencerCommand::Resume) among the ones set aside — wire
+//! order `X, Resume, Y, Pause`, which the drain turns into
+//! `[Pause, X, Resume, Y]`. The pause latches, `X` is held, and the resume then
+//! releases with `held = [X]` and `deferred = [Y]`. `X` was read before `Y`, so
+//! `X` must go first; spliced behind, the two swap.
+//!
+//! No test builds it. `X` and `Y` have to be commands a drain merely sets aside
+//! — so not a park, a user message or a pause, all of which stop it — which
+//! leaves a completion and a join, and the resume's own delivery runs between
+//! the splice and the dispatch and drains the backlog the join would have been
+//! observed by. Nothing mints [`Resume`](SequencerCommand::Resume) today, so the
+//! state is unreachable in production as well as untested. Recorded rather than
+//! closed.
+//!
+//! ### Why not `ActivityTracker::holds_wakes`
+//!
+//! The host already has this notion of paused:
+//! [`ActivityTracker::holds_wakes`](crate::core::activity::ActivityTracker::holds_wakes)
+//! answers "cancelling or paused", and `core::router` reads it lock-free on
+//! every forward. It is not reused here, for the reason
+//! [`QuestionParked`](SequencerCommand::QuestionParked) already gives about the
+//! awaiting flag: **a flag is a LEVEL and this loop needs an EDGE.** The
+//! sequencer sits in `recv().await` between turns, so a latch flipped elsewhere
+//! is only ever observed wherever the loop happens to look, with no defined order
+//! against [`Resume`](SequencerCommand::Resume) or
+//! [`UserMessage`](SequencerCommand::UserMessage) — and the ordering of a pause
+//! against the commands around it is the whole of this section. It also answers
+//! a question this loop does not ask: `holds_wakes` is `cancelling || paused`,
+//! and a cancel settling is a state the sequencer has no concept of.
+//!
+//! The NOTION is the same one, though, and the two are meant to agree: whoever
+//! mints [`Pause`](SequencerCommand::Pause) is the code that calls
+//! `set_paused(true)`, and that wiring belongs to the task that spawns this
+//! loop, alongside the epoch round trip. The latch shape is borrowed
+//! deliberately — `set_paused` is a plain store rather than a counter, and so is
+//! this.
 
 use crate::agents::ParticipantInput;
 use crate::storage::{Participant, PersistedMessage, Storage};
@@ -476,9 +640,22 @@ pub enum SequencerCommand {
     /// holder — and disabling it leaves every test here green. It is kept as
     /// defence against a malformed sender; see the comment on the guard itself.
     ///
-    /// A user message is the reachable producer today. Pause/Resume adds a
-    /// second once it is implemented, and a supervisor that respawns an agent
-    /// mid-turn a third.
+    /// A user message is the reachable producer today, and a supervisor that
+    /// respawns an agent mid-turn would be a second. **An earlier draft named
+    /// Pause/Resume as one "once it is implemented"; it is implemented now and it
+    /// is not one.** A pause leaves `holder` and `epoch` alone, and a completion
+    /// that arrives during one is held and replayed at the epoch it was minted
+    /// with — so it passes this guard rather than failing it.
+    ///
+    /// One case does discard a held completion, and it is not the pause doing
+    /// it: a [`QuestionParked`](Self::QuestionParked) held AHEAD of it halts the
+    /// cycle on replay, which takes the holder and moves the epoch, so the
+    /// completion behind it is discarded exactly as it would have been live.
+    /// That is the park's semantics surviving the pause intact rather than a
+    /// producer of its own, and `the_pause_replays_what_it_held_in_arrival_order`
+    /// is where it is observed. (An earlier draft of this paragraph named a
+    /// replayed `UserMessage` instead. That is no longer reachable — a user
+    /// message is a RELEASE and is never held.)
     ///
     /// **Where a sender gets the epoch is not solved here.** The sequencer
     /// mints it at handover, and it has to travel out with the turn and come
@@ -499,8 +676,16 @@ pub enum SequencerCommand {
     /// The user posted to the channel. Resets the cycle to the first active
     /// participant and hands it the turn.
     ///
-    /// Also the one command that cuts a drain short — see "the drain does not
-    /// hold the command channel shut" in the module doc.
+    /// Also one of the commands that cuts a drain short — see "the drain does
+    /// not hold the command channel shut" in the module doc.
+    ///
+    /// **It is also the release for a pause**, and on today's wiring the only
+    /// one: `AppState::resume_session` is a broadcast, so the Paused bar's
+    /// Resume button arrives as this command. See "what releases a pause" in the
+    /// module doc for the three shipped sites that decide it. The release is
+    /// applied where this command is READ off the wire, and the commands the
+    /// pause held are replayed AHEAD of it, so the message still lands in
+    /// arrival order behind them.
     UserMessage,
     /// A participant's stdin, arriving after the task was spawned.
     ///
@@ -575,14 +760,65 @@ pub enum SequencerCommand {
     QuestionParked,
     /// Stop: hold the cycle where it stands, hand out no further turns.
     ///
-    /// Still a no-op. Implementing it is a later task; what is in place for it
-    /// is [`TurnComplete`](Self::TurnComplete)'s epoch, without which a turn
-    /// finishing during a pause would advance the ring on resume. Note that a
-    /// pause cannot yet cut a drain short either — only a user message, a parked
-    /// question and the channel closing do — so task 9 attaches to the same
-    /// `select!`.
+    /// **The turn in flight stays in flight.** This is not [`halt`] and must not
+    /// be written as one — see "a pause holds wakes" in the module doc for the
+    /// four things sharing that helper breaks, the fourth of which turns a free
+    /// defensive line into a live bug. It sets a flag; `holder` and `epoch` are
+    /// untouched, so the paused participant's completion still names the turn it
+    /// was handed and is HELD rather than discarded.
+    ///
+    /// Everything except this command, [`Resume`](Self::Resume) and a
+    /// freshly-read [`UserMessage`](Self::UserMessage) — the steer, which is the
+    /// release the app already ships — is held while the flag is set, in arrival
+    /// order. The pause also cuts a drain short, on the FRONT of the deferred
+    /// queue, which is the one place this loop departs from arrival order. All
+    /// three are in the module doc.
+    ///
+    /// **A latch, not a counter**, and the asymmetry with
+    /// [`QuestionParked`](Self::QuestionParked)'s refcount problem is worth
+    /// being plain about, because it is the same hazard with the sign flipped.
+    /// Two pauses and one resume runs the cycle again while one of the two
+    /// pausers still means it to be stopped. There is no second pauser today —
+    /// the user's stop button is one control — and the shape matches
+    /// `ActivityTracker::set_paused`, which is a plain store. If a second one
+    /// ever appears this becomes a count, in the same place and for the same
+    /// reason the awaiting flag will.
     Pause,
-    /// Release a [`Pause`](Self::Pause) and continue the cycle. Still a no-op.
+    /// Release a [`Pause`](Self::Pause) and continue the cycle.
+    ///
+    /// **Nothing mints this today** — `AppState::resume_session` broadcasts, so
+    /// the Resume button arrives as a [`UserMessage`](Self::UserMessage). It is
+    /// kept because it is the release for a resume that carries no message,
+    /// which is what the wiring task needs if `resume_session` is ever split off
+    /// `broadcast`, and because it is the only release that finishes the
+    /// delivery the pause cut short rather than resetting the ring.
+    ///
+    /// Two things, and it hands out no turn doing either. It finishes that
+    /// delivery — the same holder, the same epoch, re-read from the cursor — and
+    /// it replays what the pause held, in arrival order. A halted cycle has
+    /// neither, so a resume leaves it halted; a user message is still the only
+    /// release for that.
+    ///
+    /// **Idempotent in the sense that matters, which is narrower than "a no-op".**
+    /// The delivery half re-reads a cursor [`Storage::commit_delivery`] has
+    /// already moved, so a repeat re-offers nothing it has already delivered. It
+    /// is not inert: rows written since the last drain go to the current holder,
+    /// outside a hand-over, because the read is of the cursor and not of a
+    /// snapshot taken at the pause. That is the same property
+    /// `resuming_delivers_each_unread_row_exactly_once` relies on to see anything
+    /// at all. That test releases twice to lock router-inventory #19's "a flush
+    /// racing the unpause must not double-deliver" — as a regression lock, not as
+    /// a guard: see it for why the repeat kills no mutation of its own.
+    ///
+    /// **The delivery is not gated on the flag, and nothing pins that.** Wrap
+    /// this arm in `if paused` and the suite stays green, because a resume with
+    /// no pause outstanding and a resume that finds an empty backlog are the same
+    /// silence. It is left ungated so there is one path rather than two, and
+    /// because "the holder has everything it has not read" is true either way;
+    /// read it as a choice, not as a pinned behaviour. Gating on the HELD QUEUE
+    /// instead — flushing only when the pause caught something — is a different
+    /// matter and is wrong: rows written while paused are held by no queue, and
+    /// that mutation is caught by the test above.
     Resume,
 }
 
@@ -608,14 +844,81 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     // Commands a drain took off `rx` without acting on them. Drained BEFORE
     // `recv`, so arrival order is preserved end to end.
     let mut deferred: VecDeque<SequencerCommand> = VecDeque::new();
+    // Is the cycle paused? A LATCH, not a counter — see `SequencerCommand::Pause`
+    // for what that costs. Deliberately NOT `holder`/`epoch`: a pause holds the
+    // turn in flight, it does not end one.
+    let mut paused = false;
+    // Commands that arrived while paused, in arrival order. A second queue
+    // rather than `deferred`, which is popped before `recv` and would therefore
+    // spin: pop, re-hold, pop. Replayed by `Resume`.
+    let mut held: VecDeque<SequencerCommand> = VecDeque::new();
     loop {
         let cmd = match deferred.pop_front() {
             Some(cmd) => cmd,
             None => match rx.recv().await {
+                // **The steer releases the pause, and it is the release the rest
+                // of the app already ships.** `state`'s user-message path calls
+                // `set_paused(false)` with the comment "a user message is the
+                // steer"; `ActivityTracker::set_paused` documents the latch as
+                // cleared by "Resume, a user Send (steer), or a supersede"; and
+                // `AppState::resume_session` — the Paused bar's Resume button —
+                // IS a broadcast of `RESUME_NOTICE`, so on today's wiring the
+                // button arrives here as a `UserMessage` and nothing mints
+                // `Resume` at all. Holding this command would make the pause
+                // unreleasable by the only affordance the UI offers. Both role
+                // prompts also promise the agents that "the bridge halts the duo
+                // until the next user message"; holding it would make that false.
+                //
+                // **At READ time, not at dispatch time** — the same rule the
+                // drain's pause deferral follows. A `UserMessage` reaching this
+                // loop off the DEFERRED queue was read earlier and must not
+                // release a pause that arrived after it: it falls through to the
+                // gate below and is held like anything else.
+                Some(SequencerCommand::UserMessage) if paused => {
+                    paused = false;
+                    // The steer takes its place at the END of the held queue, so
+                    // everything the pause caught ahead of it — a park, a
+                    // completion, a join — is applied first and in arrival order.
+                    // Dropping the queue instead would under-halt (a held park
+                    // would never take effect), and applying the message first
+                    // would restart a cycle the park is about to stop.
+                    held.push_back(SequencerCommand::UserMessage);
+                    let replayed = release_held(&mut held, &mut deferred);
+                    debug!(
+                        session = %deps.session_id,
+                        replayed,
+                        "sequencer: a user message released the pause"
+                    );
+                    continue;
+                }
                 Some(cmd) => cmd,
                 None => break,
             },
         };
+        // **The pause gate: while paused, nothing that could wake a participant
+        // is acted on, and nothing is thrown away either.** Both halves are the
+        // point. Discarding would lose a completion's work — the state the
+        // module doc's "a pause is not a halt" section exists to keep — and
+        // acting would hand out the turn the pause is there to withhold.
+        //
+        // `Resume` is the exemption because it is the release; `Pause` because
+        // holding it would make the latch a counter (see the variant doc); a
+        // freshly-read `UserMessage` because it is the release the app already
+        // ships, and it is exempted above rather than here so a deferred one is
+        // not mistaken for a fresh arrival. Every other command waits, including
+        // `ParticipantJoined`: its map insert is harmless on its own, but it is
+        // followed by a DELIVERY, and splitting the two would reorder a join
+        // against a completion that arrived behind it. Nothing reads `inputs`
+        // while paused, so waiting costs nothing.
+        if paused && !matches!(cmd, SequencerCommand::Pause | SequencerCommand::Resume) {
+            debug!(
+                session = %deps.session_id,
+                held = held.len() + 1,
+                "sequencer: the cycle is paused; holding this command for the resume"
+            );
+            held.push_back(cmd);
+            continue;
+        }
         match cmd {
             SequencerCommand::TurnComplete {
                 participant_id,
@@ -716,14 +1019,109 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 );
             }
             SequencerCommand::Pause => {
-                debug!(session = %deps.session_id, "sequencer: Pause (no-op)");
+                // **Not [`halt`], and the difference is the whole command.**
+                // `holder` and `epoch` are left exactly as they are, so the turn
+                // in flight is still the turn in flight: its completion still
+                // names it, the ring still knows where it stands, and the resume
+                // carries on rather than rewinding. See the variant doc for the
+                // four things sharing `halt` would break.
+                //
+                // Idempotent. A second pause latches an already-latched flag,
+                // which is what makes `Resume` a release rather than a decrement.
+                paused = true;
+                debug!(
+                    session = %deps.session_id,
+                    holder = ?holder.as_ref().map(|h| h.id),
+                    "sequencer: the cycle is paused; no further turns are handed out"
+                );
             }
             SequencerCommand::Resume => {
-                debug!(session = %deps.session_id, "sequencer: Resume (no-op)");
+                paused = false;
+                // **The replay goes on FIRST, ahead of anything the delivery
+                // below defers.** That delivery reads commands — it runs under
+                // the same select every drain does — so a pause arriving during
+                // it lands on the FRONT of this queue and has to sit ahead of the
+                // replayed commands, or the completion this pause held would step
+                // the ring during the next one.
+                // `a_pause_racing_a_resume_re_holds_what_the_resume_replayed`
+                // is that case, and it is the only test here that fails if these
+                // two blocks swap.
+                //
+                // Popped from the back onto the front, which restores arrival
+                // order.
+                let replayed = release_held(&mut held, &mut deferred);
+                // Finish the delivery the pause cut short. Not a new turn — the
+                // ring does not move and the epoch does not change; this is the
+                // turn the pause interrupted, being handed the rest of what its
+                // holder had not read. `Resume` never hands a turn OUT: a halted
+                // cycle has no holder, so it stays halted, and a user message is
+                // still its only release.
+                //
+                // Ahead of the replay in EXECUTION for the reason the
+                // drain-before-handover rule gives — acting on a held completion
+                // first would step the ring with rows undelivered, which is the
+                // deferral the module doc rejects.
+                //
+                // Re-read from the cursor rather than replayed from a list, so
+                // what goes out is everything unread AS OF THE RESUME, and each
+                // row exactly once: `commit_delivery` moved the cursor past the
+                // prefix that landed and it never rewinds.
+                if let Some(to) = holder.as_ref() {
+                    deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut deferred).await;
+                }
+                debug!(
+                    session = %deps.session_id,
+                    holder = ?holder.as_ref().map(|h| h.id),
+                    replayed,
+                    "sequencer: the cycle resumes"
+                );
             }
         }
     }
     debug!(session = %deps.session_id, "sequencer: control channel closed; exiting");
+}
+
+/// Move everything a pause held onto the FRONT of the deferred queue, in
+/// arrival order, and say how many. Shared by the two releases —
+/// [`SequencerCommand::Resume`] and a freshly-read
+/// [`SequencerCommand::UserMessage`] — so they cannot disagree about the order
+/// things come back in.
+///
+/// **Arrival order is the whole of it, and the misordering is unsafe rather
+/// than untidy.** A park held ahead of a completion halts the cycle, so the
+/// completion behind it is discarded and nobody is woken. Replay the two the
+/// other way round and the completion steps the ring first — a turn handed out
+/// with a human still blocking, which is the direction
+/// [`SequencerCommand::QuestionParked`]'s own doc calls the unsafe one.
+/// `the_pause_replays_what_it_held_in_arrival_order` is the pin; a reversal is
+/// the mutation it exists for.
+///
+/// **A splice rather than a pop/push loop, deliberately.** Written as
+/// `pop_back` onto `push_front` it produces the same queue, and a one-token slip
+/// to `pop_front`/`push_front` reverses it — which is the unsafe direction
+/// above, arrived at by a typo. Concatenating the two queues has no direction to
+/// slip: what is left to get wrong is which side goes first, and that is a whole
+/// operand swap rather than a token.
+///
+/// The held queue goes AHEAD of whatever is already deferred, and that is the
+/// arrival order rather than a preference. Both releases are reached with an
+/// empty `deferred` in every ordinary state — the loop drains `deferred` before
+/// it ever calls `recv` again — so the concatenation is usually with nothing.
+/// Where it is not, everything in `deferred` was read AFTER everything in
+/// `held`: the only route to a non-empty one is a drain that set commands aside
+/// and then stopped on a [`SequencerCommand::Pause`] it pushed to the front, and
+/// a drain reads in wire order. See the mutation note in the module doc for the
+/// wire sequence that would expose the other operand order, and why no test
+/// builds it.
+fn release_held(
+    held: &mut VecDeque<SequencerCommand>,
+    deferred: &mut VecDeque<SequencerCommand>,
+) -> usize {
+    let replayed = held.len();
+    // `held ++ deferred`, then hand that back as the deferred queue.
+    held.append(deferred);
+    std::mem::swap(held, deferred);
+    replayed
 }
 
 /// Step the ring, stamp the new turn, and deliver its backlog — emptying the
@@ -774,7 +1172,16 @@ async fn advance_turn(
     // a second restart path, and it costs nothing now. Do not read it as pinning
     // a reachable behaviour, and do not read the task numbers an earlier draft
     // gave here as a schedule — task 8 owned the user-message reset and added no
-    // second path; a pause (task 9) or spin detection (task 11) may.
+    // second path.
+    //
+    // **The pause (task 9) has landed and added none either, which was not a
+    // given.** A pause written as `halt()` — the obvious sharing, since a halt is
+    // also "stop handing out turns" — leaves `holder` as `None` with the cycle
+    // still live, so the resume's step would arrive here with `current.is_none()`
+    // true and `reset` false, and every resume would empty the tally. That is why
+    // the pause sets a flag instead and leaves `holder` alone. Re-measured after
+    // it: swap this condition for `reset` and all 30 tests still pass. Spin
+    // detection (task 11) may yet be the second path.
     //
     // What IS pinned is the other narrowing. `holder.is_none()` looks equivalent
     // and is not: a user message resets a LIVE cycle too, where the holder is
@@ -1008,6 +1415,10 @@ enum Stop {
     /// A question was parked: the cycle is about to halt, so there is no turn
     /// left to feed. Already pushed onto the deferred queue.
     Parked,
+    /// The cycle was paused: the participant being fed is the one the user just
+    /// stopped, so there is no-one left to feed either. Pushed onto the FRONT of
+    /// the deferred queue rather than the back — see the drain's own arm.
+    Paused,
     /// The control channel closed — session end.
     SessionEnd,
     /// `deliver` returned `false`.
@@ -1094,6 +1505,32 @@ async fn deliver_backlog(
                             stop = Some(Stop::Parked);
                             break 'rows;
                         }
+                        // Ends the drain like the two above, and for the same
+                        // reason the park does: the participant being fed is the
+                        // one the user just stopped, so every further row goes
+                        // into a buffer in front of a process that is not
+                        // reading, and `deliver` PARKS when it fills — until the
+                        // user unpauses. A pause that waits out the user before
+                        // taking effect is not a pause.
+                        //
+                        // **`push_front`, unlike every other deferral here, and
+                        // that asymmetry is the decision.** Arrival order is the
+                        // rule everywhere else in this loop, and it costs a
+                        // parked question at most one extra wake (the module doc
+                        // prices it). It costs a pause the whole semantic: a
+                        // `TurnComplete` set aside a moment ago would be
+                        // dispatched first, step the ring, and start a fresh turn
+                        // in a session the user has stopped — and unlike the
+                        // park's extra wake there is no user answer coming to end
+                        // it, only a Resume the user has not sent yet. So the
+                        // pause takes effect where it was READ rather than where
+                        // it would have been dispatched, and everything the drain
+                        // had merely set aside waits behind it.
+                        Some(cmd @ SequencerCommand::Pause) => {
+                            deferred.push_front(cmd);
+                            stop = Some(Stop::Paused);
+                            break 'rows;
+                        }
                         // Set aside and re-attempt this row. Deferring rather
                         // than acting is what keeps the drain-before-handover
                         // rule true.
@@ -1148,6 +1585,20 @@ async fn deliver_backlog(
                     delivered = landed.len(),
                     of = page.rows.len(),
                     "sequencer: a parked question halted this turn mid-drain"
+                );
+                return;
+            }
+            Some(Stop::Paused) => {
+                // Costs nothing but the rows read and not delivered, exactly as
+                // the two above: the commit just made records only the prefix
+                // that landed, so the remainder is still past this participant's
+                // cursor and `Resume` re-drains from there.
+                debug!(
+                    session = %deps.session_id,
+                    participant_id = to.id,
+                    delivered = landed.len(),
+                    of = page.rows.len(),
+                    "sequencer: a pause stopped this turn's delivery mid-drain"
                 );
                 return;
             }
@@ -2897,6 +3348,583 @@ mod tests {
         // And nothing more went to the first one. Its sender was dropped by the
         // replace, but a queued wire would still be read back here.
         first_seat.quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_paused_session_does_not_wake_the_next_participant() {
+        // Router-inventory #19's HOLD half, **on the turn path specifically**,
+        // which is the whole of what #19 preserves here: a pause stops the cycle
+        // where it stands, so a `TurnComplete` arriving during one must not hand
+        // the next participant a turn. It says nothing about a human steering —
+        // a `UserMessage` releases the pause and wakes the ring, which is what
+        // the old router did too (its pause held peer FORWARDS, and a user Send
+        // was always the release). `a_user_message_releases_a_pause_and_wakes_the_ring`
+        // is that side; the two are not in tension.
+        //
+        // **Held, not discarded** is the other half of the claim and it is
+        // asserted here too, because the two come apart under the obvious wrong
+        // implementation. A pause written as `halt()` clears the holder and moves
+        // the epoch, so A's completion would fail `TurnComplete`'s guard and its
+        // work would be thrown away rather than kept — and the silence below
+        // would look identical. The resume is what tells them apart: B wakes on
+        // the completion the pause held, at the epoch it was minted with.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "delivery is live in this run"
+        );
+
+        // Twice, because the latch is a latch and not a counter: the single
+        // resume below has to release both. Hold a duplicate pause instead of
+        // exempting it and it is replayed on resume, re-pausing on the spot —
+        // B's wake never comes and this test is where that shows up.
+        send(&tx, SequencerCommand::Pause).await;
+        send(&tx, SequencerCommand::Pause).await;
+        // Unread by B when the completion lands, so B's silence is the pause
+        // rather than a ring step that found nothing to hand over.
+        assert!(
+            !storage.unread_for_participant(b).await.unwrap().rows.is_empty(),
+            "the silence has to be the pause, not an empty backlog"
+        );
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        // With the control channel still OPEN — dropping `tx` here would abort
+        // the very delivery a pause that did not hold would have made, and the
+        // empty seat would then prove nothing.
+        seats[1].quiet().await;
+        assert_eq!(
+            storage.cursor_for(b).await.unwrap(),
+            0,
+            "and nothing moved on B's behalf either"
+        );
+
+        // The completion was HELD, not thrown away: the resume hands it back to
+        // the loop and the ring steps exactly as it would have.
+        send(&tx, SequencerCommand::Resume).await;
+        assert_eq!(
+            seats[1].expect(1).await,
+            vec!["go"],
+            "the turn the pause held was handed over on resume, not lost with it"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+
+        assert_eq!(
+            seats[0].drain(),
+            nothing(),
+            "and the resume re-fed A nothing: its cursor was already past every row"
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_delivers_each_unread_row_exactly_once() {
+        // Router-inventory #19's FLUSH half. There the router held a LIST of
+        // forwards and the flush had to hand each one over exactly once; here
+        // there is no list. The pause holds a CURSOR still, and the resume hands
+        // the holder whatever sits past it — so exactly-once is what
+        // `commit_delivery` already guarantees, moving the cursor to the highest
+        // id in the batch and never rewinding.
+        //
+        // The second release at the end carries #19's other clause — a flush
+        // racing the unpause must not double-deliver — and it is worth being
+        // exact about what that buys here, because the obvious claim ("it is what
+        // reads the cursor's idempotence") is wrong. **It kills no mutation of
+        // its own**, measured: every way of breaking the delivery breaks the
+        // `expect(2)` above first, and gating the whole `Resume` arm on the flag
+        // — so the second release runs no code at all — leaves this test green.
+        // It is a regression lock on the shape the router had to work for.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "row 0").await;
+        post(&storage, "user", None, "row 1").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        assert_eq!(seats[0].expect(2).await, vec!["row 0", "row 1"]);
+
+        send(&tx, SequencerCommand::Pause).await;
+        // Written while the cycle is paused, and posted BEFORE the resume goes
+        // in, which is what makes the wires below a fact rather than a race.
+        //
+        // **No silence is asserted between here and the resume**, because none
+        // would discriminate: nothing tells this loop that a row arrived (see
+        // the module doc), so a pause that did nothing at all is just as quiet
+        // over these two posts. What the pause is on the hook for is the line
+        // after the resume.
+        post(&storage, "user", None, "row 2").await;
+        post(&storage, "user", None, "row 3").await;
+
+        send(&tx, SequencerCommand::Resume).await;
+        assert_eq!(
+            seats[0].expect(2).await,
+            vec!["row 2", "row 3"],
+            "the resume hands the holder everything past its cursor"
+        );
+
+        // Paused and released a SECOND time, with nothing left past the cursor.
+        // A real release rather than a stray `Resume`: the second pause is what
+        // makes the loop take the same path it took above, so the silence is a
+        // release that found nothing rather than an arm that declined to run.
+        send(&tx, SequencerCommand::Pause).await;
+        send(&tx, SequencerCommand::Resume).await;
+        seats[0].quiet().await;
+        assert!(
+            storage.unread_for_participant(a).await.unwrap().rows.is_empty(),
+            "the delivery was RECORDED, not just written — which is the whole of \
+             what makes a second release idempotent"
+        );
+
+        // B has every row past its cursor throughout, so its silence is the
+        // absence of a hand-over rather than an empty backlog.
+        assert!(
+            !storage.unread_for_participant(b).await.unwrap().rows.is_empty(),
+            "the silence below has to be the missing turn, not an empty backlog"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+
+        assert_eq!(
+            seats[1].drain(),
+            nothing(),
+            "a resume finishes the HOLDER's delivery; it hands out no turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pause_stops_the_drain_rather_than_finishing_it() {
+        // A pause arriving mid-drain ENDS it, joining the user message and the
+        // parked question as the commands that can. The reason is the park's,
+        // reached independently rather than inherited: the participant being fed
+        // is the one the user has just stopped, so every further row goes into a
+        // 64-slot buffer in front of a process that is not reading, and
+        // `deliver` PARKS when that buffer fills — for as long as the pause
+        // lasts, which is until the user says otherwise. A pause that waits out
+        // the user before taking effect is not a pause.
+        //
+        // **What stopping costs is traced here, not assumed.** `commit_delivery`
+        // records only the prefix that landed and the cursor moves to the highest
+        // id in it, so the remainder stays past the cursor — the last two
+        // assertions — and `Resume` re-drains from there.
+        //
+        // Driven through `deliver_backlog` directly, with both commands already
+        // on the channel when the drain reaches its first row. The completion is
+        // there to pin the ORDER: it arrived FIRST and is merely set aside, and
+        // the pause still has to be what the loop handles first. Handled in
+        // arrival order that completion would step the ring and hand out a fresh
+        // turn — for a park the module doc prices that at one extra wake, but a
+        // pause exists to stop exactly it.
+        //
+        // The backlog spans TWO batches for the same reason the park's test
+        // does: `break 'rows` alone ends the page, so on a single-page fixture
+        // the `Stop::Paused` arm's own `return` is dead weight no assertion
+        // could see.
+        let (deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        let a = seats[0].id;
+        let overflow = UNREAD_BATCH_LIMIT as usize + 1;
+        for i in 0..overflow {
+            post(&storage, "user", None, &format!("row {i}")).await;
+        }
+        assert!(
+            storage.unread_for_participant(a).await.unwrap().more,
+            "the fixture has to outgrow one batch or the `return` below is untested"
+        );
+        let holder = storage
+            .next_active_participant("s1", None)
+            .await
+            .unwrap()
+            .expect("the fixture's one active participant");
+
+        // `cmd_tx` is HELD, not dropped. A closed command channel is
+        // `Stop::SessionEnd` inside the drain, which stops it for a reason that
+        // has nothing to do with the pause — and would leave this test green
+        // with the pause branch deleted.
+        let (cmd_tx, mut rx) = mpsc::channel(8);
+        send(
+            &cmd_tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        send(&cmd_tx, SequencerCommand::Pause).await;
+        let mut deferred = VecDeque::new();
+        deliver_backlog(&deps, &holder, &mut rx, MAX_TURN_BATCHES, &mut deferred).await;
+
+        seats[0].quiet().await;
+        assert!(
+            matches!(deferred.front(), Some(SequencerCommand::Pause)),
+            "the pause is set aside for the loop AHEAD of the completion that arrived \
+             before it"
+        );
+        assert!(
+            matches!(deferred.get(1), Some(SequencerCommand::TurnComplete { .. })),
+            "and that completion is kept, not swallowed — the pause holds work, it \
+             does not discard it"
+        );
+        assert_eq!(deferred.len(), 2);
+        assert_eq!(storage.cursor_for(a).await.unwrap(), 0);
+        let left = storage.unread_for_participant(a).await.unwrap();
+        assert!(left.more);
+        assert_eq!(left.rows.first().map(|r| r.content.as_str()), Some("row 0"));
+    }
+
+    #[tokio::test]
+    async fn a_completion_deferred_ahead_of_a_pause_hands_out_no_turn() {
+        // The behavioural half of the ordering above, end to end. A completion
+        // arrives mid-drain and is set aside; the pause arrives behind it and
+        // stops the drain. Dispatched in arrival order the completion would step
+        // the ring and wake B — an agent starting work after the user pressed
+        // stop, which is the one thing this command exists to prevent.
+        //
+        // **How the timing is made a fact rather than a hope.** The three
+        // commands go in with nothing awaited between them: `send` on a channel
+        // with room completes without yielding, and `#[tokio::test]` runs a
+        // CURRENT-THREAD runtime, so the spawned loop cannot be polled until this
+        // test next parks. All three are therefore on the channel before the
+        // drain reads its first row, where the biased select takes them in order.
+        //
+        // The 201-row fixture is slack against that argument being wrong
+        // somewhere: a drain that had already started would still be hundreds of
+        // sends and a second page read from finishing. The one arrangement this
+        // test could not see is a drain that had FINISHED first — that is the
+        // loop dispatching in plain arrival order, which is not what "deferred
+        // ahead of" means and is not what is being pinned.
+        //
+        // Without the priority the seat below is not quiet: the completion is
+        // dispatched first, steps the ring, and hands B a 201-row turn while the
+        // session is stopped.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        for i in 0..UNREAD_BATCH_LIMIT as usize + 1 {
+            post(&storage, "user", None, &format!("row {i}")).await;
+        }
+        assert!(
+            !storage.unread_for_participant(b).await.unwrap().rows.is_empty(),
+            "the silence has to be the pause, not an empty backlog"
+        );
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        send(&tx, SequencerCommand::Pause).await;
+        // With the control channel still OPEN, as everywhere else here.
+        seats[1].quiet().await;
+        assert_eq!(
+            storage.cursor_for(b).await.unwrap(),
+            0,
+            "B was handed no turn, so its cursor never moved"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_pause_over_a_halted_cycle_hands_out_no_turn_on_resume() {
+        // The third state a pause can arrive in, after "a turn in flight" and
+        // "mid-drain": already halted. A halt is released by a user message and
+        // by nothing else, and a resume must not quietly become a second release
+        // — `Resume` finishes the HOLDER's delivery and replays what the pause
+        // held, and a halted cycle has neither.
+        //
+        // **A regression lock, not a red-first guard, and worth being plain
+        // about.** With Pause and Resume as no-ops this passes for the trivial
+        // reason that a halted cycle is quiet anyway.
+        //
+        // Its EXCLUSIVE catch is narrower than "a resume written as an advance":
+        // a resume that advances while a holder exists is caught by
+        // `a_paused_session_does_not_wake_the_next_participant` too, since there
+        // the resume would wake B twice over. What only this test sees is a
+        // resume that advances **when there is no holder at all** — the halted
+        // case, where `advance_turn` would read `None` as "reset to the front"
+        // and wake the ring with the user never having answered the question that
+        // halted it.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "delivery is live in this run"
+        );
+        send(&tx, SequencerCommand::QuestionParked).await;
+
+        // Unread by both, so any silence below is the halt holding rather than
+        // a ring step that found nothing to hand over.
+        post(&storage, "user", None, "while halted").await;
+        send(&tx, SequencerCommand::Pause).await;
+        send(&tx, SequencerCommand::Resume).await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        assert_eq!(
+            storage.cursor_for(a).await.unwrap(),
+            1,
+            "A's cursor sits where its pre-halt turn left it"
+        );
+
+        // Halted, not dead — and it is still the USER's message that releases
+        // it, which is what says the silence above was the halt rather than a
+        // wedged loop.
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["while halted"]);
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_pause_racing_a_resume_re_holds_what_the_resume_replayed() {
+        // Why the replay goes onto the deferred queue BEFORE the resume's own
+        // delivery rather than after it. The delivery can read commands — that
+        // is the whole point of the select it runs under — so a user pressing
+        // stop again while the resume is still feeding lands a fresh `Pause` on
+        // the FRONT of the queue. Replayed first, the held commands sit behind
+        // that pause and are held again. Replayed afterwards they would sit
+        // AHEAD of it, and the completion the first pause held would step the
+        // ring during the second one.
+        //
+        // Timed the same way as
+        // `a_completion_deferred_ahead_of_a_pause_hands_out_no_turn`: nothing is
+        // awaited between the sends, so on the current-thread test runtime all
+        // five are on the channel before the loop is polled at all. Every drain
+        // here therefore meets a command at its first row, which is where the
+        // biased select reads it — including the resume's own.
+        //
+        // **Green before this task's change, for the trivial reason that a
+        // no-op pause never replays anything.** What it is here for is the one
+        // mutation the other five miss: replay the held queue AFTER the resume's
+        // delivery instead of before it and this seat wakes.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        for i in 0..UNREAD_BATCH_LIMIT as usize + 1 {
+            post(&storage, "user", None, &format!("row {i}")).await;
+        }
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, SequencerCommand::Pause).await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        // The resume replays that completion — and the second pause reaches the
+        // resume's own delivery before it has handed A a single row.
+        send(&tx, SequencerCommand::Resume).await;
+        send(&tx, SequencerCommand::Pause).await;
+        assert!(
+            !storage.unread_for_participant(b).await.unwrap().rows.is_empty(),
+            "the silence has to be the second pause, not an empty backlog"
+        );
+        seats[1].quiet().await;
+        assert_eq!(
+            storage.cursor_for(b).await.unwrap(),
+            0,
+            "the replayed completion was re-held by the second pause, so B was \
+             handed no turn"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_user_message_releases_a_pause_and_wakes_the_ring() {
+        // The steer. `AppState::resume_session` is a broadcast, so the Paused
+        // bar's Resume button reaches this loop as a `UserMessage` and nothing
+        // mints `Resume` at all — hold this command and the pause is
+        // unreleasable by the only affordance the UI has. `state` and
+        // `ActivityTracker::set_paused` both already say a user Send clears the
+        // latch, and both role prompts promise the agents that the bridge halts
+        // "until the next user message".
+        //
+        // The release is the full one: the ring resets to the front and the
+        // front is WOKEN, not merely unblocked. Nothing here contradicts
+        // inventory #19 — that is about waking the next participant off a TURN,
+        // and this wake is the user's own.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "delivery is live in this run"
+        );
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2, B holds");
+
+        // Paused mid-cycle with B holding, and a row written while stopped.
+        send(&tx, SequencerCommand::Pause).await;
+        post(&storage, "user", None, "u2").await;
+
+        // The steer. It releases the latch AND does what a user message always
+        // does: back to the front of the ring, carrying the row.
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["u2"],
+            "the user's message released the pause and restarted the cycle at the front"
+        );
+
+        // And the release is durable rather than a single command slipping
+        // through: the cycle runs on. Without the release this completion is
+        // held and B is never woken.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: false },
+        )
+        .await;
+        assert_eq!(
+            seats[1].expect(1).await,
+            vec!["u2"],
+            "the cycle is running, not just one command deep past the latch"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn the_pause_replays_what_it_held_in_arrival_order() {
+        // The held queue comes back in the order it went in, and the misordering
+        // is UNSAFE rather than untidy. A park held ahead of a completion halts
+        // the cycle, so the completion behind it names a turn that no longer
+        // exists and is discarded — nobody is woken, which is the point of a
+        // park. Replayed the other way round the completion steps the ring first
+        // and B takes a turn with a human still blocking, which
+        // `QuestionParked`'s own doc calls the unsafe direction.
+        //
+        // Two held commands is the minimum that can be misordered, and this is
+        // the only test here that holds two. Both order-destroying mutations of
+        // `release_held` — a pure reversal, and pop/push swapped — are invisible
+        // to every other test in this file.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "delivery is live in this run"
+        );
+
+        // Unread by B throughout, so its silence is the halt rather than a ring
+        // step that found nothing to hand over.
+        assert!(
+            !storage.unread_for_participant(b).await.unwrap().rows.is_empty(),
+            "the silence has to be the replayed halt, not an empty backlog"
+        );
+
+        // Stopped, then two commands caught by the pause: the park FIRST, the
+        // completion behind it.
+        send(&tx, SequencerCommand::Pause).await;
+        send(&tx, SequencerCommand::QuestionParked).await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        send(&tx, SequencerCommand::Resume).await;
+        // With the control channel still OPEN.
+        seats[1].quiet().await;
+        assert_eq!(
+            storage.cursor_for(b).await.unwrap(),
+            0,
+            "the park was replayed FIRST, so the completion behind it named a turn \
+             that no longer existed and woke nobody"
+        );
+
+        // And the replay really happened — the park took effect rather than
+        // everything being dropped. Without this the silence above would also be
+        // what a resume that discarded its queue looks like: the cycle is halted,
+        // and it is the user's message that restarts it. The row is posted first
+        // because A's cursor is already past `go`, so the restart would otherwise
+        // be a silent step.
+        post(&storage, "user", None, "u2").await;
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["u2"],
+            "the halt the pause held was applied, and the user's message released it"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_pause_behind_a_user_message_still_holds_the_cycle() {
+        // The release fires where the message is READ, not where it is
+        // dispatched — the same rule the drain's pause deferral follows. A user
+        // message that reached the loop, released a pause and was re-queued
+        // behind the commands that pause had held is dispatched LATER, and by
+        // then a second Stop may have arrived. Letting it release again would
+        // silently cancel that Stop: the user's last action was to stop the
+        // session and the session would be running.
+        //
+        // Wire order here is Pause, TurnComplete, UserMessage, Pause. Nothing is
+        // awaited between the four, so on the current-thread test runtime they
+        // are all on the channel before the loop is polled — the first three set
+        // up the re-queue, and the fourth arrives while the replayed completion's
+        // own delivery is running, which is where the drain reads it.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        for i in 0..UNREAD_BATCH_LIMIT as usize + 1 {
+            post(&storage, "user", None, &format!("row {i}")).await;
+        }
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        let drained = seats[0].expect(UNREAD_BATCH_LIMIT as usize + 1).await;
+        assert_eq!(drained.first().map(String::as_str), Some("row 0"));
+
+        // A row for the re-dispatched user message to wake the front WITH, so a
+        // release that wrongly fired twice is a wire rather than a silent step.
+        post(&storage, "user", None, "u2").await;
+        send(&tx, SequencerCommand::Pause).await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, SequencerCommand::Pause).await;
+
+        // A is the front of the ring, so a second release would reset to A and
+        // hand it `u2`. It must not: the last thing the user did was stop.
+        assert!(
+            !storage.unread_for_participant(a).await.unwrap().rows.is_empty(),
+            "the silence has to be the second pause, not an empty backlog"
+        );
+        seats[0].quiet().await;
         drop(tx);
         assert!(exited(task).await);
     }
