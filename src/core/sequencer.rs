@@ -198,12 +198,14 @@ use tracing::{debug, warn};
 /// ```
 ///
 /// Reaching the cap is therefore no longer only "something is producing during
-/// a turn". It is one long-lived session away, and what happens there is
-/// covered by
-/// `the_batch_cap_hands_over_with_the_remainder_still_past_the_cursor`: the
+/// a turn". It is one long-lived session away, and what happens there is: the
 /// drain stops, the turn is handed over, and the remainder arrives on this
 /// participant's next turn — the deferral the module doc rejects as a policy,
 /// used here only as a backstop, with a `warn!` to say it happened.
+///
+/// `the_batch_cap_hands_over_with_the_remainder_still_past_the_cursor` pins
+/// that, on a small `max_batches` rather than a 6,401-row fixture — see
+/// [`deliver_backlog`]'s parameter.
 const MAX_TURN_BATCHES: usize = 32;
 
 /// What the sequencer task needs, cloned from the session's own state at spawn
@@ -267,6 +269,12 @@ pub enum SequencerCommand {
     /// agents on a turn at once, which is the one invariant this loop exists to
     /// keep. `a_completion_from_a_turn_the_user_restarted_is_discarded` is that
     /// case; with the epoch compare removed it fails.
+    ///
+    /// **There is no case running the other way**, so do not read "both fields"
+    /// as a symmetry. For a sender that returns the epoch it was handed, the
+    /// identity compare is redundant — the epoch already names one turn and one
+    /// holder — and disabling it leaves every test here green. It is kept as
+    /// defence against a malformed sender; see the comment on the guard itself.
     ///
     /// A user message is the reachable producer today. Pause/Resume adds a
     /// second once it is implemented, and a supervisor that respawns an agent
@@ -347,9 +355,24 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 epoch: completed,
             } => {
                 // The completion has to name the turn in flight: the same
-                // participant AND the same turn. Either half alone lets a stale
-                // completion through — see the variant doc for which case each
-                // one misses.
+                // participant AND the same turn.
+                //
+                // **The two halves are not symmetric.** The epoch is what
+                // separates two turns — see the variant doc for the case that
+                // `participant_id` alone lets through, and
+                // `a_completion_from_a_turn_the_user_restarted_is_discarded`,
+                // which fails without it. There is no mirror case: an epoch
+                // names exactly one turn and a turn has exactly one holder, so
+                // for a sender that returns the epoch it was handed the identity
+                // compare is redundant — mutating it to `true` leaves the whole
+                // suite green, and no test here pins it.
+                //
+                // It stays as defence against a MALFORMED sender: one that
+                // echoes a live epoch back under the wrong participant id (a
+                // crossed round trip, a copied field). Nothing in this file mints
+                // the epochs senders will carry, so "well-formed" is an
+                // assumption about code that is not written yet, and this is the
+                // cheap half of the guard to keep.
                 let live = completed == epoch
                     && holder.as_ref().is_some_and(|h| h.id == participant_id);
                 if live {
@@ -510,7 +533,10 @@ enum Stop {
 /// module doc.
 /// `max_batches` is [`MAX_TURN_BATCHES`] on every production path; it is a
 /// parameter so the cap's own behaviour can be exercised without a 6,401-row
-/// fixture.
+/// fixture. The caller that does that is
+/// `the_batch_cap_hands_over_with_the_remainder_still_past_the_cursor`, which
+/// calls this function directly — the loop above has no way to pass anything
+/// but the constant.
 ///
 /// Commands that arrive mid-drain go onto `deferred` — see "the drain does not
 /// hold the command channel shut" in the module doc for which two end the drain
@@ -701,8 +727,13 @@ mod tests {
     /// Sized above the largest backlog these tests post (201 rows) so that a
     /// test about ring order is not also a test about back-pressure. That is a
     /// convenience, not an assumption the loop makes: production stdin is 64
-    /// slots, and [`ring_sized`] is used by the tests that care what happens
-    /// when a drain runs out of buffer.
+    /// slots, and a drain that outruns it PARKS inside `deliver`.
+    ///
+    /// [`ring_sized`] is how a test opts out of the convenience.
+    /// `a_backlog_larger_than_the_stdin_buffer_lands_in_full` is the one that
+    /// does, and it is the only coverage of the parking path: every other test
+    /// here runs with more slots than it posts rows, so none of them would
+    /// notice a drain that dropped a row instead of waiting for a slot.
     const STDIN_CAPACITY: usize = 512;
 
     /// One stubbed participant: its roster id and the stdin a test reads.
@@ -726,6 +757,19 @@ mod tests {
             out
         }
 
+        /// One [`QUIET`] window of silence, or the wire that broke it.
+        ///
+        /// The shared body of [`quiet`](Self::quiet) and the tail of
+        /// [`expect`](Self::expect) — the two negative assertions in this file
+        /// differ only in what they say when they fail.
+        async fn extra_wire(&mut self) -> Option<String> {
+            match tokio::time::timeout(QUIET, self.rx.recv()).await {
+                Ok(Some(m)) => Some(m.message.content),
+                // Elapsed, or the sender was dropped. Both are silence.
+                _ => None,
+            }
+        }
+
         /// Assert nothing arrives within a bounded window, **with the control
         /// channel still open**.
         ///
@@ -739,8 +783,8 @@ mod tests {
         /// the guard removed. Waiting while the channel is open is what makes
         /// the silence mean something.
         async fn quiet(&mut self) {
-            if let Ok(Some(m)) = tokio::time::timeout(QUIET, self.rx.recv()).await {
-                panic!("expected no wire, got {:?}", m.message.content);
+            if let Some(w) = self.extra_wire().await {
+                panic!("expected no wire, got {w:?}");
             }
         }
 
@@ -749,6 +793,24 @@ mod tests {
         /// A synchronisation point: it returns only once the sequencer has
         /// finished the delivery, which is what lets a test post a NEW row
         /// between two commands and know which turn will read it.
+        ///
+        /// **Both halves are asserted here, and the second one is why this is
+        /// not just a bounded `recv` loop.** For a while it was: the body read
+        /// `n` wires and returned, so `expect(n)` caught UNDER-delivery only
+        /// while the doc claimed both. That is not a hypothetical gap — four
+        /// tests below were moved off `drain()` (which compares whole contents)
+        /// onto `expect(n)`, and appending one duplicate wire to the end of
+        /// every drain left all four green:
+        /// `a_completed_turn_wakes_exactly_one_participant`,
+        /// `an_observer_is_skipped_not_given_a_no_op_turn`,
+        /// `a_participant_with_no_stdin_holds_the_turn_rather_than_losing_its_rows`
+        /// and `a_backlog_past_the_batch_limit_is_drained_before_the_turn_is_handed_over`.
+        /// With the [`QUIET`] window below, that same duplicate fails all four.
+        ///
+        /// The cost is one `QUIET` per call, paid on the happy path. That is
+        /// the price of a negative assertion — [`quiet`](Self::quiet) pays it
+        /// too — and it buys the half of this contract that was being asserted
+        /// nowhere.
         async fn expect(&mut self, n: usize) -> Vec<String> {
             let mut out = Vec::new();
             for i in 0..n {
@@ -758,16 +820,32 @@ mod tests {
                     .expect("the sequencer dropped this participant's stdin");
                 out.push(m.message.content);
             }
+            if let Some(w) = self.extra_wire().await {
+                panic!("expected exactly {n} wires, then {w:?} arrived as well");
+            }
             out
         }
     }
 
     /// A session whose rotation is `roster` — `(slug, participation_mode)` in
-    /// turn-position order — with one stdin per participant.
+    /// turn-position order — with one [`STDIN_CAPACITY`]-slot stdin per
+    /// participant.
     ///
     /// Returns the deps (moved into the task), a clone of the storage the test
     /// posts and asserts with, and one [`Seat`] per roster entry.
     async fn ring(roster: &[(&str, &str)]) -> (SequencerDeps, Storage, Vec<Seat>) {
+        ring_sized(roster, STDIN_CAPACITY).await
+    }
+
+    /// [`ring`], with the stdin buffer named rather than defaulted.
+    ///
+    /// For the tests that want a drain to RUN OUT of buffer: pass a capacity
+    /// below the number of rows the test posts and `deliver` parks mid-drain,
+    /// the way production's 64 slots do behind a slow child.
+    async fn ring_sized(
+        roster: &[(&str, &str)],
+        stdin_capacity: usize,
+    ) -> (SequencerDeps, Storage, Vec<Seat>) {
         let storage = Storage::memory().await.unwrap();
         storage.create_session("s1", "t", None).await.unwrap();
         let mut inputs = HashMap::new();
@@ -777,7 +855,7 @@ mod tests {
                 .insert_participant("s1", slug, slug, None, None, "[]", mode, position as i64)
                 .await
                 .unwrap();
-            let (tx, rx) = mpsc::channel(STDIN_CAPACITY);
+            let (tx, rx) = mpsc::channel(stdin_capacity);
             inputs.insert(id, ParticipantInput::new("s1", tx));
             seats.push(Seat { id, rx });
         }
@@ -787,6 +865,18 @@ mod tests {
             inputs,
         };
         (deps, storage, seats)
+    }
+
+    /// A stdin that arrives AFTER the task was spawned, as
+    /// [`SequencerCommand::ParticipantJoined`] carries one: the input to send
+    /// and the seat that reads it.
+    ///
+    /// Deliberately not built by [`ring`] — the point of these cases is a
+    /// participant the deps map does not have (or no longer has), so the
+    /// channel has to be made outside it.
+    fn late_stdin(id: i64) -> (ParticipantInput, Seat) {
+        let (tx, rx) = mpsc::channel(STDIN_CAPACITY);
+        (ParticipantInput::new("s1", tx), Seat { id, rx })
     }
 
     async fn post(storage: &Storage, origin: &str, slug: Option<&str>, body: &str) {
@@ -1065,7 +1155,13 @@ mod tests {
         drop(tx);
         assert!(exited(task).await);
 
-        assert_eq!(got.len(), overflow, "every unread row, not the first batch");
+        // The COUNT is asserted by `expect(overflow)` itself and is not restated
+        // here: short of `overflow` it times out, past it the quiescence window
+        // fires. An `assert_eq!(got.len(), overflow)` at this point held for a
+        // while and was tautological — `expect(n)` returns exactly `n` by
+        // construction — so it read as a check on the sequencer while testing
+        // the helper's `Vec::push`. What is left is what `expect` does NOT pin:
+        // the rows are the right ones, in order, spanning both batches.
         assert_eq!(got.first().map(String::as_str), Some("row 0"));
         assert_eq!(
             got.last().map(String::as_str),
@@ -1135,18 +1231,282 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_backlog_larger_than_the_stdin_buffer_lands_in_full() {
+        // The only test here that lets a drain run out of buffer. Production
+        // stdin is 64 slots and `deliver` PARKS when it fills, so a drain of any
+        // real backlog parks and resumes repeatedly; every other test in this
+        // file runs with more slots than it posts rows and would not notice a
+        // drain that dropped a row rather than waiting for one.
+        //
+        // Two slots against eight rows: the drain cannot finish without the
+        // reader freeing space three times over.
+        let (deps, storage, mut seats) =
+            ring_sized(&[("a", "active"), ("b", "active")], 2).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        for i in 0..8 {
+            post(&storage, "user", None, &format!("row {i}")).await;
+        }
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        // `expect` is the reader: it drains the seat as the sequencer fills it,
+        // so the parking and the unparking both happen inside this call.
+        let want: Vec<String> = (0..8).map(|i| format!("row {i}")).collect();
+        assert_eq!(
+            seats[0].expect(8).await,
+            want,
+            "a full stdin delays a row; it does not lose one"
+        );
+
+        // And the loop was not wedged by the parking — the turn still hands over.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+            },
+        )
+        .await;
+        assert_eq!(seats[1].expect(8).await, want);
+        drop(tx);
+        assert!(exited(task).await);
+
+        for id in [a, b] {
+            assert!(
+                storage.unread_for_participant(id).await.unwrap().rows.is_empty(),
+                "the cursor moved with the rows, not ahead of the ones that parked"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_batch_cap_hands_over_with_the_remainder_still_past_the_cursor() {
+        // What `MAX_TURN_BATCHES` actually does at the cap. It is the backstop
+        // for a writer appending faster than the drain consumes, and what it
+        // does there IS the deferral the module doc rejects as a policy — so it
+        // has to be pinned rather than described.
+        //
+        // Driven through `deliver_backlog` directly with a small `max_batches`.
+        // That parameter exists for exactly this caller and had none: both
+        // production sites pass the constant, and reaching the real cap needs
+        // 6,401 rows.
+        let (deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        let a = seats[0].id;
+        let cap = 2usize;
+        let per_batch = UNREAD_BATCH_LIMIT as usize;
+        let capped = cap * per_batch;
+        for i in 0..capped + 1 {
+            post(&storage, "user", None, &format!("row {i}")).await;
+        }
+        let holder = storage
+            .next_active_participant("s1", None)
+            .await
+            .unwrap()
+            .expect("the fixture's one active participant");
+        assert_eq!(holder.id, a);
+
+        // Held, not dropped: a closed command channel is `Stop::SessionEnd`
+        // inside the drain, which would end it before the cap ever bit.
+        let (_cmd_tx, mut rx) = mpsc::channel(8);
+        let mut deferred = VecDeque::new();
+        deliver_backlog(&deps, &holder, &mut rx, cap, &mut deferred).await;
+
+        // Exactly `cap` batches went out — `expect` times out below that and
+        // fails its quiescence window above it.
+        let got = seats[0].expect(capped).await;
+        assert_eq!(got.first().map(String::as_str), Some("row 0"));
+        assert_eq!(
+            got.last().map(String::as_str),
+            Some(format!("row {}", capped - 1).as_str()),
+            "the drain stopped at the cap, mid-backlog"
+        );
+        assert!(deferred.is_empty(), "nothing arrived to defer");
+
+        // The half that matters: the cap DEFERS the remainder, it does not drop
+        // it. The cursor sits where delivery stopped, so the rest is offered
+        // again when the ring comes back round.
+        let left = storage.unread_for_participant(a).await.unwrap();
+        assert_eq!(
+            left.rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(),
+            vec![format!("row {capped}").as_str()],
+            "the remainder is still past the cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_participant_that_joins_while_holding_the_turn_gets_its_backlog_at_once() {
+        // The way OUT of the frozen cycle: A was handed the turn with no stdin,
+        // so nothing could be delivered and no completion can ever come back.
+        // The stdin arriving is when that turn becomes deliverable — and it must
+        // go out WITHOUT the ring moving, because no turn ended.
+        let (mut deps, storage, mut seats) =
+            ring(&[("a", "active"), ("b", "active"), ("c", "active")]).await;
+        let a = seats[0].id;
+        deps.inputs.remove(&a);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        // No wire to await between these two: A has no stdin yet, so the frozen
+        // state has nothing to observe. Ordering is the command channel's — the
+        // join is handled after the reset because it was sent after it.
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds, undeliverable
+        let (input, mut joined) = late_stdin(a);
+        send(
+            &tx,
+            SequencerCommand::ParticipantJoined {
+                participant_id: a,
+                input,
+            },
+        )
+        .await;
+        assert_eq!(
+            joined.expect(1).await,
+            vec!["go"],
+            "the stdin arriving delivered the turn A was already holding"
+        );
+
+        // The EPOCH did not change: the turn in flight is still the one minted
+        // at the reset, so the completion carrying epoch 1 is the live one. Had
+        // the join stamped a new turn, this would name a stale epoch and be
+        // discarded — and the wake below would never come.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+            },
+        )
+        .await;
+        assert_eq!(
+            seats[1].expect(1).await,
+            vec!["go"],
+            "the ring stepped one place, A→B, from where the join left it"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+
+        assert_eq!(
+            seats[2].drain(),
+            nothing(),
+            "and it did not step twice: C sits past B and was never woken"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_participant_that_joins_without_the_turn_is_registered_but_not_woken() {
+        // The other half of the arm's conditional. A join is a map insert, not a
+        // wake: B has a backlog the whole time, and delivering it here would put
+        // B and the holder on a turn at once.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "A holds the turn — and delivery is live in this run"
+        );
+
+        let (input, mut joined) = late_stdin(b);
+        send(
+            &tx,
+            SequencerCommand::ParticipantJoined {
+                participant_id: b,
+                input,
+            },
+        )
+        .await;
+        // Asserted with the control channel still OPEN. Dropping `tx` first
+        // would abort any delivery the arm wrongly made, and the empty seat
+        // would then prove nothing.
+        joined.quiet().await;
+
+        // The insert DID take, though — B's turn, when it comes, is delivered on
+        // the stdin that arrived. Without this the silence above would also be
+        // what a dropped-on-the-floor join looks like.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+            },
+        )
+        .await;
+        assert_eq!(joined.expect(1).await, vec!["go"]);
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_second_join_replaces_the_first_and_the_turn_follows_the_new_stdin() {
+        // Replace semantics, which is what a RESPAWN needs: same participant id,
+        // different process. An insert that kept the first entry would keep
+        // writing into the dead incarnation's pipe — silently, since a dropped
+        // receiver only shows up as `deliver` returning false much later.
+        let (mut deps, storage, seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        deps.inputs.remove(&a);
+        post(&storage, "user", None, "first").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        let (first_input, mut first_seat) = late_stdin(a);
+        send(
+            &tx,
+            SequencerCommand::ParticipantJoined {
+                participant_id: a,
+                input: first_input,
+            },
+        )
+        .await;
+        assert_eq!(first_seat.expect(1).await, vec!["first"]);
+
+        // A respawns mid-turn. Awaiting the wire above puts this row strictly
+        // after the first delivery, so which stdin reads it is a fact rather
+        // than a race.
+        post(&storage, "user", None, "second").await;
+        let (second_input, mut second_seat) = late_stdin(a);
+        send(
+            &tx,
+            SequencerCommand::ParticipantJoined {
+                participant_id: a,
+                input: second_input,
+            },
+        )
+        .await;
+        assert_eq!(
+            second_seat.expect(1).await,
+            vec!["second"],
+            "the backlog followed the stdin that arrived LAST"
+        );
+        // And nothing more went to the first one. Its sender was dropped by the
+        // replace, but a queued wire would still be read back here.
+        first_seat.quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
     async fn every_command_is_consumed_and_the_loop_comes_back_for_more() {
         // "No-op" has to mean the loop CONSUMED the command and looped, not
         // that the first one ended the task or panicked an arm nobody wrote.
         // Buffered sends are drained before `recv()` reports the close, so
-        // reaching the exit is proof all four were handled.
+        // reaching the exit is proof all five were handled.
         let (deps, _storage, seats) = ring(&[("a", "active")]).await;
         let a = seats[0].id;
+        let (joined_input, _joined_seat) = late_stdin(a);
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
         for cmd in [
             SequencerCommand::TurnComplete { participant_id: a, epoch: 0 },
             SequencerCommand::UserMessage,
+            SequencerCommand::ParticipantJoined { participant_id: a, input: joined_input },
             SequencerCommand::Pause,
             SequencerCommand::Resume,
         ] {
