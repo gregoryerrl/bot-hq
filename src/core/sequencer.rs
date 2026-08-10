@@ -523,7 +523,7 @@
 
 use crate::agents::ParticipantInput;
 use crate::storage::{Participant, PersistedMessage, Storage};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -1657,6 +1657,57 @@ async fn deliver_backlog(
         "sequencer: backlog still not drained at the batch cap; the rest waits for the next turn"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Jaccard helpers — moved VERBATIM from `core::router` (2026-08-10).
+//
+// The router inventory marks these PRESERVED: spin detection (a later task in
+// this file) reuses them unchanged, so they land here ahead of the caller
+// rather than being rewritten next to it. `core::router` still owns the
+// convergence breaker that calls them and imports them from here until that
+// path is deleted; nothing about their behaviour changed in the move.
+// ---------------------------------------------------------------------------
+
+/// Tokenize a forward body for convergence comparison: split on whitespace, trim
+/// each token of leading/trailing non-alphanumerics, lowercase, drop empties — so
+/// "OK.", "OK", "ok" all reduce to {ok}.
+pub(super) fn token_set(s: &str) -> HashSet<String> {
+    s.split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// Token-set Jaccard similarity — the shape-based convergence signal (no length
+/// threshold, no keyword/prefix list). Edge: BOTH sets empty (pure punctuation /
+/// emoji like "." or "🤝", the canonical s-e4fc25 volley) → 1.0, so convergence
+/// catches it fast rather than deferring to the hard-cap. One empty, one not →
+/// 0.0. Two DISTINCT substantive messages always carry alphanumeric tokens, so
+/// they can never collide at 1.0 via the both-empty path.
+pub(super) fn jaccard_from_sets(sa: &HashSet<String>, sb: &HashSet<String>) -> f64 {
+    if sa.is_empty() && sb.is_empty() {
+        return 1.0;
+    }
+    let inter = sa.intersection(sb).count();
+    let union = sa.union(sb).count();
+    if union == 0 {
+        1.0
+    } else {
+        inter as f64 / union as f64
+    }
+}
+
+/// String-level convenience wrapper (tokenizes BOTH sides). Test-only: the hot
+/// path keeps the previous forward's token set and calls `jaccard_from_sets`
+/// directly, so it never re-tokenizes the previous body.
+#[cfg(test)]
+fn jaccard_similarity(a: &str, b: &str) -> f64 {
+    jaccard_from_sets(&token_set(a), &token_set(b))
+}
+
+/// Jaccard similarity at or above which two consecutive forwards count as "the
+/// same content" for convergence detection.
+pub(super) const VOLLEY_SIMILARITY_THRESHOLD: f64 = 0.85;
 
 #[cfg(test)]
 mod tests {
@@ -3954,6 +4005,21 @@ mod tests {
         assert!(
             exited(task).await,
             "a command must not end the loop, and must not panic an arm"
+        );
+    }
+
+    #[test]
+    fn jaccard_similarity_normalizes_and_handles_edges() {
+        assert_eq!(jaccard_similarity("ready to go", "ready to go"), 1.0);
+        assert_eq!(jaccard_similarity("OK.", "ok"), 1.0);
+        assert_eq!(jaccard_similarity(".", "."), 1.0);
+        assert_eq!(jaccard_similarity("...", "—"), 1.0);
+        assert_eq!(jaccard_similarity(".", "check line forty two"), 0.0);
+        assert_eq!(jaccard_similarity("alpha beta", "gamma delta"), 0.0);
+        let partial = jaccard_similarity("the quick brown fox", "the quick red hen");
+        assert!(
+            partial > 0.0 && partial < VOLLEY_SIMILARITY_THRESHOLD,
+            "partial overlap should not trip the breaker: {partial}"
         );
     }
 }
