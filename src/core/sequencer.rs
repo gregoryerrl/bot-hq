@@ -8,11 +8,11 @@
 //! done ([`Storage::all_active_voted_done`]) — or immediately, when a
 //! participant parks a question for the user.
 //!
-//! **What is implemented is the ring advance and the delivery.** Consensus,
-//! parked-question preemption and spin detection are later tasks and are NOT
-//! here; [`SequencerCommand::Pause`] and [`SequencerCommand::Resume`] are still
-//! accepted-and-logged. Nothing spawns this yet, so no session behaves
-//! differently because it exists.
+//! **What is implemented is the ring advance, the delivery and the consensus
+//! halt.** Parked-question preemption and spin detection are later tasks and
+//! are NOT here; [`SequencerCommand::Pause`] and [`SequencerCommand::Resume`]
+//! are still accepted-and-logged. Nothing spawns this yet, so no session
+//! behaves differently because it exists.
 //!
 //! ## What the storage helpers guarantee
 //!
@@ -124,9 +124,63 @@
 //! spawned can ever be reached, since [`run_sequencer`] owns its
 //! [`SequencerDeps`] and nothing else can write to the map.
 //!
-//! Consensus (a later task) needs every active participant to vote done, and a
-//! participant that never receives input never votes — so a ring member with no
-//! stdin has to become reachable, not merely be stepped over.
+//! Consensus needs every active participant to vote done, and a participant
+//! that never receives input never votes — so a ring member with no stdin has
+//! to become reachable, not merely be stepped over. That is now a live cost
+//! rather than a future one: an unreachable ring member cannot vote, so the
+//! tally can never complete, so the session can never halt by consensus.
+//!
+//! ## The halt is a yield, not a stop
+//!
+//! Every accepted completion carries a vote —
+//! [`TurnComplete`](SequencerCommand::TurnComplete)'s `done` — and
+//! [`halted_on_consensus`] records it and asks
+//! [`Storage::all_active_voted_done`] BEFORE the ring is stepped. Arriving
+//! means waking nobody, so a step taken first would have to be taken back.
+//! **`all_active_voted_done` is the halt test and the only one**; the ring's
+//! own `None` is "nobody to wake" and is not a substitute, as above.
+//!
+//! Two things reset the tally, both of them substantive output: a completion
+//! with `done: false`, and a [`UserMessage`](SequencerCommand::UserMessage).
+//! The reset is session-wide, not per-participant, because a vote cast before
+//! someone else spoke was a statement about a session that no longer exists —
+//! left standing, one stale done and one fresh one add up to an arrival nobody
+//! voted for, and the session halts with a participant never having read what
+//! the other said.
+//!
+//! **Mechanically the halt is: no holder, no live epoch, and the loop goes back
+//! to `recv`.** It emits nothing and marks nothing extra. Three consequences,
+//! and the third is a gap:
+//!
+//! - the DURABLE record already exists — the votes are in
+//!   `session_participants.done_vote`, so a host that wants to know whether a
+//!   session arrived asks `all_active_voted_done` rather than watching for an
+//!   event. Adding a second marker here would be a second copy of a fact that
+//!   is already stored;
+//! - the halt SURVIVES a repeat. `holder` is `None` and the epoch has moved, so
+//!   a completion arriving afterwards cannot name the turn in flight — there is
+//!   not one — and the cycle restarts only on a user message, which is what
+//!   "yields to the user" means operationally.
+//!   `the_cycle_halts_when_every_active_participant_votes_done` pins this with a
+//!   late SUBSTANTIVE completion, because repeating the halting VOTE pins
+//!   nothing: a loop that wrongly accepted that would record the same vote,
+//!   find the same consensus and fall silent for the same reason. **The two
+//!   clears are belt and braces, and the test is honest about it** — delete
+//!   either one alone and the suite stays green, since the other half of the
+//!   guard rejects unaided; delete both and that test fails;
+//! - **nothing NOTIFIES the user.** A yield the user is not told about is a
+//!   session that has gone quiet, and telling them needs a sink
+//!   [`SequencerDeps`] does not have — it carries storage and stdins, no event
+//!   emitter. Which sink that is (a `SessionActivity::AwaitingUser` transition,
+//!   a tray row) is the host's contract, and guessing it here would be inventing
+//!   the interface the task that spawns this loop has to define. That task owns
+//!   it, along with the epoch round trip.
+//!
+//! One more gap the command set implies rather than consensus: a halt is broken
+//! only by a `UserMessage`. A row written to the channel by anything else — a
+//! host note, a tool result landing late — wakes nobody, because no command
+//! says "a row arrived". That is a property of the four commands, not of the
+//! tally.
 //!
 //! ## How far a turn reads
 //!
@@ -254,6 +308,22 @@ pub struct SequencerDeps {
 pub enum SequencerCommand {
     /// The turn identified by `epoch` finished — advance the ring.
     ///
+    /// **`done` is the consensus vote**, and it is a field on this command
+    /// rather than a command of its own. A turn ends exactly once and ends one
+    /// of two ways — substantive output, or nothing left to do — so the vote is
+    /// a property of the ending, not a second event. Split into
+    /// `TurnComplete` + `Done`, both would mean "my turn ended", both would
+    /// need this same two-field guard, and both would have to step the ring;
+    /// a sender that emitted the pair would then step it twice and put two
+    /// participants on a turn at once, which is the one invariant this loop
+    /// exists to keep. One field keeps "one accepted completion, one ring step,
+    /// one vote" true by construction.
+    ///
+    /// `done: false` is substantive output and RESETS the tally for the whole
+    /// session — see [`halted_on_consensus`]. The vote is recorded only for a
+    /// completion that passes the guard below, for the same reason the ring is
+    /// only stepped for one.
+    ///
     /// **Both fields are the guard, and the epoch is the load-bearing one.**
     /// The sequencer stamps a fresh `epoch` on every handover
     /// ([`hand_over`]) and accepts a completion only when both fields match the
@@ -284,8 +354,18 @@ pub enum SequencerCommand {
     /// mints it at handover, and it has to travel out with the turn and come
     /// back on the completion. Nothing spawns this loop yet, so nothing carries
     /// it yet; the tests below are the only senders, and wiring the round trip
-    /// belongs with the task that spawns the loop.
-    TurnComplete { participant_id: i64, epoch: u64 },
+    /// belongs with the task that spawns the loop. `done` now rides the same
+    /// unsolved round trip, so the task that carries the epoch OUT is the one
+    /// that has to carry the vote back. A participant that arrives by
+    /// [`ParticipantJoined`](Self::ParticipantJoined) is the sharpest case:
+    /// that command hands the loop an stdin and gets nothing back, so a late
+    /// joiner holding the turn has no way to learn which epoch to complete
+    /// with — and therefore no way to cast a vote that passes the guard.
+    TurnComplete {
+        participant_id: i64,
+        epoch: u64,
+        done: bool,
+    },
     /// The user posted to the channel. Resets the cycle to the first active
     /// participant and hands it the turn.
     ///
@@ -353,6 +433,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
             SequencerCommand::TurnComplete {
                 participant_id,
                 epoch: completed,
+                done,
             } => {
                 // The completion has to name the turn in flight: the same
                 // participant AND the same turn.
@@ -376,8 +457,19 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 let live = completed == epoch
                     && holder.as_ref().is_some_and(|h| h.id == participant_id);
                 if live {
-                    advance_turn(&deps, &mut rx, &mut holder, &mut epoch, &mut deferred, false)
-                        .await;
+                    // The vote is recorded and consensus asked BEFORE the ring
+                    // is stepped: arriving means waking nobody, so a step taken
+                    // first would have to be taken back. Both are inside the
+                    // guard, because a superseded turn's vote is an opinion
+                    // about a turn that no longer exists — counting it would
+                    // let a discarded completion do the one thing discarding it
+                    // was meant to prevent.
+                    if !halted_on_consensus(&deps, &mut holder, &mut epoch, participant_id, done)
+                        .await
+                    {
+                        advance_turn(&deps, &mut rx, &mut holder, &mut epoch, &mut deferred, false)
+                            .await;
+                    }
                 } else {
                     debug!(
                         session = %deps.session_id,
@@ -390,6 +482,20 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 }
             }
             SequencerCommand::UserMessage => {
+                // The user's own output is substantive, so it resets the tally
+                // like any other. This is not belt-and-braces: without it, a
+                // session that halted and was then spoken to would carry every
+                // vote from the previous arrival into the new cycle, and the
+                // FIRST participant to say done would halt it again — with the
+                // rest of the ring never having seen what the user said.
+                if let Err(e) = deps.storage.clear_done_votes(&deps.session_id).await {
+                    warn!(
+                        session = %deps.session_id,
+                        error = %e,
+                        "sequencer: the tally was not cleared for a user message; the next \
+                         arrival may count votes cast before it"
+                    );
+                }
                 // The user speaking resets the cycle to the front of the
                 // rotation, whoever held the turn — `None` is what
                 // `next_active_participant` reads as "reset". The previous
@@ -465,6 +571,78 @@ async fn advance_turn(
     }
 }
 
+/// Record how a turn ended, then answer: has the cycle arrived?
+///
+/// `true` means every active participant has declared done and the caller must
+/// NOT step the ring — the turn is already cleared here. See "the halt is a
+/// yield, not a stop" in the module doc for what that leaves observable.
+///
+/// **A storage failure answers `false`.** Neither error is a vote, and of the
+/// two ways to be wrong the cycle continuing is the recoverable one: a spurious
+/// extra lap costs a turn and the participant votes again, whereas a halt
+/// nobody voted for parks the session waiting on a user who was never told they
+/// are being waited on. Same instinct as [`Handover::Held`] — do not invent a
+/// state out of a failure.
+async fn halted_on_consensus(
+    deps: &SequencerDeps,
+    holder: &mut Option<Participant>,
+    epoch: &mut u64,
+    participant_id: i64,
+    done: bool,
+) -> bool {
+    let recorded = if done {
+        deps.storage.set_done_vote(participant_id, true).await
+    } else {
+        // Substantive output resets the tally for the WHOLE session, not just
+        // for this participant. A done cast before this turn was a statement
+        // about a session that no longer exists — see
+        // `substantive_output_resets_the_tally` for the arithmetic that lets
+        // one stale vote and one fresh one add up to an arrival nobody voted
+        // for.
+        deps.storage.clear_done_votes(&deps.session_id).await
+    };
+    if let Err(e) = recorded {
+        warn!(
+            session = %deps.session_id,
+            participant_id,
+            done,
+            error = %e,
+            "sequencer: done vote not recorded; continuing the cycle"
+        );
+        return false;
+    }
+    match deps.storage.all_active_voted_done(&deps.session_id).await {
+        Ok(true) => {
+            // The turn ended and no new one is minted. Both halves of
+            // `TurnComplete`'s guard now reject: there is no holder to name,
+            // and the epoch that was live is spent. Clearing the holder alone
+            // would leave a halted cycle resting on the identity compare — the
+            // half the variant doc calls redundant — so the epoch moves too.
+            //
+            // `holder = None` is also exactly what `next_active_participant`
+            // reads as "reset to the front", so the user message that ends the
+            // halt starts the next cycle where a fresh session would.
+            *holder = None;
+            *epoch += 1;
+            debug!(
+                session = %deps.session_id,
+                participant_id,
+                "sequencer: every active participant voted done; the cycle yields to the user"
+            );
+            true
+        }
+        Ok(false) => false,
+        Err(e) => {
+            warn!(
+                session = %deps.session_id,
+                error = %e,
+                "sequencer: consensus read failed; continuing the cycle"
+            );
+            false
+        }
+    }
+}
+
 /// Where a ring step landed.
 enum Handover {
     /// The turn moved. `None` inside means nobody is active — "nobody to wake",
@@ -507,7 +685,8 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Hando
     };
     if next.is_none() {
         // Nobody active. NOT a consensus test — see the module doc; consensus
-        // is `all_active_voted_done` and is a later task.
+        // is `all_active_voted_done`, asked in `halted_on_consensus` before the
+        // caller ever gets here.
         debug!(
             session = %deps.session_id,
             "sequencer: no active participant to hand the turn to"
@@ -955,6 +1134,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
+                done: false,
             },
         )
         .await;
@@ -1000,6 +1180,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
+                done: false,
             },
         )
         .await;
@@ -1033,7 +1214,11 @@ mod tests {
         let task = tokio::spawn(run_sequencer(deps, rx));
         send(&tx, SequencerCommand::UserMessage).await;
         assert_eq!(seats[0].expect(1).await, vec!["r1"]);
-        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1 }).await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
         assert_eq!(seats[1].expect(1).await, vec!["r1"], "B now holds the turn");
 
         // The user speaks over B's turn. Waiting on A's wake is what makes the
@@ -1043,7 +1228,11 @@ mod tests {
         assert_eq!(seats[0].expect(1).await, vec!["r2"], "the ring reset to A");
 
         // B's turn ends, late.
-        send(&tx, SequencerCommand::TurnComplete { participant_id: b, epoch: 2 }).await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: false },
+        )
+        .await;
         drop(tx);
         assert!(exited(task).await);
 
@@ -1089,6 +1278,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
+                done: false,
             },
         )
         .await;
@@ -1106,6 +1296,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 2,
+                done: false,
             },
         )
         .await;
@@ -1114,6 +1305,313 @@ mod tests {
             vec!["r1", "r2"],
             "the live completion steps the ring the stale one could not"
         );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn the_cycle_halts_when_every_active_participant_votes_done() {
+        // The cycle runs until every ACTIVE participant agrees there is nothing
+        // left to do. Two actives here, so it takes two done votes with no
+        // substantive output between them.
+        //
+        // "Halts" means NO FURTHER WAKE ARRIVES, which a bare `recv().await`
+        // cannot tell from a hang and a dropped `tx` cannot tell from a delivery
+        // it aborted — the drain is biased on commands, so a closed control
+        // channel stops a wake the halt was supposed to prevent, and a halt
+        // asserted that way passes with the consensus check removed. `quiet()`
+        // is the instrument: a bounded window with the channel still OPEN.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // A has nothing to add. One vote of two is not consensus, so the ring
+        // steps — and this is also what says the halt below is the SECOND vote
+        // arriving rather than the first one halting everything.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: true },
+        )
+        .await;
+        assert_eq!(
+            seats[1].expect(1).await,
+            vec!["go"],
+            "one done vote of two is not consensus — the cycle continues"
+        );
+
+        // An unread row for whoever would be woken next. Without it every
+        // silence below would also be what a sequencer that stepped the ring
+        // and found an empty backlog produces, and the test would prove nothing
+        // — a ring step delivers no wire when there is nothing past the cursor.
+        post(&storage, "system", None, "host note").await;
+        assert!(
+            !storage.unread_for_participant(a).await.unwrap().rows.is_empty(),
+            "the silence has to be the halt, not an empty backlog"
+        );
+
+        // B votes done too: every active participant has now declared done with
+        // nothing substantive between the two votes, so the session yields.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: true },
+        )
+        .await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        assert!(
+            storage.all_active_voted_done("s1").await.unwrap(),
+            "the arrival is durable in the roster, which is where a host reads it"
+        );
+
+        // Nothing can complete a turn that is not in flight. A late completion
+        // for the turn that halted the cycle — a retry, a supervisor echoing
+        // the last one back after a respawn — is discarded rather than
+        // re-entering the cycle.
+        //
+        // **`done: false` is what makes this assertion mean anything.** Repeat
+        // the halting vote instead and a loop that accepted it would record the
+        // same vote, find the same consensus and fall silent for the same
+        // reason: the silence proves nothing, and both `*holder = None` and
+        // `*epoch += 1` can be deleted with the suite still green. A
+        // SUBSTANTIVE late completion separates them — taken as live it clears
+        // the tally and steps the ring, so the silence and the intact tally
+        // below are two independent observations of the same discard.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: false },
+        )
+        .await;
+        seats[0].quiet().await;
+        assert!(
+            storage.all_active_voted_done("s1").await.unwrap(),
+            "a completion arriving after the halt did not reset the tally"
+        );
+
+        // Halted, not dead. The user speaking restarts the cycle at the front
+        // of the ring — without this the silence above would also be what a
+        // wedged loop looks like — and it clears the tally on the way in.
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["host note"],
+            "the user's message restarts the cycle at the front of the ring"
+        );
+        assert!(
+            !storage.all_active_voted_done("s1").await.unwrap(),
+            "and resets the tally: a vote cast before the user spoke cannot count \
+             toward the next arrival"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn substantive_output_resets_the_tally() {
+        // The stale-done case. A votes done, then B speaks — and a vote cast
+        // before that output describes a session that no longer exists. Let it
+        // stand and A's stale done plus B's eventual fresh one add up to an
+        // arrival neither of them voted for, halting the session with A never
+        // having seen what B said.
+        //
+        // The shape is chosen so the two worlds DIVERGE: A's turn after B's
+        // output must itself end non-done, or A re-votes done and the stale
+        // vote is indistinguishable from the fresh one.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // The vote that must not survive what follows.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: true },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"]);
+
+        // B produces substantive output. A row, because that is what
+        // substantive MEANS — and posting it is also what makes A's next wake
+        // observable at all.
+        post(&storage, "participant", Some("b"), "b found something").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: false },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["b found something"],
+            "the ring came back to A carrying B's output"
+        );
+        let roster = storage.participants_for_session("s1").await.unwrap();
+        assert!(
+            !roster.iter().find(|p| p.id == a).unwrap().done_vote,
+            "B's output cleared A's done vote — asserted on the vote itself, because \
+             consensus is `false` either way at this point and would not tell the two apart"
+        );
+
+        // A reads it and has nothing to add either, but that is not a vote — it
+        // is output of its own, so the tally stays at zero.
+        post(&storage, "participant", Some("a"), "a replied").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: false },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["a replied"]);
+
+        // Unread by A, so A's wake below is a wire rather than a silent step.
+        post(&storage, "system", None, "host note").await;
+        // B now votes done — the vote that WOULD complete a tally still holding
+        // A's stale done from three turns ago. It must not: A has spoken since,
+        // so the ring comes back to A instead of the session halting.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 4, done: true },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["host note"],
+            "A's done was cleared by B's output, so B's vote is one of two and the \
+             cycle continues"
+        );
+
+        // And the tally does still ARRIVE — the reset delays consensus, it does
+        // not make it unreachable. A votes done on top of B's live vote.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 5, done: true },
+        )
+        .await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        assert!(
+            storage.all_active_voted_done("s1").await.unwrap(),
+            "two consecutive done votes, and B's unread `host note` proves the silence \
+             is the halt rather than an empty backlog"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_discarded_completions_vote_does_not_count_toward_the_tally() {
+        // The guard gates the VOTE as well as the ring step. A completion that
+        // does not name the turn in flight is an opinion about a turn that no
+        // longer exists, and counting it would let a completion the loop
+        // discarded do the one thing discarding it was meant to prevent —
+        // arrive at a halt on a vote nobody currently holding a turn cast.
+        //
+        // Both halves of the guard reject the injected completion here (dead
+        // epoch, and not the holder), so this pins the vote against the guard
+        // as a whole rather than against either half.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // B is not holding the turn and epoch 0 is spent. Discarded.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 0, done: true },
+        )
+        .await;
+        // Unread by B, so B's wake below is a wire rather than a silent step.
+        post(&storage, "system", None, "host note").await;
+
+        // A votes done — the live half of a tally that would be COMPLETE if
+        // B's discarded vote had been recorded.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: true },
+        )
+        .await;
+        assert_eq!(
+            seats[1].expect(2).await,
+            vec!["go", "host note"],
+            "one live vote of two: the ring steps to B, which has still not voted"
+        );
+        assert!(
+            !storage.all_active_voted_done("s1").await.unwrap(),
+            "the discarded completion left no vote behind"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn observers_do_not_vote() {
+        // Only the rotation votes. Observers and on-demand participants are
+        // skipped in it, so they never get a turn, so they can never declare
+        // done — count them and one active plus three watchers would need four
+        // yields to halt, which is a session that never halts at all.
+        //
+        // One active and two non-voters here: consensus has to arrive on A's
+        // single done.
+        let (deps, storage, mut seats) = ring(&[
+            ("a", "active"),
+            ("watcher", "observer"),
+            ("helper", "on_demand"),
+        ])
+        .await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // Unread by all three when the vote lands. A ring of one WRAPS, so a
+        // sequencer that did not halt would hand A the turn straight back and
+        // deliver this row; without it A's silence would be ambiguous.
+        post(&storage, "system", None, "host note").await;
+        assert!(
+            !storage.unread_for_participant(a).await.unwrap().rows.is_empty(),
+            "the silence has to be the halt, not an empty backlog"
+        );
+
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: true },
+        )
+        .await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        seats[2].quiet().await;
+
+        // The claim in the name, stated directly: the session has arrived while
+        // two of its three participants have not voted, and cannot have.
+        assert!(storage.all_active_voted_done("s1").await.unwrap());
+        let roster = storage.participants_for_session("s1").await.unwrap();
+        let silent: Vec<&str> = roster
+            .iter()
+            .filter(|p| !p.done_vote)
+            .map(|p| p.slug.as_str())
+            .collect();
+        assert_eq!(
+            silent,
+            vec!["watcher", "helper"],
+            "consensus arrived on the rotation's one vote, with neither non-voter having cast one"
+        );
+
+        // Halted, not wedged.
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["host note"]);
         drop(tx);
         assert!(exited(task).await);
     }
@@ -1148,6 +1646,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
+                done: false,
             },
         )
         .await;
@@ -1211,6 +1710,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
+                done: false,
             },
         )
         .await;
@@ -1265,6 +1765,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
+                done: false,
             },
         )
         .await;
@@ -1376,6 +1877,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
+                done: false,
             },
         )
         .await;
@@ -1434,6 +1936,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
+                done: false,
             },
         )
         .await;
@@ -1504,7 +2007,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
         for cmd in [
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 0 },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 0, done: false },
             SequencerCommand::UserMessage,
             SequencerCommand::ParticipantJoined { participant_id: a, input: joined_input },
             SequencerCommand::Pause,
