@@ -445,8 +445,31 @@ semantic must survive*: a paused session must not wake the next participant.
 **Tests:** `a_paused_session_does_not_wake_the_next_participant`;
 `resuming_delivers_each_unread_row_exactly_once`.
 
-`ActivityTracker::holds_wakes()` already answers "cancelling or paused"; reuse it
-rather than re-deriving.
+~~`ActivityTracker::holds_wakes()` already answers "cancelling or paused"; reuse
+it rather than re-deriving.~~ **Superseded — the sequencer re-derived, and the
+deviation was reviewed and accepted.** Two reasons, both in the module doc:
+`holds_wakes()` is a *level* and this loop needs an *edge* (it sits in
+`recv().await` between turns, so a latch flipped elsewhere is observed wherever
+the loop happens to look, with no defined order against neighbouring commands —
+and that ordering IS the pause semantic); and it answers `cancelling || paused`,
+where a settling cancel is a state the sequencer has no concept of. The two
+notions of "paused" are meant to agree, and nothing enforces that — which is the
+mechanism behind the release conflict below.
+
+**Also settled here, against what this plan originally implied:** a
+`UserMessage` is EXEMPT from the pause gate and clears the latch. The host had
+already decided this in three places — `state.rs:737` ("a user message is the
+steer") calling `set_paused(false)`, `activity.rs:217` ("Cleared by Resume, a
+user Send (steer), or a supersede"), and decisively `resume_session`, which is
+implemented as `broadcast(RESUME_NOTICE)`, so **the Resume button IS a user
+message today**. Holding it would have left `SequencerCommand::Resume` with no
+producer and the pause unreleasable, while `ActivityTracker` read unpaused and
+the UI dropped the only Resume affordance. This is faithful to #19 besides: the
+old router's pause held *peer forwards*, and a user Send was always its release.
+
+The release fires where the message is READ, not where it is dispatched — the
+steer is re-queued behind the commands the pause held, and by dispatch time a
+second `Pause` may have arrived, which releasing again would silently cancel.
 
 Commit: `feat: hold wakes while the session is paused`
 
