@@ -207,24 +207,40 @@
 //! here too — no event, no marker, both halves of `TurnComplete`'s guard
 //! rejecting afterwards, and nothing notifying the user.
 //!
-//! **Nothing releases it that does not also release a consensus halt**, and that
-//! is a decision rather than an omission. The obvious trigger is the user
-//! answering, and answering is not always a `UserMessage`:
-//! `SignalingBridge::resolve_choice` hands the pick back in-band through the
-//! agent's own MCP call and writes NO row; only its out-of-band fall-back posts
-//! one (`origin = "user"`). A second command for "the user answered" would
-//! nevertheless be handled identically to `UserMessage` — reset to the front,
-//! clear the tally, hand out a turn — and two commands the loop cannot tell
-//! apart are one command. The row-writing event is also the better trigger on
-//! its merits: a restart wakes the front of the ring, and that wake is worth
-//! taking only if something sits past the participant's cursor. The user's row
-//! is what puts it there.
+//! **Nothing releases it that does not also release a consensus halt**, and the
+//! bridge supports that better than the obvious worry suggests. The worry is
+//! that "the user answered" and "the user posted a row" might be different
+//! events, since `resolve_choice` has an in-band branch that returns the pick
+//! through the agent's own MCP call and writes no row. Traced rather than
+//! assumed, they are the same event: every path that clears the awaiting flag
+//! also writes an `origin = "user"` row.
 //!
-//! The cost is named rather than papered over. An answer delivered in-band has
-//! no row, so it has no command behind it today and the halt stands until the
-//! user types something. That is the mirror of the gap below — there a row
-//! arrives with no command; here an event arrives with no row — and it falls to
-//! the same task, the one that wires this loop to a session.
+//! - every agent-facing park — `ask_user_choice`, `supersede_question`,
+//!   `request_approval_parked`, `action_gate` — reaches
+//!   `ask_user_choice_inner` with `blocking = false`, and that path DROPS the
+//!   oneshot receiver before returning. So `resolve_choice`'s `tx.send` cannot
+//!   succeed, and the answer always falls through to `deliver_oob`, which posts
+//!   the row. The in-band branch is live code that no question can reach: its
+//!   only `rx.await` belongs to the BLOCKING `request_approval`, whose sole
+//!   caller is the pre-push git hook — host-internal, never a participant in a
+//!   cycle;
+//! - `mark_awaiting_user` parks with no `messages` row at all (`emit_halt_row`
+//!   writes only `session_tray`, and halts never populate the pending map), but
+//!   its releases still post one: a user broadcast, or `advance_phase`, which
+//!   writes its transition notice as `Author::User` — and `insert_message` maps
+//!   that author to `origin = "user"`.
+//!
+//! So a second command for "the user answered" would fire on exactly the
+//! occasions `UserMessage` already does, and would be handled identically —
+//! reset to the front, clear the tally, hand out a turn. Two commands the loop
+//! cannot tell apart are one command. The row is also what makes the restart
+//! worth taking at all: it wakes the front of the ring, and that wake earns its
+//! keep only if something sits past that participant's cursor.
+//!
+//! What none of this establishes is that one row means one release. It does not,
+//! and that gap is real — see
+//! [`QuestionParked`](SequencerCommand::QuestionParked) for the case where two
+//! parks share a flag that only ever counts to one.
 //!
 //! ### A row can arrive with no command behind it
 //!
@@ -306,6 +322,16 @@
 //! and `deliver` PARKS when that buffer fills, for as long as the human takes to
 //! answer. A halt that waits out a human before taking effect is not a halt.
 //! `a_parked_question_stops_the_drain_rather_than_finishing_it` pins it.
+//!
+//! **"Immediately" is about the drain in progress, not about the loop.** The
+//! park is deferred, so anything that arrived AHEAD of it on the channel is
+//! handled first — and a `TurnComplete` that got there first will step the ring
+//! and start a fresh drain for the next participant before the halt lands. So a
+//! park can be one full delivery away from taking effect, and that delivery goes
+//! to somebody who is not the parker. It is bounded (one turn, not a human's
+//! thinking time) and it is the price of handling commands in arrival order,
+//! which is deliberate everywhere else in this loop. Worth knowing before
+//! reading "halts immediately and unilaterally" as "no wire can follow a park".
 //!
 //! Every OTHER command is taken off the channel and deferred, so a sender never
 //! parks behind a drain, and then handled in arrival order once the drain
@@ -495,6 +521,25 @@ pub enum SequencerCommand {
     /// or one whose turn a reset superseded while its process kept running), and
     /// refusing its park leaves the ring handing out turns while a human is
     /// blocking — the state this command exists to end.
+    ///
+    /// **The error in the other direction is the likelier one, and nothing here
+    /// can fix it.** The surplus halt above is the safe side; UNDER-halting is
+    /// the unsafe one, and it is reachable through the RELEASE. The awaiting
+    /// flag this command stands for is a bare `bool` —
+    /// `set_session_awaiting`/`clear_session_awaiting` are a plain
+    /// `store(true)`/`store(false)` with no refcount — and `resolve_choice`
+    /// clears it on the FIRST answer. Several questions parked at once is
+    /// normal, not pathological; `list_my_pending_questions` exists to dedupe
+    /// them. So two participants parking gives two halts, the user answering one
+    /// gives one row and therefore one `UserMessage`, and the cycle restarts
+    /// with a human still blocking on the second question — the exact state this
+    /// command exists to end, arrived at through its release rather than despite
+    /// it.
+    ///
+    /// Counting parks in this loop would not close it: the loop would have to
+    /// know which answer released which park, and nothing carries that. What has
+    /// to change is the flag becoming a count, which is the bridge's to fix and
+    /// not this file's.
     ///
     /// **A command rather than a flag read.** The bridge already keeps a
     /// per-session `Arc<AtomicBool>`
@@ -702,10 +747,17 @@ async fn advance_turn(
     // that would go red: delete this clear and its last `expect(3)` times out.
     //
     // The test is `current.is_none()` rather than `reset` because those are the
-    // TWO ways to the front of the rotation: an explicit reset, and a `None`
-    // holder — which is what a consensus halt leaves behind. Anything that
-    // restarts a cycle passes through here, so a restart cannot forget the
-    // clear by not calling a helper.
+    // two ways to the front of the rotation IN PRINCIPLE: an explicit reset, and
+    // a `None` holder, which is what a halt leaves behind.
+    //
+    // **Today they are the same condition and no test can tell them apart.**
+    // `reset = false` is reached from exactly one place — inside `if live`,
+    // which requires `holder.is_some()` — so `current` is always `Some` there,
+    // and `current.is_none()` is true exactly when `reset` is. Swap the
+    // condition for `reset` and the suite stays green. This is kept as the
+    // defensive shape, not because it covers a case that exists: it is the
+    // right form for the second restart path tasks 8/9 add, and it costs
+    // nothing now. Do not read it as pinning a reachable behaviour.
     //
     // A failure warns and continues, like the other storage faults on this
     // path. It is the one that leans the wrong way — stale votes can only make
@@ -2039,12 +2091,12 @@ mod tests {
             .unwrap()
             .expect("the fixture's one active participant");
 
-        // `_cmd_tx` is HELD, not dropped. A closed command channel is
+        // `cmd_tx` is HELD, not dropped. A closed command channel is
         // `Stop::SessionEnd` inside the drain, which stops it for a reason that
         // has nothing to do with the park — and would leave this test green with
         // the park branch deleted.
-        let (_cmd_tx, mut rx) = mpsc::channel(8);
-        send(&_cmd_tx, SequencerCommand::QuestionParked).await;
+        let (cmd_tx, mut rx) = mpsc::channel(8);
+        send(&cmd_tx, SequencerCommand::QuestionParked).await;
         let mut deferred = VecDeque::new();
         deliver_backlog(&deps, &holder, &mut rx, MAX_TURN_BATCHES, &mut deferred).await;
 
