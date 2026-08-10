@@ -148,6 +148,14 @@
 //! voted for, and the session halts with a participant never having read what
 //! the other said.
 //!
+//! The second of those resets is bound to the RESTART, not to the command:
+//! [`advance_turn`] empties the tally whenever it steps to the front of the
+//! rotation. A user message is the only way to the front today, so the two are
+//! the same event and no test can tell the shapes apart — but task 7 adds a
+//! parked question as a second halt reason, and its release restarts a cycle
+//! too. Binding the clear to the mechanism is what stops that release path
+//! re-opening the false arrival above.
+//!
 //! **Mechanically the halt is: no holder, no live epoch, and the loop goes back
 //! to `recv`.** It emits nothing and marks nothing extra. Three consequences,
 //! and the third is a gap:
@@ -176,11 +184,36 @@
 //!   the interface the task that spawns this loop has to define. That task owns
 //!   it, along with the epoch round trip.
 //!
-//! One more gap the command set implies rather than consensus: a halt is broken
-//! only by a `UserMessage`. A row written to the channel by anything else — a
-//! host note, a tool result landing late — wakes nobody, because no command
-//! says "a row arrived". That is a property of the four commands, not of the
-//! tally.
+//! ### A row can arrive with no command behind it
+//!
+//! One more misfit, and it belongs to the command set rather than to consensus:
+//! **nothing says "a row arrived"**, so a halt is broken only by a
+//! `UserMessage`. That costs two things, and the second contradicts the design
+//! rather than merely limiting it:
+//!
+//! - a row written by anything else — a host note, a tool result landing late —
+//!   WAKES nobody;
+//! - it resets NO VOTE either. "Any substantive output resets the tally" is
+//!   therefore true only of output this loop is told about, and the gap is not
+//!   theoretical: **a session can arrive at consensus with rows no participant
+//!   has read.**
+//!
+//! `the_cycle_halts_when_every_active_participant_votes_done` demonstrates that
+//! rather than merely permitting it. It posts `host note`, both participants
+//! vote done, and the cycle halts — at which instant neither cursor has moved
+//! past `go`. The row reaches A only because the test then sends a user
+//! message; without one it would sit unread behind an arrival that declared
+//! there was nothing left to do.
+//!
+//! Production writers on that path exist today, all of them `origin =
+//! "system"` host injections: `watchdog`'s idle nudge, `session`'s first-spawn
+//! phase nudge, `state`'s per-agent phase instruction and `duo`'s two adherence
+//! nudges. (`broadcast` and `tray` write `origin = "user"` — that is the one
+//! origin a command already covers, so they are not on this list.)
+//!
+//! Closing it needs a fifth command and is out of scope here. Read it with the
+//! notification gap above rather than apart from it: the session yields to a
+//! user who is not told it has yielded, possibly over rows nobody read.
 //!
 //! ## How far a turn reads
 //!
@@ -482,20 +515,11 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 }
             }
             SequencerCommand::UserMessage => {
-                // The user's own output is substantive, so it resets the tally
-                // like any other. This is not belt-and-braces: without it, a
-                // session that halted and was then spoken to would carry every
-                // vote from the previous arrival into the new cycle, and the
-                // FIRST participant to say done would halt it again — with the
-                // rest of the ring never having seen what the user said.
-                if let Err(e) = deps.storage.clear_done_votes(&deps.session_id).await {
-                    warn!(
-                        session = %deps.session_id,
-                        error = %e,
-                        "sequencer: the tally was not cleared for a user message; the next \
-                         arrival may count votes cast before it"
-                    );
-                }
+                // The user's own output is substantive, so it resets the tally —
+                // but the reset is NOT written here. It rides the restart itself,
+                // in `advance_turn`; see the comment there for why this arm is
+                // the wrong place to own it.
+                //
                 // The user speaking resets the cycle to the front of the
                 // rotation, whoever held the turn — `None` is what
                 // `next_active_participant` reads as "reset". The previous
@@ -534,10 +558,13 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     debug!(session = %deps.session_id, "sequencer: control channel closed; exiting");
 }
 
-/// Step the ring, stamp the new turn, and deliver its backlog.
+/// Step the ring, stamp the new turn, and deliver its backlog — emptying the
+/// tally first if this step RESTARTS the cycle rather than continuing it.
 ///
 /// `reset` is a user message: the ring goes back to its first place instead of
-/// one past the current holder.
+/// one past the current holder. It is the only restart today, which is exactly
+/// why the tally clear lives in here and not at its call site; see the comment
+/// on the clear.
 ///
 /// Takes `reset` rather than the current participant because `holder` is behind
 /// a `&mut` here — the caller cannot lend it out and have it written back in
@@ -551,6 +578,40 @@ async fn advance_turn(
     reset: bool,
 ) {
     let current = if reset { None } else { holder.as_ref() };
+    // A cycle starting at the front of the ring starts with an empty tally.
+    //
+    // **Bound to the mechanism, not to a call site.** This lived in the
+    // `UserMessage` arm, where it was correct and invisible: a user message is
+    // the only restart there is today, so "the user spoke" and "a cycle
+    // restarts" were the same event and nothing said which one the clear
+    // belonged to. Task 7 separates them — a parked question is a SECOND halt
+    // reason, and releasing it restarts a cycle. A release path that did not
+    // happen to route through `UserMessage` would leave every vote from the
+    // previous arrival standing, `all_active_voted_done` still `true`, and the
+    // FIRST `done: true` of the new cycle would halt it again with the rest of
+    // the ring never having taken a turn. That is precisely the false arrival
+    // this file exists to prevent, coming back through the door task 7 opens.
+    //
+    // The test is `current.is_none()` rather than `reset` because those are the
+    // TWO ways to the front of the rotation: an explicit reset, and a `None`
+    // holder — which is what a consensus halt leaves behind. Anything that
+    // restarts a cycle passes through here, so a restart cannot forget the
+    // clear by not calling a helper.
+    //
+    // A failure warns and continues, like the other storage faults on this
+    // path. It is the one that leans the wrong way — stale votes can only make
+    // an arrival come EARLY — but the alternative is refusing to hand out a
+    // turn because a write failed, which strands the session outright.
+    if current.is_none() {
+        if let Err(e) = deps.storage.clear_done_votes(&deps.session_id).await {
+            warn!(
+                session = %deps.session_id,
+                error = %e,
+                "sequencer: the tally was not cleared for a restart; the next arrival may \
+                 count votes cast before it"
+            );
+        }
+    }
     match hand_over(deps, current).await {
         // The ring could not be read. Keeping the holder AND the epoch is what
         // makes the retry in `hand_over`'s comment real: the same holder's
