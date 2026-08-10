@@ -276,11 +276,29 @@
 //! message; without one it would sit unread behind an arrival that declared
 //! there was nothing left to do.
 //!
-//! Production writers on that path exist today, all of them `origin =
-//! "system"` host injections: `watchdog`'s idle nudge, `session`'s first-spawn
-//! phase nudge, `state`'s per-agent phase instruction and `duo`'s two adherence
-//! nudges. (`broadcast` and `tray` write `origin = "user"` — that is the one
-//! origin a command already covers, so they are not on this list.)
+//! Production writers on that path exist today. Three are `origin = "system"`
+//! host injections and nothing else: `session`'s first-spawn phase nudge
+//! (`session.rs:908`), `state`'s per-agent phase instruction (`state.rs:920`)
+//! and `duo`'s two adherence nudges (`duo.rs:310`, `duo.rs:459`).
+//!
+//! **`watchdog`'s idle nudge is not one of them, and an earlier draft listed it
+//! as one.** `deliver_idle_nudge` writes TWO rows for the two things it says.
+//! NOTICE — the one-line summary the user reads in the chat — goes through
+//! `insert_message(.., Author::User, ..)` (`watchdog.rs:364`), which
+//! `storage/messages.rs:60` maps to `origin = "user"`. Only NUDGE, the
+//! instruction Brian reads, is posted as `"system"` (`watchdog.rs:379`).
+//!
+//! It is not alone: `AppState::advance_phase` writes its transition notice as
+//! `Author::User` too (`state.rs:878-882`), and `request_phase_advance` FALLS
+//! BACK to that author when an agent slug will not parse
+//! (`bridge/tray.rs:916`). So **rows land on this path under the user's origin
+//! with no human behind them**, which matters more for the pause than it does
+//! here — see "what releases a pause" below for the obligation that puts on
+//! whoever mints [`UserMessage`](SequencerCommand::UserMessage).
+//!
+//! (`broadcast` and `tray` write `origin = "user"` too — that is the one origin
+//! a command already covers, and theirs really is the user, so they are not on
+//! this list.)
 //!
 //! Closing it needs a fifth command and is out of scope here. Read it with the
 //! notification gap above rather than apart from it: the session yields to a
@@ -449,9 +467,52 @@
 //!
 //! **So there are two sources of truth for "paused" now** — this flag and
 //! `ActivityTracker`'s latch — and they are meant to agree, on the same three
-//! events. Whoever mints these commands is the code that already flips the
-//! latch, and keeping them in step is that task's obligation; nothing here can
-//! check it.
+//! events. Keeping them in step is the wiring task's obligation; nothing here
+//! can check it.
+//!
+//! ### What a `UserMessage` producer must be, now that it releases a pause
+//!
+//! An earlier draft of the paragraph above finished "whoever mints these
+//! commands is the code that already flips the latch". **That is false, and the
+//! writer list in the command-set section names the counter-examples.** It
+//! holds for `state`'s user-message path, which calls `set_paused(false)` under
+//! the comment "a user message is the steer" (`state.rs:737-740`) — and
+//! therefore for the Resume button, which is a broadcast and routes through it.
+//! It does not hold for:
+//!
+//! - `AppState::advance_phase`, which writes its transition notice as
+//!   `Author::User` (`state.rs:878-882`) → `origin = "user"`
+//!   (`storage/messages.rs:60`), and calls `clear_awaiting` but **never**
+//!   `set_paused(false)`. `state.rs:743-744` says why in as many words: "a phase
+//!   self-advance is not a user message";
+//! - `watchdog`'s idle-nudge NOTICE (`watchdog.rs:364`), same mapping, same
+//!   absence.
+//!
+//! The first one is reachable while stopped. An agent self-advances on its own
+//! initiative — `general_rules.rs:166` tells it to, "no user click needed" — and
+//! **a pause holds WAKES, not the holder**: the participant whose turn was in
+//! flight keeps working by design, so it can reach that tool mid-pause. Mint a
+//! [`UserMessage`](SequencerCommand::UserMessage) off that row and this loop
+//! un-pauses, resets the ring to the front and clears the tally, while
+//! `ActivityTracker` still reads Paused and the UI still shows the bar. The two
+//! sources of truth disagree, and the one the user can see is the one that is
+//! wrong.
+//!
+//! So the obligation belongs to the PRODUCER and is worth stating as a rule
+//! rather than an assumption: **a producer of
+//! [`UserMessage`](SequencerCommand::UserMessage) must either flip the pause
+//! latch or not be minted from a non-human writer.** `origin = "user"` does not
+//! decide the second half — host-authored rows already carry that origin — so
+//! the wiring cannot be a query over it.
+//!
+//! **This claim was TRUE when it was written, and a decision elsewhere
+//! falsified it.** `UserMessage` did not release a pause until this task made it
+//! one; before that, a producer that never touched the latch was harmless, and
+//! re-checking the claim the day it was written would have confirmed it. That is
+//! a different failure from the usual stale citation and it wants a different
+//! habit: you cannot re-verify your way out of it. When a command GAINS a
+//! meaning, go back and ask what its existing producers were allowed to assume
+//! under the old one.
 //!
 //! [`Resume`](SequencerCommand::Resume) is KEPT even though nothing mints it
 //! today. It is the explicit release for a resume that carries no message, which
@@ -471,12 +532,11 @@
 //! that case, and without the distinction a Stop pressed after a message is
 //! silently cancelled.
 //!
-//! ### One mutation of the replay survives, and where it hides
+//! ### Where the one mutation of the replay hides, and what finds it
 //!
 //! [`release_held`] splices the held queue AHEAD of whatever is already
-//! deferred. Splicing it BEHIND instead leaves every test in this file green,
-//! and that is worth stating precisely rather than filing as "narrow": it is a
-//! real defect, not an equivalent form.
+//! deferred. Splicing it BEHIND instead is a real defect rather than an
+//! equivalent form, and it hides from almost everything here.
 //!
 //! It hides because the two agree whenever `deferred` is empty, which is every
 //! ordinary state. `held` is non-empty only while paused; the loop drains
@@ -490,13 +550,26 @@
 //! releases with `held = [X]` and `deferred = [Y]`. `X` was read before `Y`, so
 //! `X` must go first; spliced behind, the two swap.
 //!
-//! No test builds it. `X` and `Y` have to be commands a drain merely sets aside
-//! — so not a park, a user message or a pause, all of which stop it — which
-//! leaves a completion and a join, and the resume's own delivery runs between
-//! the splice and the dispatch and drains the backlog the join would have been
-//! observed by. Nothing mints [`Resume`](SequencerCommand::Resume) today, so the
-//! state is unreachable in production as well as untested. Recorded rather than
-//! closed.
+//! **`X` and `Y` are two COMPLETIONS naming the same live turn, and it was the
+//! missing entry in an enumeration that had this filed as untestable for a
+//! while.** They have to be commands a drain merely SETS ASIDE — so not a park,
+//! a user message or a pause, all of which stop it — which leaves a completion,
+//! a [`ParticipantJoined`](SequencerCommand::ParticipantJoined), and
+//! [`Resume`](SequencerCommand::Resume) itself, which is also only ever deferred
+//! by a drain. The earlier enumeration was one short there, and it looked for a
+//! pair of DIFFERENT commands besides: a join is observed through a backlog the
+//! resume's own delivery has already drained, which is where it stopped. The
+//! pair that works is a completion twice over, differing only in `done` — one
+//! completes a tally the other clears — so exactly one of them is ever
+//! dispatched, and which one decides whether a participant is woken.
+//! `the_replay_is_dispatched_ahead_of_what_the_drain_had_already_deferred`
+//! builds it: `X = TurnComplete{A, 3, done: true}` halts the cycle on a vote B
+//! already cast, `Y = TurnComplete{A, 3, done: false}` clears that tally and
+//! hands B a turn. Behind-spliced it fails with `expected no wire, got "row 0"`,
+//! and it is the only test in this file that does.
+//!
+//! Nothing mints [`Resume`](SequencerCommand::Resume) today, so the state is
+//! still unreachable in production — untested is what it no longer is.
 //!
 //! ### Why not `ActivityTracker::holds_wakes`
 //!
@@ -515,11 +588,15 @@
 //! and a cancel settling is a state the sequencer has no concept of.
 //!
 //! The NOTION is the same one, though, and the two are meant to agree: whoever
-//! mints [`Pause`](SequencerCommand::Pause) is the code that calls
+//! mints [`Pause`](SequencerCommand::Pause) MUST be the code that calls
 //! `set_paused(true)`, and that wiring belongs to the task that spawns this
-//! loop, alongside the epoch round trip. The latch shape is borrowed
-//! deliberately — `set_paused` is a plain store rather than a counter, and so is
-//! this.
+//! loop, alongside the epoch round trip. An obligation on the producer, stated
+//! the same way and for the same reason as the one on
+//! [`UserMessage`](SequencerCommand::UserMessage)'s producers above — nothing
+//! today mints this command, so there is no existing site to read it off.
+//!
+//! The latch shape is borrowed deliberately — `set_paused` is a plain store
+//! rather than a counter, and so is this.
 
 use crate::agents::ParticipantInput;
 use crate::storage::{Participant, PersistedMessage, Storage};
@@ -682,10 +759,13 @@ pub enum SequencerCommand {
     /// **It is also the release for a pause**, and on today's wiring the only
     /// one: `AppState::resume_session` is a broadcast, so the Paused bar's
     /// Resume button arrives as this command. See "what releases a pause" in the
-    /// module doc for the three shipped sites that decide it. The release is
-    /// applied where this command is READ off the wire, and the commands the
-    /// pause held are replayed AHEAD of it, so the message still lands in
-    /// arrival order behind them.
+    /// module doc for the three shipped sites that decide it — and the section
+    /// after it for what releasing a pause demands of whoever MINTS this
+    /// command, which is not satisfied by "the row said `origin = 'user'`".
+    ///
+    /// The release is applied where this command is READ off the wire, and the
+    /// commands the pause held are replayed AHEAD of it, so the message still
+    /// lands in arrival order behind them.
     UserMessage,
     /// A participant's stdin, arriving after the task was spawned.
     ///
@@ -1110,9 +1190,11 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
 /// Where it is not, everything in `deferred` was read AFTER everything in
 /// `held`: the only route to a non-empty one is a drain that set commands aside
 /// and then stopped on a [`SequencerCommand::Pause`] it pushed to the front, and
-/// a drain reads in wire order. See the mutation note in the module doc for the
-/// wire sequence that would expose the other operand order, and why no test
-/// builds it.
+/// a drain reads in wire order.
+/// `the_replay_is_dispatched_ahead_of_what_the_drain_had_already_deferred`
+/// builds exactly that state and is the only test here that fails on the other
+/// operand order; the module doc's mutation note has the wire sequence and why
+/// the pair has to be two completions.
 fn release_held(
     held: &mut VecDeque<SequencerCommand>,
     deferred: &mut VecDeque<SequencerCommand>,
@@ -1180,15 +1262,22 @@ async fn advance_turn(
     // still live, so the resume's step would arrive here with `current.is_none()`
     // true and `reset` false, and every resume would empty the tally. That is why
     // the pause sets a flag instead and leaves `holder` alone. Re-measured after
-    // it: swap this condition for `reset` and all 30 tests still pass. Spin
+    // it: swap this condition for `reset` and all 35 tests still pass. Spin
     // detection (task 11) may yet be the second path.
+    //
+    // That count is 35 as of 2026-08-11 and it moves every time a test lands
+    // here — an earlier draft carried 30 through two additions. Re-run the swap
+    // rather than trusting the figure; what the figure is FOR is "no test tells
+    // them apart", which is the part that has to be re-measured anyway.
     //
     // What IS pinned is the other narrowing. `holder.is_none()` looks equivalent
     // and is not: a user message resets a LIVE cycle too, where the holder is
     // `Some` and only `current` is `None`. Both halt tests reset from a halted
-    // cycle, so both stay green under that swap;
-    // `a_user_message_over_a_live_turn_clears_the_tally` and
-    // `the_reset_survives_a_turn_that_produced_nothing` are the two that fail.
+    // cycle, so both stay green under that swap. THREE fail (re-measured
+    // 2026-08-11 — the list said two, having been edited when the third landed
+    // rather than re-run): `a_user_message_over_a_live_turn_clears_the_tally`,
+    // `the_reset_survives_a_turn_that_produced_nothing` and
+    // `a_failed_reset_clears_the_tally_but_leaves_the_turn_in_flight`.
     //
     // A failure warns and continues, like the other storage faults on this
     // path. It is the one that leans the wrong way — stale votes can only make
@@ -3976,6 +4065,110 @@ mod tests {
             "the silence has to be the second pause, not an empty backlog"
         );
         seats[0].quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn the_replay_is_dispatched_ahead_of_what_the_drain_had_already_deferred() {
+        // `release_held` splices the held queue AHEAD of whatever is already
+        // deferred, and this is the one arrangement where the two operand orders
+        // differ. They agree whenever `deferred` is empty, which is every
+        // ordinary state: `held` is non-empty only while paused, the loop drains
+        // `deferred` completely before it calls `recv` again, and a drain only
+        // ever runs unpaused.
+        //
+        // So the exception needs a drain to set commands aside and THEN stop on
+        // a pause, with a `Resume` among the ones it set aside. Wire order is
+        // `X, Resume, Y, Pause`, which the drain turns into
+        // `[Pause, X, Resume, Y]` — the pause goes to the FRONT, everything else
+        // to the back. The pause latches, `X` is held, and the resume then
+        // releases with `held = [X]` and `deferred = [Y]`. `X` was read before
+        // `Y`, so `X` must be dispatched first; spliced behind, the two swap.
+        //
+        // **`X` and `Y` are two completions naming the same live turn, differing
+        // only in `done`, and that pair is what makes the swap observable.** The
+        // module doc called this untestable for a while, having enumerated the
+        // commands a drain merely sets aside — a completion, a join, a `Resume`
+        // — and then looked for a pair of DIFFERENT ones. The pair that works is
+        // a completion twice over. Both are live, so whichever is dispatched
+        // first decides the cycle and the other names a turn that no longer
+        // exists:
+        //
+        // - `X` (`done: true`) completes the tally B voted into at epoch 2, so
+        //   the cycle halts and B is never woken;
+        // - `Y` (`done: false`) clears that tally and steps the ring, handing B
+        //   a turn.
+        //
+        // Spliced behind, this seat wakes with "row 0".
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "delivery is live in this run"
+        );
+        // `done: false`, so the step to B leaves the tally empty and B's vote
+        // below is the only one standing. That is what leaves `X` one vote short
+        // of consensus and `Y` one clear away from it.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2, B holds");
+
+        // A backlog for A's epoch-3 turn to drain. Without one the drain returns
+        // on an empty page BEFORE its select ever runs, the four commands are
+        // then handled in plain arrival order with `deferred` empty throughout,
+        // and both splices agree — the state this test exists for is unbuilt.
+        for i in 0..UNREAD_BATCH_LIMIT as usize + 1 {
+            post(&storage, "user", None, &format!("row {i}")).await;
+        }
+        assert!(
+            !storage.unread_for_participant(b).await.unwrap().rows.is_empty(),
+            "the silence below has to be the halt, not an empty backlog"
+        );
+
+        // Nothing awaited between the five, so on the current-thread test runtime
+        // they are all on the channel before the loop is polled: B's completion
+        // steps the ring to A at epoch 3, and A's drain meets the other four at
+        // its first row, where the biased select reads them in wire order.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: true },
+        )
+        .await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: true },
+        )
+        .await; // X
+        send(&tx, SequencerCommand::Resume).await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: false },
+        )
+        .await; // Y
+        send(&tx, SequencerCommand::Pause).await;
+
+        // With the control channel still OPEN, as everywhere else here.
+        seats[1].quiet().await;
+        assert!(
+            storage.all_active_voted_done("s1").await.unwrap(),
+            "X was dispatched first: it completed the tally B voted into, and Y — \
+             read after it — was discarded rather than clearing it"
+        );
+        assert_eq!(
+            storage.cursor_for(b).await.unwrap(),
+            1,
+            "B was handed no turn, so its cursor sits where epoch 2 left it"
+        );
         drop(tx);
         assert!(exited(task).await);
     }
