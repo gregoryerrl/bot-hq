@@ -4711,6 +4711,74 @@ mod tests {
         assert!(exited(task).await, "the loop is still draining");
     }
 
+    /// **13b — the measurement the inventory demands, not an assumption.**
+    ///
+    /// Inventory #6 (`a_delivered_forward_records_nothing`) is DROPPED on
+    /// purpose: the invisibility it enforced is the defect the redesign exists
+    /// to fix. But it existed because someone cared about the hot path, so the
+    /// cost the channel model puts back has to be measured rather than waved at.
+    ///
+    /// **Compared against a write the turn already pays** — one message row —
+    /// because that is the honest baseline. If a delivery costs the same order
+    /// as the row it delivers, the model added no new class of cost; it did not
+    /// become free, and this does not claim it did.
+    ///
+    /// **Asserted as a ratio, never a wall-clock bound.** An absolute threshold
+    /// measures whatever machine runs the suite; a ratio measures the code. One
+    /// `commit_delivery` call per row, deliberately: batching is the REMEDY if
+    /// this is ever hot, so measuring the batched form would measure the fix
+    /// instead of the cost.
+    #[tokio::test]
+    async fn a_delivery_costs_the_same_order_as_the_row_it_delivers() {
+        use std::time::Instant;
+
+        const N: usize = 300;
+
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+        let pid = s.participant_by_slug("s1", "brian").await.unwrap().unwrap().id;
+
+        // Warm both paths, so neither measurement pays one-time pool, statement
+        // cache or page setup that the other has already paid.
+        let mut warm = Vec::new();
+        for _ in 0..50 {
+            warm.push((
+                s.post_to_channel("s1", "user", None, "text", "warm", None)
+                    .await
+                    .unwrap()
+                    .message_id(),
+                None,
+            ));
+        }
+        s.commit_delivery(pid, &warm).await.unwrap();
+
+        let mut ids = Vec::with_capacity(N);
+        let t0 = Instant::now();
+        for _ in 0..N {
+            ids.push(
+                s.post_to_channel("s1", "user", None, "text", "body", None)
+                    .await
+                    .unwrap()
+                    .message_id(),
+            );
+        }
+        let per_row = t0.elapsed() / N as u32;
+
+        let t1 = Instant::now();
+        for id in &ids {
+            s.commit_delivery(pid, &[(*id, None)]).await.unwrap();
+        }
+        let per_delivery = t1.elapsed() / N as u32;
+
+        assert!(
+            per_delivery < per_row * 10,
+            "a delivery must stay the same order as the row it delivers — row \
+             {per_row:?}, delivery {per_delivery:?}. If this fired, batch the cursor \
+             advance the way BatchEmitter already batches emission (50ms / N=20)."
+        );
+    }
+
     #[test]
     fn jaccard_similarity_normalizes_and_handles_edges() {
         assert_eq!(jaccard_similarity("ready to go", "ready to go"), 1.0);
