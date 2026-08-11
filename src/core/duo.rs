@@ -184,6 +184,41 @@ fn peer_ack_is_final(name: &str, input: &serde_json::Value) -> bool {
     is_peer_ack_tool(name) && input.get("final").and_then(|v| v.as_bool()) == Some(true)
 }
 
+/// True for the `pass_turn` MCP tool call — the bare alias (tests) or the
+/// MCP-prefixed wire name (`mcp__bot-hq-signaling__pass_turn`).
+///
+/// Observed here rather than acted on bridge-side for the same reason
+/// [`is_peer_ack_tool`] is: what a turn MEANT is a property of the whole turn,
+/// and the pump is the only place that sees the turn end. The bridge handler
+/// cannot know yet whether the pass will be overridden by text the agent has
+/// not written.
+///
+/// **Suffix match, not `contains`.** `ends_with` is what stops a tool merely
+/// NAMED after this one — or a differently-prefixed gateway's
+/// `foo__pass_turn_v2` — from being read as a pass; the peer_ack matrix above
+/// found the same class of near-miss worth pinning, and
+/// `is_pass_turn_tool_matches_bare_and_prefixed` pins it here.
+fn is_pass_turn_tool(name: &str) -> bool {
+    name == "pass_turn" || name.ends_with("__pass_turn")
+}
+
+/// The row a pass posts, so the pass is VISIBLE (design §1: "the pass is
+/// recorded in the channel so it is visible").
+///
+/// Prose (`MessageKind::Text`) under `origin = 'participant'`, which is the rc3
+/// decision, and it is what makes the row render today: `ChatMessage` dispatches
+/// on `kind`, and every kind it does not special-case falls through to the
+/// prose branch anyway — so a `pass` kind would render identically while
+/// costing a migration this slice does not take. `system_notice` was the
+/// alternative and is wrong twice over: it is documented as HOST-emitted and
+/// every writer of it in this crate posts under `origin = 'system'`, which is
+/// the origin rc3 decided against; and D7 already prices that lane as carrying
+/// five injections at one-line sizing.
+///
+/// Phrased as the participant's own line because that is whose row it is: the
+/// author header above it names them.
+const PASS_NOTICE: &str = "(passed — nothing to add this round)";
+
 /// Provider quota/limit phrases, matched case-insensitively against each text
 /// chunk. Deliberately a plain substring net over ALL provider eras: the
 /// archive study found these render as ordinary agent speech — Brian sat dead
@@ -245,6 +280,11 @@ pub async fn pump_agent(
     // peer-forward. Per-turn — reset after every TurnComplete (success OR error).
     let mut peer_ack_pending = false;
     let mut peer_ack_final_pending = false;
+    // pass_turn (design §1): set when the agent declines this turn. Per-turn and
+    // reset alongside the peer_ack pair below — a pass that leaked into the next
+    // turn would make a participant that DID speak look like it had passed, and
+    // the pass is the one ending that leaves the tally standing.
+    let mut pass_pending = false;
     // A3a: one-shot guard so Brian gets at most one "you're mutating before
     // Apply" nudge per session (delivered to his own stdin via self_input_tx).
     let mut mutate_nudged = false;
@@ -314,6 +354,12 @@ pub async fn pump_agent(
                     if peer_ack_is_final(&name, &input) {
                         peer_ack_final_pending = true;
                     }
+                }
+                // pass_turn: the agent declined this turn. Flagged, not acted on
+                // — `turn_ending` decides at the flush whether the pass stands
+                // or the turn's own text overrode it.
+                if is_pass_turn_tool(&name) {
+                    pass_pending = true;
                 }
                 // Batch 7: a tool call started — suppress stall detection until
                 // its ToolResult (a long build/install emits no events meanwhile).
@@ -557,16 +603,26 @@ pub async fn pump_agent(
                 // the router: an errored turn, an empty buffer, or a solo session.
                 let mut router_owns_idle = false;
                 // B5: what this ending MEANS, derived before the buffer is taken
-                // below. An errored turn votes `done: false` — it produced
-                // nothing, but the ring has to step or the cycle stalls on a
-                // participant that already failed; a failure is not a claim that
-                // there is nothing left to do.
+                // below. An errored turn ends `Spoke` — it produced nothing, but
+                // the ring has to step or the cycle stalls on a participant that
+                // already failed; a failure is not a claim that there is nothing
+                // left to do.
+                //
+                // **Nor is it a PASS**, and the distinction is the reason
+                // `pass_pending` is not consulted here. A pass is a deliberate
+                // "not me this round" that leaves every other participant's done
+                // vote standing; an errored turn is a participant that could not
+                // speak at all, and letting a crash preserve a tally it never
+                // read would be a halt built on votes cast about a session the
+                // failed participant never saw. `Spoke` clears the tally, which
+                // is the conservative answer of the two.
                 let ending = if is_error {
-                    crate::core::sequencer::TurnEnding { done: false, peer_ack_override: false }
+                    crate::core::sequencer::TurnEnding::SPOKE
                 } else {
                     crate::core::sequencer::turn_ending(
                         peer_ack_pending,
                         peer_ack_final_pending,
+                        pass_pending,
                         &buffer,
                     )
                 };
@@ -613,6 +669,43 @@ pub async fn pump_agent(
                         }
                     }
                 }
+                // A pass gets a ROW, so declining a turn is something the user can
+                // see rather than a gap in the transcript (design §1).
+                //
+                // **Written at the ending, not at the tool call, and BEFORE the
+                // completion goes out.** Both halves are ordering decisions:
+                //
+                // - at the ending, because `turn_ending` may OVERRIDE the pass —
+                //   a row posted when the tool fired would sit above the agent's
+                //   own 900-character review claiming it had nothing to add;
+                // - before the completion, because the completion is what steps
+                //   the ring, and the sequencer reads the next participant's
+                //   backlog straight out of storage. Send first and the two
+                //   become a RACE between this insert and that read — and the
+                //   losing side hands the next participant a backlog with no
+                //   pass in it, so the row surfaces a round late. Awaiting the
+                //   insert first is what removes the race rather than winning
+                //   it; `a_pass_posts_its_row_before_the_completion_goes_out`
+                //   is the pin, and it fails on the reordered form.
+                //
+                // Failure posts nothing and still completes the turn: a lost row
+                // costs visibility, whereas a completion withheld over it would
+                // freeze the ring on this participant for the rest of the
+                // session. Same trade every host injection in this file makes.
+                if matches!(ending, crate::core::sequencer::TurnEnding::Passed) {
+                    match storage
+                        .insert_message(
+                            cfg.session_id.clone(),
+                            cfg.author,
+                            MessageKind::Text,
+                            PASS_NOTICE,
+                        )
+                        .await
+                    {
+                        Ok(m) => cfg.notify_persisted(m.message_id()),
+                        Err(e) => warn!(?e, agent = ?cfg.author, "persisting the pass row"),
+                    }
+                }
                 // B5: tell the ring the turn ended. Sent for BOTH branches and
                 // whether or not there was prose — the sequencer steps on the
                 // completion, not on the text, so a silent turn that never
@@ -625,7 +718,7 @@ pub async fn pump_agent(
                         .send(crate::core::sequencer::SequencerCommand::TurnComplete {
                             participant_id,
                             epoch,
-                            done: ending.done,
+                            ending,
                         })
                         .await
                         .is_err()
@@ -643,6 +736,7 @@ pub async fn pump_agent(
                 // turn (which skips the router) can't leak the flag into the next.
                 peer_ack_pending = false;
                 peer_ack_final_pending = false;
+                pass_pending = false;
                 // Turn ended → this agent is idle, UNLESS we handed off to the
                 // router (which clears it after setting the peer busy, avoiding the
                 // momentary `Idle` flicker that would unlock the input mid-handoff).
@@ -1119,6 +1213,280 @@ mod tests {
         assert!(!is_peer_ack_tool("Edit"));
         assert!(!is_peer_ack_tool("keeper_ack"));
         assert!(!is_peer_ack_tool("speer_ack"));
+    }
+
+    #[test]
+    fn is_pass_turn_tool_matches_bare_and_prefixed() {
+        // Bare alias (tests) + the real MCP-prefixed wire name both match.
+        assert!(is_pass_turn_tool("pass_turn"));
+        assert!(is_pass_turn_tool("mcp__bot-hq-signaling__pass_turn"));
+        // Near-misses. `bypass_turn` is the one that matters: a `contains`
+        // check would read it as a pass and silently throw the turn away.
+        assert!(!is_pass_turn_tool("bypass_turn"));
+        assert!(!is_pass_turn_tool("pass_turn_v2"));
+        assert!(!is_pass_turn_tool("peer_ack"));
+        assert!(!is_pass_turn_tool("Edit"));
+    }
+
+    /// A pass is a ROW plus a completion, and the row lands FIRST.
+    ///
+    /// Both halves are the slice's contract. The row is what makes the pass
+    /// visible (design §1) and it carries `origin = 'participant'` (rc3
+    /// decisions, locked) — asserted here through `unread_for_participant`,
+    /// which is the peer's real read path, so the row is proven visible to the
+    /// other participant and not merely present in a table.
+    ///
+    /// **The ordering is enforced by a channel with no room left**, which is
+    /// what makes it an assertion rather than a hope. The sequencer channel is
+    /// pre-filled to capacity, so the pump's completion send PARKS. If the row
+    /// were written after the send, the pump would be parked before writing it
+    /// and the poll below would time out; the row appearing while the
+    /// completion is still un-enqueued is the proof it was written first.
+    ///
+    /// That ordering is not cosmetic: the completion is what steps the ring,
+    /// and the sequencer reads the next participant's backlog straight out of
+    /// storage. Written after the send, the insert races that read, and the
+    /// losing side surfaces the pass a round late.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pass_posts_its_row_before_the_completion_goes_out() {
+        let (storage, state) = setup().await;
+        // `create_session` seeds no roster; the participants have to exist for
+        // the row to resolve to one.
+        storage.ensure_session_roster("s1").await.unwrap();
+        let brian = storage
+            .participant_by_slug("s1", "brian")
+            .await
+            .unwrap()
+            .expect("ensure_session_roster seeds brian")
+            .id;
+        let rain = storage
+            .participant_by_slug("s1", "rain")
+            .await
+            .unwrap()
+            .expect("ensure_session_roster seeds rain")
+            .id;
+
+        let (seq_tx, mut seq_rx) = mpsc::channel(1);
+        // The one slot, spent. Anything the pump sends now has to wait.
+        seq_tx
+            .send(crate::core::sequencer::SequencerCommand::UserMessage)
+            .await
+            .unwrap();
+        let cfg = DuoConfig {
+            participant_id: Some(brian),
+            sequencer_tx: Some(seq_tx),
+            ..fast_cfg(Author::Brian)
+        };
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_pass".into(),
+                name: "mcp__bot-hq-signaling__pass_turn".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: None,
+            })
+            .await
+            .unwrap();
+
+        // Wait for the row WHILE the completion cannot yet be delivered.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let row = loop {
+            let unread = storage.unread_for_participant(rain).await.unwrap();
+            if let Some(r) = unread.rows.iter().find(|r| r.content.contains("passed")) {
+                break r.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no pass row within 2s — the pump is parked on the full sequencer \
+                 channel, which means the completion was sent before the row was written"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(row.origin, "participant", "rc3: a pass row is the participant's");
+        assert_eq!(row.participant_id, Some(brian), "and attributed to the passer");
+        assert_eq!(row.kind, "text");
+
+        // Now let the completion through and read what it says.
+        assert!(matches!(
+            next_wire(&mut seq_rx).await,
+            crate::core::sequencer::SequencerCommand::UserMessage
+        ));
+        match next_wire(&mut seq_rx).await {
+            crate::core::sequencer::SequencerCommand::TurnComplete {
+                participant_id,
+                ending,
+                ..
+            } => {
+                assert_eq!(participant_id, brian);
+                assert_eq!(
+                    ending,
+                    crate::core::sequencer::TurnEnding::Passed,
+                    "the tool has to reach the ring as a PASS, not a done vote"
+                );
+            }
+            other => panic!("expected a TurnComplete, got {other:?}"),
+        }
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    /// A turn that calls `pass_turn` and then writes a substantive review is
+    /// NOT a pass: the text wins, the ring is told `Spoke`, and no pass row is
+    /// posted claiming the participant had nothing to add.
+    ///
+    /// The row half matters as much as the ending. `Passed` is the one ending
+    /// that leaves other participants' done votes standing, so a review read as
+    /// a pass would both mislabel the transcript and carry a stale tally over
+    /// the top of real output.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_substantive_turn_overrides_its_own_pass() {
+        let (storage, state) = setup().await;
+        storage.ensure_session_roster("s1").await.unwrap();
+        let brian = storage
+            .participant_by_slug("s1", "brian")
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+
+        let (seq_tx, mut seq_rx) = mpsc::channel(8);
+        let cfg = DuoConfig {
+            participant_id: Some(brian),
+            sequencer_tx: Some(seq_tx),
+            ..fast_cfg(Author::Brian)
+        };
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        let review = format!("BLOCKING: {}", "the retry loop never backs off. ".repeat(12));
+        assert!(review.len() > 200, "the body has to clear the content-free floor");
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_pass".into(),
+                name: "pass_turn".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        ev_tx.send(AgentEvent::Text(review.clone())).await.unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: None,
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        match next_wire(&mut seq_rx).await {
+            crate::core::sequencer::SequencerCommand::TurnComplete { ending, .. } => assert_eq!(
+                ending,
+                crate::core::sequencer::TurnEnding::SPOKE,
+                "a turn carrying a review is substantive output, pass or no pass"
+            ),
+            other => panic!("expected a TurnComplete, got {other:?}"),
+        }
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(
+            msgs.iter().any(|m| m.content.contains("BLOCKING")),
+            "the review itself is persisted"
+        );
+        assert!(
+            !msgs.iter().any(|m| m.content.contains("nothing to add")),
+            "an overridden pass must post NO row — it would contradict the review \
+             sitting next to it"
+        );
+    }
+
+    /// The pass flag is per-turn. Turn 1 passes, turn 2 says something — and
+    /// turn 2 must not inherit the pass.
+    ///
+    /// A leaked flag is not a cosmetic bug: `Passed` leaves the tally standing,
+    /// so a substantive turn wearing a stale pass would carry votes cast before
+    /// it into the next consensus check.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_pass_flag_does_not_leak_into_the_next_turn() {
+        let (storage, state) = setup().await;
+        storage.ensure_session_roster("s1").await.unwrap();
+        let brian = storage
+            .participant_by_slug("s1", "brian")
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+
+        let (seq_tx, mut seq_rx) = mpsc::channel(8);
+        let cfg = DuoConfig {
+            participant_id: Some(brian),
+            sequencer_tx: Some(seq_tx),
+            ..fast_cfg(Author::Brian)
+        };
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        let complete = || AgentEvent::TurnComplete {
+            stop_reason: None,
+            subtype: None,
+            is_error: false,
+            api_error_status: None,
+            context: None,
+        };
+        // Turn 1: a bare pass.
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_pass".into(),
+                name: "pass_turn".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        ev_tx.send(complete()).await.unwrap();
+        // Turn 2: short prose, no pass. Short on purpose — it is under the
+        // content-free floor, so ONLY a leaked flag could make it a pass.
+        ev_tx.send(AgentEvent::Text("on it".into())).await.unwrap();
+        ev_tx.send(complete()).await.unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let endings: Vec<_> = std::iter::from_fn(|| match seq_rx.try_recv() {
+            Ok(crate::core::sequencer::SequencerCommand::TurnComplete { ending, .. }) => {
+                Some(ending)
+            }
+            _ => None,
+        })
+        .collect();
+        assert_eq!(
+            endings,
+            vec![
+                crate::core::sequencer::TurnEnding::Passed,
+                crate::core::sequencer::TurnEnding::SPOKE
+            ],
+            "turn 2 called nothing, so it is ordinary output"
+        );
+        let passes = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.content.contains("nothing to add"))
+            .count();
+        assert_eq!(passes, 1, "exactly one pass row, from turn 1");
     }
 
     #[tokio::test(flavor = "current_thread")]

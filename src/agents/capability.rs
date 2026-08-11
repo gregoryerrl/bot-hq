@@ -298,7 +298,17 @@ mod tests {
     fn ungated_tools_are_allowed_to_everyone() {
         // Over-gating is a parity break too, and a quieter one.
         let empty = CapabilitySet::default();
-        for tool in ["session_doc_write", "cl_retrieve", "check_open_findings", "peer_ack"] {
+        for tool in [
+            "session_doc_write",
+            "cl_retrieve",
+            "check_open_findings",
+            "peer_ack",
+            // Declining a turn is available to anything that can hold one, so
+            // an EMPTY capability set must still admit it. A role that could
+            // not pass would be pushed back onto the two endings the pass
+            // exists to replace — a false done vote, or filler.
+            "pass_turn",
+        ] {
             assert!(empty.allows_tool(tool), "{tool} is ungated today");
         }
     }

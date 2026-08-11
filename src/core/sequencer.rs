@@ -131,19 +131,43 @@
 //!
 //! ## The halt is a yield, not a stop
 //!
-//! Every accepted completion carries a vote —
-//! [`TurnComplete`](SequencerCommand::TurnComplete)'s `done` — and
+//! Every accepted completion carries how it ended —
+//! [`TurnComplete`](SequencerCommand::TurnComplete)'s [`TurnEnding`] — and
 //! [`halted_on_consensus`] records it and asks
 //! [`Storage::all_active_voted_done`] BEFORE the ring is stepped. Arriving
 //! means waking nobody, so a step taken first would have to be taken back.
 //! **`all_active_voted_done` is the halt test and the only one**; the ring's
 //! own `None` is "nobody to wake" and is not a substitute, as above.
 //!
+//! **One of the three endings carries no vote at all.**
+//! [`TurnEnding::Passed`] — the design's PASS — steps the ring, sets nothing
+//! and clears nothing but the passer's own stale vote, so a ring in which every
+//! participant passes can never halt by consensus. That is the intended
+//! reading, not an oversight: a pass says "not me this round", and a session
+//! where nobody has anything to say has not arrived anywhere.
+//!
+//! **Nothing in this file bounds such a ring**, and the list of what does is
+//! short and worth being exact about, because the obvious candidate is NOT on
+//! it. A [`UserMessage`](SequencerCommand::UserMessage) does not end an
+//! all-pass ring — it resets the cycle to the front and hands out another turn,
+//! which is a redirect, not a stop. What actually stops it is
+//! [`Pause`](SequencerCommand::Pause), a
+//! [`QuestionParked`](SequencerCommand::QuestionParked), the command channel
+//! closing (the session going away), or a participant that stops completing
+//! turns at all — a dead process leaves the turn in flight for ever, which ends
+//! the spend by wedging rather than by deciding. Spin detection is deliberately
+//! not among them: [`TurnEnding::Passed`] skips it, for the false positive
+//! named at that call site.
+//!
+//! The round cap that would bound this mechanically is a separate unshipped
+//! slice (rc3 decisions D2 — default 500, `0` = off).
+//!
 //! That paragraph is about the CONSENSUS halt, which is a tally. The other halt
 //! reason — a parked question — is not, and has its own section below.
 //!
 //! Two things reset the tally, both of them substantive output: a completion
-//! with `done: false`, and a [`UserMessage`](SequencerCommand::UserMessage).
+//! ending [`TurnEnding::Spoke`], and a
+//! [`UserMessage`](SequencerCommand::UserMessage).
 //! The reset is session-wide, not per-participant, because a vote cast before
 //! someone else spoke was a statement about a session that no longer exists —
 //! left standing, one stale done and one fresh one add up to an arrival nobody
@@ -159,8 +183,8 @@
 //! where the tally arriving at the front is non-empty for a reason other than
 //! "the user spoke over a turn". `a_parked_question_halts_the_cycle_unilaterally`
 //! is the test: it parks with one `done` standing and then requires the first
-//! `done: true` of the restarted cycle to STEP the ring rather than complete a
-//! tally of two.
+//! [`TurnEnding::Done`] of the restarted cycle to STEP the ring rather than
+//! complete a tally of two.
 //!
 //! The reset's own two halves are pinned separately —
 //! `a_user_message_resets_the_cycle_to_the_first_participant` for the ring, on a
@@ -559,12 +583,13 @@
 //! by a drain. The earlier enumeration was one short there, and it looked for a
 //! pair of DIFFERENT commands besides: a join is observed through a backlog the
 //! resume's own delivery has already drained, which is where it stopped. The
-//! pair that works is a completion twice over, differing only in `done` — one
-//! completes a tally the other clears — so exactly one of them is ever
-//! dispatched, and which one decides whether a participant is woken.
+//! pair that works is a completion twice over, differing only in its
+//! [`TurnEnding`] — one completes a tally the other clears — so exactly one of
+//! them is ever dispatched, and which one decides whether a participant is
+//! woken.
 //! `the_replay_is_dispatched_ahead_of_what_the_drain_had_already_deferred`
-//! builds it: `X = TurnComplete{A, 3, done: true}` halts the cycle on a vote B
-//! already cast, `Y = TurnComplete{A, 3, done: false}` clears that tally and
+//! builds it: `X = TurnComplete{A, 3, Done}` halts the cycle on a vote B
+//! already cast, `Y = TurnComplete{A, 3, Spoke}` clears that tally and
 //! hands B a turn. Behind-spliced it fails with `expected no wire, got "row 0"`,
 //! and it is the only test in this file that does.
 //!
@@ -694,19 +719,28 @@ pub struct SequencerDeps {
 pub enum SequencerCommand {
     /// The turn identified by `epoch` finished — advance the ring.
     ///
-    /// **`done` is the consensus vote**, and it is a field on this command
-    /// rather than a command of its own. A turn ends exactly once and ends one
-    /// of two ways — substantive output, or nothing left to do — so the vote is
-    /// a property of the ending, not a second event. Split into
-    /// `TurnComplete` + `Done`, both would mean "my turn ended", both would
+    /// **`ending` carries the consensus vote**, and it is a field on this
+    /// command rather than a command of its own. A turn ends exactly once, so
+    /// what it meant is a property of the ending, not a second event. Split
+    /// into `TurnComplete` + `Done`, both would mean "my turn ended", both would
     /// need this same two-field guard, and both would have to step the ring;
     /// a sender that emitted the pair would then step it twice and put two
     /// participants on a turn at once, which is the one invariant this loop
     /// exists to keep. One field keeps "one accepted completion, one ring step,
     /// one vote" true by construction.
     ///
-    /// `done: false` is substantive output and RESETS the tally for the whole
-    /// session — see [`halted_on_consensus`]. The vote is recorded only for a
+    /// **The pass (design §1) widened this field rather than adding a fourth
+    /// command**, for exactly that reason: a `TurnPassed` alongside this one
+    /// would be a second thing meaning "my turn ended", needing the same guard
+    /// and taking the same ring step. [`TurnEnding`] is still ONE field, and it
+    /// is still the derived MEANING rather than the signals behind it — a
+    /// sender handed `(peer_ack, peer_ack_final, passed, body)` would have four
+    /// fields to disagree about instead of one, and the decision would move
+    /// into this loop. [`turn_ending`] is where it is made.
+    ///
+    /// [`TurnEnding::Spoke`] is substantive output and RESETS the tally for the
+    /// whole session; [`TurnEnding::Passed`] resets nothing and counts as
+    /// nothing — see [`halted_on_consensus`]. The vote is recorded only for a
     /// completion that passes the guard below, for the same reason the ring is
     /// only stepped for one.
     ///
@@ -763,7 +797,7 @@ pub enum SequencerCommand {
     TurnComplete {
         participant_id: i64,
         epoch: u64,
-        done: bool,
+        ending: TurnEnding,
     },
     /// The user posted to the channel. Resets the cycle to the first active
     /// participant and hands it the turn.
@@ -1023,7 +1057,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
             SequencerCommand::TurnComplete {
                 participant_id,
                 epoch: completed,
-                done,
+                ending,
             } => {
                 // The completion has to name the turn in flight: the same
                 // participant AND the same turn.
@@ -1054,7 +1088,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     // about a turn that no longer exists — counting it would
                     // let a discarded completion do the one thing discarding it
                     // was meant to prevent.
-                    if !halted_on_consensus(&deps, &mut holder, &mut epoch, participant_id, done)
+                    if !halted_on_consensus(&deps, &mut holder, &mut epoch, participant_id, ending)
                         .await
                     {
                         // Spin is a property of SUBSTANTIVE output. A `done`
@@ -1065,7 +1099,22 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         // read is skipped with it, so prose from a done-voting
                         // turn folds into the next substantive comparison
                         // instead of being dropped.
-                        if !done && spinning(&deps, &mut spin, participant_id).await {
+                        //
+                        // **A pass is skipped for the same reason, and the
+                        // false positive it avoids is the sharper one.** A pass
+                        // is the sanctioned way to stay quiet, so its rows are
+                        // near-identical BY DESIGN — the one shape the Jaccard
+                        // test cannot tell from a participant that is stuck. A
+                        // reviewer passing while an executor works productively
+                        // would trip the streak within three rounds and halt a
+                        // healthy cycle, which is the "punishes long-but-
+                        // productive work as a false positive" the design names
+                        // when it rejects a round cap as the wrong instrument.
+                        // `a_participant_that_passes_every_round_never_trips_spin_detection`
+                        // is that case.
+                        if ending.is_substantive()
+                            && spinning(&deps, &mut spin, participant_id).await
+                        {
                             // The router BROKE THE VOLLEY and unlocked input. In
                             // a ring that is a halt — the same yield the parked
                             // question takes: stop handing out turns and let the
@@ -1481,6 +1530,15 @@ async fn advance_turn(
 /// NOT step the ring — the turn is already cleared here. See "the halt is a
 /// yield, not a stop" in the module doc for what that leaves observable.
 ///
+/// **A [`TurnEnding::Passed`] can only ever answer `false` while the passing
+/// participant is still in the active rotation**, because the write above
+/// leaves that participant's vote at 0 and the query below wants every active
+/// vote set. The one state where a pass returns `true` is a passer that is no
+/// longer active — disabled mid-turn — with every remaining active voted done,
+/// and that is a genuine arrival among the participants who are left. The query
+/// is asked for all three endings rather than skipped for the pass so that case
+/// has an answer at all.
+///
 /// **A storage failure answers `false`.** Neither error is a vote, and of the
 /// two ways to be wrong the cycle continuing is the recoverable one: a spurious
 /// extra lap costs a turn and the participant votes again, whereas a halt
@@ -1492,24 +1550,41 @@ async fn halted_on_consensus(
     holder: &mut Option<Participant>,
     epoch: &mut u64,
     participant_id: i64,
-    done: bool,
+    ending: TurnEnding,
 ) -> bool {
-    let recorded = if done {
-        deps.storage.set_done_vote(participant_id, true).await
-    } else {
+    let recorded = match ending {
+        TurnEnding::Done => deps.storage.set_done_vote(participant_id, true).await,
         // Substantive output resets the tally for the WHOLE session, not just
         // for this participant. A done cast before this turn was a statement
         // about a session that no longer exists — see
         // `substantive_output_resets_the_tally` for the arithmetic that lets
         // one stale vote and one fresh one add up to an arrival nobody voted
         // for.
-        deps.storage.clear_done_votes(&deps.session_id).await
+        TurnEnding::Spoke { .. } => deps.storage.clear_done_votes(&deps.session_id).await,
+        // **A pass casts no vote, and RETRACTS its own.**
+        //
+        // Neither half is decoration. Casting nothing is what keeps a pass from
+        // completing the tally, which is the whole point of the ending. The
+        // retraction is what keeps a pass from completing it by ACCIDENT: the
+        // vote column is per-participant and survives across rounds, so a
+        // participant that voted done last round and passes this one would
+        // still be counted as done, and the tally would complete on a turn
+        // whose whole meaning was "not me". That path is reachable, not
+        // theoretical — `a_pass_retracts_the_passers_own_stale_done_vote`
+        // builds it out of two done votes and two passes.
+        //
+        // It retracts ONLY its own. Clearing the session (what `Spoke` does)
+        // would make a pass behaviourally identical to the filler turn it
+        // exists to replace: a participant with nothing to say would still be
+        // wiping everyone else's converged votes, which is the second of the
+        // two bad endings the design names.
+        TurnEnding::Passed => deps.storage.set_done_vote(participant_id, false).await,
     };
     if let Err(e) = recorded {
         warn!(
             session = %deps.session_id,
             participant_id,
-            done,
+            ?ending,
             error = %e,
             "sequencer: done vote not recorded; continuing the cycle"
         );
@@ -2039,15 +2114,75 @@ async fn spinning(
 /// retune.
 const PEER_ACK_MAX_SUPPRESSED_LEN: usize = 200;
 
-/// What a completed turn means.
-#[derive(Debug, PartialEq, Eq)]
-pub struct TurnEnding {
-    /// The consensus vote — [`SequencerCommand::TurnComplete::done`].
-    pub done: bool,
-    /// The ack was overridden because the turn carried substantive text. The
-    /// row records it via `Envelope::with_peer_ack_override`, so the override is
-    /// something the user can see rather than a sentence spliced onto the body.
-    pub peer_ack_override: bool,
+/// What a completed turn means — the three ways a turn can end.
+///
+/// **Three variants rather than two booleans, because two of the three are
+/// mutually exclusive claims about the tally** and a pair of flags would let a
+/// sender assert both. `done` says "I have nothing left to do" and COUNTS
+/// toward the consensus halt; `Passed` says "not me this round" and counts
+/// toward nothing. A struct carrying both could be handed to the loop with each
+/// set, and the loop would have to invent a precedence rule at the point where
+/// it is least visible. Here the precedence is decided once, in
+/// [`turn_ending`], and the result cannot express the contradiction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnEnding {
+    /// The turn carried substantive text. Steps the ring and RESETS the tally
+    /// for the whole session — see [`halted_on_consensus`].
+    Spoke {
+        /// A `peer_ack` was overridden because the turn carried substantive
+        /// text. The row records it via `Envelope::with_peer_ack_override`, so
+        /// the override is something the user can see rather than a sentence
+        /// spliced onto the body. **No ring behaviour reads it** — it decorates
+        /// the row and nothing else, which is why it rides the variant that is
+        /// otherwise indistinguishable from a plain substantive ending.
+        peer_ack_override: bool,
+    },
+    /// Nothing left to do — the consensus vote.
+    Done,
+    /// **PASS: this participant declines the turn** (design §1, "a participant
+    /// may PASS rather than burn a turn").
+    ///
+    /// Not [`Done`](Self::Done), and the difference is the whole reason the
+    /// variant exists. Before it, a participant with nothing to say had two
+    /// endings available and both were wrong: vote done — which feeds the tally
+    /// and walks the session toward an arrival nobody actually reached — or
+    /// emit filler. The filler cost is on the record in `PROGRESS.md`
+    /// (2026-08-04): a reviewer woken with nothing attached answered `"Old plan
+    /// — holding for Brian's plan"`, 40 chars, and each such turn burned a slot
+    /// of the volley budget that was already being exhausted before substantive
+    /// reviews could get through. A pass is the third ending: it steps the
+    /// ring, casts no vote, and cannot complete consensus.
+    ///
+    /// Not `Spoke` either: a pass is by construction not substantive, so it
+    /// must not reset a tally the way real output does. Making it reset would
+    /// leave it behaviourally identical to the filler it replaces.
+    Passed,
+}
+
+impl TurnEnding {
+    /// The ordinary ending — substantive output with no ack to override.
+    ///
+    /// A named constant because it is what an errored turn ends as and what
+    /// nearly every test sends, and `Spoke { peer_ack_override: false }` puts
+    /// the one field no ring behaviour reads in front of the one it does.
+    pub const SPOKE: TurnEnding = TurnEnding::Spoke { peer_ack_override: false };
+
+    /// Did this turn produce substantive output?
+    ///
+    /// **One caller — spin detection** — so this is naming, not sharing. The
+    /// tally reset in [`halted_on_consensus`] answers the same question but
+    /// does it by matching all three arms, because it has a different action
+    /// for each; folding it into this predicate would leave the pass and the
+    /// done vote sharing a branch they do not share.
+    ///
+    /// A method rather than an inline `matches!` because the call site reads
+    /// `if ending.is_substantive() && spinning(..)`, and the whole point of
+    /// that line is WHICH endings are judged for repetition. Written inline it
+    /// says which variant is excluded, which is the same fact with the reason
+    /// removed.
+    fn is_substantive(self) -> bool {
+        matches!(self, TurnEnding::Spoke { .. })
+    }
 }
 
 /// Derive a turn's ending from the `peer_ack` signals it carried.
@@ -2078,14 +2213,50 @@ pub struct TurnEnding {
 /// Safe in a way the router's version had to argue for: suppression there
 /// skipped the wake but never the record, and here there is no suppression at
 /// all. The text is a row before this is ever consulted.
-pub fn turn_ending(peer_ack: bool, peer_ack_final: bool, body: &str) -> TurnEnding {
+///
+/// # The pass (design §1)
+///
+/// `passed` is the `pass_turn` tool, observed by the pump exactly as `peer_ack`
+/// is. It is folded in HERE rather than decided in the pump for the reason the
+/// four rows above are: a turn ends one way, and the one place that says which
+/// way is this function.
+///
+/// Two rules, and both are decisions rather than mechanics:
+///
+/// - **A pass over the length floor is OVERRIDDEN**, the same way an ack is
+///   (#9). The failure it prevents is arithmetic, not editorial: `Passed` is
+///   the one ending that does NOT reset the tally, so a substantive turn read
+///   as a pass would carry a done vote cast before it straight over the top of
+///   real output — the exact "one stale vote and one fresh one add up to an
+///   arrival nobody voted for" that `substantive_output_resets_the_tally`
+///   exists to stop. **The overridden pass carries no tag** (rc3 decisions,
+///   locked): #9's ack tag says "your ack did not land"; there is no equivalent
+///   claim to make here, because the row IS the turn's own text.
+/// - **A pass outranks an ack when a turn calls both.** They disagree — the ack
+///   casts a done vote, the pass casts nothing — so one has to win, and the
+///   pass does. Of the two ways to be wrong, an extra lap costs a turn and the
+///   participant votes again, whereas a halt nobody voted for parks the session
+///   waiting on a user who was never told they are being waited on. Same
+///   instinct as [`halted_on_consensus`]'s storage-failure arm.
+///
+/// The pass gate is a PREFIX guarded by `passed`, so with `passed == false`
+/// this function is byte-for-byte the ladder it was: #8-#11 are untouched, not
+/// merely re-verified.
+pub fn turn_ending(peer_ack: bool, peer_ack_final: bool, passed: bool, body: &str) -> TurnEnding {
+    // Trimmed before measuring, like the router — whitespace must not push a
+    // content-free turn over the floor. One reading, shared by both ladders, so
+    // a pass and an ack cannot disagree about what "content-free" means.
+    let content_free = body.trim().len() <= PEER_ACK_MAX_SUPPRESSED_LEN;
+    if passed && content_free {
+        return TurnEnding::Passed;
+    }
     if !peer_ack {
-        return TurnEnding { done: false, peer_ack_override: false };
+        return TurnEnding::SPOKE;
     }
-    if peer_ack_final || body.trim().len() <= PEER_ACK_MAX_SUPPRESSED_LEN {
-        return TurnEnding { done: true, peer_ack_override: false };
+    if peer_ack_final || content_free {
+        return TurnEnding::Done;
     }
-    TurnEnding { done: false, peer_ack_override: true }
+    TurnEnding::Spoke { peer_ack_override: true }
 }
 
 #[cfg(test)]
@@ -2109,6 +2280,18 @@ mod tests {
     /// Short — it is paid on every `quiet()` call — but well past the
     /// in-process delivery these tests measure in microseconds.
     const QUIET: Duration = Duration::from_millis(250);
+
+    /// The three endings, named for the command literals below.
+    ///
+    /// Aliases rather than the paths themselves because a `TurnComplete` is
+    /// already three fields on one line in ~50 tests, and
+    /// `TurnEnding::Spoke { peer_ack_override: false }` would put the field NO
+    /// ring behaviour reads (it decorates the row) in front of the one every
+    /// one of those tests is about. `PASSED` is spelled out at its own call
+    /// sites for the same reason in reverse — it is the subject there.
+    const SPOKE: TurnEnding = TurnEnding::SPOKE;
+    const DONE: TurnEnding = TurnEnding::Done;
+    const PASSED: TurnEnding = TurnEnding::Passed;
 
     /// The default stubbed stdin buffer.
     ///
@@ -2344,7 +2527,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
-                done: false,
+                ending: SPOKE,
             },
         )
         .await;
@@ -2390,7 +2573,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
-                done: false,
+                ending: SPOKE,
             },
         )
         .await;
@@ -2426,7 +2609,7 @@ mod tests {
         assert_eq!(seats[0].expect(1).await, vec!["r1"]);
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         assert_eq!(seats[1].expect(1).await, vec!["r1"], "B now holds the turn");
@@ -2440,7 +2623,7 @@ mod tests {
         // B's turn ends, late.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: false },
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: SPOKE },
         )
         .await;
         drop(tx);
@@ -2488,7 +2671,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
-                done: false,
+                ending: SPOKE,
             },
         )
         .await;
@@ -2506,7 +2689,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 2,
-                done: false,
+                ending: SPOKE,
             },
         )
         .await;
@@ -2555,7 +2738,7 @@ mod tests {
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         assert_eq!(
@@ -2613,7 +2796,7 @@ mod tests {
         // arriving rather than the first one halting everything.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: true },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: DONE },
         )
         .await;
         assert_eq!(
@@ -2636,7 +2819,7 @@ mod tests {
         // nothing substantive between the two votes, so the session yields.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: true },
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: DONE },
         )
         .await;
         seats[0].quiet().await;
@@ -2661,7 +2844,7 @@ mod tests {
         // below are two independent observations of the same discard.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: false },
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: SPOKE },
         )
         .await;
         seats[0].quiet().await;
@@ -2688,6 +2871,249 @@ mod tests {
         assert!(exited(task).await);
     }
 
+    /// **A pass cannot complete the tally**, which is the property the whole
+    /// third ending exists for (design §1; rc3 decisions).
+    ///
+    /// The shape is the sharpest one available on a ring of two: A votes done,
+    /// so the tally is one vote short, and B — the participant whose vote would
+    /// complete it — passes instead. Read as a done vote that is consensus and
+    /// the session halts; read as a pass it is a session where one participant
+    /// is finished and the other simply had nothing this round, which has not
+    /// arrived anywhere.
+    ///
+    /// The wake at the end is what makes the assertion positive rather than a
+    /// silence that could mean anything.
+    #[tokio::test]
+    async fn a_pass_does_not_complete_the_consensus_tally() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // One vote of two. The tally now needs exactly B.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: DONE },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"]);
+
+        // The pass row the pump posts alongside the completion (`duo.rs`
+        // PASS_NOTICE). Posted here because the sequencer writes no rows — and
+        // it is also what gives A something unread to be woken WITH, so the
+        // wake below is a real observation rather than an empty-backlog no-op.
+        post(&storage, "participant", Some("b"), "(passed — nothing to add this round)").await;
+
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: PASSED },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["(passed — nothing to add this round)"],
+            "B passed rather than voting done, so the cycle continues to A"
+        );
+        assert!(
+            !storage.all_active_voted_done("s1").await.unwrap(),
+            "a pass casts NO vote — the tally is still one short in the roster, \
+             which is where a host reads it"
+        );
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// A pass **retracts the passer's own done vote**, and this is the case
+    /// where that matters: without it, a vote cast two rounds ago is still
+    /// standing when the other participants converge, and the session halts on
+    /// an arrival its own passer had already withdrawn from.
+    ///
+    /// Built out of two passes and two done votes on a ring of two:
+    ///
+    /// | step | ending | votes after |
+    /// |---|---|---|
+    /// | A, epoch 1 | `Done` | A=1 B=0 |
+    /// | B, epoch 2 | `Passed` | A=1 B=0 |
+    /// | A, epoch 3 | `Passed` | **A=0** B=0 |
+    /// | B, epoch 4 | `Done` | A=0 B=1 → no consensus |
+    ///
+    /// Drop the retraction and the last row reads A=1 B=1, so the cycle halts
+    /// on epoch 4 and the final wake never arrives.
+    #[tokio::test]
+    async fn a_pass_retracts_the_passers_own_stale_done_vote() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: DONE },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"]);
+
+        post(&storage, "participant", Some("b"), "b passes").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: PASSED },
+        )
+        .await;
+        assert_eq!(seats[0].expect(1).await, vec!["b passes"]);
+
+        // A passes on top of its OWN done vote from epoch 1. That vote is what
+        // this turn supersedes.
+        post(&storage, "participant", Some("a"), "a passes").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, ending: PASSED },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["a passes"]);
+        assert!(
+            !storage.all_active_voted_done("s1").await.unwrap(),
+            "A's epoch-1 vote is gone: A itself replaced it with a pass"
+        );
+
+        // B now votes done. With A's vote retracted this is one of two and the
+        // ring steps; with it standing it would be the second of two and halt.
+        post(&storage, "system", None, "host note").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 4, ending: DONE },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["host note"],
+            "B's done vote is the FIRST of two, not the second — A withdrew its own"
+        );
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **A ring where everyone passes never halts by consensus, and nothing in
+    /// this file bounds it.** Stated as a test rather than a comment because it
+    /// is the shape a reader will most want reassurance about, and the honest
+    /// answer is that the reassurance does not exist yet.
+    ///
+    /// Three full rounds of nothing but passes, and every one of them hands out
+    /// the next turn. Note what does NOT stop it: a user message resets the
+    /// cycle to the front and hands out another turn, so the steer redirects
+    /// this ring rather than ending it. The module doc lists what actually
+    /// does. The mechanical backstop is the round cap (rc3 decisions D2,
+    /// default 500, `0` = off), which is a separate unshipped slice and
+    /// deliberately not built here.
+    ///
+    /// Note what the rounds cost: each pass is a ROW, so the next participant
+    /// always has something unread and is always woken. An all-pass ring is
+    /// therefore not self-limiting through an empty backlog either — it is a
+    /// real spend, which is precisely why the cap is owed.
+    #[tokio::test]
+    async fn a_ring_where_everyone_passes_never_halts_by_consensus() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        let mut epoch = 1u64;
+        for round in 0..3 {
+            for (holder, slug, seat) in [(a, "a", 1usize), (b, "b", 0usize)] {
+                let row = format!("{slug} passes, round {round}");
+                post(&storage, "participant", Some(slug), &row).await;
+                send(
+                    &tx,
+                    SequencerCommand::TurnComplete {
+                        participant_id: holder,
+                        epoch,
+                        ending: PASSED,
+                    },
+                )
+                .await;
+                epoch += 1;
+                // B has never been woken before this first step, so its cursor
+                // is still behind the user's message. Every later wake carries
+                // one row, because a pass posts exactly one and a participant
+                // never reads its own.
+                let mut expected = Vec::new();
+                if epoch == 2 {
+                    expected.push("go".to_string());
+                }
+                expected.push(row);
+                // The wire is the proof: the ring handed the turn on rather
+                // than halting. A silence here would be the failure.
+                let got = seats[seat].expect(expected.len()).await;
+                assert_eq!(got, expected, "round {round}: the ring must keep turning");
+                assert!(
+                    !storage.all_active_voted_done("s1").await.unwrap(),
+                    "round {round}: passes never accumulate into an arrival"
+                );
+            }
+        }
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// A participant that passes every round must NOT trip spin detection.
+    ///
+    /// Its rows are near-identical by design — that is what a pass IS — so the
+    /// Jaccard test cannot tell it from a participant that is stuck, and the
+    /// two mean opposite things. The case that would break is the ordinary one:
+    /// a reviewer passing while an executor works productively. Three identical
+    /// passes is one more than `SPIN_BREAK_STREAK` needs, so a detector fed by
+    /// passes would have halted before the last wake below.
+    ///
+    /// `a_participant_repeating_itself_across_rounds_is_flagged` is the same
+    /// shape with `SPOKE` in place of `PASSED`, and it DOES halt — which is
+    /// what makes this a decision about the ending rather than a detector that
+    /// stopped working.
+    #[tokio::test]
+    async fn a_participant_that_passes_every_round_never_trips_spin_detection() {
+        const SAME: &str = "(passed — nothing to add this round)";
+
+        let (deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        for (epoch, tick) in [(1u64, "tick one"), (2, "tick two"), (3, "tick three")] {
+            post(&storage, "participant", Some("a"), SAME).await;
+            post(&storage, "system", None, tick).await;
+            send(
+                &tx,
+                SequencerCommand::TurnComplete { participant_id: a, epoch, ending: PASSED },
+            )
+            .await;
+            assert_eq!(
+                seats[0].expect(1).await,
+                vec![tick],
+                "an identical pass is not a spin (epoch {epoch})"
+            );
+        }
+
+        drop(tx);
+        assert!(exited(task).await, "no halt, so the loop is still draining");
+    }
+
     #[tokio::test]
     async fn substantive_output_resets_the_tally() {
         // The stale-done case. A votes done, then B speaks — and a vote cast
@@ -2711,7 +3137,7 @@ mod tests {
         // The vote that must not survive what follows.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: true },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: DONE },
         )
         .await;
         assert_eq!(seats[1].expect(1).await, vec!["go"]);
@@ -2722,7 +3148,7 @@ mod tests {
         post(&storage, "participant", Some("b"), "b found something").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: false },
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: SPOKE },
         )
         .await;
         assert_eq!(
@@ -2742,7 +3168,7 @@ mod tests {
         post(&storage, "participant", Some("a"), "a replied").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, ending: SPOKE },
         )
         .await;
         assert_eq!(seats[1].expect(1).await, vec!["a replied"]);
@@ -2754,7 +3180,7 @@ mod tests {
         // so the ring comes back to A instead of the session halting.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 4, done: true },
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 4, ending: DONE },
         )
         .await;
         assert_eq!(
@@ -2768,7 +3194,7 @@ mod tests {
         // not make it unreachable. A votes done on top of B's live vote.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 5, done: true },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 5, ending: DONE },
         )
         .await;
         seats[0].quiet().await;
@@ -2814,7 +3240,7 @@ mod tests {
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2, B holds");
@@ -2824,7 +3250,7 @@ mod tests {
         post(&storage, "user", None, "note for a").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: true },
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: DONE },
         )
         .await;
         assert_eq!(
@@ -2902,7 +3328,7 @@ mod tests {
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2, B holds");
@@ -2912,7 +3338,7 @@ mod tests {
         post(&storage, "user", None, "note for a").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: true },
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: DONE },
         )
         .await;
         assert_eq!(
@@ -2931,7 +3357,7 @@ mod tests {
         // standing it is two of two and B is never woken at all.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 4, done: true },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 4, ending: DONE },
         )
         .await;
         assert_eq!(
@@ -2951,7 +3377,7 @@ mod tests {
         post(&storage, "participant", Some("b"), "b's answer").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 5, done: false },
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 5, ending: SPOKE },
         )
         .await;
         assert_eq!(
@@ -2989,7 +3415,7 @@ mod tests {
         // A's done vote — the tally the user's message has to clear.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: true },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: DONE },
         )
         .await;
         assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2, B holds");
@@ -3028,7 +3454,7 @@ mod tests {
             .unwrap();
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: true },
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: DONE },
         )
         .await;
         assert_eq!(
@@ -3043,7 +3469,7 @@ mod tests {
         // spoke, and it counts. A's done makes two of two.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: true },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, ending: DONE },
         )
         .await;
         seats[0].quiet().await;
@@ -3084,7 +3510,7 @@ mod tests {
         // B is not holding the turn and epoch 0 is spent. Discarded.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 0, done: true },
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 0, ending: DONE },
         )
         .await;
         // Unread by B, so B's wake below is a wire rather than a silent step.
@@ -3094,7 +3520,7 @@ mod tests {
         // B's discarded vote had been recorded.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: true },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: DONE },
         )
         .await;
         assert_eq!(
@@ -3144,7 +3570,7 @@ mod tests {
 
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: true },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: DONE },
         )
         .await;
         seats[0].quiet().await;
@@ -3190,7 +3616,7 @@ mod tests {
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2, B holds");
@@ -3200,7 +3626,7 @@ mod tests {
         post(&storage, "user", None, "note for a").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: true },
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: DONE },
         )
         .await;
         assert_eq!(
@@ -3234,7 +3660,7 @@ mod tests {
         // clears the tally and steps the ring to B, which has two rows waiting.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, ending: SPOKE },
         )
         .await;
         // With the control channel still OPEN — dropping `tx` here would abort
@@ -3263,7 +3689,7 @@ mod tests {
         post(&storage, "user", None, "note for b again").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 5, done: true },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 5, ending: DONE },
         )
         .await;
         assert_eq!(
@@ -3303,7 +3729,7 @@ mod tests {
         // cursor over two rows.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         // And a respawn, which delivers on arrival whenever the holder is the
@@ -3434,7 +3860,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
-                done: false,
+                ending: SPOKE,
             },
         )
         .await;
@@ -3498,7 +3924,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
-                done: false,
+                ending: SPOKE,
             },
         )
         .await;
@@ -3553,7 +3979,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
-                done: false,
+                ending: SPOKE,
             },
         )
         .await;
@@ -3665,7 +4091,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
-                done: false,
+                ending: SPOKE,
             },
         )
         .await;
@@ -3724,7 +4150,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
-                done: false,
+                ending: SPOKE,
             },
         )
         .await;
@@ -3828,7 +4254,7 @@ mod tests {
         );
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         // With the control channel still OPEN — dropping `tx` here would abort
@@ -3985,7 +4411,7 @@ mod tests {
         let (cmd_tx, mut rx) = mpsc::channel(8);
         send(
             &cmd_tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         send(&cmd_tx, SequencerCommand::Pause).await;
@@ -4050,7 +4476,7 @@ mod tests {
         send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         send(&tx, SequencerCommand::Pause).await;
@@ -4155,7 +4581,7 @@ mod tests {
         send(&tx, SequencerCommand::Pause).await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         // The resume replays that completion — and the second pause reaches the
@@ -4205,7 +4631,7 @@ mod tests {
         );
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2, B holds");
@@ -4228,7 +4654,7 @@ mod tests {
         // held and B is never woken.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, ending: SPOKE },
         )
         .await;
         assert_eq!(
@@ -4280,7 +4706,7 @@ mod tests {
         send(&tx, SequencerCommand::QuestionParked).await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         send(&tx, SequencerCommand::Resume).await;
@@ -4343,7 +4769,7 @@ mod tests {
         send(&tx, SequencerCommand::Pause).await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         send(&tx, SequencerCommand::UserMessage).await;
@@ -4409,7 +4835,7 @@ mod tests {
         // of consensus and `Y` one clear away from it.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2, B holds");
@@ -4432,18 +4858,18 @@ mod tests {
         // its first row, where the biased select reads them in wire order.
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, done: true },
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: DONE },
         )
         .await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: true },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, ending: DONE },
         )
         .await; // X
         send(&tx, SequencerCommand::Resume).await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, ending: SPOKE },
         )
         .await; // Y
         send(&tx, SequencerCommand::Pause).await;
@@ -4476,7 +4902,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
         for cmd in [
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 0, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 0, ending: SPOKE },
             SequencerCommand::UserMessage,
             SequencerCommand::ParticipantJoined { participant_id: a, input: joined_input },
             SequencerCommand::QuestionParked,
@@ -4523,7 +4949,7 @@ mod tests {
         post(&storage, "system", None, "tick one").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         assert_eq!(seats[0].expect(1).await, vec!["tick one"], "epoch 2, A holds again");
@@ -4535,7 +4961,7 @@ mod tests {
         post(&storage, "system", None, "tick two").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 2, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 2, ending: SPOKE },
         )
         .await;
         assert_eq!(seats[0].expect(1).await, vec!["tick two"], "one repeat is not yet a spin");
@@ -4545,7 +4971,7 @@ mod tests {
         post(&storage, "system", None, "tick three").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, ending: SPOKE },
         )
         .await;
         seats[0].quiet().await;
@@ -4572,7 +4998,7 @@ mod tests {
         post(&storage, "system", None, "tick four").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 5, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 5, ending: SPOKE },
         )
         .await;
         assert_eq!(
@@ -4612,7 +5038,7 @@ mod tests {
             post(&storage, "system", None, tick).await;
             send(
                 &tx,
-                SequencerCommand::TurnComplete { participant_id: a, epoch, done: false },
+                SequencerCommand::TurnComplete { participant_id: a, epoch, ending: SPOKE },
             )
             .await;
             assert_eq!(
@@ -4642,10 +5068,7 @@ mod tests {
     /// hiding a message.
     #[test]
     fn peer_ack_suppresses_and_doesnt_count() {
-        assert_eq!(
-            turn_ending(true, false, "ack"),
-            TurnEnding { done: true, peer_ack_override: false }
-        );
+        assert_eq!(turn_ending(true, false, false, "ack"), TurnEnding::Done);
     }
 
     /// Router inventory **#9** — the guard that exists because four full reviews
@@ -4656,17 +5079,14 @@ mod tests {
     fn peer_ack_on_substantive_turn_forwards_anyway() {
         let review = "x".repeat(PEER_ACK_MAX_SUPPRESSED_LEN + 1);
         assert_eq!(
-            turn_ending(true, false, &review),
-            TurnEnding { done: false, peer_ack_override: true }
+            turn_ending(true, false, false, &review),
+            TurnEnding::Spoke { peer_ack_override: true }
         );
         // The floor itself is still an ack — `<=`, not `<`. One byte decides
         // which of the two rows above applies, so it is worth pinning that the
         // boundary sits where the router put it.
         let at_floor = "x".repeat(PEER_ACK_MAX_SUPPRESSED_LEN);
-        assert_eq!(
-            turn_ending(true, false, &at_floor),
-            TurnEnding { done: true, peer_ack_override: false }
-        );
+        assert_eq!(turn_ending(true, false, false, &at_floor), TurnEnding::Done);
     }
 
     /// Router inventory **#10**. `final: true` is the agent asserting this is
@@ -4674,10 +5094,7 @@ mod tests {
     #[test]
     fn peer_ack_final_suppresses_a_substantive_turn() {
         let closing = "y".repeat(PEER_ACK_MAX_SUPPRESSED_LEN + 1);
-        assert_eq!(
-            turn_ending(true, true, &closing),
-            TurnEnding { done: true, peer_ack_override: false }
-        );
+        assert_eq!(turn_ending(true, true, false, &closing), TurnEnding::Done);
     }
 
     /// Router inventory **#11**, the inverse of #10 — and the pair is what makes
@@ -4687,20 +5104,86 @@ mod tests {
     fn substantive_turn_without_final_still_forwards() {
         let body = "z".repeat(PEER_ACK_MAX_SUPPRESSED_LEN + 1);
         assert_eq!(
-            turn_ending(true, false, &body),
-            TurnEnding { done: false, peer_ack_override: true }
+            turn_ending(true, false, false, &body),
+            TurnEnding::Spoke { peer_ack_override: true }
         );
         assert_eq!(
-            turn_ending(false, false, &body),
-            TurnEnding { done: false, peer_ack_override: false },
+            turn_ending(false, false, false, &body),
+            TurnEnding::SPOKE,
             "no ack at all is substantive, and carries no override tag"
         );
         // Trimmed before measuring, like the router: whitespace must not push a
         // bare ack over the floor.
         let padded = format!("   {}   ", "w".repeat(PEER_ACK_MAX_SUPPRESSED_LEN));
+        assert_eq!(turn_ending(true, false, false, &padded), TurnEnding::Done);
+    }
+
+    /// **The pass, as a derivation.** Design §1's third ending: a participant
+    /// declining a turn rather than burning one.
+    ///
+    /// The first two assertions are what makes it a THIRD ending rather than a
+    /// spelling of an existing one — the whole slice fails if either collapses
+    /// into `Done` or `SPOKE`.
+    #[test]
+    fn a_content_free_pass_is_its_own_ending() {
+        assert_eq!(turn_ending(false, false, true, ""), TurnEnding::Passed);
         assert_eq!(
-            turn_ending(true, false, &padded),
-            TurnEnding { done: true, peer_ack_override: false }
+            turn_ending(false, false, true, "  \n "),
+            TurnEnding::Passed,
+            "whitespace is not content — trimmed like the ack ladder"
+        );
+        // The floor is shared with the ack, `<=` and all: one reading of
+        // "content-free", so a pass and an ack cannot disagree about a body.
+        let at_floor = "p".repeat(PEER_ACK_MAX_SUPPRESSED_LEN);
+        assert_eq!(turn_ending(false, false, true, &at_floor), TurnEnding::Passed);
+    }
+
+    /// A pass and an ack in one turn CONTRADICT — the ack casts a done vote,
+    /// the pass casts nothing — so one wins, and it is the pass.
+    ///
+    /// Not a preference. `Done` can complete the tally and halt the session;
+    /// `Passed` can only cost an extra lap. Reading a confused turn as the
+    /// halting one parks the session on a user who was never told they are
+    /// being waited on.
+    #[test]
+    fn a_pass_outranks_an_ack_on_the_same_turn() {
+        assert_eq!(turn_ending(true, false, true, "ack"), TurnEnding::Passed);
+        assert_eq!(
+            turn_ending(true, true, true, "ack"),
+            TurnEnding::Passed,
+            "even `final: true` — the pass is the non-halting reading of the two"
+        );
+    }
+
+    /// A pass over the length floor is OVERRIDDEN, exactly as #9's ack is, and
+    /// the row carries **no tag** (rc3 decisions, locked).
+    ///
+    /// The failure this prevents is arithmetic. `Passed` is the one ending that
+    /// leaves other participants' done votes standing, so a substantive turn
+    /// read as a pass would carry a vote cast BEFORE it over the top of real
+    /// output — the same "one stale vote and one fresh one add up to an arrival
+    /// nobody voted for" that `substantive_output_resets_the_tally` exists to
+    /// stop, reached down a second path.
+    #[test]
+    fn a_substantive_pass_is_overridden_and_carries_no_tag() {
+        let verdict = "v".repeat(PEER_ACK_MAX_SUPPRESSED_LEN + 1);
+        assert_eq!(
+            turn_ending(false, false, true, &verdict),
+            TurnEnding::SPOKE,
+            "the pass is overridden, and an overridden pass is NOT tagged"
+        );
+        // With an ack alongside it, the ack ladder decides what the overridden
+        // pass left behind — #9 and #10 unchanged, which is the point: once the
+        // pass is gone there is nothing left for it to outrank.
+        assert_eq!(
+            turn_ending(true, false, true, &verdict),
+            TurnEnding::Spoke { peer_ack_override: true },
+            "#9 still applies once the pass is overridden"
+        );
+        assert_eq!(
+            turn_ending(true, true, true, &verdict),
+            TurnEnding::Done,
+            "#10 still applies once the pass is overridden"
         );
     }
 
@@ -4730,7 +5213,7 @@ mod tests {
         assert_eq!(seats[0].expect(2).await, vec!["one", "two"]);
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         assert_eq!(seats[1].expect(2).await, vec!["one", "two"]);
@@ -4967,7 +5450,7 @@ mod tests {
         post(&storage, "system", None, "next").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
         // B's cursor is its own and never moved for "go", so its first turn

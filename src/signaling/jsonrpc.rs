@@ -288,6 +288,22 @@ async fn call_tool(
                  corrections must never be silently discarded.",
             ))
         }
+        "pass_turn" => {
+            // Realized in the duo pump, exactly like `peer_ack` above: the pump
+            // observes THIS ToolUse and `sequencer::turn_ending` turns it into a
+            // `TurnEnding::Passed` at the flush (duo.rs::pump_agent). Nothing to
+            // do bridge-side, and deliberately so — whether the pass STANDS
+            // depends on text the agent may not have written yet, so a handler
+            // that acted here would be deciding on evidence it does not have.
+            //
+            // Ungated: every participant that can hold a turn can decline one.
+            Ok(ToolCallResult::text(
+                "pass noted — your turn is recorded as a pass and moves on. It counts \
+                 toward nothing: a session settles when its participants say they are \
+                 FINISHED, and a pass is not that. If this turn also carries substantive \
+                 text, the text wins and the pass is ignored.",
+            ))
+        }
         "halt" => {
             // Yield to the user: reuse mark_awaiting_user's machinery (set the
             // awaiting flag + Halt tray row + AwaitingUser event). `awaiting`
@@ -1731,6 +1747,47 @@ mod tests {
                 "peer_ack must be allowed for {agent}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn pass_turn_is_ungated_and_needs_no_arguments() {
+        // Ungated by design: every participant that can hold a turn can decline
+        // one. Gate it and a role is pushed back onto the two endings the pass
+        // exists to replace — a false done vote, or filler.
+        //
+        // The empty `arguments` is the second half. The pass carries no
+        // parameters, and an agent reaching for it mid-turn must not be able to
+        // fail the call by omitting something.
+        let bridge = SignalingBridge::new();
+        for c in [caller(), rain_caller()] {
+            let agent = c.agent.clone();
+            let res = dispatch(
+                req("tools/call", json!({"name": "pass_turn", "arguments": {}}), 1),
+                &c,
+                &bridge,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let v = serde_json::to_value(&res).unwrap();
+            assert_eq!(
+                v["result"]["isError"],
+                json!(false),
+                "pass_turn must be allowed for {agent}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pass_turn_is_advertised_in_the_tool_list() {
+        // The pump can only observe a tool the agent can SEE. Nothing else in
+        // this slice fails if the descriptor is missing — the flag would simply
+        // never be set — so the registry entry needs its own pin.
+        let names: Vec<&str> = super::super::protocol::tool_descriptors()
+            .iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(names.contains(&"pass_turn"), "got: {names:?}");
     }
 
     #[tokio::test]

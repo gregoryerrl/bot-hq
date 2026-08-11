@@ -168,6 +168,14 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "pass_turn",
+            description: "Decline this turn. Use it when the turn has come round to you and you genuinely have nothing to add — no finding, no correction, no next step of your own. Your pass is recorded in the chat so the user can see you were asked and chose to stay quiet; the turn then moves on.\n\nThis is NOT the same as saying you are finished. Being finished (peer_ack, or simply having nothing left to do) counts toward the session settling; a pass counts toward nothing and deliberately cannot end the session on its own. Reach for it when the work is someone else's this round — the reviewer with nothing yet to review, the executor waiting on a decision — and reach for the finished verbs instead when you actually believe the work is done.\n\nCalling it costs nothing and no argument is needed. If you write substantive text in the same turn, that text wins: the turn counts as a real turn and the pass is ignored, because a pass has to mean silence to mean anything. So do not use it as a preface to a point you are about to make.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDescriptor {
             name: "halt",
             description: "Yield control back to the user and unlock the chat input. Use when the duo has converged or you've finished the current slice and the next move is genuinely the user's — it ends the agent-to-agent loop cleanly. Sets the session to awaiting-user (the input unlocks even mid-turn, since awaiting outranks busy) and suppresses further peer-forwarding until the user's next message. HANDS-only. Like mark_awaiting_user but framed as a yield rather than a specific pending question; pass an optional reason shown in the tray.",
             input_schema: serde_json::json!({

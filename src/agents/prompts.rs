@@ -68,6 +68,8 @@ If Rain pings you mid-hold, only respond if you have a substantive correction or
 
 **Two explicit verbs for ending the back-and-forth** — reach for these instead of bouncing an empty ack: call `peer_ack` when you and Rain have converged (you agree / have nothing to add) — it records your acknowledgment but does NOT forward it to her, so the duo settles to Idle instead of volleying another turn. Call `halt` when the next move is genuinely the user's — it yields and unlocks the input (like `mark_awaiting_user`, framed as a yield). Both are politeness layered on top of the mechanical volley-breaker, never a substitute for just staying silent when you have nothing to say.
 
+**When the turn reaches you and you have nothing at all, call `pass_turn`.** It records a visible pass and moves on. It is NOT `peer_ack`: an ack says you and Rain have converged and counts toward the session settling, a pass says only \"not me this round\" and counts toward nothing. Use the pass when the work is genuinely someone else's right now; use the ack when you actually believe you are finished. Writing substantive text in the same turn cancels the pass, so do not use it as a preface.
+
 ## Per-phase session docs
 
 **Every IPAV phase leaves ONE rewritable doc behind when the work is substantive — not just Plan.** Call `session_doc_write(slug, body, phase=<x>)` at each phase boundary: Investigate → `phase=\"investigate\"`, Plan → `phase=\"plan\"`, Apply → `phase=\"apply\"`, Verify → `phase=\"verify\"`. The docs survive chat scroll, populate the I/P/A/V tabs in the session view, and let Rain / future-you retrieve prior-phase context via `session_doc_search(phase=<x>)` instead of grepping back through messages.
@@ -141,6 +143,8 @@ The hub broadcasts every chunk you emit to Brian and to the user's UI. Empty ack
 The single test before emitting: *if I delete this message, does Brian or the user lose any actionable information?* If no, do not emit it.
 
 **If you're closing out a converged exchange, prefer `peer_ack` over a bare prose ack.** Staying fully silent is still best when you have nothing — but if you would otherwise emit a closing acknowledgment, call `peer_ack`: it records the ack without forwarding it to Brian, so the duo settles to Idle instead of waking him for a full turn. (Yielding to the USER is `halt`, which is Brian's — surface it to him.)
+
+**When the turn reaches you and there is genuinely nothing to review yet, call `pass_turn`.** This is your alternative to inventing a finding to justify the turn. It records a visible pass and moves on, and — unlike `peer_ack` — it counts toward nothing: a pass says \"not me this round\", not \"I am finished\". Substantive text in the same turn cancels the pass, so a real finding always wins.
 
 ## Adversarial posture
 
@@ -406,6 +410,18 @@ mod tests {
         assert!(BRIAN_ROLE.contains("peer_ack"));
         assert!(BRIAN_ROLE.contains("halt"));
         assert!(RAIN_ROLE.contains("peer_ack"));
+        // `pass_turn` (design §1) is ungated, so BOTH roles document it — and
+        // both have to say what separates it from `peer_ack`, because the whole
+        // value of the third ending is lost on an agent that reads it as a
+        // synonym for the ack. The tool descriptor alone cannot carry that: it
+        // is read at call time, and the choice is made before the call.
+        for (role, name) in [(BRIAN_ROLE, "BRIAN_ROLE"), (RAIN_ROLE, "RAIN_ROLE")] {
+            assert!(role.contains("pass_turn"), "{name} must document pass_turn");
+            assert!(
+                role.contains("counts toward nothing"),
+                "{name} must say a pass does not count toward the session settling"
+            );
+        }
     }
 
     #[test]
