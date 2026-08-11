@@ -1443,8 +1443,31 @@ async fn advance_turn(
                 // agent has read something — so writing first is what makes the
                 // snapshot see this turn's epoch rather than the previous one.
                 // Release-ordered against the pump's Acquire load.
-                if let Some(cell) = deps.epochs.get(&to.id) {
-                    cell.store(*epoch, std::sync::atomic::Ordering::Release);
+                //
+                // **A holder with stdin but no epoch cell freezes the cycle**,
+                // and silently, so it is worth a loud line. The pump reads its
+                // cell with `unwrap_or(0)`, so such a participant completes at
+                // epoch 0, fails the `live` guard against any epoch past the
+                // first, and is discarded — for ever. The ring stops on it with
+                // nothing in the log to say why.
+                //
+                // This is a build-time obligation on whoever assembles
+                // [`SequencerDeps`], exactly like the "file A's stdin under B's
+                // id" hazard `inputs` already documents: the two maps must be
+                // keyed identically and nothing in the type system says so.
+                // `session.rs` populates them in one pass, so this is
+                // unreachable today — the warning exists because the next
+                // assembler is the one that will not.
+                match deps.epochs.get(&to.id) {
+                    Some(cell) => cell.store(*epoch, std::sync::atomic::Ordering::Release),
+                    None => warn!(
+                        session = %deps.session_id,
+                        participant_id = to.id,
+                        slug = %to.slug,
+                        epoch = *epoch,
+                        "sequencer: the participant taking the turn has no epoch cell; its \
+                         completions will carry 0, fail the guard, and the cycle will stop here"
+                    ),
                 }
                 deliver_backlog(deps, to, rx, MAX_TURN_BATCHES, deferred).await;
             }
@@ -4911,6 +4934,50 @@ mod tests {
 
         drop(tx);
         assert!(exited(task).await, "the loop shuts down cleanly");
+    }
+
+    /// The epoch publish itself, which nothing pinned — the round-1 review of
+    /// a later task found a proposed handler that omitted it entirely and every
+    /// test still green. That is the shape of defect this closes: the publish is
+    /// invisible from the ring's own behaviour, because a wrong epoch only
+    /// surfaces later, as a completion the guard discards and a cycle that stops
+    /// with nothing in the log.
+    #[tokio::test]
+    async fn the_epoch_is_published_to_the_holder_before_its_rows_go_out() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        let cell_a = Arc::new(AtomicU64::new(0));
+        let cell_b = Arc::new(AtomicU64::new(0));
+        deps.epochs.insert(a, Arc::clone(&cell_a));
+        deps.epochs.insert(b, Arc::clone(&cell_b));
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        // The wire is the synchronisation point: A cannot have been handed rows
+        // before its epoch was stored, because the store happens first.
+        assert_eq!(cell_a.load(Ordering::Acquire), 1, "A holds epoch 1");
+        assert_eq!(cell_b.load(Ordering::Acquire), 0, "B has not held a turn yet");
+
+        post(&storage, "system", None, "next").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        // B's cursor is its own and never moved for "go", so its first turn
+        // carries both rows.
+        assert_eq!(seats[1].expect(2).await, vec!["go", "next"]);
+        assert_eq!(cell_b.load(Ordering::Acquire), 2, "the step published B's epoch");
+        assert_eq!(cell_a.load(Ordering::Acquire), 1, "and left A's alone");
+
+        drop(tx);
+        assert!(exited(task).await, "the loop is still draining");
     }
 
     #[test]
