@@ -1,0 +1,75 @@
+# Overnight autonomous run — state, authorisations, queue
+
+**This file is the source of truth for the overnight run.** It exists because a
+context compaction would otherwise lose the queue and the user's authorisations.
+**Re-read it at the top of every wakeup, and update the log at the bottom after
+every landed unit.** If anything here disagrees with memory, this file wins.
+
+User is asleep (from ~2026-08-11 22:40 PH). Work continuously, no input available.
+
+---
+
+## Authorisations given explicitly by the user, 2026-08-11 ~22:40 PH
+
+1. **DELETE `core/router.rs` — B5 task 14 is AUTHORISED.** Previously withheld as
+   irreversible; the user has now cleared it. Still walk the gate first: all 20
+   inventory rows (**12 PRESERVED / 6 DISSOLVED / 2 DROPPED** — corrected count,
+   see `2026-08-06-router-behaviour-inventory.md`). Every PRESERVED row needs a
+   named green test; every DISSOLVED row needs the structure that makes it
+   impossible; every DROPPED row needs its reason re-confirmed.
+2. **Round cap is SETTLED — no longer an open question.** The user: *"just set it
+   to my maximum run. I thought we settled the round-cap?"* They are right; D2
+   settled the value at **500** and only the UNIT was open. Resolution:
+   - **Unit = LAPS** (one full pass of the ring over active participants).
+   - **Default 500 laps**, `0` = off, per-session override.
+   - Why that is above their maximum run: measured 3,561 uninterrupted stretches,
+     max **294 agent text messages**; at N=2 that is ~147 laps. 500 laps is ~3.4×
+     their largest real run, so it cannot fire on legitimate work — which is what
+     design §1b means by "high enough to be invisible in normal use".
+   - Document the messages→laps conversion where the constant is defined. Do not
+     claim a corpus-wide organic maximum: the available proxies are rain-only and
+     undercount laps badly in the tail (brian 174/rain 10 in the largest).
+3. **Latitude:** *"you can do whatever you want, I just want this finished by the
+   time I wake up if possible."*
+
+## Standing guardrails (NOT lifted)
+
+- **No `git push`.** Commit on main, never `--no-verify`.
+- **Do not leave bot-hq running.** If started to verify, stop it before the turn ends.
+- **Migrations 0046/0047 exist**; 0046 is committed-but-unapplied. New ones start at **0048**.
+- Every test **mutation-verified**. Never write an unverified claim into the repo.
+- Worktrees are created ~95 commits stale — `git merge --ff-only main` in each before working.
+
+## Baseline at handoff
+
+`main`, tree clean, **14 commits** on 2026-08-11, suite **1148 lib + 66 integration** green,
+app stopped. Binding docs: `2026-08-11-rc3-decisions.md` (8 user decisions),
+`2026-08-11-design-drift-audit.md`, `2026-08-06-session-focused-redesign-design.md`.
+
+## Queue, in order
+
+1. **Two open reviewer findings.** (a) B8a's `update_role` `if changed == 0 { bail }`
+   guard is untested — deleting it leaves the suite green. (b) B7a's two call-site
+   args in `spawn_session_handle` (`brian_prose.as_deref()` / `rain_prose.as_deref()`)
+   are killed by no mutation.
+2. **A1 — the round cap**, per authorisation 2 above. Now unblocked.
+3. **B8 FRONTEND — the Roles tab. THE USER'S TOP PRIORITY.** Backend landed
+   (`src/tauri_cmd/roles.rs`). Per D8: **no Agents tab**; the Roles tab owns Default
+   Model via `roles.default_model_id`; the New Session dialog overrides per
+   participant via `session_participants.model_id` (both columns already exist).
+   Add roles, edit free-text prose (`roles.description_prompt`), capabilities,
+   participation mode. **Omit `on_demand` from the picker** (D1 — it needs
+   `@mention`, which needs N-participant spawn first).
+4. **B7 layer 2** — capability-derived rules GENERATED from `roles.capabilities`
+   (D3: generate denials from ABSENT capabilities too); peer names generated from
+   the live roster (D4).
+5. **N-participant session create** — design §1: "how many agents, **default 1**".
+   Today `ensure_session_roster` hardcodes two from 11 per-agent `sessions` columns.
+6. **B5 task 14** — delete `core/router.rs`, gate-walked. Do this LAST: items 1–5
+   are additive and reversible; this one is not.
+
+---
+
+## Log — append one line per landed unit (newest last)
+
+- 2026-08-11 22:40 PH — handoff. Baseline 1148 lib + 66 integration, 14 commits.
