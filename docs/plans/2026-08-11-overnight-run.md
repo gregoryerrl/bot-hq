@@ -73,3 +73,12 @@ app stopped. Binding docs: `2026-08-11-rc3-decisions.md` (8 user decisions),
 ## Log — append one line per landed unit (newest last)
 
 - 2026-08-11 22:40 PH — handoff. Baseline 1148 lib + 66 integration, 14 commits.
+- 2026-08-12 morning — **the overnight loop never fired.** The wakeup was
+  re-armed to land after the 00:50 PH limit reset and did not come back. Nothing
+  was lost: `main` is still `f18d6fb`, tree clean, suite unchanged. The queue
+  below is untouched and resumes from item 1. Do not re-run the timer; the user
+  is awake and driving.
+- 2026-08-12 — phase 1 fan-out started: queue items 1, 2, 3 and 4 in four
+  isolated worktrees, each adversarially verified before merge. Items 5 and 6
+  follow after the merge, in that order, because both touch `core/session.rs`
+  and item 6 is the irreversible one.
