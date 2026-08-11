@@ -4657,6 +4657,60 @@ mod tests {
         );
     }
 
+    // ---- task 13: the delivery record ---------------------------------------
+
+    /// **13a, as a pin rather than a feature.** Inventory #5 asked that a
+    /// suppressed delivery become a visible row instead of a preview in a side
+    /// table. On the turn path that upgrade is already paid and there is nothing
+    /// left to record: the message is a `messages` row (task 2), and the module
+    /// doc argues the forward ladder does not survive onto a PULL — every row
+    /// past a cursor is offered when the turn arrives, so nothing suppresses.
+    ///
+    /// That claim had no test. `withheld_reason` stays in the schema for a
+    /// policy that does not exist yet, and a policy added tomorrow would change
+    /// the model silently. This is the guard: the turn path withholds NOTHING,
+    /// and it records what it handed over.
+    #[tokio::test]
+    async fn the_turn_path_records_every_delivery_and_withholds_nothing() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "one").await;
+        post(&storage, "system", None, "two").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(2).await, vec!["one", "two"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        assert_eq!(seats[1].expect(2).await, vec!["one", "two"]);
+
+        for (who, id) in [("a", a), ("b", b)] {
+            let (total, withheld): (i64, i64) = sqlx::query_as(
+                "SELECT COUNT(*), COUNT(withheld_reason) FROM participant_deliveries \
+                 WHERE participant_id = ?",
+            )
+            .bind(id)
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+            assert_eq!(total, 2, "{who}: both rows recorded");
+            // `COUNT(column)` skips NULLs, so zero here is "every row carries no
+            // reason" — the model's claim, asserted.
+            assert_eq!(withheld, 0, "{who}: the turn path withholds nothing");
+        }
+        assert!(
+            storage.withheld_for_participant(a).await.unwrap().is_empty(),
+            "and the public reader agrees with the raw count"
+        );
+
+        drop(tx);
+        assert!(exited(task).await, "the loop is still draining");
+    }
+
     #[test]
     fn jaccard_similarity_normalizes_and_handles_edges() {
         assert_eq!(jaccard_similarity("ready to go", "ready to go"), 1.0);
