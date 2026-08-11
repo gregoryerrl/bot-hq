@@ -54,6 +54,10 @@ const UNGATED: &[&str] = &[
     "cl_retrieve",
     "check_open_findings",
     "peer_ack",
+    // Every participant that can hold a turn can decline one, so there is no
+    // capability to gate this on — a role that could not pass would be forced
+    // back to the two endings the pass exists to replace.
+    "pass_turn",
     "advance_phase",
     "gate_status",
 ];
