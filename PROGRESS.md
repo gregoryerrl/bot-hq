@@ -9,6 +9,48 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-11 — the ring ran live; a drift audit found three unscheduled decisions
+
+**The sequencer drove a real session for the first time.** `BOT_HQ_SEQUENCER=1`
+on `s-156543b6`: turns alternated, backlogs drained, cursors advanced, delivery
+rows recorded, both agents worked the task. The turn model is sound.
+
+**One live defect, and it blocks B5:** a native participant is not gated by the
+ring. Rain kept taking turns nobody handed her (~1 every 5s) while Brian held
+the turn; every completion was correctly discarded, so the ring never corrupted
+— she just burned tokens out of turn. The claude-code subprocess blocks on stdin
+between turns; the native loop self-drives. **No test could have caught it** —
+all 1,101 use fake seats that sit still until fed.
+
+**Then a full audit of the design's `✅ VALIDATED` decisions against the code**,
+prompted by the user asking whether the redesign had lost its direction. It has
+not — Section 2 (Roles) is recorded exactly as the user restated it, the `roles`
+table exists with `description_prompt`, and HANDS/EYES are seeded as editable
+rows. But **three validated decisions exist in neither the code nor any batch**:
+
+1. **The round cap** (§1b backstop #2) — and inventory row #1 dissolves the L2
+   hard cap *citing it as the replacement*. Neither half exists;
+   `sessions.round_number` is a column nothing reads. **This blocks task 14**:
+   deleting `router.rs` removes the only bound on a cycle whose consensus never
+   arrives.
+2. **PASS** (§1) — a participant declining a turn without voting done. A done
+   vote is not a pass; today "nothing to add" must either inflate consensus or
+   emit filler.
+3. **`on_demand`** (§1) — skipped in rotation correctly, but the "posts when
+   addressed" half has no mechanism, so the mode builds a participant that
+   cannot participate.
+
+**Why they were lost:** all three are prose-only decisions that never became
+rows in the router inventory. The implementation plan was built from the
+inventory, and task 14's gate walks rows — so a decision that never became one
+was never scheduled and cannot be missed by the gate. **Guard: every validated
+decision becomes an inventory row before a batch is planned from it.**
+
+Full detail, severities and fixes:
+[`docs/plans/2026-08-11-design-drift-audit.md`](docs/plans/2026-08-11-design-drift-audit.md).
+
+---
+
 ## 2026-08-11 — B5 in progress: the turn sequencer exists, `router.rs` is still live (HANDOFF)
 
 **Status: plan tasks 1–13 complete; 14, 15 and 16 remain. Nothing in the

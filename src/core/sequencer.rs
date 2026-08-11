@@ -662,6 +662,21 @@ pub struct SequencerDeps {
     /// stdin freezes the cycle" in the module doc for what that costs and for
     /// the way out, which is [`SequencerCommand::ParticipantJoined`].
     pub inputs: HashMap<i64, ParticipantInput>,
+    /// Where each participant's pump reads the epoch of the turn it is holding,
+    /// keyed like [`Self::inputs`].
+    ///
+    /// Written here at handover and read by the pump on its turn's first event,
+    /// which is the round trip [`SequencerCommand::TurnComplete`]'s doc calls
+    /// unsolved — this is the solution. The cell exists because there is no
+    /// channel from this loop to a pump: the turn travels as bytes on stdin, and
+    /// the process reading them is not the task that reports the completion.
+    ///
+    /// A participant missing from this map still gets turns; its completions
+    /// arrive with epoch 0 and are discarded by the guard once the ring has
+    /// stepped once, so the cycle stalls on it rather than mis-stepping. Empty
+    /// is therefore the safe default, and it is what the unit tests use — they
+    /// are their own sender and mint epochs directly.
+    pub epochs: HashMap<i64, Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// A wake for the sequencer.
@@ -1423,6 +1438,14 @@ async fn advance_turn(
             // That case is exactly why the epoch exists.
             *epoch += 1;
             if let Some(to) = holder.as_ref() {
+                // Publish BEFORE the rows go out. The pump snapshots on its
+                // turn's first event, and that event cannot happen until the
+                // agent has read something — so writing first is what makes the
+                // snapshot see this turn's epoch rather than the previous one.
+                // Release-ordered against the pump's Acquire load.
+                if let Some(cell) = deps.epochs.get(&to.id) {
+                    cell.store(*epoch, std::sync::atomic::Ordering::Release);
+                }
                 deliver_backlog(deps, to, rx, MAX_TURN_BATCHES, deferred).await;
             }
         }
@@ -2205,6 +2228,7 @@ mod tests {
             session_id: "s1".into(),
             storage: storage.clone(),
             inputs,
+            epochs: HashMap::new(),
         };
         (deps, storage, seats)
     }
@@ -4777,6 +4801,116 @@ mod tests {
              {per_row:?}, delivery {per_delivery:?}. If this fired, batch the cursor \
              advance the way BatchEmitter already batches emission (50ms / N=20)."
         );
+    }
+
+    // ---- real-data smoke -----------------------------------------------------
+
+    /// **Run by hand:**
+    /// ```text
+    /// cp ~/.bot-hq/.local/bot-hq.db /tmp/smoke.db
+    /// cargo test --lib the_ring_runs_against_a_real_session -- --ignored --nocapture
+    /// ```
+    ///
+    /// `#[ignore]`d because it needs a database this machine happens to have.
+    /// **Point it at a COPY** — it advances cursors and writes delivery rows, and
+    /// it is not worth discovering that on the file the app is using.
+    ///
+    /// **Why it exists.** Every other test in this file builds a two-row session
+    /// in memory. Task 14 deletes `router.rs` — the batch's only irreversible
+    /// step — on the strength of those. This runs the ring against a real
+    /// roster, real cursors and a real channel, which is the cheapest thing that
+    /// can say the loop survives contact with production shapes before that
+    /// deletion, rather than after.
+    ///
+    /// It asserts SHAPES, not counts: the data moves. What it pins is that a
+    /// cold cursor drains, the cursor lands exactly on the last row handed over,
+    /// every delivery is recorded, and none is withheld.
+    #[tokio::test]
+    #[ignore = "needs /tmp/smoke.db — a copy of a real bot-hq database"]
+    async fn the_ring_runs_against_a_real_session() {
+        let db = std::path::Path::new("/tmp/smoke.db");
+        if !db.exists() {
+            panic!("copy a real database to {} first", db.display());
+        }
+        let storage = Storage::open(db).await.unwrap();
+
+        // The session with the largest roster-backed channel, chosen from the
+        // data rather than hardcoded, so this keeps working on another machine.
+        let (session, backlog): (String, i64) = sqlx::query_as(
+            "SELECT s.id, (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS n \
+             FROM sessions s \
+             WHERE (SELECT COUNT(*) FROM session_participants p WHERE p.session_id = s.id) > 1 \
+             ORDER BY n DESC LIMIT 1",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+
+        let roster = storage.participants_for_session(&session).await.unwrap();
+        eprintln!("session {session}: {} participants, {backlog} rows", roster.len());
+
+        let mut inputs = HashMap::new();
+        let mut seats = Vec::new();
+        for p in &roster {
+            // Generous, so the drain is bounded by MAX_TURN_BATCHES rather than
+            // by a full buffer — the batch cap is what this is measuring.
+            let (tx, rx) = mpsc::channel(16_384);
+            inputs.insert(p.id, ParticipantInput::new(session.as_str(), tx));
+            seats.push(Seat { id: p.id, rx });
+        }
+        let first = roster.first().unwrap().id;
+        let before = storage.cursor_for(first).await.unwrap();
+
+        let deps = SequencerDeps {
+            session_id: session.as_str().into(),
+            storage: storage.clone(),
+            inputs,
+            epochs: HashMap::new(),
+        };
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+
+        // Drain whatever the first turn hands over, stopping on the first gap —
+        // the turn is done when nothing more arrives, and a deadline per row
+        // keeps a stalled loop from hanging the run.
+        let seat = seats.iter_mut().find(|s| s.id == first).unwrap();
+        let mut wires: i64 = 0;
+        while let Ok(Some(_)) = tokio::time::timeout(DEADLINE, seat.rx.recv()).await {
+            wires += 1;
+        }
+
+        let after = storage.cursor_for(first).await.unwrap();
+        // The wire carries `role`/`content` and no id, so the "did the cursor
+        // overshoot" question is asked of the delivery rows instead — which is
+        // the stronger place to ask it anyway: those rows ARE the record of what
+        // was handed over.
+        let (recorded, withheld, highest): (i64, i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COUNT(withheld_reason), COALESCE(MAX(message_id), 0) \
+             FROM participant_deliveries WHERE participant_id = ?",
+        )
+        .bind(first)
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+
+        eprintln!(
+            "delivered {wires} rows; cursor {before} -> {after}; \
+             recorded {recorded}, withheld {withheld}, highest {highest}"
+        );
+
+        assert!(wires > 0, "a cold cursor must drain something");
+        assert!(after > before, "the cursor advanced");
+        assert_eq!(
+            after, highest,
+            "the cursor lands exactly on the highest row recorded as delivered — \
+             never past a row the participant did not get"
+        );
+        assert_eq!(recorded, wires, "every row handed over is recorded");
+        assert_eq!(withheld, 0, "the turn path withholds nothing, on real data too");
+
+        drop(tx);
+        assert!(exited(task).await, "the loop shuts down cleanly");
     }
 
     #[test]

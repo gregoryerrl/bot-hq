@@ -815,8 +815,71 @@ async fn spawn_session_handle(
         }
         None => (None, None, None),
     };
+    // B5: the turn sequencer, opt-in per run while `router.rs` still ships.
+    // `BOT_HQ_SEQUENCER=1` spawns the ring for this session; without it nothing
+    // changes and the router keeps every forward. Opt-in is what makes this
+    // landable BEFORE task 14 deletes that path — the ring has to earn the
+    // deletion on a real session first, and it cannot do that from a test.
+    let sequencer_enabled = std::env::var("BOT_HQ_SEQUENCER").as_deref() == Ok("1");
+    let mut sequencer_tx = None;
+    let mut brian_epoch = None;
+    let mut rain_epoch = None;
+    if sequencer_enabled {
+        let mut inputs = std::collections::HashMap::new();
+        let mut epochs = std::collections::HashMap::new();
+        // The map is keyed by participant id and the value is that participant's
+        // OWN stdin. `SequencerDeps::inputs` documents this as a build-time
+        // obligation nothing downstream can check: file A's stdin under B's id
+        // and B's turn is read by A, silently, because the scope compare inside
+        // `deliver` is on the session rather than the participant.
+        if let Some(p) = roster_row(&roster, "brian") {
+            inputs.insert(p.id, brian_handle.input().clone());
+            let cell = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            epochs.insert(p.id, Arc::clone(&cell));
+            brian_epoch = Some(cell);
+        }
+        if let (Some(p), Some(rain_in)) = (roster_row(&roster, "rain"), rain_input.as_ref()) {
+            inputs.insert(p.id, rain_in.clone());
+            let cell = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            epochs.insert(p.id, Arc::clone(&cell));
+            rain_epoch = Some(cell);
+        }
+        let ring = inputs.len();
+        let deps = crate::core::sequencer::SequencerDeps {
+            session_id: session.id.as_str().into(),
+            storage: storage.clone(),
+            inputs,
+            epochs,
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        tokio::spawn(crate::core::sequencer::run_sequencer(deps, rx));
+        // Hand out the first turn. Nothing else mints a `UserMessage` yet, so
+        // without this the ring sits with no holder and never starts.
+        let kick = tx.clone();
+        tokio::spawn(async move {
+            let _ = kick
+                .send(crate::core::sequencer::SequencerCommand::UserMessage)
+                .await;
+        });
+        sequencer_tx = Some(tx);
+        tracing::warn!(
+            session = %session.id,
+            participants = ring,
+            "B5: turn sequencer spawned (BOT_HQ_SEQUENCER=1) — the router is still live \
+             alongside it"
+        );
+    }
+    // EXCLUSIVE, not additive. Both paths deliver to the same stdin — the router
+    // pushes a peer forward, the ring drains everything past a cursor — so
+    // running them together hands every peer message over twice and the test
+    // measures the duplication rather than the ring. The router task stays
+    // spawned and simply receives nothing, which keeps its health dot and the
+    // watchdog wiring untouched.
+    let duo_router_tx = if sequencer_enabled { None } else { router_tx.clone() };
     let brian_duo = DuoConfig {
-        router_tx: router_tx.clone(),
+        sequencer_tx: sequencer_tx.clone(),
+        turn_epoch: brian_epoch,
+        router_tx: duo_router_tx.clone(),
         bridge: Some(Arc::clone(&bridge)),
         activity: Some(Arc::clone(&activity)),
         in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
@@ -839,7 +902,9 @@ async fn spawn_session_handle(
         let rain_liveness = crate::core::watchdog::AgentLiveness::new();
         watchdog_agents.push((Author::Rain, Arc::downgrade(&rain_liveness)));
         let rain_duo = DuoConfig {
-            router_tx: router_tx.clone(),
+            sequencer_tx: sequencer_tx.clone(),
+            turn_epoch: rain_epoch,
+            router_tx: duo_router_tx.clone(),
             bridge: Some(Arc::clone(&bridge)),
             activity: Some(Arc::clone(&activity)),
             in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),

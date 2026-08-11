@@ -85,6 +85,29 @@ pub struct DuoConfig {
     /// every event and tracks tools-in-flight. `None` in tests / solo configs
     /// that don't run the watchdog.
     pub liveness: Option<Arc<crate::core::watchdog::AgentLiveness>>,
+    /// Sender to the turn sequencer (`core::sequencer`), the B5 replacement for
+    /// `router_tx`. The pump emits one `TurnComplete` per finished turn, carrying
+    /// the consensus vote `turn_ending()` derives from the same `peer_ack` signals
+    /// the Forward above carries.
+    ///
+    /// **Both may be set during the changeover**, and that is deliberate: it lets
+    /// one session run the ring while the router still drives the rest, which is
+    /// how the sequencer earns the right to task 14's deletion. `None` = this
+    /// pump does not feed a ring.
+    pub sequencer_tx: Option<mpsc::Sender<crate::core::sequencer::SequencerCommand>>,
+    /// The epoch of the turn this participant currently holds, written by the
+    /// sequencer at handover.
+    ///
+    /// **Read at the START of a turn, never at its end**, and the difference is
+    /// the whole reason this is a cell rather than a value on the completion. A
+    /// user message mid-turn resets the ring and moves the epoch while this
+    /// participant still holds; a completion that read the cell on its way out
+    /// would carry the NEW epoch, pass the sequencer's guard, and step a ring
+    /// that had just been re-pointed at it — two participants on a turn at once,
+    /// the one invariant that loop exists to keep. Snapshotting on the first
+    /// event of the turn makes the stale completion carry the OLD epoch, which is
+    /// exactly what the guard is there to reject.
+    pub turn_epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl DuoConfig {
@@ -99,6 +122,8 @@ impl DuoConfig {
             activity: None,
             in_atomic_tool: None,
             liveness: None,
+            sequencer_tx: None,
+            turn_epoch: None,
         }
     }
 
@@ -233,6 +258,11 @@ pub async fn pump_agent(
     // incident, not one per nudged retry).
     let mut limit_line: Option<String> = None;
     let mut last_limit_notice: Option<std::time::Instant> = None;
+    // B5: the epoch of the turn in flight, snapshotted from `cfg.turn_epoch` on
+    // this turn's FIRST event and cleared when it completes. See the field's doc
+    // for why reading it at completion time instead would defeat the guard it
+    // exists to pass.
+    let mut turn_epoch: Option<u64> = None;
 
     loop {
         let Some(event) = event_rx.recv().await else { break };
@@ -240,6 +270,16 @@ pub async fn pump_agent(
         // Batch 7: any event means the agent is alive — reset the stall timer.
         if let Some(liveness) = &cfg.liveness {
             liveness.touch();
+        }
+        // First event of a turn: bind it to whichever epoch the sequencer had
+        // handed out when the agent started speaking. Deliberately BEFORE the
+        // match, so every event kind opens a turn — the agent may lead with a
+        // tool call rather than prose, and a turn opened only by text would
+        // snapshot late and miss exactly the reset this guards against.
+        if turn_epoch.is_none() {
+            if let Some(cell) = &cfg.turn_epoch {
+                turn_epoch = Some(cell.load(std::sync::atomic::Ordering::Acquire));
+            }
         }
 
         match event {
@@ -516,6 +556,20 @@ pub async fn pump_agent(
                 // The pump owns self-idle only when it does NOT hand a Forward to
                 // the router: an errored turn, an empty buffer, or a solo session.
                 let mut router_owns_idle = false;
+                // B5: what this ending MEANS, derived before the buffer is taken
+                // below. An errored turn votes `done: false` — it produced
+                // nothing, but the ring has to step or the cycle stalls on a
+                // participant that already failed; a failure is not a claim that
+                // there is nothing left to do.
+                let ending = if is_error {
+                    crate::core::sequencer::TurnEnding { done: false, peer_ack_override: false }
+                } else {
+                    crate::core::sequencer::turn_ending(
+                        peer_ack_pending,
+                        peer_ack_final_pending,
+                        &buffer,
+                    )
+                };
                 if is_error {
                     // Failed turn (API/permission error). The error text is already
                     // persisted per-chunk above for UI visibility, but must NOT be
@@ -559,6 +613,32 @@ pub async fn pump_agent(
                         }
                     }
                 }
+                // B5: tell the ring the turn ended. Sent for BOTH branches and
+                // whether or not there was prose — the sequencer steps on the
+                // completion, not on the text, so a silent turn that never
+                // reported would freeze the cycle on this participant.
+                if let (Some(sequencer_tx), Some(participant_id)) =
+                    (&cfg.sequencer_tx, cfg.participant_id)
+                {
+                    let epoch = turn_epoch.unwrap_or(0);
+                    if sequencer_tx
+                        .send(crate::core::sequencer::SequencerCommand::TurnComplete {
+                            participant_id,
+                            epoch,
+                            done: ending.done,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        warn!(
+                            agent = ?cfg.author,
+                            "turn completion DROPPED: sequencer channel closed — the ring \
+                             will not step past this participant"
+                        );
+                    }
+                }
+                // Opened by the next event, from whatever epoch is live then.
+                turn_epoch = None;
                 // peer_ack is per-turn — reset after BOTH branches so an errored
                 // turn (which skips the router) can't leak the flag into the next.
                 peer_ack_pending = false;
@@ -743,6 +823,8 @@ mod tests {
             activity: None,
             in_atomic_tool: None,
             liveness: None,
+            sequencer_tx: None,
+            turn_epoch: None,
         }
     }
 
