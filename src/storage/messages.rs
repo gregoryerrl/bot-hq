@@ -136,12 +136,139 @@ impl Storage {
         };
         Ok(rows)
     }
+
+    /// The prose one participant wrote after `since_id`, joined oldest-first,
+    /// with the id of the newest row read.
+    ///
+    /// Written for spin detection (B5 task 11), which needs "what did this
+    /// participant just say" and gets no text on
+    /// [`SequencerCommand::TurnComplete`](crate::core::sequencer::SequencerCommand).
+    ///
+    /// **`kind = 'text'` is the load-bearing filter, not a tidy-up.** A
+    /// participant's turn also writes `tool_use` and `tool_result` rows — on the
+    /// live database they outnumber its prose four to one — and those are
+    /// near-identical across rounds *by construction*: the same tool called
+    /// twice differs only in its arguments, so a token-set similarity over them
+    /// reads as repetition on a participant that is working normally. The
+    /// router's breaker compared forwarded prose; this is that same material.
+    ///
+    /// **Newest-capped, returned oldest-first.** `insert_message` fires per
+    /// chunk, so one turn is many rows and an unbounded read would grow with the
+    /// session. Taking the newest `limit` rather than the oldest keeps the
+    /// returned id the participant's true high-water mark, so a turn longer than
+    /// the cap cannot smear its remainder into the next comparison — the cost is
+    /// that only the tail of such a turn is compared, which is the part a
+    /// repeating participant repeats.
+    ///
+    /// `Ok(None)` means the participant has written no prose since `since_id`.
+    /// That is not the same as "wrote something empty", and the caller leans on
+    /// the difference: a turn that produced no text must leave a repetition
+    /// streak standing rather than reset it (router inventory #13).
+    pub async fn participant_text_since(
+        &self,
+        participant_id: i64,
+        since_id: i64,
+        limit: i64,
+    ) -> Result<Option<(String, i64)>> {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, content FROM messages \
+             WHERE participant_id = ? AND kind = 'text' AND id > ? \
+             ORDER BY id DESC LIMIT ?",
+        )
+        .bind(participant_id)
+        .bind(since_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("reading prose for participant {participant_id}"))?;
+
+        let Some(&(newest, _)) = rows.first() else {
+            return Ok(None);
+        };
+        let joined = rows
+            .iter()
+            .rev()
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(Some((joined, newest)))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::{Author, MessageKind, Storage};
+
+    /// Pins the three decisions in [`Storage::participant_text_since`] that the
+    /// sequencer's own spin tests cannot fail: the `kind` filter, the watermark
+    /// being the newest PROSE row, and the cap taking the newest rows rather
+    /// than the oldest. Both callers there post only prose, so deleting the
+    /// filter leaves them green — measured, not assumed.
+    ///
+    /// Tool traffic is what the filter excludes, and on the live database it
+    /// outnumbers participant prose four to one. `tool_use` and `tool_result`
+    /// rows repeat almost exactly across rounds by construction — the same tool
+    /// called twice differs only in its arguments — so a similarity test fed
+    /// them reads as repetition on a participant that is working normally, and
+    /// spin detection would halt the healthiest cycles first.
+    #[tokio::test]
+    async fn participant_text_since_reads_prose_and_ignores_tool_traffic() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "S", None).await.unwrap();
+        // `create_session` seeds no roster — 0044 backfilled the sessions that
+        // already existed, and every one created since is seeded here, pre-spawn.
+        s.ensure_session_roster("s1").await.unwrap();
+        let pid = s
+            .participant_by_slug("s1", "brian")
+            .await
+            .unwrap()
+            .expect("ensure_session_roster seeds brian")
+            .id;
+
+        let post = |kind: MessageKind, body: &'static str| {
+            let s = &s;
+            async move {
+                s.post_to_channel("s1", "participant", Some("brian"), kind.as_str(), body, None)
+                    .await
+                    .unwrap();
+            }
+        };
+
+        post(MessageKind::ToolUse, r#"{"name":"read","args":{}}"#).await;
+        post(MessageKind::Text, "found the breaker").await;
+        post(MessageKind::ToolResult, r#"{"output":"ok"}"#).await;
+        post(MessageKind::Text, "and it keys off a token set").await;
+        // AFTER the last prose row, so the watermark below cannot simply be
+        // "the newest row this participant wrote".
+        post(MessageKind::ToolUse, r#"{"name":"read","args":{}}"#).await;
+
+        let (text, newest) = s
+            .participant_text_since(pid, 0, 64)
+            .await
+            .unwrap()
+            .expect("the participant wrote prose");
+        assert_eq!(
+            text, "found the breaker\nand it keys off a token set",
+            "prose only, joined oldest-first"
+        );
+
+        assert!(
+            s.participant_text_since(pid, newest, 64).await.unwrap().is_none(),
+            "the watermark is the newest PROSE row — the tool call past it is not new prose"
+        );
+
+        let (tail, _) = s
+            .participant_text_since(pid, 0, 1)
+            .await
+            .unwrap()
+            .expect("capped, not empty");
+        assert_eq!(
+            tail, "and it keys off a token set",
+            "the cap keeps the NEWEST rows: taking the oldest instead would leave a long \
+             turn's remainder to smear into the next comparison"
+        );
+    }
 
     #[tokio::test]
     async fn count_user_messages_counts_text_only_and_per_session() {

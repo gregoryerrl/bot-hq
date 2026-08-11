@@ -932,6 +932,11 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     // rather than `deferred`, which is popped before `recv` and would therefore
     // spin: pop, re-hold, pop. Replayed by `Resume`.
     let mut held: VecDeque<SequencerCommand> = VecDeque::new();
+    // Per-participant repetition state for spin detection. In the loop's frame
+    // rather than storage: it describes THIS cycle, and a cycle that ends should
+    // not leave a streak behind for the next one to inherit. Cleared outright by
+    // a user message, which is the router's convergence reset in the ring model.
+    let mut spin: HashMap<i64, SpinState> = HashMap::new();
     loop {
         let cmd = match deferred.pop_front() {
             Some(cmd) => cmd,
@@ -1037,8 +1042,56 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     if !halted_on_consensus(&deps, &mut holder, &mut epoch, participant_id, done)
                         .await
                     {
-                        advance_turn(&deps, &mut rx, &mut holder, &mut epoch, &mut deferred, false)
+                        // Spin is a property of SUBSTANTIVE output. A `done`
+                        // vote is a participant saying it has nothing left to
+                        // add — the cycle converging rather than failing to —
+                        // and judging that as repetition would halt on exactly
+                        // the ending the consensus tally exists to reach. The
+                        // read is skipped with it, so prose from a done-voting
+                        // turn folds into the next substantive comparison
+                        // instead of being dropped.
+                        if !done && spinning(&deps, &mut spin, participant_id).await {
+                            // The router BROKE THE VOLLEY and unlocked input. In
+                            // a ring that is a halt — the same yield the parked
+                            // question takes: stop handing out turns and let the
+                            // user back in. Nothing is suppressed, which is the
+                            // whole difference from the path this replaces: the
+                            // message that tripped it is already a row, visible,
+                            // and stays that way.
+                            //
+                            // **Structurally identical to the parked-question
+                            // halt**, which is what keeps mutation M7 alive: this
+                            // leaves no holder, so no later completion can be
+                            // `live`, so `advance_turn(reset = false)` stays
+                            // unreachable with a `None` holder. Re-measured after
+                            // this landed — see the note in `advance_turn`.
+                            //
+                            // `warn` rather than a `system_notice` row: the
+                            // notice lane already carries five host injections
+                            // and is sized for one line (task 16), and the
+                            // inventory asks this task to DETECT. That leaves a
+                            // halted cycle with no on-screen reason — the
+                            // notification gap the module doc already names,
+                            // reached down one more path.
+                            let streak = spin.get(&participant_id).map_or(0, |s| s.streak);
+                            halt(&mut holder, &mut epoch);
+                            warn!(
+                                session = %deps.session_id,
+                                participant_id,
+                                streak,
+                                "sequencer: participant repeating itself across rounds; cycle halted"
+                            );
+                        } else {
+                            advance_turn(
+                                &deps,
+                                &mut rx,
+                                &mut holder,
+                                &mut epoch,
+                                &mut deferred,
+                                false,
+                            )
                             .await;
+                        }
                     }
                 } else {
                     debug!(
@@ -1063,6 +1116,25 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // holder's turn is not cancelled; nothing here can stop it. What
                 // happens instead is that the epoch moves, so its completion is
                 // discarded when it arrives.
+                //
+                // Spin state IS cleared here, unlike the tally. Router inventory
+                // #12 names the pair — a user message clears done-votes AND the
+                // repetition streak — and the streak has to go for a reason the
+                // tally does not share: it is what a halt was decided on, so a
+                // streak surviving the message that released the halt would let
+                // the first turn of the new cycle be judged against prose from
+                // before the user spoke, and halt again on it.
+                //
+                // **Placed on the call site rather than the mechanism, which is
+                // the opposite of the tally's placement**, and the argument in
+                // `advance_turn` for binding to the mechanism applies here too.
+                // It is here because every restart-to-the-front reachable today
+                // IS a user message — a halt leaves no holder, so no completion
+                // can be live, so nothing else reaches the front — and moving it
+                // would mean threading this map through `advance_turn` to cover
+                // a path that does not exist yet. If a second restart path ever
+                // lands, this belongs next to the tally clear, not here.
+                spin.clear();
                 advance_turn(&deps, &mut rx, &mut holder, &mut epoch, &mut deferred, true).await;
             }
             SequencerCommand::ParticipantJoined {
@@ -1262,13 +1334,22 @@ async fn advance_turn(
     // still live, so the resume's step would arrive here with `current.is_none()`
     // true and `reset` false, and every resume would empty the tally. That is why
     // the pause sets a flag instead and leaves `holder` alone. Re-measured after
-    // it: swap this condition for `reset` and all 35 tests still pass. Spin
-    // detection (task 11) may yet be the second path.
+    // it: swap this condition for `reset` and all 35 tests still pass.
     //
-    // That count is 35 as of 2026-08-11 and it moves every time a test lands
-    // here — an earlier draft carried 30 through two additions. Re-run the swap
-    // rather than trusting the figure; what the figure is FOR is "no test tells
-    // them apart", which is the part that has to be re-measured anyway.
+    // **Spin detection (task 11) has landed and is NOT the second path** — an
+    // earlier draft of this paragraph guessed it might be. It halts, so it does
+    // reach `None`, but it reaches it the way the parked question does: `halt()`
+    // clears the holder, and every later completion then fails the `live` guard,
+    // which is what calls this with `reset = false`. A `None` holder and a
+    // `reset = false` call therefore still cannot co-occur. A recovery that
+    // STEPPED PAST a stuck participant instead of halting would be the second
+    // path, and that is the shape to re-measure against, not spin detection.
+    //
+    // That count is 37 as of 2026-08-11 — re-measured with task 11's three
+    // tests, not carried forward — and it moves every time a test lands here; an
+    // earlier draft carried 30 through two additions. Re-run the swap rather
+    // than trusting the figure; what the figure is FOR is "no test tells them
+    // apart", which is the part that has to be re-measured anyway.
     //
     // What IS pinned is the other narrowing. `holder.is_none()` looks equivalent
     // and is not: a user message resets a LIVE cycle too, where the holder is
@@ -1797,6 +1878,105 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
 /// Jaccard similarity at or above which two consecutive forwards count as "the
 /// same content" for convergence detection.
 pub(super) const VOLLEY_SIMILARITY_THRESHOLD: f64 = 0.85;
+
+// --- spin detection --------------------------------------------------------
+// Router inventory #2 (`single_stream_cross_agent_same_phrase_breaks_fast`),
+// guarded by #3 (`varied_substantive_cross_agent_never_breaks`). Reframed for
+// the ring: cross-agent echo is impossible when exactly one participant holds
+// the turn, but a participant repeating ITSELF across rounds is not.
+
+/// Jaccard bar at or above which a turn counts as a repeat of the same
+/// participant's previous one.
+///
+/// **Deliberately not [`VOLLEY_SIMILARITY_THRESHOLD`], despite the same value.**
+/// `core::router` imports that one for the convergence breaker it still runs, so
+/// until task 14 deletes that file, retuning it would retune a shipped path.
+/// They also measure different things: that one compares consecutive forwards
+/// across a single interleaved stream of two agents, this one compares one
+/// participant against its own last turn. They start equal because the number
+/// was calibrated on the same material, not because they are one knob.
+const SPIN_SIMILARITY_THRESHOLD: f64 = 0.85;
+
+/// Consecutive self-similar turns before a participant counts as spinning.
+///
+/// Mirrors the router's `VOLLEY_SIMILAR_BREAK = 2`: a streak of 2 is three
+/// similar turns in a row, because the first reading has nothing to compare
+/// against and sets a baseline without scoring.
+const SPIN_BREAK_STREAK: u32 = 2;
+
+/// Prose rows read per completion. `insert_message` fires per chunk, so one turn
+/// is many rows; this bounds the read without bounding the session.
+const SPIN_TEXT_ROWS: i64 = 64;
+
+/// One participant's repetition state.
+#[derive(Default)]
+struct SpinState {
+    /// Token set of the prose read at the last comparison. `None` until the
+    /// first reading, which is NOT the same as an empty set: [`jaccard_from_sets`]
+    /// scores two empty sets as 1.0 — the punctuation-only volley it exists to
+    /// catch — so a first turn of "." compared against an empty baseline would
+    /// score a perfect match against nothing.
+    last: Option<HashSet<String>>,
+    /// Consecutive self-similar turns. **Not reset when it trips**, matching the
+    /// router: sustained repetition stays tripped until the content changes or a
+    /// user message clears the state.
+    streak: u32,
+    /// Highest message id already folded into `last`.
+    watermark: i64,
+}
+
+/// Has this participant just repeated itself? Records the reading either way.
+///
+/// Reads storage because [`SequencerCommand::TurnComplete`] carries no text —
+/// only who finished and which turn. The prose is already a row by then (task
+/// 2's guarantee), so the canonical record is both the cheaper source and the
+/// one a malformed sender cannot lie about.
+///
+/// **A turn that produced no prose leaves the streak standing** rather than
+/// resetting it — router inventory #13, subtle enough to have earned its own
+/// row: a reset consumed by a turn that produced nothing would silence the
+/// detector on the turn after it.
+///
+/// **A failed read answers `false` and does not advance the watermark**, so the
+/// next comparison re-reads those rows alongside the new ones. Same instinct as
+/// every other storage fault on this path: a missed detection costs a lap, an
+/// invented one halts a session on a transient error.
+async fn spinning(
+    deps: &SequencerDeps,
+    spin: &mut HashMap<i64, SpinState>,
+    participant_id: i64,
+) -> bool {
+    let state = spin.entry(participant_id).or_default();
+    let read = deps
+        .storage
+        .participant_text_since(participant_id, state.watermark, SPIN_TEXT_ROWS)
+        .await;
+    let (text, newest) = match read {
+        Ok(Some(found)) => found,
+        Ok(None) => return false,
+        Err(e) => {
+            warn!(
+                session = %deps.session_id,
+                participant_id,
+                error = %e,
+                "sequencer: a participant's prose could not be read; spin not evaluated this turn"
+            );
+            return false;
+        }
+    };
+    state.watermark = newest;
+    let tokens = token_set(&text);
+    match state.last.as_ref() {
+        Some(prev) if jaccard_from_sets(prev, &tokens) >= SPIN_SIMILARITY_THRESHOLD => {
+            state.streak += 1;
+        }
+        Some(_) => state.streak = 0,
+        // First reading: a baseline, not a score.
+        None => {}
+    }
+    state.last = Some(tokens);
+    state.streak >= SPIN_BREAK_STREAK
+}
 
 #[cfg(test)]
 mod tests {
@@ -4199,6 +4379,140 @@ mod tests {
             exited(task).await,
             "a command must not end the loop, and must not panic an arm"
         );
+    }
+
+    /// Router inventory **#2**, reframed for the ring. One participant saying
+    /// the same thing round after round is the repetition the convergence
+    /// breaker existed to stop; the cross-agent echo the original test used is
+    /// impossible here, because exactly one participant holds the turn.
+    ///
+    /// A one-participant ring is what isolates it: the ring comes straight back
+    /// to A, so three of A's turns are three commands rather than six. A never
+    /// reads its own rows — `channel_page` excludes them — so each wake is
+    /// driven by a host row posted alongside, which is also what makes the
+    /// silence at the end mean something.
+    #[tokio::test]
+    async fn a_participant_repeating_itself_across_rounds_is_flagged() {
+        const SAME: &str = "still waiting on the parser fix before i can continue";
+
+        let (deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // Round one is a BASELINE, not a score — there is nothing to be similar
+        // to yet. Collapse `SpinState::last`'s `None` arm into an empty set and
+        // this stops being true: `jaccard_from_sets` scores two empty sets as
+        // 1.0, so a first turn of pure punctuation would trip against nothing.
+        post(&storage, "participant", Some("a"), SAME).await;
+        post(&storage, "system", None, "tick one").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, done: false },
+        )
+        .await;
+        assert_eq!(seats[0].expect(1).await, vec!["tick one"], "epoch 2, A holds again");
+
+        // One repeat is a streak of ONE — under `SPIN_BREAK_STREAK`, so the ring
+        // keeps moving. This is the half that stops the detector firing on a
+        // participant that merely restated itself once.
+        post(&storage, "participant", Some("a"), SAME).await;
+        post(&storage, "system", None, "tick two").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 2, done: false },
+        )
+        .await;
+        assert_eq!(seats[0].expect(1).await, vec!["tick two"], "one repeat is not yet a spin");
+
+        // The third identical turn takes the streak to two and halts the cycle.
+        post(&storage, "participant", Some("a"), SAME).await;
+        post(&storage, "system", None, "tick three").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 3, done: false },
+        )
+        .await;
+        seats[0].quiet().await;
+        assert!(
+            !storage.unread_for_participant(a).await.unwrap().rows.is_empty(),
+            "the silence has to be the halt, not an empty backlog"
+        );
+
+        // The halt is a yield. A user message releases it AND clears the streak;
+        // without the clear, the first turn of the new cycle would be judged
+        // against prose from before the user spoke and halt on its own step.
+        post(&storage, "user", None, "try a different angle").await;
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(
+            seats[0].expect(2).await,
+            vec!["tick three", "try a different angle"],
+            "the release wakes A with everything past its cursor"
+        );
+
+        // The same text a fourth time. With the streak cleared this is a
+        // baseline again, so the ring steps instead of halting — which is what
+        // proves the clear happened, rather than the detector going quiet.
+        post(&storage, "participant", Some("a"), SAME).await;
+        post(&storage, "system", None, "tick four").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 5, done: false },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["tick four"],
+            "a user message cleared the streak, so this repeat starts a new count"
+        );
+
+        drop(tx);
+        assert!(exited(task).await, "the loop outlives a spin halt");
+    }
+
+    /// Router inventory **#3** — the false-positive guard, and the one the plan
+    /// says not to skip: it is what stops spin detection eating productive work.
+    ///
+    /// Four varied turns is deliberately two more than `SPIN_BREAK_STREAK`
+    /// needs, so a detector that scored any completion as a repeat would have
+    /// halted before the last one.
+    #[tokio::test]
+    async fn varied_substantive_output_never_trips_the_detector() {
+        let (deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        for (epoch, body, tick) in [
+            (1u64, "the parser drops trailing commas on nested maps", "tick one"),
+            (2, "cursor lag sits two rows behind after every retry", "tick two"),
+            (3, "storage gives up after the second attempt without logging", "tick three"),
+            (4, "watchdog fires before any turn has been handed out", "tick four"),
+        ] {
+            post(&storage, "participant", Some("a"), body).await;
+            post(&storage, "system", None, tick).await;
+            send(
+                &tx,
+                SequencerCommand::TurnComplete { participant_id: a, epoch, done: false },
+            )
+            .await;
+            assert_eq!(
+                seats[0].expect(1).await,
+                vec![tick],
+                "varied output must keep the ring moving (epoch {epoch})"
+            );
+        }
+
+        drop(tx);
+        assert!(exited(task).await, "no halt, so the loop is still draining");
     }
 
     #[test]
