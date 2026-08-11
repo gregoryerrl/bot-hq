@@ -15,12 +15,19 @@ planned next see [`PLAN.md`](PLAN.md).
 on `s-156543b6`: turns alternated, backlogs drained, cursors advanced, delivery
 rows recorded, both agents worked the task. The turn model is sound.
 
-**One live defect, and it blocks B5:** a native participant is not gated by the
-ring. Rain kept taking turns nobody handed her (~1 every 5s) while Brian held
-the turn; every completion was correctly discarded, so the ring never corrupted
-— she just burned tokens out of turn. The claude-code subprocess blocks on stdin
-between turns; the native loop self-drives. **No test could have caught it** —
-all 1,101 use fake seats that sit still until fed.
+**One live defect, now FIXED (`d874d33`) — and the first reading of it was
+wrong.** A native participant took a fresh turn every ~5s while Brian held the
+turn, all correctly discarded by the epoch guard. The mechanism was NOT
+self-driving: `run_loop` blocks on `input_rx.recv()` like the subprocess does.
+The ring writes **one stdin message per channel row** and this runtime answered
+**each with its own API request** — 87 rows in three drains answered by 135 API
+calls and 7,523,266 prompt tokens, 84 of them after the last row had arrived.
+That breaks design §1's "a turn is one participant's entire turn, not one
+message". The fix folds what is already queued at the wake into one turn,
+leaving completion cardinality untouched — because one-turn-per-message was
+accidentally the mechanism that re-snapshots the epoch, and the obvious
+alternative (re-fold after the turn) would have frozen the ring. **No test could
+have caught it** — all 1,101 used fake seats that sit still until fed.
 
 **Then a full audit of the design's `✅ VALIDATED` decisions against the code**,
 prompted by the user asking whether the redesign had lost its direction. It has

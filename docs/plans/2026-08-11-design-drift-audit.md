@@ -83,21 +83,52 @@ from the design until there is a mechanism.
 
 ## C. Found by the first live run (2026-08-11)
 
-### C1. A native participant is not gated by the ring ⚠ BLOCKS B5
+### C1. A native turn was one message, not one turn ✅ FIXED `d874d33`
+
+> **AMENDED 2026-08-11.** The original entry said "the native loop self-drives".
+> **That was wrong**, and the correction is kept visible rather than overwritten
+> because how the diagnosis moved is the useful part.
 
 With `BOT_HQ_SEQUENCER=1` on session `s-156543b6`, the ring delivered, cursors
 advanced, and turns alternated — the model works. But Rain (native,
-`deepseek-v4-pro`) **kept taking turns nobody handed her**: `history_messages`
-77 → 79 → 81, a fresh turn every ~5s while Brian held the turn. Every completion
-was correctly discarded (`completion does not name the turn in flight`), so the
-ring was never corrupted — but she burned tokens working out of turn.
+`deepseek-v4-pro`) took a fresh turn every ~5s while Brian held the turn, all
+correctly discarded by the epoch guard (`completion does not name the turn in
+flight`), so the ring was never corrupted — she just burned tokens out of turn.
 
-The claude-code subprocess blocks on stdin between turns; the native loop
-self-drives. In a push model that was invisible. In a ring, **a participant must
-act only when woken**, and nothing enforces that for the native runtime.
+**The mechanism was not self-driving.** `run_loop` blocks on `input_rx.recv()`
+exactly as the subprocess blocks on stdin. What actually happened: the ring
+writes **one stdin message per channel row**, and this runtime answered **each
+one with its own API request**, while claude-code absorbs a queued burst into a
+single turn. That breaks design §1's *"a turn is one participant's entire turn
+(many tool calls), not one message"* — token cost is the consequence, not the
+contract.
 
-Not catchable by any of the 1,101 tests: every one uses a fake seat that sits
-still until fed.
+**The burst shape is the evidence; the aggregate is not.** 87 rows in → 82 turns
+out is equally consistent with a self-driving loop, and the first reading drew
+exactly that wrong conclusion from it. A single drain of **59 rows answered
+one-per-request**, with 84 of the session's 135 calls landing *after* the last
+row arrived, is not. Measured 2026-08-11: 87 rows in three drains (27 / 59 / 1),
+135 API calls, **7,523,266 prompt tokens**.
+
+**A second wrong fix was caught before it shipped.** The obvious cure — hoist
+completion emission and re-fold *after* a turn — would have frozen the ring. The
+pump snapshots the epoch on a turn's first event and clears it at
+`TurnComplete`, so a turn spanning two folds reports the stale epoch, the guard
+discards it, and nothing further arrives. One-turn-per-message was *accidentally*
+the liveness mechanism that re-snapshots the epoch.
+
+**Shipped fix:** fold only what is already queued **at the wake**, before the
+turn starts; completion cardinality is unchanged at one per turn. ~15 lines in
+`src/agents/native/agent.rs`, pinned by
+`a_burst_of_queued_inputs_becomes_one_request` (3 queued rows → 1 request;
+deleting the fold gives 3, capping it at 1 gives 2).
+
+**Residual, not closed:** a row landing between the last `try_recv` and the
+request still starts a turn of its own. The bound moves from one turn per row to
+at most one stale turn per wake — a bound, not a proof.
+
+Not catchable by any of the 1,101 tests then in the suite: every one used a fake
+seat that sits still until fed.
 
 ---
 
