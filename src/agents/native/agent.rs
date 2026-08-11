@@ -44,7 +44,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::accounting::{AccountingLog, TurnRecord};
 use super::history;
@@ -78,6 +78,22 @@ pub const CONTEXT_WARN_FRACTION: f64 = 0.85;
 
 /// Runaway-loop guard: tool cycles allowed for a single user input.
 pub const MAX_TURNS_PER_INPUT: usize = 50;
+
+/// Inputs folded into one turn before the request goes out.
+///
+/// **A different question from [`MAX_TURNS_PER_INPUT`]**, which asks "is the
+/// model looping on tools?". This one asks "will this drain ever end?" — the
+/// fold reads a channel another task is still writing to, so without a ceiling
+/// termination would be a property of the producer's speed rather than of this
+/// loop.
+///
+/// Set to the stdin channel's own depth (the `mpsc::channel` this loop is
+/// handed, and the CLI's at `spawn.rs`), so a fold can only hit it when a
+/// producer refills mid-drain. **It is reachable** — `UNREAD_BATCH_LIMIT` is 200,
+/// well above this, so a single backlog page can exceed the channel and refill
+/// it while the fold runs. Hitting it costs nothing: the leftovers stay queued
+/// and wake the loop again on the next `recv()`.
+pub const MAX_FOLDED_INPUTS: usize = 64;
 
 /// TCP connect budget for `POST /v1/messages`.
 pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -364,9 +380,19 @@ pub async fn run_loop(
         // Deliberately NOT persisted here. `history::save` serialises the WHOLE
         // conversation, so a write per mutation is three per turn; the assistant
         // and tool-result writes below are enough. Dying between this push and
-        // the next write loses only the message the user just typed, which they
-        // can retype — cheaper than a third full serialisation every turn.
+        // the next write loses every row folded into this turn — and under the
+        // ring their cursor has already advanced, so they are NOT re-offered.
+        // That is a wider loss than the pre-ring "only the message the user just
+        // typed", and it is still cheaper than a third full serialisation every
+        // turn.
         push_user_text(&mut state.history, &msg.message.content);
+
+        // One wake, one turn. Everything already queued joins THIS turn instead
+        // of each becoming a turn of its own.
+        let folded = fold_queued(&mut input_rx, &mut state.history);
+        if folded > 0 {
+            debug!(agent = %cfg.agent_name, folded, "native: folded queued inputs into one turn");
+        }
 
         // Inner scope so the `&mut state` borrow held by `turns` ends before the
         // interrupt repair below needs it again.
@@ -732,6 +758,54 @@ fn push_user_text(history: &mut Vec<Value>, text: &str) {
         }
     }
     history.push(json!({ "role": "user", "content": [block] }));
+}
+
+/// Fold every input already queued into the turn that is about to start, and
+/// answer how many were taken.
+///
+/// **The contract this restores** is design §1: *"A turn is one participant's
+/// entire turn (many tool calls), not one message."* The ring delivers one stdin
+/// write per channel row, and this runtime answered each with its own API
+/// request — so a participant's "turn" was one message, not one turn.
+///
+/// **Measured on `s-156543b6`, 2026-08-11.** The ring wrote 87 rows to the
+/// native participant in three drains — 27, then 59, then 1 — and the runtime
+/// made 135 API calls against 84 consumed inputs, billing 7,523,266 prompt
+/// tokens. 84 of those calls landed AFTER the final row arrived, still running
+/// six minutes later with no input left to justify them.
+///
+/// **The burst shape is the evidence, not the totals.** 87-in / 82-turns-out is
+/// equally consistent with a loop that drives itself, and an earlier reading of
+/// this defect drew exactly that wrong conclusion from it. A single drain of 59
+/// writes consumed one-per-request is not: it can only be one-turn-per-message.
+/// (Totals also cannot be reconciled directly — `broadcast_user_message` and
+/// `SessionHandle::send_to_all` write to the same stdin, so not every input came
+/// from the ring's drain.)
+///
+/// **`try_recv`, never `recv`.** Waiting for one more input is a debounce, and a
+/// debounce needs a constant nobody has measured. This takes what is already
+/// there and starts the turn.
+///
+/// **`Empty` and `Disconnected` are deliberately not distinguished** — both end
+/// the drain. A disconnect is then seen by the outer `recv()`, which returns
+/// `None` and tears the loop down; that is the supervisor's end-of-incarnation
+/// signal and it already has a test.
+///
+/// **What this does NOT fix:** a row landing between the last `try_recv` and the
+/// request still starts a turn of its own. The bound moves from one turn per row
+/// to at most one stale turn per wake — a bound, not a proof.
+fn fold_queued(rx: &mut mpsc::Receiver<OutgoingUserMessage>, history: &mut Vec<Value>) -> usize {
+    let mut folded = 0;
+    while folded < MAX_FOLDED_INPUTS {
+        match rx.try_recv() {
+            Ok(m) => {
+                push_user_text(history, &m.message.content);
+                folded += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    folded
 }
 
 /// An interrupt can drop the turn between "assistant asked for tools" and "the
@@ -1156,6 +1230,54 @@ mod tests {
         match next_raw(&mut h).await {
             AgentEvent::Text(t) => assert_eq!(t, "hi", "no notice when the window is known"),
             other => panic!("expected turn text, got {other:?}"),
+        }
+    }
+
+    /// One wake, one turn — the defect the ring exposed and the contract design
+    /// §1 states: "a turn is one participant's entire turn, not one message".
+    ///
+    /// The ring writes one stdin message per channel row, so a backlog drain
+    /// arrives as a burst. Before the fold this runtime answered each with its
+    /// own API request: measured on `s-156543b6` (2026-08-11) a single drain of
+    /// 59 rows produced 59 requests, and 84 of the session's 135 calls landed
+    /// after the last row had arrived.
+    ///
+    /// `try_send` rather than `send` so all three are buffered before the loop
+    /// is polled — on the current-thread test runtime the spawned loop cannot
+    /// run until this task awaits, which makes the fold deterministic instead
+    /// of a race the assertion would only usually win.
+    #[tokio::test]
+    async fn a_burst_of_queued_inputs_becomes_one_request() {
+        let t = ScriptedTransport::new(vec![Ok(end_turn("done"))]);
+        let mut h = start(t.clone(), Some(1_000_000));
+
+        h.input.try_send(OutgoingUserMessage::text("row one")).unwrap();
+        h.input.try_send(OutgoingUserMessage::text("row two")).unwrap();
+        h.input.try_send(OutgoingUserMessage::text("row three")).unwrap();
+
+        // `Init` rides every spawn; the turn's text is what this test is about.
+        let mut text = None;
+        for _ in 0..4 {
+            if let AgentEvent::Text(t) = next(&mut h).await {
+                text = Some(t);
+                break;
+            }
+        }
+        assert_eq!(text.as_deref(), Some("done"), "the folded turn produced its answer");
+
+        let reqs = t.requests();
+        assert_eq!(
+            reqs.len(),
+            1,
+            "three queued rows must be answered by ONE request, not three"
+        );
+
+        // And the fold must not lose any of them: all three texts ride the
+        // trailing user message. `push_user_text` merges consecutive user
+        // content, so they land as blocks on one message rather than three.
+        let body = serde_json::to_string(&reqs[0]).unwrap();
+        for row in ["row one", "row two", "row three"] {
+            assert!(body.contains(row), "folded turn dropped {row:?}");
         }
     }
 
