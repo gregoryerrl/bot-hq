@@ -1978,6 +1978,70 @@ async fn spinning(
     state.streak >= SPIN_BREAK_STREAK
 }
 
+// --- what a completed turn means -------------------------------------------
+// Router inventory #8, #9, #10 and #11 as one group. In the router these were
+// four branches over "do I forward this?"; in a ring there is nothing to
+// forward — the turn's text is already a row — so the same four branches decide
+// the VOTE instead: does this ending mean "I have nothing left to add"?
+
+/// Longest acked turn still read as a bare acknowledgement.
+///
+/// **Mints its own rather than importing `router::PEER_ACK_MAX_SUPPRESSED_LEN`,**
+/// which is private to a module task 14 deletes — same reasoning as
+/// [`SPIN_SIMILARITY_THRESHOLD`]. The VALUE is the router's on purpose: the
+/// inventory says the length proxy stays as the floor, so this is a move, not a
+/// retune.
+const PEER_ACK_MAX_SUPPRESSED_LEN: usize = 200;
+
+/// What a completed turn means.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TurnEnding {
+    /// The consensus vote — [`SequencerCommand::TurnComplete::done`].
+    pub done: bool,
+    /// The ack was overridden because the turn carried substantive text. The
+    /// row records it via `Envelope::with_peer_ack_override`, so the override is
+    /// something the user can see rather than a sentence spliced onto the body.
+    pub peer_ack_override: bool,
+}
+
+/// Derive a turn's ending from the `peer_ack` signals it carried.
+///
+/// **Here rather than on the command, and called by the sender.**
+/// [`SequencerCommand::TurnComplete`] argues its own case for carrying exactly
+/// `done` and not the signals behind it; widening it to `(peer_ack,
+/// peer_ack_final, body)` would move this decision into the loop and give a
+/// malformed sender three fields to disagree about instead of one. So the
+/// semantics live in this module — which owns what a turn means — and the pump
+/// that carries the epoch out calls this on the way back in. That wiring is
+/// task 14/15's, the same unsolved round trip `done` already rides.
+///
+/// The four inventory rows, in the order the router evaluated them:
+///
+/// - **#8** a bare `peer_ack` is a done vote. In the router it suppressed the
+///   forward and skipped the counters; here it declines to wake the next
+///   participant by voting, which is the same intent expressed as consensus.
+/// - **#9** an acked turn over [`PEER_ACK_MAX_SUPPRESSED_LEN`] is NOT a vote —
+///   it posts, tagged. **This guard exists because four full reviews were
+///   destroyed** by an agent posting its verdict and calling `peer_ack` in the
+///   same turn: the tool name reads as "acknowledge my peer", the effect was
+///   "throw my turn away".
+/// - **#10** `final: true` votes regardless of length — the agent ASSERTING
+///   this is its closing turn outranks the length proxy.
+/// - **#11** the inverse: substantive and not final still posts.
+///
+/// Safe in a way the router's version had to argue for: suppression there
+/// skipped the wake but never the record, and here there is no suppression at
+/// all. The text is a row before this is ever consulted.
+pub fn turn_ending(peer_ack: bool, peer_ack_final: bool, body: &str) -> TurnEnding {
+    if !peer_ack {
+        return TurnEnding { done: false, peer_ack_override: false };
+    }
+    if peer_ack_final || body.trim().len() <= PEER_ACK_MAX_SUPPRESSED_LEN {
+        return TurnEnding { done: true, peer_ack_override: false };
+    }
+    TurnEnding { done: false, peer_ack_override: true }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4513,6 +4577,84 @@ mod tests {
 
         drop(tx);
         assert!(exited(task).await, "no halt, so the loop is still draining");
+    }
+
+    // ---- what a completed turn means (inventory #8-#11) --------------------
+    //
+    // Pure-function tests, deliberately. What each row means for the RING — a
+    // done vote does not wake the next participant, a non-done one steps and
+    // resets the tally — is already pinned end to end by
+    // `the_cycle_halts_when_every_active_participant_votes_done` and
+    // `substantive_output_resets_the_tally`. What is new here is the derivation,
+    // so that is what these test; asserting the ring again would re-test the
+    // half that already has cover and leave the new half resting on it.
+
+    /// Router inventory **#8**. In the router a bare `peer_ack` suppressed the
+    /// forward and skipped the counters; in the ring it is a done vote, which
+    /// declines to wake the next participant by ending the cycle rather than by
+    /// hiding a message.
+    #[test]
+    fn peer_ack_suppresses_and_doesnt_count() {
+        assert_eq!(
+            turn_ending(true, false, "ack"),
+            TurnEnding { done: true, peer_ack_override: false }
+        );
+    }
+
+    /// Router inventory **#9** — the guard that exists because four full reviews
+    /// were destroyed by an agent posting its verdict and acking in one turn.
+    /// Over the length floor, the ack does not become a vote and the row carries
+    /// the override tag.
+    #[test]
+    fn peer_ack_on_substantive_turn_forwards_anyway() {
+        let review = "x".repeat(PEER_ACK_MAX_SUPPRESSED_LEN + 1);
+        assert_eq!(
+            turn_ending(true, false, &review),
+            TurnEnding { done: false, peer_ack_override: true }
+        );
+        // The floor itself is still an ack — `<=`, not `<`. One byte decides
+        // which of the two rows above applies, so it is worth pinning that the
+        // boundary sits where the router put it.
+        let at_floor = "x".repeat(PEER_ACK_MAX_SUPPRESSED_LEN);
+        assert_eq!(
+            turn_ending(true, false, &at_floor),
+            TurnEnding { done: true, peer_ack_override: false }
+        );
+    }
+
+    /// Router inventory **#10**. `final: true` is the agent asserting this is
+    /// its closing turn, and it outranks the length proxy.
+    #[test]
+    fn peer_ack_final_suppresses_a_substantive_turn() {
+        let closing = "y".repeat(PEER_ACK_MAX_SUPPRESSED_LEN + 1);
+        assert_eq!(
+            turn_ending(true, true, &closing),
+            TurnEnding { done: true, peer_ack_override: false }
+        );
+    }
+
+    /// Router inventory **#11**, the inverse of #10 — and the pair is what makes
+    /// `final` load-bearing rather than decorative: same body, one flag apart,
+    /// opposite endings. A turn that never acked at all is substantive too.
+    #[test]
+    fn substantive_turn_without_final_still_forwards() {
+        let body = "z".repeat(PEER_ACK_MAX_SUPPRESSED_LEN + 1);
+        assert_eq!(
+            turn_ending(true, false, &body),
+            TurnEnding { done: false, peer_ack_override: true }
+        );
+        assert_eq!(
+            turn_ending(false, false, &body),
+            TurnEnding { done: false, peer_ack_override: false },
+            "no ack at all is substantive, and carries no override tag"
+        );
+        // Trimmed before measuring, like the router: whitespace must not push a
+        // bare ack over the floor.
+        let padded = format!("   {}   ", "w".repeat(PEER_ACK_MAX_SUPPRESSED_LEN));
+        assert_eq!(
+            turn_ending(true, false, &padded),
+            TurnEnding { done: true, peer_ack_override: false }
+        );
     }
 
     #[test]
