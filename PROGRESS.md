@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## 2026-08-11 — B5 in progress: the turn sequencer exists, `router.rs` is still live (HANDOFF)
 
-**Status: 14 of 18 tasks done, 41 commits (`3c8c90a..b07563c`). Nothing in the
+**Status: 16 of 18 tasks done, 43 commits (`3c8c90a..2ac4875`). Nothing in the
 system behaves differently yet** — the sequencer is built but nothing spawns it,
 and `core/router.rs` still routes every peer forward. Everything through task 13
 is additive; task 14 is the first irreversible one.
@@ -33,15 +33,23 @@ Acceptance criterion: [`docs/plans/2026-08-06-router-behaviour-inventory.md`](do
 | 8 | user-message cycle reset (inventory #12, #13) |
 | 9 | pause holds wakes (inventory #19) |
 | 10 | Jaccard helpers moved out of `router.rs`, verbatim |
+| 11 | spin detection (inventory #2, guarded by #3) — one participant repeating itself across rounds halts the cycle. Mints its own `SPIN_*` constants; `VOLLEY_SIMILARITY_THRESHOLD` stays `router.rs`'s until task 14. **M7 re-measured: it survives** — `halt()` leaves no holder, so `advance_turn(reset = false)` is still unreachable with a `None` holder, and the doc's guess that spin detection might be the second path is now answered in place |
+| 12 | `peer_ack` → done-votes (inventory #8, #9, #10, #11) as one pure `turn_ending()`, called by the sender rather than widening `TurnComplete`; #9's override tag moved from a spliced sentence to an `Envelope` field, same wire text |
 
-`src/core/sequencer.rs`: 35 tests. Full suite: 1091 lib + 66 integration.
+`src/core/sequencer.rs`: 41 tests. Full suite: 1099 lib + 66 integration.
+
+**Both tasks were mutation-tested, and both turned up a hole a green suite hid.**
+Task 11's two sequencer tests passed with `participant_text_since`'s `kind =
+'text'` filter deleted — the filter that keeps `tool_use` rows, which outnumber
+prose four to one and repeat by construction, out of a similarity test; it is
+pinned at the storage layer now. Task 12's envelope renderer had no test at all.
+Also worth knowing for anyone re-running these: the `TurnEnding { done: false,
+peer_ack_override: true }` literal appears in the implementation AND in two test
+expectations, so a naive `sed` mutates all three, they agree, and the probe
+reports a false survival. Anchor on the four-space indent.
 
 ### Left
 
-- **11 — spin detection** (inventory #2 and its false-positive guard #3). Was
-  in flight; the subagent died after ~3h having written nothing. Nothing to
-  recover, start clean.
-- **12** — `peer_ack` → done-votes (inventory #8, #9, #10, #11).
 - **13** — withheld-delivery rows, **plus the perf benchmark the inventory
   demands**: the old delivery path never touched storage, and the channel model
   puts a write back on it. "Measured, not assumed" is an acceptance criterion.
@@ -57,17 +65,23 @@ Acceptance criterion: [`docs/plans/2026-08-06-router-behaviour-inventory.md`](do
 
 ### Three things the next session should not have to rediscover
 
-1. **`VOLLEY_SIMILARITY_THRESHOLD` is shared with live code.** `router.rs`'s
-   convergence breaker uses it, so **`0.85` cannot be retuned until task 14
-   deletes that file.** Spin detection should mint its own constant rather than
-   inherit it by inertia. Its docs still say "forward"/"convergence" — router
-   concepts the sequencer's own module doc says do not exist on the turn path.
-2. **Mutation M7 is a live tripwire.** Swapping `advance_turn`'s
-   `current.is_none()` for `reset` currently changes nothing, *because every
-   `None` holder today means a genuine restart*. If spin detection (or anything
-   else) clears the holder without passing `reset`, that equivalence dies and
-   **every recovery silently clears the consensus tally**. Re-measure M7 after
-   task 11; if it broke, change the condition in the same commit.
+1. **`VOLLEY_SIMILARITY_THRESHOLD` is still shared with live code**, and so is
+   `router.rs`'s private `PEER_ACK_MAX_SUPPRESSED_LEN`. `0.85` and `200` cannot
+   be retuned until task 14 deletes that file. Tasks 11 and 12 minted their own
+   (`SPIN_SIMILARITY_THRESHOLD`, `SPIN_BREAK_STREAK`,
+   `PEER_ACK_MAX_SUPPRESSED_LEN` in `sequencer.rs`) rather than inherit by
+   inertia — same values on purpose, because both inventories say the proxy
+   MOVES rather than being retuned. Task 14 is where they become tunable, and
+   where the router copies go.
+2. **Mutation M7 survives task 11 — re-measured 2026-08-11, all 41 tests.**
+   Spin detection halts, so it does produce a `None` holder, but it reaches it
+   the way the parked question does: `halt()` clears the holder, every later
+   completion then fails the `live` guard, and the `live` guard is what calls
+   `advance_turn(reset = false)`. So a `None` holder and a `reset = false` call
+   still cannot co-occur. **The shape that WOULD break it is a recovery that
+   steps past a stuck participant instead of halting** — measure against that,
+   not against spin detection. The reasoning is recorded at the condition
+   itself; re-run the swap rather than trusting this paragraph.
 3. **A `UserMessage` releases a pause** (host contract: `state.rs:737`,
    `activity.rs:217`, and `resume_session` is a `broadcast`, so the Resume
    button IS a user message). Three non-human writers mint `origin = "user"`
