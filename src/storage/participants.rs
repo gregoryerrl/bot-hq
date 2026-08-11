@@ -15,6 +15,7 @@
 
 use super::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,10 +24,76 @@ pub struct Role {
     pub slug: String,
     pub display_name: String,
     pub description_prompt: Option<String>,
+    /// JSON array of capability slugs — grants only (0044). Kept as the raw
+    /// column rather than a parsed set because `storage` has no dependency on
+    /// `agents`, where [`Capability`](crate::agents::Capability) lives, and
+    /// adding one for a list of strings would invert the layering. Whatever
+    /// writes this must have already decided the slugs are real;
+    /// [`Storage::create_role`] only guarantees the SHAPE (a JSON array of
+    /// strings), never that a slug names a capability that exists.
+    pub capabilities: String,
+    /// `active` | `observer` | `on_demand` — see [`PARTICIPATION_MODES`].
+    pub participation_mode: String,
+    /// The role's default model, overridable per participant at invite
+    /// (`session_participants.model_id`). Both columns ship in 0044; rc3
+    /// decision D8 makes THIS one the Roles tab's model control and deletes the
+    /// Agents tab rather than renaming it.
+    pub default_model_id: Option<String>,
+    pub builtin: bool,
+    /// Archived roles are hidden from [`Storage::list_roles`] but keep their
+    /// rows, their ids and their slugs — see migration 0047 for why removal
+    /// cannot be a delete.
+    pub archived: bool,
+}
+
+/// Everything the Roles tab may set on a role, as one value.
+///
+/// One struct for create AND update, because the tab edits the same form in
+/// both cases and two near-identical structs would drift the moment a field is
+/// added. What differs is `slug`, and only `slug` — see the field.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoleDraft {
+    pub display_name: String,
+    /// **`None` means different things per operation, and the difference is
+    /// load-bearing.**
+    ///
+    /// On [`Storage::create_role`]: derive the slug from `display_name`.
+    ///
+    /// On [`Storage::update_role`]: leave the existing slug ALONE. Re-deriving
+    /// it from the display name on every edit would mean renaming the "HANDS"
+    /// role to "Executor" silently moves its slug from `hands` to `executor` —
+    /// and `Storage::ensure_session_roster` seeds every new session's roster
+    /// with two literal `(SELECT id FROM roles WHERE slug = 'hands' / 'eyes')`
+    /// subqueries. Those resolve to NULL against a renamed slug, so every
+    /// session created afterwards would get a roster with `role_id IS NULL` and
+    /// nothing would report an error. A rename is therefore always explicit:
+    /// pass `Some`.
+    ///
+    /// `Some` is normalised through [`slugify`] and de-duplicated, so a caller
+    /// cannot write a slug with spaces in it or collide with an existing role.
+    pub slug: Option<String>,
+    pub description_prompt: Option<String>,
+    /// JSON array of capability slugs. Validated for SHAPE and re-serialised
+    /// canonically — see [`canonical_capabilities`].
     pub capabilities: String,
     pub participation_mode: String,
-    pub builtin: bool,
+    pub default_model_id: Option<String>,
 }
+
+/// The participation modes 0044's column comment defines, as data.
+///
+/// A guard rather than documentation because the value is compared as a STRING
+/// with no CHECK constraint behind it: `next_active_participant` filters the
+/// ring on `p.participation_mode == "active"`, so a role stored as `"Active"`
+/// or `"actve"` produces participants that are enabled, visible in the roster,
+/// counted by `all_active_voted_done` — no, not even counted, since that filters
+/// on the same string — and simply never given a turn. The failure is a session
+/// that looks fully staffed and never advances, with nothing to grep for.
+pub const PARTICIPATION_MODES: [&str; 3] = ["active", "observer", "on_demand"];
+
+/// The slug a role whose display name contains no ASCII alphanumerics falls
+/// back to. See [`slugify`] for why that case exists at all.
+const FALLBACK_SLUG: &str = "role";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Participant {
@@ -45,8 +112,8 @@ pub struct Participant {
     pub enabled: bool,
 }
 
-const ROLE_COLUMNS: &str =
-    "id, slug, display_name, description_prompt, capabilities, participation_mode, builtin";
+const ROLE_COLUMNS: &str = "id, slug, display_name, description_prompt, capabilities, \
+     participation_mode, default_model_id, builtin, archived";
 
 const PARTICIPANT_COLUMNS: &str = "id, session_id, slug, display_name, role_id, model_id, \
      runtime, capabilities, participation_mode, turn_position, done_vote, enabled";
@@ -60,7 +127,14 @@ fn role_from_row(r: &sqlx::sqlite::SqliteRow) -> Role {
         description_prompt: r.get("description_prompt"),
         capabilities: r.get("capabilities"),
         participation_mode: r.get("participation_mode"),
+        default_model_id: r.get("default_model_id"),
         builtin: r.get::<i64, _>("builtin") != 0,
+        // `<> 0`, not `== 1`, for the same reason `enabled` is decoded that way:
+        // the column is `INTEGER NOT NULL DEFAULT 0` with no CHECK, so 2 is a
+        // storable value, and a truthiness flag has to be read as one. A row
+        // storing 2 read as "not archived" would put a removed role back in the
+        // picker.
+        archived: r.get::<i64, _>("archived") != 0,
     }
 }
 
@@ -138,17 +212,157 @@ fn next_in_ring<'a>(
     }
 }
 
+/// A display name reduced to a stable key: lowercase ASCII alphanumerics, with
+/// every other run of characters collapsed to a single `-` and the ends
+/// trimmed.
+///
+/// ASCII-only is a deliberate narrowing rather than an oversight. A role slug
+/// is a key that gets typed and pasted — `ensure_session_roster` matches two of
+/// them as SQL literals (`'hands'`, `'eyes'`) — and it seeds the participant
+/// slug the rc3 mention syntax parses as `@slug`. A slug nobody can type on
+/// their keyboard is worse than one that lost an accent.
+///
+/// The cost is named rather than hidden: `Café` slugifies to `caf`, and a name
+/// written entirely in a non-Latin script slugifies to the empty string. The
+/// empty case is exactly why [`FALLBACK_SLUG`] exists — `roles.slug` is
+/// `NOT NULL UNIQUE`, so an empty slug would insert once and then fail every
+/// subsequent time with a constraint error the user cannot act on.
+fn slugify(display_name: &str) -> String {
+    let mut out = String::with_capacity(display_name.len());
+    for ch in display_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            // One `-` per run of anything else, so "HANDS  //  v2" is
+            // `hands-v2` rather than `hands------v2`. A leading `-` can be
+            // pushed here (the string is empty, so it does not end with one);
+            // the trim below removes it.
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        FALLBACK_SLUG.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// `base`, or the first `base-N` (N from 2) that nobody holds.
+///
+/// `taken` must include ARCHIVED roles: `roles.slug` is UNIQUE over the whole
+/// table and 0047 did not scope that to live rows, so an archived role's slug
+/// is still reserved. Handing this a live-only set would produce a slug that
+/// passes here and fails at the INSERT.
+///
+/// Suffixes start at 2 because `base` itself is the "1": `hands`, `hands-2`,
+/// `hands-3`. The search is bounded rather than unbounded, and provably
+/// sufficient — `base` plus `base-2 ..= base-(N+2)` is N+2 candidates against N
+/// taken slugs, so by pigeonhole at least two are free. The `expect` is
+/// therefore unreachable rather than optimistic.
+fn first_free_slug(base: &str, taken: &HashSet<String>) -> String {
+    if !taken.contains(base) {
+        return base.to_string();
+    }
+    (2..=taken.len() as u64 + 2)
+        .map(|n| format!("{base}-{n}"))
+        .find(|candidate| !taken.contains(candidate))
+        .expect("N+2 candidates cannot all collide with N taken slugs")
+}
+
+/// Validate the SHAPE of a capabilities column and re-serialise it compactly.
+///
+/// Shape only — this checks that the value is a JSON array of strings, never
+/// that a string names a capability that exists. That second check belongs
+/// where [`Capability`](crate::agents::Capability) is in scope, which is not
+/// here: `storage` carries no dependency on `agents`, and the Tauri command
+/// layer is the Roles tab's only door.
+///
+/// The shape check still earns its place. `CapabilitySet::from_slugs` is a
+/// `filter_map` over `Capability::parse`, so a column holding `"[]"`, `"null"`,
+/// or a stray `{}` all decode to the same thing: a role with no capabilities,
+/// which is a legal configuration (an observer) and reads as intentional. A
+/// write that stored the wrong TYPE would be indistinguishable from a user who
+/// meant to grant nothing.
+///
+/// Re-serialising normalises whitespace so the column holds one spelling of a
+/// given list. Order and duplicates are preserved as given: dropping a repeat
+/// would be a silent edit of what the caller asked to store, and order is what
+/// the migration's own seed rows use.
+fn canonical_capabilities(raw: &str) -> Result<String> {
+    let parsed: serde_json::Value = serde_json::from_str(raw)
+        .with_context(|| format!("role capabilities must be JSON, got {raw:?}"))?;
+    let serde_json::Value::Array(items) = parsed else {
+        anyhow::bail!("role capabilities must be a JSON array, got {raw:?}");
+    };
+    let slugs = items
+        .iter()
+        .map(|item| match item {
+            serde_json::Value::String(s) => Ok(s.as_str()),
+            other => Err(anyhow::anyhow!(
+                "role capabilities must be an array of strings, got {other}"
+            )),
+        })
+        .collect::<Result<Vec<&str>>>()?;
+    serde_json::to_string(&slugs).context("re-serialising role capabilities")
+}
+
+/// The checks every role write runs, whichever operation is writing.
+///
+/// Returns the canonical capabilities so the caller cannot forget to store the
+/// validated form — a `Result<()>` here would leave the raw string one typo
+/// away from being the thing that gets bound.
+fn validated_draft_capabilities(draft: &RoleDraft) -> Result<String> {
+    if draft.display_name.trim().is_empty() {
+        // The display name is what the tab lists and what a generated slug is
+        // derived from. Blank, the slug falls back to `role`, `role-2`, … and
+        // the picker shows a column of unlabelled rows.
+        anyhow::bail!("a role needs a display name");
+    }
+    if !PARTICIPATION_MODES.contains(&draft.participation_mode.as_str()) {
+        anyhow::bail!(
+            "unknown participation mode {:?} — expected one of {}",
+            draft.participation_mode,
+            PARTICIPATION_MODES.join(", ")
+        );
+    }
+    canonical_capabilities(&draft.capabilities)
+}
+
 impl Storage {
     // ---- roles ----------------------------------------------------------
 
+    /// Live roles, archived ones excluded — what a picker should offer.
+    ///
+    /// The filter is `archived = 0` rather than `archived <> 1` so a row storing
+    /// any other non-zero value is treated as archived, agreeing with
+    /// [`role_from_row`]'s `<> 0` decode. The two must select the same rows;
+    /// 0045's post-mortem is the record of what it costs when a SQL predicate
+    /// and a Rust decode disagree about a truthiness column.
     pub async fn list_roles(&self) -> Result<Vec<Role>> {
-        let rows = sqlx::query(&format!("SELECT {ROLE_COLUMNS} FROM roles ORDER BY slug"))
-            .fetch_all(&self.pool)
-            .await
-            .context("listing roles")?;
+        let rows = sqlx::query(&format!(
+            "SELECT {ROLE_COLUMNS} FROM roles WHERE archived = 0 ORDER BY slug"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .context("listing roles")?;
         Ok(rows.iter().map(role_from_row).collect())
     }
 
+    /// Every role, archived included. The Roles tab needs this to offer an
+    /// un-archive, and a past session's `role_id` only resolves through it.
+    pub async fn list_roles_including_archived(&self) -> Result<Vec<Role>> {
+        let rows = sqlx::query(&format!("SELECT {ROLE_COLUMNS} FROM roles ORDER BY slug"))
+            .fetch_all(&self.pool)
+            .await
+            .context("listing roles including archived")?;
+        Ok(rows.iter().map(role_from_row).collect())
+    }
+
+    /// **Does not filter archived**, deliberately. This is a lookup by a UNIQUE
+    /// key, and 0047 left the slug reserved while a role is archived precisely
+    /// so the row stays reachable — hiding it here would make an archived role
+    /// both unresolvable and un-recreatable under its own name.
     pub async fn role_by_slug(&self, slug: &str) -> Result<Option<Role>> {
         let row = sqlx::query(&format!("SELECT {ROLE_COLUMNS} FROM roles WHERE slug = ?"))
             .bind(slug)
@@ -174,6 +388,159 @@ impl Storage {
             .await
             .with_context(|| format!("loading role id {id}"))?;
         Ok(row.as_ref().map(role_from_row))
+    }
+
+    /// Every slug currently held, archived rows included, optionally excluding
+    /// one row's own. See [`first_free_slug`] for why archived rows count.
+    ///
+    /// `exclude_id` is what makes a rename idempotent: without it, saving the
+    /// `hands` role with `slug: Some("hands")` would find `hands` taken — by
+    /// itself — and rename it to `hands-2` on every save.
+    async fn taken_slugs(&self, exclude_id: Option<i64>) -> Result<HashSet<String>> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT slug FROM roles WHERE ?1 IS NULL OR id <> ?1")
+                .bind(exclude_id)
+                .fetch_all(&self.pool)
+                .await
+                .context("reading taken role slugs")?;
+        Ok(rows.into_iter().map(|(slug,)| slug).collect())
+    }
+
+    /// Create a role and return it as stored — including the slug that was
+    /// allocated for it, which the caller cannot predict.
+    ///
+    /// `builtin` is 0 and is not a parameter: the flag means "seeded by bot-hq"
+    /// (0044), and a role the user just created is not that, whatever it is
+    /// named.
+    ///
+    /// **The slug is allocated by a SELECT and used by a later INSERT, and those
+    /// are two statements.** Two creates racing on the same base name can both
+    /// read the same taken-set and pick the same suffix; the second INSERT then
+    /// fails on `roles.slug`'s UNIQUE index and this returns that error with the
+    /// slug named in the context. That is the backstop working, not the window
+    /// being closed — a caller that must not see it needs its own serialisation.
+    /// Left as-is because the only caller is a desktop tab where the two writers
+    /// would have to be two clicks in the same millisecond, and because a
+    /// constraint error is a loud, correct failure rather than a wrong row.
+    pub async fn create_role(&self, draft: &RoleDraft) -> Result<Role> {
+        let capabilities = validated_draft_capabilities(draft)?;
+        let base = slugify(draft.slug.as_deref().unwrap_or(&draft.display_name));
+        let slug = first_free_slug(&base, &self.taken_slugs(None).await?);
+        // `now_utc()` (RFC3339-Z), not the column's `datetime('now')` DEFAULT.
+        // That default is what 0044 seeded `hands` and `eyes` with, so this
+        // column now holds two spellings — a fact, not a claim that it does not
+        // matter. RFC3339-Z is the project baseline every other write keeps
+        // (`storage::time`), and the alternative is worse: `datetime('now')`
+        // emits a zone-less local-looking string the frontend renders as local
+        // time, which is the staleness hallucination `now_utc` exists to stop.
+        let now = now_utc();
+        let id = sqlx::query(
+            "INSERT INTO roles \
+             (slug, display_name, description_prompt, capabilities, participation_mode, \
+              default_model_id, builtin, archived, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)",
+        )
+        .bind(&slug)
+        .bind(draft.display_name.trim())
+        .bind(draft.description_prompt.as_deref())
+        .bind(&capabilities)
+        .bind(&draft.participation_mode)
+        .bind(draft.default_model_id.as_deref())
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("creating role {slug}"))?
+        .last_insert_rowid();
+        self.role_by_id(id)
+            .await?
+            .with_context(|| format!("role {id} vanished between insert and read"))
+    }
+
+    /// Update a role in place and return it as stored.
+    ///
+    /// Touches exactly the five fields the Roles tab owns plus the slug. What
+    /// it deliberately does NOT touch:
+    ///   * `builtin` — the flag records provenance, and editing a seeded role
+    ///     does not stop it having been seeded (0044: seeds are user-editable);
+    ///   * `archived` — [`Storage::set_role_archived`] is the one way that
+    ///     moves, so a save from a form that never rendered the flag cannot
+    ///     resurrect an archived role by omission;
+    ///   * `created_at`;
+    ///   * every LIVE participant that was invited from this role. That is the
+    ///     invite-time snapshot (0044) and it is the point: editing a role must
+    ///     not widen a running participant's permissions mid-turn.
+    ///
+    /// Errors when `id` names no role. An UPDATE matching nothing is not an
+    /// error in SQLite, so without the check a save against a role another
+    /// window had just archived-and-recreated would report success and change
+    /// nothing.
+    pub async fn update_role(&self, id: i64, draft: &RoleDraft) -> Result<Role> {
+        let capabilities = validated_draft_capabilities(draft)?;
+        // `None` leaves the slug alone — see `RoleDraft::slug` for why a rename
+        // has to be explicit rather than derived from the display name.
+        let slug = match draft.slug.as_deref() {
+            Some(requested) => {
+                let base = slugify(requested);
+                Some(first_free_slug(&base, &self.taken_slugs(Some(id)).await?))
+            }
+            None => None,
+        };
+        let changed = sqlx::query(
+            "UPDATE roles SET \
+                 slug = COALESCE(?, slug), \
+                 display_name = ?, \
+                 description_prompt = ?, \
+                 capabilities = ?, \
+                 participation_mode = ?, \
+                 default_model_id = ?, \
+                 updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(slug.as_deref())
+        .bind(draft.display_name.trim())
+        .bind(draft.description_prompt.as_deref())
+        .bind(&capabilities)
+        .bind(&draft.participation_mode)
+        .bind(draft.default_model_id.as_deref())
+        .bind(now_utc())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("updating role {id}"))?
+        .rows_affected();
+        if changed == 0 {
+            anyhow::bail!("role {id} does not exist");
+        }
+        self.role_by_id(id)
+            .await?
+            .with_context(|| format!("role {id} vanished between update and read"))
+    }
+
+    /// Archive or un-archive a role (decision D8: removal is archival).
+    ///
+    /// Takes the target state rather than being a one-way `archive_role`, so
+    /// the same call restores. Nothing else about the row moves — the slug
+    /// stays reserved (0047) and every participant that carries this `role_id`
+    /// keeps resolving it.
+    ///
+    /// Errors when `id` names no role, for the same reason
+    /// [`Storage::update_role`] does: a no-match UPDATE is silent success in
+    /// SQLite, and "the role you archived is still in the list" is exactly the
+    /// bug that would produce.
+    pub async fn set_role_archived(&self, id: i64, archived: bool) -> Result<()> {
+        let changed = sqlx::query("UPDATE roles SET archived = ?, updated_at = ? WHERE id = ?")
+            .bind(i64::from(archived))
+            .bind(now_utc())
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("archiving role {id}"))?
+            .rows_affected();
+        if changed == 0 {
+            anyhow::bail!("role {id} does not exist");
+        }
+        Ok(())
     }
 
     // ---- participants ---------------------------------------------------
@@ -1453,6 +1820,354 @@ mod tests {
             !eyes.capabilities.contains("edit_files"),
             "EYES must not be seeded with write access"
         );
+    }
+
+    // ---- roles CRUD (B8a) -------------------------------------------------
+
+    /// A minimal legal draft. Tests override only the field under test, so a
+    /// new required field breaks compilation here rather than silently
+    /// defaulting in twenty places.
+    fn draft(display_name: &str) -> RoleDraft {
+        RoleDraft {
+            display_name: display_name.to_string(),
+            slug: None,
+            description_prompt: None,
+            capabilities: r#"["read_channel","post_channel"]"#.to_string(),
+            participation_mode: "active".to_string(),
+            default_model_id: None,
+        }
+    }
+
+    #[test]
+    fn slugify_keeps_ascii_alphanumerics_and_collapses_everything_else() {
+        assert_eq!(slugify("HANDS"), "hands");
+        assert_eq!(slugify("Code Reviewer"), "code-reviewer");
+        // Runs collapse to ONE hyphen, and both ends are trimmed — otherwise a
+        // name pasted with trailing spaces yields a slug ending in `-`, which
+        // reads as a truncated key.
+        assert_eq!(slugify("  Deep  //  Thinker!!  "), "deep-thinker");
+        assert_eq!(slugify("v2"), "v2");
+        // The documented cost of ASCII-only, asserted rather than described:
+        // an accent is dropped, and a wholly non-Latin name has no slug at all
+        // and falls back rather than inserting an empty UNIQUE key.
+        assert_eq!(slugify("Café"), "caf");
+        assert_eq!(slugify("日本語"), FALLBACK_SLUG);
+        assert_eq!(slugify(""), FALLBACK_SLUG);
+        assert_eq!(slugify("!!!"), FALLBACK_SLUG);
+    }
+
+    #[test]
+    fn a_colliding_slug_takes_the_first_free_numeric_suffix() {
+        let taken: HashSet<String> = ["hands", "hands-2", "hands-4"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        // Free base wins outright — the common case must not be suffixed.
+        assert_eq!(first_free_slug("eyes", &taken), "eyes");
+        // Suffixes start at 2 (the base is the "1") and skip what is held, so
+        // the run is `hands`, `hands-2`, `hands-3` — NOT `hands-5`, which is
+        // what "one past the highest" would produce.
+        assert_eq!(first_free_slug("hands", &taken), "hands-3");
+        // Densely packed: every candidate up to the bound is taken except the
+        // last. This is the case that proves the `expect` is unreachable
+        // rather than lucky — N taken slugs cannot exhaust N+2 candidates.
+        let dense: HashSet<String> = std::iter::once("r".to_string())
+            .chain((2..=4).map(|n| format!("r-{n}")))
+            .collect();
+        assert_eq!(first_free_slug("r", &dense), "r-5");
+    }
+
+    #[test]
+    fn capabilities_must_be_a_json_array_of_strings() {
+        // Normalised: whitespace goes, so the column holds one spelling.
+        assert_eq!(
+            canonical_capabilities(r#"[ "read_channel" ,  "post_channel" ]"#).unwrap(),
+            r#"["read_channel","post_channel"]"#
+        );
+        assert_eq!(canonical_capabilities("[]").unwrap(), "[]");
+        // Order and duplicates survive: silently reordering or de-duplicating
+        // would be an edit of what the caller asked to store.
+        assert_eq!(
+            canonical_capabilities(r#"["b","a","b"]"#).unwrap(),
+            r#"["b","a","b"]"#
+        );
+        // The rejections. Each of these decodes to "no capabilities" through
+        // `CapabilitySet::from_slugs`, which is a LEGAL configuration (an
+        // observer) — so accepting them would make a malformed write
+        // indistinguishable from a deliberate one.
+        for bad in ["null", "{}", r#""read_channel""#, "[1,2]", r#"["ok",3]"#, "nonsense"] {
+            assert!(
+                canonical_capabilities(bad).is_err(),
+                "{bad} must not be storable as a capability set"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn creating_a_role_derives_its_slug_and_returns_what_was_stored() {
+        let s = storage_with_0044().await;
+        // Padded on purpose: a name arrives from a text field and carries
+        // whatever the user pasted. It is stored TRIMMED, so the list does not
+        // render a row that looks indented, and so the blank-name guard's
+        // `trim().is_empty()` agrees with what actually gets written.
+        let mut d = draft("  Code Reviewer  ");
+        d.description_prompt = Some("be terse".into());
+        d.default_model_id = Some("m1".into());
+        d.capabilities = r#"[ "read_channel" , "file_finding" ]"#.into();
+        d.participation_mode = "observer".into();
+        let created = s.create_role(&d).await.unwrap();
+
+        assert_eq!(created.slug, "code-reviewer");
+        assert_eq!(created.display_name, "Code Reviewer");
+        assert_eq!(created.description_prompt.as_deref(), Some("be terse"));
+        // D8: the Roles tab owns the default model, so this column has to
+        // round-trip or the tab's model select is a control that does nothing.
+        assert_eq!(created.default_model_id.as_deref(), Some("m1"));
+        assert_eq!(created.participation_mode, "observer");
+        assert_eq!(created.capabilities, r#"["read_channel","file_finding"]"#);
+        // A user-created role is not a bot-hq seed, whatever it is called.
+        assert!(!created.builtin);
+        assert!(!created.archived);
+        // The returned value is the stored row, not the draft echoed back.
+        assert_eq!(s.role_by_id(created.id).await.unwrap().as_ref(), Some(&created));
+        assert!(s.list_roles().await.unwrap().contains(&created));
+    }
+
+    #[tokio::test]
+    async fn a_created_role_never_steals_an_existing_slug() {
+        let s = storage_with_0044().await;
+        // "HANDS" slugifies onto the seeded role's slug.
+        let first = s.create_role(&draft("HANDS")).await.unwrap();
+        assert_eq!(first.slug, "hands-2");
+        let second = s.create_role(&draft("hands")).await.unwrap();
+        assert_eq!(second.slug, "hands-3");
+        // The seeded role is untouched — a collision must not overwrite.
+        let seeded = s.role_by_slug("hands").await.unwrap().unwrap();
+        assert!(seeded.builtin);
+        assert!(seeded.capabilities.contains("edit_files"));
+    }
+
+    #[tokio::test]
+    async fn a_caller_supplied_slug_is_normalised_not_taken_verbatim() {
+        let s = storage_with_0044().await;
+        let mut d = draft("Anything At All");
+        d.slug = Some("My Custom Slug!".into());
+        let created = s.create_role(&d).await.unwrap();
+        // The slug is a typed key and seeds the participant handle the rc3
+        // mention syntax parses; a space in it would not survive that.
+        assert_eq!(created.slug, "my-custom-slug");
+    }
+
+    #[tokio::test]
+    async fn an_archived_slug_stays_reserved() {
+        let s = storage_with_0044().await;
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        s.set_role_archived(hands.id, true).await.unwrap();
+        // `roles.slug` is UNIQUE over the WHOLE table (0047 did not scope it to
+        // live rows), so a generator that only counted live roles would hand
+        // out `hands` here and then fail at the INSERT.
+        let created = s.create_role(&draft("HANDS")).await.unwrap();
+        assert_eq!(created.slug, "hands-2");
+        // …and the archived original is still reachable, so it can come back.
+        assert_eq!(
+            s.role_by_slug("hands").await.unwrap().map(|r| r.id),
+            Some(hands.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_role_write_refuses_an_unknown_mode_or_a_malformed_capability_set() {
+        let s = storage_with_0044().await;
+        let mut bad_mode = draft("Watcher");
+        bad_mode.participation_mode = "Active".into();
+        // Capitalised, and `next_active_participant` filters the ring on the
+        // exact string "active" — so this role's participants would be enabled,
+        // listed, and never handed a turn.
+        assert!(s.create_role(&bad_mode).await.is_err());
+
+        let mut bad_caps = draft("Watcher");
+        bad_caps.capabilities = "{}".into();
+        assert!(s.create_role(&bad_caps).await.is_err());
+
+        let mut blank = draft("   ");
+        blank.slug = Some("watcher".into());
+        assert!(s.create_role(&blank).await.is_err(), "a role needs a name");
+
+        // Nothing partial was written by any of the three.
+        assert_eq!(s.list_roles_including_archived().await.unwrap().len(), 2);
+
+        // The same checks guard UPDATE, not just INSERT — a role edited into an
+        // unschedulable mode is the identical failure, arrived at later.
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        assert!(s.update_role(hands.id, &bad_mode).await.is_err());
+        assert!(s.update_role(hands.id, &bad_caps).await.is_err());
+        assert_eq!(
+            s.role_by_id(hands.id).await.unwrap().unwrap(),
+            hands,
+            "a refused update must change nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn renaming_a_role_leaves_its_slug_alone_so_roster_seeding_still_resolves() {
+        let s = storage_with_0044().await;
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        // Padded, for the same reason `create_role`'s test is: an edit stores
+        // the trimmed name, not the field's raw contents.
+        let mut d = draft("  Executor  ");
+        d.capabilities = hands.capabilities.clone();
+        d.description_prompt = Some("drive the work".into());
+        let renamed = s.update_role(hands.id, &d).await.unwrap();
+        assert_eq!(renamed.display_name, "Executor");
+        assert_eq!(renamed.slug, "hands", "a rename must not re-derive the slug");
+        // The design's "ONLY stored prose" — the role's identity layer. An
+        // update that dropped it would blank what the user just typed, and the
+        // tab would redraw the empty box as if the save had taken.
+        assert_eq!(renamed.description_prompt.as_deref(), Some("drive the work"));
+
+        // The reason it must not. `ensure_session_roster` seeds every new
+        // session from two literal `WHERE slug = 'hands' / 'eyes'` subqueries;
+        // against a re-derived slug those resolve to NULL, and the session gets
+        // a roster whose `role_id` is NULL with nothing reporting an error.
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+        assert_eq!(roster.len(), 2);
+        assert_eq!(roster[0].role_id, Some(hands.id));
+        assert!(roster.iter().all(|p| p.role_id.is_some()));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_rename_moves_the_slug_and_is_idempotent() {
+        let s = storage_with_0044().await;
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        let mut d = draft("Executor");
+        d.slug = Some("Executor".into());
+        assert_eq!(s.update_role(hands.id, &d).await.unwrap().slug, "executor");
+
+        // Saving the same form again must NOT find `executor` taken by the row
+        // being saved and slide it to `executor-2` — which is what saving twice
+        // would do without `taken_slugs`' self-exclusion.
+        assert_eq!(s.update_role(hands.id, &d).await.unwrap().slug, "executor");
+
+        // A DIFFERENT role asking for the same slug still gets suffixed.
+        let other = s.create_role(&draft("Eyes")).await.unwrap();
+        let mut clash = draft("Executor");
+        clash.slug = Some("executor".into());
+        assert_eq!(s.update_role(other.id, &clash).await.unwrap().slug, "executor-2");
+    }
+
+    #[tokio::test]
+    async fn updating_a_role_leaves_provenance_archival_state_and_live_snapshots_alone() {
+        let s = storage_with_0044().await;
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        let pid = s
+            .insert_participant("s1", "brian", "Brian", Some(hands.id), None,
+                                &hands.capabilities, "active", 0)
+            .await
+            .unwrap();
+        s.set_role_archived(hands.id, true).await.unwrap();
+
+        let mut d = draft("Executor");
+        d.capabilities = r#"[ "read_channel" ]"#.into();
+        d.participation_mode = "observer".into();
+        let updated = s.update_role(hands.id, &d).await.unwrap();
+
+        // The edit lands, normalised the same way a create is — an update that
+        // stored the field's raw text would leave the column holding a second
+        // spelling of the same set.
+        assert_eq!(updated.capabilities, r#"["read_channel"]"#);
+        // And the mode is the caller's, not a default. Pinned here because
+        // demoting a role to `observer` is how the ring stops scheduling it:
+        // an update that ignored this would leave the role looking demoted in
+        // the tab while its participants kept taking turns.
+        assert_eq!(updated.participation_mode, "observer");
+
+        // `builtin` records that bot-hq seeded this row; editing it does not
+        // un-seed it (0044: seeds are user-editable, and the flag is what lets
+        // the UI offer "restore defaults").
+        assert!(updated.builtin);
+        // `archived` moves only through `set_role_archived`, so a save from a
+        // form that never rendered the flag cannot resurrect a removed role.
+        assert!(updated.archived);
+        // The invite-time snapshot is the whole point of duplicating
+        // capabilities onto the participant: narrowing the role must not
+        // narrow — or widen — a participant that is already running.
+        let live = s.participant_by_id(pid).await.unwrap().unwrap();
+        assert_eq!(live.capabilities, hands.capabilities);
+        assert!(live.capabilities.contains("edit_files"));
+        assert_eq!(live.role_id, Some(hands.id));
+    }
+
+    #[tokio::test]
+    async fn archiving_hides_a_role_from_the_picker_without_destroying_it() {
+        let s = storage_with_0044().await;
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        s.set_role_archived(hands.id, true).await.unwrap();
+
+        let live = s.list_roles().await.unwrap();
+        assert_eq!(live.len(), 1, "archived roles leave the picker");
+        assert_eq!(live[0].slug, "eyes");
+        // Still a row: the id a past session's `role_id` points at resolves,
+        // and the tab can offer an un-archive.
+        let all = s.list_roles_including_archived().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|r| r.id == hands.id && r.archived));
+        assert!(s.role_by_id(hands.id).await.unwrap().unwrap().archived);
+        assert!(s.role_by_slug("hands").await.unwrap().unwrap().archived);
+
+        s.set_role_archived(hands.id, false).await.unwrap();
+        assert_eq!(s.list_roles().await.unwrap().len(), 2);
+        assert!(!s.role_by_id(hands.id).await.unwrap().unwrap().archived);
+    }
+
+    #[tokio::test]
+    async fn writing_to_a_role_that_does_not_exist_is_an_error_not_a_no_op() {
+        let s = storage_with_0044().await;
+        // An UPDATE that matches nothing is not an error in SQLite, so without
+        // the row-count check both of these would report success and change
+        // nothing — the quietest possible failure.
+        assert!(s.update_role(9999, &draft("Ghost")).await.is_err());
+        assert!(s.set_role_archived(9999, true).await.is_err());
+        // And a read for an id nothing holds is `None`, not "whatever row sorts
+        // first". `AUTOINCREMENT` never assigns 0, so this is the id every
+        // uninitialised caller passes — and a lookup loosened from `id = ?` to
+        // a range would answer it with the `hands` role.
+        assert!(s.role_by_id(0).await.unwrap().is_none());
+        assert!(s.role_by_id(9999).await.unwrap().is_none());
+        // Same for the slug lookup, and the name is chosen to sort BEFORE both
+        // seeded slugs: a lookup loosened to a range would answer this with
+        // `eyes` rather than nothing, and `create_role` reads the taken set
+        // through the same table.
+        assert!(s.role_by_slug("absent-role").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_role_a_participant_references_cannot_be_hard_deleted() {
+        // The premise of migration 0047, checked against the real schema rather
+        // than asserted in its comment. `session_participants.role_id` REFERENCES
+        // `roles(id)` with no ON DELETE clause, and `Storage::memory` connects
+        // with foreign_keys ON, so the delete is REFUSED — which is why removal
+        // had to become archival.
+        let s = storage_with_0044().await;
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.insert_participant("s1", "brian", "Brian", Some(hands.id), None,
+                             &hands.capabilities, "active", 0)
+            .await
+            .unwrap();
+
+        let err = sqlx::query("DELETE FROM roles WHERE id = ?")
+            .bind(hands.id)
+            .execute(s.pool())
+            .await
+            .expect_err("the FK must refuse this");
+        assert!(
+            err.to_string().to_uppercase().contains("FOREIGN KEY"),
+            "expected an FK refusal, got {err}"
+        );
+        assert!(s.role_by_id(hands.id).await.unwrap().is_some());
     }
 
     #[tokio::test]

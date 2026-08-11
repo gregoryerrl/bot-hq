@@ -22,7 +22,7 @@ pub fn typescript_config() -> specta_typescript::Typescript {
 
 use crate::tauri_cmd::{
     agent_configs, claude_config, cl, docs, feedback, files, findings, messages, models, plugin_api,
-    plugins, policy, sessions, terminal, tool_gate, tray, updates,
+    plugins, policy, roles, sessions, terminal, tool_gate, tray, updates,
 };
 use tauri_specta::{collect_commands, Builder};
 
@@ -56,6 +56,11 @@ pub fn builder() -> Builder<tauri::Wry> {
         agent_configs::get_agent_config,
         agent_configs::list_agent_configs,
         agent_configs::upsert_agent_config,
+        // Roles tab (rc3 D8: the Roles tab owns the default model)
+        roles::list_roles,
+        roles::create_role,
+        roles::update_role,
+        roles::archive_role,
         // Models registry + default-model setting
         models::list_models,
         models::upsert_model,

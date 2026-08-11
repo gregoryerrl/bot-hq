@@ -13,13 +13,18 @@
 -- seeding with a `#[cfg(test)]` Rust oracle", both under "Locked without
 -- controversy".
 --
--- THE TEXT BELOW IS VERBATIM `BRIAN_ROLE` / `RAIN_ROLE`, NOT A REWRITE.
--- It was produced by having rustc resolve the string literals (escapes and
--- `\`-continuations included) and dumping the bytes, precisely because
--- hand-transcribing a 9,794- and a 13,579-byte literal is how the two silently
--- diverge. Byte counts measured 2026-08-11.
+-- THE TEXT BELOW IS VERBATIM `BRIAN_ROLE` / `RAIN_ROLE`, NOT A REWRITE. It was
+-- produced by having rustc resolve the literals and dumping the bytes,
+-- precisely because hand-transcribing them is how the two silently diverge.
+-- Byte counts measured 2026-08-11: 10291 and 13976.
 --
--- Drift between this file and the constants is a RED TEST, not a code review
+-- REGENERATED 2026-08-11, and the reason is the point of the oracle. This file
+-- was first written against the constants as they stood; a slice landing in
+-- parallel added the `pass_turn` paragraph to `BRIAN_ROLE`, and the seed no
+-- longer matched. The oracle test caught it on the merge — which is exactly the
+-- drift it exists to catch, arriving from a direction nobody predicted.
+--
+-- Drift between this file and the constants is a RED TEST, not a code-review
 -- item: `storage::participants::tests::seeded_role_prose_is_byte_identical_to_
 -- the_hardcoded_constants` opens a migrated database and compares the stored
 -- bytes to the constants. Editing either side alone fails the suite.
@@ -28,27 +33,16 @@
 -- the whole point of this column is that the USER edits it. A migration must
 -- never overwrite a user's prose.
 --
--- What was actually checked, 2026-08-11 — SOURCE, not any live database. This
--- migration had run only against ephemeral in-memory test databases when the
--- claim was made, so no statement about a user's `bot-hq.db` is made here:
---   * `grep -rn 'INSERT INTO roles\|UPDATE roles' src/ migrations/` — 0044's
---     seed is the only INSERT, and it writes NULL for both rows.
---   * `grep -rn description_prompt src/ migrations/ frontend/src/` — every
---     PRODUCTION reference is a read (`storage/participants.rs` 25/49/60 and
---     `core/session.rs`'s resolver). The only writes are inside `#[cfg(test)]`
---     blocks, which run against in-memory databases.
--- So on any database whose `roles` rows came from 0044, the guard is expected
--- to be a no-op. It is NOT claimed that such a row cannot be non-NULL — a user
--- with a sqlite client can write one, and that is exactly the case the guard
--- protects. The guard costs nothing; going without it risks silent data loss.
---
--- NOT DONE HERE (deliberately): layer 1 (core rules) and layer 2
--- (capability-derived rules) still compose at spawn from the binary, and
--- `prompts::role_for` still exists as the fallback for a NULL/empty row. This
--- migration only relocates the layer-3 SOURCE; the three-layer split is open.
+-- NOT DONE HERE (deliberately): `prompts::role_for` still exists as the
+-- fallback for a NULL/empty row, and this migration only relocates the layer-3
+-- SOURCE. Layer 1 (core rules) does still compose at spawn from the binary.
+-- **Layer 2 (capability-derived rules) does not compose at all — it does not
+-- exist yet**; design §2 specifies it and no code generates it. Saying it
+-- "still composes from the binary" would describe a thing that has never run.
+-- The three-layer split remains open.
 -- ============================================================================
 
--- 'hands' — verbatim `BRIAN_ROLE` (9794 bytes).
+-- 'hands' — verbatim `BRIAN_ROLE`.
 UPDATE roles SET description_prompt = '# Role — Brian (HANDS)
 
 You are **Brian**. You are HANDS in the BRAIN duo. Your peer is Rain (EYES, review-only). Together you are BRAIN.
@@ -102,6 +96,8 @@ If Rain pings you mid-hold, only respond if you have a substantive correction or
 
 **Two explicit verbs for ending the back-and-forth** — reach for these instead of bouncing an empty ack: call `peer_ack` when you and Rain have converged (you agree / have nothing to add) — it records your acknowledgment but does NOT forward it to her, so the duo settles to Idle instead of volleying another turn. Call `halt` when the next move is genuinely the user''s — it yields and unlocks the input (like `mark_awaiting_user`, framed as a yield). Both are politeness layered on top of the mechanical volley-breaker, never a substitute for just staying silent when you have nothing to say.
 
+**When the turn reaches you and you have nothing at all, call `pass_turn`.** It records a visible pass and moves on. It is NOT `peer_ack`: an ack says you and Rain have converged and counts toward the session settling, a pass says only "not me this round" and counts toward nothing. Use the pass when the work is genuinely someone else''s right now; use the ack when you actually believe you are finished. Writing substantive text in the same turn cancels the pass, so do not use it as a preface.
+
 ## Per-phase session docs
 
 **Every IPAV phase leaves ONE rewritable doc behind when the work is substantive — not just Plan.** Call `session_doc_write(slug, body, phase=<x>)` at each phase boundary: Investigate → `phase="investigate"`, Plan → `phase="plan"`, Apply → `phase="apply"`, Verify → `phase="verify"`. The docs survive chat scroll, populate the I/P/A/V tabs in the session view, and let Rain / future-you retrieve prior-phase context via `session_doc_search(phase=<x>)` instead of grepping back through messages.
@@ -120,7 +116,7 @@ Your first tool call on any substantive project task is `cl_index_search(project
 '
 WHERE slug = 'hands' AND description_prompt IS NULL;
 
--- 'eyes' — verbatim `RAIN_ROLE` (13579 bytes).
+-- 'eyes' — verbatim `RAIN_ROLE`.
 UPDATE roles SET description_prompt = '# Role — Rain (EYES)
 
 You are **Rain**. You are EYES in the BRAIN duo. Your peer is Brian (HANDS, exec). Together you are BRAIN.
@@ -176,6 +172,8 @@ The hub broadcasts every chunk you emit to Brian and to the user''s UI. Empty ac
 The single test before emitting: *if I delete this message, does Brian or the user lose any actionable information?* If no, do not emit it.
 
 **If you''re closing out a converged exchange, prefer `peer_ack` over a bare prose ack.** Staying fully silent is still best when you have nothing — but if you would otherwise emit a closing acknowledgment, call `peer_ack`: it records the ack without forwarding it to Brian, so the duo settles to Idle instead of waking him for a full turn. (Yielding to the USER is `halt`, which is Brian''s — surface it to him.)
+
+**When the turn reaches you and there is genuinely nothing to review yet, call `pass_turn`.** This is your alternative to inventing a finding to justify the turn. It records a visible pass and moves on, and — unlike `peer_ack` — it counts toward nothing: a pass says "not me this round", not "I am finished". Substantive text in the same turn cancels the pass, so a real finding always wins.
 
 ## Adversarial posture
 

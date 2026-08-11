@@ -7,6 +7,7 @@
 //! - [`sessions`] — session CRUD + lifecycle
 //! - [`messages`] — chronological chat fetch
 //! - [`agent_configs`] — Settings page per-agent provider/model/token rows
+//! - [`roles`] — Roles tab: role templates + their default model (rc3 D8)
 //! - [`models`] — saved-model registry + default-model app setting
 //! - [`cl`] — Context Library index + folder search, audit, rescan
 //! - [`claude_config`] — Claude Config surface (global + per-agent overrides)
@@ -35,6 +36,7 @@ pub mod models;
 pub mod plugin_api;
 pub mod plugins;
 pub mod policy;
+pub mod roles;
 pub mod screenshot;
 pub mod sessions;
 pub mod terminal;
