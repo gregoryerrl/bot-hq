@@ -552,8 +552,8 @@ Commit: `feat: record withheld deliveries` + `perf: measure the channel delivery
 
 **Step 1: Walk the inventory table row by row.** For each of the 20:
 
-- PRESERVED (11) → name the new test that covers it and confirm it is green.
-- DISSOLVED (8) → confirm the structure that makes it impossible actually exists
+- PRESERVED (12) → name the new test that covers it and confirm it is green.
+- DISSOLVED (6) → confirm the structure that makes it impossible actually exists
   (no hold queue; a fixed ring; no bilateral `peer_of`).
 - DROPPED (2) → confirm the written reason is still true. #6's reason depends on
   Task 13b's benchmark.

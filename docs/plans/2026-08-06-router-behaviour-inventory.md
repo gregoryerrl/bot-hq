@@ -54,11 +54,23 @@ either green-in-the-new-model (PRESERVED) or has a written reason (DROPPED).
 
 ## Tally
 
-- **PRESERVED: 11** (2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 19, 20 + jaccard) — each
-  needs a green test in the new model **before** the old one is deleted.
-- **DISSOLVED: 8** (1, 7, 15, 16, 17, 18 + `peer_of`) — structurally impossible;
-  no replacement.
-- **DROPPED: 2** (6, 14) — both with stated reasons above.
+**Counting convention — stated because its absence is what broke this.** The
+numbers below count **numbered table rows**, and they sum to 20, which is what
+task 14's gate walks. The parenthesised helpers (`jaccard`, `peer_of`) are NOT
+rows; they are named so nothing forgets them, and they are excluded from the
+counts. Corrected 2026-08-11: this read **11 / 8 / 2**, which summed to 21 —
+one more row than exists — while the row lists beside those numbers held 12 and
+6. An implementer walking it would either come up a row short and go looking for
+a missing one, or invent one.
+
+- **PRESERVED: 12 rows** — 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 19, 20 (plus the
+  `jaccard` helper, not a row). Each needs a green test in the new model
+  **before** the old one is deleted.
+- **DISSOLVED: 6 rows** — 1, 7, 15, 16, 17, 18 (plus `peer_of`, not a row).
+  Structurally impossible; no replacement.
+- **DROPPED: 2 rows** — 6, 14. Both with stated reasons above.
+
+12 + 6 + 2 = **20**.
 
 ## Perf note carried from behaviour #6
 
