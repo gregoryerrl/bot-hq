@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## 2026-08-11 — B5 in progress: the turn sequencer exists, `router.rs` is still live (HANDOFF)
 
-**Status: 16 of 18 tasks done, 43 commits (`3c8c90a..2ac4875`). Nothing in the
+**Status: plan tasks 1–13 complete; 14, 15 and 16 remain. Nothing in the
 system behaves differently yet** — the sequencer is built but nothing spawns it,
 and `core/router.rs` still routes every peer forward. Everything through task 13
 is additive; task 14 is the first irreversible one.
@@ -35,8 +35,10 @@ Acceptance criterion: [`docs/plans/2026-08-06-router-behaviour-inventory.md`](do
 | 10 | Jaccard helpers moved out of `router.rs`, verbatim |
 | 11 | spin detection (inventory #2, guarded by #3) — one participant repeating itself across rounds halts the cycle. Mints its own `SPIN_*` constants; `VOLLEY_SIMILARITY_THRESHOLD` stays `router.rs`'s until task 14. **M7 re-measured: it survives** — `halt()` leaves no holder, so `advance_turn(reset = false)` is still unreachable with a `None` holder, and the doc's guess that spin detection might be the second path is now answered in place |
 | 12 | `peer_ack` → done-votes (inventory #8, #9, #10, #11) as one pure `turn_ending()`, called by the sender rather than widening `TurnComplete`; #9's override tag moved from a spliced sentence to an `Envelope` field, same wire text |
+| 13a | **a pin, not a feature — the plan's framing did not survive contact.** Inventory #5 wants suppressed deliveries recorded as rows; on a PULL path nothing suppresses, and the module doc (§"the forward ladder does not survive onto the turn path") already argued why. The upgrade #5 asked for was paid by task 2: the message is a real row, not a preview in a side table. What was missing is the inverse guard, so that is what landed — `the_turn_path_records_every_delivery_and_withholds_nothing`. `withheld_reason` stays in the schema for a policy that does not exist yet; the storage round-trip was already covered by `a_withheld_delivery_is_still_a_visible_row` |
+| 13b | **the measurement, not an assumption.** Per message row **68.3 µs**, per delivery (row + cursor advance, one call each) **87.6 µs** — a ratio of **1.28×**, in-memory sqlite, N=300 after warm-up. A delivery costs the same order as the row it delivers, so **the cursor advance is not hot and needs no batching**. Guarded continuously as a RATIO — an absolute bound would measure the CI machine, not the code |
 
-`src/core/sequencer.rs`: 41 tests. Full suite: 1099 lib + 66 integration.
+`src/core/sequencer.rs`: 43 tests. Full suite: 1101 lib + 66 integration.
 
 **Both tasks were mutation-tested, and both turned up a hole a green suite hid.**
 Task 11's two sequencer tests passed with `participant_text_since`'s `kind =
@@ -49,10 +51,6 @@ expectations, so a naive `sed` mutates all three, they agree, and the probe
 reports a false survival. Anchor on the four-space indent.
 
 ### Left
-
-- **13** — withheld-delivery rows, **plus the perf benchmark the inventory
-  demands**: the old delivery path never touched storage, and the channel model
-  puts a write back on it. "Measured, not assumed" is an acceptance criterion.
 - **14 — delete `router.rs`. THE ONLY IRREVERSIBLE TASK**, gated on walking all
   20 inventory rows: every PRESERVED row needs a named green test, every
   DISSOLVED row needs the structure that makes it impossible to actually exist,
