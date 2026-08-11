@@ -158,6 +158,24 @@ impl Storage {
         Ok(row.as_ref().map(role_from_row))
     }
 
+    /// Load a role by its primary key — the id a participant row carries in
+    /// `role_id`.
+    ///
+    /// Exists so the spawn path can resolve a participant's role prose WITHOUT
+    /// mapping an agent name onto a role slug. `role_by_slug("hands")` would
+    /// have re-introduced the `agent == "brian"` coupling that 0044 exists to
+    /// remove, and would be wrong the moment a user renames a role or adds a
+    /// third one. `role_id` is the participant's own answer to "which role am
+    /// I", so it stays right under both.
+    pub async fn role_by_id(&self, id: i64) -> Result<Option<Role>> {
+        let row = sqlx::query(&format!("SELECT {ROLE_COLUMNS} FROM roles WHERE id = ?"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .with_context(|| format!("loading role id {id}"))?;
+        Ok(row.as_ref().map(role_from_row))
+    }
+
     // ---- participants ---------------------------------------------------
 
     /// Invite a participant, snapshotting the role's capabilities and
@@ -1228,6 +1246,97 @@ mod tests {
     /// "storage that has 0044", which is the property they depend on.
     async fn storage_with_0044() -> Storage {
         Storage::memory().await.unwrap()
+    }
+
+    // ---- 0046: role prose lives in the database --------------------------
+
+    /// **The drift oracle for migration 0046.**
+    ///
+    /// 0046 seeds `roles.description_prompt` with the verbatim bytes of
+    /// `BRIAN_ROLE` / `RAIN_ROLE`. Two copies of ~23KB of prose now exist — the
+    /// SQL literal and the Rust constant — and nothing in the compiler relates
+    /// them. Without this test, editing `prompts.rs` would leave every existing
+    /// install serving the OLD prose from its database (0046 already applied,
+    /// migrations never re-run) while a fresh install serves the new text, and
+    /// the suite would stay green through the whole divergence.
+    ///
+    /// This opens a database that has actually run the migration and compares
+    /// the stored bytes to the constants, so it also covers the SQL escaping —
+    /// a mis-escaped quote is a byte difference like any other.
+    ///
+    /// **If this fails, do not delete it and do not edit the migration.** 0046
+    /// is applied and therefore immutable; changing a byte of it breaks boot.
+    /// The fix is a NEW migration that re-seeds, plus updating the constants.
+    #[tokio::test]
+    async fn seeded_role_prose_is_byte_identical_to_the_hardcoded_constants() {
+        let s = storage_with_0044().await;
+
+        let hands = s.role_by_slug("hands").await.unwrap().expect("0044 seeds 'hands'");
+        assert_eq!(
+            hands.description_prompt.as_deref(),
+            Some(crate::agents::prompts::BRIAN_ROLE),
+            "roles.description_prompt for 'hands' has drifted from BRIAN_ROLE"
+        );
+
+        let eyes = s.role_by_slug("eyes").await.unwrap().expect("0044 seeds 'eyes'");
+        assert_eq!(
+            eyes.description_prompt.as_deref(),
+            Some(crate::agents::prompts::RAIN_ROLE),
+            "roles.description_prompt for 'eyes' has drifted from RAIN_ROLE"
+        );
+
+        // Guard against the assertion above passing vacuously. `assert_eq!` on
+        // two `None`s would be green, and a migration that seeded nothing is
+        // exactly the failure this whole test exists to catch.
+        assert!(
+            !crate::agents::prompts::BRIAN_ROLE.is_empty()
+                && !crate::agents::prompts::RAIN_ROLE.is_empty(),
+            "the constants are empty — the comparison above proves nothing"
+        );
+    }
+
+    /// The spawn path resolves prose through `role_id`, not through a role slug,
+    /// so `role_by_id` has to agree with `role_by_slug` about which row is which.
+    /// A transposed lookup would hand HANDS's prompt to EYES — a swap that reads
+    /// as a model behaving strangely, not as a database bug.
+    #[tokio::test]
+    async fn role_by_id_returns_the_same_row_as_role_by_slug() {
+        let s = storage_with_0044().await;
+        for slug in ["hands", "eyes"] {
+            let by_slug = s.role_by_slug(slug).await.unwrap().unwrap();
+            let by_id = s.role_by_id(by_slug.id).await.unwrap().unwrap();
+            assert_eq!(by_id, by_slug, "role_by_id disagreed with role_by_slug");
+        }
+        // An id no role has is `None`, not an error and not row 1 — the spawn
+        // path treats a stale `role_id` as "no prose" and needs that distinction.
+        let missing = s.role_by_id(9_999).await.unwrap();
+        assert!(missing.is_none(), "an unknown role id must resolve to None");
+    }
+
+    /// An edit to the row is the entire point of 0046: the user could not touch
+    /// the prose while it lived in the binary. This proves the column is a
+    /// writable source, not a decorative copy — a read-only seed would satisfy
+    /// the oracle above and still leave the feature unbuilt.
+    #[tokio::test]
+    async fn an_edited_role_row_is_what_a_later_read_returns() {
+        let s = storage_with_0044().await;
+        sqlx::query("UPDATE roles SET description_prompt = ? WHERE slug = 'hands'")
+            .bind("You are HANDS. Ship small, verified changes.")
+            .execute(s.pool())
+            .await
+            .unwrap();
+
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        assert_eq!(
+            hands.description_prompt.as_deref(),
+            Some("You are HANDS. Ship small, verified changes.")
+        );
+        // The other role is untouched — an edit is per-row, not per-table.
+        let eyes = s.role_by_slug("eyes").await.unwrap().unwrap();
+        assert_eq!(
+            eyes.description_prompt.as_deref(),
+            Some(crate::agents::prompts::RAIN_ROLE)
+        );
     }
 
     // ---- the wire renderer ----------------------------------------------

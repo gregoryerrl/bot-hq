@@ -646,6 +646,14 @@ async fn spawn_session_handle(
     let rain_effort = session.rain_effort.clone();
     let rain_ultracode = session.rain_ultracode;
 
+    // Layer-3 role prose, read from each participant's `roles` row. Resolved
+    // here — once per spawn, alongside the other pre-resolved prompt inputs —
+    // so `read_system_prompt` stays a pure function of its arguments. `None`
+    // means "use the built-in constant", which until the user edits the row is
+    // the identical text (migration 0046 seeded it verbatim).
+    let brian_prose = resolve_role_prose(&storage, &roster, "brian").await;
+    let rain_prose = resolve_role_prose(&storage, &roster, "rain").await;
+
     let brian = spawn_agent_for(
         &session.id,
         "brian",
@@ -654,6 +662,7 @@ async fn spawn_session_handle(
         &project,
         project_root.as_deref(),
         cl_index.as_deref(),
+        brian_prose.as_deref(),
         signaling_addr,
         mcp_temp.path(),
         working_repo_path.clone(),
@@ -672,6 +681,7 @@ async fn spawn_session_handle(
                 &project,
                 project_root.as_deref(),
                 cl_index.as_deref(),
+                rain_prose.as_deref(),
                 signaling_addr,
                 mcp_temp.path(),
                 working_repo_path.clone(),
@@ -1039,6 +1049,48 @@ fn cl_opener_nudge(project: Option<&str>) -> Option<String> {
     ))
 }
 
+/// This participant's user-editable role prose (`roles.description_prompt`), or
+/// `None` to fall back to the binary's hardcoded constant.
+///
+/// Resolved through the roster's `role_id` rather than by mapping the agent name
+/// onto a role slug: the participant row is what actually knows which role it
+/// was invited as, and it keeps working when a user renames a role or adds one.
+///
+/// Every failure mode collapses to `None`, deliberately:
+///   * roster read failed (already `warn`ed and degraded to an empty vec at the
+///     seeding site) — no row to ask,
+///   * the row predates a `role_id` or points at a deleted role,
+///   * `description_prompt` is NULL (every row's state before 0046),
+///   * the query itself errored.
+///
+/// None of these should cost the user a session, because the fallback is not a
+/// degraded prompt — until a user edits the row it is the *same bytes*. A query
+/// error is logged at `warn` because it is genuinely unexpected; the others are
+/// ordinary states and stay silent.
+async fn resolve_role_prose(
+    storage: &Storage,
+    roster: &[crate::storage::Participant],
+    slug: &str,
+) -> Option<String> {
+    let role_id = roster_row(roster, slug)?.role_id?;
+    let role = match storage.role_by_id(role_id).await {
+        Ok(r) => r?,
+        Err(e) => {
+            warn!(%slug, role_id, ?e, "reading role prose failed; using built-in role");
+            return None;
+        }
+    };
+    // Non-empty check lives here AND in `read_system_prompt` on purpose: this
+    // one keeps the log line below honest, that one is the actual guard for
+    // every caller. Neither is load-bearing alone.
+    let prose = role.description_prompt?;
+    if prose.trim().is_empty() {
+        return None;
+    }
+    tracing::debug!(%slug, role_id, bytes = prose.len(), "role prose sourced from roles row");
+    Some(prose)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn_agent_for(
     session_id: &str,
@@ -1048,6 +1100,7 @@ async fn spawn_agent_for(
     project: &Option<String>,
     project_root: Option<&Path>,
     cl_index: Option<&[ClIndexEntry]>,
+    role_prose: Option<&str>,
     signaling_addr: SocketAddr,
     mcp_temp_dir: &std::path::Path,
     working_dir: Option<PathBuf>,
@@ -1056,8 +1109,14 @@ async fn spawn_agent_for(
     session_ultracode: Option<bool>,
 ) -> Result<AgentHandle> {
     let native = config.native;
-    let system_prompt =
-        read_system_prompt(paths, agent_name, project.as_deref(), project_root, cl_index)?;
+    let system_prompt = read_system_prompt(
+        paths,
+        agent_name,
+        project.as_deref(),
+        project_root,
+        cl_index,
+        role_prose,
+    )?;
     // The assembled prompt is multi-KB. Hand it to claude-code via a file
     // (`--append-system-prompt-file`) rather than an inline arg so the command
     // line stays under Windows' 32,767-char `CreateProcessW` limit. Co-located
@@ -1172,8 +1231,10 @@ pub fn user_mcp_servers_for_agent(agent_name: &str) -> serde_json::Map<String, s
 
 /// Assemble the system prompt for an agent at spawn time. Layers:
 ///
-///   1. **Hardcoded role** (from `agents::prompts`) — identity + ask-close
-///      convention. Baked into the binary so user can't break it.
+///   1. **Role prose** — identity + ask-close convention. Sourced from
+///      `roles.description_prompt` when the caller resolved one (`role_prose`),
+///      else the hardcoded `agents::prompts` constant. See
+///      [`resolve_role_prose`] for why the DB wins.
 ///   2. **CL location anchor** — index-first orientation.
 ///   3. **Hardcoded `GENERAL_RULES`** (from `agents::general_rules`) — shared
 ///      conventions every agent follows. Baked into the binary so the load-
@@ -1195,17 +1256,50 @@ pub fn user_mcp_servers_for_agent(agent_name: &str) -> serde_json::Map<String, s
 ///
 /// Missing optional files are logged at debug and skipped. Policy parse
 /// errors propagate — broken YAML should surface loudly.
+///
+/// `role_prose` is the caller-resolved `roles.description_prompt` for this
+/// agent's participant row ([`resolve_role_prose`]). It is passed IN rather than
+/// read here for the same reason `cl_index` is: this function stays pure and
+/// synchronously testable, and the database round-trip happens once per spawn in
+/// `spawn_session_handle` instead of inside prompt assembly.
+///
+/// `spawn_session_handle` — not `open_session` — is where it is resolved because
+/// that is the shared body BOTH creation paths funnel through (`open_session`
+/// for the external driver, `spawn_existing_session` for everything else), the
+/// same choke point the roster seeding above it relies on. Resolving in either
+/// caller alone would give one of the two paths the built-in prose forever.
 pub fn read_system_prompt(
     paths: &Paths,
     agent: &str,
     project: Option<&str>,
     project_root: Option<&Path>,
     cl_index: Option<&[ClIndexEntry]>,
+    role_prose: Option<&str>,
 ) -> Result<String> {
     let mut out = String::new();
 
-    // 1. Hardcoded role.
-    let role = crate::agents::role_for(agent);
+    // 1. Role prose — the DB row when it has one, else the binary's constant.
+    //
+    // Migration 0046 seeds `roles.description_prompt` with the VERBATIM bytes of
+    // `BRIAN_ROLE` / `RAIN_ROLE`, so on an unedited install both branches
+    // produce a byte-identical prompt and this is a pure source swap. The point
+    // of the swap is that the DB row is user-editable and the constant is not:
+    // editing the row now changes what the agent is told.
+    //
+    // The fallback is not decoration. `role_prose` is `None` whenever the roster
+    // read failed, the participant has no `role_id`, or the row is NULL — and a
+    // failed roster read is explicitly non-fatal at the seeding site above
+    // (`warn`, then `Vec::new()`). Without the fallback that degradation would
+    // silently spawn an agent with NO role at all, which is the worst possible
+    // failure mode: it still runs, and it runs unbriefed.
+    let role = match role_prose {
+        // An all-whitespace row is treated as absent, not as an empty role. The
+        // UI that will edit this column has no way to distinguish "cleared it by
+        // accident" from "meant it", and a blank identity is never the safer
+        // reading of the two.
+        Some(p) if !p.trim().is_empty() => p,
+        _ => crate::agents::role_for(agent),
+    };
     if !role.is_empty() {
         push_section(&mut out, role);
     }
@@ -1898,11 +1992,173 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None, None, None).unwrap();
         // Hardcoded role from agents::prompts — identity + duo + ask-close.
         assert!(prompt.contains("HANDS"));
         assert!(prompt.contains("BRAIN"));
         assert!(prompt.contains("Close session"));
+    }
+
+    // ---- 0046: the prompt's role prose comes from the database ----------
+
+    /// **Behavioural parity, the whole claim of this slice.**
+    ///
+    /// Sourcing the role from `roles.description_prompt` may not change what a
+    /// live agent is told today. This runs both branches — DB row vs built-in
+    /// constant — and compares the FULL assembled prompt byte for byte, because
+    /// "same role text" is not the claim; "same bytes to the agent" is, and the
+    /// role feeds the section spacing and the `<your project>` interpolation
+    /// that run after it.
+    #[tokio::test]
+    async fn seeded_prose_produces_a_byte_identical_prompt_to_the_constant() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+
+        // The real seeded row, not a copy of the constant — a hand-copied
+        // fixture would prove the test agrees with itself, not that the
+        // migration seeded the right bytes.
+        let s = Storage::memory().await.unwrap();
+        for (agent, slug) in [("brian", "hands"), ("rain", "eyes")] {
+            let seeded = s
+                .role_by_slug(slug)
+                .await
+                .unwrap()
+                .unwrap()
+                .description_prompt
+                .expect("0046 seeds description_prompt");
+
+            let from_db =
+                read_system_prompt(&paths, agent, Some("p"), None, None, Some(&seeded)).unwrap();
+            let from_constant =
+                read_system_prompt(&paths, agent, Some("p"), None, None, None).unwrap();
+            assert_eq!(
+                from_db, from_constant,
+                "{agent}'s prompt changed when the prose came from the database"
+            );
+            assert!(
+                from_db.contains(if agent == "brian" { "HANDS" } else { "EYES" }),
+                "the prompts matched but carry no role — both branches went empty"
+            );
+        }
+    }
+
+    /// The other half of parity: an EDIT must actually reach the agent. Parity
+    /// alone is satisfiable by ignoring `role_prose` entirely, so without this
+    /// the feature could be entirely inert and both tests would still pass.
+    #[test]
+    fn an_edited_role_row_replaces_the_built_in_prose_in_the_prompt() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+
+        let edited = "You are HANDS. Ship small, verified changes. SENTINEL_K3P";
+        let prompt =
+            read_system_prompt(&paths, "brian", None, None, None, Some(edited)).unwrap();
+        let baseline = read_system_prompt(&paths, "brian", None, None, None, None).unwrap();
+
+        assert!(prompt.contains("SENTINEL_K3P"), "the edit never reached the prompt");
+
+        // The built-in prose is REPLACED, not appended to. Two role sections
+        // would be a contradictory prompt, with the user's edit arguing against
+        // a copy of the text they just replaced.
+        //
+        // Compared against the WHOLE constant rather than a hand-picked phrase:
+        // the first attempt at this test asserted on "Close session", which
+        // `GENERAL_RULES` also contains (general_rules.rs:74), so it failed
+        // against correct code. `BRIAN_ROLE` carries one `<your project>`
+        // placeholder that layer 6 interpolates, so the search text has to be
+        // interpolated the same way — `None` project resolves to `"_globals"`.
+        let builtin = crate::agents::prompts::BRIAN_ROLE.replace("<your project>", "\"_globals\"");
+        assert!(
+            baseline.contains(&builtin),
+            "the search text does not match the built-in branch, so the negative \
+             assertion below would pass vacuously"
+        );
+        assert!(
+            !prompt.contains(&builtin),
+            "the built-in role survived alongside the edited one"
+        );
+
+        // Later layers are untouched — this swaps layer 1, nothing else.
+        // `GENERAL_RULES` carries the same `<your project>` placeholder, so it
+        // needs the same interpolation before it can be searched for.
+        assert!(prompt.contains("Context Library"));
+        let rules = crate::agents::GENERAL_RULES.replace("<your project>", "\"_globals\"");
+        assert!(
+            prompt.contains(rules.trim_end()),
+            "swapping layer 1 disturbed layer 3"
+        );
+    }
+
+    /// A blank row falls back rather than spawning an agent with no identity.
+    ///
+    /// `Some("")` and `Some("   \n")` are what a user clearing the field in a
+    /// text box produces. The unbriefed agent still runs, so the failure is
+    /// silent — it looks like a model behaving oddly, not like a cleared field.
+    #[test]
+    fn a_blank_role_row_falls_back_to_the_built_in_prose() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+
+        let baseline = read_system_prompt(&paths, "brian", None, None, None, None).unwrap();
+        for blank in ["", "   ", "\n\t \n"] {
+            let prompt =
+                read_system_prompt(&paths, "brian", None, None, None, Some(blank)).unwrap();
+            assert_eq!(
+                prompt, baseline,
+                "a blank role row ({blank:?}) did not fall back to the constant"
+            );
+        }
+    }
+
+    /// `resolve_role_prose` reads through the roster's `role_id`. Every way that
+    /// can come up empty must degrade to `None` (= use the constant) rather than
+    /// propagate — a roster read failure is already non-fatal at the seeding
+    /// site, and must not become fatal here.
+    #[tokio::test]
+    async fn role_prose_resolves_through_the_roster_and_degrades_to_none() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+
+        // The happy path: brian's participant row points at 'hands', whose
+        // prose 0046 seeded.
+        assert_eq!(
+            resolve_role_prose(&s, &roster, "brian").await.as_deref(),
+            Some(crate::agents::prompts::BRIAN_ROLE),
+            "the roster path did not reach the seeded prose"
+        );
+        assert_eq!(
+            resolve_role_prose(&s, &roster, "rain").await.as_deref(),
+            Some(crate::agents::prompts::RAIN_ROLE)
+        );
+
+        // A slug with no roster row — the shape an empty roster takes after a
+        // failed read, and the shape any not-yet-known participant takes.
+        assert!(resolve_role_prose(&s, &roster, "nobody").await.is_none());
+        assert!(resolve_role_prose(&s, &[], "brian").await.is_none());
+
+        // NULL prose — every row's state between 0044 and 0046, and the state
+        // of any role a user creates without writing a description.
+        sqlx::query("UPDATE roles SET description_prompt = NULL WHERE slug = 'hands'")
+            .execute(s.pool())
+            .await
+            .unwrap();
+        assert!(
+            resolve_role_prose(&s, &roster, "brian").await.is_none(),
+            "a NULL description_prompt must resolve to None, not to an empty role"
+        );
+
+        // Whitespace-only prose is treated as absent here too, so the debug log
+        // above never claims prose was sourced when nothing usable was.
+        sqlx::query("UPDATE roles SET description_prompt = '  \n ' WHERE slug = 'hands'")
+            .execute(s.pool())
+            .await
+            .unwrap();
+        assert!(resolve_role_prose(&s, &roster, "brian").await.is_none());
     }
 
     #[test]
@@ -1916,9 +2172,9 @@ mod tests {
         )
         .unwrap();
         // The single consolidated file reaches BOTH agents' prompts.
-        let brian = read_system_prompt(&paths, "brian", None, None, None).unwrap();
+        let brian = read_system_prompt(&paths, "brian", None, None, None, None).unwrap();
         assert!(brian.contains("SHARED_CUSTOM_PREFS_X9Q"));
-        let rain = read_system_prompt(&paths, "rain", None, None, None).unwrap();
+        let rain = read_system_prompt(&paths, "rain", None, None, None, None).unwrap();
         assert!(rain.contains("SHARED_CUSTOM_PREFS_X9Q"));
     }
 
@@ -1936,7 +2192,7 @@ mod tests {
         std::fs::write(pdir.join("notes.md"), "FOO_NOTES_M1").unwrap();
         std::fs::write(pdir.join("decisions.md"), "FOO_DECISIONS_M1").unwrap();
 
-        let prompt = read_system_prompt(&paths, "brian", Some("foo"), None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", Some("foo"), None, None, None).unwrap();
         assert!(!prompt.contains("FOO_CONVENTIONS_M1"));
         assert!(!prompt.contains("FOO_NOTES_M1"));
         assert!(!prompt.contains("FOO_DECISIONS_M1"));
@@ -1970,7 +2226,7 @@ mod tests {
             cl_entry("policy.yaml", "machine gates"),
         ];
         let prompt =
-            read_system_prompt(&paths, "brian", Some("foo"), None, Some(&entries)).unwrap();
+            read_system_prompt(&paths, "brian", Some("foo"), None, Some(&entries), None).unwrap();
         assert!(prompt.contains("Project CL — files available"));
         assert!(prompt.contains("`conventions.md` — repo, stack, commands"));
         assert!(prompt.contains("`notes.md` — durable gotchas"));
@@ -1985,7 +2241,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let prompt = read_system_prompt(&paths, "brian", Some("foo"), None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", Some("foo"), None, None, None).unwrap();
         assert!(!prompt.contains("Project CL — files available"));
     }
 
@@ -2070,7 +2326,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None, None, None).unwrap();
         assert!(prompt.contains("cl_index_search"));
         assert!(prompt.contains("Index-first"));
         // Regression (2026-07-03 telemetry dig): the orientation never named
@@ -2098,7 +2354,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let prompt = read_system_prompt(&paths, "brian", Some("bot-hq"), None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", Some("bot-hq"), None, None, None).unwrap();
         assert!(
             prompt.contains("cl_index_search(project=\"bot-hq\")"),
             "CL anchor must interpolate the resolved project name"
@@ -2113,7 +2369,7 @@ mod tests {
         );
         // Repo-less session (project None) falls back to the _globals example
         // rather than leaving a dangling placeholder.
-        let prompt_none = read_system_prompt(&paths, "brian", None, None, None).unwrap();
+        let prompt_none = read_system_prompt(&paths, "brian", None, None, None, None).unwrap();
         assert!(prompt_none.contains("cl_index_search(project=\"_globals\")"));
     }
 
@@ -2126,7 +2382,7 @@ mod tests {
         // should still produce a prompt with at minimum the hardcoded role
         // and the hardcoded universal rules.
         std::fs::remove_file(paths.cl_dir.join("custom-general-rules.md")).ok();
-        let prompt = read_system_prompt(&paths, "rain", Some("nonexistent"), None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "rain", Some("nonexistent"), None, None, None).unwrap();
         assert!(prompt.contains("EYES"));
         assert!(prompt.contains("Working directory"));
     }
@@ -2140,7 +2396,7 @@ mod tests {
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
         std::fs::remove_file(paths.cl_dir.join("custom-general-rules.md")).ok();
-        let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None, None, None).unwrap();
         assert!(
             prompt.contains("Working directory"),
             "missing working-directory section"
@@ -2166,7 +2422,7 @@ mod tests {
             "MY_ORG_RULE_X7P: always prefer ripgrep over grep.\n",
         )
         .unwrap();
-        let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None, None, None).unwrap();
         // Both layers present.
         assert!(prompt.contains("Working directory"));
         assert!(prompt.contains("MY_ORG_RULE_X7P"));
