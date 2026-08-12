@@ -2388,6 +2388,109 @@ mod tests {
         assert!(rain.contains(&format!("- {}.\n", edit.deny)), "EYES was not told it cannot edit");
     }
 
+    /// **The parity test for migration 0048's prose edit.** Three refusals were
+    /// deleted from `RAIN_ROLE`; rc3 is a reframe, so each has to still reach
+    /// EYES — from layer 2 instead of from the constant. This walks the exact
+    /// list and proves both halves for every one: the tool is refused in the
+    /// composed prompt, and the constant no longer says so itself.
+    ///
+    /// It composes through `ensure_session_roster` → `resolve_roster_facts` →
+    /// `read_system_prompt`, i.e. the real spawn path, because the claim is that
+    /// a spawned EYES is still told these things. Asserting against a hand-built
+    /// `RosterFacts` would only prove the renderer agrees with itself.
+    ///
+    /// The `under_denials` slicing matters: `terminal_read` and the mutating-Bash
+    /// enumeration legitimately appear elsewhere in the prompt, so a whole-prompt
+    /// `contains` would pass on prose that says the opposite of a refusal.
+    #[tokio::test]
+    async fn role_deny_prose_removed_from_the_constant_is_regenerated_by_layer_2() {
+        use crate::agents::Capability;
+
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+        let facts = resolve_roster_facts(&s, &roster, "rain").await.unwrap();
+        let prompt = read_system_prompt(&paths, "rain", None, None, None, None, Some(&facts))
+            .unwrap();
+
+        // Only the "You may not" list, so a permission or a passing mention
+        // cannot satisfy an assertion about a refusal.
+        let start = prompt.rfind("**You may not**").expect("no denial section in the prompt");
+        let end = prompt[start..]
+            .find("## Participants in this session")
+            .expect("denial section is unterminated")
+            + start;
+        let under_denials = &prompt[start..end];
+
+        // (what left `RAIN_ROLE` in 0048, the capability that regenerates it,
+        //  the tool names that refusal has to keep naming)
+        let moved: [(&str, Capability, &[&str]); 5] = [
+            (
+                "- **`Edit`, `Write`, `NotebookEdit`** — file writes.",
+                Capability::EditFiles,
+                &["`Edit`", "`Write`", "`NotebookEdit`", "mutating `Bash`"],
+            ),
+            (
+                "- **`terminal_exec`** — types commands into the session's visible PTY",
+                Capability::RunTerminal,
+                &["`terminal_exec`", "`terminal_read`"],
+            ),
+            (
+                "User-facing tools (`ask_user_choice`, …) are reserved for Brian [ask]",
+                Capability::AskUser,
+                &["`ask_user_choice`"],
+            ),
+            (
+                "User-facing tools (…, `mark_awaiting_user`, …) are reserved for Brian [halt]",
+                Capability::Halt,
+                &["`mark_awaiting_user`"],
+            ),
+            (
+                "User-facing tools (…, `request_approval`) are reserved for Brian [approval]",
+                Capability::ParkApproval,
+                &["`request_approval`"],
+            ),
+        ];
+
+        for (removed_line, cap, tools) in moved {
+            let deny = crate::agents::capability_prompt::phrasing(cap).deny;
+            assert!(
+                under_denials.contains(&format!("- {deny}.\n")),
+                "{removed_line}\n  left the constant but {} does not refuse it in the composed \
+                 prompt — the rule was deleted, not moved",
+                cap.slug()
+            );
+            for tool in tools {
+                assert!(
+                    under_denials.contains(tool),
+                    "{removed_line}\n  left the constant and layer 2's {} denial no longer names \
+                     {tool} — EYES is refused something the prompt never identifies",
+                    cap.slug()
+                );
+            }
+        }
+
+        // The other half of "moved": if the constant still carried these, the
+        // prompt would have two sources for one rule and this test would be
+        // green while proving nothing about the move.
+        let constant = crate::agents::prompts::RAIN_ROLE;
+        for gone in [
+            "**`Edit`, `Write`, `NotebookEdit`**",
+            "the bridge enforces HANDS-only",
+            "are reserved for Brian",
+            "tool reserved for the HANDS agent",
+        ] {
+            assert!(
+                !constant.contains(gone),
+                "RAIN_ROLE still hand-writes a refusal layer 2 generates: {gone}"
+            );
+        }
+    }
+
     /// Layer 3 is user free text; layer 2 is derived from the enforced set. A
     /// role description that claims a capability the set does not grant must not
     /// be the last word — 0044's schema comment is explicit that *"a role must

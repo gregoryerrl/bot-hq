@@ -1615,6 +1615,216 @@ mod tests {
         Storage::memory().await.unwrap()
     }
 
+    // ---- 0048: the seeded roles are the user's ---------------------------
+
+    /// rc3's load-bearing distinction, as a query: after 0048, bot-hq claims to
+    /// own no role at all.
+    ///
+    /// Asserted over EVERY row rather than over `hands`/`eyes` by name, because
+    /// the claim in the reframe contract is about the product, not about two
+    /// slugs — a later migration that seeds a third builtin role breaks the
+    /// promise just as thoroughly, and should fail here.
+    #[tokio::test]
+    async fn no_role_is_flagged_builtin_after_0048() {
+        let s = storage_with_0044().await;
+        let flagged: Vec<String> =
+            sqlx::query_scalar("SELECT slug FROM roles WHERE builtin <> 0")
+                .fetch_all(s.pool())
+                .await
+                .unwrap();
+        assert!(
+            flagged.is_empty(),
+            "bot-hq still claims to ship these roles: {flagged:?}"
+        );
+        // Non-vacuous: there ARE rows, so the query above had something to find.
+        let total: i64 = sqlx::query_scalar("SELECT count(*) FROM roles")
+            .fetch_one(s.pool())
+            .await
+            .unwrap();
+        assert!(total >= 2, "no seeded roles at all — the assertion proves nothing");
+    }
+
+    /// 0044 seeded `hands` with `route_gated_command`, which is not a
+    /// `Capability`. 0048 removes it.
+    ///
+    /// The second half is the one that matters: EVERY surviving slug on EVERY
+    /// role must parse. Asserting only that the known-bad slug is gone would
+    /// stay green if the seed grew a second unparseable one.
+    #[tokio::test]
+    async fn every_seeded_capability_slug_parses_after_0048() {
+        let s = storage_with_0044().await;
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT slug, capabilities FROM roles")
+                .fetch_all(s.pool())
+                .await
+                .unwrap();
+        assert!(!rows.is_empty(), "no roles to check");
+
+        let mut checked = 0usize;
+        for (role, raw) in &rows {
+            let slugs: Vec<String> = serde_json::from_str(raw)
+                .unwrap_or_else(|e| panic!("role {role} capabilities is not a JSON array: {e}"));
+            assert!(
+                !slugs.contains(&"route_gated_command".to_string()),
+                "role {role} still carries the stray `route_gated_command` grant"
+            );
+            for slug in &slugs {
+                assert!(
+                    crate::agents::Capability::parse(slug).is_some(),
+                    "role {role} grants `{slug}`, which Capability::parse drops on the floor"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no slugs were checked — the loop proves nothing");
+    }
+
+    /// The correction is a REMOVAL, not a rename — which only holds because the
+    /// 0044 seed already carried the real slug. If it had not, dropping
+    /// `route_gated_command` would have silently taken HANDS's gated-command
+    /// grant away with it, and `every_seeded_capability_slug_parses_after_0048`
+    /// would still be green.
+    #[tokio::test]
+    async fn hands_keeps_gated_bash_through_the_0048_correction() {
+        let s = storage_with_0044().await;
+        let hands = s.role_by_slug("hands").await.unwrap().expect("0044 seeds 'hands'");
+        let caps = crate::agents::CapabilitySet::from_json(&hands.capabilities)
+            .expect("hands capabilities must decode");
+        assert!(
+            caps.contains(crate::agents::Capability::GatedBash),
+            "the stray slug's removal took `gated_bash` with it"
+        );
+        assert!(
+            caps.contains(crate::agents::Capability::RunBash),
+            "`gated_bash` without `run_bash` is the incoherent pair validate() refuses"
+        );
+
+        // **The parity claim for this migration, stated as an equality.** rc3 is
+        // a reframe: 0048 corrects stored DATA and must change no behaviour. The
+        // effective set is what any behaviour reads, and `Capability::parse`
+        // already returned `None` for the stray slug, so `from_json` was already
+        // dropping it — decoding the exact 0044 seed has to yield the same set
+        // the corrected row does. If this ever differs, 0048 stopped being a
+        // cleanup and started being a permission change.
+        let seed_0044 = r#"["read_channel","post_channel","ask_user","park_approval",
+          "route_gated_command","supersede_question","disposition_finding",
+          "override_reviewer_block","halt","declare_working","run_terminal",
+          "write_context_library","edit_files","run_bash","gated_bash",
+          "close_session"]"#;
+        let before = crate::agents::CapabilitySet::from_json(seed_0044)
+            .expect("the 0044 seed must decode");
+        assert_eq!(
+            before, caps,
+            "0048 changed HANDS's effective capabilities; it is only allowed to change the bytes"
+        );
+    }
+
+    /// 0048's capability statement must be safe on a row the user has already
+    /// edited: it rewrites the ONE stray element and leaves everything else,
+    /// including grants that did not come from the seed, exactly as written.
+    ///
+    /// Re-runs the migration's own statement against a hand-edited row rather
+    /// than re-running the whole migration, because sqlx will not re-apply an
+    /// applied migration and the property under test is the statement's.
+    #[tokio::test]
+    async fn the_0048_capability_fix_does_not_clobber_a_hand_edited_list() {
+        let s = storage_with_0044().await;
+        // A user who has pruned HANDS down, added the stray back, and kept an
+        // order of their own.
+        let edited = r#"["close_session","route_gated_command","read_channel","post_channel","run_bash","gated_bash"]"#;
+        sqlx::query("UPDATE roles SET capabilities = ? WHERE slug = 'hands'")
+            .bind(edited)
+            .execute(s.pool())
+            .await
+            .unwrap();
+
+        let stmt = capability_fix_statement();
+        sqlx::query(stmt).execute(s.pool()).await.unwrap();
+
+        let after = s.role_by_slug("hands").await.unwrap().unwrap();
+        let slugs: Vec<String> = serde_json::from_str(&after.capabilities).unwrap();
+        // The stray element and only the stray element — the user's pruning,
+        // their additions and their ORDER all survive untouched.
+        assert_eq!(
+            slugs,
+            ["close_session", "read_channel", "post_channel", "run_bash", "gated_bash"],
+            "the fix changed more than the one stray element"
+        );
+
+        // Idempotent: a second run is a no-op, not a further edit.
+        sqlx::query(stmt).execute(s.pool()).await.unwrap();
+        let again = s.role_by_slug("hands").await.unwrap().unwrap();
+        assert_eq!(again.capabilities, after.capabilities, "the fix is not idempotent");
+    }
+
+    /// 0048's prose re-seed overwrites what 0046 wrote and NOTHING ELSE.
+    ///
+    /// The migration's header claims exactly that, and the claim is the reason
+    /// it matches the old bytes rather than using 0046's `IS NULL` guard (which
+    /// would match nothing, 0046 having just filled the column) or an
+    /// unconditional `SET` (which would eat the user's prose). Both halves are
+    /// asserted here because either one alone is satisfiable by a wrong
+    /// statement: `IS NULL` passes the "edited row survives" half, and an
+    /// unconditional SET passes the "0046's seed is replaced" half.
+    #[tokio::test]
+    async fn the_0048_prose_reseed_overwrites_0046_but_not_a_user_edit() {
+        // Half 1 — a stock migrated database ends up on the NEW constant, so
+        // 0048 really did overwrite the bytes 0046 had just written.
+        let s = storage_with_0044().await;
+        let eyes = s.role_by_slug("eyes").await.unwrap().unwrap();
+        assert_eq!(
+            eyes.description_prompt.as_deref(),
+            Some(crate::agents::prompts::RAIN_ROLE),
+            "0048 did not overwrite 0046's seed"
+        );
+
+        // Half 2 — the statement, replayed against a row the user has edited,
+        // leaves it alone. Replayed rather than re-migrated because sqlx will
+        // not re-apply an applied migration.
+        sqlx::query("UPDATE roles SET description_prompt = ? WHERE slug = 'eyes'")
+            .bind("You are EYES. Be brief and be right.")
+            .execute(s.pool())
+            .await
+            .unwrap();
+        sqlx::query(prose_reseed_statement()).execute(s.pool()).await.unwrap();
+        let after = s.role_by_slug("eyes").await.unwrap().unwrap();
+        assert_eq!(
+            after.description_prompt.as_deref(),
+            Some("You are EYES. Be brief and be right."),
+            "0048 clobbered a user-edited role prompt"
+        );
+    }
+
+    /// The prose re-seed from `0048_roles_are_the_users.sql`, read out of the
+    /// migration itself so the test cannot drift from what actually ran.
+    fn prose_reseed_statement() -> &'static str {
+        use std::sync::OnceLock;
+        static STMT: OnceLock<String> = OnceLock::new();
+        STMT.get_or_init(|| {
+            let sql = include_str!("../../migrations/0048_roles_are_the_users.sql");
+            let marker = "-- 3. Re-seed 'eyes' prose";
+            let from = sql.find(marker).expect("0048 lost its section-3 marker");
+            let start = sql[from..].find("UPDATE").expect("no UPDATE after the marker") + from;
+            sql[start..].trim_end().to_string()
+        })
+    }
+
+    /// The capability-correcting statement from `0048_roles_are_the_users.sql`,
+    /// read out of the migration file itself so the test cannot drift from what
+    /// actually ran. Parsed by its section marker rather than copied.
+    fn capability_fix_statement() -> &'static str {
+        use std::sync::OnceLock;
+        static STMT: OnceLock<String> = OnceLock::new();
+        STMT.get_or_init(|| {
+            let sql = include_str!("../../migrations/0048_roles_are_the_users.sql");
+            let marker = "-- 2. Drop the stray grant";
+            let from = sql.find(marker).expect("0048 lost its section-2 marker");
+            let start = sql[from..].find("UPDATE").expect("no UPDATE after the marker") + from;
+            let end = sql[start..].find(";\n").expect("unterminated statement") + start + 1;
+            sql[start..end].to_string()
+        })
+    }
+
     // ---- 0046: role prose lives in the database --------------------------
 
     /// **The drift oracle for migration 0046.**
@@ -1811,7 +2021,10 @@ mod tests {
         let roles = s.list_roles().await.unwrap();
         assert_eq!(roles.len(), 2, "hands + eyes");
         let hands = s.role_by_slug("hands").await.unwrap().expect("hands");
-        assert!(hands.builtin);
+        // 0044 seeded this `builtin = 1`; 0048 flips it, because these are the
+        // user's two roles and bot-hq ships none. Pinned per-row here, and over
+        // the whole table by `no_role_is_flagged_builtin_after_0048`.
+        assert!(!hands.builtin, "bot-hq still claims to own HANDS");
         assert_eq!(hands.participation_mode, "active");
         assert!(hands.capabilities.contains("edit_files"));
         let eyes = s.role_by_slug("eyes").await.unwrap().expect("eyes");
@@ -1942,8 +2155,10 @@ mod tests {
         let second = s.create_role(&draft("hands")).await.unwrap();
         assert_eq!(second.slug, "hands-3");
         // The seeded role is untouched — a collision must not overwrite.
+        // Asserted on fields a collision would actually have clobbered;
+        // `builtin` is 0 on every row since 0048 and so proves nothing here.
         let seeded = s.role_by_slug("hands").await.unwrap().unwrap();
-        assert!(seeded.builtin);
+        assert_eq!(seeded.display_name, "HANDS");
         assert!(seeded.capabilities.contains("edit_files"));
     }
 
@@ -2084,10 +2299,18 @@ mod tests {
         // the tab while its participants kept taking turns.
         assert_eq!(updated.participation_mode, "observer");
 
-        // `builtin` records that bot-hq seeded this row; editing it does not
-        // un-seed it (0044: seeds are user-editable, and the flag is what lets
-        // the UI offer "restore defaults").
-        assert!(updated.builtin);
+        // `update_role` does not touch `builtin` at all — the flag records
+        // provenance and a save is not a provenance change. Since 0048 leaves
+        // every seeded row at 0, asserting `!updated.builtin` would pass on an
+        // UPDATE that wrongly zeroed it; so set it first and prove the save
+        // leaves the 1 alone.
+        sqlx::query("UPDATE roles SET builtin = 1 WHERE id = ?")
+            .bind(hands.id)
+            .execute(s.pool())
+            .await
+            .unwrap();
+        let resaved = s.update_role(hands.id, &d).await.unwrap();
+        assert!(resaved.builtin, "update_role overwrote `builtin`");
         // `archived` moves only through `set_role_archived`, so a save from a
         // form that never rendered the flag cannot resurrect a removed role.
         assert!(updated.archived);
