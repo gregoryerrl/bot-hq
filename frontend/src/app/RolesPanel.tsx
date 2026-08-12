@@ -526,8 +526,9 @@ function RoleForm({
         <span className="mt-1 block max-w-prose font-code-sm text-code-sm text-on-surface-variant">
           Markdown, injected into every session this role joins. It is the
           role&rsquo;s identity layer only — bot-hq&rsquo;s core rules and the
-          rules derived from the capabilities below are composed on top at
-          spawn, so a role cannot write itself out of them here.
+          rules derived from the capabilities below are composed after it at
+          spawn, and the capabilities themselves are what the tool gate reads.
+          Text written here cannot grant a capability the boxes below withhold.
         </span>
       </label>
 
@@ -541,8 +542,13 @@ function RoleForm({
           Capabilities
         </legend>
         <p className="mb-3 max-w-prose font-code-sm text-code-sm text-on-surface-variant">
-          Grants only — anything unticked is denied, so the two can never
-          contradict. The session&rsquo;s own policy is still the ceiling.
+          Grants only — there is no separate deny list to contradict, so
+          anything unticked is simply not granted. Most boxes are enforced when
+          the agent calls the matching tool; <em>Edit files</em> is enforced at
+          spawn, by how the agent&rsquo;s process is launched.{" "}
+          <em>Read the channel</em>, <em>Post to the channel</em> and{" "}
+          <em>Run Bash</em> are described to the agent but not yet mechanically
+          enforced.
         </p>
         {!capsReady ? (
           <p className="font-code-sm text-code-sm text-warning">

@@ -634,6 +634,36 @@ mod tests {
     }
 
     #[test]
+    fn exactly_four_capabilities_gate_no_tool() {
+        // `capability_prompt`'s module doc publishes a table of WHERE each
+        // capability is enforced, and tells the agent to treat a refusal as
+        // binding precisely because a few are carried by the prompt alone. That
+        // is a factual claim about this file, so it is pinned here rather than
+        // left to rot the first time a tool mapping is added.
+        //
+        // A capability with no tool in `required_for` is not enforced by the
+        // tool gate. Of the four below, `edit_files` IS enforced — at spawn, by
+        // the child's permission posture and its MCP servers
+        // (`spawn::build_command`, `core::session::user_mcp_servers_for_agent`).
+        // The other three have no enforcement site at all today.
+        let registry = crate::signaling::protocol::tool_descriptors();
+        let unmapped: Vec<&'static str> = Capability::ALL
+            .into_iter()
+            // No tool in the live registry maps to this capability, so no call
+            // the gate sees can ever depend on holding it.
+            .filter(|c| !registry.iter().any(|d| required_for(d.name) == Some(*c)))
+            .map(|c| c.slug())
+            .collect();
+        assert_eq!(
+            unmapped,
+            vec!["read_channel", "post_channel", "edit_files", "run_bash"],
+            "the set of capabilities the TOOL GATE cannot enforce changed — \
+             update the enforcement table in `capability_prompt`'s module doc \
+             and the Roles tab's capability hint before changing this"
+        );
+    }
+
+    #[test]
     fn an_unreadable_set_denies_gated_tools_and_leaves_ungated_ones_alone() {
         // The degradation contract, at the type rather than through dispatch.
         // The gate short-circuits ungated tools before it ever asks

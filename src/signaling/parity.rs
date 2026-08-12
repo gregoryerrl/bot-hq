@@ -86,9 +86,18 @@ const UNGATED: &[&str] = &[
 /// which is the exact failure mode the reframe contract's rule 1 is written
 /// against.
 fn legacy_name_gate_admits(tool: &str, agent: &str) -> bool {
-    !(HANDS_ONLY.contains(&tool) && agent != "brian")
-        && !(CL_MUTATE.contains(&tool) && agent == "rain")
-        && !(EYES_ONLY.contains(&tool) && agent != "rain")
+    // Statement for statement, in the original order. Kept as three separate
+    // `if`s rather than one boolean so it reads as the code it transcribes.
+    if HANDS_ONLY.contains(&tool) && agent != "brian" {
+        return false;
+    }
+    if CL_MUTATE.contains(&tool) && agent == "rain" {
+        return false;
+    }
+    if EYES_ONLY.contains(&tool) && agent != "rain" {
+        return false;
+    }
+    true
 }
 
 /// A caller whose grants come from the DATABASE, resolved the way the HTTP
