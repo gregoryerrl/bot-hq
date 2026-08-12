@@ -322,3 +322,44 @@ Still open, and smaller: a fire-and-forget write that FAILS looks identical to
 one that correctly declined. Record the decision where session state already
 lives — a visible row, as the capped halt posts one — so the two are
 distinguishable without the Context Library carrying anything.
+
+### D16 — `close_session` becomes a real capability, and the user is the fallback
+
+Decided 2026-08-13, closing the `PARITY_HOLD` question rc3 left open.
+
+The user: *"close session tick on agent capabilities. if no agents are ticked,
+then user must be the one to manually click the close button if they want to
+close."*
+
+**Remove `close_session` from `jsonrpc::PARITY_HOLD`** and let it gate on
+`Capability::CloseSession` like every other tool. Today the hold makes it
+ungated, so every participant can close a session regardless of what its role
+ticks — while the generated prompt already tells a participant without the
+capability that it may not. The prompt has been the honest half all along; this
+makes the runtime agree with it.
+
+**Consequences to build deliberately, not to discover:**
+
+1. **A roster where nobody holds `close_session` is a LEGAL configuration**, not
+   an error. It means the session ends when the user says so — the Close button
+   in the UI, which must work regardless of the roster and must never be gated
+   on a participant's capability. Verify the button path does not route through
+   the same gate before assuming it is fine.
+2. **The seeded `eyes` role does not hold `CloseSession`.** So after this lands, a
+   HANDS + EYES session where only HANDS holds it behaves as pre-rc3 did; a
+   session of EYES alone can no longer close itself. That is the intended
+   behaviour change and the reason this was held for a decision.
+3. **The refusal must be legible.** A participant that tries to close without the
+   capability should get the standard capability refusal — and, since rc3 P2, a
+   visible row saying so. A session that silently will not close looks like a
+   hang.
+4. `parity::UNGATED` and `PARITY_HOLD` both carry `close_session` today, and the
+   parity oracle asserts the pre-rc3 answer for it. Both move together; the
+   oracle's expectation for this one tool changes from "admitted" to "gated", and
+   that edit is the point rather than a test getting in the way.
+
+**Definition of done:** `PARITY_HOLD` is empty or gone; a participant without
+`CloseSession` is refused and the refusal is a row; a participant with it closes
+as before; the UI Close button closes a session whose roster holds the capability
+nowhere; and the parity oracle states plainly that this one tool deliberately
+diverges from pre-rc3 behaviour, with this decision as the reason.
