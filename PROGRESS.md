@@ -115,6 +115,65 @@ green.
 
 ---
 
+## 2026-08-12 — a session is created from N picked participants, not two literals
+
+**`Storage::seed_session_roster` writes a roster from a list of
+`(role, model, display name)`**, turn slots in the order given. It is the
+N-participant counterpart of `ensure_session_roster`, whose two literal
+`(SELECT id FROM roles WHERE slug = 'hands' / 'eyes')` subqueries were the last
+thing that made "who is in this session" a product constant. Same table, same
+invite-time capability snapshot, same cursor-from-birth invariant, one
+transaction; only the source of the roles moved.
+
+**Parity is proved, not asserted.**
+`n_of_two_is_byte_identical_to_the_default_roster` builds one session each way
+from the same inputs and compares EVERY column of both rosters — the column list
+comes from `pragma_table_info` and is pinned, so a column added later fails the
+test rather than escaping the comparison. `joined_at` is compared as a relation
+(it is the session's own `created_at` on both paths) rather than as a clock
+reading. `a_session_created_before_rc3_still_opens_with_the_same_roster` covers
+the other half: a 0044-backfilled roster comes back unchanged on re-open, and a
+session from the rosterless window is still healed into the same shape.
+
+**`ensure_session_roster` now seeds only into a session that has NO roster.**
+`OR IGNORE` on `UNIQUE (session_id, slug)` was sufficient idempotence while
+`brian` + `rain` were the only rows that could exist; against a
+one-participant roster it collides on the first insert and sails through the
+second, handing the user a Rain they did not invite. Stated delta: a session left
+with a PARTIAL legacy roster is no longer healed by the next spawn. That state is
+only reachable if the second of two non-transactional inserts failed, and every
+session in the live database has both rows (0044 backfilled 385 × 2; 0045's
+precondition re-counted 770).
+
+**The New Session dialog picks participants** — add/remove rows, each choosing a
+role from `list_roles` and optionally overriding the model. **Default 1.** No
+role is pre-selected and Create stays disabled until every row has one: guessing
+is how a session silently gets an agent nobody chose. Gone: the "Disable Rain"
+checkbox and the two by-name model selects. Their values are now DERIVED from the
+roster — `sessions.rain_enabled` from its length, `brian_model_id` /
+`rain_model_id` from each participant's resolved model — so spawn reads the same
+columns it always did. rc3 **D8**: a participant with no model pick inherits
+`roles.default_model_id`; with no role default the column stays NULL and
+`resolve_spawn_config` falls through to the per-agent config — the same
+"(agent default)" the old dialog labelled, now resolved at spawn instead of
+pre-selected in the dialog.
+
+**Two limits are enforced rather than described.** At most 2 participants, because
+`spawn_session_handle` starts two literally-named agents and finds their rows with
+`roster_row(&roster, "brian")` / `"rain"` — a third row would be scheduled by the
+ring and never woken. And `on_demand` roles are not offered (rc3 **D1**: the
+`@mention` wake is not built), alongside a refusal of an all-observer roster,
+which `all_active_voted_done` would report as vacuously finished.
+
+**What the user picks is the ROLE each slot plays; the two runtime identities
+stay put.** Slot 0 is `brian`/`Brian`, slot 1 is `rain`/`Rain`, because the slug
+is what spawn looks up and what `messages.author` carries, and because the role
+prose migration 0046 seeded opens with `You are **Brian**` — naming a participant
+after its role would put `**HANDS** (HANDS)` two paragraphs from that. Both halves
+lift with the name removal.
+
+---
+
 ## 2026-08-12 — B7 layer 2: the prompt's permissions and refusals are one set
 
 **`src/agents/capability_prompt.rs` generates layer 2 of every spawned agent's

@@ -112,6 +112,41 @@ pub struct Participant {
     pub enabled: bool,
 }
 
+/// One participant a session is created with: **a role, a model, and a name**.
+///
+/// The three things rc3's New Session dialog picks per row, plus the two spawn
+/// knobs the dialog already had. It is the input to
+/// [`Storage::seed_session_roster`], which is the N-participant counterpart of
+/// [`Storage::ensure_session_roster`]'s two literal slug subqueries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParticipantDraft {
+    /// The per-session handle, supplied rather than derived.
+    ///
+    /// **Deliberately the caller's choice, because it is not cosmetic.** The
+    /// spawn path looks its processes up by literal slug —
+    /// `roster_row(&roster, "brian")` / `"rain"` in
+    /// `core::session::spawn_session_handle` — and `insert_message`'s dual-write
+    /// resolves `participant_id` by matching `slug` against the legacy `author`
+    /// string. A roster whose slugs the runtime does not know is a roster with
+    /// no process behind it, so the layer that knows what the runtime spawns is
+    /// the layer that names the rows. Storage writes what it is told and only
+    /// enforces that a batch does not repeat one.
+    pub slug: String,
+    /// What the prompt calls this participant (`resolve_roster_facts` reads it
+    /// straight out of the row). Not derived from the role, so an invite can
+    /// name two participants of the same role apart.
+    pub display_name: String,
+    pub role_id: i64,
+    /// rc3 **D8**: `None` falls back to the role's `default_model_id`. The
+    /// dialog's per-participant picker is the override.
+    pub model_id: Option<String>,
+    /// Per-participant spawn knobs, mirroring the columns 0044 gave the table.
+    /// `None` = inherit, exactly as the `sessions.{brian,rain}_effort` columns
+    /// these generalise mean it.
+    pub effort: Option<String>,
+    pub ultracode: Option<bool>,
+}
+
 const ROLE_COLUMNS: &str = "id, slug, display_name, description_prompt, capabilities, \
      participation_mode, default_model_id, builtin, archived";
 
@@ -636,7 +671,39 @@ impl Storage {
     /// backfilled one, which is what stops the two populations drifting.
     /// `OR IGNORE` rides `UNIQUE (session_id, slug)` for idempotence, so a
     /// healthy respawn pays two no-op inserts and nothing else.
+    ///
+    /// **This is the DEFAULT roster, not the only one.** A session created
+    /// through [`Storage::seed_session_roster`] already has the roster its
+    /// creator chose, and this must not add to it — see the guard below for
+    /// what `OR IGNORE` alone would have done to a one-participant roster.
     pub async fn ensure_session_roster(&self, session_id: &str) -> Result<u64> {
+        // Seed the default pair only into a session that has NO roster.
+        //
+        // `OR IGNORE` on `UNIQUE (session_id, slug)` was the whole idempotence
+        // story while `brian` + `rain` were the only rows that could exist. It
+        // stops being one the moment a roster can hold a different SET of
+        // slugs: a session created with one participant slugged `brian` would
+        // collide on the first insert and sail through the second, silently
+        // acquiring a Rain nobody invited; a roster of two participants named
+        // anything else would acquire both.
+        //
+        // Behaviour delta, stated rather than hidden: a session left with a
+        // PARTIAL legacy roster — the `brian` insert committed and the `rain`
+        // insert then failed, which is the only way to reach that state, since
+        // the two statements are not in a transaction — is no longer healed by
+        // the next spawn. The rosterless case that this method exists for is
+        // unaffected (count 0 seeds both), and every session in the live
+        // database has both rows: 0044 backfilled 385 sessions × 2 and 0045's
+        // precondition re-counted 770 participants across them.
+        let (existing,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM session_participants WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_one(&self.pool)
+                .await
+                .with_context(|| format!("counting the roster of {session_id}"))?;
+        if existing > 0 {
+            return Ok(0);
+        }
         let hands = sqlx::query(
             "INSERT OR IGNORE INTO session_participants \
              (session_id, slug, display_name, role_id, model_id, effort, ultracode, \
@@ -707,6 +774,139 @@ impl Storage {
         .await
         .with_context(|| format!("repairing unmapped messages in {session_id}"))?;
         Ok(inserted)
+    }
+
+    /// Seed a session's roster from N chosen roles, returning the new
+    /// participant ids in the order they were given.
+    ///
+    /// The generalisation of [`Storage::ensure_session_roster`]: same table,
+    /// same invite-time snapshot, same cursor-from-birth invariant — the roles
+    /// come from the caller instead of from two literal `WHERE slug = 'hands'
+    /// / 'eyes'` subqueries. Nothing about the ROW changes, which is what makes
+    /// a two-participant HANDS + EYES session identical to today's (proved by
+    /// `n_of_two_is_byte_identical_to_the_default_roster`, which compares every
+    /// column of both rosters).
+    ///
+    /// **Turn slots are the order given**, 0..N — the same values 0044's
+    /// backfill wrote, from a list instead of from two literals.
+    /// [`Storage::next_active_participant`] advances by place in that order, so
+    /// the list is the ring's order wherever the ring is what runs. It is NOT a
+    /// claim about today's default path: `core::router` fans a user message out
+    /// to every live agent at once and the ring only drives a session under
+    /// `BOT_HQ_SEQUENCER=1`. What slot 0 decides on both paths is which agent
+    /// the participant is spawned as — see `PARTICIPANT_SLOTS` in
+    /// `tauri_cmd::sessions`.
+    ///
+    /// **Not idempotent, on purpose.** `ensure_session_roster` runs on every
+    /// spawn and must be a no-op on the common path; this runs once, at create,
+    /// and a second call means something has gone wrong upstream. Seeding over
+    /// an existing roster would double it (the slugs would collide only if they
+    /// happened to match), so it is an error rather than a merge.
+    ///
+    /// The whole batch is ONE transaction. Half a roster is worse than none:
+    /// with the guard above, `ensure_session_roster` will not heal it, and a
+    /// session missing its reviewer runs unreviewed rather than failing.
+    pub async fn seed_session_roster(
+        &self,
+        session_id: &str,
+        drafts: &[ParticipantDraft],
+    ) -> Result<Vec<i64>> {
+        if drafts.is_empty() {
+            anyhow::bail!("a session needs at least one participant");
+        }
+        let mut seen = HashSet::new();
+        for draft in drafts {
+            if !seen.insert(draft.slug.as_str()) {
+                // `UNIQUE (session_id, slug)` would catch this at the INSERT,
+                // but as a constraint error naming neither the batch nor which
+                // row repeated.
+                anyhow::bail!("two participants share the slug {:?}", draft.slug);
+            }
+        }
+        // `joined_at` is the SESSION's `created_at`, not `datetime('now')` —
+        // the value `ensure_session_roster` and 0044's backfill both write. The
+        // double duty is why: it is also the existence check, so a roster
+        // cannot be seeded into a session id that has no row (the FK would
+        // catch it, as a constraint error naming an integer).
+        let created_at: Option<(String,)> =
+            sqlx::query_as("SELECT created_at FROM sessions WHERE id = ?")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await
+                .with_context(|| format!("reading session {session_id}"))?;
+        let (created_at,) =
+            created_at.with_context(|| format!("session {session_id} does not exist"))?;
+        let (existing,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM session_participants WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_one(&self.pool)
+                .await
+                .with_context(|| format!("counting the roster of {session_id}"))?;
+        if existing > 0 {
+            anyhow::bail!(
+                "session {session_id} already has {existing} participant(s); \
+                 a roster is seeded once"
+            );
+        }
+
+        let mut roles = Vec::with_capacity(drafts.len());
+        for draft in drafts {
+            let role = self
+                .role_by_id(draft.role_id)
+                .await?
+                .with_context(|| format!("role {} does not exist", draft.role_id))?;
+            roles.push(role);
+        }
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("opening the roster transaction")?;
+        let mut ids = Vec::with_capacity(drafts.len());
+        for (slot, (draft, role)) in drafts.iter().zip(&roles).enumerate() {
+            // The invite-time snapshot: `capabilities` and `participation_mode`
+            // are COPIED off the role, so editing the role later cannot widen a
+            // live participant mid-session. `role_id` records which template
+            // this came from; these two record what it actually runs with.
+            let id = sqlx::query(
+                "INSERT INTO session_participants \
+                 (session_id, slug, display_name, role_id, model_id, effort, ultracode, \
+                  capabilities, participation_mode, turn_position, joined_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(session_id)
+            .bind(&draft.slug)
+            .bind(&draft.display_name)
+            .bind(role.id)
+            // D8's fallback: the participant's own pick, else the role's default.
+            .bind(draft.model_id.as_deref().or(role.default_model_id.as_deref()))
+            .bind(draft.effort.as_deref())
+            .bind(draft.ultracode.map(i64::from))
+            .bind(&role.capabilities)
+            .bind(&role.participation_mode)
+            .bind(slot as i64)
+            .bind(&created_at)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| {
+                format!("seeding participant {} into {session_id}", draft.slug)
+            })?
+            .last_insert_rowid();
+            // Every participant reads the channel, so every participant has a
+            // cursor from birth — the invariant `insert_participant` and
+            // `ensure_session_roster` both hold. Without it a delivery records
+            // itself, leaves the cursor at 0, and re-offers the same batch
+            // every turn while reporting success.
+            sqlx::query("INSERT INTO participant_cursors (participant_id) VALUES (?)")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .context("seeding participant cursor")?;
+            ids.push(id);
+        }
+        tx.commit().await.context("committing the roster")?;
+        Ok(ids)
     }
 
     // ---- turn cycle -----------------------------------------------------
@@ -3295,6 +3495,409 @@ mod tests {
         assert!(roster[0].enabled, "HANDS runs");
         assert!(!roster[1].enabled, "EYES present but disabled");
         assert!(s.next_active_participant("s1", None).await.unwrap().is_some());
+    }
+
+    // ---- rc3: N participants chosen from roles ---------------------------
+
+    /// Every column of a session's roster, rendered as text, in ring order.
+    ///
+    /// `quote()` renders NULL as `NULL` and every other value as a SQL literal,
+    /// so the comparison is type-independent and total — which is the point:
+    /// this is the oracle the parity claim rests on, and a comparison that
+    /// silently skipped a column would let the two paths diverge in exactly the
+    /// place nobody looked. `id` and `session_id` are excluded because they
+    /// necessarily differ between two sessions; everything else must match.
+    ///
+    /// `joined_at` is rendered as a RELATION rather than a timestamp — both
+    /// paths write the session's own `created_at`, and two sessions are created
+    /// milliseconds apart, so comparing the literal would compare the clock.
+    /// A row that joined at some OTHER time still renders its literal and still
+    /// fails the comparison.
+    async fn roster_verbatim(s: &Storage, session_id: &str) -> Vec<Vec<String>> {
+        use sqlx::Row as _;
+        let (created_at,): (String,) = sqlx::query_as("SELECT created_at FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        let joined_at_is_created_at = format!("joined_at='{created_at}'");
+        let columns: Vec<String> = sqlx::query_as("SELECT name FROM pragma_table_info(?)")
+            .bind("session_participants")
+            .fetch_all(&s.pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(name,): (String,)| name)
+            .collect();
+        // A column added later joins the comparison automatically — but only if
+        // this list is what the table actually holds, so pin it. If this fails,
+        // the fix is to decide whether the new column is part of roster parity
+        // (it almost certainly is) and update the list, not to loosen it.
+        assert_eq!(
+            columns,
+            [
+                "id", "session_id", "slug", "display_name", "role_id", "model_id", "runtime",
+                "capabilities", "participation_mode", "prompt", "turn_position", "done_vote",
+                "effort", "ultracode", "claude_session_id", "enabled", "joined_at", "left_at",
+            ],
+            "session_participants grew a column; roster parity has to cover it"
+        );
+        let compared: Vec<&String> = columns
+            .iter()
+            .filter(|c| c.as_str() != "id" && c.as_str() != "session_id")
+            .collect();
+        let selected = compared
+            .iter()
+            .map(|c| format!("quote({c})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rows = sqlx::query(&format!(
+            "SELECT {selected} FROM session_participants \
+             WHERE session_id = ? ORDER BY turn_position, id"
+        ))
+        .bind(session_id)
+        .fetch_all(&s.pool)
+        .await
+        .unwrap();
+        rows.iter()
+            .map(|row| {
+                compared
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let rendered = format!("{c}={}", row.get::<String, _>(i));
+                        if rendered == joined_at_is_created_at {
+                            "joined_at=<the session's created_at>".to_string()
+                        } else {
+                            rendered
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The two drafts that reproduce today's roster, given the seeded roles.
+    async fn hands_and_eyes_drafts(s: &Storage) -> Vec<ParticipantDraft> {
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        let eyes = s.role_by_slug("eyes").await.unwrap().unwrap();
+        vec![
+            ParticipantDraft {
+                slug: "brian".into(),
+                display_name: "Brian".into(),
+                role_id: hands.id,
+                model_id: Some("opus".into()),
+                effort: Some("max".into()),
+                ultracode: Some(true),
+            },
+            ParticipantDraft {
+                slug: "rain".into(),
+                display_name: "Rain".into(),
+                role_id: eyes.id,
+                model_id: Some("sonnet".into()),
+                effort: Some("low".into()),
+                ultracode: Some(false),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn n_of_two_is_byte_identical_to_the_default_roster() {
+        // THE reframe test. rc3 moves where a roster comes from — two literal
+        // `WHERE slug = 'hands' / 'eyes'` subqueries become the user's picks —
+        // and moving a source is only a reframe if the result is the same. So
+        // this builds one session each way, from the same inputs, and compares
+        // EVERY column of both rosters.
+        let s = storage_with_0044().await;
+
+        // The old way: the session columns carry the picks and the default
+        // roster is seeded from them at spawn.
+        s.create_session("s-old", "t", None).await.unwrap();
+        s.set_session_spawn_config("s-old", true, Some("opus"), Some("sonnet"))
+            .await
+            .unwrap();
+        s.set_session_effort_config("s-old", Some("max"), Some("low"), Some(true), Some(false))
+            .await
+            .unwrap();
+        assert_eq!(s.ensure_session_roster("s-old").await.unwrap(), 2);
+
+        // The new way: the same two roles, chosen.
+        s.create_session("s-new", "t", None).await.unwrap();
+        let drafts = hands_and_eyes_drafts(&s).await;
+        let ids = s.seed_session_roster("s-new", &drafts).await.unwrap();
+        assert_eq!(ids.len(), 2);
+
+        let old = roster_verbatim(&s, "s-old").await;
+        let new = roster_verbatim(&s, "s-new").await;
+        assert_eq!(old.len(), 2, "precondition: the default roster is two rows");
+        assert_eq!(
+            new, old,
+            "a session created from the HANDS and EYES roles must be the session bot-hq \
+             has always created"
+        );
+        // And the invariant the columns cannot show: a participant with no
+        // cursor is invisibly undeliverable.
+        for id in ids {
+            assert_eq!(s.cursor_for(id).await.unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn one_participant_is_a_roster_of_one_and_the_ring_runs() {
+        // Design §1's default. The ring has to hand this participant the turn,
+        // hand it the turn again after its own, and halt only on its vote —
+        // otherwise "one agent" is a session that looks staffed and never acts.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        let ids = s
+            .seed_session_roster(
+                "s1",
+                &[ParticipantDraft {
+                    slug: "brian".into(),
+                    display_name: "Brian".into(),
+                    role_id: hands.id,
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+
+        let roster = s.participants_for_session("s1").await.unwrap();
+        assert_eq!(roster.len(), 1, "one pick is one row — no disabled placeholder");
+        assert_eq!(roster[0].turn_position, 0);
+        assert!(roster[0].enabled);
+        assert!(roster[0].capabilities.contains("edit_files"), "HANDS still executes");
+
+        let first = s.next_active_participant("s1", None).await.unwrap().unwrap();
+        assert_eq!(first.id, ids[0], "a user message opens on the only participant");
+        let next = s.next_active_participant("s1", Some(&first)).await.unwrap();
+        assert_eq!(next.map(|p| p.id), Some(ids[0]), "the ring wraps onto itself");
+        assert!(!s.all_active_voted_done("s1").await.unwrap(), "nobody has voted yet");
+        s.set_done_vote(ids[0], true).await.unwrap();
+        assert!(s.all_active_voted_done("s1").await.unwrap(), "its vote alone ends the cycle");
+    }
+
+    #[tokio::test]
+    async fn turn_slots_are_the_order_given_and_are_unique() {
+        // The list IS the running order: the ring steps by place in the
+        // rotation, so seeding EYES first would make the reviewer speak before
+        // there is anything to review. Reversed here so the assertion cannot
+        // pass off the roles' own ids or their alphabetical order.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let mut drafts = hands_and_eyes_drafts(&s).await;
+        drafts.reverse();
+        s.seed_session_roster("s1", &drafts).await.unwrap();
+
+        let roster = s.participants_for_session("s1").await.unwrap();
+        let slots: Vec<(i64, &str)> = roster
+            .iter()
+            .map(|p| (p.turn_position, p.slug.as_str()))
+            .collect();
+        assert_eq!(slots, [(0, "rain"), (1, "brian")], "slot 0 is whoever was listed first");
+        // 0045's partial unique index is what makes a shared slot
+        // unrepresentable; this proves the seeding path does not need it.
+        let mut seen: Vec<i64> = roster.iter().map(|p| p.turn_position).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), roster.len(), "no two participants share a slot");
+    }
+
+    #[tokio::test]
+    async fn a_participant_model_overrides_the_roles_default() {
+        // rc3 D8: the Roles tab names a default model, the New Session dialog
+        // overrides it per participant. Both halves, on one roster — the second
+        // participant takes what the role names because it asked for nothing.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        s.update_role(
+            hands.id,
+            &RoleDraft {
+                display_name: hands.display_name.clone(),
+                slug: None,
+                description_prompt: hands.description_prompt.clone(),
+                capabilities: hands.capabilities.clone(),
+                participation_mode: hands.participation_mode.clone(),
+                default_model_id: Some("role-default".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+        s.seed_session_roster(
+            "s1",
+            &[
+                ParticipantDraft {
+                    slug: "brian".into(),
+                    display_name: "Brian".into(),
+                    role_id: hands.id,
+                    model_id: Some("chosen-at-invite".into()),
+                    ..Default::default()
+                },
+                ParticipantDraft {
+                    slug: "rain".into(),
+                    display_name: "Rain".into(),
+                    role_id: hands.id,
+                    model_id: None,
+                    ..Default::default()
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+        let roster = s.participants_for_session("s1").await.unwrap();
+        assert_eq!(
+            roster[0].model_id.as_deref(),
+            Some("chosen-at-invite"),
+            "the participant's own pick wins"
+        );
+        assert_eq!(
+            roster[1].model_id.as_deref(),
+            Some("role-default"),
+            "no pick falls back to the role's default"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chosen_roster_survives_the_next_spawn() {
+        // `ensure_session_roster` runs pre-spawn on EVERY session, and its
+        // `OR IGNORE` idempotence keys on the slug. A one-participant roster
+        // collides on `brian` and would have sailed straight through the second
+        // insert — handing the user a Rain they did not invite.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        s.seed_session_roster(
+            "s1",
+            &[ParticipantDraft {
+                slug: "brian".into(),
+                display_name: "Brian".into(),
+                role_id: hands.id,
+                ..Default::default()
+            }],
+        )
+        .await
+        .unwrap();
+        let before = roster_verbatim(&s, "s1").await;
+
+        assert_eq!(s.ensure_session_roster("s1").await.unwrap(), 0, "nothing to seed");
+        assert_eq!(s.ensure_session_roster("s1").await.unwrap(), 0, "still nothing on respawn");
+
+        assert_eq!(roster_verbatim(&s, "s1").await, before, "the chosen roster is untouched");
+    }
+
+    #[tokio::test]
+    async fn a_session_created_before_rc3_still_opens_with_the_same_roster() {
+        // The other half of parity: every session in the live database was
+        // created the old way, and opening one calls `ensure_session_roster`.
+        // A 0044-backfilled roster must come back byte for byte, and a session
+        // from the rosterless window must still be healed into the SAME shape a
+        // pre-rc3 open would have given it.
+        let s = storage_with_0044().await;
+
+        // A session as 0044 left it: both rows, seeded before this change.
+        s.create_session("s-backfilled", "t", None).await.unwrap();
+        s.set_session_spawn_config("s-backfilled", true, Some("opus"), Some("sonnet"))
+            .await
+            .unwrap();
+        s.ensure_session_roster("s-backfilled").await.unwrap();
+        let backfilled = roster_verbatim(&s, "s-backfilled").await;
+        assert_eq!(s.ensure_session_roster("s-backfilled").await.unwrap(), 0);
+        assert_eq!(
+            roster_verbatim(&s, "s-backfilled").await,
+            backfilled,
+            "re-opening an existing session must not reshape its roster"
+        );
+
+        // A session from the window where nothing seeded a roster at all.
+        s.create_session("s-rosterless", "t", None).await.unwrap();
+        s.set_session_spawn_config("s-rosterless", true, Some("opus"), Some("sonnet"))
+            .await
+            .unwrap();
+        s.insert_message("s-rosterless", Author::Brian, MessageKind::Text, "work")
+            .await
+            .unwrap();
+        assert_eq!(
+            s.ensure_session_roster("s-rosterless").await.unwrap(),
+            2,
+            "the heal path still seeds both"
+        );
+        let healed = s.participants_for_session("s-rosterless").await.unwrap();
+        assert_eq!(healed.len(), 2);
+        assert_eq!(healed[0].slug, "brian");
+        assert_eq!(healed[1].slug, "rain");
+        let rows = all_rows(&s, "s-rosterless").await;
+        assert_eq!(
+            rows[0].participant_id,
+            Some(healed[0].id),
+            "and still repairs what that window wrote"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_roster_is_seeded_once_and_refuses_what_it_cannot_write() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let drafts = hands_and_eyes_drafts(&s).await;
+
+        assert!(
+            s.seed_session_roster("s1", &[]).await.is_err(),
+            "an empty roster is a session nobody can act in"
+        );
+        let mut clashing = drafts.clone();
+        clashing[1].slug = "brian".into();
+        assert!(
+            s.seed_session_roster("s1", &clashing).await.is_err(),
+            "two participants cannot share one slug"
+        );
+        let mut unknown = drafts.clone();
+        unknown[0].role_id = 9999;
+        assert!(
+            s.seed_session_roster("s1", &unknown).await.is_err(),
+            "a role that does not exist is not a participant"
+        );
+        assert!(
+            s.seed_session_roster("s-missing", &drafts).await.is_err(),
+            "a roster needs a session to belong to"
+        );
+        // Every refusal above is decided before the first INSERT, so a refused
+        // create leaves a session with no roster rather than a partial one.
+        assert!(
+            s.participants_for_session("s1").await.unwrap().is_empty(),
+            "a refused seed writes no rows"
+        );
+
+        s.seed_session_roster("s1", &drafts).await.unwrap();
+        // The second seed the SCHEMA cannot stop, which is what makes the guard
+        // load-bearing rather than decorative: a fresh slug clears
+        // `UNIQUE (session_id, slug)`, and an observer is outside 0045's
+        // turn-slot index (`WHERE enabled <> 0 AND participation_mode =
+        // 'active'`), so both constraints let this through and the roster
+        // quietly grows a third member.
+        let observer = s
+            .create_role(&RoleDraft {
+                display_name: "Watcher".into(),
+                capabilities: "[]".into(),
+                participation_mode: "observer".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let third = ParticipantDraft {
+            slug: "someone-else".into(),
+            display_name: "Someone Else".into(),
+            role_id: observer.id,
+            ..Default::default()
+        };
+        assert!(
+            s.seed_session_roster("s1", &[third]).await.is_err(),
+            "seeding twice would grow the roster, not merge into it"
+        );
+        assert_eq!(s.participants_for_session("s1").await.unwrap().len(), 2);
     }
 
     #[tokio::test]

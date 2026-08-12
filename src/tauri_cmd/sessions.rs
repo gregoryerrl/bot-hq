@@ -109,6 +109,165 @@ pub struct SessionCreateOptions {
     /// `worktree_default` app setting, which defaults ON for repo-backed
     /// sessions).
     pub use_worktree: Option<bool>,
+    /// rc3: the participants the New Session dialog chose, in turn order.
+    ///
+    /// `None` is the pre-rc3 path and behaves EXACTLY as before — no roster is
+    /// written at create and `ensure_session_roster` seeds the default pair at
+    /// spawn. Every non-dialog caller (the external driver's `open_session`,
+    /// `dispatch_session`, the plugin proxy) is on that path and is untouched.
+    pub participants: Option<Vec<ParticipantPick>>,
+}
+
+/// One row of the dialog's participant list: a role, and optionally a model
+/// that overrides the role's default (rc3 **D8**).
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ParticipantPick {
+    pub role_id: i64,
+    pub model_id: Option<String>,
+}
+
+/// How many participants a session can be created with **today**.
+///
+/// Not a design limit — the runtime limit, and it is enforced here because the
+/// alternative is a dialog that offers a third row and produces a participant
+/// with no process behind it. `core::session::spawn_session_handle` spawns two
+/// literally-named agents and finds their rows with
+/// `roster_row(&roster, "brian")` / `"rain"`; a third row would be scheduled by
+/// the ring, never woken, and the consensus halt would then wait forever on a
+/// vote it can never cast. Raise this when spawning stops being name-keyed.
+pub const MAX_SESSION_PARTICIPANTS: usize = 2;
+
+/// The slug and display name a participant takes, by turn slot.
+///
+/// **What the user picks is the ROLE each slot plays; the two runtime
+/// identities are not yet theirs to name.** Both halves are forced, and by
+/// different things:
+///
+/// * the **slug** is the wire. `spawn_session_handle` finds a participant's row
+///   with `roster_row(&roster, "brian")` / `"rain"`, and `insert_message`'s
+///   dual-write resolves `participant_id` by matching it against the legacy
+///   `author` string. A row slugged anything else has no process behind it.
+/// * the **display name** is what layer 2 calls the participant
+///   (`RosterFacts::display_name`, rendered as `**Brian** (HANDS)`), and layer 3
+///   — the role prose migration 0046 seeded from `BRIAN_ROLE` / `RAIN_ROLE` —
+///   opens with `You are **Brian**`. Naming the participant after its role
+///   would put `**HANDS** (HANDS)` two paragraphs from `You are **Brian**` in
+///   one prompt.
+///
+/// Both lift together when the name removal
+/// (`docs/plans/2026-08-11-agent-name-removal.md`) takes the names out of the
+/// prose and the spawn path.
+const PARTICIPANT_SLOTS: [(&str, &str); MAX_SESSION_PARTICIPANTS] =
+    [("brian", "Brian"), ("rain", "Rain")];
+
+/// What a resolved participant list means for the columns spawn still reads.
+///
+/// The reframe in one struct: the dialog now picks participants, and the values
+/// that used to come from the dialog's "Disable Rain" checkbox and its two
+/// model selects are DERIVED from those picks instead. They land in the same
+/// `sessions` columns as before, so spawn behaves identically — the source
+/// moved, the behaviour did not.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ResolvedRoster {
+    pub drafts: Vec<crate::storage::ParticipantDraft>,
+    /// `sessions.rain_enabled`: two participants is a duo, one is solo — the
+    /// same flag the checkbox set, read off the roster's length.
+    pub rain_enabled: bool,
+    /// `sessions.brian_model_id` / `rain_model_id`. **Load-bearing, not
+    /// bookkeeping:** `spawn_session_handle` resolves each agent's model from
+    /// these columns, not from the roster, so a per-participant model pick that
+    /// only reached `session_participants.model_id` would be a picker that
+    /// changes nothing.
+    pub brian_model_id: Option<String>,
+    pub rain_model_id: Option<String>,
+}
+
+/// Turn the dialog's picks into a roster, refusing the ones that cannot run.
+///
+/// Split out of the command body because a `#[tauri::command]` takes
+/// `tauri::State`, which cannot be constructed in a unit test — the convention
+/// `roles.rs::load_roles` already follows.
+pub(crate) async fn resolve_participant_picks(
+    storage: &Storage,
+    picks: &[ParticipantPick],
+    options: &SessionCreateOptions,
+) -> Result<ResolvedRoster, AppError> {
+    if picks.is_empty() {
+        return Err(AppError::Validation(
+            "a session needs at least one participant".into(),
+        ));
+    }
+    if picks.len() > MAX_SESSION_PARTICIPANTS {
+        return Err(AppError::Validation(format!(
+            "a session can run at most {MAX_SESSION_PARTICIPANTS} participants today, \
+             not {}",
+            picks.len()
+        )));
+    }
+    // The effort/ultracode picks are still per-SLOT in the dialog, because they
+    // are still per-slot in the columns spawn reads.
+    let per_slot_effort = [
+        (options.brian_effort.clone(), options.brian_ultracode),
+        (options.rain_effort.clone(), options.rain_ultracode),
+    ];
+    let mut drafts = Vec::with_capacity(picks.len());
+    let mut models: Vec<Option<String>> = Vec::with_capacity(picks.len());
+    let mut any_active = false;
+    for (slot, pick) in picks.iter().enumerate() {
+        let role = storage
+            .role_by_id(pick.role_id)
+            .await
+            .map_err(|e| AppError::DbError(e.to_string()))?
+            .ok_or_else(|| AppError::Validation(format!("role {} does not exist", pick.role_id)))?;
+        if role.archived {
+            // The picker lists live roles only, so this is a stale dialog —
+            // the role was archived between the list read and Create.
+            return Err(AppError::Validation(format!(
+                "role {} is archived",
+                role.display_name
+            )));
+        }
+        if role.participation_mode == "on_demand" {
+            // rc3 D1: an `on_demand` participant wakes on a user `@mention`,
+            // and that is not built. Inviting one produces a participant the
+            // ring skips and nothing ever wakes.
+            return Err(AppError::Validation(format!(
+                "role {} is on-demand, and waking one is not built yet",
+                role.display_name
+            )));
+        }
+        any_active |= role.participation_mode == "active";
+        let (effort, ultracode) = per_slot_effort[slot].clone();
+        // D8's fallback, resolved ONCE: the same value goes into the
+        // participant row and into the `sessions` column spawn reads, so the
+        // two cannot disagree about which model this participant runs.
+        let model_id = pick.model_id.clone().or_else(|| role.default_model_id.clone());
+        let (slug, display_name) = PARTICIPANT_SLOTS[slot];
+        drafts.push(crate::storage::ParticipantDraft {
+            slug: slug.to_string(),
+            display_name: display_name.to_string(),
+            role_id: role.id,
+            model_id: model_id.clone(),
+            effort,
+            ultracode,
+        });
+        models.push(model_id);
+    }
+    if !any_active {
+        // Every participant an observer is a session that can never take a
+        // turn: the ring is empty, so `all_active_voted_done` is vacuously
+        // true and the session is "finished" before it starts.
+        return Err(AppError::Validation(
+            "at least one participant has to be in the turn rotation".into(),
+        ));
+    }
+    Ok(ResolvedRoster {
+        rain_enabled: picks.len() >= 2,
+        brian_model_id: models.first().cloned().flatten(),
+        rain_model_id: models.get(1).cloned().flatten(),
+        drafts,
+    })
 }
 
 /// Where a new session runs: `(working_repo_path, base_repo_path)`.
@@ -168,6 +327,24 @@ pub async fn create_session(
     options: SessionCreateOptions,
 ) -> Result<SessionInfo, AppError> {
     let storage = &core.storage;
+    // rc3: resolve the picked roster BEFORE the session row exists, so a
+    // refused pick (an archived role, an on-demand one, too many rows) leaves
+    // nothing behind to clean up.
+    let roster = match options.participants.as_deref() {
+        Some(picks) => Some(resolve_participant_picks(storage, picks, &options).await?),
+        None => None,
+    };
+    // With a roster, the solo/duo flag and both model columns are DERIVED from
+    // it — same columns, same spawn, a different source. Without one this is
+    // the pre-rc3 path, argument for argument.
+    let (rain_enabled, brian_model_id, rain_model_id) = match &roster {
+        Some(r) => (
+            r.rain_enabled,
+            r.brian_model_id.clone(),
+            r.rain_model_id.clone(),
+        ),
+        None => (rain_enabled.unwrap_or(true), brian_model_id, rain_model_id),
+    };
     let (working, base) = resolve_session_placement(
         storage,
         &core.paths.data_dir,
@@ -191,7 +368,7 @@ pub async fn create_session(
     storage
         .set_session_spawn_config(
             &id,
-            rain_enabled.unwrap_or(true),
+            rain_enabled,
             brian_model_id.as_deref(),
             rain_model_id.as_deref(),
         )
@@ -209,6 +386,15 @@ pub async fn create_session(
         )
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
+    // The picked roster, written before the background spawn below reaches
+    // `ensure_session_roster` — which seeds the default pair only into a
+    // session that has none, so the two never both fire.
+    if let Some(roster) = &roster {
+        storage
+            .seed_session_roster(&id, &roster.drafts)
+            .await
+            .map_err(|e| AppError::DbError(format!("{e:#}")))?;
+    }
     core.bridge.register_session(id.clone(), project).await;
     // Re-fetch so the returned SessionInfo reflects the persisted config.
     let session = storage
@@ -754,5 +940,165 @@ mod tests {
         let list = storage.list_active_sessions().await.unwrap();
         let ids: Vec<String> = list.into_iter().map(|s| s.id).collect();
         assert!(ids.contains(&"s1".to_string()));
+    }
+
+    // ---- rc3: the New Session dialog picks participants ------------------
+
+    fn pick(role_id: i64, model_id: Option<&str>) -> ParticipantPick {
+        ParticipantPick {
+            role_id,
+            model_id: model_id.map(str::to_string),
+        }
+    }
+
+    async fn role_with_mode(storage: &Storage, name: &str, mode: &str) -> i64 {
+        storage
+            .create_role(&crate::storage::RoleDraft {
+                display_name: name.into(),
+                capabilities: "[\"read_channel\"]".into(),
+                participation_mode: mode.into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test]
+    async fn picks_derive_the_solo_flag_and_the_columns_spawn_reads() {
+        // The reframe, at the layer that does it: the dialog's "Disable Rain"
+        // checkbox and its two model selects are GONE, and the values they used
+        // to write are read off the participant list instead. Spawn still reads
+        // `sessions.rain_enabled` / `brian_model_id` / `rain_model_id`, so a
+        // pick that did not reach those columns would be a picker that changes
+        // nothing.
+        let (storage, _b) = setup().await;
+        let hands = storage.role_by_slug("hands").await.unwrap().unwrap();
+        let eyes = storage.role_by_slug("eyes").await.unwrap().unwrap();
+        let options = SessionCreateOptions {
+            brian_effort: Some("max".into()),
+            rain_effort: Some("low".into()),
+            brian_ultracode: Some(true),
+            ..Default::default()
+        };
+
+        let solo = resolve_participant_picks(&storage, &[pick(hands.id, Some("opus"))], &options)
+            .await
+            .unwrap();
+        assert!(!solo.rain_enabled, "one participant is a solo session");
+        assert_eq!(solo.brian_model_id.as_deref(), Some("opus"));
+        assert_eq!(solo.rain_model_id, None);
+        assert_eq!(solo.drafts.len(), 1);
+        assert_eq!(solo.drafts[0].slug, "brian", "slot 0 is the handle spawn looks up");
+        assert_eq!(solo.drafts[0].effort.as_deref(), Some("max"));
+        assert_eq!(solo.drafts[0].ultracode, Some(true));
+
+        let duo = resolve_participant_picks(
+            &storage,
+            &[pick(hands.id, Some("opus")), pick(eyes.id, Some("sonnet"))],
+            &options,
+        )
+        .await
+        .unwrap();
+        assert!(duo.rain_enabled, "two participants is the duo");
+        assert_eq!(duo.rain_model_id.as_deref(), Some("sonnet"));
+        let slugs: Vec<&str> = duo.drafts.iter().map(|d| d.slug.as_str()).collect();
+        assert_eq!(slugs, ["brian", "rain"], "in the order they were picked");
+        assert_eq!(duo.drafts[1].effort.as_deref(), Some("low"), "slot 1 takes Rain's knobs");
+    }
+
+    #[tokio::test]
+    async fn a_pick_without_a_model_takes_the_roles_default() {
+        // D8's fallback has to be applied HERE and not only in storage: the
+        // session column spawn reads is written from this value, so leaving it
+        // NULL would silently spawn the agent-config model instead of the one
+        // the Roles tab names.
+        let (storage, _b) = setup().await;
+        let role = storage
+            .create_role(&crate::storage::RoleDraft {
+                display_name: "Reviewer".into(),
+                capabilities: "[\"read_channel\"]".into(),
+                participation_mode: "active".into(),
+                default_model_id: Some("role-default".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let inherited =
+            resolve_participant_picks(&storage, &[pick(role.id, None)], &Default::default())
+                .await
+                .unwrap();
+        assert_eq!(inherited.brian_model_id.as_deref(), Some("role-default"));
+        assert_eq!(inherited.drafts[0].model_id.as_deref(), Some("role-default"));
+
+        let overridden =
+            resolve_participant_picks(&storage, &[pick(role.id, Some("chosen"))], &Default::default())
+                .await
+                .unwrap();
+        assert_eq!(overridden.brian_model_id.as_deref(), Some("chosen"));
+        assert_eq!(overridden.drafts[0].model_id.as_deref(), Some("chosen"));
+    }
+
+    #[tokio::test]
+    async fn a_roster_the_runtime_cannot_run_is_refused() {
+        let (storage, _b) = setup().await;
+        let hands = storage.role_by_slug("hands").await.unwrap().unwrap();
+        let opts = SessionCreateOptions::default();
+
+        assert!(
+            resolve_participant_picks(&storage, &[], &opts).await.is_err(),
+            "a session with nobody in it"
+        );
+        // One more than the two agents `spawn_session_handle` spawns. Offering
+        // a third row would produce a participant the ring schedules and
+        // nothing ever wakes — and the consensus halt would then wait forever
+        // on its vote.
+        let three = vec![pick(hands.id, None), pick(hands.id, None), pick(hands.id, None)];
+        assert!(
+            resolve_participant_picks(&storage, &three, &opts).await.is_err(),
+            "more participants than the runtime can spawn"
+        );
+        assert!(
+            resolve_participant_picks(&storage, &[pick(9999, None)], &opts).await.is_err(),
+            "a role id that names nothing"
+        );
+
+        // rc3 D1: an on-demand participant wakes on a user @mention, and that
+        // is not built. Inviting one is inviting a participant nothing wakes.
+        // Paired with an ACTIVE participant on purpose — a lone on-demand
+        // roster is also caught by the empty-rotation check below, so it would
+        // not tell us whether this rule exists at all.
+        let on_demand = role_with_mode(&storage, "Specialist", "on_demand").await;
+        assert!(
+            resolve_participant_picks(&storage, &[pick(hands.id, None), pick(on_demand, None)], &opts)
+                .await
+                .is_err(),
+            "on-demand is not offered anywhere yet"
+        );
+
+        // An all-observer roster leaves the rotation empty, which
+        // `all_active_voted_done` reports as vacuously DONE — a session that is
+        // finished before it starts.
+        let observer = role_with_mode(&storage, "Watcher", "observer").await;
+        assert!(
+            resolve_participant_picks(&storage, &[pick(observer, None)], &opts).await.is_err(),
+            "nobody in the turn rotation"
+        );
+        assert!(
+            resolve_participant_picks(&storage, &[pick(hands.id, None), pick(observer, None)], &opts)
+                .await
+                .is_ok(),
+            "an observer alongside an active participant is a legal roster"
+        );
+
+        // The picker lists live roles only, so an archived pick means the
+        // dialog was open while the Roles tab archived it.
+        let archived = role_with_mode(&storage, "Retired", "active").await;
+        storage.set_role_archived(archived, true).await.unwrap();
+        assert!(
+            resolve_participant_picks(&storage, &[pick(archived, None)], &opts).await.is_err(),
+            "a role the user removed"
+        );
     }
 }

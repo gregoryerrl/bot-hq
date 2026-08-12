@@ -1481,6 +1481,11 @@ native: boolean;
  */
 context_window: number | null }
 /**
+ * One row of the dialog's participant list: a role, and optionally a model
+ * that overrides the role's default (rc3 **D8**).
+ */
+export type ParticipantPick = { roleId: number; modelId: string | null }
+/**
  * Permission posture summary (counts only; bot-hq overrides per agent anyway).
  */
 export type PermissionsView = { default_mode: string | null; allow: number; ask: number; deny: number; additional_directories: number; inheritance: Inheritance }
@@ -1712,7 +1717,16 @@ export type SessionCreateOptions = { brianEffort: string | null; rainEffort: str
  * `worktree_default` app setting, which defaults ON for repo-backed
  * sessions).
  */
-useWorktree: boolean | null }
+useWorktree: boolean | null; 
+/**
+ * rc3: the participants the New Session dialog chose, in turn order.
+ * 
+ * `None` is the pre-rc3 path and behaves EXACTLY as before — no roster is
+ * written at create and `ensure_session_roster` seeds the default pair at
+ * spawn. Every non-dialog caller (the external driver's `open_session`,
+ * `dispatch_session`, the plugin proxy) is on that path and is untouched.
+ */
+participants: ParticipantPick[] | null }
 /**
  * Uncommitted-work probe for the close-confirm dialog: how many entries
  * `git status --porcelain` reports in the session's working tree. `has_repo`
