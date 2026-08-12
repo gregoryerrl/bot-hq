@@ -223,10 +223,10 @@ const PASS_NOTICE: &str = "(passed — nothing to add this round)";
 /// chunk. Deliberately a plain substring net over ALL provider eras: the
 /// archive study found these render as ordinary agent speech — Brian sat dead
 /// 3h13m across two quota deaths while the session looked merely quiet, and
-/// the reviewer kept reviewing into the void. Native providers classify quota
-/// HTTP statuses as non-transient (is_transient_api_error), which surfaces the
-/// error body as text through this same pump — so one net covers both the CLI
-/// and native paths. Misclassification cost is a spurious tray notice.
+/// the reviewer kept reviewing into the void. The net is over TEXT, not over a
+/// status code, which is why it covered a second backend without a second
+/// implementation and why it keeps working now there is one.
+/// Misclassification cost is a spurious tray notice.
 const PROVIDER_LIMIT_PATTERNS: &[&str] = &[
     "out of usage credits",
     "hit your session limit",
@@ -811,21 +811,25 @@ pub async fn pump_agent(
             }
             AgentEvent::Error(msg) => {
                 warn!(agent = ?cfg.author, msg = %msg, "agent error");
-                // Persist so it RENDERS. The native loop is the only emitter of
-                // this variant and routes every user-facing failure through it —
-                // API errors, model refusals, the max-tool-cycle cap and the
-                // context-ceiling stop. Logging alone meant each of those showed
+                // Persist so it RENDERS. **Nothing emits this variant today**:
+                // its only producer was the native loop (rc3 D9), which routed
+                // every user-facing failure through it — API errors, model
+                // refusals, the max-tool-cycle cap and the context-ceiling stop.
+                // The handler is kept rather than deleted because it is the
+                // rendering path any future connector needs, and because losing
+                // it is silent: logging alone meant each of those failures showed
                 // up in the UI as an empty turn, and `init_logging` has no file
                 // sink, so the text survived exactly as long as the launching
                 // terminal's scrollback.
                 //
-                // Deliberately NOT pushed into `buffer`. Every native error is
-                // followed by an errored `TurnComplete`, whose branch below drains
-                // the buffer without forwarding — so buffering would be a no-op
-                // today and a trap tomorrow: the first error emitted without that
+                // Deliberately NOT pushed into `buffer`. The native loop always
+                // followed an error with an errored `TurnComplete`, whose branch
+                // below drains the buffer without forwarding — so buffering was a
+                // no-op then and a trap now: the first error emitted WITHOUT that
                 // trailing event would peer-forward error text, which is the
-                // unbounded error-spam loop documented in that branch. The user
-                // needs to see this; the peer does not.
+                // unbounded error-spam loop documented in that branch. A new
+                // emitter cannot rely on the old pairing. The user needs to see
+                // this; the peer does not.
                 match storage
                     // `msg` MOVES — the `warn!` above already consumed what it
                     // needed and nothing reads it after this.
@@ -992,13 +996,15 @@ mod tests {
         assert!(msgs[0].content.contains("API Error"));
     }
 
+    /// **This variant has no emitter today** — rc3 D9 deleted the native loop,
+    /// which was the only one. The test is kept because it, and the handler it
+    /// covers, are the contract a future connector inherits: emit
+    /// `AgentEvent::Error` and the text reaches the user. The handler once only
+    /// `warn!`ed, so every failure rendered as an empty turn and the text
+    /// survived no longer than the launching terminal's scrollback. Deleting
+    /// this would re-open that silently.
     #[tokio::test(flavor = "current_thread")]
-    async fn error_event_is_persisted_so_native_failures_render() {
-        // The native loop routes EVERY user-facing failure through
-        // `AgentEvent::Error` — API errors, refusals, the max-tool-cycle cap and
-        // the context-ceiling stop. This handler used to only `warn!`, so each of
-        // those rendered in the UI as an empty turn and the text survived no
-        // longer than the launching terminal's scrollback.
+    async fn an_error_event_is_persisted_so_the_failure_reaches_the_user() {
         let (storage, state) = setup().await;
         let (cfg, _route_rx) = cfg_with_route(Author::Rain);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
@@ -1022,12 +1028,13 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn error_event_is_not_peer_forwarded() {
-        // Pins the decision to persist WITHOUT buffering. Buffering would be a
-        // no-op today (every native error is followed by an errored TurnComplete,
-        // which drains the buffer unforwarded) — but it would make the first error
-        // emitted without that trailing event bounce to the peer, which is the
-        // unbounded error-spam loop of 2026-05-29. The user sees it; the peer
-        // must not.
+        // Pins the decision to persist WITHOUT buffering. Under the deleted
+        // native loop, buffering would have been a no-op — it always followed an
+        // error with an errored TurnComplete, whose branch drains the buffer
+        // unforwarded. But an error emitted WITHOUT that trailing event would
+        // bounce to the peer, which is the unbounded error-spam loop of
+        // 2026-05-29, and a future emitter cannot be assumed to pair them. The
+        // user sees it; the peer must not.
         let (storage, state) = setup().await;
         let (cfg, mut route_rx) = cfg_with_route(Author::Rain);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
