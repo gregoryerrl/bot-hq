@@ -146,3 +146,72 @@ shipped path).
 - **B8** — mapped assuming the Agents tab survives. Re-run against D8.
 
 The other four are unaffected.
+
+---
+
+## D9–D12 — decided 2026-08-12, after the first live rc3 test sessions
+
+Recorded the same day they were made. The five-day drift happened because
+decisions stayed in conversation; these are rows, not prose.
+
+### D9 — the claude CLI is the connector. The native loop is DELETED.
+
+The user: *"I actually want to commit using the claude cli as the model
+connector, defer the native loop/connector as a plugin I'll build in the future.
+The reason is uniformity."*
+
+`src/agents/native/` (6,290 lines) and its 119 call sites come out, along with
+the `native` model flag, `may_run_native`, the native spawn branch and the
+native toggles in the UI. **Git history is the archive** — the future plugin
+starts from `git show <sha>:src/agents/native/`. Chosen over dormant-code and
+feature-flag options because a second runtime that nobody builds still costs
+every reviewer a re-read and every refactor a second case.
+
+Consequence to keep in view: this retires D6 (`## Observations only` on the
+native EYES prompt) and every "the native loop cannot keep this promise"
+carve-out, because there is no native loop.
+
+### D10 — Brian and Rain are gone, data included. History stays legacy.
+
+The user: *"I already said multiple times that I'm dropping the names, only the
+Role + Model Name"*, and *"brian and rain's history can be legacy data. I don't
+want to see brian and rain anymore moving forward."*
+
+- A participant is displayed as **Role + model name**, nowhere as a person's name.
+- `session_participants.slug` becomes role-derived; `spawn_session_handle` stops
+  binding rows with literal `"brian"` / `"rain"` lookups.
+- The agents' own prompts stop saying `You are **Brian**`.
+- **Existing `messages.author = 'brian' | 'rain'` rows are NOT backfilled.** They
+  are legacy data and must keep rendering. Migration 0049 covers new structure,
+  not history.
+- The user notes the display name remains theirs anyway: *"I can technically
+  still name them brian and rain by changing model name (model id is what
+  chooses the model anyway)."*
+
+**This is what lifts the 2-participant cap.** The cap exists only because spawn
+binds by literal slug.
+
+### D11 — the New Session dialog warns from CAPABILITIES, never from role meaning
+
+The user, correcting a framing that assumed the product knows what a reviewer
+is: *"how would bot-hq know EYES are reviewers? Maybe warn that no participant
+can edit files (participant list has no write capabilities ticked)."*
+
+Right, and it generalises. bot-hq must not encode what any role MEANS — that is
+the user's to define. It knows only the ticked boxes. So the dialog computes the
+union of the picked participants' capabilities and names what the set cannot do
+— e.g. **no participant holds `edit_files`, so this session can review but not
+act**. Duplicate roles are NOT blocked and NOT special-cased; two of the same
+role is simply one case that can produce that warning.
+
+### D12 — effort level is per participant
+
+The Create New Session dialog's effort section is currently two fixed
+Brian/Rain blocks. It becomes one effort select per participant row, alongside
+that row's role and model. Follows D10: nothing in that dialog is keyed on an
+agent name.
+
+### Confirmed working in the 2026-08-12 live tests
+
+Session `s-15090a`: gates and questions parked on the tray correctly, and
+`close_session` worked when asked. Session `s-bc50f2` surfaced D10 and D11.
