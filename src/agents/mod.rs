@@ -4,6 +4,7 @@
 //! built against, and `docs/decisions.md#mcp-server` for transport choices.
 
 pub mod capability;
+pub mod capability_prompt;
 pub mod events;
 pub mod general_rules;
 pub mod input;
@@ -14,6 +15,8 @@ pub mod protocol;
 pub mod roles;
 pub mod spawn;
 
+pub use capability::{Capability, CapabilitySet};
+pub use capability_prompt::{PeerFact, RosterFacts};
 pub use general_rules::GENERAL_RULES;
 pub use prompts::role_for;
 pub use roles::AgentRole;

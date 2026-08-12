@@ -7,12 +7,18 @@
 //! agent).
 //!
 //! Layering at session spawn (see core::session::read_system_prompt):
-//!   1. role prompt (this file)              — identity + ask-close convention
+//!   1. role prompt (this file, or `roles.description_prompt`) — identity
 //!   2. CL location anchor                    — index-first orientation
 //!   3. agents::general_rules::GENERAL_RULES  — hardcoded universal rules
 //!   4. <data_dir>/library/custom-general-rules.md — optional user additions
 //!   5. <data_dir>/library/custom-instructions.md — user tweaks, all agents
-//!   6. policy directive block                — rendered from policy.yaml
+//!   6. agents::capability_prompt             — capability-derived rules +
+//!      the live roster, generated from the participant's grants
+//!   7. policy directive block                — rendered from policy.yaml
+//!
+//! Layers 6 and 7 are generated and come LAST, so nothing editable — including
+//! this file's replacement in the `roles` row — gets the last word on what the
+//! tool gate actually enforces.
 
 pub const BRIAN_ROLE: &str = "\
 # Role — Brian (HANDS)
@@ -206,7 +212,23 @@ pub fn role_for(agent: &str) -> &'static str {
 pub const RAIN_TOOLS_CLI: &str = "Tools you may use:";
 
 /// Heading that terminates the tool-inventory span in [`RAIN_ROLE`].
-const RAIN_TOOLS_END: &str = "## Silence on transitions and holds";
+///
+/// **This used to be `"## Silence on transitions and holds"`, which swallowed
+/// four sections that are not a tool inventory** — the mutation deny-list, the
+/// mutation-boundary paragraph, the user-facing-tools paragraph, and the whole
+/// `## Observations only` rule. Native EYES has therefore been running without
+/// the never-assert-what-you-did-not-read instruction that CLI EYES receives,
+/// and no test noticed (rc3 decision D6: *"it was lost by accident, not by
+/// decision"*). Ending the span at the deny-list heading strips exactly what the
+/// strip is FOR — the `Read`/`Grep`/`Glob`/`TodoWrite`/read-only-`Bash` promises
+/// the native loop does not implement — and nothing else.
+///
+/// The deny-list that now survives is consistent with the native loop rather
+/// than contradictory: `NATIVE_TOOL_ADDENDUM` refuses the same writes
+/// (`no write_file, no Edit/Write, no git commit|push…`). The contradiction the
+/// strip exists to remove is a PROMISE of a tool that does not exist, not a
+/// refusal of one.
+const RAIN_TOOLS_END: &str = "Tools that are Brian's, NOT yours";
 
 /// Remove the claude-code tool inventory from an assembled prompt.
 ///
@@ -291,6 +313,47 @@ mod tests {
             assert!(native.contains(kept), "native prompt lost: {kept}");
         }
         assert!(native.len() < RAIN_ROLE.len(), "nothing was removed");
+    }
+
+    /// **rc3 decision D6.** The strip is for tool PROMISES the native loop
+    /// cannot keep. It used to run to `## Silence on transitions and holds`,
+    /// which also took `## Observations only` — the rule written after an
+    /// archived session recorded five EYES assertions with no observation behind
+    /// them, three of them shaped like user authorization. Native EYES ran
+    /// without it and nothing failed, which is why this test exists rather than
+    /// only the fix.
+    #[test]
+    fn the_native_prompt_keeps_the_observations_only_rule() {
+        let native = strip_claude_code_tool_inventory(RAIN_ROLE);
+        assert!(
+            native.contains("## Observations only"),
+            "the native prompt lost the observations-only rule"
+        );
+        assert!(
+            native.contains("never assert what you didn't read this turn"),
+            "the heading survived but the rule under it did not"
+        );
+        // The three sentences that make it a rule rather than a heading.
+        for kept in [
+            "you cannot see the tray",
+            "report only what a tool result in THIS turn shows",
+            "a reviewer who guesses is worse than no reviewer",
+        ] {
+            assert!(native.contains(kept), "the native prompt lost: {kept}");
+        }
+    }
+
+    /// The mutation deny-list rides on the same boundary move, and is the reason
+    /// the span ends where it does rather than at `## Observations only`: the
+    /// native addendum refuses the same writes, so keeping this text is
+    /// consistent with the loop, and a degraded spawn that renders no layer 2
+    /// still tells EYES what is not hers.
+    #[test]
+    fn the_native_prompt_keeps_the_mutation_deny_list() {
+        let native = strip_claude_code_tool_inventory(RAIN_ROLE);
+        assert!(native.contains("Tools that are Brian's, NOT yours"));
+        assert!(native.contains("The boundary is mutation, not just risk"));
+        assert!(native.contains("User-facing tools"));
     }
 
     #[test]

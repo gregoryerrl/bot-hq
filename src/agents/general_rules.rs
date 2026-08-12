@@ -12,7 +12,9 @@
 //!   3. THIS constant                              — universal rules
 //!   4. <data_dir>/library/custom-general-rules.md — optional user additions
 //!   5. <data_dir>/library/custom-instructions.md — user tweaks, all agents
-//!   6. policy directive block                      — project policy.yaml
+//!   6. agents::capability_prompt                  — capability-derived rules
+//!      + the live roster, generated from the participant's grants
+//!   7. policy directive block                      — project policy.yaml
 
 pub const GENERAL_RULES: &str = "\
 # General rules
