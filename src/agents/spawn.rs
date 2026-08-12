@@ -154,12 +154,16 @@ pub enum AgentEvent {
         /// non-API failure. The retry supervisor reads this to decide whether
         /// the failure is transient (auto-resume) or permanent (surface it).
         api_error_status: Option<u16>,
-        /// Context-window occupancy as of THIS turn, when claude-code reported
-        /// it. `None` whenever the denominator is unavailable — notably for
-        /// gateway models whose provider may not populate `contextWindow`
-        /// (Rain on the DeepSeek endpoint). A missing value must render as a
-        /// visible gap in the UI, never as a guessed percentage.
-        context: Option<ContextUsage>,
+        /// What this turn's `result` event said about the context window —
+        /// **including when it said nothing usable** (rc3 P7).
+        ///
+        /// It was `Option<ContextUsage>`, which threw the absences away: a
+        /// gateway that never reports `contextWindow` and an agent that never
+        /// finished a turn both arrived as `None`, so the question "does the
+        /// window arrive at all on that provider" was unanswerable after the
+        /// fact. [`ContextReport::usable`] is still the meter's reading, and it
+        /// is derived rather than carried alongside, so the two cannot disagree.
+        context: ContextReport,
     },
     /// System/init event — agent is ready and reporting its session metadata.
     /// (The wire `SystemEvent::Init` also carries `model`/`cwd`, but no
@@ -206,6 +210,98 @@ impl ContextUsage {
     /// and are the caller's problem to clamp for display).
     pub fn fraction(&self) -> f64 {
         self.used_tokens as f64 / self.context_window as f64
+    }
+}
+
+/// Why a `result` event's context figures are, or are not, a meter reading.
+///
+/// Recorded per reading (rc3 P7) because the three failures are different
+/// facts about the provider, and a bare "no reading" conflates them with an
+/// agent that simply has not finished a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextVerdict {
+    /// Both operands present and plausible — the meter moves.
+    Usable,
+    /// No `modelUsage` entry carried a non-zero `contextWindow`. **This is the
+    /// one the 2026-08-12 `Prompt is too long` incident needs distinguished:**
+    /// a participant whose provider never sends a window has no meter at all,
+    /// so nothing could have warned anyone.
+    NoWindow,
+    /// A window arrived, but the point-in-time `usage` object did not, so there
+    /// is no numerator.
+    NoUsage,
+    /// `used_tokens` overshoots the reported window by more than the plausible
+    /// band — the provider's denominator is wrong, not the agent's occupancy,
+    /// and dividing by it produces a confident 100% that means nothing.
+    ImplausibleWindow,
+}
+
+impl ContextVerdict {
+    /// The stored form (`context_readings.verdict`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Usable => "usable",
+            Self::NoWindow => "no_window",
+            Self::NoUsage => "no_usage",
+            Self::ImplausibleWindow => "implausible_window",
+        }
+    }
+}
+
+/// Everything one `result` event reported about the context window, usable or
+/// not — the raw operands plus the verdict on them (rc3 **P7**).
+///
+/// **The operands are kept even when they are unusable.** An implausible
+/// window is still what the provider said, and a reading with a numerator but
+/// no denominator still tells you the prompt size. Persisting the raw figures
+/// is what makes "what was its context doing before it died" answerable after
+/// the session is closed; a pre-divided percentage, or a `None`, is not
+/// recoverable.
+///
+/// Nothing here substitutes a configured `models.context_window` for a missing
+/// report. Whether it SHOULD is exactly the question this record exists to
+/// settle with evidence, and filling it in as though it were measured would
+/// destroy that evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextReport {
+    /// The `modelUsage` key the figures were read from. `None` when no entry
+    /// carried a usable window.
+    pub model: Option<String>,
+    /// `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`
+    /// off the point-in-time `usage` object. `None` when that object is absent.
+    pub used_tokens: Option<u64>,
+    /// `contextWindow` exactly as reported, including an implausible one.
+    /// `None` when absent or zero.
+    pub reported_window: Option<u64>,
+    pub verdict: ContextVerdict,
+}
+
+impl ContextReport {
+    /// A report from a `result` event that carried no usable window.
+    pub fn none(verdict: ContextVerdict) -> Self {
+        Self {
+            model: None,
+            used_tokens: None,
+            reported_window: None,
+            verdict,
+        }
+    }
+
+    /// The meter's reading, or `None` when this turn did not produce one.
+    ///
+    /// **Derived, never carried beside the operands.** The UI's figure and the
+    /// recorded figures are then the same numbers by construction — the pairing
+    /// that used to be two fields is the class of drift that shipped three
+    /// wrong context numerators.
+    pub fn usable(&self) -> Option<ContextUsage> {
+        if self.verdict != ContextVerdict::Usable {
+            return None;
+        }
+        Some(ContextUsage {
+            model: self.model.clone()?,
+            used_tokens: self.used_tokens?,
+            context_window: self.reported_window?,
+        })
     }
 }
 
@@ -1753,7 +1849,7 @@ mod tests {
             subtype: Some("error_during_execution".into()),
             is_error: true,
             api_error_status: Some(status),
-            context: None,
+            context: ContextReport::none(ContextVerdict::NoWindow),
         }
     }
 
@@ -1763,7 +1859,7 @@ mod tests {
             subtype: Some("success".into()),
             is_error: false,
             api_error_status: None,
-            context: None,
+            context: ContextReport::none(ContextVerdict::NoWindow),
         }
     }
 
@@ -1950,7 +2046,6 @@ mod tests {
             AgentEvent::TurnComplete {
                 is_error: true,
                 api_error_status: Some(400),
-                context: None,
                 ..
             }
         )));

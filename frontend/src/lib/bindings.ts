@@ -81,6 +81,28 @@ async getParticipantSystemPrompt(sessionId: string, slug: string) : Promise<Resu
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * One participant's recorded context readings, oldest first (rc3 **P7**).
+ * 
+ * Reads the `context_readings` rows, so it answers for a CLOSED session too —
+ * which is the whole point. The live meter is forwarded to a UI that may not
+ * be open, is overwritten by the next turn, and dies with the session; that is
+ * why the 2026-08-12 `Prompt is too long` death left nothing to diagnose.
+ * 
+ * Unusable readings are returned alongside usable ones, unaltered. A row whose
+ * `reported_window` is null means the provider sent no window and the meter
+ * could not have warned anyone — the distinction the caller most needs, and
+ * the reason nothing here substitutes the model's configured
+ * `context_window`.
+ */
+async listParticipantContextReadings(sessionId: string, slug: string) : Promise<Result<ContextReadingView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_participant_context_readings", { sessionId, slug }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async checkSessionDirty(sessionId: string) : Promise<Result<SessionDirty, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_session_dirty", { sessionId }) };
@@ -1326,6 +1348,28 @@ per_role?: Partial<{ [key in string]: AgentOverride }> }
  * and we fell back to `git diff HEAD`).
  */
 export type ComputeApplyDiffResult = { lines: DiffLine[]; note: string | null }
+/**
+ * One recorded reading, as the UI reads it. A view type rather than the
+ * storage row because no storage struct carries UI traits here.
+ */
+export type ContextReadingView = { 
+/**
+ * `modelUsage` key the operands came from; `null` when none was usable.
+ */
+model: string | null; 
+/**
+ * Point-in-time prompt size. `null` when the turn reported no usage.
+ */
+used_tokens: number | null; 
+/**
+ * The window EXACTLY as the provider reported it — `null` when it
+ * reported none, which is the case in which no meter was ever possible.
+ */
+reported_window: number | null; 
+/**
+ * `usable` | `no_window` | `no_usage` | `implausible_window`.
+ */
+verdict: string; created_at: string }
 /**
  * Extra origins a plugin may request per CSP directive (v1: exactly these
  * four directives; explicit `https://host[:port]` origins only). Unknown

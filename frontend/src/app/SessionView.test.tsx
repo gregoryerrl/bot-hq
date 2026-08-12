@@ -79,6 +79,12 @@ const promptCall = vi.hoisted(() => ({
   lastArgs: null as Record<string, unknown> | null,
 }));
 
+// rc3 P7: the recorded context readings a participant's meter opens onto.
+const readingsCall = vi.hoisted(() => ({
+  rows: [] as unknown[],
+  lastArgs: null as Record<string, unknown> | null,
+}));
+
 // Keyed invoke mock: `get_session` must return a session row or the view
 // renders its not-found state; everything else gets an empty default.
 vi.mock("@tauri-apps/api/core", () => ({
@@ -87,6 +93,9 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "get_participant_system_prompt":
         promptCall.lastArgs = args ?? null;
         return Promise.resolve(promptCall.reply);
+      case "list_participant_context_readings":
+        readingsCall.lastArgs = args ?? null;
+        return Promise.resolve(readingsCall.rows);
       case "terminal_open":
         return Promise.resolve({ snapshot_b64: "", cols: 80, rows: 24 });
       case "get_session":
@@ -148,6 +157,8 @@ beforeEach(() => {
   roster.rows = roster.default;
   promptCall.reply = {};
   promptCall.lastArgs = null;
+  readingsCall.rows = [];
+  readingsCall.lastArgs = null;
 });
 
 /** The worker's own line in the turn-status row: `<label> is working`. */
@@ -391,5 +402,63 @@ describe("SessionView composed system prompt (rc3 P1)", () => {
     expect(dialog).toHaveTextContent("This session has no live agents.");
     // No byte count and no append caveat: there is no prompt to describe.
     expect(dialog).not.toHaveTextContent(/APPENDS/);
+  });
+});
+
+describe("SessionView context readings (rc3 P7)", () => {
+  it("offers the recorded readings even when no meter is showing", async () => {
+    // The state the 2026-08-12 death happened in: a provider that reports no
+    // `contextWindow`, so the meter renders nothing and nobody could have been
+    // warned. The badge is still reachable, and the history explains WHY there
+    // is no percentage — that is the whole point of persisting the absences.
+    readingsCall.rows = [
+      {
+        model: null,
+        used_tokens: null,
+        reported_window: null,
+        verdict: "no_window",
+        created_at: "2026-08-13T00:10:00Z",
+      },
+      {
+        model: "claude-opus-5",
+        used_tokens: 620000,
+        reported_window: 1000000,
+        verdict: "usable",
+        created_at: "2026-08-13T00:11:00Z",
+      },
+    ];
+    renderSessionView();
+    // No context store state is seeded, so no participant has a live meter.
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "EYES · DeepSeek R2 context history",
+      }),
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "EYES · DeepSeek R2 — context readings",
+    });
+    expect(readingsCall.lastArgs).toEqual({ sessionId: "s1", slug: "eyes-2" });
+    expect(dialog).toHaveTextContent("no_window");
+    // A missing operand is printed as a dash, never as a substituted figure —
+    // the meter's denominator must not be quietly back-filled from config.
+    expect(dialog.querySelector("pre")?.textContent).toContain("— / —");
+    expect(dialog.querySelector("pre")?.textContent).toContain(
+      "620,000 / 1,000,000 (62%)",
+    );
+  });
+
+  it("says so when a participant has no recorded readings", async () => {
+    readingsCall.rows = [];
+    renderSessionView();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "EYES · Claude Opus 5 context history",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "EYES · Claude Opus 5 — context readings",
+    });
+    expect(dialog).toHaveTextContent("No readings recorded");
   });
 });

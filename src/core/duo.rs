@@ -504,13 +504,31 @@ pub async fn pump_agent(
                 // Publish it BEFORE the error branch below: a failed turn still
                 // consumed context, and the meter going stale exactly when a
                 // session starts erroring would hide the most useful reading.
-                if let (Some(c), Some(bridge)) = (context, &cfg.bridge) {
+                if let (Some(c), Some(bridge)) = (context.usable(), &cfg.bridge) {
                     bridge.notify_agent_context(
                         cfg.session_id.to_string(),
                         &cfg.slug,
                         c.used_tokens,
                         c.context_window,
                     );
+                }
+                // …and record EVERY report, usable or not (rc3 P7). The meter
+                // above is live-only: it is forwarded to a UI that may not be
+                // open, it is overwritten by the next turn, and it dies with the
+                // session — which is why a participant that died with `Prompt is
+                // too long` on 2026-08-12 left no evidence of what its context
+                // was doing beforehand. The unusable reports are the load-bearing
+                // half: without a row for them, "the provider never sent a
+                // window" and "the agent never finished a turn" are the same
+                // empty query result.
+                //
+                // Best-effort, exactly like the rows above it: a failed insert is
+                // warned about and never interrupts a turn.
+                if let Err(e) = storage
+                    .record_context_reading(&cfg.session_id, &cfg.slug, &context)
+                    .await
+                {
+                    warn!(?e, agent = %cfg.slug, "persisting context reading");
                 }
                 // Provider limit hit this turn: surface it as a real state
                 // instead of letting it pass as agent speech. Peer notice FIRST
@@ -793,6 +811,7 @@ pub async fn pump_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::spawn::{ContextReport, ContextVerdict};
 
     /// `recv()` with a deadline.
     ///
@@ -887,6 +906,67 @@ mod tests {
             .collect()
     }
 
+    /// rc3 **P7**: the pump writes a reading for EVERY completed turn, and the
+    /// unusable ones are the reason it exists.
+    ///
+    /// The wire this pins is the one that was missing entirely: `ContextUsage`
+    /// reached the UI and was never written down, so a participant that died
+    /// with `Prompt is too long` on 2026-08-12 left no record of what its meter
+    /// had shown. Asserting `ContextReport` parses correctly would not catch a
+    /// pump that never persists it — the parse is one half of the join and this
+    /// is the other.
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_completed_turn_records_a_context_reading() {
+        let (storage, state) = setup().await;
+        let (cfg, _ring_rx) = cfg_with_ring(Author::Brian);
+        let slug = cfg.slug.to_string();
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        // A turn the meter can show…
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: Some("success".into()),
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport {
+                    model: Some("claude-opus-5".into()),
+                    used_tokens: Some(620_000),
+                    reported_window: Some(1_000_000),
+                    verdict: ContextVerdict::Usable,
+                },
+            })
+            .await
+            .unwrap();
+        // …and one it cannot, because the provider reported no window. This is
+        // the state the dead participant was in, and it must leave a row.
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: Some("success".into()),
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let history = storage
+            .context_readings_for_participant("s1", &slug, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            history.iter().map(|r| r.verdict.as_str()).collect::<Vec<_>>(),
+            ["usable", "no_window"],
+            "both turns must leave a reading — the unusable one especially"
+        );
+        assert_eq!(history[0].used_tokens, Some(620_000));
+        assert_eq!(history[0].reported_window, Some(1_000_000));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn errored_turn_emits_no_forward() {
         // Regression (Rain on the DeepSeek gateway, 2026-05-29): a turn that ends
@@ -913,7 +993,7 @@ mod tests {
                 subtype: Some("error_during_execution".into()),
                 is_error: true,
                 api_error_status: None,
-                context: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
             })
             .await
             .unwrap();
@@ -952,7 +1032,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
-                context: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
             })
             .await
             .unwrap();
@@ -996,7 +1076,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
-                context: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
             })
             .await
             .unwrap();
@@ -1037,7 +1117,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
-                context: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
             })
             .await
             .unwrap();
@@ -1245,7 +1325,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
-                context: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
             })
             .await
             .unwrap();
@@ -1338,7 +1418,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
-                context: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
             })
             .await
             .unwrap();
@@ -1396,7 +1476,7 @@ mod tests {
             subtype: None,
             is_error: false,
             api_error_status: None,
-            context: None,
+            context: ContextReport::none(ContextVerdict::NoWindow),
         };
         // Turn 1: a bare pass.
         ev_tx
@@ -1468,7 +1548,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
-                context: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
             })
             .await
             .unwrap();
@@ -1514,7 +1594,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
-                context: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
             })
             .await
             .unwrap();
@@ -1530,7 +1610,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
-                context: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
             })
             .await
             .unwrap();
@@ -1682,7 +1762,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
-                context: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
             })
             .await
             .unwrap();
@@ -1813,7 +1893,7 @@ mod tests {
                     subtype: None,
                     is_error: false,
                     api_error_status: None,
-                    context: None,
+                    context: ContextReport::none(ContextVerdict::NoWindow),
                 })
                 .await
                 .unwrap();
@@ -1886,7 +1966,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
-                context: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
             })
             .await
             .unwrap();
@@ -1962,7 +2042,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
-                context: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
             })
             .await
             .unwrap();

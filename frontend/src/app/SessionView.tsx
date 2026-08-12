@@ -50,6 +50,30 @@ interface ParticipantSystemPrompt {
   unavailable: string | null;
 }
 
+/** Hand mirror of the Rust `ContextReadingView` (rc3 P7). */
+interface ContextReadingView {
+  model: string | null;
+  used_tokens: number | null;
+  reported_window: number | null;
+  verdict: string;
+  created_at: string;
+}
+
+/** One recorded reading as a fixed-width line. Operands are printed exactly as
+ *  recorded — a missing one renders as `—`, never as a substituted figure, so a
+ *  provider that sent no window stays visibly different from one that did. */
+function readingLine(r: ContextReadingView): string {
+  const used = r.used_tokens?.toLocaleString() ?? "—";
+  const window = r.reported_window?.toLocaleString() ?? "—";
+  const pct =
+    r.used_tokens !== null && r.reported_window
+      ? ` (${Math.floor((r.used_tokens / r.reported_window) * 100)}%)`
+      : "";
+  return `${r.created_at}  ${r.verdict.padEnd(19)}${used} / ${window}${pct}${
+    r.model ? `  ${r.model}` : ""
+  }`;
+}
+
 function normalizePhase(raw: string | null | undefined): Phase | null {
   if (!raw) return null;
   const lower = raw.toLowerCase();
@@ -147,6 +171,33 @@ export function SessionView() {
           ? `${view.bytes.toLocaleString()} bytes, composed at spawn. bot-hq APPENDS this to ` +
             `claude-code's own system prompt, so what you see here is bot-hq's portion only.`
           : undefined,
+      });
+    } catch (e) {
+      setPromptView({ title, text: errorMessage(e) });
+    }
+  };
+
+  /** What this participant's context window was doing — including after the
+   *  session is closed, which is when it matters (rc3 P7). */
+  const openContextHistory = async (p: ParticipantView) => {
+    const title = `${participantLabel(p)} — context readings`;
+    try {
+      const rows = await invoke<ContextReadingView[]>(
+        "list_participant_context_readings",
+        { sessionId, slug: p.slug },
+      );
+      setPromptView({
+        title,
+        text: rows.length
+          ? rows.map(readingLine).join("\n")
+          : "No readings recorded for this participant yet — it has not " +
+            "completed a turn since bot-hq started recording them.",
+        note:
+          "One row per completed turn, oldest first. `no_window` means the " +
+          "provider reported no context window, so no meter was possible; " +
+          "`implausible_window` means the prompt exceeded the window it was " +
+          "accepted into, so the figure is not trusted for display. Nothing " +
+          "here is substituted from the model's configured context window.",
       });
     } catch (e) {
       setPromptView({ title, text: errorMessage(e) });
@@ -391,6 +442,7 @@ export function SessionView() {
                   <ContextMeter
                     context={participantRuntime(agentContext, participants, p)}
                     name={participantLabel(p)}
+                    onOpenHistory={() => void openContextHistory(p)}
                   />
                 </span>
               </span>

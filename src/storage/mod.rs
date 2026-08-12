@@ -21,6 +21,7 @@ mod agent_config;
 mod cancel_events;
 mod cl_atoms;
 mod cl_index;
+mod context_readings;
 mod feedback;
 mod forward_events;
 mod findings;
@@ -37,6 +38,7 @@ mod time;
 mod tray;
 
 pub use cl_atoms::{Atom, RetrievedAtom};
+pub use context_readings::ContextReading;
 pub(crate) use cl_atoms::estimate_tokens;
 pub use models::WORKTREE_DEFAULT_KEY;
 pub use cancel_events::CancelEventRecord;

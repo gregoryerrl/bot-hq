@@ -395,6 +395,65 @@ pub async fn get_participant_system_prompt(
     Ok(view)
 }
 
+/// How many readings the history view asks for. The tail is what a
+/// post-mortem wants — "what was it doing before it died" — and a long session
+/// can hold thousands.
+const CONTEXT_HISTORY_LIMIT: i64 = 200;
+
+/// One participant's recorded context readings, oldest first (rc3 **P7**).
+///
+/// Reads the `context_readings` rows, so it answers for a CLOSED session too —
+/// which is the whole point. The live meter is forwarded to a UI that may not
+/// be open, is overwritten by the next turn, and dies with the session; that is
+/// why the 2026-08-12 `Prompt is too long` death left nothing to diagnose.
+///
+/// Unusable readings are returned alongside usable ones, unaltered. A row whose
+/// `reported_window` is null means the provider sent no window and the meter
+/// could not have warned anyone — the distinction the caller most needs, and
+/// the reason nothing here substitutes the model's configured
+/// `context_window`.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_participant_context_readings(
+    storage: tauri::State<'_, Arc<Storage>>,
+    session_id: String,
+    slug: String,
+) -> Result<Vec<ContextReadingView>, AppError> {
+    let rows = storage
+        .context_readings_for_participant(&session_id, &slug, CONTEXT_HISTORY_LIMIT)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?;
+    Ok(rows.into_iter().map(ContextReadingView::from).collect())
+}
+
+/// One recorded reading, as the UI reads it. A view type rather than the
+/// storage row because no storage struct carries UI traits here.
+#[derive(Debug, Clone, Serialize, Type, PartialEq)]
+pub struct ContextReadingView {
+    /// `modelUsage` key the operands came from; `null` when none was usable.
+    pub model: Option<String>,
+    /// Point-in-time prompt size. `null` when the turn reported no usage.
+    pub used_tokens: Option<i64>,
+    /// The window EXACTLY as the provider reported it — `null` when it
+    /// reported none, which is the case in which no meter was ever possible.
+    pub reported_window: Option<i64>,
+    /// `usable` | `no_window` | `no_usage` | `implausible_window`.
+    pub verdict: String,
+    pub created_at: String,
+}
+
+impl From<crate::storage::ContextReading> for ContextReadingView {
+    fn from(r: crate::storage::ContextReading) -> Self {
+        Self {
+            model: r.model,
+            used_tokens: r.used_tokens,
+            reported_window: r.reported_window,
+            verdict: r.verdict,
+            created_at: r.created_at,
+        }
+    }
+}
+
 /// Testable body of [`list_session_participants`] — the command is a thin
 /// `State`-unwrapping shim, matching `dispatch_session_inner`.
 pub(crate) async fn participant_views(

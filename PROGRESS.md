@@ -9,6 +9,57 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-13 — context readings are persisted, and the meter's denominator is measured (rc3 P7)
+
+Third dogfood-queue item. `ContextUsage` was forwarded to the UI and never
+written down, so when a participant died mid-session with `Prompt is too long`
+on 2026-08-12 there was no record of what its meter had shown — the failure
+could be watched live and not diagnosed afterwards.
+
+**Every `result` event now leaves a row** (`context_readings`, migration
+**0051** — note 0050 was already taken by the D15 close-learnings prose, so the
+queue doc's "take 0050" is one behind). The row carries the RAW operands and a
+verdict: `usable`, `no_window`, `no_usage`, `implausible_window`. The unusable
+readings are the load-bearing half — with only usable rows, "the provider never
+reported a window" and "the agent never finished a turn" are the same empty
+query result.
+
+`AgentEvent::TurnComplete.context` changed from `Option<ContextUsage>` to
+`ContextReport`, which keeps the operands even when they cannot be displayed.
+The meter's reading is DERIVED from it (`ContextReport::usable()`) rather than
+carried beside it, so the figure shown and the figures recorded cannot drift —
+the drift class that shipped three wrong context numerators.
+
+Each participant chip's meter opens its recorded readings, and the badge now
+renders as a muted `ctx` when there is no live reading, because that state is
+exactly the one needing an explanation. It reads `context_readings`, so a
+**closed** session still answers.
+
+**The open question, settled by measurement rather than argument.** The
+proposal doc held that the meter divides by the user-typed
+`models.context_window`. It does not: that column and `agent_configs.
+context_window` have no readers in the tree, and the denominator comes from
+claude-code's own `result.modelUsage[<model>].contextWindow`. The 2026-08-12
+logs (`~/.bot-hq/.local/logs/bot-hq.2026-08-12.log`) show what actually
+arrived:
+
+- `contextWindow` **does** arrive through the DeepSeek gateway — every reading
+  carries `context_window=200000`.
+- The model's configured window is **1,000,000**. The provider's figure and the
+  configured one disagree **5×**, and the configured one was never used.
+- The last reading before the death, at `15:09:50`, was **146,787 / 200,000 =
+  73%**. At `15:14:50` — the minute of the `Prompt is too long` message — the
+  reading is `used_tokens=0`, because a failed turn carries no assistant usage.
+- Zero `implausible context reading` warnings in any log, so the overshoot guard
+  never fired.
+
+So **the meter should not fall back to `models.context_window`**: doing so would
+have shown 14.7% at the moment the agent was at 73% of the window its provider
+actually enforces — strictly worse than what shipped. The real defect is the
+opposite of the one proposed: the CONFIGURED window is the wrong number, and
+nothing surfaces that it disagrees with what the provider reports. That is not
+in the queue, so it is recorded here rather than fixed here.
+
 ## 2026-08-13 — a refused tool call leaves a row (rc3 P2)
 
 Second dogfood-queue item. When the capability gate refused a tool call it told

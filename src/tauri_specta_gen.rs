@@ -37,6 +37,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         sessions::list_session_participants,
         // rc3 P1: what a running participant was actually told.
         sessions::get_participant_system_prompt,
+        // rc3 P7: what its context window was doing, closed session included.
+        sessions::list_participant_context_readings,
         sessions::check_session_dirty,
         sessions::session_worktree_kept,
         sessions::list_sessions,

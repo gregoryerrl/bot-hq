@@ -2,7 +2,7 @@
 //! event per line; translates wire events into high-level `AgentEvent`.
 
 use crate::agents::protocol::*;
-use crate::agents::spawn::{AgentEvent, ContextUsage};
+use crate::agents::spawn::{AgentEvent, ContextReport, ContextVerdict};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -142,10 +142,13 @@ pub fn translate(
             // silently inherit the PREVIOUS turn's reading and report it as
             // current. Deliberately NOT falling back to `r.usage`: that number
             // is a per-turn sum, and a known-wrong value is worse than none.
-            let context = r
-                .model_usage
-                .as_ref()
-                .and_then(|mu| parse_context_usage(last_assistant_usage.take().as_ref(), mu));
+            // A `result` with no `modelUsage` map at all reports no window —
+            // the same fact as a map whose entries carry none, and recorded as
+            // the same verdict (rc3 P7).
+            let context = match r.model_usage.as_ref() {
+                Some(mu) => parse_context_usage(last_assistant_usage.take().as_ref(), mu),
+                None => ContextReport::none(ContextVerdict::NoWindow),
+            };
             vec![AgentEvent::TurnComplete {
                 stop_reason: r.stop_reason,
                 subtype: r.subtype,
@@ -210,7 +213,7 @@ pub fn translate(
 fn parse_context_usage(
     usage: Option<&serde_json::Value>,
     model_usage: &serde_json::Value,
-) -> Option<ContextUsage> {
+) -> ContextReport {
     /// Cumulative per-model fields (camelCase) — used ONLY to identify the
     /// primary model, never as the numerator.
     const MODEL_FIELDS: [&str; 3] = [
@@ -233,8 +236,10 @@ fn parse_context_usage(
     }
 
     // Denominator + which model it belongs to.
-    let (model, context_window) = model_usage
-        .as_object()?
+    let Some(entries) = model_usage.as_object() else {
+        return ContextReport::none(ContextVerdict::NoWindow);
+    };
+    let window = entries
         .iter()
         .filter_map(|(model, entry)| {
             // A zero window is as unusable as an absent one — filtering here is
@@ -246,10 +251,24 @@ fn parse_context_usage(
             Some((model.clone(), window, sum(entry, &MODEL_FIELDS)))
         })
         .max_by_key(|(_, _, cumulative)| *cumulative)
-        .map(|(model, window, _)| (model, window))?;
+        .map(|(model, window, _)| (model, window));
+    // No entry reported a usable window. Recorded rather than dropped: this is
+    // the state a participant dies in when its gateway sends no `contextWindow`
+    // — no meter, so no warning was possible (rc3 P7).
+    let Some((model, context_window)) = window else {
+        return ContextReport::none(ContextVerdict::NoWindow);
+    };
 
     // Numerator: current prompt size, from the point-in-time object.
-    let used_tokens = sum(usage?, &USAGE_FIELDS);
+    let Some(usage) = usage else {
+        return ContextReport {
+            model: Some(model),
+            used_tokens: None,
+            reported_window: Some(context_window),
+            verdict: ContextVerdict::NoUsage,
+        };
+    };
+    let used_tokens = sum(usage, &USAGE_FIELDS);
 
     // A prompt cannot exceed the window it was accepted into. When `used`
     // overshoots, the provider's reported window is wrong — not the agent's
@@ -274,16 +293,25 @@ fn parse_context_usage(
             ratio = used_tokens as f64 / context_window as f64,
             "implausible context reading — provider's contextWindow looks wrong; suppressing meter"
         );
-        return None;
+        // Suppressed for the METER, kept for the RECORD: both operands are
+        // exactly what the provider reported, and they are the evidence for
+        // whether that provider's window can be trusted at all.
+        return ContextReport {
+            model: Some(model),
+            used_tokens: Some(used_tokens),
+            reported_window: Some(context_window),
+            verdict: ContextVerdict::ImplausibleWindow,
+        };
     }
 
     debug!(model = %model, used_tokens, context_window, "context usage");
 
-    Some(ContextUsage {
-        model,
-        used_tokens,
-        context_window,
-    })
+    ContextReport {
+        model: Some(model),
+        used_tokens: Some(used_tokens),
+        reported_window: Some(context_window),
+        verdict: ContextVerdict::Usable,
+    }
 }
 
 /// Coerce the wire `api_error_status` — which arrives as a JSON number, or
@@ -485,7 +513,7 @@ mod tests {
             }
         });
         let u = usage(2, 11_631, 12_324);
-        let c = parse_context_usage(Some(&u), &mu).expect("usable entry");
+        let c = parse_context_usage(Some(&u), &mu).usable().expect("usable entry");
         assert_eq!(c.model, "claude-opus-5");
         // Cache fields count: they occupy the window even when cheap to send.
         assert_eq!(c.used_tokens, 2 + 11_631 + 12_324);
@@ -518,7 +546,7 @@ mod tests {
         // The live prompt for THIS turn: 619,856 tokens = 62%.
         let u = usage(2, 616_968, 2_886);
 
-        let c = parse_context_usage(Some(&u), &mu).expect("usable entry");
+        let c = parse_context_usage(Some(&u), &mu).usable().expect("usable entry");
         assert_eq!(c.used_tokens, 619_856, "numerator must be point-in-time");
         assert_eq!(c.context_window, 1_000_000);
         assert!(
@@ -547,7 +575,7 @@ mod tests {
     fn used_equal_to_window_is_reported() {
         let mu = model_usage_with_window(1_000);
         let u = usage(0, 1_000, 0);
-        let c = parse_context_usage(Some(&u), &mu).expect("100% is a valid reading");
+        let c = parse_context_usage(Some(&u), &mu).usable().expect("100% is a valid reading");
         assert_eq!(c.used_tokens, 1_000);
         assert_eq!((c.fraction() * 100.0).floor() as u64, 100);
     }
@@ -559,7 +587,7 @@ mod tests {
     fn small_overshoot_is_tolerated() {
         let mu = model_usage_with_window(1_000);
         let u = usage(0, 1_030, 0); // 3% over
-        let c = parse_context_usage(Some(&u), &mu).expect("3% overshoot is skew, not corruption");
+        let c = parse_context_usage(Some(&u), &mu).usable().expect("3% overshoot is skew, not corruption");
         assert_eq!(c.used_tokens, 1_030);
     }
 
@@ -572,7 +600,7 @@ mod tests {
         let mu = model_usage_with_window(131_072);
         let u = usage(139, 219_392, 0); // 219,531 — ~167% of the reported window
         assert!(
-            parse_context_usage(Some(&u), &mu).is_none(),
+            parse_context_usage(Some(&u), &mu).usable().is_none(),
             "an impossible ratio must suppress, not render 100%"
         );
     }
@@ -584,7 +612,7 @@ mod tests {
         let mu = serde_json::json!({
             "claude-opus-5": { "inputTokens": 5, "contextWindow": 1_000_000u64 }
         });
-        assert!(parse_context_usage(None, &mu).is_none());
+        assert!(parse_context_usage(None, &mu).usable().is_none());
     }
 
     /// A provider that reports tokens but no window yields NOTHING rather than
@@ -595,7 +623,7 @@ mod tests {
         let mu = serde_json::json!({
             "deepseek-v4-pro": { "inputTokens": 759, "cacheReadInputTokens": 191_872 }
         });
-        assert!(parse_context_usage(Some(&usage(1,1,1)), &mu).is_none());
+        assert!(parse_context_usage(Some(&usage(1,1,1)), &mu).usable().is_none());
     }
 
     /// Zero window is as unusable as an absent one, and filtering it here is
@@ -603,7 +631,7 @@ mod tests {
     #[test]
     fn zero_context_window_yields_none() {
         let mu = serde_json::json!({ "weird-model": { "inputTokens": 10, "contextWindow": 0 } });
-        assert!(parse_context_usage(Some(&usage(1,1,1)), &mu).is_none());
+        assert!(parse_context_usage(Some(&usage(1,1,1)), &mu).usable().is_none());
     }
 
     /// A turn that dispatched a subagent on another model carries several keys.
@@ -619,7 +647,7 @@ mod tests {
         // haiku's 200K. Picking the wrong entry would quietly rescale every
         // reading by 5x, which is exactly the class of bug that looks fine.
         let u = usage(10, 20, 30);
-        let c = parse_context_usage(Some(&u), &mu).expect("usable entry");
+        let c = parse_context_usage(Some(&u), &mu).usable().expect("usable entry");
         assert_eq!(c.model, "claude-opus-5");
         assert_eq!(c.context_window, 1_000_000);
         // ...while the numerator stays independent of the map entirely.
@@ -634,7 +662,7 @@ mod tests {
             "gateway-model": { "inputTokens": 900_000 },
             "claude-opus-5": { "inputTokens": 1_000, "contextWindow": 1_000_000u64 },
         });
-        let c = parse_context_usage(Some(&usage(1,1,1)), &mu).expect("usable entry");
+        let c = parse_context_usage(Some(&usage(1,1,1)), &mu).usable().expect("usable entry");
         assert_eq!(c.model, "claude-opus-5");
     }
 
@@ -647,14 +675,14 @@ mod tests {
             "deepseek-v4-pro": { "inputTokens": 759, "cacheReadInputTokens": 191_872 },
             "some-other-gateway-model": { "inputTokens": 4_000 },
         });
-        assert!(parse_context_usage(Some(&usage(1,1,1)), &mu).is_none());
+        assert!(parse_context_usage(Some(&usage(1,1,1)), &mu).usable().is_none());
     }
 
     #[test]
     fn empty_or_non_object_model_usage_yields_none() {
-        assert!(parse_context_usage(Some(&usage(1,1,1)), &serde_json::json!({})).is_none());
-        assert!(parse_context_usage(Some(&usage(1,1,1)), &serde_json::json!("nonsense")).is_none());
-        assert!(parse_context_usage(Some(&usage(1,1,1)), &serde_json::Value::Null).is_none());
+        assert!(parse_context_usage(Some(&usage(1,1,1)), &serde_json::json!({})).usable().is_none());
+        assert!(parse_context_usage(Some(&usage(1,1,1)), &serde_json::json!("nonsense")).usable().is_none());
+        assert!(parse_context_usage(Some(&usage(1,1,1)), &serde_json::Value::Null).usable().is_none());
     }
 
     /// End-to-end: a `result` line carrying `modelUsage` surfaces occupancy on
@@ -677,7 +705,7 @@ mod tests {
         let ev: StreamEvent = serde_json::from_str(line).unwrap();
         match translate(ev, &mut carry).as_slice() {
             [AgentEvent::TurnComplete { context, .. }] => {
-                let c = context.as_ref().expect("context present");
+                let c = context.usable().expect("context present");
                 assert_eq!(c.used_tokens, 10);
                 assert_eq!(c.context_window, 1000);
             }
@@ -717,7 +745,7 @@ mod tests {
         let ev: StreamEvent = serde_json::from_str(result).unwrap();
         match translate(ev, &mut carry).as_slice() {
             [AgentEvent::TurnComplete { context, .. }] => {
-                let c = context.as_ref().expect("context present");
+                let c = context.usable().expect("context present");
                 assert_eq!(
                     c.used_tokens, 34_216,
                     "must use the LAST assistant reading, not result's turn-sum"
@@ -745,10 +773,17 @@ mod tests {
 
         // A second turn with no assistant usage must report nothing, not 500.
         match translate(serde_json::from_str(result).unwrap(), &mut carry).as_slice() {
-            [AgentEvent::TurnComplete { context, .. }] => assert!(
-                context.is_none(),
-                "a turn without its own reading must not inherit the last one"
-            ),
+            [AgentEvent::TurnComplete { context, .. }] => {
+                assert!(
+                    context.usable().is_none(),
+                    "a turn without its own reading must not inherit the last one"
+                );
+                // …and the absence is RECORDED as its own fact: the window
+                // arrived, the numerator did not (rc3 P7).
+                assert_eq!(context.verdict, ContextVerdict::NoUsage);
+                assert_eq!(context.reported_window, Some(1000));
+                assert_eq!(context.used_tokens, None);
+            }
             other => panic!("expected TurnComplete, got {other:?}"),
         }
     }
@@ -760,7 +795,12 @@ mod tests {
         let line = r#"{"type":"result","stop_reason":"end_turn","subtype":"success"}"#;
         let ev: StreamEvent = serde_json::from_str(line).unwrap();
         match translate(ev, &mut None).as_slice() {
-            [AgentEvent::TurnComplete { context, .. }] => assert!(context.is_none()),
+            [AgentEvent::TurnComplete { context, .. }] => {
+                assert!(context.usable().is_none());
+                // A `result` with no `modelUsage` reports no window, and that
+                // is recorded rather than dropped (rc3 P7).
+                assert_eq!(context.verdict, ContextVerdict::NoWindow);
+            }
             other => panic!("expected TurnComplete, got {other:?}"),
         }
     }
