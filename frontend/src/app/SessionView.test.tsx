@@ -70,11 +70,23 @@ const roster = vi.hoisted(() => ({
   ] as unknown[],
 }));
 
+// rc3 P1: what `get_participant_system_prompt` answers, and what it was asked.
+// Mutable so one test can hand back a prompt and another an absence, and so the
+// slug the view sent is assertable — attribution is the half of P1 that a
+// rendered string alone does not pin.
+const promptCall = vi.hoisted(() => ({
+  reply: {} as Record<string, unknown>,
+  lastArgs: null as Record<string, unknown> | null,
+}));
+
 // Keyed invoke mock: `get_session` must return a session row or the view
 // renders its not-found state; everything else gets an empty default.
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn((cmd: string) => {
+  invoke: vi.fn((cmd: string, args?: Record<string, unknown>) => {
     switch (cmd) {
+      case "get_participant_system_prompt":
+        promptCall.lastArgs = args ?? null;
+        return Promise.resolve(promptCall.reply);
       case "terminal_open":
         return Promise.resolve({ snapshot_b64: "", cols: 80, rows: 24 });
       case "get_session":
@@ -134,6 +146,8 @@ beforeEach(() => {
   useHealthStore.setState({ bySession: {}, routerBySession: {} });
   useContextStore.setState({ bySession: {} });
   roster.rows = roster.default;
+  promptCall.reply = {};
+  promptCall.lastArgs = null;
 });
 
 /** The worker's own line in the turn-status row: `<label> is working`. */
@@ -322,5 +336,60 @@ describe("SessionView subtabs", () => {
     fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
     expect(panel("Workspace").className).not.toContain("hidden");
     expect(panel("Terminal").className).toContain("hidden");
+  });
+});
+
+describe("SessionView composed system prompt (rc3 P1)", () => {
+  it("opens the prompt of the participant whose chip was clicked", async () => {
+    // The defect P1 closes is that ~48 KB of standing instruction — appended
+    // to claude-code's own system prompt — was visible to nobody. Asserted as
+    // ONE chain: the chip's slug goes out on the invoke and the answer comes
+    // back under that participant's heading. Two participants share a ROLE
+    // here, which is exactly the roster where showing the wrong one would look
+    // right.
+    promptCall.reply = {
+      slug: "eyes-2",
+      content: "SENTINEL_PROMPT_BODY_Q4\n\n## Capabilities",
+      bytes: 41,
+      unavailable: null,
+    };
+    renderSessionView();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "EYES · DeepSeek R2" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "EYES · DeepSeek R2 — composed system prompt",
+    });
+    expect(promptCall.lastArgs).toEqual({ sessionId: "s1", slug: "eyes-2" });
+    expect(dialog).toHaveTextContent("SENTINEL_PROMPT_BODY_Q4");
+    // The append caveat is stated every time, and NOT inside the prompt body:
+    // pasted into the text it would read as one more instruction the agent got.
+    expect(dialog).toHaveTextContent(/APPENDS this to claude-code's own system prompt/);
+    expect(
+      dialog.querySelector("pre")?.textContent,
+    ).not.toMatch(/APPENDS/);
+  });
+
+  it("shows why a prompt is missing instead of an empty pane", async () => {
+    // A blank viewer teaches the user that the prompt is empty, which is the
+    // opposite of what this view exists to show.
+    promptCall.reply = {
+      slug: "eyes",
+      content: null,
+      bytes: 0,
+      unavailable: "This session has no live agents.",
+    };
+    renderSessionView();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "EYES · Claude Opus 5" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "EYES · Claude Opus 5 — composed system prompt",
+    });
+    expect(dialog).toHaveTextContent("This session has no live agents.");
+    // No byte count and no append caveat: there is no prompt to describe.
+    expect(dialog).not.toHaveTextContent(/APPENDS/);
   });
 });

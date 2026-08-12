@@ -283,6 +283,118 @@ pub async fn list_session_participants(
     participant_views(&storage, &session_id).await
 }
 
+/// One participant's composed system prompt — the ~48 KB of standing
+/// instruction bot-hq assembled for it at spawn (rc3 **P1**).
+///
+/// Exactly one of `content` / `unavailable` is set. `unavailable` exists so the
+/// view never renders an empty pane and calls it a prompt: a session that has
+/// ended, a participant that was never spawned, and a file that would not read
+/// are three different facts, and each says which one it is.
+#[derive(Debug, Clone, Serialize, Type, PartialEq)]
+pub struct ParticipantSystemPrompt {
+    /// The participant this prompt was composed for. The caller supplies it and
+    /// it is echoed back, so a late response cannot be attributed to whichever
+    /// chip the user clicked most recently.
+    pub slug: String,
+    /// The bytes `--append-system-prompt-file` handed the CLI, or `null`.
+    ///
+    /// **bot-hq's portion only.** The flag APPENDS: claude-code's own system
+    /// prompt is still in front of this and is not ours to show.
+    pub content: Option<String>,
+    /// Length of `content` in bytes; 0 when there is none.
+    pub bytes: u32,
+    /// Why there is nothing to show, in the user's terms. `null` when `content`
+    /// is set.
+    pub unavailable: Option<String>,
+}
+
+/// Where [`prompt_view`] should read a participant's prompt from — or why it
+/// cannot.
+///
+/// An enum rather than an `Option<&Path>` because the two empty cases are not
+/// the same news: a closed session's prompt file is gone by design (it lives in
+/// the session's `TempDir`), while a participant with no live agent was never
+/// spawned at all — a disabled or `on_demand` row, which is a roster fact the
+/// user may not expect.
+pub(crate) enum PromptSource<'a> {
+    /// No live handle for this session — closed, or not started since the app
+    /// last launched.
+    SessionNotLive,
+    /// The session is live, but nothing in it spawned under this slug.
+    NotSpawned,
+    /// The file the spawn wrote and the CLI read.
+    File(&'a Path),
+}
+
+/// Read one participant's composed prompt, or explain the absence.
+///
+/// Split from the command for the usual reason — a `#[tauri::command]` takes
+/// `tauri::State`, which no unit test can build — and because the three empty
+/// cases are the part worth pinning.
+pub(crate) fn prompt_view(source: PromptSource<'_>, slug: &str) -> ParticipantSystemPrompt {
+    let unavailable = |reason: String| ParticipantSystemPrompt {
+        slug: slug.to_string(),
+        content: None,
+        bytes: 0,
+        unavailable: Some(reason),
+    };
+    match source {
+        PromptSource::SessionNotLive => unavailable(
+            "This session has no live agents. The composed prompt is written to a temp file \
+             at spawn and removed when the session ends, so there is nothing left to show."
+                .to_string(),
+        ),
+        PromptSource::NotSpawned => unavailable(format!(
+            "No agent is running as `{slug}` in this session — a participant that is \
+             disabled, or waiting to be called on, never had a prompt composed for it."
+        )),
+        PromptSource::File(path) => match std::fs::read_to_string(path) {
+            Ok(content) => ParticipantSystemPrompt {
+                slug: slug.to_string(),
+                bytes: content.len() as u32,
+                content: Some(content),
+                unavailable: None,
+            },
+            Err(e) => unavailable(format!(
+                "Couldn't read the prompt file this participant spawned with ({}): {e}",
+                path.display()
+            )),
+        },
+    }
+}
+
+/// The prompt one participant is actually running under (rc3 **P1**).
+///
+/// The defect this closes: ~48 KB of standing instruction, assembled from six
+/// layers and APPENDED to claude-code's own system prompt, that nobody — user
+/// or agent — could see. Every "the prompt asserts an enforcement that is not
+/// wired" defect was invisible by construction, and the Roles tab let the user
+/// edit role prose with no way to view the result in context.
+///
+/// It reads the file the spawn WROTE, off the live agent
+/// ([`SessionAgent::system_prompt_path`](crate::core::session::SessionAgent)),
+/// rather than recomposing the prompt or rebuilding the filename here. A
+/// recomposition would show what a spawn TODAY would produce — which is a
+/// different claim, and would go quietly wrong the moment a role row or a CL
+/// file changed after the agent started.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_participant_system_prompt(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+    slug: String,
+) -> Result<ParticipantSystemPrompt, AppError> {
+    let sessions = core.sessions.lock().await;
+    let view = match sessions.get(&session_id) {
+        None => prompt_view(PromptSource::SessionNotLive, &slug),
+        Some(handle) => match handle.by_slug(&slug) {
+            None => prompt_view(PromptSource::NotSpawned, &slug),
+            Some(agent) => prompt_view(PromptSource::File(&agent.system_prompt_path), &slug),
+        },
+    };
+    Ok(view)
+}
+
 /// Testable body of [`list_session_participants`] — the command is a thin
 /// `State`-unwrapping shim, matching `dispatch_session_inner`.
 pub(crate) async fn participant_views(
@@ -916,6 +1028,54 @@ mod tests {
         let s = Arc::new(Storage::memory().await.unwrap());
         let b = SignalingBridge::new();
         (s, b)
+    }
+
+    /// rc3 **P1**: the three ways a prompt can be absent are three different
+    /// sentences, and none of them is an empty pane.
+    ///
+    /// The failure this guards is the one the task doc names: a viewer that
+    /// renders blank when the file is gone teaches the user that the prompt is
+    /// empty, which is the opposite of what P1 exists to show. Asserted through
+    /// `prompt_view` for the usual reason — the command takes `tauri::State`.
+    #[test]
+    fn an_absent_prompt_says_which_absence_it_is() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("hands-system-prompt.txt");
+        std::fs::write(&path, "ROLE PROSE\n\n## Context Library\n").unwrap();
+
+        let present = prompt_view(PromptSource::File(&path), "hands");
+        assert_eq!(present.slug, "hands");
+        assert_eq!(
+            present.content.as_deref(),
+            Some("ROLE PROSE\n\n## Context Library\n")
+        );
+        assert_eq!(present.bytes, 31);
+        assert!(present.unavailable.is_none());
+
+        // Each empty case names its own cause, and none of them carries content.
+        let dead = prompt_view(PromptSource::SessionNotLive, "hands");
+        let unspawned = prompt_view(PromptSource::NotSpawned, "eyes");
+        let unreadable = prompt_view(PromptSource::File(&dir.path().join("gone.txt")), "hands");
+        for view in [&dead, &unspawned, &unreadable] {
+            assert!(view.content.is_none(), "an unavailable prompt carried content");
+            assert_eq!(view.bytes, 0);
+            assert!(
+                view.unavailable.as_deref().is_some_and(|r| !r.trim().is_empty()),
+                "an unavailable prompt gave no reason"
+            );
+        }
+        assert_ne!(
+            dead.unavailable, unspawned.unavailable,
+            "a closed session and a participant that never spawned read the same"
+        );
+        assert!(
+            unspawned.unavailable.as_deref().unwrap().contains("eyes"),
+            "the reason must name the participant it is about"
+        );
+        assert!(
+            unreadable.unavailable.as_deref().unwrap().contains("gone.txt"),
+            "a read failure must name the file it could not read"
+        );
     }
 
     /// The read side of the rc3 contract, on real rows.

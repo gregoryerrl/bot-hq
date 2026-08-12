@@ -73,6 +73,24 @@ pub struct SessionAgent {
     /// participant MAY DO instead of what it is called — rc3 D11, which forbids
     /// bot-hq from encoding what a role means.
     pub capabilities: crate::agents::ResolvedCapabilities,
+    /// The file this participant's composed system prompt was written to, and
+    /// the one the CLI actually read — `build_command` passes this same value
+    /// to `--append-system-prompt-file` (rc3 P1).
+    ///
+    /// **Carried, never re-derived.** It is a clone of
+    /// [`SpawnConfig::system_prompt_path`], which is where the name
+    /// `{slug}-system-prompt.txt` is composed and where the bytes are written
+    /// ([`participant_spawn_config`]). A reader that rebuilt the filename from
+    /// the temp dir and the slug would be a second derivation, and a rename on
+    /// the writing side would then blank the view with nothing to say so. This
+    /// field cannot drift: dropping it fails to compile, and
+    /// `the_prompt_file_a_spawn_config_names_holds_the_composed_prompt` pins
+    /// that the path names the composed bytes.
+    ///
+    /// The file lives in the session's `TempDir`, so it is gone once the
+    /// session ends — and a respawn writes a NEW dir, which this follows
+    /// because the handle it hangs off is rebuilt with it.
+    pub system_prompt_path: PathBuf,
     pub handle: AgentHandle,
 }
 
@@ -734,7 +752,10 @@ async fn spawn_session_handle(
     // gets the one-shot CL-opener nudge below; a `--resume` reopen does not.
     let is_first_spawn = live.iter().all(|p| p.claude_session_id.is_none());
 
-    let mut spawned: Vec<(usize, AgentHandle)> = Vec::with_capacity(live.len());
+    // Third element: the prompt file this slot spawned with, kept because the
+    // `SpawnConfig` that names it is consumed by the spawn one line later and
+    // the session view reads it back (rc3 P1).
+    let mut spawned: Vec<(usize, AgentHandle, PathBuf)> = Vec::with_capacity(live.len());
     for (slot, p) in live.iter().enumerate() {
         // D8's model chain: the participant's own pick (create dialog) wins,
         // then the ROLE's default, then the per-agent row. The middle step is
@@ -793,8 +814,9 @@ async fn spawn_session_handle(
         // whose gateway does not speak the Anthropic Messages API now simply
         // fails here rather than being routed somewhere else; `validate_model`'s
         // pre-flight is what surfaces that at configure time.
+        let system_prompt_path = spawn_cfg.system_prompt_path.clone();
         let handle = spawn_supervised_agent(spawn_cfg, RetryPolicy::default()).await?;
-        spawned.push((slot, handle));
+        spawned.push((slot, handle, system_prompt_path));
     }
     // The second slot's spawn model is NULL when this session runs one agent —
     // the header's "no peer" state, which the old code produced by skipping
@@ -862,13 +884,15 @@ async fn spawn_session_handle(
     // pull the receivers here. The handles keep their other fields (kill
     // signal, stdin, etc.).
     let mut handles: Vec<AgentHandle> = Vec::with_capacity(spawned.len());
+    let mut prompt_paths: Vec<PathBuf> = Vec::with_capacity(spawned.len());
     let mut event_rxs = Vec::with_capacity(spawned.len());
-    for (_, mut handle) in spawned {
+    for (_, mut handle, prompt_path) in spawned {
         event_rxs.push(std::mem::replace(
             &mut handle.event_rx,
             tokio::sync::mpsc::channel(1).1,
         ));
         handles.push(handle);
+        prompt_paths.push(prompt_path);
     }
     // Batch 7: per-agent liveness for the stall watchdog. The watchdog holds Weak
     // refs, so it self-terminates once the pumps drop their Arcs (session end).
@@ -1088,11 +1112,13 @@ async fn spawn_session_handle(
         participants: live
             .iter()
             .zip(handles)
-            .map(|(p, handle)| SessionAgent {
+            .zip(prompt_paths)
+            .map(|((p, handle), system_prompt_path)| SessionAgent {
                 participant_id: Some(p.id),
                 slug: p.slug.clone(),
                 turn_position: p.turn_position,
                 capabilities: participant_capabilities(p),
+                system_prompt_path,
                 handle,
             })
             .collect(),
@@ -1965,6 +1991,10 @@ mod tests {
                 capabilities: crate::agents::ResolvedCapabilities::Known(
                     crate::agents::CapabilitySet::from_slugs(&["edit_files"]),
                 ),
+                // No spawn ran, so no prompt file was written. A path that does
+                // not exist is exactly what the session view's "the file is
+                // gone" branch reports on.
+                system_prompt_path: PathBuf::from("/nonexistent/hands-system-prompt.txt"),
                 handle: {
                     let (_etx, erx) = tokio::sync::mpsc::channel(1);
                     let (ctx, _crx) = tokio::sync::mpsc::channel(1);
@@ -2064,6 +2094,7 @@ mod tests {
             slug: "hands".into(),
             turn_position: 0,
             capabilities: crate::agents::ResolvedCapabilities::Unreadable { reason: "test" },
+            system_prompt_path: PathBuf::from("/nonexistent/hands-system-prompt.txt"),
             handle: {
                 let (_etx, erx) = tokio::sync::mpsc::channel(1);
                 let (ctx, _crx) = tokio::sync::mpsc::channel(1);
@@ -2378,6 +2409,7 @@ mod tests {
                     slug: p.slug.clone(),
                     turn_position: p.turn_position,
                     capabilities: participant_capabilities(p),
+                    system_prompt_path: PathBuf::from("/nonexistent/system-prompt.txt"),
                     handle: stub_handle(&p.slug),
                 })
                 .collect();
@@ -2458,6 +2490,7 @@ mod tests {
             capabilities: crate::agents::ResolvedCapabilities::Known(
                 crate::agents::CapabilitySet::from_slugs(caps),
             ),
+            system_prompt_path: PathBuf::from(format!("/nonexistent/{slug}-system-prompt.txt")),
             handle: stub_handle(slug),
         }
     }
@@ -2703,6 +2736,54 @@ mod tests {
         roleless.role_id = None;
         let for_roleless = spawn_of(roleless).await;
         assert_eq!(for_roleless.overrides.effort.as_deref(), Some("medium"));
+    }
+
+    /// rc3 **P1**: the path a spawn records is the file holding the composed
+    /// prompt, and it is the same file the CLI is told to read.
+    ///
+    /// The session view reads `SessionAgent::system_prompt_path`, a clone of
+    /// the `SpawnConfig` field asserted here, so this is the half a struct
+    /// field cannot carry on its own: that the path NAMES the composed bytes
+    /// rather than a sibling in the same temp dir (the mcp-config lives beside
+    /// it), and that the CLI was pointed at that same path. Without the second
+    /// assertion the view could faithfully show a file nothing ever read.
+    #[tokio::test]
+    async fn the_prompt_file_a_spawn_config_names_holds_the_composed_prompt() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", false).await.unwrap();
+        let data_dir = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
+        let mcp_temp = TempDir::new().unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+        let me = roster.iter().find(|p| p.slug == "hands").expect("the executor");
+
+        let composed = "COMPOSED_PROMPT_SENTINEL_4K2\n\n## layer two\n";
+        let cfg = participant_spawn_config(
+            &s,
+            me,
+            resolve_participant_config(&s, me).await,
+            &paths,
+            &None,
+            composed.to_string(),
+            "127.0.0.1:1".parse().unwrap(),
+            mcp_temp.path(),
+            None,
+        )
+        .await
+        .expect("spawn config");
+
+        assert_eq!(
+            std::fs::read_to_string(&cfg.system_prompt_path).expect("the prompt file"),
+            composed,
+            "the path the session view reads back does not name the composed prompt"
+        );
+        let argv = crate::agents::spawn::debug_command(&cfg);
+        assert!(
+            argv.windows(2).any(|w| w[0] == "--append-system-prompt-file"
+                && w[1] == cfg.system_prompt_path.display().to_string()),
+            "the CLI was pointed at a different file than the one recorded for the view"
+        );
     }
 
     #[tokio::test]

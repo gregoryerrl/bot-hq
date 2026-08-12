@@ -9,6 +9,41 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-13 — the composed system prompt is viewable per participant (rc3 P1)
+
+First item of the dogfood queue (`docs/plans/2026-08-13-dogfood-queue.md`). An
+agent spawns with ~48 KB of standing instruction assembled from six layers and
+**appended** to claude-code's own system prompt, and nobody — user or agent —
+could see the result. Every "the prompt asserts an enforcement that is not
+wired" defect was invisible by construction, and the Roles tab let the user edit
+role prose with no way to view it in context.
+
+Click a participant chip in the session header and the full-screen viewer opens
+that participant's prompt, with the byte count and a standing note that this is
+bot-hq's appended portion only. The note is rendered ABOVE the body, never
+inside it — a caveat pasted into the prompt text would read as one more
+instruction the agent was given.
+
+**Nothing is recomposed and no filename is re-derived.** The view reads the file
+the spawn WROTE, carried forward on `SessionAgent::system_prompt_path` from the
+`SpawnConfig` that wrote it and that `build_command` points the CLI at. A
+recomposition would answer a different question ("what would a spawn produce
+today"), and a reader that rebuilt `{slug}-system-prompt.txt` from the temp dir
+would be a second derivation that a rename could silently break. Dropping the
+field fails to compile; a test pins that the path names the composed bytes AND
+that the CLI was pointed at that same path.
+
+The file lives in the session's `TempDir`, so it is gone once the session ends —
+and a respawn writes a new one, which the view follows because the handle it
+hangs off is rebuilt with it. All three empty cases say which absence they are
+(session not live / participant never spawned / file unreadable, naming the
+file); none of them renders a blank pane, which would teach the user that the
+prompt is empty.
+
+Audited for secrets before shipping the panel: the composed prompt carries no
+token, env or gateway credential — those live in the agent's env and in the
+sibling `{slug}-mcp.json`, and the view is wired to the prompt file alone.
+
 ## 2026-08-12 — closing four blocking findings against the name removal (+ D13, D14)
 
 The previous entry claimed *"nothing in the runtime, the schema writes, or the

@@ -34,6 +34,14 @@ interface FileViewerDialogProps {
   /** Optional inline text to show instead of reading a file (long commands). */
   inlineTitle?: string;
   inlineText?: string;
+  /**
+   * Optional line ABOUT the inline text, rendered above it rather than inside
+   * it. Kept out of `inlineText` on purpose: the composed system prompt (rc3
+   * P1) needs to say "this is bot-hq's appended portion", and a caveat pasted
+   * into the prompt body would read as one more instruction the agent was
+   * given.
+   */
+  inlineNote?: string;
 }
 
 /**
@@ -53,6 +61,7 @@ export function FileViewerDialog({
   onClose,
   inlineTitle,
   inlineText,
+  inlineNote,
 }: FileViewerDialogProps) {
   const open = target !== null || inlineText !== undefined;
   const trapRef = useFocusTrap<HTMLDivElement>(open);
@@ -139,6 +148,12 @@ export function FileViewerDialog({
           {loading && (
             <p className="font-body-md text-body-md text-on-surface-variant">
               Reading…
+            </p>
+          )}
+
+          {inlineNote && (
+            <p className="mb-3 border-b border-outline-variant pb-2 font-code-sm text-code-sm text-on-surface-variant">
+              {inlineNote}
             </p>
           )}
 

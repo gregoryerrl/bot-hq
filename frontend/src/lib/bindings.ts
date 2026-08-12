@@ -57,6 +57,30 @@ async listSessionParticipants(sessionId: string) : Promise<Result<ParticipantVie
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * The prompt one participant is actually running under (rc3 **P1**).
+ * 
+ * The defect this closes: ~48 KB of standing instruction, assembled from six
+ * layers and APPENDED to claude-code's own system prompt, that nobody — user
+ * or agent — could see. Every "the prompt asserts an enforcement that is not
+ * wired" defect was invisible by construction, and the Roles tab let the user
+ * edit role prose with no way to view the result in context.
+ * 
+ * It reads the file the spawn WROTE, off the live agent
+ * ([`SessionAgent::system_prompt_path`](crate::core::session::SessionAgent)),
+ * rather than recomposing the prompt or rebuilding the filename here. A
+ * recomposition would show what a spawn TODAY would produce — which is a
+ * different claim, and would go quietly wrong the moment a role row or a CL
+ * file changed after the agent started.
+ */
+async getParticipantSystemPrompt(sessionId: string, slug: string) : Promise<Result<ParticipantSystemPrompt, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_participant_system_prompt", { sessionId, slug }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async checkSessionDirty(sessionId: string) : Promise<Result<SessionDirty, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_session_dirty", { sessionId }) };
@@ -1488,6 +1512,38 @@ export type ParticipantPick = { roleId: number; modelId: string | null;
  * carry one effort select per AGENT, in two fixed blocks.
  */
 effort: string | null; ultracode: boolean | null }
+/**
+ * One participant's composed system prompt — the ~48 KB of standing
+ * instruction bot-hq assembled for it at spawn (rc3 **P1**).
+ * 
+ * Exactly one of `content` / `unavailable` is set. `unavailable` exists so the
+ * view never renders an empty pane and calls it a prompt: a session that has
+ * ended, a participant that was never spawned, and a file that would not read
+ * are three different facts, and each says which one it is.
+ */
+export type ParticipantSystemPrompt = { 
+/**
+ * The participant this prompt was composed for. The caller supplies it and
+ * it is echoed back, so a late response cannot be attributed to whichever
+ * chip the user clicked most recently.
+ */
+slug: string; 
+/**
+ * The bytes `--append-system-prompt-file` handed the CLI, or `null`.
+ * 
+ * **bot-hq's portion only.** The flag APPENDS: claude-code's own system
+ * prompt is still in front of this and is not ours to show.
+ */
+content: string | null; 
+/**
+ * Length of `content` in bytes; 0 when there is none.
+ */
+bytes: number; 
+/**
+ * Why there is nothing to show, in the user's terms. `null` when `content`
+ * is set.
+ */
+unavailable: string | null }
 /**
  * One participant of a session, as the UI names it (rc3 **D10**).
  * 

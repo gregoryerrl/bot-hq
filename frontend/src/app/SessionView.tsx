@@ -22,7 +22,9 @@ import {
   participantLabel,
   participantRuntime,
   useParticipantLabels,
+  type ParticipantView,
 } from "../lib/participants";
+import { FileViewerDialog } from "../components/FileViewerDialog";
 import type { AppError, SessionInfo } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -37,6 +39,16 @@ const PHASE_NAMES: Phase[] = ["investigate", "plan", "apply", "verify"];
 /** Session-container subtabs. Workspace = chat + IPAV documents (the
  * original session view); Context and Terminal land with this arc. */
 type SessionTab = "workspace" | "context" | "terminal";
+
+/** Hand mirror of the Rust `ParticipantSystemPrompt` (rc3 P1) — the raw-invoke
+ * convention `WorkspaceFile` follows, so `bindings.ts` (which is `@ts-nocheck`
+ * and regenerates only at app launch) is not what tsc checks here. */
+interface ParticipantSystemPrompt {
+  slug: string;
+  content: string | null;
+  bytes: number;
+  unavailable: string | null;
+}
 
 function normalizePhase(raw: string | null | undefined): Phase | null {
   if (!raw) return null;
@@ -108,6 +120,39 @@ export function SessionView() {
     compute: (ev, rect) =>
       Math.min(75, Math.max(25, ((ev.clientX - rect.left) / rect.width) * 100)),
   });
+  // rc3 P1: the composed system prompt of whichever participant chip was
+  // clicked. Held as resolved TEXT rather than a slug so a slow read can't land
+  // under a different participant's heading.
+  const [promptView, setPromptView] = useState<{
+    title: string;
+    text: string;
+    note?: string;
+  } | null>(null);
+
+  /** Read what this participant was actually told, and show it. */
+  const openComposedPrompt = async (p: ParticipantView) => {
+    const title = `${participantLabel(p)} — composed system prompt`;
+    try {
+      const view = await invoke<ParticipantSystemPrompt>(
+        "get_participant_system_prompt",
+        { sessionId, slug: p.slug },
+      );
+      setPromptView({
+        title,
+        // An unavailable prompt still opens the dialog, carrying its reason —
+        // a blank pane would read as "the prompt is empty", which is the
+        // opposite of what this view exists to show.
+        text: view.content ?? view.unavailable ?? "",
+        note: view.content
+          ? `${view.bytes.toLocaleString()} bytes, composed at spawn. bot-hq APPENDS this to ` +
+            `claude-code's own system prompt, so what you see here is bot-hq's portion only.`
+          : undefined,
+      });
+    } catch (e) {
+      setPromptView({ title, text: errorMessage(e) });
+    }
+  };
+
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState<string | null>(null);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
@@ -317,7 +362,18 @@ export function SessionView() {
                       : `Participant ${p.turn_position + 1} — not running in this session.`
                   }
                 >
-                  {participantLabel(p)}{" "}
+                  {/* rc3 P1: the label is the way in to what this participant
+                      was actually told. Attribution is structural — the chip
+                      you click IS the participant, so a prompt can't be shown
+                      under the wrong heading. */}
+                  <button
+                    type="button"
+                    onClick={() => void openComposedPrompt(p)}
+                    title="View the composed system prompt this participant spawned with"
+                    className="underline decoration-dotted underline-offset-2 transition-colors hover:text-on-surface"
+                  >
+                    {participantLabel(p)}
+                  </button>{" "}
                   {/* Both stores hold TWO key spaces: the live
                       `session:agent_health` / `session:agent_context` events
                       key by the participant's slug, while the mount backfill
@@ -417,6 +473,16 @@ export function SessionView() {
         confirmVariant="danger"
         onConfirm={onCloseSession}
         onCancel={() => setShowCloseConfirm(false)}
+      />
+
+      {/* rc3 P1: ~48 KB of standing instruction that nothing could display
+          until now. Full-screen, because reading it is the point. */}
+      <FileViewerDialog
+        target={null}
+        inlineTitle={promptView?.title}
+        inlineText={promptView?.text}
+        inlineNote={promptView?.note}
+        onClose={() => setPromptView(null)}
       />
 
       {respawnError && (
