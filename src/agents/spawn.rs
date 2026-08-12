@@ -167,8 +167,6 @@ pub enum AgentEvent {
     Init { session_id: Option<String> },
     /// Process exited. Carries exit-status string for log/observability.
     Exited(String),
-    /// Catch-all for fatal errors the supervisor wants to surface.
-    Error(String),
     /// Retry-supervisor liveness transition (B2), relayed by the duo pump to
     /// the UI as a health dot. Not produced by the stream-json translator —
     /// emitted directly by `supervise` at running/retrying/dead transitions.
