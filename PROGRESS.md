@@ -92,6 +92,19 @@ which is the drift D3 exists to prevent. `no_permission_line_names_a_claude_code
 _tool` keeps the rule and loses only its dead premise (it asserted
 `AgentRole::Eyes.may_run_native()`).
 
+**`AgentEvent::Error` now has no emitter — the handler stays anyway.** The
+native loop was its only producer: it routed API errors, model refusals, the
+max-tool-cycle cap and the context-ceiling stop through that variant. The
+`core::duo` handler that persists it is kept, and now says so out loud, because
+it is the rendering path a future connector inherits and because losing it is
+silent — before it persisted, every agent failure rendered in the UI as an empty
+turn and the text lived only as long as the launching terminal's scrollback. The
+no-buffering decision beside it was justified by a property of that emitter
+("every native error is followed by an errored `TurnComplete`"); restated as
+what it always was, since nothing constrains a new emitter to pair them.
+**Flagged for review** — deleting the variant instead is a defensible call, and
+one for the person who owns the connector plugin.
+
 **Tests: 1274 → 1094 in Rust** (lib 1208 → 1034; `native_mcp_test.rs`'s 5 gone;
 `storage_test` 14 → 13), **222 → 224 in the frontend**. The drop is the native
 modules' own coverage, which is correct — every test deleted was about code that
