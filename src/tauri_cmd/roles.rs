@@ -40,7 +40,21 @@ pub struct RoleView {
     pub default_model_id: Option<String>,
     /// Seeded by bot-hq. Still editable — the flag exists so the tab can offer
     /// "restore defaults", not to lock the row (migration 0044).
+    ///
+    /// **Permanently `false` since migration 0048**, which set it to 0 on every
+    /// row to state that bot-hq ships no roles; `create_role` hardcodes 0 and
+    /// `update_role` never writes it. Nothing may branch on it — use
+    /// [`Self::has_builtin_prose`] for "does this role have a default to
+    /// restore", which is the question the tab was really asking.
     pub builtin: bool,
+    /// True when clearing `description_prompt` restores built-in prose rather
+    /// than leaving the role with no instruction of its own.
+    ///
+    /// Answered in Rust, not by a slug list in TypeScript, for the same reason
+    /// [`CapabilityView`] is: the set of roles the binary carries prose for
+    /// lives in `agents::prompts`, and a copy in the frontend drifts silently
+    /// the first time it changes.
+    pub has_builtin_prose: bool,
     pub archived: bool,
 }
 
@@ -68,6 +82,8 @@ impl TryFrom<Role> for RoleView {
                 role.id, role.slug
             ))
         })?;
+        let has_builtin_prose =
+            !crate::agents::prompts::builtin_prose_for_role(&role.slug).is_empty();
         Ok(Self {
             id: role.id,
             slug: role.slug,
@@ -77,6 +93,7 @@ impl TryFrom<Role> for RoleView {
             participation_mode: role.participation_mode,
             default_model_id: role.default_model_id,
             builtin: role.builtin,
+            has_builtin_prose,
             archived: role.archived,
         })
     }

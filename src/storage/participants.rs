@@ -1844,6 +1844,56 @@ mod tests {
         assert!(total >= 2, "no seeded roles at all — the assertion proves nothing");
     }
 
+    /// The replacement for what `builtin` used to be asked, pinned end to end.
+    ///
+    /// `no_role_is_flagged_builtin_after_0048` above makes `builtin` permanently
+    /// false, which silently broke the Roles tab's "clearing this box restores
+    /// the built-in text" notice — it branched on that flag, so it started
+    /// telling every user that clearing HANDS' prompt would leave HANDS with no
+    /// instruction. The truth is the opposite: `read_system_prompt` falls back
+    /// to `role_for(<agent slug>)`, which returns `BRIAN_ROLE` in full.
+    ///
+    /// `builtin_prose_for_role` answers that honestly, but only if the role→agent
+    /// binding it restates is the one `ensure_session_roster` actually writes —
+    /// and that binding lives in two SQL literals in this file, which no compiler
+    /// checks against `prompts.rs`. So this walks a REAL roster rather than
+    /// asserting the mapping against itself.
+    #[tokio::test]
+    async fn builtin_prose_for_role_matches_what_the_seeded_roster_falls_back_to() {
+        use crate::agents::prompts::builtin_prose_for_role;
+        use crate::agents::role_for;
+
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+        assert_eq!(roster.len(), 2, "the roster did not seed, so nothing is compared");
+
+        for p in &roster {
+            let role_id = p.role_id.expect("a seeded participant points at a role");
+            let role = s.role_by_id(role_id).await.unwrap().expect("its role row exists");
+            assert_eq!(
+                builtin_prose_for_role(&role.slug),
+                role_for(&p.slug),
+                "role '{}' is seeded onto agent '{}', so the Roles tab's answer about \
+                 clearing the prompt disagrees with what the spawn path would fall back to",
+                role.slug,
+                p.slug
+            );
+            // Non-vacuous: two empty strings would compare equal and prove
+            // nothing, and that is exactly the bug's shape.
+            assert!(
+                !role_for(&p.slug).is_empty(),
+                "agent '{}' has no built-in prose, so the comparison above is vacuous",
+                p.slug
+            );
+        }
+
+        // A role the roster never seeds has nothing to fall back to — the other
+        // arm of the notice, and the one that WAS right before.
+        assert_eq!(builtin_prose_for_role("reviewer-2"), "");
+    }
+
     /// 0044 seeded `hands` with `route_gated_command`, which is not a
     /// `Capability`. 0048 removes it.
     ///

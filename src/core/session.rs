@@ -2524,11 +2524,22 @@ mod tests {
         assert!(rain.contains(&format!("- {}.\n", edit.deny)), "EYES was not told it cannot edit");
     }
 
-    /// **The parity test for migration 0048's prose edit.** Three refusals were
+    /// **The parity test for migration 0048's prose edit.** Refusals were
     /// deleted from `RAIN_ROLE`; rc3 is a reframe, so each has to still reach
     /// EYES — from layer 2 instead of from the constant. This walks the exact
     /// list and proves both halves for every one: the tool is refused in the
     /// composed prompt, and the constant no longer says so itself.
+    ///
+    /// **This test has already earned its keep.** 0048 removed a fourth line,
+    /// the `Edit`/`Write`/`NotebookEdit` bullet, when `EditFiles`'s denial still
+    /// named all three. A branch authored 92 seconds later took every
+    /// claude-code tool name out of layer 2 — correctly: a `Capability` is
+    /// runtime-independent and `Edit` is a claude-code spelling the native loop
+    /// does not implement. Neither branch could see the other, and the merge
+    /// left EYES refused a tool nothing in her briefing named. This test failed
+    /// on `main` and the bullet went back into the constant, which is why it is
+    /// no longer in the table below. The remaining entries name MCP tools, whose
+    /// spelling does not vary by runtime, so layer 2 can keep naming them.
     ///
     /// It composes through `ensure_session_roster` → `resolve_roster_facts` →
     /// `read_system_prompt`, i.e. the real spawn path, because the claim is that
@@ -2564,12 +2575,7 @@ mod tests {
 
         // (what left `RAIN_ROLE` in 0048, the capability that regenerates it,
         //  the tool names that refusal has to keep naming)
-        let moved: [(&str, Capability, &[&str]); 5] = [
-            (
-                "- **`Edit`, `Write`, `NotebookEdit`** — file writes.",
-                Capability::EditFiles,
-                &["`Edit`", "`Write`", "`NotebookEdit`", "mutating `Bash`"],
-            ),
+        let moved: [(&str, Capability, &[&str]); 4] = [
             (
                 "- **`terminal_exec`** — types commands into the session's visible PTY",
                 Capability::RunTerminal,
@@ -2613,9 +2619,16 @@ mod tests {
         // The other half of "moved": if the constant still carried these, the
         // prompt would have two sources for one rule and this test would be
         // green while proving nothing about the move.
+        //
+        // The `Edit`/`Write`/`NotebookEdit` bullet is deliberately NOT on this
+        // list. It is back in the constant, and it is not a second source for
+        // anything: layer 2's `EditFiles` denial states the rule without naming
+        // a tool, and this names the tools without restating the rule. One
+        // source each for the two halves — see `prompts.rs`'s module header, and
+        // `prompts::tests::the_surviving_deny_list_is_exactly_what_layer_2
+        // _cannot_generate` for why the naming half cannot live in layer 2.
         let constant = crate::agents::prompts::RAIN_ROLE;
         for gone in [
-            "**`Edit`, `Write`, `NotebookEdit`**",
             "the bridge enforces HANDS-only",
             "are reserved for Brian",
             "tool reserved for the HANDS agent",
@@ -2623,6 +2636,23 @@ mod tests {
             assert!(
                 !constant.contains(gone),
                 "RAIN_ROLE still hand-writes a refusal layer 2 generates: {gone}"
+            );
+        }
+
+        // And the mirror, which is what keeps the restored bullet from becoming
+        // the duplication 0048 removed: the constant names the file-write tools,
+        // so layer 2 must not. Scoped to `EditFiles` on purpose — a denial that
+        // names a tool is fine in general and `RunTerminal`'s does, which is why
+        // it is still in the table above. What is not fine is BOTH sources
+        // naming the same three, because then they drift.
+        let edit_deny = crate::agents::capability_prompt::phrasing(Capability::EditFiles).deny;
+        for tool in ["`Edit`", "`Write`", "`NotebookEdit`"] {
+            assert!(
+                !edit_deny.contains(tool),
+                "edit_files' denial names {tool} and so does RAIN_ROLE — one rule, two \
+                 sources. Layer 2 is the wrong one to hold it: it is rendered from a \
+                 runtime-independent `Capability`, and {tool} is a claude-code spelling \
+                 the native loop does not implement."
             );
         }
     }

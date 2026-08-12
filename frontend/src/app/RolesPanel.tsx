@@ -68,8 +68,10 @@ function draftOf(role: RoleView): RoleDraftInput {
  * participates, and which model it defaults to (rc3 decision D8).
  *
  * HANDS and EYES are rows here like any other — seeded by migration 0044/0046
- * from the built-in constants, flagged `builtin` for provenance only. Nothing
- * on this tab is read-only because of that flag.
+ * from the built-in constants. Migration 0048 then cleared `builtin` on every
+ * row, so the product claims to own none of them; nothing on this tab reads
+ * that column any more. What the tab does still need to know is whether a role
+ * has built-in prose to fall back to, and that arrives as `has_builtin_prose`.
  *
  * Master/detail rather than a modal: the role instruction is the point of the
  * tab and a long-form editor does not fit in a dialog. The list is the rail;
@@ -210,11 +212,10 @@ export function RolesPanel() {
                         {r.slug}
                       </span>
                     </span>
-                    {r.builtin && (
-                      <span className="shrink-0 rounded border border-secondary/50 px-1 font-label-caps text-label-caps text-secondary">
-                        built-in
-                      </span>
-                    )}
+                    {/* No "built-in" chip: migration 0048 set `builtin = 0` on
+                        every row to state that bot-hq ships no roles, and
+                        nothing writes it back, so the chip could never render
+                        again. */}
                     {r.archived && (
                       <span className="shrink-0 rounded border border-outline-variant/60 px-1 font-label-caps text-label-caps text-on-surface-variant">
                         archived
@@ -419,7 +420,9 @@ function RoleForm({
             {role ? (
               <>
                 <code className="text-on-surface-variant">{role.slug}</code>
-                {role.builtin && " · seeded by bot-hq, and fully editable"}
+                {/* The " · seeded by bot-hq" suffix went with the rail's
+                    "built-in" chip, and for the same reason: `builtin` is 0 on
+                    every row after 0048, so it was dead. */}
                 {role.archived && " · archived"}
               </>
             ) : (
@@ -536,22 +539,28 @@ function RoleForm({
         {/* **Emptying the box is not "no instruction".** `submit` sends
             `description_prompt: null` for an all-whitespace value, and the
             spawn path treats a NULL row as "use the built-in", so clearing it
-            silently reinstates the shipped prose. That is the right behaviour —
-            it is the "restore defaults" affordance 0044's schema comment
-            describes `builtin` as existing for — but it was invisible, and a
-            user who cleared the box to silence a role got the opposite of what
-            they asked for. Said here, at the box, rather than in a doc. */}
+            silently reinstates the shipped prose for a role that HAS one. That
+            is the right behaviour, but it was invisible, and a user who cleared
+            the box to silence a role got the opposite of what they asked for.
+            Said here, at the box, rather than in a doc.
+
+            The predicate is `has_builtin_prose`, NOT `builtin`. It asks the
+            backend whether `agents::prompts` carries a constant this role's
+            participants fall back to. `builtin` is a different question — who
+            seeded the row — and migration 0048 answered it "nobody" for every
+            role, permanently, so branching on it sent every user down the
+            "role you added" arm and told them clearing HANDS' prompt would
+            leave HANDS unbriefed. The opposite is true. */}
         {promptCleared && (
           <span
             role="note"
             className="mt-1 block max-w-prose font-code-sm text-code-sm text-warning"
           >
             Empty is not a blank instruction. Saving now stores no prose for
-            this role, and the prompt falls back to bot-hq&rsquo;s built-in text
-            for it —{" "}
-            {role?.builtin
-              ? "for a seeded role that is the wording it shipped with, so clearing the box is how you restore the default."
-              : "and bot-hq ships no built-in text for a role you added, so this one would join a session with no instruction of its own."}
+            this role.{" "}
+            {role?.has_builtin_prose
+              ? "At spawn the prompt falls back to bot-hq’s built-in text for this role, so clearing the box is how you restore the default wording."
+              : "bot-hq carries no built-in text for this role, so it would join a session with no instruction of its own."}
           </span>
         )}
       </label>
