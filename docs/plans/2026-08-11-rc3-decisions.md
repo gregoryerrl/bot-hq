@@ -441,3 +441,55 @@ in the chat input offers only this session's participants; a mention hands that
 participant the next turn and no more; the rotation resumes where it left off; a
 mention typed by an agent does nothing; and the whole path is pinned by a test
 that would fail if a participant's mention were honoured.
+
+### D18 — delete `observer`; two participation modes, both of which do something
+
+Decided 2026-08-13, alongside [D17]. The user, on being shown what an observer
+actually does: *"delete it, so we have two role types that are actually useful?
+Active and On Mention"* — yes.
+
+**`PARTICIPATION_MODES` becomes `["active", "on_mention"]`.**
+
+**Why it goes.** Design §1 specified `observer` as *"not in rotation; **reads**;
+doesn't post."* The reads half was never implemented, and the mode is worse than
+inert — it is inert **and** expensive:
+
+| | |
+|---|---|
+| Spawned? | **Yes.** `resolve_spawn_roster` filters `enabled && participation_mode != "on_demand"`, so an observer gets a full claude-code subprocess, its own context window and its own bill |
+| Handed a turn? | No — `next_active_participant` filters on `active` |
+| Delivered anything? | **No.** A turn is a PULL: "a participant's cursor is offered to it when its turn comes". No turn, no delivery, the cursor never moves |
+| Posts? | No |
+| Votes? | No — `all_active_voted_done` filters on `active` |
+
+So it starts a subprocess that reads nothing, says nothing, and bills for
+existing. **This is the same defect as `on_demand`'s** — a mode specified with a
+capability the ring does not grant it — and it hid longer only because an inert
+participant does not spin, it just quietly costs a process.
+
+**Why not fix it instead.** Once `on_mention` exists, ask what "reads but
+structurally can never speak" is for. The candidate answers do not survive:
+*accumulates context for later* — it is delivered nothing; *promote it to active
+mid-session* — participation mode is not editable on a live session; *a silent
+auditor* — with no delivery it audits nothing, and with delivery it is
+`on_mention` that you never mention. Two modes that both do something beats
+three where one is a trap.
+
+**Scope — no data migration.** Zero `roles` rows and zero `session_participants`
+rows use `observer`, and the column has no CHECK constraint (only
+`NOT NULL DEFAULT 'active'`), so this is code plus the picker:
+
+- `PARTICIPATION_MODES` in `src/storage/participants.rs`.
+- The Roles-tab picker (which already offers only `active`, since it omitted
+  `on_demand` under D1 — after D17 it offers `active` and `on_mention`).
+- `RoleDraftInput` validation, which reads the constant and needs no edit.
+- **Retarget, do not delete, `an_observer_is_skipped_not_given_a_no_op_turn`**
+  (`core/sequencer.rs`). Its subject — *a non-active participant must be skipped
+  rather than handed a wake it cannot use* — survives as the property that keeps
+  `on_mention` out of the rotation, and it is the pin that stops a future change
+  putting it back. Rename it for `on_mention` and keep the assertion.
+
+**Definition of done:** the picker offers exactly `active` and `on_mention`;
+storage refuses any other value; the skip property is still pinned by a named
+test under its new subject; and no code path spawns a participant that cannot
+take a turn.
