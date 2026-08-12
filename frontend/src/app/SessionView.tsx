@@ -324,13 +324,16 @@ export function SessionView() {
                       unpacks the slot-shaped `get_session_runtime` pair. A bare
                       `[p.slug]` read the first and missed the second, so every
                       dot and meter went blank after a restart until the next
-                      transition — `participantRuntime` spans both. */}
+                      transition — `participantRuntime` spans both. It needs the
+                      whole roster because a slot is a place IN it: the backend
+                      numbers slots over the SPAWNABLE rows, so a disabled or
+                      on-demand row shifts every slot after it. */}
                   <HealthDot
-                    health={participantRuntime(health, p)}
+                    health={participantRuntime(health, participants, p)}
                     name={participantLabel(p)}
                   />
                   <ContextMeter
-                    context={participantRuntime(agentContext, p)}
+                    context={participantRuntime(agentContext, participants, p)}
                     name={participantLabel(p)}
                   />
                 </span>

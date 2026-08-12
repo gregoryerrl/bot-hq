@@ -106,9 +106,64 @@ export const UNKNOWN_PARTICIPANT = "Unknown participant";
  * The `#` prefix is what keeps the two spaces from overwriting each other in
  * one map: `slugify` (`src/storage/participants.rs`) emits `[a-z0-9-]` only,
  * trimmed of leading dashes and never empty, so no slug can start with `#`.
+ *
+ * The argument is a SPAWN SLOT, not a `turn_position` — see
+ * {@link spawnSlotOf} for why those are not the same number.
  */
-export function slotKey(turnPosition: number): string {
-  return `#slot${turnPosition}`;
+export function slotKey(spawnSlot: number): string {
+  return `#slot${spawnSlot}`;
+}
+
+/**
+ * Does this participant get a claude-code subprocess?
+ *
+ * Mirrors `spawnable` in `src/core/session.rs` exactly — `enabled` and not
+ * `on_demand` — because that filter is what decides which participants the
+ * slot-shaped payloads describe. Observers ARE spawned; they read the channel
+ * and may post, they simply never take a scheduled turn.
+ */
+export function isSpawnable(
+  p: Pick<ParticipantView, "enabled" | "participation_mode">,
+): boolean {
+  return p.enabled && p.participation_mode !== "on_demand";
+}
+
+/**
+ * The slot index the backend's fixed-pair payloads report this participant
+ * under, or `null` when it occupies no slot.
+ *
+ * **This is an index into the SPAWNABLE roster, not `turn_position`.** Both
+ * producers build their pair off `spawnable(roster)`:
+ * `spawn_session_handle` (`src/core/session.rs`) stores that filtered vec as
+ * `SessionHandle.participants`, which `get_session_runtime` indexes with
+ * `.get(0)` / `.get(1)`, and hands the same slugs to `ActivityTracker::new`,
+ * which indexes them with `slugs.get(0)` / `.get(1)`.
+ *
+ * `turn_position` is the roster row's own column and counts every row —
+ * `insert_roster` writes it as the un-filtered enumerate index. The two numbers
+ * agree only while every row is spawnable. They part the moment one is not, and
+ * then reading `slotKey(turn_position)` hands one participant's health dot,
+ * context meter and busy label to a different participant: with a disabled row
+ * at position 0, the backend's slot 0 IS the row at position 1, and position 1's
+ * own key matches nothing.
+ *
+ * Derived from the roster rather than corrected by an offset so there is one
+ * rule, written the same way on both sides.
+ *
+ * Two limits, both inherent rather than approximations:
+ *   * the roster is read live while `SessionHandle.participants` is frozen at
+ *     spawn, so a roster edited mid-session is only right again after a
+ *     respawn — which is when the backend's own slots move too;
+ *   * `participants` must arrive in `(turn_position, id)` order, which is what
+ *     `participants_for_session` orders by and `participant_views` preserves.
+ *     Re-sorting here would be a second source of truth, not a safeguard.
+ */
+export function spawnSlotOf(
+  roster: readonly ParticipantView[],
+  p: Pick<ParticipantView, "id">,
+): number | null {
+  const slot = roster.filter(isSpawnable).findIndex((q) => q.id === p.id);
+  return slot < 0 ? null : slot;
 }
 
 /**
@@ -126,29 +181,37 @@ export function slotKey(turnPosition: number): string {
  *
  * The slug wins: it comes from a live event, the slot key from a snapshot.
  *
- * A third participant has no slot key on the wire at all — the fixed pair
- * reports slots 0 and 1 only — so it resolves through its slug, which the live
- * events supply as soon as it acts.
+ * A participant with no slot gets its slug alone. That covers both a
+ * non-spawnable row — nothing runs for it, so no producer can report it, and
+ * claiming a slot would be claiming another participant's state — and a third
+ * spawnable one, since the fixed pair reports slots 0 and 1 only. Either way its
+ * slug still resolves whatever the live events supply.
  */
 export function participantRuntimeKeys(
-  p: Pick<ParticipantView, "slug" | "turn_position">,
-): [string, string] {
-  return [p.slug, slotKey(p.turn_position)];
+  roster: readonly ParticipantView[],
+  p: ParticipantView,
+): string[] {
+  const slot = spawnSlotOf(roster, p);
+  return slot === null ? [p.slug] : [p.slug, slotKey(slot)];
 }
 
 /**
  * One participant's entry in a per-participant runtime map (health, context
  * occupancy, busy flags), looked up across both key spaces.
  *
+ * Takes the whole roster because the slot key is a property of the participant's
+ * PLACE in it, not of the row alone — see {@link spawnSlotOf}.
+ *
  * `undefined` means "nothing reported for this participant", which every caller
  * already treats as unknown rather than empty.
  */
 export function participantRuntime<T>(
   map: Record<string, T | undefined> | undefined,
-  p: Pick<ParticipantView, "slug" | "turn_position">,
+  roster: readonly ParticipantView[],
+  p: ParticipantView,
 ): T | undefined {
   if (!map) return undefined;
-  for (const key of participantRuntimeKeys(p)) {
+  for (const key of participantRuntimeKeys(roster, p)) {
     const value = map[key];
     if (value !== undefined) return value;
   }
@@ -185,7 +248,7 @@ export function participantLabelIndex(
   const out: Record<string, string> = {};
   for (const p of participants) {
     const label = participantLabel(p);
-    for (const key of participantRuntimeKeys(p)) out[key] = label;
+    for (const key of participantRuntimeKeys(participants, p)) out[key] = label;
   }
   return out;
 }

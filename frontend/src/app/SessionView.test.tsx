@@ -42,6 +42,34 @@ class ResizeObserverStub {
 }
 vi.stubGlobal("ResizeObserver", ResizeObserverStub);
 
+// rc3 D10: the header roster. Two rows sharing a role is the exact
+// configuration the user could not see until the agents said so. Mutable so a
+// test can hand the view a roster whose SPAWNABLE order differs from its turn
+// positions — see the disabled-row test below.
+const roster = vi.hoisted(() => ({
+  rows: [] as unknown[],
+  default: [
+    {
+      id: 1,
+      slug: "eyes",
+      role_display_name: "EYES",
+      model_display_name: "Claude Opus 5",
+      turn_position: 0,
+      participation_mode: "active",
+      enabled: true,
+    },
+    {
+      id: 2,
+      slug: "eyes-2",
+      role_display_name: "EYES",
+      model_display_name: "DeepSeek R2",
+      turn_position: 1,
+      participation_mode: "active",
+      enabled: true,
+    },
+  ] as unknown[],
+}));
+
 // Keyed invoke mock: `get_session` must return a session row or the view
 // renders its not-found state; everything else gets an empty default.
 vi.mock("@tauri-apps/api/core", () => ({
@@ -64,29 +92,8 @@ vi.mock("@tauri-apps/api/core", () => ({
         });
       case "get_session_phase":
         return Promise.resolve(null);
-      // rc3 D10: the header roster. Two rows sharing a role is the exact
-      // configuration the user could not see until the agents said so.
       case "list_session_participants":
-        return Promise.resolve([
-          {
-            id: 1,
-            slug: "eyes",
-            role_display_name: "EYES",
-            model_display_name: "Claude Opus 5",
-            turn_position: 0,
-            participation_mode: "active",
-            enabled: true,
-          },
-          {
-            id: 2,
-            slug: "eyes-2",
-            role_display_name: "EYES",
-            model_display_name: "DeepSeek R2",
-            turn_position: 1,
-            participation_mode: "active",
-            enabled: true,
-          },
-        ]);
+        return Promise.resolve(roster.rows);
       case "compute_apply_diff":
         return Promise.resolve({ files: [], truncated: false });
       default:
@@ -126,6 +133,7 @@ beforeEach(() => {
   useActivityStore.setState({ bySession: {}, busyBySession: {} });
   useHealthStore.setState({ bySession: {}, routerBySession: {} });
   useContextStore.setState({ bySession: {} });
+  roster.rows = roster.default;
 });
 
 /** The worker's own line in the turn-status row: `<label> is working`. */
@@ -186,7 +194,13 @@ describe("SessionView health dots + context meters (rc3 D10)", () => {
     });
     useContextStore.setState({
       bySession: {
-        s1: { eyes: { usedTokens: 620_000, contextWindow: 1_000_000 } },
+        s1: {
+          // Slug-keyed, as the live event seeds it.
+          eyes: { usedTokens: 620_000, contextWindow: 1_000_000 },
+          // Slot-keyed, as the backfill seeds it — and the SECOND slot, so
+          // resolving it needs this row's place in the roster, not the row.
+          [slotKey(1)]: { usedTokens: 310_000, contextWindow: 1_000_000 },
+        },
       },
     });
     renderSessionView();
@@ -203,6 +217,9 @@ describe("SessionView health dots + context meters (rc3 D10)", () => {
     expect(
       screen.getByLabelText("EYES · Claude Opus 5 context 62 percent used"),
     ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("EYES · DeepSeek R2 context 31 percent used"),
+    ).toBeInTheDocument();
   });
 
   it("leaves a participant nothing reported for reading as healthy, not as another's state", async () => {
@@ -216,6 +233,29 @@ describe("SessionView health dots + context meters (rc3 D10)", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByLabelText("EYES · DeepSeek R2 running"),
+    ).toBeInTheDocument();
+  });
+
+  it("attributes a slot to the row that RUNS in it, not the row at that turn position", async () => {
+    // `get_session_runtime` fills its pair from `handle.participants.get(0)`,
+    // and `handle.participants` is `spawnable(roster)` — the enabled,
+    // non-on-demand rows. A disabled row still holds turn position 0, so slot 0
+    // here belongs to the row at turn position 1. Keying the lookup off
+    // `turn_position` showed the running participant's health on the row that
+    // is not running, and left the running one blank.
+    roster.rows = [
+      { ...(roster.default[0] as object), enabled: false },
+      roster.default[1],
+    ];
+    useHealthStore.setState({ bySession: { s1: { [slotKey(0)]: "dead" } } });
+    renderSessionView();
+    await screen.findByRole("button", { name: "Workspace" });
+
+    expect(
+      screen.getByLabelText("EYES · DeepSeek R2 stopped — gave up after errors"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("EYES · Claude Opus 5 running"),
     ).toBeInTheDocument();
   });
 });
