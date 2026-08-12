@@ -238,6 +238,12 @@ fn with_repeat_halt_note(base: &str, prior: Option<&str>) -> String {
 /// Case-insensitive word-boundary scan for a peer/agent name in an
 /// awaiting-user reason. Returns the offending word for the error message.
 fn peer_shaped_reason(reason: &str) -> Option<&'static str> {
+    // Heuristic VOCABULARY, not an identity check — nothing is keyed on a
+    // participant being called any of these. `eyes` / `hands` are the role slugs
+    // an agent writes today; the two person names stay because a user may still
+    // name a MODEL that way (rc3 D10 leaves display names theirs), and a reason
+    // that mentions one is peer-shaped either way. Word-boundary matched below,
+    // so `constraint` does not trip `rain`.
     const PEER_WORDS: &[&str] = &["rain", "brian", "peer", "eyes", "hands"];
     let lower = reason.to_lowercase();
     PEER_WORDS.iter().copied().find(|w| {

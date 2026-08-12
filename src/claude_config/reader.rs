@@ -297,12 +297,18 @@ fn mcp_servers(
                 .map(mcp_detail)
                 .unwrap_or(("unknown".into(), String::new()));
             let reserved_filtered = crate::signaling::RESERVED_MCP_KEYS.contains(&name.as_str());
-            // bot-hq's load_user_mcp_servers reads BOTH files, so any non-reserved
-            // server (even a settings.json-only one) is forwarded to Brian.
+            // bot-hq's `load_user_mcp_servers` reads BOTH files, so any
+            // non-reserved server (even a settings.json-only one) is forwarded.
+            //
+            // **rc3 D10/D11: to whom is a CAPABILITY, not a name.**
+            // `core::session::user_mcp_servers_for_agent` forwards to a
+            // participant whose role grants `edit_files` and to nobody else, so
+            // the chip says that instead of naming an agent that no longer
+            // exists — this label is the only place a user learns the rule.
             let forwarded_to_agents = if reserved_filtered {
                 Vec::new()
             } else {
-                vec!["brian".to_string()]
+                vec!["agents that may edit files".to_string()]
             };
             McpServerItem {
                 name: name.clone(),
@@ -587,7 +593,12 @@ mod tests {
         let discord = v.mcp_servers.iter().find(|m| m.name == "discord").unwrap();
         assert!(discord.effective);
         assert!(!discord.reserved_filtered);
-        assert_eq!(discord.forwarded_to_agents, vec!["brian"]);
+        // Who it reaches is a CAPABILITY, not a name (rc3 D10/D11) — the chip
+        // has to state the rule the spawn path actually applies.
+        assert_eq!(
+            discord.forwarded_to_agents,
+            vec!["agents that may edit files"]
+        );
         // bot-hq is reserved → filtered from agents.
         let bothq = v.mcp_servers.iter().find(|m| m.name == "bot-hq").unwrap();
         assert!(bothq.reserved_filtered);

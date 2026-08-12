@@ -189,7 +189,7 @@ async fn handle_request(
 }
 
 /// Handle `POST /hooks/pre-push` from the git pre-push hook subprocess. Body:
-/// `{ "session_id": "...", "agent": "brian", "branch": "..."? }`. Surfaces a
+/// `{ "session_id": "...", "agent": "<slug>", "branch": "..."? }`. Surfaces a
 /// `request_approval` (kind=push_gate) prompt and blocks until the user picks,
 /// then replies `{ "approved": <bool> }`. The hook maps `approved` → exit 0
 /// (push proceeds) / not-approved → exit 1 (blocked). Reuses the same
@@ -208,13 +208,15 @@ async fn handle_pre_push(body: Incoming, bridge: Arc<SignalingBridge>) -> Respon
     let Some(session_id) = v.get("session_id").and_then(|s| s.as_str()) else {
         return text_response(StatusCode::BAD_REQUEST, "missing session_id");
     };
-    // Only HANDS (brian) pushes; default to brian if the
-    // hook couldn't read BOT_HQ_AGENT (graceful — affects only the tray label).
+    // The pushing participant, from `BOT_HQ_AGENT` (injected at spawn). The
+    // fallback is a LABEL, not a roster lookup — it only names the tray entry
+    // when the hook could not read the env, and rc3 D10's role-derived slugs
+    // mean no fixed name would match a participant anyway.
     let agent = v
         .get("agent")
         .and_then(|s| s.as_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("brian");
+        .unwrap_or("an agent");
     let branch = v
         .get("branch")
         .and_then(|s| s.as_str())
@@ -255,7 +257,7 @@ async fn handle_pre_push(body: Incoming, bridge: Arc<SignalingBridge>) -> Respon
 }
 
 /// Handle `POST /hooks/tool-gate` from the PreToolUse Tool Gate hook. Body:
-/// `{ "session_id": "...", "agent": "brian"?, "command": "..." }`. Parks the
+/// `{ "session_id": "...", "agent": "<slug>"?, "command": "..." }`. Parks the
 /// blocked command for the user's approval and replies at once with
 /// `{ "gate_id": "...", "existing": <bool> }` — `existing` when an identical
 /// command was already pending, which is how a retry can't stack a second card.
@@ -294,13 +296,13 @@ async fn handle_tool_gate(body: Incoming, bridge: Arc<SignalingBridge>) -> Respo
     let Some(command) = command else {
         return text_response(StatusCode::BAD_REQUEST, "missing command");
     };
-    // Only HANDS runs gated Bash; default to brian when the hook couldn't read
-    // BOT_HQ_AGENT (affects only the tray label).
+    // The participant running the gated command, from `BOT_HQ_AGENT`. Same as
+    // above: the fallback is the tray LABEL, never a roster lookup.
     let agent = v
         .get("agent")
         .and_then(|s| s.as_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("brian");
+        .unwrap_or("an agent");
 
     match bridge.park_gated_command(session_id, agent, command).await {
         Ok((gate_id, existing)) => text_response(

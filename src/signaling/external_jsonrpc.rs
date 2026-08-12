@@ -101,26 +101,26 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "list_models",
-            description: "List saved models from the Models registry. Returns id, display_name, provider, model_name, base_url, context_window and updated_at for each. Use this to obtain the `brian_model_id` / `rain_model_id` values `create_session` accepts — they are ids from here, not model names. Every model spawns through the claude CLI. Auth tokens are redacted.",
+            description: "List saved models from the Models registry. Returns id, display_name, provider, model_name, base_url, context_window and updated_at for each. Use this to obtain the model-id values `create_session` accepts — they are ids from here, not model names. Every model spawns through the claude CLI. Auth tokens are redacted.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDescriptor {
             name: "create_session",
-            description: "Open a new bot-hq session. Spawns Brian (HANDS) + Rain (EYES); returns the session id. The call blocks until both agents have spawned (typically 1-3 seconds). `working_repo_path` is optional — if set, the project name is derived from the path's last component and project-specific policy.yaml is resolved. `brian_model_id` / `rain_model_id` are saved-model ids from `list_models`; omit them to fall back to each agent's stored config. Pass them when THIS session needs a specific model.",
+            description: "Open a new bot-hq session and return its id. **This path has no roster picker, so it spawns exactly ONE agent — the first active role** (rc3 D13); use the app's New Session dialog when a session needs more. The call blocks until the agent has spawned (typically 1-3 seconds). `working_repo_path` is optional — if set, the project name is derived from the path's last component and project-specific policy.yaml is resolved. The two model parameters are saved-model ids from `list_models`, positional over turn order; omit them to fall back to the role's default model. `rain_model_id` targets a second slot this path does not create, so it is accepted and ignored.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Human-readable label shown in the session tile." },
                     "working_repo_path": { "type": "string", "description": "Optional absolute path to a git repo. Drives project-specific policy + system-prompt context." },
-                    "brian_model_id": { "type": "string", "description": "Optional saved-model id (from list_models) for HANDS. Omit to use his stored agent config." },
-                    "rain_model_id": { "type": "string", "description": "Optional saved-model id (from list_models) for EYES. Omit to use her stored agent config." }
+                    "brian_model_id": { "type": "string", "description": "Optional saved-model id (from list_models) for the first participant. Omit to use its role's default model." },
+                    "rain_model_id": { "type": "string", "description": "Optional saved-model id (from list_models) for a second participant. This path creates only one, so it currently has no slot to land on." }
                 },
                 "required": ["title"]
             }),
         },
         ToolDescriptor {
             name: "send_message",
-            description: "Send a user-authored message to a session. The message is persisted, fed to both agents (Brian + Rain), and clears any 'awaiting user' halt.",
+            description: "Send a user-authored message to a session. The message is persisted, fed to every participant, and clears any 'awaiting user' halt.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -132,7 +132,7 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "get_session_messages",
-            description: "Read messages for a session in chronological order. Optional `since_id` returns only messages with id > since_id — use for polling. Each message has id, author (user|brian|rain), kind (text|tool_use|tool_result|phase_change), content, created_at.",
+            description: "Read messages for a session in chronological order. Optional `since_id` returns only messages with id > since_id — use for polling. Each message has id, author (`user`, or a participant slug), kind (text|tool_use|tool_result|phase_change), content, created_at.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -144,7 +144,7 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "advance_phase",
-            description: "Move a session to a new IPAV phase. Emits a synthetic phase-change message both agents see. Phases: I (Investigate), P (Plan), A (Apply), V (Verify).",
+            description: "Move a session to a new IPAV phase. Emits a synthetic phase-change message every participant sees. Phases: I (Investigate), P (Plan), A (Apply), V (Verify).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -168,7 +168,7 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "close_session",
-            description: "Close a session — kills Brian + Rain subprocesses and marks the session row closed/archived. Idempotent: closing an already-closed session is a no-op.",
+            description: "Close a session — kills its agent subprocesses and marks the session row closed/archived. Idempotent: closing an already-closed session is a no-op.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -185,17 +185,17 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "get_status",
-            description: "Snapshot of bot-hq runtime state — version, signaling address, external MCP address, count of active duo sessions, and a millisecond-resolution wall-clock timestamp. Useful for client health checks.",
+            description: "Snapshot of bot-hq runtime state — version, signaling address, external MCP address, count of active sessions, and a millisecond-resolution wall-clock timestamp. Useful for client health checks.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDescriptor {
             name: "get_agent_configs",
-            description: "List both agent configs (brian, rain) — provider, model_name, base_url, updated_at. The auth_token is REDACTED: returned as `<unset>` if empty, or `<set:****abcd>` showing only the last 4 chars to confirm which key is loaded. Full secret retrieval is intentionally not exposed.",
+            description: "List the legacy per-agent config rows — provider, model_name, base_url, updated_at. These are a pre-rc3 fallback: a session's model comes from the participant's own pick or its role's default (Roles tab). The auth_token is REDACTED: returned as `<unset>` if empty, or `<set:****abcd>` showing only the last 4 chars to confirm which key is loaded. Full secret retrieval is intentionally not exposed.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDescriptor {
             name: "set_agent_config",
-            description: "Upsert an agent config row. agent_name must be brian or rain. Pass auth_token to set a new credential; pass empty string to clear. Other fields (provider, model_name, base_url) are optional — omit to keep the current value.",
+            description: "Upsert a legacy per-agent config row; `agent_name` is one of the two fixed keys that table still carries. Prefer the Roles tab's default model — this is the pre-rc3 fallback only. Pass auth_token to set a new credential; pass empty string to clear. Other fields (provider, model_name, base_url) are optional — omit to keep the current value.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -560,6 +560,12 @@ async fn call_external_tool(
         }
         "set_agent_config" => {
             let agent_name = arg_required_str(&args, "agent_name")?;
+            // These two literals are the PRIMARY KEYS of the rows the legacy
+            // `agent_configs` table actually holds, not agent names any spawn
+            // resolves — rc3 D10's role-derived slugs never match one, so a
+            // session's model comes from the participant or its role instead
+            // (see `core::session::resolve_participant_config`). Accepting
+            // anything else would write a row nothing can ever read.
             if !["brian", "rain"].contains(&agent_name.as_str()) {
                 return Err(JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,

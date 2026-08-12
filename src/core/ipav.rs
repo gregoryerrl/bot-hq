@@ -73,7 +73,7 @@ impl IpavPhase {
         match self {
             IpavPhase::Investigate => "[PHASE: Investigate] Gather facts only. No Edit, Write, or mutating Bash. Output understanding in chat.",
             IpavPhase::Plan => "[PHASE: Plan] Propose the approach in chat — name files, functions, expected diffs. No Edit/Write yet.",
-            IpavPhase::Apply => "[PHASE: Apply] HANDS (Brian) executes Edit/Write/Bash. EYES (Rain) reviews — no writes from Rain. Apply output may be code or a document.",
+            IpavPhase::Apply => "[PHASE: Apply] Participants granted `edit_files` execute Edit/Write/Bash. Participants without it review only — no writes. Apply output may be code or a document.",
             IpavPhase::Verify => "[PHASE: Verify] Run tests, type-check, re-read, or describe the manual check. Cite the output.",
         }
     }

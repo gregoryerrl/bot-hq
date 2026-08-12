@@ -108,11 +108,20 @@ pub struct RouterDeps {
     /// is precisely the failure this exists to end. `None` in tests that don't
     /// assert telemetry.
     pub storage: Option<crate::storage::Storage>,
-    /// Brian's stdin (peer target when Rain speaks).
+    /// Slot 0's stdin (peer target when slot 1 speaks).
     pub brian_input: ParticipantInput,
-    /// Rain's stdin (peer target when Brian speaks). `None` = solo; the
+    /// Slot 1's stdin (peer target when slot 0 speaks). `None` = solo; the
     /// pump never emits a Forward in solo mode, so the router isn't spawned then.
     pub rain_input: Option<ParticipantInput>,
+    /// How each slot is NAMED to its peer, by turn order — the display rule's
+    /// `role · model`, resolved once at spawn.
+    ///
+    /// **rc3 D4/D10: peer names are roster facts, not constants.** The
+    /// provenance tag on every forwarded peer message used to be one of two
+    /// hardcoded person names picked by `Author`, so a renamed or third role
+    /// was announced to its peer as somebody else. An empty entry degrades to
+    /// an unattributed tag rather than to a wrong name.
+    pub slot_labels: [String; 2],
 }
 
 impl RouterDeps {
@@ -123,6 +132,16 @@ impl RouterDeps {
             Author::Brian => Some(&self.brian_input),
             Author::Rain => self.rain_input.as_ref(),
             Author::User => None,
+        }
+    }
+
+    /// How `author` is announced to its peer. Slot 0 / slot 1 by turn order,
+    /// matching `input_for` above; `User` never reaches a peer forward.
+    fn label_for(&self, author: Author) -> &str {
+        match author {
+            Author::Brian => self.slot_labels[0].as_str(),
+            Author::Rain => self.slot_labels[1].as_str(),
+            Author::User => "",
         }
     }
 
@@ -538,7 +557,15 @@ async fn route_forward(
     } else {
         trimmed
     };
-    peer_forward_message(from, body_to_send, phase, open_blocking, peer_tx).await;
+    peer_forward_message(
+        from,
+        deps.label_for(from),
+        body_to_send,
+        phase,
+        open_blocking,
+        peer_tx,
+    )
+    .await;
     // Diagnostics: count the DELIVERED forward by direction (after the send). A
     // one-sided break shows one counter flat while the other climbs. `User` can't
     // reach here (the peer-resolution early-return above handles it).
@@ -645,6 +672,9 @@ mod tests {
             storage: None,
             brian_input,
             rain_input,
+            // Two distinguishable labels: a test that asserts the provenance tag
+            // has to be able to tell the slots apart.
+            slot_labels: ["HANDS · Test Model".into(), "EYES · Test Model".into()],
         }
     }
 

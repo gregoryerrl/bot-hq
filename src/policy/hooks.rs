@@ -362,15 +362,18 @@ fn run_post_commit(data_dir: &Path, project: Option<&str>, session: Option<&str>
     Ok(0)
 }
 
-/// The pushing/committing agent for hook attribution: the `BOT_HQ_AGENT` env
-/// (trimmed, non-empty) or the "brian" default. Shared by the pre-push +
+/// The pushing/committing participant for hook attribution: the `BOT_HQ_AGENT`
+/// env (trimmed, non-empty), else a neutral LABEL. Shared by the pre-push +
 /// findings-gate hooks so the fallback can't drift between them.
+///
+/// The fallback names a tray entry; it is not a roster lookup, and under rc3
+/// D10's role-derived slugs no fixed name could be one.
 fn hook_agent() -> String {
     std::env::var("BOT_HQ_AGENT")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "brian".to_string())
+        .unwrap_or_else(|| "an agent".to_string())
 }
 
 /// Build a current-thread runtime to drive async calls from a sync git-hook

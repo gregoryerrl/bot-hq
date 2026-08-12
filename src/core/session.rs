@@ -919,6 +919,15 @@ async fn spawn_session_handle(
                 ipav: Arc::clone(&ipav),
                 brian_input: first.input().clone(),
                 rain_input: Some(second.input().clone()),
+                // How each slot announces itself on the DEFAULT peer-forward
+                // path. Read off the roster by the display rule, in turn order,
+                // so the tag names the role and model rather than a person
+                // (rc3 D4/D10). `live` is the same slice `handles` was built
+                // from, so slot 0/1 line up with `first`/`second`.
+                slot_labels: [
+                    display_name_for(&storage, live[0]).await,
+                    display_name_for(&storage, live[1]).await,
+                ],
             };
             let task = tokio::spawn(crate::core::run_router(deps, router_rx));
             // Seed the router-health dot "up" — also clears any stale `false` left
@@ -2565,6 +2574,51 @@ mod tests {
         let mut roleless = eyes.clone();
         roleless.role_id = None;
         assert!(role_default_model(&s, &roleless).await.is_none());
+    }
+
+    /// **The dialogless create paths land on one participant (rc3 D13).**
+    ///
+    /// `seed_default_roster` is the funnel both of them share —
+    /// `CoreAppState::open_session` (the external driver) reaches it directly,
+    /// and `dispatch_session_inner` (the plugin arm) reaches it through the
+    /// pre-spawn `ensure_session_roster`. Neither has a dialog and the setting
+    /// that used to answer for them is deleted, so this shape IS the product
+    /// default.
+    ///
+    /// The second assertion is the consequence a driver has to know: passing a
+    /// model id for a second slot does not create one. It is dropped, because
+    /// there is no participant for it to land on.
+    #[tokio::test]
+    async fn a_dialogless_create_seeds_one_participant_and_drops_the_second_model() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        sqlx::query(
+            "INSERT INTO models (id, display_name, provider, model_name) VALUES \
+             ('m-one', 'One', 'anthropic', 'model-one'), \
+             ('m-two', 'Two', 'anthropic', 'model-two')",
+        )
+        .execute(s.pool())
+        .await
+        .unwrap();
+
+        // Exactly what `CoreAppState::open_session` passes: solo, two model ids
+        // positional over the default roster's turn order.
+        seed_default_roster(
+            &s,
+            "s1",
+            true,
+            &[Some("m-one".into()), Some("m-two".into())],
+            &[],
+        )
+        .await;
+
+        let roster = s.participants_for_session("s1").await.unwrap();
+        assert_eq!(roster.len(), 1, "the default is one agent, not the old pair");
+        assert_eq!(roster[0].model_id.as_deref(), Some("m-one"));
+        assert!(
+            !roster.iter().any(|p| p.model_id.as_deref() == Some("m-two")),
+            "a model id for a slot that does not exist creates no participant"
+        );
     }
 
     /// **Per-role Claude-config overrides actually reach a spawn.**

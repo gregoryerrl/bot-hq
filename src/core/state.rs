@@ -199,9 +199,17 @@ impl AppState {
     ///
     /// `brian_model_id` / `rain_model_id` are saved-model ids; `None` falls back
     /// to the per-agent config, which is the historical behaviour. Pass them when
-    /// the caller wants a SPECIFIC model for this session. Solo/duo still comes
-    /// from the user's `rain_disabled_default` setting; there is no create dialog
-    /// here.
+    /// the caller wants a SPECIFIC model for this session. The two parameter
+    /// NAMES are the driver's wire contract and are left alone; what they mean
+    /// here is slot 0 and slot 1 (rc3 D10).
+    ///
+    /// **This path has no dialog, so it takes the product default: ONE
+    /// participant** (rc3 D13 — the `rain_disabled_default` setting it used to
+    /// read is deleted, and design §1 puts the default at one agent). See
+    /// [`Storage::ensure_session_roster`], which seeds it. A driver that wants a
+    /// second participant has to add the role to the session it creates; passing
+    /// `rain_model_id` alone does NOT add one, and there is no roster slot for
+    /// it to land on.
     pub async fn open_session(
         &self,
         title: impl Into<String>,
@@ -210,7 +218,8 @@ impl AppState {
         rain_model_id: Option<String>,
     ) -> Result<String> {
         let mut req = OpenSessionRequest::full(title, working_repo_path);
-        req.solo = !self.storage.default_rain_enabled().await;
+        // rc3 D13: the product default with no UI behind it. One participant.
+        req.solo = true;
         // Positional over the default roster's turn order. The two parameter
         // NAMES are the external driver's wire contract and are left alone; what
         // they mean here is slot 0 and slot 1 (rc3 D10).
@@ -932,10 +941,11 @@ impl AppState {
     /// the peer automatically, so SAYING SO is the wake mechanism. Pinned by
     /// `apply_nudge_never_tells_hands_to_park_on_the_user`.
     const APPLY_ENTRY_NUDGE: &'static str =
-        "🔔 Entering Apply. Before you mutate: confirm Rain reviewed the plan — pull \
-         session_doc_search(phase=\"plan\") and check her pushback landed. If it hasn't, \
-         say so in chat (your turn output is forwarded to her automatically, which wakes \
-         her) and do non-mutating prep meanwhile. Don't park on the USER for a peer wait.";
+        "🔔 Entering Apply. Before you mutate: confirm your reviewer reviewed the plan — \
+         pull session_doc_search(phase=\"plan\") and check their pushback landed. If it \
+         hasn't, say so in chat (your turn output is forwarded to them automatically, \
+         which wakes them) and do non-mutating prep meanwhile. Don't park on the USER \
+         for a peer wait.";
 
     /// A2 (adherence): whether the Plan→Apply boundary in a duo session warrants
     /// the peer-ack nudge to Brian. Pure for testing; the caller additionally
