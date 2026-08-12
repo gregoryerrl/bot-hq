@@ -246,37 +246,11 @@ impl SessionHandle {
     }
 }
 
-/// The roster rows this spawn actually starts a subprocess for, in turn order.
-///
-/// **The N-participant unlock, as one function.** Spawn used to name two rows
-/// (`roster_row(&roster, "brian")` / `"rain"`), which is the only reason the
-/// create dialog capped a session at two; it now takes whatever the roster
-/// holds. Split out of `spawn_session_handle` so the selection rule is reachable
-/// from a test — that function goes on to launch claude-code subprocesses and no
-/// test can follow it there.
-///
-/// Two exclusions, both because the process would have nothing to do:
-///   * `enabled = 0` — the row a solo session keeps for the participant it did
-///     not invite, exactly as 0044 wrote it,
-///   * `participation_mode = 'on_demand'` — nothing wakes one yet (rc3 D1), so a
-///     subprocess would idle for the life of the session.
-///
-/// Observers ARE spawned: they read the channel and may post, they simply never
-/// receive a scheduled turn.
-///
-/// `participants_for_session` already orders by `(turn_position, id)`, so the
-/// filter preserves turn order and the returned order IS the spawn order.
-fn spawnable(roster: &[crate::storage::Participant]) -> Vec<&crate::storage::Participant> {
-    roster
-        .iter()
-        .filter(|p| p.enabled && p.participation_mode != "on_demand")
-        .collect()
-}
-
 /// **The spawn's roster decisions, resolved together and registered once.**
 ///
 /// Two answers come off one roster read, and they must agree:
-///   1. WHO SPAWNS — [`spawnable`], the list this function returns;
+///   1. WHO SPAWNS — the rows this spawn actually starts a subprocess for, in
+///      turn order, which is what the function returns;
 ///   2. WHO THE COMMIT GATE WATCHES — the participants holding
 ///      [`Capability::FileFinding`](crate::agents::Capability::FileFinding),
 ///      handed to the bridge's reviewer registry. bot-hq's own definition of a
@@ -284,7 +258,21 @@ fn spawnable(roster: &[crate::storage::Participant]) -> Vec<&crate::storage::Par
 ///      (rc3 D10/D11). An empty list means this session has no reviewer, and
 ///      `check_open_findings` then has nothing to fail closed on.
 ///
-/// **Why this is a function and not two lines in `spawn_session_handle`.**
+/// **The selection rule.** Spawn used to name two rows
+/// (`roster_row(&roster, "brian")` / `"rain"`), which is the only reason the
+/// create dialog capped a session at two; it now takes whatever the roster
+/// holds, minus two exclusions where the process would have nothing to do:
+///   * `enabled = 0` — the row a solo session keeps for the participant it did
+///     not invite, exactly as 0044 wrote it,
+///   * `participation_mode = 'on_demand'` — nothing wakes one yet (rc3 D1), so a
+///     subprocess would idle for the life of the session.
+///
+/// Observers ARE spawned: they read the channel and may post, they simply never
+/// receive a scheduled turn. `participants_for_session` already orders by
+/// `(turn_position, id)`, so the filter preserves turn order and the returned
+/// order IS the spawn order.
+///
+/// **Why this is one function and not two lines in `spawn_session_handle`.**
 /// The registration used to sit inline, and it was the ONLY production site
 /// that populated the registry — every test registered reviewers by hand.
 /// Verified by mutation on 2026-08-12: deleting the inline call left the whole
@@ -295,6 +283,15 @@ fn spawnable(roster: &[crate::storage::Participant]) -> Vec<&crate::storage::Par
 /// registration without `the_spawn_roster_registers_every_reviewer_it_returns`
 /// going red.
 ///
+/// **And the filter is inlined here rather than kept as a `spawnable` sibling.**
+/// It was extracted, with the same signature and return type, which left the
+/// production call site one word away from the unregistered version — verified
+/// on 2026-08-12: swapping `resolve_spawn_roster` back to `spawnable` compiled
+/// and left all 1049 tests green, reopening the exact fail-open this function
+/// was written to close. A second way to answer "who spawns" is the hole, not
+/// the convenience; the tests that used to call it call this instead, which is
+/// also what makes them tests of the thing production runs.
+///
 /// The side effect is deliberate and is why the bridge is a parameter. Reviewer
 /// registration is not incidental to resolving the spawn roster — it is the
 /// same decision, read off the same rows, and separating them is exactly how
@@ -304,7 +301,10 @@ fn resolve_spawn_roster<'a>(
     session_id: &str,
     roster: &'a [crate::storage::Participant],
 ) -> Vec<&'a crate::storage::Participant> {
-    let live = spawnable(roster);
+    let live: Vec<&crate::storage::Participant> = roster
+        .iter()
+        .filter(|p| p.enabled && p.participation_mode != "on_demand")
+        .collect();
     bridge.register_session_reviewers(
         session_id.to_string(),
         live.iter()
@@ -1170,7 +1170,7 @@ async fn spawn_session_handle(
         working_repo_path,
         session_start_sha,
         ipav,
-        // Already in turn order: `spawnable` preserves
+        // Already in turn order: `resolve_spawn_roster` preserves
         // `participants_for_session`'s `(turn_position, id)` sort and `handles`
         // was built from it index for index, so no re-sort is needed and none
         // can silently disagree with the ring's order.
@@ -2198,6 +2198,10 @@ mod tests {
     /// consensus halt then waited forever on a vote nobody could cast. This
     /// walks a three-row roster whose slugs are role-derived and asserts every
     /// one of them is spawned, in turn order.
+    ///
+    /// Through `resolve_spawn_roster` — the function production calls — because
+    /// the filter used to be reachable on its own and the call site could be
+    /// pointed back at it with the suite green.
     #[test]
     fn every_enabled_participant_is_spawned_in_turn_order() {
         let roster = vec![
@@ -2205,7 +2209,7 @@ mod tests {
             stub_participant(7, "eyes", 1),
             stub_participant(9, "auditor", 2),
         ];
-        let live = spawnable(&roster);
+        let live = resolve_spawn_roster(&SignalingBridge::new(), "s1", &roster);
         assert_eq!(
             live.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
             ["hands", "eyes", "auditor"],
@@ -2215,7 +2219,7 @@ mod tests {
     }
 
     #[test]
-    fn spawnable_is_turn_order_even_when_the_roster_is_not_alphabetical() {
+    fn the_spawn_roster_is_turn_order_even_when_the_rows_are_not_alphabetical() {
         // `participants_for_session` sorts by `(turn_position, id)`, and the
         // filter must not reorder: seeding the reviewer at slot 0 would make it
         // speak before there is anything to review.
@@ -2224,7 +2228,10 @@ mod tests {
             stub_participant(4, "hands", 1),
         ];
         assert_eq!(
-            spawnable(&roster).iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
+            resolve_spawn_roster(&SignalingBridge::new(), "s1", &roster)
+                .iter()
+                .map(|p| p.slug.as_str())
+                .collect::<Vec<_>>(),
             ["eyes", "hands"]
         );
     }
@@ -2242,8 +2249,12 @@ mod tests {
         ];
         roster[1].enabled = false;
         roster[2].participation_mode = "on_demand".into();
+        let bridge = SignalingBridge::new();
         assert_eq!(
-            spawnable(&roster).iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
+            resolve_spawn_roster(&bridge, "s1", &roster)
+                .iter()
+                .map(|p| p.slug.as_str())
+                .collect::<Vec<_>>(),
             ["hands"],
             "a solo session spawns one agent and the on-demand row stays asleep"
         );
@@ -2251,7 +2262,10 @@ mod tests {
         // never receives a scheduled turn.
         roster[2].participation_mode = "observer".into();
         assert_eq!(
-            spawnable(&roster).iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
+            resolve_spawn_roster(&bridge, "s1", &roster)
+                .iter()
+                .map(|p| p.slug.as_str())
+                .collect::<Vec<_>>(),
             ["hands", "specialist"]
         );
     }
@@ -2368,8 +2382,8 @@ mod tests {
     /// **THE BAR, as one chain.** rc3 is a reframe: a HANDS + EYES session must
     /// behave exactly as it did, and N=1 / N=3 are the new capability.
     ///
-    /// Run through the REAL join — `seed_session_roster` → `spawnable` → the
-    /// ring → the consensus halt — rather than against each link separately.
+    /// Run through the REAL join — `seed_session_roster` → `resolve_spawn_roster`
+    /// → the ring → the consensus halt — rather than against each link separately.
     /// The two halves were pinned apart before and the join was not: dropping
     /// the roster read at the spawn site would have left both halves green while
     /// no agent was spawned at all.
@@ -2396,7 +2410,7 @@ mod tests {
 
             // 1. Spawn: one agent per roster row, in turn order.
             let roster = s.participants_for_session("s1").await.unwrap();
-            let live = spawnable(&roster);
+            let live = resolve_spawn_roster(&SignalingBridge::new(), "s1", &roster);
             assert_eq!(live.len(), n, "N={n}: every participant must get a process");
             assert_eq!(
                 live.iter().map(|p| p.id).collect::<Vec<_>>(),
@@ -2469,7 +2483,7 @@ mod tests {
         s.create_session("s1", "t", None).await.unwrap();
         s.ensure_session_roster("s1", false).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
-        let live = spawnable(&roster);
+        let live = resolve_spawn_roster(&SignalingBridge::new(), "s1", &roster);
 
         let caps = |slug: &str| {
             participant_capabilities(live.iter().find(|p| p.slug == slug).expect(slug))
