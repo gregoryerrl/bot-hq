@@ -1577,25 +1577,76 @@ mod tests {
         assert!(has_effort, "effort env should be set from override");
     }
 
+    /// The persistent half of a cross-layer overlay, resolved the way the spawn
+    /// path resolves it.
+    ///
+    /// **The three reconcile tests below used to write this to a file under
+    /// `c.data_dir` and nothing read it back.** Overrides stopped being loaded
+    /// inside `build_command` when they moved onto `SpawnConfig.overrides`
+    /// (resolved by `core::session::resolve_participant_overrides`), so a store
+    /// on disk that no resolver is pointed at is a fixture the code never sees:
+    /// every "persistent" premise was absent, and each test was asserting only
+    /// its session half. Verified by mutation on 2026-08-12 — the whole
+    /// cross-layer reconcile block could be disabled with all 1049 tests green.
+    ///
+    /// Routing through the REAL `resolve_agent_overrides` (rather than building
+    /// an `AgentOverride` by hand) keeps the `_all` → per-role layering in the
+    /// path, which is what makes the premise a persistent override rather than
+    /// a struct literal that happens to look like one.
+    fn persistent_for_hands(
+        f: impl FnOnce(&mut crate::claude_config::AgentOverride),
+    ) -> crate::claude_config::AgentOverride {
+        use crate::claude_config::{resolve_agent_overrides, ClaudeOverrides};
+        let mut store = ClaudeOverrides::default();
+        f(store.per_role.entry("hands".into()).or_default());
+        resolve_agent_overrides(&store, Some("hands"))
+    }
+
+    /// `CLAUDE_CODE_EFFORT_LEVEL` as the built command carries it. `None` means
+    /// the variable is not set AT ALL — a different answer from "set to
+    /// something else", and the difference is what the exclusion turns on.
+    fn effort_env(cfg: &SpawnConfig) -> Option<String> {
+        build_command(cfg)
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("CLAUDE_CODE_EFFORT_LEVEL"))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().to_string())
+    }
+
+    /// The `--settings` JSON a role holding `edit_files` always gets (it carries
+    /// the PreToolUse hook), so a test can ask whether `ultracode` rode along.
+    fn settings_fragment(cfg: &SpawnConfig) -> String {
+        debug_command(cfg)
+            .iter()
+            .skip_while(|a| *a != "--settings")
+            .nth(1)
+            .expect("--settings present")
+            .clone()
+    }
+
     #[test]
     fn session_overrides_win_over_persistent() {
-        use crate::claude_config::{save_overrides, ClaudeOverrides};
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ClaudeOverrides::default();
-        store.per_role.entry("hands".into()).or_default().effort = Some("high".into()); // persistent default
-        save_overrides(dir.path(), &store).unwrap();
+        let persistent = persistent_for_hands(|o| o.effort = Some("high".into()));
 
-        let mut c = cfg(); // brian (gets --settings)
-        c.data_dir = dir.path().to_path_buf();
-        c.session_effort = Some("max".into()); // per-session pick wins
+        // Control: with no session pick, the persistent effort is what spawns.
+        // Without this the test cannot tell "the session pick won" from "the
+        // persistent pick was never there" — the failure it shipped with.
+        let mut c = cfg();
+        c.overrides = persistent;
+        assert_eq!(
+            effort_env(&c).as_deref(),
+            Some("high"),
+            "the persistent override must reach the spawn on its own"
+        );
 
-        // Session effort beats the persistent "high".
-        let cmd = build_command(&c);
-        let has_max = cmd.as_std().get_envs().any(|(k, v)| {
-            k == std::ffi::OsStr::new("CLAUDE_CODE_EFFORT_LEVEL")
-                && v == Some(std::ffi::OsStr::new("max"))
-        });
-        assert!(has_max, "session effort should win over persistent override");
+        // And the per-session pick beats it.
+        c.session_effort = Some("max".into());
+        assert_eq!(
+            effort_env(&c).as_deref(),
+            Some("max"),
+            "session effort should win over persistent override"
+        );
     }
 
     #[test]
@@ -1603,33 +1654,24 @@ mod tests {
         // Cross-layer collision: persistent effort=max + a per-session ultracode
         // pick (session effort left on Inherit). Session ultracode wins; the
         // inherited max must NOT also reach env (the documented exclusion).
-        use crate::claude_config::{save_overrides, ClaudeOverrides};
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ClaudeOverrides::default();
-        store.per_role.entry("hands".into()).or_default().effort = Some("max".into()); // persistent
-        save_overrides(dir.path(), &store).unwrap();
-
         let mut c = cfg();
-        c.data_dir = dir.path().to_path_buf();
-        c.session_ultracode = Some(true); // session pick; session_effort stays None
-
-        let cmd = build_command(&c);
-        let has_effort_env = cmd
-            .as_std()
-            .get_envs()
-            .any(|(k, _)| k == std::ffi::OsStr::new("CLAUDE_CODE_EFFORT_LEVEL"));
-        assert!(
-            !has_effort_env,
-            "inherited max effort must be cleared when the session enables ultracode"
+        c.overrides = persistent_for_hands(|o| o.effort = Some("max".into()));
+        assert_eq!(
+            effort_env(&c).as_deref(),
+            Some("max"),
+            "control: the inherited max is live before the session picks ultracode"
         );
 
-        let args = debug_command(&c);
-        let settings_arg = args
-            .iter()
-            .skip_while(|a| *a != "--settings")
-            .nth(1)
-            .expect("--settings present");
-        assert!(settings_arg.contains("ultracode"), "got {settings_arg}");
+        c.session_ultracode = Some(true); // session pick; session_effort stays None
+        assert_eq!(
+            effort_env(&c),
+            None,
+            "inherited max effort must be cleared when the session enables ultracode"
+        );
+        assert!(
+            settings_fragment(&c).contains("ultracode"),
+            "the session's ultracode is what survives the collision"
+        );
     }
 
     #[test]
@@ -1637,34 +1679,23 @@ mod tests {
         // Reverse collision: persistent ultracode + a per-session effort=max pick
         // (session ultracode left on Inherit). The session's explicit max wins;
         // ultracode must NOT also reach --settings.
-        use crate::claude_config::{save_overrides, ClaudeOverrides};
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ClaudeOverrides::default();
-        store.per_role.entry("hands".into()).or_default().ultracode = Some(true); // persistent
-        save_overrides(dir.path(), &store).unwrap();
-
         let mut c = cfg();
-        c.data_dir = dir.path().to_path_buf();
-        c.session_effort = Some("max".into()); // session pick; session_ultracode stays None
-
-        let cmd = build_command(&c);
-        let has_max = cmd.as_std().get_envs().any(|(k, v)| {
-            k == std::ffi::OsStr::new("CLAUDE_CODE_EFFORT_LEVEL")
-                && v == Some(std::ffi::OsStr::new("max"))
-        });
-        assert!(has_max, "session effort=max should reach env");
-
-        // brian always gets a --settings (the PreToolUse hook); assert the
-        // fragment no longer carries ultracode (the persistent one was cleared).
-        let args = debug_command(&c);
-        let settings_arg = args
-            .iter()
-            .skip_while(|a| *a != "--settings")
-            .nth(1)
-            .expect("--settings present");
+        c.overrides = persistent_for_hands(|o| o.ultracode = Some(true));
         assert!(
-            !settings_arg.contains("ultracode"),
-            "ultracode must be cleared by the explicit max pick; got {settings_arg}"
+            settings_fragment(&c).contains("ultracode"),
+            "control: the inherited ultracode is live before the session picks max"
+        );
+
+        c.session_effort = Some("max".into()); // session pick; session_ultracode stays None
+        assert_eq!(
+            effort_env(&c).as_deref(),
+            Some("max"),
+            "session effort=max should reach env"
+        );
+        assert!(
+            !settings_fragment(&c).contains("ultracode"),
+            "ultracode must be cleared by the explicit max pick; got {}",
+            settings_fragment(&c)
         );
     }
 
