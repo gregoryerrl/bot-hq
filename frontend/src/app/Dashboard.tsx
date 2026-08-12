@@ -603,6 +603,18 @@ export function Dashboard() {
                     pick per session (and to run a pre-flight connection test).
                   </p>
                 )}
+                {/* rc3 D9: one connector, so the picker no longer distinguishes
+                    runtimes — which means the list can offer a model whose
+                    gateway the CLI cannot talk to. Say so here, where the choice
+                    is made, rather than letting it surface as a spawn error. */}
+                {models.length > 0 && (
+                  <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                    Every model spawns through the claude CLI, so its endpoint
+                    must speak the Anthropic Messages API. Use <b>Test</b> in{" "}
+                    <b>Settings → Models</b> to check one before a session
+                    depends on it.
+                  </p>
+                )}
               </div>
               {(projects.find((p) => p.name === selectedProject)
                 ?.working_repo_path ||

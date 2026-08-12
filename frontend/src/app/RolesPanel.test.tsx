@@ -49,7 +49,6 @@ const MODELS: ModelView[] = [
     auth_token: null,
     created_at: "",
     updated_at: "",
-    native: false,
     context_window: null,
   },
 ];

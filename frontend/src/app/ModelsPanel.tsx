@@ -138,14 +138,6 @@ export function ModelsPanel() {
                     title={m.model_name}
                   >
                     <span className="truncate">{m.model_name || "—"}</span>
-                    {/* Which runtime a model uses changes its whole tool
-                        surface, so it belongs in the list rather than only
-                        inside Edit. */}
-                    {m.native && (
-                      <span className="shrink-0 rounded border border-secondary/50 px-1 font-label-caps text-label-caps text-secondary">
-                        native
-                      </span>
-                    )}
                   </span>
                   <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
                     {m.updated_at ? formatTimestamp(m.updated_at) : "—"}
@@ -255,7 +247,6 @@ function emptyDraft(): ModelView {
     auth_token: null,
     created_at: "",
     updated_at: "",
-    native: false,
     context_window: null,
   };
 }
@@ -400,11 +391,7 @@ function ModelDialog({
                 onChange={(e) =>
                   setDraft({ ...draft, auth_token: e.target.value || null })
                 }
-                placeholder={
-                  draft.native
-                    ? "(required — the native loop has no ambient-auth fallback)"
-                    : "(unset — uses provider env vars)"
-                }
+                placeholder="(unset — uses provider env vars)"
                 className={cn(terminalInputClass, "pr-12")}
               />
               <button
@@ -436,32 +423,23 @@ function ModelDialog({
             />
             <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
               Total tokens this specific model accepts.{" "}
-              <strong>Used only by the native loop</strong> — on a claude-code
-              model the meter comes from the CLI and this field is ignored. Only
-              you can know it; bot-hq never guesses, because a window is a
-              per-model fact and a wrong one renders as a confident percentage.
-              Leave blank and the meter shows a visible gap instead.
+              <strong>Nothing reads this today</strong> — the context meter takes
+              its window from claude-code, which reports one per turn. Its only
+              reader was the native loop, removed in rc3. The value is still
+              saved, so a connector that needs it can pick it up later.
             </span>
           </label>
 
-          <label className="flex items-start gap-2">
-            <input
-              type="checkbox"
-              checked={draft.native}
-              onChange={(e) => setDraft({ ...draft, native: e.target.checked })}
-              className="mt-1 accent-secondary"
-            />
-            <span className="min-w-0">
-              <FieldLabel>Native loop</FieldLabel>
-              <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
-                Run this model through bot-hq's own agent loop instead of
-                claude-code. EYES only — Rain gets exact context accounting and a
-                read root she cannot escape, but loses skills, plugins and every
-                built-in tool except file reads. Assigning it to Brian falls back
-                to claude-code.
-              </span>
-            </span>
-          </label>
+          {/* The "Native loop" checkbox lived here until rc3 D9. bot-hq now has
+              one connector, so there is no runtime to choose — but the choice it
+              used to make still has a consequence the user has to be able to
+              see, which is what this says. */}
+          <p className="break-words rounded border border-outline-variant/60 bg-surface-container-lowest p-2 font-body text-code-sm text-on-surface-variant">
+            Every saved model is spawned through the <strong>claude CLI</strong>,
+            so its endpoint has to speak the Anthropic Messages API. A gateway
+            that does not will fail at spawn — press <strong>Test</strong> above
+            to find out now instead of mid-session.
+          </p>
         </div>
 
         {error && (
