@@ -2,7 +2,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import { Dashboard } from "./Dashboard";
+import { Dashboard, MAX_PARTICIPANTS } from "./Dashboard";
 import { invoke } from "@tauri-apps/api/core";
 import type { ClaudeOverrides, ModelView, RoleView } from "../lib/bindings";
 
@@ -201,26 +201,40 @@ describe("New session dialog — participants", () => {
     expect(args.rainModelId).toBeNull();
   });
 
-  it("stops at the number of participants the runtime can spawn", async () => {
+  it("stops at the participant cap, wherever the cap is set", async () => {
     mockBackend();
     await openDialog();
     await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
 
-    fireEvent.click(screen.getByRole("button", { name: /add participant/i }));
-    expect(roleSelect(2)).toBeInTheDocument();
-    // A third row would be a participant with no process behind it — spawn
-    // starts two literally-named agents.
-    expect(
-      screen.queryByRole("button", { name: /add participant/i }),
-    ).not.toBeInTheDocument();
+    // Driven off MAX_PARTICIPANTS rather than a hardcoded 2, so raising the cap
+    // is a one-line change and not a test rewrite. The cap is a PRODUCT choice,
+    // not a runtime limit: the backend accepts MAX_SESSION_PARTICIPANTS = 8 and
+    // spawn iterates the roster. It is low because each participant is its own
+    // claude-code subprocess with its own context window and its own bill.
+    // (The reason that used to sit here — "spawn starts two literally-named
+    // agents" — stopped being true when D10 made spawn roster-driven and the
+    // bilateral router was deleted. A stale REASON on a live assertion is how
+    // someone later concludes the cap cannot be raised.)
+    const addButton = () =>
+      screen.queryByRole("button", { name: /add participant/i });
 
-    fireEvent.click(screen.getByRole("button", { name: /remove participant 2/i }));
+    for (let n = 2; n <= MAX_PARTICIPANTS; n++) {
+      fireEvent.click(addButton()!);
+      expect(roleSelect(n)).toBeInTheDocument();
+    }
+    expect(addButton()).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: new RegExp(`remove participant ${MAX_PARTICIPANTS}`, "i"),
+      }),
+    );
     expect(
-      screen.queryByRole("combobox", { name: "Participant 2 role" }),
+      screen.queryByRole("combobox", {
+        name: `Participant ${MAX_PARTICIPANTS} role`,
+      }),
     ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /add participant/i }),
-    ).toBeInTheDocument();
+    expect(addButton()).toBeInTheDocument();
   });
 
   it("says a picked model runs through the claude CLI, and only when there is one to pick", async () => {

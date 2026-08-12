@@ -38,7 +38,7 @@ import {
  * change. Nothing here refuses a wider roster: a session seeded through
  * `seed_session_roster` already runs at whatever size its creator chose.
  */
-const MAX_PARTICIPANTS = 2;
+export const MAX_PARTICIPANTS = 4;
 
 /** Effort levels claude-code accepts. Mirrors `EFFORT_OPTS` in ClaudeConfig. */
 const EFFORT_OPTS = ["low", "medium", "high", "xhigh", "max"];
