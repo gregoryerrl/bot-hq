@@ -19,6 +19,32 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// **The pre-rc3 names that survive here are WIRE STRINGS, not prose.**
+///
+/// rc3 D10 takes the agent names out of everything an agent reads, and
+/// `protocol::tests::no_tool_description_an_agent_reads_names_an_agent` sweeps
+/// both descriptor lists for them. These three are the exceptions, and they are
+/// exceptions for one reason: each is an identifier a driver SENDS or the server
+/// RETURNS. Renaming one is an API break for every external driver already
+/// written against it — a behaviour change, which the reframe contract (rule 3)
+/// says has to be argued on its own merits rather than smuggled in as a prose
+/// fix. So they stay, and the sweep exempts exactly these strings and nothing
+/// else: a NEW agent-named key still fails.
+///
+/// Each is declared once and read by both the schema and the dispatcher, so the
+/// exemption cannot outlive the contract that justifies it — drop the handler
+/// and the constant is dead code; rename the constant and the schema follows.
+pub(crate) mod wire {
+    /// `create_session`'s two positional model arguments, by turn slot.
+    pub const MODEL_ARGS: [&str; 2] = ["brian_model_id", "rain_model_id"];
+    /// The spawn-model fields `list_sessions` / `get_session_snapshot` return,
+    /// which are the `sessions` table's own column names.
+    pub const SPAWN_MODEL_FIELDS: [&str; 2] = ["brian_model_at_spawn", "rain_model_at_spawn"];
+    /// The two PRIMARY KEYS the legacy `agent_configs` table holds. Not agent
+    /// names any spawn resolves — rc3 D10's role-derived slugs never match one.
+    pub const LEGACY_CONFIG_KEYS: [&str; 2] = ["brian", "rain"];
+}
+
 fn message_to_json(m: &Message) -> Value {
     json!({
         "id": m.id,
@@ -96,7 +122,11 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
         vec![
         ToolDescriptor {
             name: "list_sessions",
-            description: "List active bot-hq sessions (not archived, not closed). Each entry includes id, title, working_repo_path, created_at, and the brian_model_at_spawn / rain_model_at_spawn fields if recorded.",
+            description: Box::leak(format!(
+                "List active bot-hq sessions (not archived, not closed). Each entry includes id, \
+                 title, working_repo_path, created_at, and the {} / {} fields if recorded.",
+                wire::SPAWN_MODEL_FIELDS[0], wire::SPAWN_MODEL_FIELDS[1]
+            ).into_boxed_str()),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDescriptor {
@@ -106,14 +136,25 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "create_session",
-            description: "Open a new bot-hq session and return its id. **This path has no roster picker, so it spawns exactly ONE agent — the first active role** (rc3 D13); use the app's New Session dialog when a session needs more. The call blocks until the agent has spawned (typically 1-3 seconds). `working_repo_path` is optional — if set, the project name is derived from the path's last component and project-specific policy.yaml is resolved. The two model parameters are saved-model ids from `list_models`, positional over turn order; omit them to fall back to the role's default model. `rain_model_id` targets a second slot this path does not create, so it is accepted and ignored.",
+            description: Box::leak(format!(
+                "Open a new bot-hq session and return its id. **This path has no roster picker, so \
+                 it spawns exactly ONE agent — the first active role** (rc3 D13); use the app's New \
+                 Session dialog when a session needs more. The call blocks until the agent has \
+                 spawned (typically 1-3 seconds). `working_repo_path` is optional — if set, the \
+                 project name is derived from the path's last component and project-specific \
+                 policy.yaml is resolved. The two model parameters are saved-model ids from \
+                 `list_models`, positional over turn order; omit them to fall back to the role's \
+                 default model. `{}` targets a second slot this path does not create, so it is \
+                 accepted and ignored.",
+                wire::MODEL_ARGS[1]
+            ).into_boxed_str()),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Human-readable label shown in the session tile." },
                     "working_repo_path": { "type": "string", "description": "Optional absolute path to a git repo. Drives project-specific policy + system-prompt context." },
-                    "brian_model_id": { "type": "string", "description": "Optional saved-model id (from list_models) for the first participant. Omit to use its role's default model." },
-                    "rain_model_id": { "type": "string", "description": "Optional saved-model id (from list_models) for a second participant. This path creates only one, so it currently has no slot to land on." }
+                    wire::MODEL_ARGS[0]: { "type": "string", "description": "Optional saved-model id (from list_models) for the first participant. Omit to use its role's default model." },
+                    wire::MODEL_ARGS[1]: { "type": "string", "description": "Optional saved-model id (from list_models) for a second participant. This path creates only one, so it currently has no slot to land on." }
                 },
                 "required": ["title"]
             }),
@@ -199,7 +240,7 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "agent_name": { "type": "string", "enum": ["brian", "rain"] },
+                    "agent_name": { "type": "string", "enum": wire::LEGACY_CONFIG_KEYS },
                     "provider": { "type": "string", "description": "Optional. e.g. 'anthropic'. Omit to keep current value." },
                     "model_name": { "type": "string", "description": "Optional. e.g. 'claude-opus-4-7'. Omit to keep current value." },
                     "base_url": { "type": "string", "description": "Optional. e.g. 'https://api.anthropic.com/v1'. Empty string clears. Omit to keep current value." },
@@ -400,8 +441,8 @@ async fn call_external_tool(
                         "title": s.title,
                         "working_repo_path": s.working_repo_path,
                         "created_at": s.created_at,
-                        "brian_model_at_spawn": s.brian_model_at_spawn,
-                        "rain_model_at_spawn": s.rain_model_at_spawn,
+                        wire::SPAWN_MODEL_FIELDS[0]: s.brian_model_at_spawn,
+                        wire::SPAWN_MODEL_FIELDS[1]: s.rain_model_at_spawn,
                     })
                 })
                 .collect();
@@ -424,8 +465,8 @@ async fn call_external_tool(
                 .open_session(
                     title,
                     working_repo_path,
-                    model_arg("brian_model_id"),
-                    model_arg("rain_model_id"),
+                    model_arg(wire::MODEL_ARGS[0]),
+                    model_arg(wire::MODEL_ARGS[1]),
                 )
                 .await
                 .map_err(|e| internal_err("open_session", e))?;
@@ -560,16 +601,21 @@ async fn call_external_tool(
         }
         "set_agent_config" => {
             let agent_name = arg_required_str(&args, "agent_name")?;
-            // These two literals are the PRIMARY KEYS of the rows the legacy
-            // `agent_configs` table actually holds, not agent names any spawn
-            // resolves — rc3 D10's role-derived slugs never match one, so a
-            // session's model comes from the participant or its role instead
+            // `wire::LEGACY_CONFIG_KEYS` is the PRIMARY KEY set of the rows the
+            // legacy `agent_configs` table actually holds, not agent names any
+            // spawn resolves — rc3 D10's role-derived slugs never match one, so
+            // a session's model comes from the participant or its role instead
             // (see `core::session::resolve_participant_config`). Accepting
-            // anything else would write a row nothing can ever read.
-            if !["brian", "rain"].contains(&agent_name.as_str()) {
+            // anything else would write a row nothing can ever read. Same
+            // constant the schema's `enum` renders, so the advertised values and
+            // the accepted ones cannot drift.
+            if !wire::LEGACY_CONFIG_KEYS.contains(&agent_name.as_str()) {
                 return Err(JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
-                    format!("agent_name must be brian/rain, got {agent_name}"),
+                    format!(
+                        "agent_name must be one of {:?}, got {agent_name}",
+                        wire::LEGACY_CONFIG_KEYS
+                    ),
                 ));
             }
             // Load current, then overlay any provided fields.
@@ -709,8 +755,8 @@ async fn call_external_tool(
                     "working_repo_path": s.working_repo_path,
                     "created_at": s.created_at,
                     "closed_at": s.closed_at,
-                    "brian_model_at_spawn": s.brian_model_at_spawn,
-                    "rain_model_at_spawn": s.rain_model_at_spawn,
+                    wire::SPAWN_MODEL_FIELDS[0]: s.brian_model_at_spawn,
+                    wire::SPAWN_MODEL_FIELDS[1]: s.rain_model_at_spawn,
                 })),
                 "phase": phase,
                 "awaiting": awaiting,

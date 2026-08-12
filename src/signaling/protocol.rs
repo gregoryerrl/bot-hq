@@ -121,6 +121,38 @@ pub struct ToolDescriptor {
     pub input_schema: Value,
 }
 
+/// The sentence a gated tool's description opens with, **derived from the gate
+/// itself** rather than written beside it.
+///
+/// These four lines used to spell the capability by hand and three of them named
+/// the wrong one: `disposition_finding` and `override_reviewer_block` claimed
+/// `edit_files`, `approve_finding` claimed `file_finding`, while
+/// [`capability::required_for`](crate::agents::capability::required_for) gates
+/// each on its own. `tools/list` is unfiltered, so every agent in every session
+/// read the wrong rule — and the SAME agent's layer-2 prompt section, which is
+/// generated from `required_for`, told it the right one. Two answers to one
+/// question, in one context window.
+///
+/// Same principle as rc3 D3 (`agents::capability_prompt`): the text that states
+/// a rule is produced from the data the runtime enforces, so the two cannot
+/// disagree. Rename a capability slug and every description follows.
+///
+/// **Panics** if `tool` is not gated at all. A description that claims a
+/// requirement the runtime does not enforce is the defect the reframe contract's
+/// acceptance rule 2 names, and this way it cannot ship: the descriptor list is
+/// a `LazyLock` and [`tests::every_gated_tool_names_the_capability_its_gate_reads`]
+/// forces it, so a mis-registered tool fails the suite rather than a user's call.
+///
+/// Leaks one string per gated tool, once per process, because
+/// [`ToolDescriptor::description`] is `&'static str` and this runs inside that
+/// `LazyLock`. Four allocations, for a sentence that cannot go stale.
+fn gated_by(tool: &'static str, rest: &str) -> &'static str {
+    let cap = crate::agents::capability::required_for(tool).unwrap_or_else(|| {
+        panic!("`{tool}` describes itself as gated, but `required_for` gates no such tool")
+    });
+    Box::leak(format!("Requires the `{}` capability. {rest}", cap.slug()).into_boxed_str())
+}
+
 /// Hand-built JSON Schemas for our tools. We don't pull in `schemars`.
 pub fn tool_descriptors() -> &'static [ToolDescriptor] {
     use std::sync::LazyLock;
@@ -128,7 +160,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         vec![
         ToolDescriptor {
             name: "ask_user_choice",
-            description: "Ask the user to pick one option from a list. Returns IMMEDIATELY with a parked acknowledgment (status=parked plus a choice_id) — it does NOT block; the user's pick is delivered later as an out-of-band user message and the session stays halted until then. After calling it, stop and wait — don't guess, poll, or re-ask. Use this whenever a decision belongs to the user.",
+            description: gated_by("ask_user_choice", "Ask the user to pick one option from a list. Returns IMMEDIATELY with a parked acknowledgment (status=parked plus a choice_id) — it does NOT block; the user's pick is delivered later as an out-of-band user message and the session stays halted until then. After calling it, stop and wait — don't guess, poll, or re-ask. Use this whenever a decision belongs to the user."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -145,7 +177,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "mark_awaiting_user",
-            description: "Flag this session as awaiting user input (non-blocking). The session's [Need User Input] badge is set; it clears the next time the user sends a message.",
+            description: gated_by("mark_awaiting_user", "Flag this session as awaiting user input (non-blocking). The session's [Need User Input] badge is set; it clears the next time the user sends a message."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -177,7 +209,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "halt",
-            description: "Yield control back to the user and unlock the chat input. Use when the duo has converged or you've finished the current slice and the next move is genuinely the user's — it ends the agent-to-agent loop cleanly. Sets the session to awaiting-user (the input unlocks even mid-turn, since awaiting outranks busy) and suppresses further peer-forwarding until the user's next message. HANDS-only. Like mark_awaiting_user but framed as a yield rather than a specific pending question; pass an optional reason shown in the tray.",
+            description: gated_by("halt", "Yield control back to the user and unlock the chat input. Use when the participants have converged or you've finished the current slice and the next move is genuinely the user's — it ends the agent-to-agent loop cleanly. Sets the session to awaiting-user (the input unlocks even mid-turn, since awaiting outranks busy) and suppresses further peer-forwarding until the user's next message. Like mark_awaiting_user but framed as a yield rather than a specific pending question; pass an optional reason shown in the tray."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -187,7 +219,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "declare_working",
-            description: "Declare harness-background work that outlives your turn (a backgrounded build/test chain, a long external job you'll be re-woken for) so the idle-unflagged watchdog doesn't read the session as stalled — suppresses the NEEDS DIRECTION chip + nudge and shows a neutral WORKING badge with your reason. NOT for user-waits (ask_user_choice / mark_awaiting_user) or peer-waits (stay silent). The declaration EXPIRES — default 600s, clamp 30–3600 via expected_seconds — and an expired declaration fires the watchdog on its next poll, so a dead background task surfaces fast; re-declare on each wake while work continues. Size it to the work: if you are orchestrating a subagent you cannot re-declare mid-wait, because nothing wakes you until it returns, so a task that may run 45 minutes needs a declaration that covers 45 minutes. Cleared automatically by the user's next message. HANDS-only.",
+            description: gated_by("declare_working", "Declare harness-background work that outlives your turn (a backgrounded build/test chain, a long external job you'll be re-woken for) so the idle-unflagged watchdog doesn't read the session as stalled — suppresses the NEEDS DIRECTION chip + nudge and shows a neutral WORKING badge with your reason. NOT for user-waits (ask_user_choice / mark_awaiting_user) or peer-waits (stay silent). The declaration EXPIRES — default 600s, clamp 30–3600 via expected_seconds — and an expired declaration fires the watchdog on its next poll, so a dead background task surfaces fast; re-declare on each wake while work continues. Size it to the work: if you are orchestrating a subagent you cannot re-declare mid-wait, because nothing wakes you until it returns, so a task that may run 45 minutes needs a declaration that covers 45 minutes. Cleared automatically by the user's next message."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -269,7 +301,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "request_approval",
-            description: "Request user approval for a policy-gated action (push_gate, force_push, per_action). PARKS and returns IMMEDIATELY with a parked acknowledgment carrying a choice_id — it does NOT block waiting for the answer. The user's pick arrives later as an out-of-band message, so do not re-issue on no answer yet; call `gate_status` with the choice_id if you need to know whether it resolved. The outcome is written to violations.jsonl. Call this BEFORE running the action (e.g., before a prod query). For a Tool-Gate-blocked Bash command, use `action_gate` instead.",
+            description: gated_by("request_approval", "Request user approval for a policy-gated action (push_gate, force_push, per_action). PARKS and returns IMMEDIATELY with a parked acknowledgment carrying a choice_id — it does NOT block waiting for the answer. The user's pick arrives later as an out-of-band message, so do not re-issue on no answer yet; call `gate_status` with the choice_id if you need to know whether it resolved. The outcome is written to violations.jsonl. Call this BEFORE running the action (e.g., before a prod query). For a Tool-Gate-blocked Bash command, use `action_gate` instead."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -309,7 +341,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "action_gate",
-            description: "Route a Bash command that the bot-hq Tool Gate blocked (the PreToolUse hook told you to call this). An `auto_allow`/unmatched command runs immediately and you get its output back. A `gate` command PARKS for the user's approval and this call returns AT ONCE with `gate_id` — it does not block, so there is nothing to time out. On approve bot-hq executes the command in your working repo and the stdout/stderr/exit code arrives as an out-of-band message; on reject you get a rejection notice (any text beyond 'Reject' is the user's reasoning — read it). NEVER re-issue a parked command or assume it ran; call gate_status(gate_id) to check. Re-parking an identical command while one is pending returns the existing gate instead of stacking a duplicate prompt. Prefer `--body-file /tmp/x.md` over inline heredocs for long bodies.",
+            description: gated_by("action_gate", "Route a Bash command that the bot-hq Tool Gate blocked (the PreToolUse hook told you to call this). An `auto_allow`/unmatched command runs immediately and you get its output back. A `gate` command PARKS for the user's approval and this call returns AT ONCE with `gate_id` — it does not block, so there is nothing to time out. On approve bot-hq executes the command in your working repo and the stdout/stderr/exit code arrives as an out-of-band message; on reject you get a rejection notice (any text beyond 'Reject' is the user's reasoning — read it). NEVER re-issue a parked command or assume it ran; call gate_status(gate_id) to check. Re-parking an identical command while one is pending returns the existing gate instead of stacking a duplicate prompt. Prefer `--body-file /tmp/x.md` over inline heredocs for long bodies."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -351,7 +383,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "eyes_flag",
-            description: "Reviewer-only — requires the `file_finding` capability. File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until HANDS dispositions it (the mechanical EYES-sign-off gate, mirroring the commit-message gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id. Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains HANDS to ignore the gate). This is how EYES makes a finding STICK instead of relying on HANDS reading chat.",
+            description: gated_by("eyes_flag", "File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until a participant holding `disposition_finding` resolves it (the mechanical sign-off gate, mirroring the commit-message gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id. Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains the executor to ignore the gate). This is how a finding STICKS instead of relying on someone reading chat."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -368,7 +400,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "disposition_finding",
-            description: "Executor-only — requires the `edit_files` capability. Resolve an EYES `blocking` finding so it stops gating `git commit`. `status='fixed'` (you fixed it — `reason` should reference the fix: commit/line/test) or `status='rebutted'` (you disagree — `reason` must justify why). A rebuttal does NOT need EYES's agreement (so it can't deadlock) but IS surfaced to the user. `reason` is REQUIRED for both. Call this for each open blocking finding before committing; see what's open with `check_open_findings`.",
+            description: gated_by("disposition_finding", "Resolve a `blocking` review finding so it stops gating `git commit`. `status='fixed'` (you fixed it — `reason` should reference the fix: commit/line/test) or `status='rebutted'` (you disagree — `reason` must justify why). A rebuttal does NOT need the finder's agreement (so it can't deadlock) but IS surfaced to the user. `reason` is REQUIRED for both. Call this for each open blocking finding before committing; see what's open with `check_open_findings`."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -394,7 +426,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "override_reviewer_block",
-            description: "Executor-only — requires the `edit_files` capability. Override a 'reviewer down' commit block when this session's reviewer is Stalled/Dead and you've confirmed the change is safe to ship unreviewed. `reason` is REQUIRED and is logged + shown in the gate response (the fail-closed escape valve — mirrors a finding rebuttal). The override auto-clears when the reviewer recovers. Only needed when check_open_findings returns 'blocked: reviewer down'.",
+            description: gated_by("override_reviewer_block", "Override a 'reviewer down' commit block when this session's reviewer is Stalled/Dead and you've confirmed the change is safe to ship unreviewed. `reason` is REQUIRED and is logged + shown in the gate response (the fail-closed escape valve — mirrors a finding rebuttal). The override auto-clears when the reviewer recovers. Only needed when check_open_findings returns 'blocked: reviewer down'."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -405,7 +437,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "approve_finding",
-            description: "Reviewer-only — requires the `file_finding` capability. Confirm that an escalated finding HANDS marked fixed is genuinely resolved — clears the escalation's 'awaiting EYES confirm' signal. Use this AFTER HANDS dispositions a finding you re-raised, once you've verified the fix is real. This does NOT gate commits (HANDS's disposition already cleared the commit gate); it's the sign-off that closes the loop. If you DON'T agree the fix is adequate, do NOT approve — re-file it with `eyes_flag` instead (a fresh open finding re-blocks the commit).",
+            description: gated_by("approve_finding", "Confirm that an escalated finding the executor marked fixed is genuinely resolved — clears the escalation's 'awaiting confirmation' signal. Use this AFTER a finding you re-raised has been dispositioned, once you've verified the fix is real. This does NOT gate commits (the disposition already cleared the commit gate); it's the sign-off that closes the loop. If you DON'T agree the fix is adequate, do NOT approve — re-file it with `eyes_flag` instead (a fresh open finding re-blocks the commit)."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -416,7 +448,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "close_session",
-            description: "Close the session this agent is running in. Kills both agents (the duo) and marks the session row closed (or archived). Use this when the user asks you to close the session and the conversation has reached a natural stopping point. Fire-and-forget — your subprocess will be terminated shortly after this call returns.",
+            description: "Close the session this agent is running in. Kills every participant's subprocess and marks the session row closed (or archived). Use this when the user asks you to close the session and the conversation has reached a natural stopping point. Fire-and-forget — your subprocess will be terminated shortly after this call returns.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -454,7 +486,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "supersede_question",
-            description: "Replace a stale question you parked for the user with a rephrased version. The old row gets status='superseded' (drops from the tray); the new row links to it via `supersedes_id` so the history is traceable. Same non-blocking semantics as `ask_user_choice` — parks the new question and returns a parked acknowledgment immediately; the user's pick on it arrives out-of-band.\n\nNote: `ask_user_choice` and `request_approval` already auto-supersede the MOST RECENT pending question from this agent in this session. Use `supersede_question` when you need to explicitly target a SPECIFIC stale row that isn't the most recent (e.g. multiple pending choices from different topics, and you want to rephrase a particular one without disturbing others).",
+            description: gated_by("supersede_question", "Replace a stale question you parked for the user with a rephrased version. The old row gets status='superseded' (drops from the tray); the new row links to it via `supersedes_id` so the history is traceable. Same non-blocking semantics as `ask_user_choice` — parks the new question and returns a parked acknowledgment immediately; the user's pick on it arrives out-of-band.\n\nNote: `ask_user_choice` and `request_approval` already auto-supersede the MOST RECENT pending question from this agent in this session. Use `supersede_question` when you need to explicitly target a SPECIFIC stale row that isn't the most recent (e.g. multiple pending choices from different topics, and you want to rephrase a particular one without disturbing others)."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -584,7 +616,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_write_file",
-            description: "Write a project-scoped Context Library file. Default mode replaces the ENTIRE file; mode:\"append\" adds content to the end instead (no read-modify-write needed). Direct write: missing parent folders are created, the write is atomic, the index rescans automatically, and every write is snapshotted into the library's local git history. Replacing a file with empty or >50%-smaller content is refused unless confirm_shrink:true (accidental-truncation guard — pass it when a prune is intentional). Also lifts the session's close-out learnings gate. HANDS-only; bot-hq-owned _globals system files (custom-instructions.md, custom-general-rules.md) are refused.",
+            description: gated_by("cl_write_file", "Write a project-scoped Context Library file. Default mode replaces the ENTIRE file; mode:\"append\" adds content to the end instead (no read-modify-write needed). Direct write: missing parent folders are created, the write is atomic, the index rescans automatically, and every write is snapshotted into the library's local git history. Replacing a file with empty or >50%-smaller content is refused unless confirm_shrink:true (accidental-truncation guard — pass it when a prune is intentional). Also lifts the session's close-out learnings gate. bot-hq-owned _globals system files (custom-instructions.md, custom-general-rules.md) are refused."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -665,7 +697,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_register_folder_description",
-            description: "Upsert a description for a CL folder. Mirrors cl_register_read's role for files but writes a stored description instead of an audit row. Requires the context-library write capability; a participant without it is denied and reviews via cl_folder_search instead. `folder_path = \"\"` writes the project-root description.",
+            description: gated_by("cl_register_folder_description", "Upsert a description for a CL folder. Mirrors cl_register_read's role for files but writes a stored description instead of an audit row. A participant without it is denied and reviews via cl_folder_search instead. `folder_path = \"\"` writes the project-root description."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -693,7 +725,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         // where the user can watch. core/terminal.rs + bridge/terminal_tools.rs.
         ToolDescriptor {
             name: "terminal_exec",
-            description: "HANDS-only. Run ONE shell command in this session's Terminal subtab (the PTY the user watches — visible evidence, unlike your Bash tool). BLOCKING by default: types the command, waits for output to settle (~0.7s quiet or wait_ms cap, default 10s), and returns the captured output with a timed_out note when capped. Pass block:false for long-running processes (servers, watchers) and read later with terminal_read. The shell runs in the session's working repo. Commands matching a gated Tool-Gate keyword are refused — route those through action_gate. Settle is a quiet-window heuristic, not prompt detection: interactive/TUI commands may return early.",
+            description: gated_by("terminal_exec", "Run ONE shell command in this session's Terminal subtab (the PTY the user watches — visible evidence, unlike your Bash tool). BLOCKING by default: types the command, waits for output to settle (~0.7s quiet or wait_ms cap, default 10s), and returns the captured output with a timed_out note when capped. Pass block:false for long-running processes (servers, watchers) and read later with terminal_read. The shell runs in the session's working repo. Commands matching a gated Tool-Gate keyword are refused — route those through action_gate. Settle is a quiet-window heuristic, not prompt detection: interactive/TUI commands may return early."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -826,13 +858,39 @@ mod tests {
     /// among the most-read text in the product. Sweeping the WHOLE descriptor
     /// list — rather than the six that were wrong — is what stops the seventh.
     ///
+    /// **Both lists.** The first version of this sweep took `tool_descriptors()`
+    /// only, so the external driver's toolset kept shipping `create_session`
+    /// with agent-named parameters and nothing said so. A sweep that covers one
+    /// of two lists is how the seventh arrives anyway; the driver is an AI client
+    /// reading these descriptions exactly as a spawned agent does.
+    ///
+    /// The only survivors are `external_jsonrpc::wire`'s identifiers — keys a
+    /// driver sends or the server returns, exempted string-by-string (see that
+    /// module for why renaming them is a behaviour change, not a prose fix). A
+    /// new agent-named key is not on that list and still fails.
+    ///
     /// Word-boundary matched: `constraint` contains `rain`, and a substring
     /// check would fail on prose that is perfectly fine.
     #[test]
     fn no_tool_description_an_agent_reads_names_an_agent() {
-        for d in tool_descriptors() {
-            let text = format!("{} {} {}", d.name, d.description, d.input_schema);
-            for word in text.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+        use crate::signaling::external_jsonrpc::{external_tool_descriptors, wire};
+        // Rendered exactly as the schema carries them: the model args and spawn
+        // fields as bare keys, the legacy config keys only as the enum ARRAY the
+        // schema prints — so a bare `"brian"` anywhere else is still caught.
+        let exempt: Vec<String> = wire::MODEL_ARGS
+            .iter()
+            .chain(wire::SPAWN_MODEL_FIELDS.iter())
+            .map(|s| s.to_string())
+            .chain(std::iter::once(
+                serde_json::to_string(&wire::LEGACY_CONFIG_KEYS).unwrap(),
+            ))
+            .collect();
+        for d in tool_descriptors().iter().chain(external_tool_descriptors()) {
+            let text = format!("{} {} {}", d.name, d.description, d.input_schema).to_lowercase();
+            let prose = exempt
+                .iter()
+                .fold(text, |acc, id| acc.replace(&id.to_lowercase(), " "));
+            for word in prose.split(|c: char| !c.is_alphanumeric()) {
                 assert!(
                     word != "brian" && word != "rain",
                     "tool `{}` still names an agent: {}",
@@ -843,27 +901,63 @@ mod tests {
         }
     }
 
-    /// The gate lines have to keep saying WHO may call a tool, or the rewrite
-    /// that removed the names also removed the contract. Each gated tool names
-    /// the capability its gate actually reads.
+    /// **The gate line names the capability the gate actually reads.**
+    ///
+    /// The first version of this test carried its own table of (tool,
+    /// capability) pairs and THREE OF FOUR were wrong — `disposition_finding`
+    /// and `override_reviewer_block` were pinned to `edit_files`,
+    /// `approve_finding` to `file_finding` — so it certified the drift it was
+    /// written to catch. `tools/list` is unfiltered, so every agent in every
+    /// session read those lines, while the same agent's layer-2 prompt section
+    /// (generated from `required_for`) told it the opposite.
+    ///
+    /// Nothing here spells a capability. The expectation is computed from
+    /// `capability::required_for` — the map `gated_by` renders from and
+    /// `jsonrpc::call_tool` gates on — so the only way to pass is to agree with
+    /// the runtime. Three rules, all derived:
+    ///
+    /// 1. an ENFORCED gated tool states its capability;
+    /// 2. no descriptor names a capability that is not its gate;
+    /// 3. a tool the gate does not enforce (`jsonrpc::PARITY_HOLD`) claims
+    ///    nothing — reframe-contract rule 2: nothing ships an enforcement that
+    ///    is not wired.
     #[test]
-    fn the_gated_tools_still_say_which_capability_they_require() {
-        let want = [
-            ("eyes_flag", "file_finding"),
-            ("approve_finding", "file_finding"),
-            ("disposition_finding", "edit_files"),
-            ("override_reviewer_block", "edit_files"),
-        ];
-        for (tool, cap) in want {
-            let d = tool_descriptors()
-                .iter()
-                .find(|d| d.name == tool)
-                .unwrap_or_else(|| panic!("no descriptor for {tool}"));
-            assert!(
-                d.description.contains(cap),
-                "`{tool}` no longer tells the agent it needs `{cap}`: {}",
-                d.description
-            );
+    fn every_gated_tool_names_the_capability_its_gate_reads() {
+        use crate::agents::capability::{required_for, Capability};
+        let mut enforced = 0;
+        for d in tool_descriptors() {
+            let claimed: Vec<&str> = Capability::ALL
+                .into_iter()
+                .filter(|c| d.description.contains(&format!("`{}` capability", c.slug())))
+                .map(|c| c.slug())
+                .collect();
+            let gate =
+                required_for(d.name).filter(|_| crate::signaling::jsonrpc::capability_gated(d.name));
+            match gate {
+                Some(cap) => {
+                    enforced += 1;
+                    assert_eq!(
+                        claimed,
+                        vec![cap.slug()],
+                        "`{}` is gated on `{}`; its description claims {:?}",
+                        d.name,
+                        cap.slug(),
+                        claimed
+                    );
+                }
+                None => assert!(
+                    claimed.is_empty(),
+                    "`{}` claims {:?} but nothing enforces it — a described gate that \
+                     does not exist is worse than no line at all",
+                    d.name,
+                    claimed
+                ),
+            }
         }
+        assert!(
+            enforced >= 14,
+            "only {enforced} enforced gated tools were checked — the descriptor list \
+             or the gate map shrank without this test noticing"
+        );
     }
 }
