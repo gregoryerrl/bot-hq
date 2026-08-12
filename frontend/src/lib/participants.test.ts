@@ -2,8 +2,11 @@ import { describe, it, expect } from "vitest";
 import {
   authorLabel,
   capabilityGapWarning,
-  labelsBySlug,
+  participantLabelIndex,
   participantLabel,
+  participantRuntime,
+  slotKey,
+  UNKNOWN_PARTICIPANT,
   type ParticipantView,
 } from "./participants";
 
@@ -54,9 +57,15 @@ describe("participantLabel — the contract's display rule", () => {
 });
 
 describe("authorLabel", () => {
-  const labels = labelsBySlug([
+  const labels = participantLabelIndex([
     p(),
-    p({ id: 2, slug: "eyes", role_display_name: "EYES", model_display_name: "R2" }),
+    p({
+      id: 2,
+      slug: "eyes",
+      role_display_name: "EYES",
+      model_display_name: "R2",
+      turn_position: 1,
+    }),
   ]);
 
   it("resolves a participant slug through the roster", () => {
@@ -72,13 +81,100 @@ describe("authorLabel", () => {
   it("lets the roster win over a reserved word", () => {
     // A role could legitimately be slugged `user`; the session's own roster is
     // the authority on who its participants are.
-    const shadowed = labelsBySlug([p({ slug: "user" })]);
+    const shadowed = participantLabelIndex([p({ slug: "user" })]);
     expect(authorLabel("user", shadowed)).toBe("HANDS · Claude Opus 5");
   });
 
-  it("keeps an unknown author attributable rather than dropping it", () => {
-    expect(authorLabel("departed", labels)).toBe("departed");
+  it("names an unresolvable author without printing its slug", () => {
+    // rc3 D10 kept legacy rows renderable — "brian and rain's history can be
+    // legacy data" — and every one of them carries `author = 'brian'` or
+    // `'rain'`. Falling back to the slug put exactly the two names the decision
+    // removed back on screen, so an author the roster cannot back is named by
+    // what is actually known about it: nothing.
+    expect(authorLabel("departed", labels)).toBe(UNKNOWN_PARTICIPANT);
+    expect(authorLabel("brian", labels)).toBe(UNKNOWN_PARTICIPANT);
+    expect(authorLabel("rain", labels)).toBe(UNKNOWN_PARTICIPANT);
+    expect(UNKNOWN_PARTICIPANT).not.toMatch(/brian|rain/i);
+    // Still attributed — an empty byline would be its own defect.
+    expect(authorLabel("departed", labels)).not.toBe("");
     expect(authorLabel(null, labels)).toBe("");
+  });
+
+  it("returns a STRING for an author that collides with Object.prototype", () => {
+    // A bare index answers `labels["toString"]` out of the prototype, and a
+    // function is not null-ish, so `??` would not catch it — the byline would
+    // render a function body. Every surface resolves its author through here.
+    for (const author of ["toString", "constructor", "valueOf"]) {
+      expect(authorLabel(author, labels)).toBe(UNKNOWN_PARTICIPANT);
+    }
+    // …and a real roster row under such a slug still wins.
+    const odd = participantLabelIndex([p({ slug: "toString" })]);
+    expect(authorLabel("toString", odd)).toBe("HANDS · Claude Opus 5");
+  });
+});
+
+describe("the two runtime key spaces", () => {
+  // Two of the backend's runtime payloads are a frozen fixed pair naming TURN
+  // SLOTS (`SessionActivityEvent.brian_busy` / `SessionRuntime.brian_health`,
+  // filled from `slugs.get(0)` / `participants.get(0)`), while the live
+  // `session:agent_health` / `session:agent_context` events key by the
+  // participant's slug. Both have to reach the same participant.
+  const first = p({
+    slug: "eyes",
+    role_display_name: "EYES",
+    turn_position: 0,
+  });
+  const second = p({
+    id: 2,
+    slug: "eyes-2",
+    role_display_name: "EYES",
+    model_display_name: "DeepSeek R2",
+    turn_position: 1,
+  });
+
+  it("keeps a slot key from ever colliding with a slug", () => {
+    // A role-derived slug cannot start with `#`, so one map holds both spaces
+    // without either silently overwriting the other.
+    expect(slotKey(0)).toBe("#slot0");
+    expect(slotKey(1)).not.toBe(slotKey(0));
+    expect(slotKey(0).startsWith("#")).toBe(true);
+  });
+
+  it("resolves a participant's runtime state through EITHER key space", () => {
+    // The backfill seeds health by slot; the live event seeds it by slug. A
+    // reader keyed to one space alone goes blank the moment the other produces.
+    expect(participantRuntime({ [slotKey(0)]: "stalled" }, first)).toBe(
+      "stalled",
+    );
+    expect(participantRuntime({ eyes: "dead" }, first)).toBe("dead");
+    expect(participantRuntime({ [slotKey(1)]: "dead" }, second)).toBe("dead");
+  });
+
+  it("prefers the live slug over the snapshot slot", () => {
+    // The slug comes from an event, the slot key from a mount-time snapshot.
+    expect(
+      participantRuntime({ eyes: "running", [slotKey(0)]: "dead" }, first),
+    ).toBe("running");
+  });
+
+  it("reads nothing for a participant nothing has reported", () => {
+    expect(participantRuntime({ "eyes-2": "dead" }, first)).toBeUndefined();
+    expect(participantRuntime(undefined, first)).toBeUndefined();
+    // A third participant has no slot on the wire at all (the pair reports 0
+    // and 1) — it resolves by slug once the live events supply one.
+    const third = p({ id: 3, slug: "hands-2", turn_position: 2 });
+    expect(participantRuntime({ [slotKey(0)]: "dead" }, third)).toBeUndefined();
+    expect(participantRuntime({ "hands-2": "running" }, third)).toBe("running");
+  });
+
+  it("indexes a label under BOTH keys, so one lookup serves either producer", () => {
+    // This is what lets `authorLabel` be the single lookup for the chat byline
+    // (slug-keyed) and the turn-status line (slot-keyed) at once.
+    const labels = participantLabelIndex([first, second]);
+    expect(labels["eyes"]).toBe("EYES · Claude Opus 5");
+    expect(labels[slotKey(0)]).toBe("EYES · Claude Opus 5");
+    expect(labels[slotKey(1)]).toBe("EYES · DeepSeek R2");
+    expect(authorLabel(slotKey(0), labels)).toBe("EYES · Claude Opus 5");
   });
 });
 

@@ -210,18 +210,22 @@ function GlobalPolicyPanel() {
  *
  * These are `app_settings` rows, not policy YAML, and each toggle persists on
  * change — the panel's "Save policy" button does not cover them. They lived
- * under the Agents subtab until rc3 D8 retired it; neither toggle is per-agent
- * configuration, so they moved here rather than being deleted with it.
+ * under the Agents subtab until rc3 D8 retired it; the worktree default is not
+ * per-agent configuration, so it moved here rather than being deleted with it.
+ *
+ * rc3 D13 removed the second toggle ("start new sessions with one
+ * participant"). The user: *"There's no 'disable rain by default' on rc3, thats
+ * moot. Just don't add the role to your session creation."* It was a toggle
+ * only because the roster was fixed at two; now the New-session dialog picks
+ * the roster, so starting solo is just not adding a second participant. A
+ * parallel unit deletes the `rain_disabled_default` key and its backend
+ * readers.
  */
 function SessionDefaults() {
   const { data: worktreeDefault, refetch } = useTauriQuery<string | null>(
     "get_app_setting",
     { key: "worktree_default" },
   );
-  const { data: rainDisabledDefault, refetch: refetchRainDefault } =
-    useTauriQuery<string | null>("get_app_setting", {
-      key: "rain_disabled_default",
-    });
   const setAppSetting = useTauriMutation<void, { key: string; value: string }>(
     "set_app_setting",
   );
@@ -253,28 +257,6 @@ function SessionDefaults() {
         several sessions can work the same project in parallel. Clean worktrees
         are removed at close; anything uncommitted is kept. The New-session
         dialog can override this per session.
-      </p>
-      <label className="mt-4 flex items-center gap-2">
-        <input
-          type="checkbox"
-          checked={rainDisabledDefault === "1"}
-          onChange={async (e) => {
-            await setAppSetting.mutateAsync({
-              key: "rain_disabled_default",
-              value: e.target.checked ? "1" : "",
-            });
-            refetchRainDefault();
-          }}
-          className="size-4 accent-primary"
-        />
-        <span className="font-body-md text-body-md text-on-surface">
-          Start new sessions with one participant (the second is opt-in)
-        </span>
-      </label>
-      <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
-        Only applies where there is no New-session dialog to pick participants —
-        the external driver and the Maintain-CL button. A solo session invites
-        the first of your roles and leaves the rest disabled.
       </p>
       {setAppSetting.error && (
         <p className="mt-2 inline-block rounded border border-error/40 bg-error-container/20 px-2 py-1 font-code-sm text-code-sm text-on-error-container">

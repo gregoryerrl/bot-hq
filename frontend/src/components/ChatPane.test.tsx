@@ -176,18 +176,24 @@ describe("ChatPane", () => {
     expect(screen.getByText("EYES · DeepSeek R2")).toBeInTheDocument();
   });
 
-  it("falls back to the author slug when the roster has no row for it", async () => {
-    // A legacy row, or a participant that has left: the line still has to be
-    // attributable, and an internal key beats no attribution at all.
+  it("attributes a row the roster cannot back WITHOUT printing its slug", async () => {
+    // A legacy row, or a participant that has left. rc3 D10 keeps these
+    // renderable on purpose — "brian and rain's history can be legacy data" —
+    // and every legacy row carries `author = 'brian'` / `'rain'`, so printing
+    // the slug here put the two removed names straight back on screen.
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === "get_session_messages")
-        return Promise.resolve([msg(1, "orphan line", "text", "departed")]);
+        return Promise.resolve([msg(1, "orphan line", "text", "brian")]);
       if (cmd === "list_session_participants") return Promise.resolve([]);
       return Promise.resolve([]);
     });
 
     renderPane();
-    expect(await screen.findByText("departed")).toBeInTheDocument();
+    // The line survives, attributed…
+    expect(await screen.findByText("orphan line")).toBeInTheDocument();
+    expect(await screen.findByText("Unknown participant")).toBeInTheDocument();
+    // …and the stored agent name does not reach the screen.
+    expect(screen.queryByText(/^brian$/i)).toBeNull();
   });
 
   it("appends live batches for this session and ignores other sessions", async () => {

@@ -29,12 +29,26 @@ function trayRow(over: Partial<SessionTrayView> = {}): SessionTrayView {
   } as SessionTrayView;
 }
 
-function renderTray(rows: SessionTrayView[]) {
+/** The session's roster, as `list_session_participants` returns it (rc3 D10). */
+const ROSTER = [
+  {
+    id: 1,
+    slug: "hands",
+    role_display_name: "HANDS",
+    model_display_name: "Claude Opus 5",
+    turn_position: 0,
+    participation_mode: "active",
+    enabled: true,
+  },
+];
+
+function renderTray(rows: SessionTrayView[], participants: unknown[] = []) {
   mockInvoke.mockImplementation((cmd: string) => {
     if (cmd === "list_session_tray") return Promise.resolve(rows);
     if (cmd === "discard_choice") return Promise.resolve(true);
     if (cmd === "compute_apply_diff")
       return Promise.resolve({ lines: [], note: null });
+    if (cmd === "list_session_participants") return Promise.resolve(participants);
     // session_doc_search and friends are list-shaped; the pane filters them.
     return Promise.resolve([]);
   });
@@ -48,11 +62,40 @@ function renderTray(rows: SessionTrayView[]) {
   );
 }
 
-async function openTray(rows: SessionTrayView[]) {
-  renderTray(rows);
+async function openTray(rows: SessionTrayView[], participants: unknown[] = []) {
+  renderTray(rows, participants);
   // The Tray tab is phase-independent and starts closed.
   fireEvent.click(await screen.findByRole("button", { name: /tray/i }));
 }
+
+describe("tray card attribution (rc3 D10)", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+  });
+
+  it("names who asked as ROLE · Model, resolved through the session's roster", async () => {
+    // Tested as ONE chain: the stored `agent` slug goes through
+    // `list_session_participants` and comes out as the card's asked-by line.
+    // The tray was named in the D10 sweep list and was still printing
+    // `entry.agent` straight from the row.
+    await openTray([trayRow({ agent: "hands" })], ROSTER);
+
+    expect(await screen.findByText("Ship it?")).toBeInTheDocument();
+    expect(screen.getByText("HANDS · Claude Opus 5")).toBeInTheDocument();
+    // The slug is an internal key; it must not reach the card.
+    expect(screen.queryByText("hands")).toBeNull();
+  });
+
+  it("does not print a legacy agent name when the roster cannot place it", async () => {
+    // A card parked before the rekey keeps `agent = 'brian'` forever — rc3 D10
+    // kept that history readable on purpose, but not by that name.
+    await openTray([trayRow({ agent: "brian" })], ROSTER);
+    await screen.findByText("Ship it?");
+
+    expect(screen.getByText("Unknown participant")).toBeInTheDocument();
+    expect(screen.queryByText(/^brian$/i)).toBeNull();
+  });
+});
 
 describe("tray discard", () => {
   beforeEach(() => {

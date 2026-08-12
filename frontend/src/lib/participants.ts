@@ -72,6 +72,88 @@ const NON_PARTICIPANT_AUTHORS: Record<string, string> = {
 };
 
 /**
+ * What an author with no roster row reads as.
+ *
+ * It used to be the author slug itself, on the reasoning that "the line still
+ * has to be attributable". That reasoning survives; the slug does not. rc3 D10
+ * kept legacy rows renderable on purpose — *"brian and rain's history can be
+ * legacy data"* — and every one of those rows carries `author = 'brian'` or
+ * `'rain'`, so falling back to the slug puts exactly the two names the same
+ * decision removed back on screen: *"I don't want to see brian and rain anymore
+ * moving forward."*
+ *
+ * So an unresolvable author is named by what is actually known about it, which
+ * is nothing. It stays visibly attributed — the byline, the tag and the status
+ * line all still render — without asserting an identity the roster cannot back.
+ */
+export const UNKNOWN_PARTICIPANT = "Unknown participant";
+
+/**
+ * The key a SLOT-SHAPED runtime field lands under.
+ *
+ * Two of the backend's runtime payloads are still shaped as a fixed pair —
+ * `SessionActivityEvent { brian_busy, rain_busy }` and
+ * `SessionRuntime { brian_health, rain_health }`. Those field names are frozen
+ * wire that names **turn slots, not agents**: `src/core/activity.rs` fills them
+ * from `slugs.get(0)` / `slugs.get(1)`, and `src/tauri_cmd/sessions.rs` from
+ * `handle.participants.get(0)` / `.get(1)`.
+ *
+ * The frontend used to unpack them under the literal keys `"brian"` / `"rain"`,
+ * which no rc3 roster has — so every lookup keyed by a roster slug missed, the
+ * mount backfill left every health dot blank, and the turn-status line printed
+ * the raw key. A `#`-prefixed key cannot collide with a slug (slugs are
+ * role-derived identifiers), which keeps the two spaces distinguishable in one
+ * map instead of silently overwriting each other.
+ */
+export function slotKey(turnPosition: number): string {
+  return `#slot${turnPosition}`;
+}
+
+/**
+ * Every key one participant's runtime state can arrive under, most specific
+ * first.
+ *
+ * **This is the only declaration of the two key spaces**, and both directions
+ * route through it: {@link participantRuntime} reads a runtime map with it and
+ * {@link participantLabelIndex} writes the label index with it. Producers that
+ * key by the live slug (`session:agent_health`, `session:agent_context` — both
+ * emitted with `cfg.slug`) and producers that key by turn slot (the
+ * `session:activity` busy flags, the `get_session_runtime` backfill) therefore
+ * resolve to the same participant without either consumer knowing which one it
+ * got.
+ *
+ * The slug wins: it comes from a live event, the slot key from a snapshot.
+ *
+ * A third participant has no slot key on the wire at all — the fixed pair
+ * reports slots 0 and 1 only — so it resolves through its slug, which the live
+ * events supply as soon as it acts.
+ */
+export function participantRuntimeKeys(
+  p: Pick<ParticipantView, "slug" | "turn_position">,
+): [string, string] {
+  return [p.slug, slotKey(p.turn_position)];
+}
+
+/**
+ * One participant's entry in a per-participant runtime map (health, context
+ * occupancy, busy flags), looked up across both key spaces.
+ *
+ * `undefined` means "nothing reported for this participant", which every caller
+ * already treats as unknown rather than empty.
+ */
+export function participantRuntime<T>(
+  map: Record<string, T | undefined> | undefined,
+  p: Pick<ParticipantView, "slug" | "turn_position">,
+): T | undefined {
+  if (!map) return undefined;
+  for (const key of participantRuntimeKeys(p)) {
+    const value = map[key];
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+/**
  * Live roster for a session, in turn order.
  *
  * `enabled` is left to the caller: the session header wants to show a disabled
@@ -87,38 +169,53 @@ export function useSessionParticipants(sessionId: string) {
 }
 
 /**
- * Roster as a slug → display-label map, for surfaces that hold an author slug
- * rather than a participant row (chat messages, the Quickview, the busy line).
+ * Roster as a key → display-label map, for surfaces that hold a key rather than
+ * a participant row: an author slug (chat messages, the Quickview, tray cards,
+ * the enforcement log) or a slot key (the turn-status line's busy flags).
+ *
+ * Both spaces land in one map via {@link participantRuntimeKeys}, so
+ * {@link authorLabel} is the single lookup every one of those surfaces uses and
+ * they cannot drift apart.
  */
-export function labelsBySlug(
+export function participantLabelIndex(
   participants: readonly ParticipantView[],
 ): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const p of participants) out[p.slug] = participantLabel(p);
+  for (const p of participants) {
+    const label = participantLabel(p);
+    for (const key of participantRuntimeKeys(p)) out[key] = label;
+  }
   return out;
 }
 
 /**
- * Display name for a message/preview author.
+ * Display name for an author slug or a slot key.
  *
  * Order matters: the roster wins over everything, so a participant is named by
  * role and model even if its slug happens to collide with a reserved word.
- * An author with no roster row (a legacy row, an agent that has since left)
- * falls back to the slug rather than being dropped — the line still has to be
- * attributable.
+ * An author with no roster row (a legacy row, a participant that has since
+ * left) reads as {@link UNKNOWN_PARTICIPANT} — still attributed, never named
+ * after an agent.
  */
 export function authorLabel(
   author: string | null | undefined,
   labels: Record<string, string>,
 ): string {
   if (!author) return "";
-  return labels[author] ?? NON_PARTICIPANT_AUTHORS[author] ?? author;
+  // `Object.hasOwn`, not a bare index: `labels["toString"]` answers out of
+  // `Object.prototype`, and a FUNCTION is not null-ish, so `??` would not catch
+  // it — a participant slugged `toString` would render a function body as its
+  // byline. Every surface in the app resolves its author through here.
+  if (Object.hasOwn(labels, author)) return labels[author];
+  if (Object.hasOwn(NON_PARTICIPANT_AUTHORS, author))
+    return NON_PARTICIPANT_AUTHORS[author];
+  return UNKNOWN_PARTICIPANT;
 }
 
-/** Hook form of {@link labelsBySlug}, memoised on the roster. */
+/** Hook form of {@link participantLabelIndex}, memoised on the roster. */
 export function useParticipantLabels(sessionId: string) {
   const { participants } = useSessionParticipants(sessionId);
-  const labels = useMemo(() => labelsBySlug(participants), [participants]);
+  const labels = useMemo(() => participantLabelIndex(participants), [participants]);
   return { participants, labels };
 }
 

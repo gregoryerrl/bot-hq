@@ -7,6 +7,7 @@ import type {
 } from "../lib/bindings";
 import { formatTimestamp } from "../lib/time";
 import { cn } from "../lib/cn";
+import { authorLabel, useParticipantLabels } from "../lib/participants";
 
 // Human labels for the snake_case wire kinds (mirrors policy/violations.rs).
 const KIND_LABELS: Record<ViolationKind, string> = {
@@ -141,7 +142,7 @@ export function ViolationsPanel() {
                   When
                 </th>
                 <th className="px-3 py-2 font-label-caps text-label-caps">
-                  Agent
+                  Participant
                 </th>
                 <th className="px-3 py-2 font-label-caps text-label-caps">
                   Kind
@@ -163,8 +164,11 @@ export function ViolationsPanel() {
                   <td className="break-words px-3 py-2 text-on-surface-variant">
                     {formatTimestamp(r.ts)}
                   </td>
-                  <td className="px-3 py-2 capitalize text-on-surface">
-                    {r.agent}
+                  <td className="px-3 py-2 text-on-surface">
+                    <ParticipantCell
+                      sessionId={r.session_id}
+                      author={r.agent}
+                    />
                   </td>
                   <td className="break-words px-3 py-2 text-on-surface-variant">
                     {KIND_LABELS[r.kind] ?? r.kind}
@@ -201,4 +205,30 @@ export function ViolationsPanel() {
       ) : null}
     </div>
   );
+}
+
+/**
+ * Who a logged event is attributed to, as `ROLE · Model` (rc3 D10).
+ *
+ * The column used to print `record.agent` straight from the log under a
+ * CSS `capitalize`, which rendered the two names the decision removed as
+ * "Brian" / "Rain" — dressed up as display names rather than the stored slugs
+ * they are. The log is append-only and never backfilled, so those rows are
+ * permanent: *"brian and rain's history can be legacy data."*
+ *
+ * One roster read per DISTINCT session — React Query keys on
+ * `[command, { sessionId }]`, so the rows of one session share a single
+ * in-flight query. A session whose roster is gone (or never had one) leaves
+ * every row of it reading "Unknown participant", which is the honest answer
+ * and still lets the Kind / Action / Outcome columns carry the audit.
+ */
+function ParticipantCell({
+  sessionId,
+  author,
+}: {
+  sessionId: string;
+  author: string;
+}) {
+  const { labels } = useParticipantLabels(sessionId);
+  return <>{authorLabel(author, labels)}</>;
 }

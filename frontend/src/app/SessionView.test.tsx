@@ -1,8 +1,12 @@
 import { render, screen, fireEvent } from "@testing-library/react";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { SessionView } from "./SessionView";
+import { useActivityStore } from "../stores/activity";
+import { useHealthStore } from "../stores/health";
+import { useContextStore } from "../stores/context";
+import { slotKey } from "../lib/participants";
 
 // The Terminal panel mounts the real SessionTerminalTab on pill click — mock
 // xterm out (jsdom has no matchMedia/canvas); panel-switching is what's under
@@ -115,6 +119,106 @@ function renderSessionView() {
 function panel(name: string): HTMLElement {
   return screen.getByRole("tabpanel", { name });
 }
+
+// The zustand runtime stores are module-global — reset between tests so a
+// seeded slot/slug key cannot leak into a test that assumes nothing reported.
+beforeEach(() => {
+  useActivityStore.setState({ bySession: {}, busyBySession: {} });
+  useHealthStore.setState({ bySession: {}, routerBySession: {} });
+  useContextStore.setState({ bySession: {} });
+});
+
+/** The worker's own line in the turn-status row: `<label> is working`. */
+function workerLine(): string {
+  return screen.getByText("is working").parentElement!.textContent!;
+}
+
+describe("SessionView turn-status line (rc3 D10)", () => {
+  it("names the working participant as ROLE · Model, resolved through the roster", async () => {
+    // Tested as ONE chain: the busy map's key goes through
+    // `list_session_participants` and comes out as the rendered status line.
+    // Pinning `ChatInput`'s rendering and the roster lookup separately would
+    // not catch a SessionView that stops handing the resolver down — which is
+    // exactly the state this test was written against (the whole `busyLabel`
+    // prop could be deleted with the suite still green).
+    //
+    // The key is a SLOT key because that is what `session:activity` produces:
+    // `brian_busy` / `rain_busy` are frozen wire naming turn slots 0 and 1
+    // (`src/core/activity.rs` fills them from `slugs.get(0)` / `.get(1)`).
+    useActivityStore.setState({
+      bySession: { s1: "busy" },
+      busyBySession: { s1: { [slotKey(0)]: true } },
+    });
+    renderSessionView();
+    await screen.findByRole("button", { name: "Workspace" });
+
+    expect(workerLine()).toBe("EYES · Claude Opus 5is working");
+  });
+
+  it("says the participant is unknown rather than printing the internal key", async () => {
+    // A busy flag for a slot the roster cannot account for. Printing the raw
+    // key here is what put "brian is working" on screen, because the frontend
+    // used to unpack the frozen pair under the literal slugs `brian` / `rain`.
+    useActivityStore.setState({
+      bySession: { s1: "busy" },
+      busyBySession: { s1: { brian: true } },
+    });
+    renderSessionView();
+    await screen.findByRole("button", { name: "Workspace" });
+
+    expect(workerLine()).toBe("Unknown participantis working");
+    expect(workerLine()).not.toMatch(/brian/i);
+  });
+});
+
+describe("SessionView health dots + context meters (rc3 D10)", () => {
+  it("finds a participant's runtime state under EITHER key the backend emits", async () => {
+    // The two halves disagreed silently. `get_session_runtime`'s
+    // `brian_health` / `rain_health` are SLOT-shaped (filled from
+    // `handle.participants.get(0)` / `.get(1)`), while the live
+    // `session:agent_health` event keys by the participant's own slug. A
+    // lookup keyed to one space alone leaves the other blank — and a blank dot
+    // renders as a healthy one, so nothing looks wrong.
+    useHealthStore.setState({
+      // Slot-keyed, as the mount backfill seeds it.
+      // Slug-keyed, as the live event seeds it.
+      bySession: { s1: { [slotKey(0)]: "stalled", "eyes-2": "dead" } },
+    });
+    useContextStore.setState({
+      bySession: {
+        s1: { eyes: { usedTokens: 620_000, contextWindow: 1_000_000 } },
+      },
+    });
+    renderSessionView();
+    await screen.findByRole("button", { name: "Workspace" });
+
+    expect(
+      screen.getByLabelText(
+        "EYES · Claude Opus 5 stalled — no response, possibly hung",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("EYES · DeepSeek R2 stopped — gave up after errors"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("EYES · Claude Opus 5 context 62 percent used"),
+    ).toBeInTheDocument();
+  });
+
+  it("leaves a participant nothing reported for reading as healthy, not as another's state", async () => {
+    // Slot 1 has no entry in either space; it must not inherit slot 0's.
+    useHealthStore.setState({ bySession: { s1: { [slotKey(0)]: "dead" } } });
+    renderSessionView();
+    await screen.findByRole("button", { name: "Workspace" });
+
+    expect(
+      screen.getByLabelText("EYES · Claude Opus 5 stopped — gave up after errors"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("EYES · DeepSeek R2 running"),
+    ).toBeInTheDocument();
+  });
+});
 
 describe("SessionView header roster (rc3 D10)", () => {
   it("names every participant as ROLE · Model while the session runs", async () => {

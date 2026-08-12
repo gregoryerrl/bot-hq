@@ -73,8 +73,10 @@ describe("Settings", () => {
     expect(subtab(/^models$/i)).not.toHaveClass("text-primary");
   });
 
-  // The two seeds are deliberately opposite ("0" = worktrees off, "1" = solo
-  // on), so a box wired to the OTHER key reads the wrong state and fails.
+  // Worktrees seeded OFF, against the opt-out default, so a box that ignores
+  // the seed reads the wrong state and fails. The solo-by-default seed is
+  // still supplied: rc3 D13 deleted the toggle, and the test below proves
+  // Settings no longer reaches for the key even when it would answer.
   const SEEDS = { worktree_default: "0", rain_disabled_default: "1" };
 
   it("keeps the worktree session default reachable, under Policy", async () => {
@@ -99,25 +101,30 @@ describe("Settings", () => {
     );
   });
 
-  it("keeps the solo-by-default session default reachable, under Policy", async () => {
+  it("no longer offers a solo-by-default toggle, or reads its key (D13)", async () => {
+    // The user: "There's no 'disable rain by default' on rc3, thats moot. Just
+    // don't add the role to your session creation." It was a toggle only while
+    // the roster was fixed at two; now the New-session dialog picks the roster,
+    // so starting solo is just not adding a second participant.
     mockBackend(SEEDS);
     renderSettings();
     await openPolicy();
-
-    // rc3 D10: the label no longer names an agent — it states what the
-    // setting does (start with one participant).
-    const box = screen.getByRole("checkbox", { name: /one participant/i });
-    await waitFor(() => expect(box).toBeChecked());
-
-    // Cleared, not "0": `default_rain_enabled` only treats the literal "1" as
-    // solo, so an empty string is what turns it back off.
-    fireEvent.click(box);
+    // The sibling toggle is the render probe — waiting on it means the block
+    // finished, so a missing checkbox below is absence, not a slow load.
     await waitFor(() =>
-      expect(mockInvoke).toHaveBeenCalledWith("set_app_setting", {
-        key: "rain_disabled_default",
-        value: "",
-      }),
+      expect(
+        screen.getByRole("checkbox", { name: /isolated git worktrees/i }),
+      ).not.toBeChecked(),
     );
+
+    expect(
+      screen.queryByRole("checkbox", { name: /one participant/i }),
+    ).toBeNull();
+    // Stronger than the missing box: nothing in Settings reaches for the key
+    // at all, so a re-added hidden reader fails here too.
+    expect(mockInvoke).not.toHaveBeenCalledWith("get_app_setting", {
+      key: "rain_disabled_default",
+    });
   });
 
   it("shows worktrees on when the setting was never written", async () => {

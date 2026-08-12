@@ -17,8 +17,9 @@ interface SessionTileProps {
   pendingCount?: number;
   /** Current IPAV phase (lowercase) from `get_session_phase`. Null when unknown. */
   phase?: string | null;
-  /** Participant slug → `ROLE · Model`, from the session's roster (rc3 D10).
-   *  Empty is safe: an unknown author falls back to its own slug. */
+  /** Participant key → `ROLE · Model`, from the session's roster (rc3 D10).
+   *  Empty is safe, but it is not free: an author with no row reads as
+   *  "Unknown participant", so the roster is what makes the tag informative. */
   authorLabels?: Record<string, string>;
 }
 
@@ -45,6 +46,10 @@ function SessionTileImpl({
   const working = useHealthStore((s) => s.workingBySession[session.id]);
   // Slot 8 Quickview: first line of the latest text message (null until one exists).
   const quickview = firstLine(session.last_message);
+  // …and who wrote it, as `ROLE · Model` (rc3 D10). The label is both what the
+  // tag prints and what tints it, so this session's byline matches the colour
+  // the same participant gets inside the session view.
+  const quickviewAuthor = authorLabel(session.last_author, authorLabels);
 
   const open = () => navigate(`/sessions/${session.id}`);
   const onTileKey = (e: React.KeyboardEvent) => {
@@ -165,10 +170,10 @@ function SessionTileImpl({
             <span
               className={cn(
                 "mr-1.5 font-semibold",
-                authorColorClass(session.last_author ?? ""),
+                authorColorClass(quickviewAuthor),
               )}
             >
-              {authorLabel(session.last_author, authorLabels)}
+              {quickviewAuthor}
             </span>
             {quickview}
           </div>
