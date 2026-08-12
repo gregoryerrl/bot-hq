@@ -2143,6 +2143,42 @@ mod tests {
         assert!(s.role_by_slug("absent-role").await.unwrap().is_none());
     }
 
+    /// The row-count check in [`Storage::update_role`] is what DIAGNOSES a
+    /// missing id — and it is the only thing that does.
+    ///
+    /// The test above asserts `update_role(9999, ..).is_err()`, and that
+    /// assertion is green with the `changed == 0` guard deleted: the function
+    /// re-reads the row it just wrote, `role_by_id(9999)` answers `None`, and
+    /// the `with_context` on that `Option` produces an error of its own. So
+    /// err-vs-ok cannot tell the two builds apart. Verified by running the whole
+    /// suite with the guard neutered — 1148 lib tests passed.
+    ///
+    /// What the guard buys is the difference between the two messages, and that
+    /// difference is not cosmetic. "vanished between update and read" describes
+    /// a row that existed for the UPDATE and was gone microseconds later — a
+    /// should-be-impossible race, and a full afternoon of hunting for a
+    /// concurrency bug. The truth is the flat, ordinary case of an id that never
+    /// named anything: a stale roles-tab row, a caller's uninitialised `0`. The
+    /// guard is what says so.
+    #[tokio::test]
+    async fn updating_a_missing_role_blames_the_id_not_an_impossible_race() {
+        let s = storage_with_0044().await;
+        let err = s
+            .update_role(9999, &draft("Ghost"))
+            .await
+            .expect_err("a write to an id nothing holds must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("9999") && msg.contains("does not exist"),
+            "expected the missing id to be named, got {msg:?}"
+        );
+        assert!(
+            !msg.contains("vanished"),
+            "a plain bad id was reported as a lost-row race, which sends the \
+             reader hunting a concurrency bug that did not happen: {msg:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_role_a_participant_references_cannot_be_hard_deleted() {
         // The premise of migration 0047, checked against the real schema rather
