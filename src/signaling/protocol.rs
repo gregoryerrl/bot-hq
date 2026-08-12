@@ -351,7 +351,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "eyes_flag",
-            description: "EYES-only (rain). File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until HANDS dispositions it (the mechanical EYES-sign-off gate, mirroring the commit-message gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id. Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains HANDS to ignore the gate). This is how EYES makes a finding STICK instead of relying on HANDS reading chat.",
+            description: "Reviewer-only — requires the `file_finding` capability. File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until HANDS dispositions it (the mechanical EYES-sign-off gate, mirroring the commit-message gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id. Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains HANDS to ignore the gate). This is how EYES makes a finding STICK instead of relying on HANDS reading chat.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -368,7 +368,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "disposition_finding",
-            description: "HANDS-only (brian). Resolve an EYES `blocking` finding so it stops gating `git commit`. `status='fixed'` (you fixed it — `reason` should reference the fix: commit/line/test) or `status='rebutted'` (you disagree — `reason` must justify why). A rebuttal does NOT need EYES's agreement (so it can't deadlock) but IS surfaced to the user. `reason` is REQUIRED for both. Call this for each open blocking finding before committing; see what's open with `check_open_findings`.",
+            description: "Executor-only — requires the `edit_files` capability. Resolve an EYES `blocking` finding so it stops gating `git commit`. `status='fixed'` (you fixed it — `reason` should reference the fix: commit/line/test) or `status='rebutted'` (you disagree — `reason` must justify why). A rebuttal does NOT need EYES's agreement (so it can't deadlock) but IS surfaced to the user. `reason` is REQUIRED for both. Call this for each open blocking finding before committing; see what's open with `check_open_findings`.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -394,7 +394,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "override_reviewer_block",
-            description: "HANDS-only (brian). Override a 'reviewer down' commit block when the duo reviewer (Rain) is Stalled/Dead and you've confirmed the change is safe to ship unreviewed. `reason` is REQUIRED and is logged + shown in the gate response (the fail-closed escape valve — mirrors a finding rebuttal). The override auto-clears when the reviewer recovers. Only needed when check_open_findings returns 'blocked: reviewer down'.",
+            description: "Executor-only — requires the `edit_files` capability. Override a 'reviewer down' commit block when this session's reviewer is Stalled/Dead and you've confirmed the change is safe to ship unreviewed. `reason` is REQUIRED and is logged + shown in the gate response (the fail-closed escape valve — mirrors a finding rebuttal). The override auto-clears when the reviewer recovers. Only needed when check_open_findings returns 'blocked: reviewer down'.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -405,7 +405,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "approve_finding",
-            description: "EYES-only (rain). Confirm that an escalated finding HANDS marked fixed is genuinely resolved — clears the escalation's 'awaiting EYES confirm' signal. Use this AFTER HANDS dispositions a finding you re-raised, once you've verified the fix is real. This does NOT gate commits (HANDS's disposition already cleared the commit gate); it's the sign-off that closes the loop. If you DON'T agree the fix is adequate, do NOT approve — re-file it with `eyes_flag` instead (a fresh open finding re-blocks the commit).",
+            description: "Reviewer-only — requires the `file_finding` capability. Confirm that an escalated finding HANDS marked fixed is genuinely resolved — clears the escalation's 'awaiting EYES confirm' signal. Use this AFTER HANDS dispositions a finding you re-raised, once you've verified the fix is real. This does NOT gate commits (HANDS's disposition already cleared the commit gate); it's the sign-off that closes the loop. If you DON'T agree the fix is adequate, do NOT approve — re-file it with `eyes_flag` instead (a fresh open finding re-blocks the commit).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -506,7 +506,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "session_doc_search",
-            description: "List this session's scratch documents. Returns lightweight rows {id, slug, body, phase, updated_at} ordered newest-first. Use BEFORE session_doc_read to find what's worth opening. **Use the `phase` filter to pull prior-phase context (e.g., Brian in Apply: `session_doc_search(phase=\"plan\")` finds the plan to implement; Rain in Verify: `session_doc_search(phase=\"apply\")` finds the apply summary).** Prefer this over scrolling chat history.",
+            description: "List this session's scratch documents. Returns lightweight rows {id, slug, body, phase, updated_at} ordered newest-first. Use BEFORE session_doc_read to find what's worth opening. **Use the `phase` filter to pull prior-phase context (e.g., in Apply: `session_doc_search(phase=\"plan\")` finds the plan to implement; in Verify: `session_doc_search(phase=\"apply\")` finds the apply summary).** Prefer this over scrolling chat history.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -665,7 +665,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_register_folder_description",
-            description: "Upsert a description for a CL folder. Mirrors cl_register_read's role for files but writes a stored description instead of an audit row. HANDS (brian) can call this; Rain (EYES) is denied — Rain reviews via cl_folder_search. `folder_path = \"\"` writes the project-root description.",
+            description: "Upsert a description for a CL folder. Mirrors cl_register_read's role for files but writes a stored description instead of an audit row. Requires the context-library write capability; a participant without it is denied and reviews via cl_folder_search instead. `folder_path = \"\"` writes the project-root description.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -810,6 +810,60 @@ impl ToolCallResult {
         Self {
             content: vec![ToolContentBlock::Text { text: s.into() }],
             is_error: true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **Nothing an agent reads names a person (rc3 D10).**
+    ///
+    /// The name-removal commit claimed this and it was not true: six tool
+    /// descriptions still said `EYES-only (rain)` / `HANDS-only (brian)`, and
+    /// tool descriptions are read by every agent on every session, so they are
+    /// among the most-read text in the product. Sweeping the WHOLE descriptor
+    /// list — rather than the six that were wrong — is what stops the seventh.
+    ///
+    /// Word-boundary matched: `constraint` contains `rain`, and a substring
+    /// check would fail on prose that is perfectly fine.
+    #[test]
+    fn no_tool_description_an_agent_reads_names_an_agent() {
+        for d in tool_descriptors() {
+            let text = format!("{} {} {}", d.name, d.description, d.input_schema);
+            for word in text.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+                assert!(
+                    word != "brian" && word != "rain",
+                    "tool `{}` still names an agent: {}",
+                    d.name,
+                    d.description
+                );
+            }
+        }
+    }
+
+    /// The gate lines have to keep saying WHO may call a tool, or the rewrite
+    /// that removed the names also removed the contract. Each gated tool names
+    /// the capability its gate actually reads.
+    #[test]
+    fn the_gated_tools_still_say_which_capability_they_require() {
+        let want = [
+            ("eyes_flag", "file_finding"),
+            ("approve_finding", "file_finding"),
+            ("disposition_finding", "edit_files"),
+            ("override_reviewer_block", "edit_files"),
+        ];
+        for (tool, cap) in want {
+            let d = tool_descriptors()
+                .iter()
+                .find(|d| d.name == tool)
+                .unwrap_or_else(|| panic!("no descriptor for {tool}"));
+            assert!(
+                d.description.contains(cap),
+                "`{tool}` no longer tells the agent it needs `{cap}`: {}",
+                d.description
+            );
         }
     }
 }

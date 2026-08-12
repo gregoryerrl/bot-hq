@@ -1296,9 +1296,27 @@ managed_settings_present: boolean; core_knobs: SettingItem[]; skills: SkillItem[
  */
 warnings: string[] }
 /**
- * The full override store: a fan-out `_all` default plus per-agent entries.
+ * The full override store: a fan-out `_all` default plus per-ROLE entries.
+ * 
+ * **rc3 D10 re-key.** The per-agent buckets were two fixed fields named after
+ * people, and `resolve_agent_overrides` matched a participant slug against
+ * those two literals. Role-derived slugs match neither, so every per-agent
+ * override silently resolved to `_all` — the store had an editor, a file and a
+ * resolver, and changed nothing at spawn.
+ * 
+ * The key is now the **role slug**, which is the unit the user actually
+ * configures (the Roles tab owns a role's prose, capabilities and default
+ * model, so its Claude-config overrides belong beside them). Not the
+ * participant slug: those are per-session and gain numeric suffixes
+ * (`hands-2`), so a global config panel could neither enumerate nor address
+ * them, and two participants of one role would need the override entered
+ * twice.
  */
-export type ClaudeOverrides = { _all?: AgentOverride; brian?: AgentOverride; rain?: AgentOverride }
+export type ClaudeOverrides = { _all?: AgentOverride; 
+/**
+ * role slug → that role's overrides, layered over `_all` at resolve time.
+ */
+per_role?: Partial<{ [key in string]: AgentOverride }> }
 /**
  * Result of `compute_apply_diff`: the classified diff lines plus an
  * optional human-readable note (e.g., the session-start anchor was lost
@@ -1519,7 +1537,20 @@ model_display_name: string | null; turn_position: number;
 /**
  * `active` | `observer` (| `on_demand`, which create refuses today).
  */
-participation_mode: string; enabled: boolean }
+participation_mode: string; enabled: boolean; 
+/**
+ * This participant's effort override (rc3 D12), or `null` to inherit.
+ * 
+ * The New Session dialog writes both this and `ultracode` per row and
+ * nothing could read them back, so the session view had no way to show
+ * what a running participant was actually spawned with. Read off the
+ * participant row, where spawn reads them from.
+ */
+effort: string | null; 
+/**
+ * This participant's ultracode override (rc3 D12), or `null` to inherit.
+ */
+ultracode: boolean | null }
 /**
  * Permission posture summary (counts only; bot-hq overrides per agent anyway).
  */

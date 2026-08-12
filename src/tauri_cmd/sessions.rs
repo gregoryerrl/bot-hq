@@ -259,6 +259,15 @@ pub struct ParticipantView {
     /// `active` | `observer` (| `on_demand`, which create refuses today).
     pub participation_mode: String,
     pub enabled: bool,
+    /// This participant's effort override (rc3 D12), or `null` to inherit.
+    ///
+    /// The New Session dialog writes both this and `ultracode` per row and
+    /// nothing could read them back, so the session view had no way to show
+    /// what a running participant was actually spawned with. Read off the
+    /// participant row, where spawn reads them from.
+    pub effort: Option<String>,
+    /// This participant's ultracode override (rc3 D12), or `null` to inherit.
+    pub ultracode: Option<bool>,
 }
 
 /// A session's roster in turn order — the read side of rc3 D10.
@@ -314,6 +323,8 @@ pub(crate) async fn participant_views(
             turn_position: p.turn_position,
             participation_mode: p.participation_mode,
             enabled: p.enabled,
+            effort: p.effort,
+            ultracode: p.ultracode,
         });
     }
     Ok(out)
@@ -528,9 +539,9 @@ pub(crate) async fn dispatch_session_inner(
     rain_override: Option<bool>,
 ) -> Result<SessionInfo, AppError> {
     // No create dialog on this path → placement comes from the configured
-    // default (worktree_default). solo/duo is `rain_override` when the caller
-    // pins it (the `plugin_sessions` create arm forces solo unless the plugin
-    // asks for a duo), else the configured default (rain_disabled_default).
+    // default (worktree_default), and the roster from `rain_override` when the
+    // caller pins it (the `plugin_sessions` create arm) or from the product
+    // default below.
     let (working, base) = resolve_session_placement(
         storage,
         &core.paths.data_dir,
@@ -550,14 +561,14 @@ pub(crate) async fn dispatch_session_inner(
             .map_err(|e| AppError::DbError(e.to_string()))?;
         session.base_repo_path = base;
     }
-    // Honor `rain_override` when the caller pins solo/duo, else the user's
-    // configured default. Without this the DB default (`rain_enabled=1`)
-    // always spawned the duo regardless of `rain_disabled_default`. Models
-    // stay NULL = per-agent defaults, same as the dialog's "(agent default)".
-    let rain_enabled = match rain_override {
-        Some(v) => v,
-        None => storage.default_rain_enabled().await,
-    };
+    // **rc3 D13: no setting behind this any more — the product default is ONE
+    // participant.** The `rain_disabled_default` toggle this used to read is
+    // deleted ("there is no 'disable the reviewer by default'; just don't add
+    // the role to your session creation"), and design §1 puts the default at one
+    // agent. A caller that wants more pins it through `rain_override`; the seed
+    // itself is `Storage::ensure_session_roster`, which documents the same rule.
+    // Models stay NULL = role/agent defaults, as the dialog's "(agent default)".
+    let rain_enabled = rain_override.unwrap_or(false);
     storage
         .set_session_spawn_config(&id, rain_enabled, None, None)
         .await
@@ -1013,6 +1024,37 @@ mod tests {
                 assert!(!v.model_display_name.as_deref().unwrap_or_default().contains(banned));
             }
         }
+    }
+
+    /// **The dialog's per-participant effort + ultracode become readable.**
+    ///
+    /// The New Session dialog writes both onto the participant row (rc3 D12)
+    /// and spawn reads them from there, but nothing could read them BACK — so
+    /// the session view could not show what a running participant was actually
+    /// spawned with. Two nullable fields on the row the view already returns;
+    /// the columns predate this (0044).
+    #[tokio::test]
+    async fn participant_views_carry_the_rows_effort_and_ultracode() {
+        let (storage, _b) = setup().await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage.ensure_session_roster("s1", false).await.unwrap();
+        let roster = storage.participants_for_session("s1").await.unwrap();
+
+        // Only the first row is given knobs, so the assertion is a DIFFERENCE
+        // between rows rather than a constant the view could invent.
+        storage
+            .set_participant_spawn_knobs(roster[0].id, Some("xhigh"), Some(true))
+            .await
+            .unwrap();
+
+        let views = participant_views(&storage, "s1").await.unwrap();
+        assert_eq!(views[0].effort.as_deref(), Some("xhigh"));
+        assert_eq!(views[0].ultracode, Some(true));
+        assert_eq!(
+            views[1].effort, None,
+            "a row that chose nothing inherits — null, not a guessed default"
+        );
+        assert_eq!(views[1].ultracode, None);
     }
 
     #[tokio::test]

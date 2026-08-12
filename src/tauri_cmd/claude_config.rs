@@ -94,7 +94,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut store = ClaudeOverrides::default();
         store
-            .brian
+            .per_role
+            .entry("hands".into())
+            .or_default()
             .skills
             .insert("note".into(), SkillVisibility::UserInvocableOnly);
         save_overrides(dir.path(), &store).unwrap();

@@ -717,6 +717,45 @@ impl Storage {
         Ok(row.as_ref().map(participant_from_row))
     }
 
+    /// One participant's name, by the display rule
+    /// ([`participant_display_name`]): the ROLE it plays and the MODEL it runs
+    /// on, never a person's name (rc3 D10).
+    ///
+    /// Both halves are read live rather than off the row's frozen
+    /// `display_name`, so renaming a role or swapping a model is reflected
+    /// without waiting for a respawn. Every failure — no `role_id`, an
+    /// archived-away role, a deleted model, a query error — degrades ONE half to
+    /// `None` and the display rule resolves what is left, down to the slug.
+    ///
+    /// Lives here rather than at either call site because both the spawn path
+    /// (`core::session`) and the reviewer's phase-doc header
+    /// (`SignalingBridge::session_doc_write_eyes`) name a participant, and two
+    /// copies of a display rule are two things that can disagree about what a
+    /// participant is called.
+    pub async fn display_name_of(&self, p: &Participant) -> String {
+        let role = match p.role_id {
+            Some(id) => match self.role_by_id(id).await {
+                Ok(r) => r.map(|r| r.display_name),
+                Err(e) => {
+                    tracing::warn!(role_id = id, ?e, "reading a role's display name failed");
+                    None
+                }
+            },
+            None => None,
+        };
+        let model = match p.model_id.as_deref().filter(|m| !m.is_empty()) {
+            Some(id) => match self.get_model(id).await {
+                Ok(m) => m.map(|m| m.display_name),
+                Err(e) => {
+                    tracing::warn!(model_id = %id, ?e, "reading a model's display name failed");
+                    None
+                }
+            },
+            None => None,
+        };
+        participant_display_name(role.as_deref(), model.as_deref(), &p.slug)
+    }
+
     /// Seed the DEFAULT roster for a session that has none, returning how many
     /// participants were inserted (0 on the common path).
     ///
@@ -738,15 +777,30 @@ impl Storage {
     /// slot 1), which `the_default_roster_is_role_derived_in_creation_order`
     /// pins.
     ///
-    /// `solo` is the caller's solo/duo default (`rain_disabled_default`): it
-    /// DISABLES every participant after the first, exactly as the old seed
-    /// disabled the second row for a solo session. The row is kept rather than
-    /// skipped, matching what 0044 did for the 12 solo sessions it backfilled.
+    /// **`first_role_only` is the PRODUCT DEFAULT for every create path with no
+    /// dialog, and it has no UI behind it (rc3 D13).** The
+    /// `rain_disabled_default` setting that used to answer this is deleted — the
+    /// user's words: *"there is no 'disable the reviewer by default'; just don't
+    /// add the role to your session creation"* — so the external driver
+    /// (`CoreAppState::open_session`) and the plugin create arm
+    /// (`dispatch_session_inner`) now pass `true` and this seeds **exactly one
+    /// participant: the first active role by `roles.id`**, per design §1 ("how
+    /// many agents, **default 1**"). Anything that wants more picks a roster,
+    /// through the New Session dialog or `seed_session_roster`.
+    ///
+    /// One ROW, not N rows with the extras disabled — which is what this did
+    /// while the roster was a fixed pair. A disabled row for a role the creator
+    /// never chose is a participant the session view renders and nothing wakes;
+    /// under N roles it would be one such row per role the user has ever made.
     ///
     /// **This is the DEFAULT roster, not the only one.** A session created
     /// through [`Storage::seed_session_roster`] already has the roster its
     /// creator chose, and this must not add to it — hence the count guard.
-    pub async fn ensure_session_roster(&self, session_id: &str, solo: bool) -> Result<u64> {
+    pub async fn ensure_session_roster(
+        &self,
+        session_id: &str,
+        first_role_only: bool,
+    ) -> Result<u64> {
         // Seed only into a session that has NO roster.
         //
         // `OR IGNORE` on `UNIQUE (session_id, slug)` was the whole idempotence
@@ -782,6 +836,15 @@ impl Storage {
             // subqueries used to produce silently.
             return Ok(0);
         }
+        // The default-1 cut, applied to BOTH the drafts and the role list they
+        // are zipped against — `insert_roster` reads the slug and display name
+        // off the matching role, so truncating one without the other would seed
+        // a participant under the wrong role's name.
+        let roles: Vec<Role> = if first_role_only {
+            roles.into_iter().take(1).collect()
+        } else {
+            roles
+        };
         let drafts: Vec<ParticipantDraft> = roles
             .iter()
             .map(|role| ParticipantDraft {
@@ -789,13 +852,7 @@ impl Storage {
                 ..ParticipantDraft::default()
             })
             .collect();
-        // Everything after the first is disabled when the session runs solo —
-        // the flag the create dialog's "disable the reviewer" checkbox used to
-        // set, resolved by the caller.
-        let enabled: Vec<bool> = (0..drafts.len()).map(|i| i == 0 || !solo).collect();
-        let ids = self
-            .insert_roster(session_id, &drafts, &roles, Some(&enabled))
-            .await?;
+        let ids = self.insert_roster(session_id, &drafts, &roles, None).await?;
         // Repair what a rosterless window wrote. Only reachable when this call
         // actually inserted, so a healthy respawn never runs it. Scoped to
         // `origin = 'participant'`: user/system rows have no participant by
@@ -3795,16 +3852,27 @@ mod tests {
         assert_eq!(s.participants_for_session("s1").await.unwrap().len(), 2);
     }
 
+    /// **The product default for every create path with no dialog (rc3 D13).**
+    ///
+    /// One participant — the FIRST active role by `roles.id` — not N rows with
+    /// the extras disabled, which is what this did while the roster was a fixed
+    /// pair. There is no setting behind it: `rain_disabled_default` is deleted,
+    /// so this assertion IS the default, and the external driver and the plugin
+    /// create arm both land on it.
     #[tokio::test]
-    async fn a_solo_session_keeps_rain_disabled() {
-        // Same shape 0044 gave the 12 solo sessions it backfilled: the row
-        // exists (so promoting later is an UPDATE, not an invite) but is off.
+    async fn the_dialogless_default_seeds_exactly_one_participant() {
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
-        assert_eq!(s.ensure_session_roster("s1", true).await.unwrap(), 2);
+        assert_eq!(s.ensure_session_roster("s1", true).await.unwrap(), 1);
         let roster = s.participants_for_session("s1").await.unwrap();
-        assert!(roster[0].enabled, "HANDS runs");
-        assert!(!roster[1].enabled, "EYES present but disabled");
+        assert_eq!(roster.len(), 1, "no row for a role nobody invited");
+        assert!(roster[0].enabled, "the one participant runs");
+        assert_eq!(
+            roster[0].slug, "hands",
+            "the FIRST active role by roles.id — creation order, not alphabetical"
+        );
+        // And it can take a turn, which is what makes it a session rather than
+        // a roster of one that nothing wakes.
         assert!(s.next_active_participant("s1", None).await.unwrap().is_some());
     }
 

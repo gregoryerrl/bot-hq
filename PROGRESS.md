@@ -9,6 +9,94 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-12 — closing four blocking findings against the name removal (+ D13, D14)
+
+The previous entry claimed *"nothing in the runtime, the schema writes, or the
+prompts is keyed on an agent's name."* **That was not true**, and this batch is
+what makes it true. Four of the five remaining name checks were fail-quiet — they
+did not error, they silently took the wrong branch — and one of them destroyed
+data. The correction is recorded here rather than by editing the claim above,
+because the claim is what the reviewer caught and the record of a wrong claim is
+worth more than a tidy one.
+
+**The fifth fail-quiet check, and the only one that lost work.**
+`session_doc_write` routed a reviewer's phase-tagged doc with
+`match caller.agent.as_str() { "rain" => … }`. No participant answers to that any
+more, so every phase-tagged review write took the fallback arm and OVERWROTE the
+executor's doc for that phase — while migration 0049's role prose kept promising
+the co-located `<phase>-eyes` doc, so the prompt was lying. It keys on
+`file_finding` now: the same capability the commit gate's reviewer registry is
+built from, so the two cannot disagree about who a reviewer is. The doc's heading
+(`### EYES findings (Rain)`) became a roster fact, and the display rule moved to
+`Storage::display_name_of` so the prompt's peer roster and this heading are one
+implementation.
+
+**The untested join.** `bridge.register_session_reviewers` had exactly ONE
+production caller and no test reached it — every test registered reviewers by
+hand. Proven by deleting the call and running the suite: **1102 passed**. So the
+reviewer-down commit gate could fail OPEN and nothing would say so. Both roster
+answers now come off one call whose return value the spawn cannot proceed
+without (`resolve_spawn_roster`): who spawns, and who the gate watches. Cutting
+the registration turns a test red; cutting the call site fails to COMPILE. Both
+verified.
+
+**Per-agent Claude-config overrides were dead.** `resolve_agent_overrides`
+matched the literals `"brian"` / `"rain"` while both callers passed a
+role-derived slug, so every per-agent override resolved to the global `_all`
+config — an editor, a file and a resolver that changed nothing at spawn. The
+store is re-keyed by **role slug** (`{_all, per_role: {…}}`): not participant
+slug, which is per-session and gains numeric suffixes, so a global panel could
+neither enumerate nor address one. Resolution moved into one function the spawn
+path calls and a test can reach, and the resolved value now rides on
+`SpawnConfig` — the spawner and the command builder each loaded and resolved the
+store separately off an agent name, which is two keys that went stale at once.
+**Frontend follow-up required:** `ClaudeConfig.tsx` and `Dashboard.tsx` read
+`.brian` / `.rain` and must read `per_role[<role slug>]`, enumerating roles via
+`list_roles` instead of two fixed turn-slot blocks. `tsc` flags all six reads.
+
+**Agent-visible names on the DEFAULT path.** `peer_forward_message` prefixed
+every router-forwarded message with a hardcoded person name, and the router is
+the default path (the sequencer is opt-in), so that string is what agents
+actually read. It is a roster fact now, carried on `RouterDeps` and resolved once
+at spawn; an unnameable sender degrades to an unattributed tag rather than a
+wrong one. Also swept: six MCP tool descriptions (which now name the CAPABILITY
+their gate reads, so the text states the rule instead of a lineup), the Apply
+entry nudge, the Apply phase transition notice, the idle chat notice, the
+external driver's tool text, the claude-config inheritance chips and MCP
+forwarding chip, and the hook-attribution fallbacks. Two sweep tests walk every
+tool descriptor and every inheritance surface, so the next one fails rather than
+ships.
+
+Deliberately left, each an internal key nothing displays: the legacy
+custom-instruction templates (byte-compared to tell an untouched seed from user
+content), `Author`'s wire strings (a turn-slot index), the legacy `agent_configs`
+row keys, the test-only parity oracle, and `peer_shaped_reason`'s word list
+(heuristic vocabulary, nothing keyed on it).
+
+**`ParticipantView` gained `effort` and `ultracode`** — the create dialog wrote
+both per participant (D12) and nothing could read them back, so the session view
+could not show what a running participant was spawned with.
+
+**D13 — `rain_disabled_default` is deleted.** The user: *"there is no 'disable
+the reviewer by default' on rc3; just don't add the role to your session
+creation."* The setting, `Storage::default_rain_enabled` and both readers are
+gone. The consequence needed an answer, not a silent default: those readers are
+the create paths with NO dialog (the external driver, the plugin arm), so per
+design §1 they now seed **exactly one participant — the first active role by
+`roles.id`**. One ROW, not N rows with the extras disabled, which is what the
+fixed pair used to do: a disabled row for a role the creator never chose is a
+participant the session view renders and nothing wakes. Stated at
+`ensure_session_roster`, where the seeding happens. The Settings toggle is the
+frontend's half.
+
+**D14 — `AgentEvent::Error` is deleted.** D9 removed its only emitter with the
+native loop; the variant, its handler and its two tests covered a path nothing
+could take.
+
+No migration in this batch — 0049 remains the highest.
+
+---
+
 ## 2026-08-12 — rc3 D10/D12: the agent names are gone, and the 2-participant cap with them
 
 The user, repeatedly: *"I already said multiple times that I'm dropping the

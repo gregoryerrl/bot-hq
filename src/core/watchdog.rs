@@ -360,7 +360,7 @@ async fn deliver_idle_nudge(
     bridge: &SignalingBridge,
 ) {
     const NOTICE: &str =
-        "Session idled with no question or halt parked — nudged Brian to declare state.";
+        "Session idled with no question or halt parked — nudged the executor to declare state.";
     const NUDGE: &str = "[System: this session went idle with no question parked and no \
         halt flag — the user cannot tell settled from stalled. Declare state now, with a \
         tool rather than bare prose: continue work the user already directed if any \

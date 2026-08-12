@@ -1,7 +1,7 @@
 //! Surface + control the user's **Claude Code** configuration that bot-hq's
 //! agents inherit.
 //!
-//! bot-hq's agents (Brian/Rain) are `claude-code` headless subprocesses
+//! bot-hq's agents are `claude-code` headless subprocesses
 //! (`src/agents/spawn.rs`), so whatever the user's `~/.claude` install has —
 //! skills, plugins, hooks, CLAUDE.md/memory, MCP servers, effort — flows into
 //! the agents (see the inheritance table in
@@ -65,49 +65,58 @@ fn agents(names: &[&str]) -> Vec<String> {
     names.iter().map(|s| s.to_string()).collect()
 }
 
+/// The whole roster, as the inheritance chips name it.
+///
+/// **rc3 D10: these lists used to be the two literals `brian` / `rain`.** A
+/// session's roster is now whatever roles the user picked, so naming two agents
+/// here was both wrong and a person's name in a panel the user reads. Every
+/// surface below is all-or-nothing across the roster, so one collective chip
+/// says exactly what the two used to say and stays true at any roster size.
+const EVERY_AGENT: &str = "every agent";
+
 /// The canonical inheritance lens for a surface. See the design doc §2.
 pub fn inheritance(surface: Surface) -> Inheritance {
     match surface {
         Surface::Skills => Inheritance {
-            inherited_by: agents(&["brian", "rain"]),
+            inherited_by: agents(&[EVERY_AGENT]),
             skipped_by: agents(&[]),
-            note: "Both agents load your skills (a skill can self-invoke). bot-hq gates Rain's tools server-side.".into(),
+            note: "Every agent loads your skills (a skill can self-invoke). bot-hq gates each agent's tools server-side from its capabilities.".into(),
             overridable: true,
         },
         Surface::Plugins => Inheritance {
-            inherited_by: agents(&["brian", "rain"]),
+            inherited_by: agents(&[EVERY_AGENT]),
             skipped_by: agents(&[]),
-            note: "Both agents load enabled plugins (and their skills/hooks/MCP). bot-hq gates Rain's tools server-side.".into(),
+            note: "Every agent loads enabled plugins (and their skills/hooks/MCP). bot-hq gates each agent's tools server-side from its capabilities.".into(),
             overridable: true,
         },
         Surface::Hooks => Inheritance {
-            inherited_by: agents(&["brian", "rain"]),
+            inherited_by: agents(&[EVERY_AGENT]),
             skipped_by: agents(&[]),
-            note: "Both agents run your hooks alongside bot-hq's PreToolUse hook. Rain's write tools are denied at spawn.".into(),
+            note: "Every agent runs your hooks alongside bot-hq's PreToolUse hook. An agent whose role lacks edit_files has its write tools denied at spawn.".into(),
             overridable: false,
         },
         Surface::Memory => Inheritance {
-            inherited_by: agents(&["brian", "rain"]),
+            inherited_by: agents(&[EVERY_AGENT]),
             skipped_by: agents(&[]),
-            note: "Both agents autodiscover CLAUDE.md + auto-memory. bot-hq adds its own system prompt regardless.".into(),
+            note: "Every agent autodiscovers CLAUDE.md + auto-memory. bot-hq adds its own system prompt regardless.".into(),
             overridable: true,
         },
         Surface::CoreKnobs => Inheritance {
-            inherited_by: agents(&["brian", "rain"]),
+            inherited_by: agents(&[EVERY_AGENT]),
             skipped_by: agents(&[]),
-            note: "Read from settings.json by all agents (effort, thinking, output tokens, …).".into(),
+            note: "Read from settings.json by every agent (effort, thinking, output tokens, …).".into(),
             overridable: true,
         },
         Surface::Model => Inheritance {
             inherited_by: agents(&[]),
-            skipped_by: agents(&["brian", "rain"]),
-            note: "Overridden per-agent by bot-hq via ANTHROPIC_MODEL (the Agents tab).".into(),
+            skipped_by: agents(&[EVERY_AGENT]),
+            note: "Overridden by bot-hq via ANTHROPIC_MODEL — the model comes from the participant's own pick or its role's default (Roles tab).".into(),
             overridable: true,
         },
         Surface::Permissions => Inheritance {
             inherited_by: agents(&[]),
-            skipped_by: agents(&["brian", "rain"]),
-            note: "bot-hq sets each agent's permission posture (Brian bypass; Rain dontAsk + allow/deny).".into(),
+            skipped_by: agents(&[EVERY_AGENT]),
+            note: "bot-hq sets each agent's permission posture from its role's capabilities (edit_files → bypass; otherwise dontAsk + allow/deny).".into(),
             overridable: false,
         },
     }
@@ -173,7 +182,7 @@ pub struct McpServerItem {
     pub effective: bool,
     /// Masked one-line detail (url or command), secrets redacted.
     pub detail: String,
-    /// Agents bot-hq forwards it into (Brian; reserved keys excluded).
+    /// Agents bot-hq forwards it into (reserved keys excluded).
     pub forwarded_to_agents: Vec<String>,
     /// True if bot-hq filters this server from agents (bot-hq / claude-in-chrome).
     pub reserved_filtered: bool,
@@ -228,10 +237,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skills_inherited_by_both_agents() {
+    fn skills_are_inherited_by_the_whole_roster() {
         let inh = inheritance(Surface::Skills);
-        assert!(inh.inherited_by.contains(&"brian".to_string()));
-        assert!(inh.inherited_by.contains(&"rain".to_string()));
+        assert_eq!(inh.inherited_by, vec![EVERY_AGENT.to_string()]);
         assert!(inh.skipped_by.is_empty());
         assert!(inh.overridable);
     }
@@ -239,7 +247,7 @@ mod tests {
     #[test]
     fn core_knobs_inherited_by_all() {
         let inh = inheritance(Surface::CoreKnobs);
-        assert_eq!(inh.inherited_by.len(), 2);
+        assert_eq!(inh.inherited_by, vec![EVERY_AGENT.to_string()]);
         assert!(inh.skipped_by.is_empty());
     }
 
@@ -247,7 +255,33 @@ mod tests {
     fn model_overridden_for_all() {
         let inh = inheritance(Surface::Model);
         assert!(inh.inherited_by.is_empty());
-        assert_eq!(inh.skipped_by.len(), 2);
+        assert_eq!(inh.skipped_by, vec![EVERY_AGENT.to_string()]);
+    }
+
+    /// **No inheritance chip names a person (rc3 D10).** These strings render
+    /// verbatim in Settings → Claude Config, so a name here is a name the user
+    /// reads. Sweeps every surface, so a new one cannot reintroduce it.
+    #[test]
+    fn no_inheritance_label_or_note_names_an_agent() {
+        for surface in [
+            Surface::Skills,
+            Surface::Plugins,
+            Surface::Hooks,
+            Surface::Memory,
+            Surface::CoreKnobs,
+            Surface::Model,
+            Surface::Permissions,
+        ] {
+            let inh = inheritance(surface);
+            let rendered = format!("{:?} {:?} {}", inh.inherited_by, inh.skipped_by, inh.note);
+            let lower = rendered.to_lowercase();
+            for banned in ["brian", "rain"] {
+                assert!(
+                    !lower.split(|c: char| !c.is_alphanumeric()).any(|w| w == banned),
+                    "{surface:?} still names {banned}: {rendered}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -26,9 +26,11 @@ use uuid::Uuid;
 pub struct OpenSessionRequest {
     pub title: String,
     pub working_repo_path: Option<PathBuf>,
-    /// Run only the FIRST participant of the default roster (`true`) or all of
-    /// them (`false`). The external driver has no create dialog, so this comes
-    /// from the user's solo/duo default setting.
+    /// Seed only the FIRST active role (`true`) or every one of them (`false`).
+    ///
+    /// The external driver has no create dialog and the setting that used to
+    /// answer for it is deleted, so it passes `true` — the rc3 D13 product
+    /// default of one participant. See [`Storage::ensure_session_roster`].
     pub solo: bool,
     /// Per-slot saved-model ids, positional over the default roster's turn
     /// order — `models[0]` overrides the first participant's model, `models[1]`
@@ -269,6 +271,48 @@ fn spawnable(roster: &[crate::storage::Participant]) -> Vec<&crate::storage::Par
         .iter()
         .filter(|p| p.enabled && p.participation_mode != "on_demand")
         .collect()
+}
+
+/// **The spawn's roster decisions, resolved together and registered once.**
+///
+/// Two answers come off one roster read, and they must agree:
+///   1. WHO SPAWNS — [`spawnable`], the list this function returns;
+///   2. WHO THE COMMIT GATE WATCHES — the participants holding
+///      [`Capability::FileFinding`](crate::agents::Capability::FileFinding),
+///      handed to the bridge's reviewer registry. bot-hq's own definition of a
+///      reviewer, from the ticked boxes, never from what a role's name implies
+///      (rc3 D10/D11). An empty list means this session has no reviewer, and
+///      `check_open_findings` then has nothing to fail closed on.
+///
+/// **Why this is a function and not two lines in `spawn_session_handle`.**
+/// The registration used to sit inline, and it was the ONLY production site
+/// that populated the registry — every test registered reviewers by hand.
+/// Verified by mutation on 2026-08-12: deleting the inline call left the whole
+/// suite green (1102 passed), i.e. the reviewer-down commit gate could fail
+/// OPEN and nothing would say so. Routing both answers through one function
+/// closes that in both directions: `spawn_session_handle` cannot drop the call
+/// without losing `live` and failing to COMPILE, and it cannot lose the
+/// registration without `the_spawn_roster_registers_every_reviewer_it_returns`
+/// going red.
+///
+/// The side effect is deliberate and is why the bridge is a parameter. Reviewer
+/// registration is not incidental to resolving the spawn roster — it is the
+/// same decision, read off the same rows, and separating them is exactly how
+/// they came apart.
+fn resolve_spawn_roster<'a>(
+    bridge: &SignalingBridge,
+    session_id: &str,
+    roster: &'a [crate::storage::Participant],
+) -> Vec<&'a crate::storage::Participant> {
+    let live = spawnable(roster);
+    bridge.register_session_reviewers(
+        session_id.to_string(),
+        live.iter()
+            .filter(|p| participant_capabilities(p).grants(crate::agents::Capability::FileFinding))
+            .map(|p| p.slug.clone())
+            .collect(),
+    );
+    live
 }
 
 pub async fn open_session(
@@ -683,7 +727,9 @@ async fn spawn_session_handle(
     // Everything the two branches read off `sessions.brian_*` / `rain_*` now
     // comes off the participant row: `effort`, `ultracode` (rc3 D12) and
     // `claude_session_id`. Those columns are left in place and UNREAD.
-    let live = spawnable(&roster);
+    // Resolves WHO SPAWNS and registers WHO THE COMMIT GATE WATCHES off the same
+    // rows — see `resolve_spawn_roster` for why those are one call.
+    let live = resolve_spawn_roster(&bridge, &session.id, &roster);
     if live.is_empty() {
         warn!(session_id = %session.id, "session has no spawnable participant");
     }
@@ -724,6 +770,10 @@ async fn spawn_session_handle(
                 warn!(?e, slot, "set_session_spawn_model_slot");
             }
         }
+        // Claude-config overrides for the ROLE this participant plays — see
+        // `resolve_participant_overrides` for why they resolve here rather than
+        // twice inside the spawner off an agent name.
+        let overrides = resolve_participant_overrides(&storage, &paths.data_dir, p).await;
         let handle = spawn_agent_for(
             &session.id,
             &p.slug,
@@ -738,6 +788,7 @@ async fn spawn_session_handle(
             p.effort.clone(),
             p.ultracode,
             participant_capabilities(p),
+            overrides,
         )
         .await?;
         spawned.push((slot, handle));
@@ -765,18 +816,7 @@ async fn spawn_session_handle(
     bridge
         .register_session_awaiting(session.id.clone(), Arc::clone(&awaiting))
         .await;
-    // Who the commit gate watches for "the reviewer is down": the participants
-    // that hold `file_finding`. bot-hq's own definition of a reviewer, from the
-    // ticked boxes, never from what a role's name implies (rc3 D10/D11).
-    bridge.register_session_reviewers(
-        session.id.clone(),
-        live.iter()
-            .filter(|p| {
-                participant_capabilities(p).grants(crate::agents::Capability::FileFinding)
-            })
-            .map(|p| p.slug.clone())
-            .collect(),
-    );
+    // (Who the commit gate watches was registered with the spawn roster above.)
 
     // Shared "HANDS mid-atomic-tool" flag (interrupt redesign, Batch 3.1 Part
     // 1) — lets a cancel defer the kill until a git commit/push/migration
@@ -881,6 +921,15 @@ async fn spawn_session_handle(
                 ipav: Arc::clone(&ipav),
                 brian_input: first.input().clone(),
                 rain_input: Some(second.input().clone()),
+                // How each slot announces itself on the DEFAULT peer-forward
+                // path. Read off the roster by the display rule, in turn order,
+                // so the tag names the role and model rather than a person
+                // (rc3 D4/D10). `live` is the same slice `handles` was built
+                // from, so slot 0/1 line up with `first`/`second`.
+                slot_labels: [
+                    display_name_for(&storage, live[0]).await,
+                    display_name_for(&storage, live[1]).await,
+                ],
             };
             let task = tokio::spawn(crate::core::run_router(deps, router_rx));
             // Seed the router-health dot "up" — also clears any stale `false` left
@@ -1174,6 +1223,53 @@ fn cl_opener_nudge(project: Option<&str>) -> Option<String> {
 /// degraded prompt — until a user edits the row it is the *same bytes*. A query
 /// error is logged at `warn` because it is genuinely unexpected; the others are
 /// ordinary states and stay silent.
+/// The slug of the ROLE this participant was invited as, or `None` when the row
+/// has no `role_id`, the role was deleted, or the read failed.
+///
+/// Separate from [`resolve_role_prose`] (which needs the whole row) because the
+/// override store is keyed on this and nothing else about the role.
+async fn participant_role_slug(
+    storage: &Storage,
+    p: &crate::storage::Participant,
+) -> Option<String> {
+    let role_id = p.role_id?;
+    match storage.role_by_id(role_id).await {
+        Ok(r) => r.map(|r| r.slug),
+        Err(e) => {
+            warn!(participant = %p.slug, role_id, ?e, "reading a role's slug failed");
+            None
+        }
+    }
+}
+
+/// **One participant's Claude-config overrides, in one place a test can reach.**
+///
+/// The chain is: participant row → its ROLE's slug → that role's entry in
+/// `<data_dir>/config/claude-overrides.json`, layered over the `_all` fan-out.
+///
+/// It is a function for the reason [`compose_system_prompt`] and
+/// [`resolve_participant_config`] are: `spawn_agent_for` goes on to launch a
+/// claude-code subprocess and no test can follow it there, so a chain assembled
+/// inline is a chain nothing pins. This one had already broken that way — the
+/// resolver matched the literals `"brian"` / `"rain"` while both callers passed
+/// a role-derived participant slug, so every per-agent override resolved to the
+/// global config and no test noticed.
+///
+/// Fail-open at both ends: an unreadable store loads empty (logged there), and a
+/// participant with no role resolves to `_all` alone. A spawn must not fail
+/// because a config file is malformed.
+async fn resolve_participant_overrides(
+    storage: &Storage,
+    data_dir: &Path,
+    p: &crate::storage::Participant,
+) -> crate::claude_config::AgentOverride {
+    let role_slug = participant_role_slug(storage, p).await;
+    crate::claude_config::resolve_agent_overrides(
+        &crate::claude_config::load_overrides(data_dir),
+        role_slug.as_deref(),
+    )
+}
+
 async fn resolve_role_prose(
     storage: &Storage,
     me: &crate::storage::Participant,
@@ -1340,34 +1436,11 @@ async fn resolve_roster_facts(
 /// One participant's name, by the display rule (rc3 D10): the ROLE it plays and
 /// the MODEL it runs on, never a person's name.
 ///
-/// Both halves are read live rather than off the participant row's frozen
-/// `display_name`, so renaming a role or swapping a model is reflected on the
-/// next spawn. Every failure — no `role_id`, an archived-away role, a deleted
-/// model, a query error — degrades one half to `None` and
-/// [`participant_display_name`](crate::storage::participant_display_name)
-/// resolves what is left, down to the slug.
+/// A thin alias for [`Storage::display_name_of`], which owns the rule so the
+/// prompt's peer roster and the reviewer's phase-doc header cannot disagree
+/// about what a participant is called.
 async fn display_name_for(storage: &Storage, p: &crate::storage::Participant) -> String {
-    let role = match p.role_id {
-        Some(id) => match storage.role_by_id(id).await {
-            Ok(r) => r.map(|r| r.display_name),
-            Err(e) => {
-                warn!(role_id = id, ?e, "reading a role's display name failed");
-                None
-            }
-        },
-        None => None,
-    };
-    let model = match p.model_id.as_deref().filter(|m| !m.is_empty()) {
-        Some(id) => match storage.get_model(id).await {
-            Ok(m) => m.map(|m| m.display_name),
-            Err(e) => {
-                warn!(model_id = id, ?e, "reading a model's display name failed");
-                None
-            }
-        },
-        None => None,
-    };
-    crate::storage::participant_display_name(role.as_deref(), model.as_deref(), &p.slug)
+    storage.display_name_of(p).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1385,6 +1458,7 @@ async fn spawn_agent_for(
     session_effort: Option<String>,
     session_ultracode: Option<bool>,
     capabilities: crate::agents::ResolvedCapabilities,
+    overrides: crate::claude_config::AgentOverride,
 ) -> Result<AgentHandle> {
     // The assembled prompt is multi-KB. Hand it to claude-code via a file
     // (`--append-system-prompt-file`) rather than an inline arg so the command
@@ -1395,13 +1469,10 @@ async fn spawn_agent_for(
         .with_context(|| format!("writing system prompt to {}", system_prompt_path.display()))?;
     let mcp_config_path = mcp_temp_dir.join(format!("{agent_name}-mcp.json"));
     let mut user_servers = user_mcp_servers_for_agent(&capabilities);
-    // Apply per-agent MCP overrides (Settings → Claude Config): a server the
-    // user disabled for this agent is dropped from its forwarded mcp-config.
-    let agent_override = crate::claude_config::resolve_agent_overrides(
-        &crate::claude_config::load_overrides(&paths.data_dir),
-        agent_name,
-    );
-    for name in crate::claude_config::overrides::disabled_mcp(&agent_override) {
+    // Apply the role's MCP overrides (Settings → Claude Config): a server the
+    // user disabled for this role is dropped from its forwarded mcp-config.
+    // `overrides` arrives resolved — see `resolve_participant_overrides`.
+    for name in crate::claude_config::overrides::disabled_mcp(&overrides) {
         user_servers.remove(&name);
     }
     let json = mcp_config_json(signaling_addr, session_id, agent_name, &user_servers);
@@ -1422,6 +1493,7 @@ async fn spawn_agent_for(
         session_effort,
         session_ultracode,
         capabilities,
+        overrides,
     };
     // Supervised: a transient upstream API error (e.g. 529 Overloaded)
     // auto-resumes the agent with capped backoff instead of stranding the
@@ -2160,6 +2232,88 @@ mod tests {
         );
     }
 
+    /// **The wire between the roster and the reviewer-down commit gate.**
+    ///
+    /// `spawn_session_handle` is the ONLY production caller that ever populates
+    /// the reviewer registry; every other test in the tree registers reviewers
+    /// by hand. Proven on 2026-08-12 by deleting the inline registration: the
+    /// entire suite stayed green (1102 passed), so the gate could fail OPEN —
+    /// commit allowed with the reviewer stalled — and nothing would have said
+    /// so. That is why the registration now rides inside
+    /// [`resolve_spawn_roster`], whose RETURN VALUE the spawn cannot proceed
+    /// without.
+    ///
+    /// The assertions walk the real chain rather than reading the registry back:
+    /// capabilities column → `file_finding` → registry → `check_open_findings`.
+    #[tokio::test]
+    async fn the_spawn_roster_registers_every_reviewer_it_returns() {
+        let bridge = SignalingBridge::new();
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+
+        // Two reviewers and a non-reviewer, keyed only by the capabilities
+        // column — no slug here spells any of the answers.
+        let caps = |slugs: &[&str]| {
+            serde_json::to_string(&slugs.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+        };
+        let mut roster = vec![
+            stub_participant(4, "hands", 0),
+            stub_participant(7, "eyes", 1),
+            stub_participant(9, "auditor", 2),
+        ];
+        roster[0].capabilities = caps(&["edit_files"]);
+        roster[1].capabilities = caps(&["file_finding"]);
+        roster[2].capabilities = caps(&["file_finding"]);
+
+        let live = resolve_spawn_roster(&bridge, "s1", &roster);
+        assert_eq!(live.len(), 3, "all three take a subprocess");
+        assert_eq!(
+            bridge.session_reviewers("s1"),
+            vec!["eyes".to_string(), "auditor".to_string()],
+            "every returned participant holding file_finding is registered"
+        );
+
+        // The join that matters: a registered reviewer going down BLOCKS the
+        // commit gate. Unregistered, the gate has no reviewer to watch and
+        // returns plain `ok` — the fail-open this wire exists to prevent.
+        bridge.notify_agent_health("s1".to_string(), "auditor", "stalled");
+        assert!(
+            bridge
+                .check_open_findings("s1")
+                .await
+                .unwrap()
+                .starts_with("blocked: reviewer down"),
+            "a registered reviewer that is down must gate the commit"
+        );
+    }
+
+    /// The other half: a roster where NOBODY reviews registers nobody, so the
+    /// gate stays open. Without this, a registration that indiscriminately
+    /// registered the whole roster would pass the test above.
+    #[tokio::test]
+    async fn a_roster_with_no_finder_registers_no_reviewer() {
+        let bridge = SignalingBridge::new();
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+
+        let mut roster = vec![stub_participant(4, "hands", 0)];
+        roster[0].capabilities = "[\"edit_files\"]".into();
+
+        resolve_spawn_roster(&bridge, "s1", &roster);
+        assert!(
+            bridge.session_reviewers("s1").is_empty(),
+            "a session nobody reviews has no reviewer to be down"
+        );
+        bridge.notify_agent_health("s1".to_string(), "hands", "stalled");
+        assert_eq!(
+            bridge.check_open_findings("s1").await.unwrap(),
+            "ok",
+            "a stalled non-reviewer must not gate the commit"
+        );
+    }
+
     /// The HANDS-only paths ask a CAPABILITY, not a name (rc3 D10/D11).
     ///
     /// `SessionHandle::hands` was `by_slug("brian")`. Under role-derived slugs
@@ -2422,6 +2576,115 @@ mod tests {
         let mut roleless = eyes.clone();
         roleless.role_id = None;
         assert!(role_default_model(&s, &roleless).await.is_none());
+    }
+
+    /// **The dialogless create paths land on one participant (rc3 D13).**
+    ///
+    /// `seed_default_roster` is the funnel both of them share —
+    /// `CoreAppState::open_session` (the external driver) reaches it directly,
+    /// and `dispatch_session_inner` (the plugin arm) reaches it through the
+    /// pre-spawn `ensure_session_roster`. Neither has a dialog and the setting
+    /// that used to answer for them is deleted, so this shape IS the product
+    /// default.
+    ///
+    /// The second assertion is the consequence a driver has to know: passing a
+    /// model id for a second slot does not create one. It is dropped, because
+    /// there is no participant for it to land on.
+    #[tokio::test]
+    async fn a_dialogless_create_seeds_one_participant_and_drops_the_second_model() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        sqlx::query(
+            "INSERT INTO models (id, display_name, provider, model_name) VALUES \
+             ('m-one', 'One', 'anthropic', 'model-one'), \
+             ('m-two', 'Two', 'anthropic', 'model-two')",
+        )
+        .execute(s.pool())
+        .await
+        .unwrap();
+
+        // Exactly what `CoreAppState::open_session` passes: solo, two model ids
+        // positional over the default roster's turn order.
+        seed_default_roster(
+            &s,
+            "s1",
+            true,
+            &[Some("m-one".into()), Some("m-two".into())],
+            &[],
+        )
+        .await;
+
+        let roster = s.participants_for_session("s1").await.unwrap();
+        assert_eq!(roster.len(), 1, "the default is one agent, not the old pair");
+        assert_eq!(roster[0].model_id.as_deref(), Some("m-one"));
+        assert!(
+            !roster.iter().any(|p| p.model_id.as_deref() == Some("m-two")),
+            "a model id for a slot that does not exist creates no participant"
+        );
+    }
+
+    /// **Per-role Claude-config overrides actually reach a spawn.**
+    ///
+    /// They did not. `resolve_agent_overrides` matched the literals `"brian"` /
+    /// `"rain"` while both production callers passed a role-derived participant
+    /// slug, so every branch but the fallback was dead and the whole store
+    /// collapsed to `_all` — an editor, a file and a resolver that changed
+    /// nothing at spawn, with no test to notice.
+    ///
+    /// Walked through the real chain — participant row → role slug → store —
+    /// because that is the link that broke. Two participants, so the assertion
+    /// is a DIFFERENCE between roles rather than a value that `_all` alone would
+    /// also produce.
+    #[tokio::test]
+    async fn a_roles_claude_overrides_reach_its_participants_spawn() {
+        use crate::claude_config::{save_overrides, ClaudeOverrides};
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", false).await.unwrap();
+        let data_dir = TempDir::new().unwrap();
+
+        let mut store = ClaudeOverrides::default();
+        store.all.effort = Some("medium".into()); // the fan-out floor
+        store
+            .per_role
+            .entry("eyes".into())
+            .or_default()
+            .effort = Some("xhigh".into());
+        store
+            .per_role
+            .entry("eyes".into())
+            .or_default()
+            .mcp
+            .insert("discord".into(), false);
+        save_overrides(data_dir.path(), &store).unwrap();
+
+        let roster = s.participants_for_session("s1").await.unwrap();
+        let reviewer = roster.iter().find(|p| p.slug == "eyes").expect("the reviewer");
+        let executor = roster.iter().find(|p| p.slug == "hands").expect("the executor");
+
+        let for_reviewer = resolve_participant_overrides(&s, data_dir.path(), reviewer).await;
+        assert_eq!(
+            for_reviewer.effort.as_deref(),
+            Some("xhigh"),
+            "the EYES role's override never reached its participant"
+        );
+        assert_eq!(
+            crate::claude_config::overrides::disabled_mcp(&for_reviewer),
+            vec!["discord".to_string()],
+            "the role's MCP opt-out must reach the forwarded mcp-config"
+        );
+
+        // The other role is untouched and falls back to `_all`, which is what
+        // makes the assertion above about the ROLE and not about the store.
+        let for_executor = resolve_participant_overrides(&s, data_dir.path(), executor).await;
+        assert_eq!(for_executor.effort.as_deref(), Some("medium"));
+        assert!(crate::claude_config::overrides::disabled_mcp(&for_executor).is_empty());
+
+        // A participant with no role has no per-role entry to find.
+        let mut roleless = reviewer.clone();
+        roleless.role_id = None;
+        let for_roleless = resolve_participant_overrides(&s, data_dir.path(), &roleless).await;
+        assert_eq!(for_roleless.effort.as_deref(), Some("medium"));
     }
 
     #[tokio::test]

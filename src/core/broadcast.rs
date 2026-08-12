@@ -147,15 +147,23 @@ pub async fn broadcast_user_message(
 /// all four decisions with it, which is the turn sequencer's work.
 pub async fn peer_forward_message(
     peer_author: Author,
+    sender_label: &str,
     text: &str,
     phase: IpavPhase,
     open_blocking: usize,
     input_tx: &ParticipantInput,
 ) {
-    let prefix = match peer_author {
-        Author::Brian => "[PEER MESSAGE — from Brian (HANDS), not the user]\n",
-        Author::Rain => "[PEER MESSAGE — from Rain (EYES), not the user]\n",
-        Author::User => "",
+    // **rc3 D10: the provenance tag names the SENDER off the roster.** It was
+    // two hardcoded person names, one per `Author` slot, and this is the DEFAULT
+    // runtime path — the sequencer is opt-in — so it is what agents actually
+    // read on every peer forward today. `sender_label` is resolved once at spawn
+    // by the display rule (role · model), so a third role or a renamed one is
+    // announced as itself. An empty label degrades to an unattributed tag, which
+    // still says the message is not from the user — the load-bearing half.
+    let prefix = if sender_label.is_empty() {
+        "[PEER MESSAGE — from another participant, not the user]\n".to_string()
+    } else {
+        format!("[PEER MESSAGE — from {sender_label}, not the user]\n")
     };
     let inner = format!("{prefix}{text}");
     let wire = with_phase_and_findings_envelope(phase, open_blocking, &inner);
@@ -289,22 +297,46 @@ mod tests {
         assert_eq!(s.messages_for_session("solo", None).await.unwrap().len(), 1);
     }
 
+    /// The provenance tag names the SENDER from the roster (rc3 D4/D10).
+    ///
+    /// It used to be one of two hardcoded person names selected by `Author`, on
+    /// the DEFAULT runtime path — the sequencer is opt-in — so this string is
+    /// what agents read on every peer forward. A label is passed in rather than
+    /// derived here so a renamed or third role is announced as itself.
     #[tokio::test]
     async fn peer_forward_envelopes_then_author_tags() {
         // `peer_forward_message` writes through `send_unrouted`, which carries
         // no receipt and so has no session to be checked against; the id here is
         // therefore arbitrary.
         let (tx, mut rx) = stub_input("s1");
-        peer_forward_message(Author::Rain, "concerns?", IpavPhase::Plan, 0, &tx).await;
+        peer_forward_message(
+            Author::Rain,
+            "AUDITOR · Claude Opus 5",
+            "concerns?",
+            IpavPhase::Plan,
+            0,
+            &tx,
+        )
+        .await;
         let m = next_wire(&mut rx).await;
         assert!(
-            m.message
-                .content
-                .starts_with("[PHASE: Plan]\n[PEER MESSAGE — from Rain (EYES), not the user]\n"),
+            m.message.content.starts_with(
+                "[PHASE: Plan]\n[PEER MESSAGE — from AUDITOR · Claude Opus 5, not the user]\n"
+            ),
             "expected phase envelope wrapping peer provenance tag, got: {}",
             m.message.content
         );
         assert!(m.message.content.contains("concerns?"));
+
+        // An unnameable sender still says "not the user", which is the tag's
+        // load-bearing half — better an unattributed peer than a wrong name.
+        peer_forward_message(Author::Rain, "", "again?", IpavPhase::Plan, 0, &tx).await;
+        let m = next_wire(&mut rx).await;
+        assert!(
+            m.message.content.contains("from another participant, not the user"),
+            "got: {}",
+            m.message.content
+        );
     }
 
     #[test]
