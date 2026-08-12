@@ -2183,6 +2183,80 @@ mod tests {
         })
     }
 
+    /// One of `0049_role_prose_drops_the_names.sql`'s two UPDATEs, read out of
+    /// the migration itself so the test cannot drift from what actually ran.
+    fn drops_the_names_statement(section: &str) -> String {
+        let sql = include_str!("../../migrations/0049_role_prose_drops_the_names.sql");
+        let from = sql
+            .find(section)
+            .unwrap_or_else(|| panic!("0049 lost its {section:?} marker"));
+        let start = sql[from..].find("UPDATE").expect("no UPDATE after the marker") + from;
+        // Each statement ends at `);\n` — the closing paren of its guard — which
+        // no line of the prose contains, unlike a bare `;`.
+        let end = sql[start..].find(");\n").expect("unterminated statement") + start + 2;
+        sql[start..end].to_string()
+    }
+
+    /// **The guard on migration 0049, both directions.**
+    ///
+    /// 0049 re-seeds both roles' prose because rc3 D10 took the agent names out
+    /// of the constants, and the column has been the USER's to edit since 0046.
+    /// A migration that overwrites a user's prose is a data-loss bug, and one
+    /// that overwrites nothing leaves every install serving the old text while a
+    /// fresh one serves the new — the divergence the byte-parity oracle exists
+    /// to catch, arriving through the other door.
+    ///
+    /// Either half alone is satisfiable by a WRONG statement, which is why both
+    /// are here: `WHERE description_prompt IS NULL` passes the edited-row half
+    /// (it matches nothing after 0046) and an unconditional `SET` passes the
+    /// overwrite half.
+    #[tokio::test]
+    async fn the_0049_prose_reseed_overwrites_the_previous_seed_but_not_a_user_edit() {
+        // Half 1 — a stock migrated database ends up on the NEW constants, so
+        // 0049 really did overwrite what 0046 and 0048 had written.
+        let s = storage_with_0044().await;
+        for (slug, expected) in [
+            ("hands", crate::agents::prompts::HANDS_ROLE),
+            ("eyes", crate::agents::prompts::EYES_ROLE),
+        ] {
+            let role = s.role_by_slug(slug).await.unwrap().unwrap();
+            assert_eq!(
+                role.description_prompt.as_deref(),
+                Some(expected),
+                "0049 did not overwrite the previous seed for {slug}"
+            );
+            // The point of the whole migration, spelled out: no agent name.
+            let prose = role.description_prompt.unwrap();
+            for banned in ["Brian", "Rain"] {
+                assert!(!prose.contains(banned), "{slug} still names {banned}");
+            }
+        }
+
+        // Half 2 — each statement, replayed against a row the user has edited,
+        // leaves it alone. Replayed rather than re-migrated because sqlx will
+        // not re-apply an applied migration.
+        for (slug, section, edit) in [
+            ("hands", "-- 1. HANDS", "You are HANDS. Ship small, verified changes."),
+            ("eyes", "-- 2. EYES", "You are EYES. Be brief and be right."),
+        ] {
+            sqlx::query("UPDATE roles SET description_prompt = ? WHERE slug = ?")
+                .bind(edit)
+                .bind(slug)
+                .execute(s.pool())
+                .await
+                .unwrap();
+            sqlx::query(&drops_the_names_statement(section))
+                .execute(s.pool())
+                .await
+                .unwrap();
+            assert_eq!(
+                s.role_by_slug(slug).await.unwrap().unwrap().description_prompt.as_deref(),
+                Some(edit),
+                "0049 clobbered a user-edited prompt for {slug}"
+            );
+        }
+    }
+
     // ---- 0046: role prose lives in the database --------------------------
 
     /// **The drift oracle for migration 0046.**
