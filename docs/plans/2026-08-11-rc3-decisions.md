@@ -327,12 +327,17 @@ distinguishable without the Context Library carrying anything.
 
 Decided 2026-08-13, closing the `PARITY_HOLD` question rc3 left open.
 
-The user: *"close session tick on agent capabilities. if no agents are ticked,
-then user must be the one to manually click the close button if they want to
-close."*
+The user: *"close session tick on **role** capabilities. if no agents are
+ticked, then user must be the one to manually click the close button if they
+want to close."* (corrected from "agent capabilities" in the same breath —
+capabilities are a property of the ROLE, snapshotted onto the participant at
+invite time. `session_participants.capabilities` is what the gate reads; the
+role is where the user ticks them.)
 
 **Remove `close_session` from `jsonrpc::PARITY_HOLD`** and let it gate on
-`Capability::CloseSession` like every other tool. Today the hold makes it
+`Capability::CloseSession` like every other tool — read from the participant's
+invite-time snapshot of its role's ticks, which is how every other capability is
+already resolved. Today the hold makes it
 ungated, so every participant can close a session regardless of what its role
 ticks — while the generated prompt already tells a participant without the
 capability that it may not. The prompt has been the honest half all along; this
