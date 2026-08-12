@@ -368,3 +368,76 @@ makes the runtime agree with it.
 as before; the UI Close button closes a session whose roster holds the capability
 nowhere; and the parity oracle states plainly that this one tool deliberately
 diverges from pre-rc3 behaviour, with this decision as the reason.
+
+### D17 — `on_mention`: a participant you summon, for exactly one turn
+
+Decided 2026-08-13. This closes **A3** in
+[`2026-08-11-design-drift-audit.md`](2026-08-11-design-drift-audit.md), the last
+of the three decisions that audit found existing "in neither the code nor any
+batch" — the other two shipped as the round cap and PASS.
+
+**Why it was stuck.** Design §1 defined the mode as *"not in rotation; reads;
+posts only when addressed"* — and the same section **deleted per-message
+addressing** as one of the things the ring replaces. Both halves were written in
+one document. The rotation half works (`next_active_participant` already skips
+the mode); the addressed half was specified in terms of a mechanism being
+removed. So the mode has been, in the audit's words, *"a way to build a
+participant that cannot participate"*.
+
+**The mechanism, from the user:** *"if mentioned the next turn automatically goes
+to that agent, then after his turn, the agent will be omitted from the ring until
+he gets mentioned again."*
+
+This is a **wake target, not addressing** — which is exactly what D1 already
+settled. The ring still hands out one turn at a time; a mention only chooses who
+holds the next one. It fits the existing machinery: `SequencerCommand::UserMessage`
+already resolves the next holder by passing `None` (= reset to the front of the
+rotation), so a mention is a third input to a decision the ring already makes —
+neither "resume" nor "reset" but "hand it to this one".
+
+**Rename the mode `on_demand` → `on_mention`** (display: "On mention"). The name
+should say how to trigger it, and now that the trigger is literally `@`, it does.
+Free to do: zero `roles` and zero `session_participants` rows use the old value,
+so it is the constant, `PARTICIPATION_MODES`, any CHECK constraint, and the
+picker — no backfill.
+
+**Settled sub-decisions** (all four confirmed by the user, so an implementer does
+not re-derive them):
+
+1. **Only USER messages may mention.** Enforce it in the parser, not in role
+   prose. Participant-to-participant mentions stay forbidden (D1), and the reason
+   is concrete: HANDS mentions the advisor → the advisor speaks and mentions the
+   reviewer → the reviewer mentions HANDS, an unbounded summon loop in which
+   **every turn is substantive**, so the consensus tally cannot fire (each
+   `Spoke` clears it), spin detection cannot fire (the content differs each
+   time), and no pass is ever cast. Only the 500-lap round cap would end it, at
+   one real model call per lap on the most expensive role in the session. This is
+   the same shape as the pass volley: individually-correct behaviours composing
+   into a spin nothing catches.
+2. **The mention UI is a picker, not free text.** Typing `@` opens a list of THIS
+   session's participants; arrow keys or click to choose (Discord-style). That
+   makes mentioning a non-participant **impossible to express** rather than an
+   error to report — prevention over detection, and it removes the "mentioned
+   someone not in the roster" case entirely.
+3. **Multiple mentions queue**, in the order written. `@advisor @security` gives
+   the advisor the next turn and the security role the one after.
+4. **After the summoned turn, the rotation resumes where it was.** A mention is
+   an INSERTION, not a reset — otherwise summoning someone silently restarts the
+   cycle at participant 1. The summoned participant then drops back out until
+   mentioned again.
+5. **A summoned substantive turn clears the done tally**, like any other. That is
+   correct rather than incidental: summoning an advisor into a converged session
+   should un-converge it — nobody calls one in to rubber-stamp an arrival.
+
+**Already handled, listed so it is not re-litigated:** an `on_mention`
+participant never votes, because `all_active_voted_done` filters on
+`participation_mode == "active"`. So it cannot block a halt by existing, and —
+because it holds the turn for exactly one turn — it cannot hold one open by being
+mid-thought either. That resolves the open `on_demand`-and-the-halt question
+raised alongside P8.
+
+**Definition of done:** a role can be set to `on_mention` in the Roles tab; `@`
+in the chat input offers only this session's participants; a mention hands that
+participant the next turn and no more; the rotation resumes where it left off; a
+mention typed by an agent does nothing; and the whole path is pinned by a test
+that would fail if a participant's mention were honoured.
