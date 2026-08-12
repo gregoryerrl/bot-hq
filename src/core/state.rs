@@ -655,8 +655,16 @@ impl AppState {
         let activity = {
             let sessions = self.sessions.lock().await;
             match sessions.get(id) {
-                Some(handle) => handle.activity.current(),
-                None => return close_learnings::Epilogue::SkipNoWriter,
+                // A STALE handle is treated as no session at all, and that is
+                // the sharpest edge here: `broadcast` auto-heals a stale
+                // session by RESPAWNING it, so asking one for its learnings
+                // would start a fresh subprocess with none of this session's
+                // context and hand it "write what you learned" — the exact
+                // filler D15 exists to prevent, produced by the mechanism meant
+                // to capture knowledge. If the agents are gone, so is anything
+                // they learned.
+                Some(handle) if !handle.is_stale() => handle.activity.current(),
+                _ => return close_learnings::Epilogue::SkipNoWriter,
             }
         };
         let any_writer = match self.storage.participants_for_session(id).await {
@@ -702,12 +710,13 @@ impl AppState {
                     Some(activity) => {
                         let deadline = tokio::time::Instant::now()
                             + close_learnings::CLOSE_EPILOGUE_TIMEOUT;
-                        // The turn has to START before going idle can mean it
-                        // FINISHED — `broadcast` returns once the bytes are on
-                        // stdin, and the pump sets `busy` when the agent's first
-                        // event arrives. Without this the wait reads the
-                        // pre-turn idle and every epilogue reports "declined".
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        // No settle delay, and that is load-bearing rather than
+                        // an omission: `broadcast` sets every agent's `busy`
+                        // flag ITSELF, before it returns (the turn-start
+                        // recompute), so by here the tracker already reads
+                        // Busy. Waiting for the pump's first event instead
+                        // would race — a slow first token would read the
+                        // PRE-turn idle and report every epilogue as declined.
                         if activity.await_both_idle(deadline).await {
                             let (wrote, _) = self.bridge.close_gate_flags(id).await;
                             if wrote {
