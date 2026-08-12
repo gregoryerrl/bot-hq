@@ -1458,7 +1458,7 @@ effective: boolean;
  */
 detail: string; 
 /**
- * Agents bot-hq forwards it into (Brian; reserved keys excluded).
+ * Agents bot-hq forwards it into (reserved keys excluded).
  */
 forwarded_to_agents: string[]; 
 /**
