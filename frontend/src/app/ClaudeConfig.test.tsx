@@ -19,6 +19,11 @@ const inh = (inherited: string[], skipped: string[]) => ({
 // an agent name (rc3 D10 replaced the two literals with this constant).
 const EVERY_AGENT = "every agent";
 
+// `claude_config::reader` labels MCP forwarding by CAPABILITY, not by name —
+// `user_mcp_servers_for_agent` forwards to a role granting `edit_files` and to
+// nobody else. Different string from the inheritance chips, on purpose.
+const MCP_FORWARDED_TO = "agents that may edit files";
+
 function role(over: Partial<RoleView> = {}): RoleView {
   return {
     id: 1,
@@ -74,7 +79,7 @@ const CONFIG = {
       loaded_from: "~/.claude.json",
       effective: true,
       detail: "npx tsx",
-      forwarded_to_agents: [EVERY_AGENT],
+      forwarded_to_agents: [MCP_FORWARDED_TO],
       reserved_filtered: false,
     },
   ],
