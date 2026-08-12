@@ -5,11 +5,11 @@ import { SessionTile } from "../components/SessionTile";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import type {
-  AgentConfigView,
   ClaudeConfigView,
   ClaudeOverrides,
   ModelView,
   ProjectView,
+  RoleView,
   SessionInfo,
   SessionTrayView,
 } from "../lib/bindings";
@@ -19,7 +19,33 @@ import { useTauriEvent } from "../hooks/useTauriEvent";
 import { AgentEffortOverride } from "./ClaudeConfig";
 import { pickFolder } from "./contextLibraryShared";
 
-const RAIN_DISABLED_DEFAULT_KEY = "rain_disabled_default";
+/**
+ * How many participants a session can be created with.
+ *
+ * Mirrors `MAX_SESSION_PARTICIPANTS` in `src/tauri_cmd/sessions.rs`, which is
+ * where it is ENFORCED — this constant only stops the dialog offering a row the
+ * backend would refuse. It is the runtime's limit, not a design one: spawn
+ * still starts two literally-named agents, so a third participant would have no
+ * process behind it.
+ */
+const MAX_PARTICIPANTS = 2;
+
+/** One row of the dialog's participant list. */
+type ParticipantRow = {
+  /** Stable React key — rows are added, removed and reordered by index. */
+  key: number;
+  /** `null` until a role is chosen; Create stays disabled until it is not. */
+  roleId: number | null;
+  /** `""` = inherit the role's default model (rc3 D8). */
+  modelId: string;
+};
+
+let nextParticipantKey = 1;
+const emptyParticipant = (): ParticipantRow => ({
+  key: nextParticipantKey++,
+  roleId: null,
+  modelId: "",
+});
 
 // Quickview liveness throttle: collapse bursts of agent:messages:batch into at
 // most one dashboard refetch per this window (see onMessageBatch in Dashboard).
@@ -111,18 +137,16 @@ export function Dashboard() {
     "list_models",
     {},
   );
-  // Each agent's configured model (Agents tab) is its default for new sessions.
-  const { data: brianConfig } = useTauriQuery<AgentConfigView | null>(
-    "get_agent_config",
-    { agentName: "brian" },
-  );
-  const { data: rainConfig } = useTauriQuery<AgentConfigView | null>(
-    "get_agent_config",
-    { agentName: "rain" },
-  );
-  const { data: rainDisabledDefault } = useTauriQuery<string | null>(
-    "get_app_setting",
-    { key: RAIN_DISABLED_DEFAULT_KEY },
+  // The roles a participant can be invited from. Archived ones are excluded by
+  // the backend, and `on_demand` ones are filtered below: waking one needs the
+  // user `@mention` that rc3 D1 defers, so inviting one would produce a
+  // participant the ring skips and nothing ever wakes.
+  const { data: roles = [] } = useTauriQuery<RoleView[]>("list_roles", {
+    includeArchived: false,
+  });
+  const invitableRoles = useMemo(
+    () => roles.filter((r) => r.participation_mode !== "on_demand"),
+    [roles],
   );
   // Worktree isolation default (Settings → Agents → Session defaults).
   // Anything but "0" means on.
@@ -157,16 +181,21 @@ export function Dashboard() {
       title: string;
       repoPath: string | null;
       project: string | null;
-      rainEnabled: boolean;
+      // Null: derived from `options.participants` by the backend, which is the
+      // single source now that the dialog picks participants rather than
+      // toggling Rain and choosing two models by name.
+      rainEnabled: boolean | null;
       brianModelId: string | null;
       rainModelId: string | null;
-      // Effort/ultracode/worktree picks (bundled — at the tauri 10-arg limit).
+      // Effort/ultracode/worktree/participant picks (bundled — at the tauri
+      // 10-arg limit).
       options: {
         brianEffort: string | null;
         rainEffort: string | null;
         brianUltracode: boolean | null;
         rainUltracode: boolean | null;
         useWorktree: boolean | null;
+        participants: { roleId: number; modelId: string | null }[];
       };
     }
   >("create_session");
@@ -205,11 +234,11 @@ export function Dashboard() {
   // inherits the general policy tier, since the repo isn't a registered project).
   const [adHocRepo, setAdHocRepo] = useState("");
   const [filter, setFilter] = useState("");
-  // Per-agent model picks ("" = fall back to the agent's saved config) and the
-  // Rain toggle. Seeded from the configured defaults when the dialog opens.
-  const [brianModelId, setBrianModelId] = useState("");
-  const [rainModelId, setRainModelId] = useState("");
-  const [disableRain, setDisableRain] = useState(false);
+  // The session's participants, in turn order. Default 1 (design §1) — the
+  // list IS the running order, so row 0 takes the first turn.
+  const [participants, setParticipants] = useState<ParticipantRow[]>([
+    emptyParticipant(),
+  ]);
   // Worktree isolation for this session (seeded from the app default).
   const [useWorktree, setUseWorktree] = useState(true);
   // Per-session effort/ultracode picks (null = inherit the Settings defaults).
@@ -226,21 +255,12 @@ export function Dashboard() {
     return sessions.filter((s) => s.title.toLowerCase().includes(q));
   }, [sessions, filter]);
 
-  // Seed the model pickers + Rain toggle from the configured defaults each time
-  // the dialog opens (not on every query change, so user edits aren't clobbered).
+  // Reset the dialog's picks each time it opens (not on every query change, so
+  // user edits aren't clobbered).
   useEffect(() => {
     if (!creating) return;
     setCreateError(null);
-    const modelIdFor = (cfg: AgentConfigView | null | undefined) =>
-      models.find(
-        (m) =>
-          m.provider === cfg?.provider &&
-          m.model_name === cfg?.model_name &&
-          (m.base_url ?? "") === (cfg?.base_url ?? ""),
-      )?.id ?? "";
-    setBrianModelId(modelIdFor(brianConfig));
-    setRainModelId(modelIdFor(rainConfig));
-    setDisableRain(rainDisabledDefault === "1");
+    setParticipants([emptyParticipant()]);
     setUseWorktree(worktreeDefault !== "0");
     setSelectedProject("");
     setAdHocRepo("");
@@ -252,14 +272,32 @@ export function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [creating]);
 
+  // Every row has a role. Until then Create is disabled — a participant with no
+  // role is a participant with no capabilities, and guessing one for the user
+  // is how a session silently gets an agent they did not choose.
+  const rosterReady =
+    participants.length > 0 && participants.every((p) => p.roleId !== null);
+
+  const patchParticipant = (index: number, patch: Partial<ParticipantRow>) =>
+    setParticipants((rows) =>
+      rows.map((row, i) => (i === index ? { ...row, ...patch } : row)),
+    );
+
+  // The role a slot is playing, for the effort block's label. Empty until the
+  // row has a role — the label is context, so it stays blank rather than
+  // guessing.
+  const roleLabelAt = (index: number) =>
+    roles.find((r) => r.id === participants[index]?.roleId)?.display_name ?? "";
+
   const handleCreate = async () => {
-    if (!title.trim()) return;
+    if (!title.trim() || !rosterReady) return;
     const id = `s-${crypto.randomUUID().slice(0, 8)}`;
     const proj = projects.find((p) => p.name === selectedProject);
     // Ad-hoc repo wins over the dropdown; project stays null so the backend
     // derives it from the path basename (general policy tier).
     const repoPath = adHocRepo.trim() || proj?.working_repo_path || null;
     const project = adHocRepo.trim() ? null : selectedProject || null;
+    const solo = participants.length < 2;
     setCreateError(null);
     let ok = false;
     try {
@@ -268,15 +306,22 @@ export function Dashboard() {
         title: title.trim(),
         repoPath,
         project,
-        rainEnabled: !disableRain,
-        brianModelId: brianModelId || null,
-        rainModelId: disableRain ? null : rainModelId || null,
+        // The roster is the source: the backend derives the solo/duo flag and
+        // both model columns from `participants`, so sending them here too
+        // would be a second source that can disagree with it.
+        rainEnabled: null,
+        brianModelId: null,
+        rainModelId: null,
         options: {
           brianEffort,
-          rainEffort: disableRain ? null : rainEffort,
+          rainEffort: solo ? null : rainEffort,
           brianUltracode,
-          rainUltracode: disableRain ? null : rainUltracode,
+          rainUltracode: solo ? null : rainUltracode,
           useWorktree,
+          participants: participants.map((p) => ({
+            roleId: p.roleId as number,
+            modelId: p.modelId || null,
+          })),
         },
       });
       ok = true;
@@ -442,75 +487,123 @@ export function Dashboard() {
                   the general policy tier.
                 </p>
               )}
-              {/* Disable Rain first — it determines whether the Rain picker
-                  renders, so the model row below can collapse to one column. */}
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={disableRain}
-                  onChange={(e) => setDisableRain(e.target.checked)}
-                  className="size-4 accent-primary"
-                />
-                <span className="font-body-md text-body-md text-on-surface">
-                  Disable Rain (solo Brian — saves credits)
-                </span>
-              </label>
-              <div
-                className={cn(
-                  "grid gap-3",
-                  disableRain ? "grid-cols-1" : "grid-cols-2",
-                )}
-              >
-                <label className="block">
-                  <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                    Brian model
+              <div>
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="font-label-caps text-label-caps text-on-surface-variant">
+                    Participants
                   </span>
-                  <select
-                    value={brianModelId}
-                    onChange={(e) => setBrianModelId(e.target.value)}
-                    className={cn(
-                      "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
-                      "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
-                    )}
-                  >
-                    <option value="">(agent default)</option>
-                    {models.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.display_name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {!disableRain && (
-                  <label className="block">
-                    <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                      Rain model
-                    </span>
-                    <select
-                      value={rainModelId}
-                      onChange={(e) => setRainModelId(e.target.value)}
-                      className={cn(
-                        "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
-                        "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
-                      )}
+                  <span className="font-code-sm text-code-sm text-on-surface-variant">
+                    {participants.length} of {MAX_PARTICIPANTS}
+                  </span>
+                </div>
+                <div className="flex flex-col gap-2">
+                  {participants.map((row, index) => (
+                    <div
+                      key={row.key}
+                      className="rounded-md border border-outline-variant bg-surface p-2"
                     >
-                      <option value="">(agent default)</option>
-                      {models.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.display_name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                      <div className="mb-1 flex items-center justify-between">
+                        <span className="font-code-sm text-code-sm text-on-surface-variant">
+                          Participant {index + 1}
+                        </span>
+                        {participants.length > 1 && (
+                          <button
+                            type="button"
+                            aria-label={`Remove participant ${index + 1}`}
+                            onClick={() =>
+                              setParticipants((rows) =>
+                                rows.filter((_, i) => i !== index),
+                              )
+                            }
+                            className="text-on-surface-variant transition-colors hover:text-on-surface"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="block">
+                          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                            Role
+                          </span>
+                          <select
+                            aria-label={`Participant ${index + 1} role`}
+                            value={row.roleId ?? ""}
+                            onChange={(e) =>
+                              patchParticipant(index, {
+                                roleId: e.target.value
+                                  ? Number(e.target.value)
+                                  : null,
+                              })
+                            }
+                            className={cn(
+                              "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
+                              "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
+                            )}
+                          >
+                            <option value="">(choose a role)</option>
+                            {invitableRoles.map((r) => (
+                              <option key={r.id} value={r.id}>
+                                {r.display_name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="block">
+                          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                            Model
+                          </span>
+                          <select
+                            aria-label={`Participant ${index + 1} model`}
+                            value={row.modelId}
+                            onChange={(e) =>
+                              patchParticipant(index, { modelId: e.target.value })
+                            }
+                            className={cn(
+                              "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
+                              "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
+                            )}
+                          >
+                            <option value="">(role default)</option>
+                            {models.map((m) => (
+                              <option key={m.id} value={m.id}>
+                                {m.display_name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {participants.length < MAX_PARTICIPANTS && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setParticipants((rows) => [...rows, emptyParticipant()])
+                    }
+                    className="mt-2 font-code-sm text-code-sm text-primary transition-colors hover:underline"
+                  >
+                    + Add participant
+                  </button>
+                )}
+                <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                  Row order sets each participant's turn slot.
+                </p>
+                {invitableRoles.length === 0 && (
+                  <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                    No roles yet — add one in <b>Settings → Roles</b> before
+                    starting a session.
+                  </p>
+                )}
+                {models.length === 0 && invitableRoles.length > 0 && (
+                  <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                    No saved models yet — each participant uses its role's
+                    configured default. Add models in <b>Settings → Models</b> to
+                    pick per session (and to run a pre-flight connection test).
+                  </p>
                 )}
               </div>
-              {models.length === 0 && (
-                <p className="text-xs text-on-surface-variant">
-                  No saved models yet — both agents use their configured default.
-                  Add models in <b>Settings → Models</b> to pick per session (and
-                  to run a pre-flight connection test).
-                </p>
-              )}
               {(projects.find((p) => p.name === selectedProject)
                 ?.working_repo_path ||
                 adHocRepo.trim()) && (
@@ -531,10 +624,13 @@ export function Dashboard() {
                 <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
                   Effort & ultracode (this session)
                 </span>
+                {/* Still per-SLOT, because the columns spawn reads are still
+                    per-slot: slot 0's knobs land in `sessions.brian_effort`,
+                    slot 1's in `rain_effort`. The role label follows the pick. */}
                 <div className="flex flex-col gap-2">
                   <AgentEffortOverride
                     title="Brian"
-                    roleLabel="HANDS"
+                    roleLabel={roleLabelAt(0)}
                     ov={{ effort: brianEffort, ultracode: brianUltracode }}
                     patch={(p) => {
                       if ("effort" in p) setBrianEffort(p.effort ?? null);
@@ -543,10 +639,10 @@ export function Dashboard() {
                     inheritedEffort={inheritedEffort.brian}
                     isEyes={false}
                   />
-                  {!disableRain && (
+                  {participants.length > 1 && (
                     <AgentEffortOverride
                       title="Rain"
-                      roleLabel="EYES"
+                      roleLabel={roleLabelAt(1)}
                       ov={{ effort: rainEffort, ultracode: rainUltracode }}
                       patch={(p) => {
                         if ("effort" in p) setRainEffort(p.effort ?? null);
@@ -575,7 +671,7 @@ export function Dashboard() {
               <Button
                 variant="primary"
                 onClick={handleCreate}
-                disabled={!title.trim() || createSession.isPending}
+                disabled={!title.trim() || !rosterReady || createSession.isPending}
               >
                 {createSession.isPending ? "Creating…" : "Create session"}
               </Button>
