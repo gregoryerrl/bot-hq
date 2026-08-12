@@ -612,9 +612,14 @@ async fn call_external_tool(
             if !wire::LEGACY_CONFIG_KEYS.contains(&agent_name.as_str()) {
                 return Err(JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
+                    // Wording held byte-for-byte: a driver matches on it
+                    // (`tests/external_mcp_test.rs`), so it is as much a wire
+                    // string as the keys themselves. Built from the constant so
+                    // the two still cannot drift.
                     format!(
-                        "agent_name must be one of {:?}, got {agent_name}",
-                        wire::LEGACY_CONFIG_KEYS
+                        "agent_name must be {}/{}, got {agent_name}",
+                        wire::LEGACY_CONFIG_KEYS[0],
+                        wire::LEGACY_CONFIG_KEYS[1]
                     ),
                 ));
             }

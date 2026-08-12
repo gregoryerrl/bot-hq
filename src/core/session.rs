@@ -774,7 +774,6 @@ async fn spawn_session_handle(
         // overrides included — is decided in one place off the participant row;
         // see `participant_spawn_config` for why they are not unpacked here.
         let spawn_cfg = participant_spawn_config(
-            &session.id,
             &storage,
             p,
             cfg,
@@ -1478,8 +1477,8 @@ async fn display_name_for(storage: &Storage, p: &crate::storage::Participant) ->
 /// here removes the wires rather than testing them, and
 /// `a_participant_spawns_with_the_overrides_its_role_resolves` covers what
 /// remains.
+#[allow(clippy::too_many_arguments)]
 async fn participant_spawn_config(
-    session_id: &str,
     storage: &Storage,
     p: &crate::storage::Participant,
     config: AgentConfig,
@@ -1491,6 +1490,10 @@ async fn participant_spawn_config(
     working_dir: Option<PathBuf>,
 ) -> Result<SpawnConfig> {
     let agent_name = p.slug.as_str();
+    // The participant's OWN session, not one passed alongside it. A mismatch
+    // here is the failure `ParticipantInput`'s receipt scoping exists to catch
+    // at delivery time; taking it off the row means it cannot arise.
+    let session_id = p.session_id.as_str();
     let capabilities = participant_capabilities(p);
     // Claude-config overrides for the ROLE this participant plays. Resolved
     // HERE, from the participant, so the set that filters the mcp-config below
@@ -2712,7 +2715,6 @@ mod tests {
             let (s, paths, dir) = (s.clone(), &paths, mcp_temp.path().to_path_buf());
             async move {
                 participant_spawn_config(
-                    "s1",
                     &s,
                     &p,
                     resolve_participant_config(&s, &p).await,
