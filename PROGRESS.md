@@ -7,6 +7,15 @@ A–9 of the from-scratch rebuild), see
 For what bot-hq IS see [`ARCHITECTURE.md`](ARCHITECTURE.md). For what's
 planned next see [`PLAN.md`](PLAN.md).
 
+> **Reading older entries:** this is an append-only change log, so entries
+> describe the tree **as it was on their date**. Anything before 2026-08-13 may
+> reference subsystems since deleted — the native agent loop (rc3 D9), the
+> bilateral router `core/router.rs` (task 14), the Agents settings tab (D8), the
+> Maintain-CL button (D15) — and the retired agent names Brian/Rain (D10). That
+> is the record, not staleness, and it is deliberately not rewritten. For current
+> reality read `ARCHITECTURE.md`; for the decisions that changed it, read
+> [`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md).
+
 ---
 
 ## 2026-08-13 — CL claims that name code which is gone are detectable (rc3 P4)

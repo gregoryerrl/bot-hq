@@ -1,15 +1,20 @@
 # bot-hq — Project Instructions (for claude-code)
 
 You are working on **bot-hq**, a Tauri v2 + React + Rust desktop GUI app
-for driving AI-assisted coding sessions through a bilateral-duo agent
-model (Brian = HANDS, Rain = EYES) with policy enforcement. A former
-solo helper agent, Emma, was removed from the core (planned to return as
-the first bot-hq plugin — TBD). Planned direction (2026-08-05,
-unscheduled): Rain becomes a plugin only and the core narrows to the
-agent harness itself; the duo model described here remains accurate
-until that ships. House framing: describe bot-hq as an **agent
-harness/system** — never by agent count (no "single-agent"/"duo"-
-centric identity language).
+for driving AI-assisted coding sessions through an agent harness with
+policy enforcement.
+
+A session runs **N participants**, each playing a ROLE the user defined in
+Settings → Roles (dialog default 1, cap 4). A role owns its capabilities,
+its instruction prose, its participation mode and its default model. The
+seeded pair is HANDS (executes) and EYES (reviews adversarially) — that is
+the user's configuration, not bot-hq's furniture, and rc3 D10 retired the
+agent names that used to stand in for them.
+
+A former helper agent, Emma, was removed from the core (planned to return
+as the first bot-hq plugin — TBD). House framing: describe bot-hq as an
+**agent harness/system** — never by agent count (no "single-agent" /
+"duo"-centric identity language).
 
 The original from-scratch rebuild shipped at v0.1.0; subsequent work
 added a UI redesign, an external driver MCP server, and a two-layer

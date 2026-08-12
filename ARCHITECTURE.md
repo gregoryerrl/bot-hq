@@ -14,16 +14,23 @@ see [`PLAN.md`](PLAN.md). For recent change log see
 
 bot-hq is a desktop GUI app for driving AI-assisted coding sessions
 through a bilateral-duo agent model with policy enforcement. Each
-session spawns two agents:
+session spawns participants the user picks from their ROLES:
 
-- **Brian** (HANDS) — executes: edits, commits, runs bash, calls tools.
-- **Rain** (EYES) — reviews: read-only, adversarial counterpart. HANDS-only
-  signaling MCP tools are gated server-side.
+- A role holds a set of **capabilities** (ticked in Settings → Roles) and its own
+  instruction prose. The two the user seeded are **HANDS** (executes: edits,
+  commits, runs bash) and **EYES** (reviews: adversarial, no write tools) — but
+  those are their configuration, not bot-hq's furniture.
+- A participant is displayed as `ROLE · Model` and is never named after a person.
 
-Every agent is backed by a `claude-code` subprocess. Rain's write denial is
-`--disallowedTools` subtraction, which is fail-open: a deny-list cannot
-anticipate every mutation verb — `rm -rf`, `mv`, `chmod`, `npm install` all
-pass it, and are forbidden only by her role prompt.
+Every participant is backed by a `claude-code` subprocess. **Tool access is gated
+on the participant's invite-time capability snapshot**, not on any name —
+`signaling/jsonrpc.rs` states this in its module doc.
+
+The spawn-side write denial is `--disallowedTools` subtraction, which is
+fail-open: a deny-list cannot anticipate every mutation verb — `rm -rf`, `mv`,
+`chmod`, `npm install`, and file-writing shell forms like `sed -i` all pass it.
+The capability gate covers the MCP tools; the shell surface is covered by role
+prose and the Tool Gate, not by the deny-list.
 
 **There used to be a second backend** — bot-hq's own native Rust agent loop,
 opted into per saved model. rc3 D9 deleted it (2026-08-12): the claude CLI is
@@ -31,13 +38,13 @@ the only model connector, "for uniformity", and the native connector returns
 later as a plugin. Git history is the archive — `git show
 c7bba28:src/agents/native/` is where it starts from.
 
-bot-hq is a two-agent duo (Brian + Rain). A former solo helper agent,
-**Emma**, has been removed from the core (code + data purged); she is
-slated to return as the first bot-hq plugin — TBD. Planned (2026-08-05,
-unscheduled): **Rain** moves out of the core to become a plugin as
-well, narrowing the core to the agent harness itself — the product is
-the harness, not any particular agent lineup. Until that ships, this
-document describes the live duo.
+bot-hq is an **agent harness** — describe it that way, never by agent count. A
+session runs N participants (dialog default 1, dialog cap 4, backend cap 8),
+each playing a role the user defined. The roles that ship seeded are the user's
+own two; a different user configures different ones.
+
+A former helper agent, **Emma**, was removed from the core and is slated to
+return as the first plugin — TBD.
 
 The user directs the work and owns the decisions; the app is the bridge
 between user and agents. Policy enforcement runs at two layers (MCP tool calls + git
@@ -68,7 +75,7 @@ multi-thread runtime. Tauri owns the OS main thread.
                              │            │
                     ┌────────▼─────┐  ┌───▼─────────┐
                     │ claude-code  │  │ claude-code │
-                    │   (Brian)    │  │   (Rain)    │
+                    │ participant 1│  │ participant N│
                     │ stream-json  │  │ stream-json │
                     └──────────────┘  └─────────────┘
 ```
@@ -88,7 +95,7 @@ loop, in-process, opted into per saved model, EYES-only. It was deleted
 outright rather than feature-flagged, because a second runtime nobody builds
 still costs every reviewer a re-read and every refactor a second case. What
 made the deletion cheap is what made the loop additive in the first place:
-`AgentHandle` is a pure channel struct — `core/duo.rs`, `core/router.rs`, the
+`AgentHandle` is a pure channel struct — `core/duo.rs`, `core/sequencer.rs`, the
 policy layer, the UI event path and the context meter speak only `AgentEvent`
 and `OutgoingUserMessage` — so nothing downstream ever knew which backend it
 had, and nothing downstream changed when one went away.
@@ -118,12 +125,12 @@ model selection"). `BOT_HQ_SESSION_ID` is also injected so git-hook
 subprocesses can read session-scoped state.
 
 **LLM proxy (`src/agents/llm_proxy.rs`):** agents pointed at a
-non-Anthropic Anthropic-compatible gateway (e.g. Rain → DeepSeek) route
+non-Anthropic Anthropic-compatible gateway (e.g. DeepSeek) route
 their `ANTHROPIC_BASE_URL` through a local normalizing reverse-proxy. It
 hoists the `role:"system"` entry claude-code injects into the
 `messages[]` array (from a SessionStart hook's `additionalContext`) up
 into the top-level `system` field, which strict gateways require.
-Agents on the real first-party API (Brian) bypass it.
+Participants on the real first-party API bypass it.
 
 The proxy sits on the only path there is. It used to be described as a
 "CLI-path fixup", because the native loop built its request body itself and
@@ -132,23 +139,34 @@ gateway-backed agent routes through it.
 
 ---
 
-## Agent role prompts (hardcoded)
+## Role prompts (user-owned data, seeded from the binary)
 
-Role prompts (Brian/Rain identity) are baked into the binary at
-`src/agents/prompts.rs`. They are NOT CL-loaded. Reasoning:
+**A role's instruction prose lives in the `roles` table and is edited in
+Settings → Roles** (rc3 D8/D10). It is the user's, not the product's: migration
+0046 seeded `roles.description_prompt` byte-for-byte from the constants in
+`src/agents/prompts.rs`, 0048 cleared the `builtin` flag so bot-hq claims no
+ownership, and 0049 removed the agent names from the seeded text.
 
-- Role boundary (Brian writes, Rain reviews) is structural — a typo in a
-  CL file shouldn't be able to break it.
-- Hardcoded prompts protect the role identity through CL edits, custom
-  instruction changes, etc.
+The constants remain in the binary as the SEED and as the fallback — an empty
+`description_prompt` resolves back to them (`resolve_role_prose` →
+`builtin_prose_for_role`, keyed on the role slug). So clearing the box in the
+Roles tab restores the built-in text rather than producing a role with no
+instructions.
 
-CL still supplies per-project + per-user customizations on top (custom
-instructions, general rules, project policy directives). The hardcoded
-prompt is the floor; CL extends it.
+This inverts the old rule. The prompts used to be hardcoded *specifically* so a
+CL edit could not break a role boundary; that protection now comes from
+**layering order** instead: the generated capability section (layer 2, below)
+is emitted after every editable input, so free text cannot grant itself
+something the gate does not enforce. Migration 0044's schema comment states the
+invariant — *"a role must not be able to author rules that contradict its own
+capability set."*
+
+CL still supplies per-project and per-user customisation on top.
 
 System-prompt layering at session spawn (`src/core/session.rs::read_system_prompt`):
 
-1. Hardcoded role prompt (Brian/Rain)
+1. The role's instruction prose (`roles.description_prompt`, falling back to
+   the seeded constant)
 2. CL location anchor (`<data_dir>` path)
 2b. Project CL index primer (when the session has a project) — the
    `cl_index_search` rows for the project (`file_path — description`,
@@ -178,46 +196,54 @@ policy block in layer 6).
 
 ---
 
-## Bilateral duo coordination
+## Turn coordination — the ring
 
-Stream-json prose flows Brian ↔ Rain through a central **router task**
-(`src/core/router.rs::run_router`) — not peer-to-peer. Each agent's pump
-(`src/core/duo.rs::pump_agent`) emits a `RouterCommand::Forward` on every
-completed turn that buffered prose; the router is the single decision
-point that forwards to the peer, suppresses, or lets the duo settle. All
-phases are turn-based — a forward is decided on turn completion (the old
-Investigate/Plan 1.5s-buffer vs Apply/Verify split was retired
-2026-06-24).
+**One participant holds the turn at a time.** `src/core/sequencer.rs` runs a
+fixed rotation over the session's ACTIVE participants in `turn_position` order;
+observers and `on_demand` participants are skipped rather than handed a no-op
+turn. Each participant's pump (`src/core/duo.rs::pump_agent`) reports
+`SequencerCommand::TurnComplete` when its turn ends — on BOTH the substantive and
+the errored branch, because the ring steps on the completion, not on the text.
 
-**Forward ladder** (router decides, in order):
-1. **Awaiting guard** — drop the forward while the session's `awaiting`
-   flag is set (silent-on-hold).
-2. **`peer_ack`** — if the turn called `peer_ack`, suppress (the duo
-   converged; the peer is not woken).
-3. **Hard cap** — after `VOLLEY_HARD_CAP` (18) consecutive user-silent
-   forwards, break the volley (suppress + settle both agents to Idle).
-   The counter (`user_silent_forwards` on `SessionHandle`) resets on the
-   next user message.
-4. **Convergence** — if a forward is ≥ `VOLLEY_SIMILARITY_THRESHOLD`
-   (0.85, token-set Jaccard) similar to the previous one for
-   `VOLLEY_SIMILAR_BREAK` (2) forwards running, break.
-5. Otherwise **forward** to the peer's stdin.
+**Delivery is by cursor, not by forward.** A participant reads everything past
+its own `participant_cursors` watermark when it takes the turn, and every
+delivery is recorded in `participant_deliveries` with a nullable
+`withheld_reason`. There is no hold queue and no forward that can be lost:
+policies gate delivery, never persistence.
 
-`peer_ack` + `halt` are the *behavioral* layer (agents signal volley-end
-intent); the hard-cap + convergence breaker is the *mechanical* floor for
-weak models that never signal.
+**How a turn ends** (`TurnEnding`):
+- `Spoke { peer_ack_override }` — substantive output. Steps the ring and RESETS
+  the done-tally for the whole session.
+- `Done` — the consensus vote. Recorded per participant.
+- `Passed` — declines the turn without voting done. Casts no vote and retracts
+  its own, so a participant that is blocked rather than finished cannot complete
+  a tally by accident.
 
-**Router lifecycle:** a duo session holds `Option<RouterControl>` on its
-`SessionHandle` (`None` = solo, no router). `RouterControl`'s `Drop`
-aborts the task, so closing/dropping a session tears the router down; its
-liveness surfaces to the UI as the per-session router dot (`router_alive`).
+**How a cycle stops**, in order of how often it should fire:
+1. **Consensus** — every active participant holds a done vote
+   (`all_active_voted_done`, which filters on `enabled && participation_mode ==
+   "active"`, so observers and on-call participants never block a halt).
+2. **A parked question** — `ask_user_choice` or `mark_awaiting_user` both set the
+   awaiting flag through `set_session_awaiting`, which sends
+   `SequencerCommand::QuestionParked`. The cycle halts unilaterally: no vote is
+   cast and no further turns are handed out. Without this the ring keeps dealing
+   turns to participants that have no legal move (fixed 2026-08-13).
+3. **Spin detection** — token-set Jaccard at `SPIN_SIMILARITY_THRESHOLD` (0.85)
+   over ONE participant's output across rounds, for `SPIN_BREAK_STREAK` (2)
+   running. Cross-agent echo is impossible in a ring; self-repetition is not.
+   A pass deliberately does not trip it.
+4. **Round cap** — a crude backstop at 500 LAPS (one lap = one full pass of the
+   ring), `0` = off, per-session override on the policy chain. High enough to be
+   invisible in normal use; firing posts a visible row (rc3 D7).
 
-**Suppressed from peer forwarding** (never reach the ladder):
-- Tool-use events (`ask_user_choice`, `mark_awaiting_user`,
-  `request_approval`, etc.) — agent ↔ UI signaling, not agent-to-agent.
-- Anything emitted while `awaiting` is set (ladder step 1). The flag is
-  set by `mark_awaiting_user`, `ask_user_choice` / `request_approval`
-  (until resolved), and `halt`; forwarding resumes when it clears.
+**The bilateral router this replaced was deleted 2026-08-13** (task 14). It
+forwarded `Author::Brian ↔ Author::Rain` through a central task with a hold
+queue, a volley hard-cap and a convergence breaker, and had no third case — it
+was the last thing holding a session to two participants. Every behaviour it
+encoded carries a verdict in
+[`docs/plans/2026-08-06-router-behaviour-inventory.md`](docs/plans/2026-08-06-router-behaviour-inventory.md):
+12 PRESERVED (each with a named test in `core::sequencer`), 6 DISSOLVED
+(structurally impossible without a hold queue), 2 DROPPED with stated reasons.
 
 ---
 
@@ -256,9 +282,11 @@ opens session view. Inline `+ New session` form creates rows + registers
 the session with the bridge.
 
 **Session view:** 60/40 split — chat (left) + DocumentPane (right).
-Header: title + back link. Chronological chat: all messages (user,
-Brian, Rain, phase_change) interleaved by `created_at` with author color
-coding (brian=orange, rain=purple, user=blue, system=muted).
+Header: title + back link, plus the live roster rendered `ROLE · Model` so the
+session's composition is legible while it runs. Chronological chat: all messages
+(user, each participant, phase_change) interleaved by `created_at` with colour
+keyed to turn slot (slot 0 = orange, slot 1 = purple, user = blue, system =
+muted).
 Pending-choice banner (purple) renders above the input with inline
 choice buttons.
 
@@ -300,7 +328,7 @@ repo directly (no pre-registration).
 *Context Manager* — the per-project management surface (NOT a file
 explorer): a left rail of registered projects (`_globals` pinned last) and a
 right panel for the selected project — header strip (repo path, per-project
-Rescan, Maintain CL preselecting the project) over the **Measurement** card:
+Rescan) over the **Measurement** card:
 `cl_retrieval_stats` tiles over `retrieval_events` (tokens/session,
 tokens/retrieval, stale-hit + retrieval-miss rates). Default selection is
 the first project.
@@ -314,28 +342,31 @@ get a dynamic topbar tab (`/plugins/view/:pluginId` → `PluginPanel.tsx`
 → `PluginHost.tsx`). See "Plugin runtime" below for the execution model
 and [`docs/PLUGINS.md`](docs/PLUGINS.md) for the author contract.
 
-**Settings tab:** subtabs for the saved-model registry (Models), the
-default-model + disable-Rain-by-default app settings, the global Tool
-Gate keyword list, the global Claude Config surface, and a closed-session
-Archive. Per-row accent dot keyed to author color. Plaintext-token
-warning preserved.
+**Settings tab:** subtabs led by **Roles** (create/edit roles, their capability
+ticks, instruction prose, participation mode and default model), then the
+saved-model registry (Models), the global Tool Gate keyword list, the global
+Claude Config surface (one block per role), Policy, Violations, Feedback, and a
+closed-session Archive. The **Agents** subtab was retired by rc3 D8 — a role owns
+its default model and the New Session dialog overrides it per participant.
 
-**Per-agent model selection:** the user maintains a registry of saved
+**Per-participant model selection:** the user maintains a registry of saved
 models (`models` table — label + provider + base_url + auth_token +
-`context_window`) in Settings → Models. The New-session dialog
-exposes a Brian + Rain model dropdown (each seeded from that agent's
-`agent_configs` entry when it matches a saved model) plus a "disable
-Rain" checkbox (solo Brian) seeded from the `rain_disabled_default` app
-setting. The picks persist on the `sessions` row (`brian_model_id` /
-`rain_model_id` / `rain_enabled`) and `resolve_spawn_config` resolves
-them at spawn (registry → `agent_configs` → built-in default).
-`agent_configs` is now effectively the picker fallback. (A
-`default_model_id` app setting exists but is only consumed by
-`summarize_session_doc`'s model resolution, not the spawn path.)
-Dialog-less create paths — the Maintain-CL dispatcher and the external
-driver's `create_session` — honor `rain_disabled_default` via
-`Storage::default_rain_enabled` and leave the model ids NULL, which means
-the per-agent config decides.
+`context_window`) in Settings → Models. The New Session dialog adds one row per
+participant, each choosing a ROLE and optionally overriding that role's default
+model and effort. The picks persist on `session_participants`
+(`role_id` / `model_id` / `effort` / `ultracode`).
+
+**The model chain (rc3 D8):** the session's own pick → the ROLE's
+`default_model_id` → the per-agent row → the built-in default, resolved in
+`resolve_participant_config`. The role step is what makes the Roles tab the owner
+of "which model does this role run on" for every create path, including the ones
+with no dialog.
+
+Dialog-less create paths — the external driver's `create_session` and the plugin
+proxy — seed exactly ONE participant, the first active role by `roles.id`
+(design §1's "default 1"). The `rain_disabled_default` setting that used to
+govern them was deleted by rc3 D13: the dialog picks the roster now, so "start
+solo" is simply not adding a second participant.
 
 **Two per-model columns are now unread** (rc3 D9). Both survive in the
 schema — dropping either needs a migration, and the user is starting the
@@ -436,19 +467,25 @@ in-memory only (200 KB ring).
 **Review findings gate (EYES sign-off).** `eyes_flag` /
 `disposition_finding` / `check_open_findings` / `override_reviewer_block` /
 `approve_finding` (+ the pre-commit `check_commit_message`) implement the
-EYES-sign-off gate: a `blocking` finding Rain files via `eyes_flag` gates
-HANDS's `git commit` (mechanically, via the pre-commit hook) until HANDS
-resolves it with `disposition_finding` (fixed / rebutted). The gate is
-fail-CLOSED when the reviewer is down; `override_reviewer_block` is the
-explicit escape valve. Backed by the `findings` table.
+reviewer sign-off gate: a `blocking` finding filed via `eyes_flag` gates
+`git commit` (mechanically, via the pre-commit hook) until it is resolved with
+`disposition_finding` (fixed / rebutted). The gate is fail-CLOSED when the
+reviewer is down — the reviewers it watches are the participants holding
+`file_finding`, registered at spawn. `override_reviewer_block` is the explicit
+escape valve. Backed by the `findings` table.
 
-**Role enforcement at the dispatch layer:** `HANDS_ONLY_TOOLS` and its
-inverse `EYES_ONLY_TOOLS` are hard-coded lists. A call to a HANDS-only
-tool from Rain (or an EYES-only tool from Brian) returns a JSON-RPC error.
-EYES-only = `eyes_flag`, `approve_finding` (Rain files / signs off on her
-own findings; HANDS can't self-review). HANDS-only adds `disposition_finding`,
-`override_reviewer_block`, `halt`, and the user-facing signaling tools. The
-boundary is structural, not just convention.
+**Capability enforcement at the dispatch layer:** the hard-coded
+`HANDS_ONLY_TOOLS` / `EYES_ONLY_TOOLS` name lists are GONE (rc3). A gated tool
+resolves its required capability through `capability::required_for` and checks it
+against the caller's invite-time snapshot; the refusal names the capability and,
+since rc3 P2, also posts a visible row. Tool descriptions render their
+requirement from `required_for` itself, so a description and its gate cannot
+disagree. A parity oracle walks every gated tool against a frozen transcription
+of the old name gate, so the reframe is proven equivalent rather than asserted.
+
+One deliberate exception: **`close_session` sits on `PARITY_HOLD`** and is not
+capability-gated, preserving pre-rc3 behaviour. Decision **D16** closes this —
+see the rc3 decisions doc.
 
 **Bridge (`src/signaling/bridge/`)** owns:
 - Storage handle (writes question rows, message rows, violations).
@@ -550,11 +587,14 @@ replacing the per-project `tool_blocklist` role (post-2026-05-29
 fabricated-comment incident) with a single list that can also EXECUTE the
 command on approval.
 
-**Scope:** only HANDS — the PreToolUse hook is injected via `--settings`,
-which Rain does not receive. Rain is held read-only by `--disallowedTools`
-instead, which is fail-open for verbs a deny-list did not anticipate; the
-inline allow-list gate that used to hold her more strictly belonged to the
-native loop and went with it (rc3 D9).
+**Scope:** only participants granted `edit_files` — the PreToolUse hook is
+injected via `--settings`, which the read-only spawn posture does not receive. A
+reviewer is held by `--disallowedTools` instead, which is **fail-open** for verbs
+a deny-list did not anticipate: `sed -i`, `tee` and `python3 -c` all write files
+and none are denied. bot-hq deliberately relies on that for mutation-based
+verification (see the project CL's conventions), so treat the denial as covering
+the named tools, not as a write boundary. The inline allow-list gate that used to
+hold a reviewer more strictly belonged to the native loop and went with it (D9).
 
 - **Config:** one global list at `<data_dir>/config/tool-gate.json` —
   `[{keyword, mode}]`, `mode` ∈ `gate | auto_allow`, edited in Settings
@@ -615,7 +655,8 @@ more sessions can work the same project in parallel (per-session index,
 checkout, and branch — no file races). Opt-out per session in the
 New-session dialog, or globally via the `worktree_default` app setting
 (Settings → Policy → Session defaults; it lived under the retired Agents
-subtab until rc3 D8). Dialog-less paths (Maintain CL) follow the setting.
+subtab until rc3 D8). The Maintain-CL dispatcher was removed by D15 — start a
+session and instruct it.
 
 - **Placement:** `<data_dir>/.local/worktrees/<session-id>/<repo-basename>/`.
   The repo basename stays the final path segment because
@@ -658,8 +699,10 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   created_at, closed_at, archived, rain_enabled, brian_model_id,
   rain_model_id, + per-agent spawn metadata: brian/rain_model_at_spawn,
   brian/rain_claude_session_id, brian/rain_effort, brian/rain_ultracode)
-  — rain_enabled + the model ids drive per-session model selection + the
-  solo-Brian (disable-Rain) toggle; `base_repo_path` is set for
+  — **all now unread**: per-participant model, effort, ultracode and resume id
+  live on `session_participants` (rc3 D10). They survive because dropping a
+  column costs a migration and the database was reset anyway;
+  `base_repo_path` is set for
   worktree-isolated sessions (see "Session worktrees"). There is NO
   `project` column — the project is derived at spawn from
   `working_repo_path.file_name()` — and no `phase` column (IPAV phase is
@@ -898,8 +941,13 @@ the `bot-hq` binary and does not run at app startup. See
 
 ## Glossary
 
-- **Bilateral duo:** Brian (HANDS — edits/commits/push) + Rain (EYES —
-  review, no write tools). Spawned per session.
+- **Participant:** one claude-code subprocess in a session, playing a ROLE and
+  displayed as `ROLE · Model`. A session runs N of them (dialog default 1, cap
+  4; backend cap 8), each holding its role's capability snapshot.
+- **Role:** a user-owned template — capabilities, instruction prose,
+  participation mode, default model — edited in Settings → Roles. The seeded
+  pair is HANDS (executes) and EYES (reviews); they are the user's config, not
+  bot-hq's furniture.
 - **IPAV:** Investigate → Plan → Apply → Verify. Discipline framework
   agents follow within a session.
 - **CL (Context Library):** filesystem space at `<BOT_HQ_DATA_DIR>`
@@ -932,8 +980,9 @@ the `bot-hq` binary and does not run at app startup. See
   the gear tab. Push/force-push are pure toggles — no agent-side grants.
 - **Awaiting flag:** per-session `Arc<AtomicBool>` set by user-blocking
   tools (`mark_awaiting_user`, `ask_user_choice`, `request_approval`).
-  When set, the peer-forward router (`core/router.rs`) suppresses
-  forwarding — silent-on-hold protocol.
+  When set, the turn ring halts: `set_session_awaiting` sends
+  `SequencerCommand::QuestionParked`, so no further turns are handed out until
+  the user acts. It also stops cursors advancing.
 - **Violations log:** append-only `violations.jsonl` at the data-dir
   root recording policy enforcement events (denied tool calls, post-
   commit greps that fired, policy file mutations).

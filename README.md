@@ -1,12 +1,14 @@
 # bot-hq
 
-**Two AI agents — one builds, one reviews. You orchestrate.**
+**Agents you define. Roles you enforce. You orchestrate.**
 
 bot-hq is a desktop app for running AI-assisted coding sessions you can actually
-trust. Instead of one assistant working unchecked, every session pairs **Brian**,
-who writes the code, with **Rain**, who reviews it adversarially. You sit above both
-as the conductor — approving the risky steps, steering the work, and reading exactly
-what each agent investigated, planned, did, and verified.
+trust. Instead of one assistant working unchecked, you define **roles** — what each
+one may do, what model it runs on, how it is briefed — and a session runs however
+many of them the work needs. The usual shape is one that writes code and one that
+reviews it adversarially. You sit above them as the conductor: approving the risky
+steps, steering the work, and reading exactly what each participant investigated,
+planned, did, and verified.
 
 It's built for people who want the speed of AI coding without giving up oversight: a
 clear workflow, a project knowledge base your agents read before they touch
@@ -37,21 +39,28 @@ didn't want touched. bot-hq is built around three ideas that fix that:
 
 ## The duo you orchestrate
 
-Every session spawns two agents with distinct, enforced roles:
+A session spawns participants from roles you configure. Two roles ship seeded, and
+they are a starting point rather than the product:
 
-|                    | **Brian — HANDS**                              | **Rain — EYES**                                  |
-| ------------------ | ---------------------------------------------- | ------------------------------------------------ |
-| Role               | Executes: writes code, runs commands, commits  | Reviews: reads Brian's work, pushes back hard    |
-| Can edit files?    | Yes                                            | No — write tools are blocked                     |
-| Think of them as   | Your pair-programmer                           | Your reviewer / second opinion                   |
+|                    | **HANDS**                                       | **EYES**                                          |
+| ------------------ | ----------------------------------------------- | ------------------------------------------------- |
+| Role               | Executes: writes code, runs commands, commits    | Reviews: reads the work, pushes back hard         |
+| Can edit files?    | Yes                                              | No — the capability is unticked                   |
+| Think of it as     | Your pair-programmer                             | Your reviewer / second opinion                    |
 
-**You are the third role** — the orchestrator. You give the task, answer the
-questions the agents park for you, approve the steps that need a human, and decide
-when the work is done. Brian and Rain don't run off on their own; you conduct.
+Both are ordinary rows in **Settings → Roles**: rename them, rewrite their
+instructions, retick their capabilities, or add roles of your own. Capabilities
+are enforced at the tool gate, so unticking one takes the ability away rather than
+merely asking the agent not to use it. A participant is shown as `ROLE · Model`,
+never as a persona.
 
-Rain can run on a *different* model than Brian when you want one. A reviewer that
-doesn't share the author's blind spots catches more — cross-model diversity buys a
-real second opinion instead of an echo chamber.
+**You are the orchestrator.** You give the task, answer the questions participants
+park for you, approve the steps that need a human, and decide when the work is
+done. They don't run off on their own; you conduct.
+
+**Roles can run on different models.** A reviewer that doesn't share the author's
+blind spots catches more — cross-model diversity buys a real second opinion instead
+of an echo chamber.
 
 ---
 
@@ -62,9 +71,9 @@ Verify** — and you can watch it happen.
 
 1. **Investigate** — the agents gather facts: read the code, the docs, your project
    notes. Nothing changes yet.
-2. **Plan** — Brian proposes an approach (which files, what changes, the tradeoffs);
-   Rain reviews it *before* any code is written.
-3. **Apply** — Brian produces the work: the actual edits, commits, and commands.
+2. **Plan** — the executing role proposes an approach (which files, what changes,
+   the tradeoffs); the reviewer reviews it *before* any code is written.
+3. **Apply** — the executing role produces the work: the edits, commits, commands.
 4. **Verify** — the result is checked against the plan: tests run, output read, an
    adversarial proof-read.
 
@@ -116,7 +125,7 @@ them ship something you'll regret:
 
 - **Push approval** — pushes can be set to pause for a one-click Approve / Reject, so
   nothing reaches your remote without you.
-- **Review sign-off** — when Rain flags a real problem as *blocking*, Brian can't
+- **Review sign-off** — when a reviewer flags a real problem as *blocking*, nobody can
   commit over it until it's resolved or explicitly rebutted.
 - **Sensitive commands** — you can gate specific commands by keyword so they ask
   before running.
@@ -243,7 +252,7 @@ apart — otherwise they share one Context Library, sqlite DB, and instance lock
   mode — with bot-hq's role prompt appended and a per-agent MCP config, model swap via
   `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` — or on bot-hq's
   own in-process Rust loop, which owns the turn cycle, tool execution and context
-  accounting itself. Chosen per saved model; EYES-only in v1, since Brian's
+  accounting itself. Chosen per saved model; reviewer-only in v1, since the
   subscription binds him to the CLI. Nothing downstream can tell them apart.
 - **Two MCP servers:** an **internal** one (UI-signaling tools served to the
   agents) on an ephemeral localhost port, and an **external** one on `127.0.0.1:7892`
@@ -259,7 +268,8 @@ apart — otherwise they share one Context Library, sqlite DB, and instance lock
 
 bot-hq exposes a set of UI-signaling tools to each spawned agent (parking questions
 for you, requesting approval, reading/writing session docs, searching the Context
-Library, advancing the IPAV phase, and so on). Rain (EYES) is blocked from the
+Library, advancing the IPAV phase, and so on). A role without the matching
+capability is blocked from the
 action-taking tools — that role boundary is enforced server-side, not by convention.
 
 <details>
@@ -303,12 +313,12 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `webview_scroll(selector?, y)` | Scroll an element or the page in the webview. |
 | `webview_press_key(key)` | Dispatch a keypress in the webview. |
 
-Role boundary (enforced server-side, both directions): Rain (EYES) is blocked from the
+Role boundary (enforced server-side, from the role's capability ticks): a reviewer is blocked from the
 HANDS-only tools — `ask_user_choice`, `mark_awaiting_user`, `halt`, `request_approval`,
 `action_gate`, `supersede_question`, `disposition_finding`, `override_reviewer_block`,
 `terminal_exec` (EYES reads the terminal via `terminal_read`, never types into it),
-and `cl_register_folder_description` (Rain converges via `peer_ack`, which is not gated).
-Brian (HANDS) is blocked from the EYES-only tools — `eyes_flag` and `approve_finding`
+and `cl_register_folder_description` (a reviewer converges via `peer_ack`, which is not gated).
+A role without `file_finding` is blocked from the reviewer tools — `eyes_flag` and `approve_finding`
 (HANDS can't file or sign off on findings against its own work).
 
 </details>
@@ -377,7 +387,7 @@ Restart that claude-code; the bot-hq tools appear as `mcp__bot-hq__*`.
 |---|---|
 | `list_sessions` | Read active sessions (id, title, phase, models). |
 | `list_models` | Saved models with their ids, provider, gateway and context window (tokens redacted). |
-| `create_session(title, working_repo_path?, brian_model_id?, rain_model_id?)` | Spawn a Brian+Rain duo. Model ids come from `list_models`; omit them to use each agent's stored config. |
+| `create_session(title, working_repo_path?, brian_model_id?, rain_model_id?)` | Spawn a session. Model ids come from `list_models`; omit them to use each role's default. The `brian_`/`rain_` parameter names are retained deliberately so existing driver clients keep working — they map to turn slots, not to agent identities. |
 | `send_message(session_id, text)` | Broadcast to a session. |
 | `get_session_messages(session_id, since_id?)` | Read chat in order. |
 | `advance_phase(session_id, phase)` | Move through I/P/A/V. |

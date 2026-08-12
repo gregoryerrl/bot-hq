@@ -16,12 +16,17 @@ bot-hq is built and used. The rebuild milestone (v0.1.0) shipped and the
 (7 batches; see PROGRESS.md). React frontend in `frontend/`, Slint
 deleted, Rust core untouched. Since then a long arc shipped (see
 PROGRESS.md): the 3-tier session-policy toggles, the global Tool Gate, the
-saved-model registry + per-session model pickers + solo-Brian toggle, the
+saved-model registry + per-session model pickers, the
 claude-code config surface, the **v1.0.0 stabilization pass** (per-session
 git worktrees, dispatch defaults, prompt drafts, UX polish — 2026-06-11),
-and the **post-1.0 duo-reliability arc**: the EYES-sign-off commit gate,
-the interrupt redesign, the peer-forward router extraction,
-`peer_ack`/`halt`, agent-health dots, and event-driven UI freshness.
+the **post-1.0 reliability arc** (the reviewer sign-off commit gate, the
+interrupt redesign, `peer_ack`/`halt`, agent-health dots, event-driven UI
+freshness), and — most recently — **rc3, which is now essentially complete**:
+roles as user-owned data with editable prose, capability enforcement wired to
+the runtime, participants identified by role rather than by name, N-participant
+sessions, the turn ring as the only turn engine, and the bilateral router
+deleted. Decisions D1–D16 are recorded in
+[`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md).
 
 Test + build status (live counts) lives in PROGRESS.md, not here — it
 drifts every commit.
@@ -30,17 +35,21 @@ drifts every commit.
 
 ## Direction — the agent harness is the focus (stated 2026-08-05, unscheduled)
 
-bot-hq is an **agent harness/system** — the gates, the transparency
-surfaces (tray / IPAV docs / terminal), and the memory hierarchy — and
-that, not any particular agent lineup, is the core's identity.
-**Rain (EYES, adversarial review) becomes a plugin only**,
-following Emma's path — review stays a first-class value (ideally
-cross-model) but optional and pluggable, not a hardwired co-agent. No
-migration work is scoped yet; when it starts, the blast radius includes
-the role prompts, spawn/duo/router plumbing, the EYES-sign-off commit
-gate, and the duo-shaped UI. Vision wording: project CL `vision.md`
-("The harness, not the crew"); decision record: CL `decisions.md`
-(2026-08-05).
+bot-hq is an **agent harness/system** — the gates, the transparency surfaces
+(tray / IPAV docs / terminal), and the memory hierarchy — and that, not any
+particular agent lineup, is the core's identity.
+
+**rc3 delivered most of this direction ahead of the plugin migration.** Roles are
+user-owned rows the user creates and edits, a session picks N participants from
+them, and nothing in the runtime is keyed on a role existing: the tally filters
+on `participation_mode`, the gate reads capabilities, the prompt generates its
+peer section from the live roster. A reviewer is now a role the user configures
+rather than a hardwired co-agent — which was the substance of "EYES becomes a
+plugin only". What remains for an actual plugin migration is packaging and the
+plugin runtime tiers, not core surgery.
+
+Vision wording: project CL `vision.md` ("The harness, not the crew"); decision
+record: CL `decisions.md` (2026-08-05) and rc3 D1–D16.
 
 **Explicitly DEFERRED behind this migration** (user call, 2026-08-05,
 after the Aug-5 session study — CL `issues.md` #26–#31): the
@@ -118,7 +127,7 @@ Read those before starting; this section is the map, not the territory.
    mining pass (method: CL `session-study-method.md`); three-store
    rule (CL canonical, auto-memory mirrors it, repo docs get pointers).
 
-**Deferred behind the Rain-plugin migration** (recorded above): #26
+**Deferred behind the reviewer-plugin migration** (recorded above): #26
 held-forward flush, #30 duplicate spawn warmup, peer-wait watchdog
 classification.
 
@@ -126,8 +135,11 @@ classification.
 
 ## In flight
 
-The current arc is **rc3** — see
-[`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md).
+**Nothing.** The **rc3** arc closed 2026-08-13 — decisions D1–D16 in
+[`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md),
+all implemented. Known open items are D16 (`close_session` gating on the role
+capability, spec'd and unstarted) and the proposals in the project CL's
+`improvements-2026-08-12-visibility-and-verification.md` that were not taken.
 
 The arc before it was the **native agent loop** (2026-07-26/27): an agent
 could run on bot-hq's own Rust loop instead of a claude-code subprocess,
@@ -208,7 +220,7 @@ Shipped 2026-06-11 in the v1.0.0 stabilization pass: keyboard shortcuts
 empty-state, inline session rename, persistent prompt drafts.
 (Scroll-to-bottom had already shipped.) Remaining:
 
-- Responsive Brian/Rain vertical stack at content widths < 1200px (the
+- Responsive participant vertical stack at content widths < 1200px (the
   single-chronological-chat redesign mooted this, but keep the option
   on the table if the two-pane view is requested back).
 
@@ -232,7 +244,7 @@ Original Phase 0 research: [`docs/rebuild-archive/decisions.md`](docs/rebuild-ar
 
 ### Sub-agent dispatcher integration
 
-Brian can already use the `Agent` tool to dispatch sub-agents within
+A participant granted the `Agent` tool can already dispatch sub-agents within
 claude-code. Worth wiring a visualization so the UI knows which session
 spawned a sub-agent — currently sub-agents are invisible to bot-hq.
 Open question: do we surface them as nested message threads, or as
@@ -320,7 +332,8 @@ loading for the icon font.
   - *Write-then-prune close-loop safety net:* nothing catches a HANDS
     agent that forgets the bounded learnings delta before
     `close_session`.
-  - *Rain CL write path:* EYES has no CL write at all (by design today);
+  - *Reviewer CL write path:* a role without `write_context_library` has no CL
+    write at all (by design today);
     revisit only if review-time annotations prove valuable.
   - *`cl_register_read` feedback view:* the read-audit rows are written
     but the "what context did this agent have?" view was never built.
