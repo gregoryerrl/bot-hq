@@ -615,6 +615,20 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "cl_stale_refs",
+            description: "Report Context Library claims that name code which is GONE — a symbol, flag or file the project's repo no longer contains. The CL is what bot-hq has over plain claude-code, and it is maintained by bot-hq sessions, so drift compounds silently: an audit once found a whole learning describing a connector deleted that same day, written in present tense. Run it during CL maintenance, before trusting notes that cite code. It REPORTS ONLY and never edits: `decisions.md` and `issues.md` are append-only history that legitimately names dead code, a learning explaining a deletion has to name what was deleted, and lines marked as retirements are skipped for that reason. Verify each hit against the repo yourself; writing nothing is a correct outcome.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project whose CL to check. It must have a registered repo — that repo is what the claims are checked against."
+                    }
+                },
+                "required": ["project"]
+            }),
+        },
+        ToolDescriptor {
             name: "cl_write_file",
             description: gated_by("cl_write_file", "Write a project-scoped Context Library file. Default mode replaces the ENTIRE file; mode:\"append\" adds content to the end instead (no read-modify-write needed). Direct write: missing parent folders are created, the write is atomic, the index rescans automatically, and every write is snapshotted into the library's local git history. Replacing a file with empty or >50%-smaller content is refused unless confirm_shrink:true (accidental-truncation guard — pass it when a prune is intentional). Also lifts the session's close-out learnings gate. bot-hq-owned _globals system files (custom-instructions.md, custom-general-rules.md) are refused."),
             input_schema: serde_json::json!({

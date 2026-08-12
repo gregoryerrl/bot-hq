@@ -9,6 +9,40 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-13 — CL claims that name code which is gone are detectable (rc3 P4)
+
+Last dogfood-queue item, and the structural one. bot-hq's advantage over plain
+claude-code is the Context Library; the library is maintained by bot-hq
+sessions; so the loop closes only if something notices when it has drifted. On
+2026-08-12 an audit found ~57 stale agent-name references and a whole learning
+describing the native connector — deleted that day — in confident present tense,
+and an outsider caught it.
+
+`cl_stale_refs(project)` reports CL claims naming a symbol, flag or file the
+project's repo no longer contains. It is an MCP tool, ungated like the other CL
+reads, because the consumer is the manual maintenance session D15 describes.
+
+**It reports; it never edits.** `decisions.md` and `issues.md` are skipped
+outright — append-only history names dead code on purpose — lines carrying a
+retirement marker are skipped for the same reason, and the report ends by saying
+it is not a work order. D15's constraint applies directly: an agent handed a
+list and told to fix it produces filler, and filler in this layer is fabricated
+knowledge the next session builds on.
+
+**Precision was measured against the real library, then tuned, then measured
+again.** First run: 102 hits, mostly noise. Three rules fixed it — normalise
+`file.rs::symbol` and `src/`-less paths before deciding a file is missing; drop
+globs, URLs, templates and data-dir paths; and require a path's first segment to
+name a directory the repo actually has. Second run: **25 hits, essentially all
+genuine** — `strip_claude_code_tool_inventory`, `AgentRole`, `spawn_native_agent`,
+`maintainClPrompt`, `core/router.rs`, and a cluster of router-era symbols. Noise
+that never clears is what teaches a reader to skim the report, so the tuning was
+the feature, not polish.
+
+Complements `cl_refs`, which hashes the code an atom CITES and flags the atom
+when it drifts — that path prunes references which do not resolve, which is
+exactly this case, so the two are disjoint: drift there, absence here.
+
 ## 2026-08-13 — the Context Library pushes, behind a secret scan (rc3 P6)
 
 Fourth dogfood-queue item. The library has a private remote and nothing pushed

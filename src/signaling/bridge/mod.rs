@@ -38,6 +38,7 @@ mod cl_facade;
 mod cl_push;
 pub use cl_push::{scan_then_push, PushOutcome};
 mod cl_refs;
+mod cl_staleness;
 mod cl_write;
 mod feedback;
 mod findings;
@@ -410,7 +411,7 @@ pub struct SignalingBridge {
 }
 
 impl SignalingBridge {
-    fn new_with(violations: Option<ViolationsLog>, data_dir: Option<PathBuf>) -> Arc<Self> {
+    pub(crate) fn new_with(violations: Option<ViolationsLog>, data_dir: Option<PathBuf>) -> Arc<Self> {
         // Sized generously: every stream chunk fires MessagePersisted and several
         // consumers share this one channel (the Tauri subscriber, external
         // wait_for_change, the main.rs control handler). A small buffer let a

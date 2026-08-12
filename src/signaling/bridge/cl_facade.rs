@@ -106,6 +106,47 @@ impl SignalingBridge {
         storage.cl_index_search_agent(project, query).await
     }
 
+    /// Report CL claims naming code that is gone (rc3 **P4**).
+    ///
+    /// Needs both halves — the project's CL directory and the repo it
+    /// documents — and says which one it could not resolve rather than
+    /// reporting a clean library it never checked. A project with no registered
+    /// repo has nothing to check against, and that is a configuration answer,
+    /// not "no drift".
+    pub async fn cl_stale_refs(&self, project: &str) -> Result<String> {
+        let Some(cl_dir) = self.cl_project_root(project).await else {
+            anyhow::bail!("bot-hq's data dir is not configured; cannot locate the library");
+        };
+        let repo_root = {
+            let storage = self.storage.lock().await.clone();
+            match storage {
+                Some(s) => s
+                    .get_project(project)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|p| p.working_repo_path),
+                None => None,
+            }
+        };
+        let Some(repo_root) = repo_root.map(std::path::PathBuf::from) else {
+            anyhow::bail!(
+                "project '{project}' has no registered repo, so there is nothing to check its \
+                 CL claims against. Register one in the Context Library tab first."
+            );
+        };
+        let claims = tokio::task::spawn_blocking({
+            let (cl_dir, repo_root) = (cl_dir.clone(), repo_root.clone());
+            move || super::cl_staleness::stale_claims(&cl_dir, &repo_root)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("cl_stale_refs task panicked: {e}"))?
+        .map_err(|e| anyhow::anyhow!("scanning the repo failed: {e}"))?;
+        Ok(super::cl_staleness::render_report(
+            project, &repo_root, &claims,
+        ))
+    }
+
     /// Read-side ranked retrieval for agents: returns the CL atom bodies best
     /// matching `query` under a token budget. Wraps `storage.cl_retrieve`; empty
     /// when storage isn't configured (test bridges).

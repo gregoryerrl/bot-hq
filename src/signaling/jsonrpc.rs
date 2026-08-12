@@ -1153,6 +1153,17 @@ async fn call_tool(
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(msg))
         }
+        "cl_stale_refs" => {
+            // Report only (rc3 P4). Ungated like the other CL READS — it writes
+            // nothing, and a maintenance session that cannot see the drift is
+            // the state this exists to end.
+            let project = arg_required_str(&args, "project")?;
+            let report = bridge
+                .cl_stale_refs(&project)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(report))
+        }
         "cl_register_read" => {
             let project = arg_required_str(&args, "project")?;
             let file_path = arg_required_str(&args, "file_path")?;
@@ -1865,6 +1876,72 @@ mod tests {
         assert!(
             matches!(ev, SignalingEvent::AwaitingUser { reason, .. } if reason.contains("yielded")),
             "halt should emit AwaitingUser with the default 'yielded' reason"
+        );
+    }
+
+    /// rc3 **P4**: the staleness report is reachable as a tool, and it reports
+    /// rather than edits.
+    ///
+    /// The wire, again: the detector is unit-tested in `cl_staleness`, and a
+    /// missing `call_tool` arm would leave every one of those tests green while
+    /// no session could ever run it — which is indistinguishable from the drift
+    /// the item exists to end.
+    #[tokio::test]
+    async fn cl_stale_refs_dispatch_reports_missing_code_without_editing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/live.rs"), "fn resolve_spawn_roster() {}").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+            vec!["add", "-A"],
+            vec!["commit", "-q", "-m", "seed"],
+        ] {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(&args)
+                .output()
+                .unwrap();
+        }
+        let cl = tmp.path().join("library/projects/p");
+        std::fs::create_dir_all(&cl).unwrap();
+        let cl_body = "The spawn calls `resolve_spawn_roster`, then `may_run_native`.\n";
+        std::fs::write(cl.join("notes.md"), cl_body).unwrap();
+
+        let bridge = SignalingBridge::new_with(None, Some(tmp.path().to_path_buf()));
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage
+            .upsert_project("p", "p", Some(repo.to_str().unwrap()), None, None)
+            .await
+            .unwrap();
+        bridge.set_storage(storage).await;
+
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "cl_stale_refs", "arguments": {"project": "p"}}),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("may_run_native"), "the dead symbol: {text}");
+        assert!(!text.contains("resolve_spawn_roster"), "a live symbol: {text}");
+        assert!(text.contains("notes.md:1"), "names file and line: {text}");
+        assert!(text.contains("not a work order"), "carries the D15 caveat: {text}");
+        // Report only: the CL file is byte-identical afterwards.
+        assert_eq!(
+            std::fs::read_to_string(cl.join("notes.md")).unwrap(),
+            cl_body,
+            "the report must never edit the library"
         );
     }
 
