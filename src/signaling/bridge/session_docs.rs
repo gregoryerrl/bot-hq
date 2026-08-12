@@ -20,6 +20,22 @@ fn effective_slug<'a>(slug: &'a str, phase: Option<&'a str>) -> &'a str {
 const MAX_DOC_ARCHIVES: u32 = 50;
 
 impl SignalingBridge {
+    /// How one participant of a session is NAMED (rc3 D10's display rule), or
+    /// `None` when storage isn't wired, the roster has no such slug, or the read
+    /// failed. Every one of those is a reason to write an unattributed heading
+    /// rather than to guess a name or to fail the write.
+    async fn participant_display_name(&self, session_id: &str, slug: &str) -> Option<String> {
+        let storage = self.storage.lock().await.clone()?;
+        match storage.participant_by_slug(session_id, slug).await {
+            Ok(Some(p)) => Some(storage.display_name_of(&p).await),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(%session_id, %slug, ?e, "naming the doc's author failed");
+                None
+            }
+        }
+    }
+
     /// Archive the current body of `slug` as an untagged scratch doc
     /// (`{slug}@{n}`) before a phase-keyed rewrite replaces it. Phase docs are
     /// deliberately single-slot (one rewritable doc per IPAV phase), which in
@@ -127,22 +143,39 @@ impl SignalingBridge {
         Ok(id)
     }
 
-    /// EYES-callable: contribute findings to a phase WITHOUT clobbering Brian's
-    /// single per-phase doc. Brian's `session_doc_write` overwrites the whole
-    /// body on each upsert, so appending an EYES section into his doc would be
-    /// lost the next time he rewrites it. Instead this writes a co-located,
-    /// attributed doc keyed by `<phase>-eyes` and tagged with the SAME `phase`,
-    /// so it renders in the same IPAV tab alongside HANDS's doc. Rewritable
-    /// (Rain owns this slug — repeated writes overwrite her own doc, no header
-    /// spam) and clobber-proof in both directions. Returns the row id + slug.
+    /// Reviewer-callable: contribute findings to a phase WITHOUT clobbering the
+    /// executor's single per-phase doc. A plain `session_doc_write` overwrites
+    /// the whole body on each upsert, so appending a review section into that
+    /// doc would be lost the next time it is rewritten. Instead this writes a
+    /// co-located, attributed doc keyed by `<phase>-eyes` and tagged with the
+    /// SAME `phase`, so it renders in the same IPAV tab alongside the executor's
+    /// doc. Rewritable (the reviewer owns this slug — repeated writes overwrite
+    /// its own doc, no header spam) and clobber-proof in both directions.
+    /// Returns the row id + slug.
+    ///
+    /// The `<phase>-eyes` SLUG is fixed: migration 0049's role prose promises it
+    /// by name (`e.g. plan-eyes`) and migrations are immutable, so renaming it
+    /// here would make a shipped prompt lie.
+    ///
+    /// `author_slug` is the writing participant, used only for the header.
+    /// **rc3 D10: the header is a roster fact, not the constant `(Rain)`.** It
+    /// resolves through [`Storage::display_name_of`], so a third role reviewing
+    /// is attributed as itself instead of as somebody else; an unreadable roster
+    /// degrades to an unattributed header rather than to a wrong name.
     pub async fn session_doc_write_eyes(
         &self,
         session_id: &str,
         phase: &str,
         body: &str,
+        author_slug: &str,
     ) -> Result<(i64, String)> {
         let slug = format!("{phase}-eyes");
-        let attributed = format!("### EYES findings (Rain)\n\n{body}");
+        let author = self.participant_display_name(session_id, author_slug).await;
+        let heading = match author {
+            Some(name) => format!("### Review findings — {name}"),
+            None => "### Review findings".to_string(),
+        };
+        let attributed = format!("{heading}\n\n{body}");
         let id = {
             let storage_guard = self.storage.lock().await;
             let Some(storage) = storage_guard.as_ref() else {
@@ -210,30 +243,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eyes_doc_survives_brian_rewrite() {
-        // The justification for the co-located design over read-append-write:
-        // Brian's `session_doc_write` overwrites his whole doc body, so an EYES
-        // section appended INTO his doc would be lost on his next rewrite. The
-        // `<phase>-eyes` doc is a separate row — it survives Brian rewriting his
-        // plan, and his doc survives Rain rewriting hers. Clobber-proof both ways.
+    async fn the_review_doc_survives_the_executors_rewrite() {
+        // The justification for the co-located design over read-append-write: a
+        // plain `session_doc_write` overwrites the whole doc body, so a review
+        // section appended INTO the executor's doc would be lost on its next
+        // rewrite. The `<phase>-eyes` doc is a separate row — it survives the
+        // executor rewriting its plan, and that doc survives the reviewer
+        // rewriting its own. Clobber-proof both ways.
         let bridge = SignalingBridge::new();
         let storage = crate::storage::Storage::memory().await.unwrap();
         bridge.set_storage(storage.clone()).await;
         storage.create_session("s1", "test", None).await.unwrap();
 
         bridge
-            .session_doc_write("s1", "plan", "brian v1", Some("plan"), false)
+            .session_doc_write("s1", "plan", "executor v1", Some("plan"), false)
             .await
             .unwrap();
         let (_, eyes_slug) = bridge
-            .session_doc_write_eyes("s1", "plan", "rain's review")
+            .session_doc_write_eyes("s1", "plan", "the reviewer's notes", "eyes")
             .await
             .unwrap();
         assert_eq!(eyes_slug, "plan-eyes");
 
-        // Brian rewrites his plan doc — Rain's findings must survive.
+        // The executor rewrites its plan doc — the review must survive.
         bridge
-            .session_doc_write("s1", "plan", "brian v2", Some("plan"), false)
+            .session_doc_write("s1", "plan", "executor v2", Some("plan"), false)
             .await
             .unwrap();
 
@@ -241,18 +275,65 @@ mod tests {
             .session_doc_search("s1", None, Some("plan"))
             .await
             .unwrap();
-        assert_eq!(docs.len(), 2, "both Brian's plan and Rain's plan-eyes persist");
+        assert_eq!(docs.len(), 2, "the plan doc and plan-eyes both persist");
         let eyes = docs
             .iter()
             .find(|d| d.slug == "plan-eyes")
-            .expect("eyes doc survives Brian's rewrite");
+            .expect("review doc survives the executor's rewrite");
         assert!(
-            eyes.body.contains("rain's review"),
-            "Rain's findings survive Brian's rewrite"
+            eyes.body.contains("the reviewer's notes"),
+            "the review survives the executor's rewrite"
         );
-        assert!(eyes.body.contains("### EYES findings (Rain)"));
+        // No roster on this session, so the author cannot be named — the
+        // heading degrades to the unattributed form rather than guessing.
+        assert!(eyes.body.contains("### Review findings"));
         let plan = docs.iter().find(|d| d.slug == "plan").unwrap();
-        assert_eq!(plan.body, "brian v2", "Brian's doc updated, not clobbered by Rain");
+        assert_eq!(
+            plan.body, "executor v2",
+            "the executor's doc updated, not clobbered by the review"
+        );
+    }
+
+    /// The review doc's heading is a ROSTER FACT (rc3 D10), not the constant
+    /// `(Rain)` it used to be — it is whatever the writing participant is
+    /// displayed as, `role · model`.
+    ///
+    /// The join under test is `author slug → participant row → role + model →
+    /// heading`. Every link is real here: a migrated database, a roster seeded
+    /// from the roles table, and the same `display_name_of` the spawn path uses
+    /// to name peers in the prompt. Asserting a literal heading string instead
+    /// would pass just as happily with the name hardcoded back.
+    #[tokio::test]
+    async fn the_review_heading_names_the_writer_by_role_and_model() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+        storage.ensure_session_roster("s1", false).await.unwrap();
+        let reviewer = storage
+            .participants_for_session("s1")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.slug == "eyes")
+            .expect("the seeded roster carries the EYES role");
+        let expected = storage.display_name_of(&reviewer).await;
+
+        bridge
+            .session_doc_write_eyes("s1", "plan", "the review", "eyes")
+            .await
+            .unwrap();
+
+        let doc = bridge
+            .session_doc_read("s1", "plan-eyes")
+            .await
+            .unwrap()
+            .expect("the review doc");
+        assert!(
+            doc.body.contains(&format!("### Review findings — {expected}")),
+            "heading must name the writer as the roster displays it ({expected}); got: {}",
+            doc.body.lines().next().unwrap_or("")
+        );
     }
 
     #[tokio::test]
@@ -403,8 +484,8 @@ mod tests {
         bridge.set_storage(storage.clone()).await;
         storage.create_session("s1", "test", None).await.unwrap();
 
-        bridge.session_doc_write_eyes("s1", "verify", "verdict v1").await.unwrap();
-        bridge.session_doc_write_eyes("s1", "verify", "verdict v2").await.unwrap();
+        bridge.session_doc_write_eyes("s1", "verify", "verdict v1", "eyes").await.unwrap();
+        bridge.session_doc_write_eyes("s1", "verify", "verdict v2", "eyes").await.unwrap();
 
         let archived = bridge
             .session_doc_read("s1", "verify-eyes@1")

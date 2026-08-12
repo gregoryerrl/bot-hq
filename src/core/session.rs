@@ -1340,34 +1340,11 @@ async fn resolve_roster_facts(
 /// One participant's name, by the display rule (rc3 D10): the ROLE it plays and
 /// the MODEL it runs on, never a person's name.
 ///
-/// Both halves are read live rather than off the participant row's frozen
-/// `display_name`, so renaming a role or swapping a model is reflected on the
-/// next spawn. Every failure — no `role_id`, an archived-away role, a deleted
-/// model, a query error — degrades one half to `None` and
-/// [`participant_display_name`](crate::storage::participant_display_name)
-/// resolves what is left, down to the slug.
+/// A thin alias for [`Storage::display_name_of`], which owns the rule so the
+/// prompt's peer roster and the reviewer's phase-doc header cannot disagree
+/// about what a participant is called.
 async fn display_name_for(storage: &Storage, p: &crate::storage::Participant) -> String {
-    let role = match p.role_id {
-        Some(id) => match storage.role_by_id(id).await {
-            Ok(r) => r.map(|r| r.display_name),
-            Err(e) => {
-                warn!(role_id = id, ?e, "reading a role's display name failed");
-                None
-            }
-        },
-        None => None,
-    };
-    let model = match p.model_id.as_deref().filter(|m| !m.is_empty()) {
-        Some(id) => match storage.get_model(id).await {
-            Ok(m) => m.map(|m| m.display_name),
-            Err(e) => {
-                warn!(model_id = id, ?e, "reading a model's display name failed");
-                None
-            }
-        },
-        None => None,
-    };
-    crate::storage::participant_display_name(role.as_deref(), model.as_deref(), &p.slug)
+    storage.display_name_of(p).await
 }
 
 #[allow(clippy::too_many_arguments)]

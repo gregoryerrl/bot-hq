@@ -794,15 +794,30 @@ async fn call_tool(
                     ))
                 }
             };
-            // EYES (rain) contributing to a phase doc must not overwrite Brian's
-            // single per-phase doc. Route a phase-tagged rain write to a
-            // co-located, attributed `<phase>-eyes` doc (same phase tag → same
-            // IPAV tab). Untagged rain scratch writes fall through to the normal
-            // overwrite path.
-            match (caller.agent.as_str(), phase.as_deref()) {
-                ("rain", Some(p)) => {
+            // A reviewer contributing to a phase doc must not overwrite the
+            // executor's single per-phase doc. Route a phase-tagged REVIEWER
+            // write to a co-located, attributed `<phase>-review` doc (same phase
+            // tag → same IPAV tab). Untagged reviewer scratch writes fall
+            // through to the normal overwrite path.
+            //
+            // **rc3 D10: the reviewer is whoever holds `file_finding`, not
+            // whoever is called `rain`.** This arm used to read
+            // `caller.agent.as_str() == "rain"`, which under role-derived slugs
+            // matches no participant — so every phase-tagged write took the
+            // fallback arm and clobbered the other participant's phase doc,
+            // silently, while the EYES prompt and migration 0049 both kept
+            // promising the co-located behaviour. Same capability the commit
+            // gate's reviewer registry is built from (`core::session`), so the
+            // two cannot disagree about who a reviewer is.
+            match (
+                caller
+                    .capabilities
+                    .grants(crate::agents::Capability::FileFinding),
+                phase.as_deref(),
+            ) {
+                (true, Some(p)) => {
                     let (id, eyes_slug) = bridge
-                        .session_doc_write_eyes(&caller.session_id, p, &body)
+                        .session_doc_write_eyes(&caller.session_id, p, &body, &caller.agent)
                         .await
                         .map_err(internal_err_no_prefix)?;
                     Ok(ToolCallResult::text(
@@ -2319,24 +2334,123 @@ mod tests {
         );
     }
 
+    /// **The phase-doc router keys on the CAPABILITY, never on a slug.**
+    ///
+    /// This is the fifth fail-quiet name check of rc3 D10 and the only one that
+    /// destroyed data: the arm read `caller.agent.as_str() == "rain"`, no
+    /// participant is called that any more, so every phase-tagged review write
+    /// fell through and OVERWROTE the executor's doc for that phase — silently,
+    /// while migration 0049's EYES prose kept promising the co-located
+    /// `<phase>-eyes` doc.
+    ///
+    /// Both callers below carry the SAME role-derived slug. The only difference
+    /// between them is `file_finding`, so nothing but the capability can be
+    /// producing the split — a router that went back to matching a name would
+    /// route both the same way and fail here.
     #[tokio::test]
-    async fn rain_phase_tagged_doc_write_creates_co_located_eyes_doc() {
-        // EYES contributes to a phase doc WITHOUT clobbering Brian's single
-        // per-phase doc. Brian authors `plan`; Rain's phase-tagged write lands
-        // in a co-located `plan-eyes` doc (same phase tag → same IPAV tab).
-        // Both persist; Brian's body is untouched; Rain's is attributed.
+    async fn the_phase_doc_router_splits_on_file_finding_not_on_the_slug() {
         let bridge = SignalingBridge::new();
         let storage = crate::storage::Storage::memory().await.unwrap();
         bridge.set_storage(storage.clone()).await;
         storage.create_session("s1", "test", None).await.unwrap();
 
-        // Brian authors the plan doc.
+        // Same slug, opposite grants.
+        let reviewer = CallerIdentity {
+            session_id: "s1".into(),
+            agent: "eyes".into(),
+            capabilities: crate::agents::ResolvedCapabilities::Known(
+                crate::agents::CapabilitySet::preset_eyes(),
+            ),
+        };
+        let non_reviewer = CallerIdentity {
+            session_id: "s1".into(),
+            agent: "eyes".into(),
+            capabilities: crate::agents::ResolvedCapabilities::Known(
+                crate::agents::CapabilitySet::preset_hands(),
+            ),
+        };
+        assert!(
+            reviewer
+                .capabilities
+                .grants(crate::agents::Capability::FileFinding)
+                && !non_reviewer
+                    .capabilities
+                    .grants(crate::agents::Capability::FileFinding),
+            "the presets must differ on file_finding or this test proves nothing"
+        );
+
+        let write = |who: CallerIdentity, body: &'static str| {
+            let bridge = bridge.clone();
+            async move {
+                let res = dispatch(
+                    req(
+                        "tools/call",
+                        json!({
+                            "name": "session_doc_write",
+                            "arguments": {"slug": "plan", "body": body, "phase": "plan"}
+                        }),
+                        1,
+                    ),
+                    &who,
+                    &bridge,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let v = serde_json::to_value(&res).unwrap();
+                v["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string()
+            }
+        };
+
+        // The non-reviewer owns the phase doc itself.
+        let plain = write(non_reviewer, "the plan").await;
+        assert!(
+            plain.contains("\"slug\":\"plan\""),
+            "a caller without file_finding writes the phase doc itself; got: {plain}"
+        );
+        // The reviewer is diverted to the co-located doc.
+        let routed = write(reviewer, "the review").await;
+        assert!(
+            routed.contains("plan-eyes"),
+            "a caller holding file_finding must be routed to <phase>-eyes; got: {routed}"
+        );
+
+        // And the executor's doc is intact — the clobber this arm exists to stop.
+        let plan = bridge
+            .session_doc_read("s1", "plan")
+            .await
+            .unwrap()
+            .expect("the phase doc");
+        assert_eq!(
+            plan.body, "the plan",
+            "the reviewer's write must not have overwritten the phase doc"
+        );
+    }
+
+    /// Both docs land under the SAME phase tag, which is what puts them in one
+    /// IPAV tab. The router split itself is pinned by
+    /// `the_phase_doc_router_splits_on_file_finding_not_on_the_slug`; this one
+    /// covers what the split is FOR.
+    #[tokio::test]
+    async fn a_reviewers_phase_write_co_locates_instead_of_clobbering() {
+        // The executor authors `plan`; the reviewer's phase-tagged write lands
+        // in a co-located `plan-eyes` doc (same phase tag → same IPAV tab).
+        // Both persist; the executor's body is untouched.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        // The executor authors the plan doc.
         dispatch(
             req(
                 "tools/call",
                 json!({
                     "name": "session_doc_write",
-                    "arguments": {"slug": "plan", "body": "brian's plan", "phase": "plan"}
+                    "arguments": {"slug": "plan", "body": "the plan", "phase": "plan"}
                 }),
                 1,
             ),
@@ -2347,13 +2461,13 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        // Rain contributes — must NOT error, and must land in `plan-eyes`.
+        // The reviewer contributes — must NOT error, and must land in `plan-eyes`.
         let res = dispatch(
             req(
                 "tools/call",
                 json!({
                     "name": "session_doc_write",
-                    "arguments": {"slug": "plan", "body": "rain's review", "phase": "plan"}
+                    "arguments": {"slug": "plan", "body": "the review", "phase": "plan"}
                 }),
                 1,
             ),
@@ -2367,31 +2481,31 @@ mod tests {
         assert_ne!(
             v["result"]["isError"],
             json!(true),
-            "rain's phase-tagged write must be accepted now"
+            "the reviewer's phase-tagged write must be accepted"
         );
         let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
         assert!(
             text.contains("plan-eyes"),
-            "rain's write should report the co-located eyes slug, got: {text}"
+            "the reviewer's write should report the co-located slug, got: {text}"
         );
 
-        // Both docs render under the Plan tab; Brian's body is not clobbered.
+        // Both docs render under the Plan tab; the executor's body is not clobbered.
         let docs = bridge
             .session_doc_search("s1", None, Some("plan"))
             .await
             .unwrap();
-        assert_eq!(docs.len(), 2, "Brian's plan + Rain's plan-eyes both persist");
-        let brian = docs
+        assert_eq!(docs.len(), 2, "the plan doc + plan-eyes both persist");
+        let plan = docs
             .iter()
             .find(|d| d.slug == "plan")
-            .expect("brian's plan doc");
-        assert_eq!(brian.body, "brian's plan", "Brian's doc must be untouched");
-        let eyes = docs
+            .expect("the executor's plan doc");
+        assert_eq!(plan.body, "the plan", "the executor's doc must be untouched");
+        let review = docs
             .iter()
             .find(|d| d.slug == "plan-eyes")
-            .expect("rain's eyes doc");
-        assert!(eyes.body.contains("### EYES findings (Rain)"));
-        assert!(eyes.body.contains("rain's review"));
+            .expect("the co-located review doc");
+        assert!(review.body.contains("### Review findings"));
+        assert!(review.body.contains("the review"));
     }
 
     #[tokio::test]

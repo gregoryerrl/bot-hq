@@ -717,6 +717,45 @@ impl Storage {
         Ok(row.as_ref().map(participant_from_row))
     }
 
+    /// One participant's name, by the display rule
+    /// ([`participant_display_name`]): the ROLE it plays and the MODEL it runs
+    /// on, never a person's name (rc3 D10).
+    ///
+    /// Both halves are read live rather than off the row's frozen
+    /// `display_name`, so renaming a role or swapping a model is reflected
+    /// without waiting for a respawn. Every failure — no `role_id`, an
+    /// archived-away role, a deleted model, a query error — degrades ONE half to
+    /// `None` and the display rule resolves what is left, down to the slug.
+    ///
+    /// Lives here rather than at either call site because both the spawn path
+    /// (`core::session`) and the reviewer's phase-doc header
+    /// (`SignalingBridge::session_doc_write_eyes`) name a participant, and two
+    /// copies of a display rule are two things that can disagree about what a
+    /// participant is called.
+    pub async fn display_name_of(&self, p: &Participant) -> String {
+        let role = match p.role_id {
+            Some(id) => match self.role_by_id(id).await {
+                Ok(r) => r.map(|r| r.display_name),
+                Err(e) => {
+                    tracing::warn!(role_id = id, ?e, "reading a role's display name failed");
+                    None
+                }
+            },
+            None => None,
+        };
+        let model = match p.model_id.as_deref().filter(|m| !m.is_empty()) {
+            Some(id) => match self.get_model(id).await {
+                Ok(m) => m.map(|m| m.display_name),
+                Err(e) => {
+                    tracing::warn!(model_id = %id, ?e, "reading a model's display name failed");
+                    None
+                }
+            },
+            None => None,
+        };
+        participant_display_name(role.as_deref(), model.as_deref(), &p.slug)
+    }
+
     /// Seed the DEFAULT roster for a session that has none, returning how many
     /// participants were inserted (0 on the common path).
     ///
