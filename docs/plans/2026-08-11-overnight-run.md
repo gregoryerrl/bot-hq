@@ -82,3 +82,40 @@ app stopped. Binding docs: `2026-08-11-rc3-decisions.md` (8 user decisions),
   isolated worktrees, each adversarially verified before merge. Items 5 and 6
   follow after the merge, in that order, because both touch `core/session.rs`
   and item 6 is the irreversible one.
+- 2026-08-12 — **queue items 1–5 are DONE and merged.** Suite `dc1202f`:
+  **1208 lib + 66 integration + 222 frontend**, `tsc` clean, bindings in sync.
+  Phase 1 landed the reviewer findings, the round cap, the Roles tab and layer 2;
+  phase 2 landed capability enforcement, migration 0048, the findings sweep and
+  N-participant session create. **Only item 6 (delete `core/router.rs`) remains**,
+  and it is held for a live session run because flipping `BOT_HQ_SEQUENCER` from
+  opt-in to the only path is the irreversible half of it.
+- 2026-08-12 — **the reframe contract is now the governing doc**:
+  `2026-08-12-rc3-reframe-contract.md`, written from the user's own framing
+  (rc3 is an architecture reframe, not a redesign). It supersedes this file's
+  framing wherever the two differ.
+
+## Lesson from this batch — re-verify cross-branch claims AFTER the merge
+
+Three defects reached `main` in this batch. **Every one was a claim that was true
+on its own branch and false in combination**, and none was catchable by
+reviewing either branch alone:
+
+1. Migration 0048 removed `` `Edit`/`Write`/`NotebookEdit` `` from `RAIN_ROLE`
+   because layer 2 regenerated it; the findings sweep then removed those names
+   from layer 2 because native EYES was promised a tool it lacks. Both correct
+   alone. Together, EYES was blocked from three tools the prompt no longer named
+   — `NotebookEdit` appeared zero times in the whole 48 KB composed prompt. The
+   sweep's own commit message asserted "the CLI role prose still names `Edit`,
+   `Write`" — true when written, falsified minutes later.
+2. The sweep added a UI notice branching on `roles.builtin`; 0048 set
+   `builtin = 0` for every row, permanently. The notice always rendered its
+   wrong branch, telling the user HANDS would join with no instruction when in
+   fact clearing it restores the built-in prose.
+3. `Dashboard.test.tsx` (N-participant) and the `has_builtin_prose` field
+   (collision fix, branched pre-merge) never saw each other; `tsc` broke on a
+   fixture missing a now-required field.
+
+**Rule going forward:** after merging parallel worktree branches, re-run the
+full suite AND re-verify any claim a commit message makes about another part of
+the tree. The per-branch verifiers were rigorous and still could not see this —
+the blind spot is structural, not a lapse.
