@@ -9,6 +9,45 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-13 — the Context Library pushes, behind a secret scan (rc3 P6)
+
+Fourth dogfood-queue item. The library has a private remote and nothing pushed
+to it, so it drifted from the first session onward — a snapshot, not a backup.
+An agent's CL write now commits **and pushes**, detached from the tool call it
+was made in and fail-open: a library that cannot push is merely un-backed-up,
+and refusing to save an agent's knowledge over a network error is the worse
+trade.
+
+**The scan comes first, and that ordering is the feature.** A production
+credential file sat committed in that repo for 153 commits and was caught only
+because a human looked before the first push; `.gitignore` stops accidents, not
+an agent running `git add -f`, and not a key pasted into a markdown note. So
+`scan_then_push` refuses on a hit and names the files, and the refusal is posted
+as a visible row — a scan that quietly declines to push is indistinguishable
+from one that never ran.
+
+It scans every TRACKED file, not the outgoing diff: a secret committed three
+commits ago is still a secret this push would carry, and a diff-scoped check
+would wave it through on the second attempt.
+
+**Patterns are narrow on purpose, and the rate was measured, not assumed.** Only
+self-identifying formats — PEM private-key headers, vendor-prefixed tokens
+(`ghp_`, `sk-ant-`, `AKIA…`, `xoxb-`) — plus credential-bearing filename
+classes. No generic `password=` matching: the library is full of prose *about*
+credentials, including the write-up of the incident above, so a generic matcher
+would refuse every push forever on the strength of a sentence. Run over the real
+library: **135 tracked files, 0 hits.**
+
+A rejected push (offline, or a concurrent session got there first) stays
+rejected and is logged. Nothing auto-pulls or auto-merges — merging a knowledge
+base behind the user's back is the hazard D15 named.
+
+One correction to the queue's premise, checked rather than assumed: the library
+is **currently level with its remote** (local HEAD, `origin/main` and the remote
+ref were all `8ebb9a7`), so it has been pushed at least once by hand. The
+structural complaint stands — nothing pushed automatically, and four files were
+uncommitted at the time of checking.
+
 ## 2026-08-13 — context readings are persisted, and the meter's denominator is measured (rc3 P7)
 
 Third dogfood-queue item. `ContextUsage` was forwarded to the UI and never

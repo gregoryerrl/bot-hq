@@ -35,6 +35,8 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
 mod cl_facade;
+mod cl_push;
+pub use cl_push::{scan_then_push, PushOutcome};
 mod cl_refs;
 mod cl_write;
 mod feedback;

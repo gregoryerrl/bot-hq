@@ -134,6 +134,12 @@ impl SignalingBridge {
         }
         // Writing a CL delta lifts the close-out nudge, same as cl_rescan.
         self.mark_cl_rescan(&session_id).await;
+        // …and back the library up (rc3 P6). The remote existed and nothing
+        // ever pushed to it, so the library drifted from the first session
+        // onward — a snapshot, not a backup. Detached, because a network round
+        // trip must not sit inside the tool call an agent is waiting on, and
+        // fail-open, because a library that cannot push is merely un-backed-up.
+        self.push_library_after_write(&session_id).await;
         let mut msg = format!(
             "{} '{file_path}' in project '{project}'",
             if replaced {
@@ -146,6 +152,61 @@ impl SignalingBridge {
             msg.push_str(&lint);
         }
         Ok(msg)
+    }
+
+    /// Scan-then-push the library, off the caller's thread (rc3 **P6**).
+    ///
+    /// **A refusal is posted as a row, not just logged.** P2's lesson applied
+    /// to the user's own data: a scan that quietly declines to push is
+    /// indistinguishable from one that never ran, and the failure mode it
+    /// guards — a credential file tracked in the library — is one the user has
+    /// to act on. Everything else is log-level: an offline machine, or a
+    /// non-fast-forward from a concurrent session, is not the user's problem to
+    /// fix mid-turn. Nothing here is auto-merged; a rejected push stays
+    /// rejected rather than pulling someone else's library on top of this one.
+    async fn push_library_after_write(&self, session_id: &str) {
+        let Some(dir) = self.data_dir.clone() else {
+            return;
+        };
+        let root = crate::paths::Paths::for_data_dir(dir).cl_dir;
+        let outcome = match tokio::task::spawn_blocking(move || {
+            crate::signaling::bridge::scan_then_push(&root)
+        })
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(%e, "library push task panicked");
+                return;
+            }
+        };
+        match &outcome {
+            crate::signaling::bridge::PushOutcome::RefusedSecrets(_) => {
+                let body = format!("[System: {}]", outcome.summary());
+                tracing::warn!(%body, "library push refused by the secret scan");
+                if let Some(storage) = self.storage.lock().await.clone() {
+                    match storage
+                        .post_to_channel(
+                            session_id,
+                            "system",
+                            None,
+                            crate::storage::MessageKind::SystemNotice.as_str(),
+                            body,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(row) => self
+                            .notify_message_persisted(Arc::from(session_id), row.message_id()),
+                        Err(e) => tracing::warn!(?e, "push refusal not persisted"),
+                    }
+                }
+            }
+            crate::signaling::bridge::PushOutcome::Failed(_) => {
+                tracing::warn!(summary = %outcome.summary(), "library push")
+            }
+            _ => tracing::info!(summary = %outcome.summary(), "library push"),
+        }
     }
 }
 
@@ -563,6 +624,101 @@ mod tests {
         storage.create_session("s1", "CL write", None).await.unwrap();
         bridge.set_storage(storage.clone()).await;
         (bridge, storage, tmp)
+    }
+
+    /// Give the fixture's library a bare `origin` it is level with, and return
+    /// a reader for the remote's head.
+    fn with_remote(tmp: &tempfile::TempDir) -> impl Fn() -> String {
+        let root = tmp.path().join("library");
+        let remote = tmp.path().join("remote.git");
+        let git = move |root: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        std::process::Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&remote)
+            .output()
+            .unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.name", "bot-hq"],
+            vec!["config", "user.email", "bot-hq@local"],
+            vec!["commit", "-q", "--allow-empty", "-m", "seed"],
+        ] {
+            git(&root, &args);
+        }
+        git(&root, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&root, &["push", "-q", "-u", "origin", "main"]);
+        move || git(&root, &["rev-parse", "origin/main"])
+    }
+
+    /// rc3 **P6**: an agent's CL write reaches the remote — and a
+    /// credential-shaped file stops it there.
+    ///
+    /// The wire is what this pins. The scanner and the push are each covered in
+    /// `cl_push`, and both could pass while `cl_write_file` never calls either:
+    /// that is precisely the state P6 describes — a remote that exists and
+    /// nothing that pushes to it — so a green scanner would be no evidence at
+    /// all. Deleting the call in `cl_write_file` turns this red.
+    #[tokio::test]
+    async fn a_cl_write_reaches_the_remote_unless_it_carries_a_credential() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let remote_head = with_remote(&tmp);
+        let before = remote_head();
+
+        bridge
+            .cl_write_file(
+                "s1".into(),
+                "hands".into(),
+                "bot-hq".into(),
+                "notes.md".into(),
+                "a learning worth keeping".into(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        let after_write = remote_head();
+        assert_ne!(before, after_write, "the CL write never reached the remote");
+
+        // Now the case the order exists for: a credential lands in the library
+        // (the `git add -f` an agent can do), and the next write's push must be
+        // refused rather than carrying it off the machine.
+        std::fs::write(tmp.path().join("library/prod.env"), "DB_PASSWORD=hunter2\n").unwrap();
+        bridge
+            .cl_write_file(
+                "s1".into(),
+                "hands".into(),
+                "bot-hq".into(),
+                "notes.md".into(),
+                "a learning worth keeping, plus one more line".into(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            remote_head(),
+            after_write,
+            "a library carrying a credential must not push"
+        );
+        // …and the refusal is visible, naming the file, rather than a silent
+        // no-op the user would read as a successful backup.
+        let notice = _storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.content.contains("refusing to push"))
+            .expect("the refusal must leave a row");
+        assert!(notice.content.contains("prod.env"), "got: {}", notice.content);
     }
 
     #[tokio::test]

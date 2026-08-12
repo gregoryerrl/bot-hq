@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 pub mod audit;
 pub mod hooks;
+pub mod secret_scan;
 pub mod session_policy;
 pub mod tool_gate;
 pub mod violations;
