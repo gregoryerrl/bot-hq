@@ -159,9 +159,11 @@ UI-freshness work all landed (see PROGRESS.md). Remaining follow-ups:
   hello-plugin; see PROGRESS.md and `docs/PLUGINS.md`). Follow-up tiers
   now live under "Plugin runtime tiers" below.
 - Replace the placeholder `icons/icon.png` with the real bot-hq mark.
-- Host-mediated reroute: option (a) (centralize-only) shipped as
-  `core/router.rs` (2026-06-26); the explicit-handoff (b) / hybrid (c)
-  forward-policy variants remain open ideas only.
+- ~~Host-mediated reroute~~ — MOOT. Option (a) (centralize-only) shipped as
+  `core/router.rs` in 2026-06-26 and that file was deleted by task 14
+  (2026-08-13). The explicit-handoff (b) / hybrid (c) forward-policy variants
+  were variants of a forward path the turn ring does not have: a participant
+  reads the channel off its own cursor, so there is nothing to reroute.
 
 The Context Library editor write-back + folder-view + right-click disk ops
 shipped 2026-05-29, and the native folder picker shipped 2026-06-16
