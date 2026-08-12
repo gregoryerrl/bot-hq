@@ -38,6 +38,9 @@ function role(over: Partial<RoleView> = {}): RoleView {
     participation_mode: "active",
     default_model_id: null,
     builtin: false,
+    // `hands` is one of the two slugs `builtin_prose_for_role` answers for, so
+    // the honest default for this fixture's slug is true.
+    has_builtin_prose: true,
     archived: false,
     ...over,
   };
