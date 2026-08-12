@@ -21,7 +21,6 @@ import {
 import { WorkspaceSidebar } from "./ContextLibrarySidebar";
 import { EditorArea } from "./ContextLibraryEditor";
 import { RegisterProjectModal } from "./ContextLibraryRegisterModal";
-import { MaintainCLModal } from "./MaintainCLModal";
 import { ContextManager } from "./ContextManager";
 import { SubTabButton } from "../components/SubTabButton";
 import { cn } from "../lib/cn";
@@ -102,7 +101,6 @@ function LibraryTree() {
   // project can't hide inside a clean-looking aggregate.
   const [rescanFailures, setRescanFailures] = useState<string[]>([]);
   const [registerOpen, setRegisterOpen] = useState(false);
-  const [maintainOpen, setMaintainOpen] = useState(false);
 
   // Persist expand/collapse choices across route navigation + restarts. Keyed
   // by collapseKey(project, folderPath) — the project-root node uses "".
@@ -592,7 +590,6 @@ function LibraryTree() {
         onOpenFile={openFile}
         onOpenFolder={openFolder}
         onRequestRegister={() => setRegisterOpen(true)}
-        onRequestMaintain={() => setMaintainOpen(true)}
         onContextMenu={handleContextMenu}
       />
       <div
@@ -625,10 +622,6 @@ function LibraryTree() {
           setQuery("");
           openFolder(name, "");
         }}
-      />
-      <MaintainCLModal
-        open={maintainOpen}
-        onClose={() => setMaintainOpen(false)}
       />
       {menu && (
         <ContextMenu

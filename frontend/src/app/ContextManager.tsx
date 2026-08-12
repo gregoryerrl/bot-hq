@@ -4,15 +4,15 @@ import { useTauriQuery } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import type { ClRescanReportView, ProjectView } from "../lib/bindings";
 import { MeasurementView } from "./MeasurementView";
-import { MaintainCLModal } from "./MaintainCLModal";
 import { RegisterProjectModal } from "./ContextLibraryRegisterModal";
 import { RefreshIcon } from "./contextLibraryShared";
-import { WrenchIcon } from "../components/icons";
 
 // ============================================================================
 // ContextManager — the management half of the Context Library: a per-project
-// maintenance surface (retrieval measurement + rescan + Maintain CL dispatch),
-// NOT a file explorer. Left rail lists registered projects (including
+// maintenance surface (retrieval measurement + rescan), NOT a file explorer.
+// Library-wide maintenance is a session the user starts and instructs (rc3
+// D15) — there is no dispatch button and no hardcoded prompt behind one.
+// Left rail lists registered projects (including
 // `_globals`); the right panel shows the selected project's measurement card.
 // The "Context Manager" subtab pill is the page header — nothing here repeats
 // it. Agents write the CL directly (cl_write_file); there is no review queue.
@@ -36,7 +36,6 @@ export function ContextManager() {
   const activeProject = ordered.find((p) => p.name === active) ?? null;
 
   const [registerOpen, setRegisterOpen] = useState(false);
-  const [maintainOpen, setMaintainOpen] = useState(false);
 
   const [rescanning, setRescanning] = useState(false);
   const [rescanSummary, setRescanSummary] = useState<string | null>(null);
@@ -137,16 +136,6 @@ export function ContextManager() {
                   />
                   Rescan
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setMaintainOpen(true)}
-                  aria-label={`Maintain CL for ${activeProject.name}`}
-                  title="Dispatch an agent session to maintain this project's Context Library"
-                  className="inline-flex items-center gap-1.5 rounded border border-primary/50 px-2 py-1 font-code-sm text-code-sm text-primary transition-colors hover:bg-primary/10"
-                >
-                  <WrenchIcon size={14} />
-                  Maintain CL
-                </button>
               </div>
             </header>
 
@@ -162,11 +151,6 @@ export function ContextManager() {
         open={registerOpen}
         onClose={() => setRegisterOpen(false)}
         onRegistered={(name) => setSelected(name)}
-      />
-      <MaintainCLModal
-        open={maintainOpen}
-        onClose={() => setMaintainOpen(false)}
-        initialProject={activeProject?.name}
       />
     </div>
   );

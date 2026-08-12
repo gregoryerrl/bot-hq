@@ -114,7 +114,7 @@ pub struct SessionCreateOptions {
     /// `None` is the pre-rc3 path and behaves EXACTLY as before — no roster is
     /// written at create and `ensure_session_roster` seeds the default pair at
     /// spawn. Every non-dialog caller (the external driver's `open_session`,
-    /// `dispatch_session`, the plugin proxy) is on that path and is untouched.
+    /// the plugin proxy) is on that path and is untouched.
     pub participants: Option<Vec<ParticipantPick>>,
 }
 
@@ -495,37 +495,22 @@ pub async fn create_session(
 }
 
 /// Dispatch a session pre-loaded with a first prompt: create the row, register
-/// the project, spawn the duo, and broadcast `prompt` to their stdin — all in
-/// one call so delivery is deterministic. A fresh session spawns blank
+/// the project, spawn the roster, and broadcast `prompt` to their stdin — all
+/// in one call so delivery is deterministic. A fresh session spawns blank
 /// (`resume_session_id = None`) and bot-hq does NOT replay storage to stdin, so
 /// the prompt has to be broadcast to a LIVE session — which means spawning
 /// first. `ensure_session_started` inserts the handle before returning, so the
 /// subsequent `broadcast` always finds it; it's idempotent, so the SessionView
 /// mount's `respawn_session` is a harmless no-op.
 ///
-/// Generic on purpose — the caller supplies the prompt. The Context Library
-/// "Maintain CL" button calls this with a hardcoded CL-maintenance prompt.
-#[tauri::command]
-#[specta::specta]
-#[allow(clippy::too_many_arguments)]
-pub async fn dispatch_session(
-    core: tauri::State<'_, Arc<CoreAppState>>,
-    storage: tauri::State<'_, Arc<Storage>>,
-    bridge: tauri::State<'_, Arc<SignalingBridge>>,
-    id: String,
-    title: String,
-    project: Option<String>,
-    repo_path: Option<String>,
-    prompt: String,
-) -> Result<SessionInfo, AppError> {
-    dispatch_session_inner(&core, &storage, &bridge, id, title, project, repo_path, prompt, None)
-        .await
-}
-
-/// Testable/plugin-reachable body of [`dispatch_session`] (the command is a
-/// thin `State`-unwrapping shim, matching the plugins-command pattern). Also
-/// the target of the plugin proxy's `spawn_session` arm — which is why it
-/// takes plain refs, not `tauri::State`.
+/// Generic on purpose — the caller supplies the prompt. **There is no Tauri
+/// command over this any more (rc3 D15).** The Context Library's "Maintain CL"
+/// button was its only UI caller, and D15 deleted it: library-wide maintenance
+/// is a session the user starts and instructs through the New Session dialog,
+/// not a bespoke dialog-less create path with a hardcoded prompt. The plugin
+/// proxy (`plugin_api.rs`, the `spawn_session` and `plugin_session_create`
+/// arms) is what keeps this reachable — which is why it takes plain refs, not
+/// `tauri::State`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_session_inner(
     core: &CoreAppState,

@@ -24,7 +24,7 @@ import {
   treeProjectIds,
   type TreeNode,
 } from "./contextLibraryShared";
-import { RescanIcon, WarnIcon, WrenchIcon } from "../components/icons";
+import { RescanIcon, WarnIcon } from "../components/icons";
 
 const INDENT_PX = 12;
 
@@ -65,7 +65,6 @@ interface WorkspaceSidebarProps {
   onOpenFile: (project: string, filePath: string) => void;
   onOpenFolder: (project: string, folderPath: string) => void;
   onRequestRegister: () => void;
-  onRequestMaintain: () => void;
   onContextMenu: (target: CtxTarget, x: number, y: number) => void;
 }
 
@@ -88,7 +87,6 @@ export function WorkspaceSidebar({
   onOpenFile,
   onOpenFolder,
   onRequestRegister,
-  onRequestMaintain,
   onContextMenu,
 }: WorkspaceSidebarProps) {
   const projectIds = treeProjectIds(
@@ -218,15 +216,6 @@ export function WorkspaceSidebar({
             )}
           >
             <PlusIcon className="size-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={onRequestMaintain}
-            aria-label="Maintain CL"
-            title="Dispatch a session to maintain a project's Context Library"
-            className={cn(headerIconButtonClass, "text-primary")}
-          >
-            <WrenchIcon size={14} />
           </button>
         </div>
       </header>

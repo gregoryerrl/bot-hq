@@ -761,8 +761,8 @@ impl Storage {
     ///
     /// Every creation path funnels through `ensure_session_started` → spawn, so
     /// this is what keeps a session created WITHOUT the New Session dialog — the
-    /// external driver's `open_session`, `dispatch_session` (the Maintain-CL
-    /// button), the plugin proxy — from starting life with an empty roster.
+    /// external driver's `open_session`, the plugin proxy's
+    /// `dispatch_session_inner` — from starting life with an empty roster.
     /// Without a roster every message it writes resolves `participant_id` to
     /// NULL forever, because `insert_message`'s dual-write looks the roster up
     /// by slug.

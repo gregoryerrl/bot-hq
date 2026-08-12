@@ -22,7 +22,8 @@ interface ConfirmDialogProps {
  * (which clashes with the Industrial Terminal styling and can't carry a
  * danger affordance). It only asks — the caller owns the action fired in
  * `onConfirm`. Backdrop click and Escape both cancel; focus is trapped while
- * open and restored to the trigger on close. Modeled on `MaintainCLModal`.
+ * open and restored to the trigger on close. Modeled on
+ * `RegisterProjectModal`.
  */
 export function ConfirmDialog({
   open,

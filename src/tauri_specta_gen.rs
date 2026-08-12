@@ -30,7 +30,6 @@ pub fn builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new().commands(collect_commands![
         // Sessions
         sessions::create_session,
-        sessions::dispatch_session,
         sessions::get_session,
         sessions::get_session_runtime,
         sessions::get_session_project_info,

@@ -359,7 +359,7 @@ pub async fn open_session(
 /// **The bridge from the pre-rc3 create arguments to the roster.** Every
 /// creation path that has no participant list — the external driver's
 /// `open_session`, `create_session` called without `participants`,
-/// `dispatch_session` — used to hand spawn its picks through
+/// `dispatch_session_inner` — used to hand spawn its picks through
 /// `sessions.brian_model_id` / `rain_effort` / …, and spawn no longer reads
 /// those columns. `models[i]` / `knobs[i]` therefore belong to TURN SLOT `i` and
 /// are written onto that participant's row, which is where spawn now looks.
@@ -2521,7 +2521,7 @@ mod tests {
 
     /// The fallback path, minus the runtime question rc3 D9 deleted.
     ///
-    /// `dispatch_session` ("Maintain CL"), the plugin proxy and any driver
+    /// `dispatch_session_inner` (the plugin proxy) and any driver
     /// `create_session` without model ids all leave `*_model_id` NULL ON PURPOSE,
     /// so this fallback is the ONLY thing that carries the assigned model's
     /// gateway and credential to the spawner. It used to carry `native` too;
