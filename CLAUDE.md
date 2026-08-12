@@ -100,10 +100,6 @@ data dir.
 - `.local/session-policies/<sid>.yaml` — per-session policy snapshots
 - `.local/mcp-token` — external MCP bearer token (UUIDv4, 0600)
 - `.local/violations.jsonl` — policy audit trail
-- `.local/native-accounting.jsonl` — one record per native-agent turn
-  (append-only, unrotated; the input for the compaction design)
-- `.local/native-history/<session>-<agent>.json` — a native agent's
-  persisted conversation, so a restart resumes instead of starting blank
 - `custom-instructions.md` (all agents), `general-rules.md`,
   `projects/<p>/{conventions,notes,policy.yaml,…}.md` — CL content
 
@@ -155,9 +151,9 @@ or PLAN.md:
 
 - Rust stable toolchain (rustup, latest stable).
 - Node.js 22+ and npm (for the React frontend; pnpm works too).
-- `claude-code` CLI installed and authed (Brian is always a subprocess;
-  Rain is too unless her model opts into the native loop — plus it's
-  needed for live tests).
+- `claude-code` CLI installed and authed. It is the ONLY model connector
+  (rc3 D9) — every agent is a subprocess, whatever model it runs — and it
+  is needed for live tests.
 - macOS (initial target; Linux + Windows tracked in PLAN.md).
 
 If a prerequisite is missing, document it and continue with
