@@ -297,6 +297,108 @@ fn gate_refusal(name: &str, caller: &CallerIdentity) -> String {
     }
 }
 
+/// The row a refused tool call leaves behind (rc3 **P2**).
+///
+/// Pure, so the sentence is assertable without a database, and one line — the
+/// `system_notice` lane's sizing, the same the capped halt (D7) accepted.
+///
+/// It names the three things a reader needs and nothing else: WHO called, WHAT
+/// they called, and WHICH capability was missing. The participant is named by
+/// the display rule (`ROLE · Model`), never by the slug, which is an internal
+/// key.
+fn refusal_notice(who: &str, tool: &str, cap_slug: &str, unreadable: Option<&str>) -> String {
+    match unreadable {
+        Some(reason) => format!(
+            "[System: {who} called `{tool}`, which needs the `{cap_slug}` capability, and its \
+             capability set could not be read — {reason}. The call was refused; every gated \
+             tool stays refused until that is fixed.]"
+        ),
+        None => format!(
+            "[System: {who} called `{tool}`, which needs the `{cap_slug}` capability this \
+             session did not grant it. The call was refused and nothing ran.]"
+        ),
+    }
+}
+
+/// Refuse a gated tool call **and** record it in the session channel (rc3 P2).
+///
+/// **One function for both halves, and that is the point.** Before this, a
+/// refusal was told to the caller and to nobody else, so a gate that was
+/// silently OPEN and a gate that was simply never exercised looked identical —
+/// capability enforcement was decorative for weeks and no session would have
+/// shown it. Posting the row from a second call at the gate would be one
+/// deletable line; producing the refusal and the record together means any path
+/// that refuses a gated tool leaves a record by construction.
+///
+/// **It records, it does not block.** No halt, no awaiting flag, no gate: the
+/// caller gets exactly the refusal it got before, and the row is a record. A
+/// failed write is warned about and swallowed — losing the account of a refusal
+/// must not also change what the agent is told.
+async fn refuse_gated_tool(
+    name: &str,
+    caller: &CallerIdentity,
+    bridge: &SignalingBridge,
+) -> ToolCallResult {
+    let refusal = gate_refusal(name, caller);
+    // Only a mapped tool can reach the gate (`capability_gated` implies a
+    // mapping), so this is the same `None` arm `gate_refusal` calls unreachable.
+    if let Some(cap) = crate::agents::capability::required_for(name) {
+        if let Some(storage) = bridge.storage_handle().await {
+            // The display rule, not the slug: `ROLE · Model`, resolved live.
+            // A caller with no roster row at all — one of the ways the set goes
+            // unreadable — has no name to resolve, and the rule's own last
+            // resort is the slug.
+            let who = match storage
+                .participant_by_slug(&caller.session_id, &caller.agent)
+                .await
+            {
+                Ok(Some(p)) => storage.display_name_of(&p).await,
+                _ => caller.agent.clone(),
+            };
+            let body = refusal_notice(
+                &who,
+                name,
+                cap.slug(),
+                caller.capabilities.unreadable_reason(),
+            );
+            match storage
+                .post_to_channel(
+                    caller.session_id.as_str(),
+                    // Host-authored, so `origin = 'system'` with a NULL
+                    // participant (0044), exactly as the capped halt posts —
+                    // the refusal is the host's account, not the caller's turn
+                    // output.
+                    "system",
+                    None,
+                    crate::storage::MessageKind::SystemNotice.as_str(),
+                    body,
+                    None,
+                )
+                .await
+            {
+                Ok(row) => bridge.notify_message_persisted(
+                    Arc::from(caller.session_id.as_str()),
+                    row.message_id(),
+                ),
+                Err(e) => tracing::warn!(
+                    session_id = %caller.session_id,
+                    agent = %caller.agent,
+                    tool = %name,
+                    ?e,
+                    "a capability refusal was not recorded in the channel"
+                ),
+            }
+        } else {
+            tracing::warn!(
+                session_id = %caller.session_id,
+                tool = %name,
+                "no storage wired; a capability refusal went unrecorded"
+            );
+        }
+    }
+    ToolCallResult::error(refusal)
+}
+
 async fn call_tool(
     name: &str,
     args: Value,
@@ -316,7 +418,9 @@ async fn call_tool(
     // for them, so a call that was never gated cannot be affected by a roster
     // that will not read.
     if capability_gated(name) && !caller.capabilities.allows_tool(name) {
-        return Ok(ToolCallResult::error(gate_refusal(name, caller)));
+        // Refusing and recording are one call (rc3 P2) — see
+        // `refuse_gated_tool` for why they cannot be separated.
+        return Ok(refuse_gated_tool(name, caller, bridge).await);
     }
     match name {
         "ask_user_choice" => {
@@ -1481,6 +1585,76 @@ mod tests {
                 "tool {tool} should explain the missing grant, got: {text}"
             );
         }
+    }
+
+    /// rc3 **P2**: a refused tool call leaves a row, not just a return value.
+    ///
+    /// The defect: the gate told the caller and nobody else, so a gate that was
+    /// silently OPEN and a gate that was never exercised looked identical from
+    /// inside a session — capability enforcement was decorative for weeks and
+    /// nothing would have shown it. Asserting the returned refusal alone
+    /// reproduces exactly that blind spot, so this asserts the ROW.
+    ///
+    /// Driven through `dispatch`, not through `refuse_gated_tool`, so it covers
+    /// the gate actually taking that path.
+    #[tokio::test]
+    async fn a_refused_tool_call_is_recorded_in_the_channel() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        // A real roster, so the row can name the participant by the display
+        // rule rather than by its slug.
+        storage.ensure_session_roster("s1", false).await.unwrap();
+
+        let hands = CallerIdentity {
+            session_id: "s1".into(),
+            agent: "hands".into(),
+            capabilities: crate::agents::ResolvedCapabilities::Known(
+                crate::agents::CapabilitySet::preset_hands(),
+            ),
+        };
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "eyes_flag", "arguments": {"severity": "blocking", "summary": "x"}}),
+                1,
+            ),
+            &hands,
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // The caller is still told, unchanged — P2 adds a record, it does not
+        // replace the refusal.
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["result"]["isError"], json!(true));
+
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        let notices: Vec<&crate::storage::Message> = rows
+            .iter()
+            .filter(|m| m.kind == crate::storage::MessageKind::SystemNotice.as_str())
+            .collect();
+        assert_eq!(notices.len(), 1, "a refusal should leave exactly one row");
+        let body = notices[0].content.as_str();
+        // WHO, WHAT, and WHICH capability — the three facts that make a wrong
+        // refusal something you watch happen instead of infer.
+        assert!(body.contains("HANDS"), "the row must name the participant: {body}");
+        assert!(body.contains("`eyes_flag`"), "the row must name the tool: {body}");
+        assert!(
+            body.contains("`file_finding`"),
+            "the row must name the capability it lacked: {body}"
+        );
+        // The participant is named by the display rule; the slug is an internal
+        // key and must not be printed.
+        assert!(!body.contains("`hands`"), "the row printed a slug: {body}");
+        // A record, never a gate: nothing is parked on the user's tray, so the
+        // session is not waiting on anyone because a tool was refused.
+        assert!(
+            !storage.has_pending_tray("s1").await.unwrap(),
+            "a refusal must not park anything"
+        );
     }
 
     #[tokio::test]

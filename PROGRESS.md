@@ -9,6 +9,32 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-13 — a refused tool call leaves a row (rc3 P2)
+
+Second dogfood-queue item. When the capability gate refused a tool call it told
+the caller and nobody else, so **a gate that was silently open and a gate that
+was simply never exercised looked identical from inside a session**. Capability
+enforcement was decorative for weeks and no session would have shown it.
+
+A refusal now posts a `system_notice` row — host-authored, `origin='system'`,
+NULL participant, exactly as the capped halt (D7) posts — naming the three
+facts a reader needs: WHO called (by the display rule, `ROLE · Model`, never the
+slug), WHAT they called, and WHICH capability was missing. A wrong refusal
+becomes something you watch happen instead of infer from an agent behaving
+oddly.
+
+**It records; it does not gate.** No halt, no awaiting flag, no tray entry — the
+caller receives the same refusal text it did before, and a failed write is
+warned about and swallowed, because losing the account of a refusal must not
+also change what the agent is told.
+
+Refusing and recording are ONE function (`refuse_gated_tool`). A second "and now
+post the row" call at the gate would be a single deletable line; producing the
+refusal and its record together means every path that refuses a gated tool
+leaves a record by construction. The test asserts the ROW, not the return value
+— asserting the return value alone reproduces the exact blind spot P2 exists to
+remove.
+
 ## 2026-08-13 — the composed system prompt is viewable per participant (rc3 P1)
 
 First item of the dogfood queue (`docs/plans/2026-08-13-dogfood-queue.md`). An
