@@ -20,6 +20,28 @@ export interface SessionRuntime {
   working: string | null;
 }
 
+/**
+ * The two busy booleans of a SLOT-SHAPED payload, as a keyed busy map.
+ *
+ * **The single place the frozen pair is unpacked.** Both producers of a busy
+ * map are this shape — the live `session:activity` event
+ * (`SessionActivityEvent { brian_busy, rain_busy }`, filled in
+ * `src/core/activity.rs` from `slugs.get(0)` / `.get(1)`) and the
+ * `get_session_runtime` backfill below — and both go through here, so they
+ * cannot land under different keys and leave the turn-status line resolving one
+ * and not the other.
+ *
+ * Keying it by the literal `brian` / `rain` is what made the line print
+ * "brian is working": no rc3 roster has those slugs, so the roster lookup missed
+ * and the raw key rendered (rc3 D10).
+ */
+export function busyBySlot(p: {
+  brian_busy: boolean;
+  rain_busy: boolean;
+}): AgentBusy {
+  return { [slotKey(0)]: p.brian_busy, [slotKey(1)]: p.rain_busy };
+}
+
 /** Seed the event-driven activity + health stores from a one-shot runtime
  *  snapshot. Those stores are otherwise populated only by `session:activity` /
  *  `session:agent_health` events, which fire on transitions and can be missed
@@ -36,14 +58,11 @@ export function seedRuntimeStores(
   setWorking?: (id: string, reason: string | null) => void,
 ): void {
   for (const r of rows) {
-    // Slot-shaped wire -> slot keys. Unpacking these under the literal slugs
-    // `"brian"` / `"rain"` is what blanked every health dot after a restart:
-    // no rc3 roster has those slugs, so `SessionView`'s per-participant lookup
-    // missed every entry this seeded (rc3 D10).
-    setActivity(r.session_id, r.activity as SessionActivity, {
-      [slotKey(0)]: r.brian_busy,
-      [slotKey(1)]: r.rain_busy,
-    });
+    // Slot-shaped wire -> slot keys, through the same unpacking the live event
+    // uses. Keying these by the literal slugs `"brian"` / `"rain"` is what
+    // blanked every health dot after a restart: no rc3 roster has those slugs,
+    // so `SessionView`'s per-participant lookup missed every entry this seeded.
+    setActivity(r.session_id, r.activity as SessionActivity, busyBySlot(r));
     if (r.brian_health)
       setHealth(r.session_id, slotKey(0), r.brian_health as AgentHealth);
     if (r.rain_health)

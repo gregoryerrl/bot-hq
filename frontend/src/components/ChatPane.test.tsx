@@ -196,6 +196,22 @@ describe("ChatPane", () => {
     expect(screen.queryByText(/^brian$/i)).toBeNull();
   });
 
+  it("never renders a BLANK byline, even for a row with no author at all", async () => {
+    // `authorLabel` answers "" for an empty author, which is the one input that
+    // reaches the header's own fallback. An empty byline would read as part of
+    // the previous message rather than as an unattributed one.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "get_session_messages")
+        return Promise.resolve([msg(1, "authorless line", "text", "")]);
+      if (cmd === "list_session_participants") return Promise.resolve([]);
+      return Promise.resolve([]);
+    });
+
+    renderPane();
+    expect(await screen.findByText("authorless line")).toBeInTheDocument();
+    expect(screen.getByText("Unknown participant")).toBeInTheDocument();
+  });
+
   it("appends live batches for this session and ignores other sessions", async () => {
     renderPane();
     await screen.findByText("hello one");

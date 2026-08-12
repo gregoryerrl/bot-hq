@@ -1,10 +1,62 @@
 import { describe, it, expect, vi } from "vitest";
-import { seedRuntimeStores, type SessionRuntime } from "./runtime";
+import { busyBySlot, seedRuntimeStores, type SessionRuntime } from "./runtime";
 import {
+  authorLabel,
+  participantLabelIndex,
   participantRuntime,
   slotKey,
   type ParticipantView,
 } from "../lib/participants";
+
+/** The roster both key spaces have to reach, in turn order. */
+const ROSTER: ParticipantView[] = [
+  {
+    id: 1,
+    slug: "eyes",
+    role_display_name: "EYES",
+    model_display_name: "Claude Opus 5",
+    turn_position: 0,
+    participation_mode: "active",
+    enabled: true,
+  },
+  {
+    id: 2,
+    slug: "eyes-2",
+    role_display_name: "EYES",
+    model_display_name: "DeepSeek R2",
+    turn_position: 1,
+    participation_mode: "active",
+    enabled: true,
+  },
+];
+
+describe("busyBySlot — the frozen pair, unpacked once", () => {
+  // `Providers.tsx` calls this on every `session:activity` event and
+  // `seedRuntimeStores` calls it on the mount snapshot. It is the ONLY place
+  // the pair is unpacked, so the live event and the backfill cannot key the
+  // same session two different ways.
+  it("keys the pair by turn slot, never by an agent name", () => {
+    const busy = busyBySlot({ brian_busy: true, rain_busy: false });
+    expect(busy).toEqual({ "#slot0": true, "#slot1": false });
+    expect(Object.keys(busy)).not.toContain("brian");
+    expect(Object.keys(busy)).not.toContain("rain");
+  });
+
+  it("lands under keys the turn-status line resolves to a participant", () => {
+    // The wire, end to end: the event payload goes in, and the label the status
+    // line prints comes out — via the same index the chat byline uses. Cutting
+    // either half (the unpack keys, or the label index's slot entries) fails.
+    const busy = busyBySlot({ brian_busy: false, rain_busy: true });
+    const labels = participantLabelIndex(ROSTER);
+    const working = Object.keys(busy).filter((k) => busy[k]);
+    expect(working.map((k) => authorLabel(k, labels))).toEqual([
+      "EYES · DeepSeek R2",
+    ]);
+    // …and it is reachable as runtime state for that same participant row.
+    expect(participantRuntime(busy, ROSTER[1])).toBe(true);
+    expect(participantRuntime(busy, ROSTER[0])).toBe(false);
+  });
+});
 
 describe("seedRuntimeStores", () => {
   it("seeds activity for every row and health for non-null agents", () => {
@@ -75,26 +127,6 @@ describe("seedRuntimeStores", () => {
     // this asserts the WIRE: what `seedRuntimeStores` writes is what
     // `participantRuntime` reads back for the participant occupying that slot.
     // A rekey on either side that forgets the other fails here.
-    const roster: ParticipantView[] = [
-      {
-        id: 1,
-        slug: "eyes",
-        role_display_name: "EYES",
-        model_display_name: "Claude Opus 5",
-        turn_position: 0,
-        participation_mode: "active",
-        enabled: true,
-      },
-      {
-        id: 2,
-        slug: "eyes-2",
-        role_display_name: "EYES",
-        model_display_name: "DeepSeek R2",
-        turn_position: 1,
-        participation_mode: "active",
-        enabled: true,
-      },
-    ];
     const health: Record<string, string | undefined> = {};
     const busy: Record<string, Record<string, boolean>> = {};
     seedRuntimeStores(
@@ -120,10 +152,10 @@ describe("seedRuntimeStores", () => {
       () => {},
     );
 
-    expect(participantRuntime(health, roster[0])).toBe("stalled");
-    expect(participantRuntime(health, roster[1])).toBe("dead");
-    expect(participantRuntime(busy["s1"], roster[0])).toBe(true);
-    expect(participantRuntime(busy["s1"], roster[1])).toBe(false);
+    expect(participantRuntime(health, ROSTER[0])).toBe("stalled");
+    expect(participantRuntime(health, ROSTER[1])).toBe("dead");
+    expect(participantRuntime(busy["s1"], ROSTER[0])).toBe(true);
+    expect(participantRuntime(busy["s1"], ROSTER[1])).toBe(false);
   });
 
   it("is a no-op for an empty snapshot", () => {
