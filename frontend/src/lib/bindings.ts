@@ -13,27 +13,6 @@ async createSession(id: string, title: string, repoPath: string | null, project:
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * Dispatch a session pre-loaded with a first prompt: create the row, register
- * the project, spawn the duo, and broadcast `prompt` to their stdin — all in
- * one call so delivery is deterministic. A fresh session spawns blank
- * (`resume_session_id = None`) and bot-hq does NOT replay storage to stdin, so
- * the prompt has to be broadcast to a LIVE session — which means spawning
- * first. `ensure_session_started` inserts the handle before returning, so the
- * subsequent `broadcast` always finds it; it's idempotent, so the SessionView
- * mount's `respawn_session` is a harmless no-op.
- * 
- * Generic on purpose — the caller supplies the prompt. The Context Library
- * "Maintain CL" button calls this with a hardcoded CL-maintenance prompt.
- */
-async dispatchSession(id: string, title: string, project: string | null, repoPath: string | null, prompt: string) : Promise<Result<SessionInfo, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("dispatch_session", { id, title, project, repoPath, prompt }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async getSession(sessionId: string) : Promise<Result<SessionInfo | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_session", { sessionId }) };
@@ -1806,7 +1785,7 @@ useWorktree: boolean | null;
  * `None` is the pre-rc3 path and behaves EXACTLY as before — no roster is
  * written at create and `ensure_session_roster` seeds the default pair at
  * spawn. Every non-dialog caller (the external driver's `open_session`,
- * `dispatch_session`, the plugin proxy) is on that path and is untouched.
+ * the plugin proxy) is on that path and is untouched.
  */
 participants: ParticipantPick[] | null }
 /**
