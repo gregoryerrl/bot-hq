@@ -9,6 +9,46 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-12 — B7 layer 2: the prompt's permissions and refusals are one set
+
+**`src/agents/capability_prompt.rs` generates layer 2 of every spawned agent's
+prompt** from `session_participants.capabilities` — permissions from what the
+set contains, refusals from what it does not (rc3 **D3**). One exhaustive
+`match` over `Capability` produces both directions plus a third-person label, so
+adding a variant is a COMPILE error until all three are written; there is no arm
+that can absorb one silently. Prompt and gate cannot drift because they read the
+same data.
+
+**Peer names come from the live roster (D4).** The section names each other
+enabled participant by its `display_name` and its role's `display_name`, and
+lists what that peer holds and you do not — the actionable half. Renaming a
+participant renames it in the prompt; nothing is keyed on an agent name.
+
+**Ordering is the enforcement.** Layer 2 is emitted after EVERY editable input —
+the role prose, `custom-general-rules.md`, `custom-instructions.md` — so free
+text never gets the last word on what the gate enforces, and the section says so
+in its preamble. 0044's schema comment is the reason: *"a role must not be able
+to author rules that contradict its own capability set."*
+
+**A latent bug fixed (D6): native EYES had lost `## Observations only`.**
+`strip_claude_code_tool_inventory` ran to `## Silence on transitions and holds`,
+which swallowed the mutation deny-list, the user-facing-tools paragraph and the
+whole never-assert-what-you-did-not-read rule. The span now ends at the deny-list
+heading — exactly the CLI tool promises the native loop cannot keep, and nothing
+else. Confirmed by reverting the boundary: three tests go red, and the suite was
+green with the old one.
+
+**Nothing user-visible was deleted.** `BRIAN_ROLE` / `RAIN_ROLE` are untouched —
+migration 0046 pins them byte-for-byte, so retiring the now-duplicated
+hand-written deny prose from layer 3 needs a re-seeding migration (none was
+reserved for this slice). The CLI prompt therefore carries both the old prose and
+the generated section for now; the native one carries only what survives the
+strip.
+
+Degradation is deliberate: an unreadable roster, a missing participant row, or a
+`capabilities` column that is not a JSON array of slugs yields NO layer 2 rather
+than an empty set, because an empty set renders as "you may do nothing".
+
 ## 2026-08-11 — the ring ran live; a drift audit found three unscheduled decisions
 
 **The sequencer drove a real session for the first time.** `BOT_HQ_SEQUENCER=1`

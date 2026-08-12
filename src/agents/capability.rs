@@ -49,6 +49,40 @@ pub enum Capability {
 }
 
 impl Capability {
+    /// Every capability, in the order the prompt lists them (declaration order,
+    /// which is also `Ord` order, so a `BTreeSet` walk agrees with this array).
+    ///
+    /// **What is and is not compile-enforced.** Rust cannot enumerate an enum
+    /// without a macro, so this array is hand-maintained. What IS enforced by
+    /// the compiler is the thing that matters: `capability_prompt::phrasing`
+    /// matches exhaustively on `Capability`, so adding a variant fails to
+    /// COMPILE until the author writes its permission line, its denial line and
+    /// its third-person label. `capability_prompt`'s
+    /// `all_covers_every_capability_the_presets_and_the_tool_map_name`
+    /// cross-checks this array against two independent sources.
+    pub const ALL: [Capability; 17] = {
+        use Capability::*;
+        [
+            ReadChannel,
+            PostChannel,
+            AskUser,
+            ParkApproval,
+            SupersedeQuestion,
+            Halt,
+            DeclareWorking,
+            CloseSession,
+            FileFinding,
+            ApproveFinding,
+            DispositionFinding,
+            OverrideReviewerBlock,
+            EditFiles,
+            RunBash,
+            GatedBash,
+            RunTerminal,
+            WriteContextLibrary,
+        ]
+    };
+
     pub fn slug(self) -> &'static str {
         use Capability::*;
         match self {
@@ -143,6 +177,26 @@ pub struct CapabilitySet(BTreeSet<Capability>);
 impl CapabilitySet {
     pub fn from_slugs(slugs: &[&str]) -> Self {
         Self(slugs.iter().filter_map(|s| Capability::parse(s)).collect())
+    }
+
+    /// Decode the stored `capabilities` column — a JSON array of slugs.
+    ///
+    /// `None` means the column is not a JSON array of strings at all. It is a
+    /// separate answer from `Some(empty)` because the two must degrade
+    /// differently: an empty array is a real configuration (an observer), while
+    /// a malformed column is a read failure, and rendering a prompt that denies
+    /// everything on a read failure would tell an agent it cannot do things it
+    /// demonstrably can.
+    ///
+    /// A slug that parses as JSON but names no capability is DROPPED, not an
+    /// error — 0044 seeds `hands` with `route_gated_command`, which is not a
+    /// variant. Grants are the only thing stored, so an unrecognised one is a
+    /// grant nothing can honour.
+    pub fn from_json(raw: &str) -> Option<Self> {
+        let slugs: Vec<String> = serde_json::from_str(raw).ok()?;
+        Some(Self(
+            slugs.iter().filter_map(|s| Capability::parse(s)).collect(),
+        ))
     }
 
     pub fn to_slugs(&self) -> Vec<&'static str> {
