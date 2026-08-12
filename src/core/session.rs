@@ -610,10 +610,31 @@ async fn spawn_session_handle(
     // (they are in the 0044 INSERT but not in `PARTICIPANT_COLUMNS`), and
     // `build_command` needs all three. B7 owns that migration.
     let rain_enabled = session.rain_enabled != 0;
-    let brian_cfg =
-        resolve_spawn_config(&storage, "brian", session.brian_model_id.as_deref()).await;
+    // D8's model chain: the session's own pick (create dialog) wins, then the
+    // ROLE's default, then the per-agent row. The middle step is what makes the
+    // Roles tab the owner of "which model does this role run on" — without it
+    // every create path that has no dialog (the Maintain-CL button, a
+    // plugin-created session) resolved straight to `agent_configs`, whose only
+    // editor was the Agents tab. Retiring that tab (D8) would have left those
+    // sessions pinned to whatever the row already held, with nothing in the app
+    // able to change it.
+    let brian_cfg = resolve_participant_config(
+        &storage,
+        &roster,
+        "brian",
+        session.brian_model_id.as_deref(),
+    )
+    .await;
     let rain_cfg = if rain_enabled {
-        Some(resolve_spawn_config(&storage, "rain", session.rain_model_id.as_deref()).await)
+        Some(
+            resolve_participant_config(
+                &storage,
+                &roster,
+                "rain",
+                session.rain_model_id.as_deref(),
+            )
+            .await,
+        )
     } else {
         None
     };
@@ -1685,6 +1706,59 @@ fn default_agent_config(name: &str) -> AgentConfig {
 /// missing/empty id or a deleted model falls back to the per-agent config, then
 /// the hardcoded default. Keeps the legacy path intact for sessions created
 /// before per-agent model selection existed (`*_model_id` is NULL there).
+/// The default model of the role this participant is playing, or `None`.
+///
+/// Read through the ROSTER rather than by mapping an agent name to a role slug:
+/// the participant row already carries `role_id`, so a session whose slot plays
+/// a role other than the seeded one resolves that role's model, not the seeded
+/// role's. Nothing here is keyed on the name (D10).
+///
+/// Every failure is `None` — no participant row, no `role_id`, a deleted role, a
+/// query error — and the caller then falls through to the per-agent row exactly
+/// as it did before. A model is a preference, not a permission; degrading to the
+/// old answer is right where degrading a capability would not be.
+async fn role_default_model(
+    storage: &Storage,
+    roster: &[crate::storage::Participant],
+    slug: &str,
+) -> Option<String> {
+    let role_id = roster.iter().find(|p| p.slug == slug)?.role_id?;
+    match storage.role_by_id(role_id).await {
+        Ok(r) => r.and_then(|r| r.default_model_id),
+        Err(e) => {
+            warn!(role_id, ?e, "reading a role's default model failed");
+            None
+        }
+    }
+}
+
+/// One participant's finished spawn config — **the whole D8 model chain in one
+/// place a test can reach**.
+///
+/// The chain is: the session's own pick (create dialog) → the ROLE's default
+/// (Roles tab) → the per-agent row → the built-in default.
+///
+/// This exists as a function rather than as three lines at the call site for the
+/// reason [`compose_system_prompt`] does. `spawn_session_handle` goes on to
+/// launch a claude-code subprocess and no test can follow it there, so a chain
+/// assembled inline is a chain nothing pins: verified by mutation — dropping the
+/// role step from the call site left all 1035 lib tests passing, which is the
+/// Roles tab's model control silently doing nothing.
+async fn resolve_participant_config(
+    storage: &Storage,
+    roster: &[crate::storage::Participant],
+    agent_name: &str,
+    session_model_id: Option<&str>,
+) -> AgentConfig {
+    let role_model = role_default_model(storage, roster, agent_name).await;
+    resolve_spawn_config(
+        storage,
+        agent_name,
+        session_model_id.or(role_model.as_deref()),
+    )
+    .await
+}
+
 pub(crate) async fn resolve_spawn_config(
     storage: &Storage,
     agent_name: &str,
@@ -2024,6 +2098,73 @@ mod tests {
             "the agent default's gateway must reach the spawner"
         );
         assert_eq!(resolved.auth_token.as_deref(), Some("tok-from-the-agent-row"));
+    }
+
+    /// **D8's middle step.** The Roles tab owns "which model does this role run
+    /// on", so a create path with no dialog must resolve the ROLE's default —
+    /// not fall straight through to the per-agent row.
+    ///
+    /// This is the gap retiring the Agents tab opened: `dispatch_session_inner`
+    /// ("Maintain CL", the plugin-proxy create arm) writes NULL model ids, and
+    /// `agent_configs` no longer has an editor anywhere in the app. Without the
+    /// role step those sessions are pinned to whatever that row happened to
+    /// hold, and after the database reset that is the seeded default forever.
+    ///
+    /// Read through the ROSTER, not by mapping a name to a slug, so a slot
+    /// playing a different role resolves THAT role's model.
+    #[tokio::test]
+    async fn the_roles_default_model_is_used_when_the_session_names_none() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+
+        // A saved model, made the EYES role's default — the Roles tab's job.
+        sqlx::query(
+            "INSERT INTO models (id, display_name, provider, model_name, base_url, auth_token) \
+             VALUES ('m-role', 'Role Pick', 'anthropic', 'claude-from-the-role', \
+                     'https://role.example/anthropic', 'tok-from-the-role')",
+        )
+        .execute(s.pool())
+        .await
+        .unwrap();
+        sqlx::query("UPDATE roles SET default_model_id = 'm-role' WHERE slug = 'eyes'")
+            .execute(s.pool())
+            .await
+            .unwrap();
+
+        // The per-agent row says something else, so a fallthrough is visible
+        // rather than coincidentally equal.
+        let mut cfg = s.get_agent_config("rain").await.unwrap().unwrap();
+        cfg.model_name = "from-the-agent-row".into();
+        s.upsert_agent_config(&cfg).await.unwrap();
+
+        let roster = s.participants_for_session("s1").await.unwrap();
+
+        // Asserted through the WHOLE chain, not on the helper: an earlier
+        // version of this test called `role_default_model` and
+        // `resolve_spawn_config` separately, and dropping the role step from the
+        // chain that joins them left the entire suite green.
+        let cfg = resolve_participant_config(&s, &roster, "rain", None).await;
+        assert_eq!(
+            cfg.model_name, "claude-from-the-role",
+            "the role's default model never reached the spawn chain"
+        );
+        // The whole row, not just the name — a gateway or credential dropped
+        // here is a spawn that authenticates against the wrong endpoint.
+        assert_eq!(cfg.auth_token.as_deref(), Some("tok-from-the-role"));
+        assert_eq!(
+            cfg.base_url.as_deref(),
+            Some("https://role.example/anthropic")
+        );
+
+        // The session's own pick still outranks the role's default.
+        let picked = resolve_participant_config(&s, &roster, "rain", Some("m-role")).await;
+        assert_eq!(picked.model_name, "claude-from-the-role");
+
+        // A slug nobody holds, and a roster that never loaded, both degrade to
+        // the per-agent row rather than to a wrong model.
+        assert!(role_default_model(&s, &roster, "nobody").await.is_none());
+        assert!(role_default_model(&s, &[], "rain").await.is_none());
     }
 
     #[tokio::test]
