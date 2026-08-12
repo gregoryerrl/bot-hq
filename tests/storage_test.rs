@@ -179,7 +179,6 @@ async fn upsert_agent_config_inserts_new_via_constructor() {
         base_url: Some("https://api.deepseek.com".into()),
         auth_token: Some("ds-token".into()),
         updated_at: String::new(), // ignored on insert/upsert
-        native: false,
         context_window: None,
     };
     s.upsert_agent_config(&cfg).await.unwrap();
@@ -189,13 +188,12 @@ async fn upsert_agent_config_inserts_new_via_constructor() {
     assert_eq!(got.base_url.as_deref(), Some("https://api.deepseek.com"));
 }
 
+/// The projection lost a column but the TABLE did not (rc3 D9 leaves
+/// `agent_configs.native` in place, unread), so the surviving columns must still
+/// bind to their own slots — dropping one name from the column list and leaving
+/// the `bind()` order alone shifts every value one place, silently.
 #[tokio::test]
-async fn agent_config_round_trips_the_native_flag_and_context_window() {
-    // Before 0038 `agent_configs` had no such columns, so `#[sqlx(default)]`
-    // resolved both to false/None on every read. That made the per-agent fallback
-    // — the path EVERY session without an explicit model id takes — permanently
-    // unable to express "native", so a native model assigned on the Agents tab
-    // silently spawned claude-code.
+async fn agent_config_round_trips_every_column_it_still_projects() {
     let s = Storage::memory().await.unwrap();
     let cfg = AgentConfig {
         agent_name: "rain".into(),
@@ -204,36 +202,39 @@ async fn agent_config_round_trips_the_native_flag_and_context_window() {
         base_url: Some("https://api.deepseek.com/anthropic".into()),
         auth_token: Some("ds-token".into()),
         updated_at: String::new(),
-        native: true,
         context_window: Some(1_000_000),
     };
     s.upsert_agent_config(&cfg).await.unwrap();
 
     let got = s.get_agent_config("rain").await.unwrap().unwrap();
-    assert!(got.native, "the native flag must survive the round trip");
+    assert_eq!(got.provider, "deepseek");
+    assert_eq!(got.model_name, "deepseek-v4-pro");
+    assert_eq!(
+        got.base_url.as_deref(),
+        Some("https://api.deepseek.com/anthropic")
+    );
+    assert_eq!(got.auth_token.as_deref(), Some("ds-token"));
     assert_eq!(got.context_window, Some(1_000_000));
 
-    // And it must be un-settable too — a flag that only ever latches on is its
-    // own bug.
+    // And a written value must clear again — a field that only ever latches on
+    // is its own bug.
     let back = AgentConfig {
-        native: false,
         context_window: None,
         ..got
     };
     s.upsert_agent_config(&back).await.unwrap();
     let got = s.get_agent_config("rain").await.unwrap().unwrap();
-    assert!(!got.native);
     assert_eq!(got.context_window, None);
 }
 
+/// Same guard for `models`, and it is the one that matters most: `MODEL_COLUMNS`
+/// and the `bind()` list are two hand-maintained sequences that must stay in
+/// step, and rc3 D9 shortened both by one.
 #[tokio::test]
-async fn model_round_trips_the_native_flag_and_context_window() {
-    // `MODEL_COLUMNS` order versus the ten `bind()`s was correct by INSPECTION
-    // only — no test ever asserted `native: true` or a non-null window survived
-    // the round trip, so a reorder would have shipped a silently mis-mapped flag.
+async fn model_round_trips_every_column_it_still_projects() {
     let s = Storage::memory().await.unwrap();
     let m = bot_hq::storage::Model {
-        id: "m-native".into(),
+        id: "m-gateway".into(),
         display_name: "DeepSeek V4 Pro".into(),
         provider: "deepseek".into(),
         model_name: "deepseek-v4-pro".into(),
@@ -241,44 +242,29 @@ async fn model_round_trips_the_native_flag_and_context_window() {
         auth_token: Some("ds-token".into()),
         created_at: String::new(),
         updated_at: String::new(),
-        native: true,
         context_window: Some(1_000_000),
     };
     s.upsert_model(&m).await.unwrap();
 
-    let got = s.get_model("m-native").await.unwrap().unwrap();
-    assert!(got.native);
+    let got = s.get_model("m-gateway").await.unwrap().unwrap();
     assert_eq!(got.context_window, Some(1_000_000));
     // Every other column must land in its own slot, not a neighbour's.
     assert_eq!(got.display_name, "DeepSeek V4 Pro");
     assert_eq!(got.provider, "deepseek");
     assert_eq!(got.model_name, "deepseek-v4-pro");
+    assert_eq!(
+        got.base_url.as_deref(),
+        Some("https://api.deepseek.com/anthropic")
+    );
     assert_eq!(got.auth_token.as_deref(), Some("ds-token"));
 
-    // And it must turn back off — a flag that only latches on is its own bug.
     let off = bot_hq::storage::Model {
-        native: false,
         context_window: None,
         ..got
     };
     s.upsert_model(&off).await.unwrap();
-    let got = s.get_model("m-native").await.unwrap().unwrap();
-    assert!(!got.native);
+    let got = s.get_model("m-gateway").await.unwrap().unwrap();
     assert_eq!(got.context_window, None);
-}
-
-#[tokio::test]
-async fn existing_agent_configs_default_to_the_cli() {
-    // The 0038 defaults must leave every pre-existing row on claude-code.
-    let s = Storage::memory().await.unwrap();
-    for cfg in s.list_agent_configs().await.unwrap() {
-        assert!(
-            !cfg.native,
-            "{} defaulted to the native loop after migration",
-            cfg.agent_name
-        );
-        assert_eq!(cfg.context_window, None);
-    }
 }
 
 #[tokio::test]

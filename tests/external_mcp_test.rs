@@ -291,10 +291,14 @@ async fn list_sessions_includes_created_session() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn list_models_exposes_the_native_flag_and_redacts_the_token() {
+async fn list_models_exposes_the_spawn_fields_and_redacts_the_token() {
     // The driver could pass `brian_model_id` / `rain_model_id` but had no API to
     // discover an id, so it had to hardcode a UUID — and a wrong one fell back
-    // silently. It also could not tell which models are native.
+    // silently.
+    //
+    // The `native` assertion this test used to carry went with rc3 D9: the field
+    // is no longer in the payload because no runtime reads it. What must still be
+    // there is everything a driver needs to tell two saved models apart.
     let env = setup().await;
     env._core
         .storage
@@ -307,7 +311,6 @@ async fn list_models_exposes_the_native_flag_and_redacts_the_token() {
             auth_token: Some("sk-super-secret-token".into()),
             created_at: String::new(),
             updated_at: String::new(),
-            native: true,
             context_window: Some(1_000_000),
         })
         .await
@@ -324,8 +327,15 @@ async fn list_models_exposes_the_native_flag_and_redacts_the_token() {
 
     assert!(status.contains("200"), "got: {status}");
     assert!(body.contains(r#"\"id\":\"m-ds\""#), "body: {body}");
-    assert!(body.contains(r#"\"native\":true"#), "body: {body}");
+    assert!(body.contains(r#"\"model_name\":\"deepseek-v4-pro\""#), "body: {body}");
+    assert!(
+        body.contains(r#"\"base_url\":\"https://api.deepseek.com/anthropic\""#),
+        "body: {body}"
+    );
     assert!(body.contains(r#"\"context_window\":1000000"#), "body: {body}");
+    // The dropped field must not come back by accident, in either direction: a
+    // driver reading `native` would be reading a value nothing acts on.
+    assert!(!body.contains(r#"\"native\""#), "body: {body}");
     // The load-bearing assertion: a discovery tool must not hand a driver every
     // gateway credential.
     assert!(
@@ -531,7 +541,6 @@ async fn get_agent_configs_redacts_auth_token() {
             base_url: Some("https://api.anthropic.com/v1".into()),
             auth_token: Some("sk-ant-api03-EXAMPLE-key-with-suffix-AB12".into()),
             updated_at: String::new(),
-            native: false,
             context_window: None,
         })
         .await
@@ -613,7 +622,6 @@ async fn set_agent_config_empty_string_clears_field() {
             base_url: Some("https://example.test".into()),
             auth_token: Some("sk-rain-old".into()),
             updated_at: String::new(),
-            native: false,
             context_window: None,
         })
         .await

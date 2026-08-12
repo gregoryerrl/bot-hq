@@ -1374,7 +1374,6 @@ mod tests {
                 base_url: None,
                 auth_token: Some("sk-test".into()),
                 updated_at: String::new(),
-                native: false,
                 context_window: None,
             },
             system_prompt_path: Path::new("/tmp/bot-hq-test-prompt.txt").to_path_buf(),

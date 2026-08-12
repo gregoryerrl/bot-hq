@@ -38,14 +38,18 @@
 //! `NotebookEdit` bullet.** 0048 removed it because `EditFiles`'s generated
 //! denial named all three itself. On a branch authored 92 seconds later,
 //! `no_permission_line_names_a_claude_code_tool` stripped every claude-code
-//! tool name out of layer 2 — a `Capability` is runtime-independent, while
-//! `Bash`/`Edit`/`Write` are claude-code spellings bot-hq's native loop does
-//! not implement — so `EditFiles` now reads *"every write call your runtime
-//! offers is blocked for you"* and names nothing. Neither branch could see the
-//! other; each was right alone, and the merge left EYES refused three tools no
-//! layer of her briefing named. Layer 2 must NOT name them again, so the
-//! concrete spellings live here, which is where the runtime-specific half
-//! belongs.
+//! tool name out of layer 2, so `EditFiles` now reads *"every write call your
+//! runtime offers is blocked for you"* and names nothing. Neither branch could
+//! see the other; each was right alone, and the merge left EYES refused three
+//! tools no layer of her briefing named. Layer 2 must NOT name them again, so
+//! the concrete spellings live here.
+//!
+//! That split outlived its original argument. It was made because a
+//! `Capability` is runtime-independent while `Edit` is a claude-code spelling a
+//! second runtime did not implement; rc3 D9 deleted the second runtime, so what
+//! holds it up now is the plainer reason: layer 2 is generated, this file is
+//! hand-written, and a rule stated in both drifts. Nothing here changed when the
+//! justification did — the bytes an agent receives are the same.
 //!
 //! Everything else in that block STAYED, because layer 6 does not generate it:
 //! the enumeration of which `Bash` forms count as mutating, the
@@ -266,152 +270,33 @@ pub fn builtin_prose_for_role(role_slug: &str) -> &'static str {
     role_for(seeded_agent_for_role(role_slug))
 }
 
-/// The claude-code tool inventory inside [`RAIN_ROLE`], verbatim.
-///
-/// Exists so the native loop can REMOVE it — see
-/// [`strip_claude_code_tool_inventory`]. It promises `Read`, `Grep`, `Glob`,
-/// `WebFetch`, `ToolSearch`, `TodoWrite` and read-only `Bash`, none of which the
-/// native loop implements.
-///
-/// **Kept as an exact substring of `RAIN_ROLE` rather than composed into it.**
-/// `concat!` only takes literals, so composing would mean making the role a
-/// runtime `String` and changing every `RAIN_ROLE.contains(…)` assertion. The
-/// invariant is enforced by `tool_inventory_is_an_exact_substring_of_the_role`
-/// instead: edit one and the test fails, so the two cannot drift.
-pub const RAIN_TOOLS_CLI: &str = "Tools you may use:";
-
-/// Heading that terminates the tool-inventory span in [`RAIN_ROLE`].
-///
-/// **This used to be `"## Silence on transitions and holds"`, which swallowed
-/// sections that are not a tool inventory** — the mutation deny-list, the
-/// mutation-boundary paragraph, and the whole
-/// `## Observations only` rule. Native EYES has therefore been running without
-/// the never-assert-what-you-did-not-read instruction that CLI EYES receives,
-/// and no test noticed (rc3 decision D6: *"it was lost by accident, not by
-/// decision"*). Ending the span at the deny-list heading restores those four
-/// sections and keeps the promises the strip is FOR — `Read`/`Grep`/`Glob`,
-/// `WebFetch`/`ToolSearch`, `TodoWrite` and read-only `Bash`, none of which the
-/// native loop implements — inside the span.
-///
-/// **The span is not exactly those promises, and it must not be described as
-/// if it were.** It is a contiguous slice of the role, so it also carries two
-/// bullets naming tools the native loop DOES have: `terminal_read`, and the
-/// `mcp__bot-hq-signaling__web_search` half of the web/reference bullet. Both
-/// are `mcp__bot-hq-signaling__*` tools, which `NATIVE_TOOL_ADDENDUM` grants in
-/// full and re-describes a few lines later — so the native prompt loses their
-/// CLI-flavoured wording and immediately regains the tools themselves. That is
-/// a redundant strip, not a lost capability, and it is the price of a
-/// substring span. Narrowing it further would mean splitting the inventory
-/// into non-contiguous pieces, which is more boundary constants to drift.
-///
-/// The deny-list that now survives is consistent with the native loop rather
-/// than contradictory: `NATIVE_TOOL_ADDENDUM` refuses the same writes
-/// (`no write_file, no Edit/Write, no git commit|push…`). The contradiction the
-/// strip exists to remove is a PROMISE of a tool that does not exist, not a
-/// refusal of one.
-const RAIN_TOOLS_END: &str = "Tools that are Brian's, NOT yours";
-
-/// Remove the claude-code tool inventory from an assembled prompt.
-///
-/// The native loop appends its own inventory
-/// (`native::agent::NATIVE_TOOL_ADDENDUM`). Leaving the CLI one in place left the
-/// prompt carrying **two contradictory tool lists**, and EYES on the first live
-/// native run had to reason her way out of it: *"The prompt has a vestigial 'Bash
-/// — read-only invocations only' section, but the 'Not available' block is
-/// authoritative for this loop."* She resolved it correctly; depending on a model
-/// resolving a self-contradiction is not a design.
-///
-/// Returns the input unchanged when either boundary is missing, so a future
-/// prompt edit degrades to the old append-a-retraction behaviour rather than
-/// mangling the prompt. The
-/// `tool_inventory_is_an_exact_substring_of_the_role` test is what catches that
-/// drift at build time.
-pub fn strip_claude_code_tool_inventory(prompt: &str) -> String {
-    let Some(start) = prompt.find(RAIN_TOOLS_CLI) else {
-        return prompt.to_string();
-    };
-    let Some(end_rel) = prompt[start..].find(RAIN_TOOLS_END) else {
-        return prompt.to_string();
-    };
-    let mut out = String::with_capacity(prompt.len());
-    out.push_str(&prompt[..start]);
-    out.push_str(&prompt[start + end_rel..]);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// **`## Observations only` reaches EYES.** Pinned here after rc3 D9 deleted
+    /// the test that used to hold it.
+    ///
+    /// That test asserted the rule survived a strip span (rc3 D6: the span had
+    /// been swallowing it, so the second runtime's EYES ran without a rule the
+    /// CLI's EYES received, and nothing failed). With the span and the second
+    /// runtime gone, an assertion about the strip is meaningless — but the rule
+    /// is the same rule, written after an archived session recorded five EYES
+    /// assertions with no observation behind them, three of them shaped like user
+    /// authorization. Deleting the strip test without this one would leave the
+    /// section unguarded in the only prompt that still exists.
+    ///
+    /// The composed-prompt half is
+    /// `core::session::tests::the_composed_eyes_prompt_carries_observations_only
+    /// _and_the_tool_inventory`; this is the constant half.
     #[test]
-    fn tool_inventory_is_an_exact_substring_of_the_role() {
-        // The load-bearing invariant. `strip_claude_code_tool_inventory` returns
-        // the prompt UNCHANGED when a boundary is missing — a deliberate
-        // fail-safe against mangling, but it means a prompt edit that renames
-        // either boundary would silently ship a prompt with TWO contradictory
-        // tool inventories. This test is what turns that silence into a build
-        // failure. If it fails, update the constants — don't delete the test.
+    fn rain_carries_the_observations_only_rule() {
         assert!(
-            RAIN_ROLE.contains(RAIN_TOOLS_CLI),
-            "RAIN_TOOLS_CLI no longer matches RAIN_ROLE"
+            RAIN_ROLE.contains("## Observations only"),
+            "EYES lost the observations-only rule"
         );
         assert!(
-            RAIN_ROLE.contains(RAIN_TOOLS_END),
-            "RAIN_TOOLS_END no longer matches RAIN_ROLE"
-        );
-        let start = RAIN_ROLE.find(RAIN_TOOLS_CLI).unwrap();
-        let end = RAIN_ROLE.find(RAIN_TOOLS_END).unwrap();
-        assert!(start < end, "the tool inventory must precede its terminator");
-    }
-
-    #[test]
-    fn stripping_removes_the_cli_tool_promises() {
-        let native = strip_claude_code_tool_inventory(RAIN_ROLE);
-        // Each of these is a tool the native loop does not implement.
-        for promise in [
-            "read-only invocations only",
-            "**Read-only file tools**",
-            "**Task tracking**: `TodoWrite`",
-        ] {
-            assert!(
-                !native.contains(promise),
-                "native prompt still promises: {promise}"
-            );
-        }
-    }
-
-    #[test]
-    fn stripping_keeps_everything_that_is_not_the_tool_inventory() {
-        let native = strip_claude_code_tool_inventory(RAIN_ROLE);
-        // Identity, posture and workflow all still apply to a native agent —
-        // only the tool list changes.
-        for kept in [
-            "# Role — Rain (EYES)",
-            "## Adversarial posture",
-            "## Silence on transitions and holds",
-            "## Session opener — CL index, every time",
-        ] {
-            assert!(native.contains(kept), "native prompt lost: {kept}");
-        }
-        assert!(native.len() < RAIN_ROLE.len(), "nothing was removed");
-    }
-
-    /// **rc3 decision D6.** The strip is for tool PROMISES the native loop
-    /// cannot keep. It used to run to `## Silence on transitions and holds`,
-    /// which also took `## Observations only` — the rule written after an
-    /// archived session recorded five EYES assertions with no observation behind
-    /// them, three of them shaped like user authorization. Native EYES ran
-    /// without it and nothing failed, which is why this test exists rather than
-    /// only the fix.
-    #[test]
-    fn the_native_prompt_keeps_the_observations_only_rule() {
-        let native = strip_claude_code_tool_inventory(RAIN_ROLE);
-        assert!(
-            native.contains("## Observations only"),
-            "the native prompt lost the observations-only rule"
-        );
-        assert!(
-            native.contains("never assert what you didn't read this turn"),
+            RAIN_ROLE.contains("never assert what you didn't read this turn"),
             "the heading survived but the rule under it did not"
         );
         // The three sentences that make it a rule rather than a heading.
@@ -420,27 +305,8 @@ mod tests {
             "report only what a tool result in THIS turn shows",
             "a reviewer who guesses is worse than no reviewer",
         ] {
-            assert!(native.contains(kept), "the native prompt lost: {kept}");
+            assert!(RAIN_ROLE.contains(kept), "EYES lost: {kept}");
         }
-    }
-
-    /// The mutation deny-list rides on the same boundary move, and is the reason
-    /// the span ends where it does rather than at `## Observations only`: the
-    /// native addendum refuses the same writes, so keeping this text is
-    /// consistent with the loop, and a degraded spawn that renders no layer 2
-    /// still tells EYES what is not hers.
-    ///
-    /// **Narrowed by migration 0048, not abandoned.** The `terminal_exec`
-    /// bullet and the user-facing-tools paragraph moved to generated layer 2
-    /// (rc3 D3), so what survives here is what layer 2 does NOT generate. That
-    /// is deliberately still the majority of the block — see
-    /// `the_surviving_deny_list_is_exactly_what_layer_2_cannot_generate`.
-    #[test]
-    fn the_native_prompt_keeps_the_mutation_deny_list() {
-        let native = strip_claude_code_tool_inventory(RAIN_ROLE);
-        assert!(native.contains("Tools that are Brian's, NOT yours"));
-        assert!(native.contains("The boundary is mutation, not just risk"));
-        assert!(native.contains("When unsure if a Bash command mutates"));
     }
 
     /// The over-removal guard for migration 0048's prose edit.
@@ -458,7 +324,7 @@ mod tests {
     ///   nothing generates the enumeration of which `Bash` forms count as
     ///   mutating.
     /// - **A capability covers it but names no tool.** Every layer 2 phrasing is
-    ///   rendered from a `Capability`, which is runtime-independent, so
+    ///   rendered from a `Capability`, and
     ///   `no_permission_line_names_a_claude_code_tool` forbids claude-code tool
     ///   names there. `EditFiles`'s denial is therefore *"every write call your
     ///   runtime offers is blocked for you"* — a complete rule that identifies
@@ -468,6 +334,10 @@ mod tests {
     #[test]
     fn the_surviving_deny_list_is_exactly_what_layer_2_cannot_generate() {
         for kept in [
+            // The heading the block hangs off. It used to be pinned only as a
+            // strip boundary (`RAIN_TOOLS_END`), which rc3 D9 deleted — without
+            // this entry the whole block could be renamed with a green suite.
+            "Tools that are Brian's, NOT yours",
             // Which Bash forms count as mutating — layer 2 never enumerates.
             "`git checkout`",
             "`git commit`",
@@ -492,60 +362,6 @@ mod tests {
                 "layer 2 does not generate this, so removing it deletes it outright: {kept}"
             );
         }
-    }
-
-    /// **What the span takes BESIDES the promises the strip is for.**
-    ///
-    /// [`RAIN_TOOLS_END`]'s doc used to claim the span was "exactly the CLI
-    /// tool promises the native loop cannot keep … and nothing else", and the
-    /// PROGRESS entry repeated it. It is not: the span is one contiguous slice
-    /// of the role, and two of its bullets name `mcp__bot-hq-signaling__*`
-    /// tools the native loop DOES implement. This test is the correction, so
-    /// the sentence cannot quietly become false again — and so that anyone
-    /// narrowing the span later is told what they are changing.
-    ///
-    /// The cost is redundancy, not capability: `NATIVE_TOOL_ADDENDUM` grants
-    /// the whole `mcp__bot-hq-signaling__*` set a few lines further down, and
-    /// names these two specifically, so the native prompt re-states them
-    /// immediately after losing the CLI wording.
-    #[test]
-    fn the_stripped_span_also_takes_two_tools_the_native_loop_does_have() {
-        let start = RAIN_ROLE.find(RAIN_TOOLS_CLI).unwrap();
-        let end = RAIN_ROLE.find(RAIN_TOOLS_END).unwrap();
-        let span = &RAIN_ROLE[start..end];
-        let native = strip_claude_code_tool_inventory(RAIN_ROLE);
-
-        for tool in ["terminal_read", "mcp__bot-hq-signaling__web_search"] {
-            assert!(
-                span.contains(tool),
-                "{tool} is no longer inside the stripped span — the doc at RAIN_TOOLS_END \
-                 says it is, so one of the two is now wrong"
-            );
-            assert!(
-                crate::agents::native::agent::NATIVE_TOOL_ADDENDUM.contains(
-                    tool.trim_start_matches("mcp__bot-hq-signaling__")
-                ),
-                "{tool} is stripped for the native prompt and the addendum does not give it \
-                 back — that would be a lost capability, not a redundant strip"
-            );
-        }
-        // The bullets themselves are gone from the native prompt: it is the
-        // CLI-flavoured wording that goes, and only the addendum's version that
-        // remains.
-        assert!(
-            !native.contains("**`terminal_read(lines?)`**"),
-            "the CLI wording of terminal_read survived the strip"
-        );
-    }
-
-    #[test]
-    fn stripping_a_prompt_without_the_markers_is_a_no_op() {
-        // Brian's role has no such section; stripping must not corrupt it.
-        assert_eq!(
-            strip_claude_code_tool_inventory("no markers here"),
-            "no markers here"
-        );
-        assert_eq!(strip_claude_code_tool_inventory(""), "");
     }
 
     #[test]

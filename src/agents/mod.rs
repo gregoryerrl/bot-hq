@@ -9,17 +9,14 @@ pub mod events;
 pub mod general_rules;
 pub mod input;
 pub mod llm_proxy;
-pub mod native;
 pub mod prompts;
 pub mod protocol;
-pub mod roles;
 pub mod spawn;
 
 pub use capability::{Capability, CapabilitySet, ResolvedCapabilities};
 pub use capability_prompt::{PeerFact, RosterFacts};
 pub use general_rules::GENERAL_RULES;
 pub use prompts::role_for;
-pub use roles::AgentRole;
 pub use protocol::{OutgoingUserMessage, StreamEvent};
 pub use spawn::{
     spawn_agent, spawn_supervised_agent, AgentEvent, AgentHandle, AgentHealth, ParticipantInput,
