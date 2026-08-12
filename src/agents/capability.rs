@@ -49,6 +49,102 @@ pub enum Capability {
 }
 
 impl Capability {
+    /// Every capability, in the order the Roles tab renders its checklist —
+    /// grouped, so the 17 boxes read as five short sections rather than one
+    /// wall.
+    ///
+    /// This exists so the Roles tab can ASK for the list instead of carrying a
+    /// copy: a slug list hardcoded in TypeScript drifts the first time a
+    /// capability is added here, and the drift is silent — the new grant simply
+    /// never appears as a box, so no role can be given it.
+    ///
+    /// Kept complete by `all_lists_every_variant_exactly_once`, whose match
+    /// over the variants is exhaustive: adding one fails to COMPILE there
+    /// until it is handled, and the count assertion then points back here.
+    pub const ALL: &'static [Capability] = &[
+        Capability::ReadChannel,
+        Capability::PostChannel,
+        Capability::AskUser,
+        Capability::ParkApproval,
+        Capability::SupersedeQuestion,
+        Capability::Halt,
+        Capability::DeclareWorking,
+        Capability::CloseSession,
+        Capability::FileFinding,
+        Capability::ApproveFinding,
+        Capability::DispositionFinding,
+        Capability::OverrideReviewerBlock,
+        Capability::EditFiles,
+        Capability::RunBash,
+        Capability::GatedBash,
+        Capability::RunTerminal,
+        Capability::WriteContextLibrary,
+    ];
+
+    /// The section this capability is filed under in the Roles tab, matching
+    /// the `---- … ----` bands the variants are declared in above.
+    pub fn group(self) -> &'static str {
+        use Capability::*;
+        match self {
+            ReadChannel | PostChannel => "Channel",
+            AskUser | ParkApproval | SupersedeQuestion | Halt | DeclareWorking | CloseSession => {
+                "User-facing"
+            }
+            FileFinding | ApproveFinding | DispositionFinding | OverrideReviewerBlock => "Review",
+            EditFiles | RunBash | GatedBash | RunTerminal => "Execution",
+            WriteContextLibrary => "Knowledge",
+        }
+    }
+
+    /// Short human name for the checkbox.
+    pub fn label(self) -> &'static str {
+        use Capability::*;
+        match self {
+            ReadChannel => "Read the channel",
+            PostChannel => "Post to the channel",
+            AskUser => "Ask the user",
+            ParkApproval => "Park an approval",
+            SupersedeQuestion => "Supersede a question",
+            Halt => "Halt",
+            DeclareWorking => "Declare working",
+            CloseSession => "Close the session",
+            FileFinding => "File a finding",
+            ApproveFinding => "Approve a finding",
+            DispositionFinding => "Disposition a finding",
+            OverrideReviewerBlock => "Override a reviewer block",
+            EditFiles => "Edit files",
+            RunBash => "Run Bash",
+            GatedBash => "Route a gated command",
+            RunTerminal => "Run the terminal",
+            WriteContextLibrary => "Write the Context Library",
+        }
+    }
+
+    /// One line on what the grant actually buys, phrased from what
+    /// [`required_for`] gates and what the tool does — not from role names.
+    pub fn description(self) -> &'static str {
+        use Capability::*;
+        match self {
+            ReadChannel => "See the session's messages. An observer has this and nothing else.",
+            PostChannel => "Speak in the session channel.",
+            AskUser => "Put a multiple-choice question to the user (`ask_user_choice`).",
+            ParkApproval => "Park a request for the user to approve (`request_approval`).",
+            SupersedeQuestion => "Replace a question already waiting on the user.",
+            Halt => "Stop and hand the session back to the user.",
+            DeclareWorking => "Announce a long-running stretch so the UI stops looking stalled.",
+            CloseSession => "End the session.",
+            FileFinding => "Raise a finding against work — the reviewer's block.",
+            ApproveFinding => "Sign a finding off.",
+            DispositionFinding => "Resolve a finding filed against this participant's work.",
+            OverrideReviewerBlock => "Proceed past a blocking finding.",
+            EditFiles => "Write to files in the workspace.",
+            RunBash => "Run shell commands.",
+            GatedBash => "Send a gated command to the user for approval — needs `run_bash`.",
+            RunTerminal => "Drive the session's terminal (`terminal_exec`).",
+            WriteContextLibrary => "Add to or edit the Context Library.",
+        }
+    }
+
     pub fn slug(self) -> &'static str {
         use Capability::*;
         match self {
@@ -380,6 +476,52 @@ mod tests {
         );
         // Note it is deliberately absent from the parity oracle's UNGATED list
         // (`signaling::parity`), so the two artifacts do not contradict.
+    }
+
+    #[test]
+    fn all_lists_every_variant_exactly_once() {
+        // The Roles tab renders ONE checkbox per entry of `ALL`, so a variant
+        // missing from it is a grant no role can ever be given — and nothing
+        // errors, because the checklist simply has one fewer box.
+        //
+        // The match below is exhaustive, so a NEW variant fails to compile
+        // here until it is handled; the count assertion then fails until it is
+        // added to `ALL` as well.
+        use Capability::*;
+        let mut seen = BTreeSet::new();
+        for cap in Capability::ALL {
+            match cap {
+                ReadChannel | PostChannel | AskUser | ParkApproval | SupersedeQuestion | Halt
+                | DeclareWorking | CloseSession | FileFinding | ApproveFinding
+                | DispositionFinding | OverrideReviewerBlock | EditFiles | RunBash | GatedBash
+                | RunTerminal | WriteContextLibrary => {}
+            }
+            assert!(seen.insert(*cap), "{} is listed twice in ALL", cap.slug());
+        }
+        assert_eq!(
+            seen.len(),
+            17,
+            "a capability is missing from `Capability::ALL`"
+        );
+    }
+
+    #[test]
+    fn every_listed_capability_carries_the_labels_the_roles_tab_renders() {
+        // `list_capabilities` is the tab's ONLY source for the checklist, so a
+        // blank label or description renders as an unnamed, unexplained box the
+        // user has to guess at — and guessing wrong here hands a role a grant.
+        for cap in Capability::ALL {
+            assert!(!cap.label().is_empty(), "{} has no label", cap.slug());
+            assert!(
+                !cap.description().is_empty(),
+                "{} has no description",
+                cap.slug()
+            );
+            assert!(!cap.group().is_empty(), "{} has no group", cap.slug());
+            // A label that IS the slug means the row was added to `ALL` and the
+            // metadata matches were left to fall through to a placeholder.
+            assert_ne!(cap.label(), cap.slug(), "{} is unlabelled", cap.slug());
+        }
     }
 
     #[test]

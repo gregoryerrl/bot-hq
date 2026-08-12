@@ -82,6 +82,48 @@ impl TryFrom<Role> for RoleView {
     }
 }
 
+/// One row of the Roles tab's capability checklist.
+///
+/// The tab ASKS for this list rather than carrying a copy: a slug list
+/// hardcoded in TypeScript drifts the first time a capability is added to
+/// [`Capability`], and the drift is silent — the new grant just never appears
+/// as a box, so no role can be given it.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct CapabilityView {
+    pub slug: String,
+    pub label: String,
+    pub description: String,
+    /// Section heading, so 17 checkboxes render as five short groups.
+    pub group: String,
+    /// Slugs this one is incoherent without — [`Capability::requires`]. Sent so
+    /// the checklist can say so BEFORE a save, rather than only through the
+    /// `Validation` error [`validated_capabilities`] returns after one.
+    pub requires: Vec<String>,
+}
+
+impl From<Capability> for CapabilityView {
+    fn from(cap: Capability) -> Self {
+        Self {
+            slug: cap.slug().to_string(),
+            label: cap.label().to_string(),
+            description: cap.description().to_string(),
+            group: cap.group().to_string(),
+            requires: cap.requires().iter().map(|c| c.slug().to_string()).collect(),
+        }
+    }
+}
+
+/// The capability checklist, in render order.
+///
+/// Infallible — it reads a compile-time table, touches no storage, and so takes
+/// no `State`. It is still a command rather than a constant in the frontend for
+/// the reason on [`CapabilityView`].
+#[tauri::command]
+#[specta::specta]
+pub fn list_capabilities() -> Vec<CapabilityView> {
+    Capability::ALL.iter().copied().map(Into::into).collect()
+}
+
 /// What the Roles tab submits, for both create and edit.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct RoleDraftInput {
@@ -268,6 +310,55 @@ mod tests {
             participation_mode: "active".into(),
             default_model_id: None,
         }
+    }
+
+    #[test]
+    fn the_checklist_offers_exactly_the_slugs_the_validator_accepts() {
+        // The tab builds its draft from these rows and `validated_capabilities`
+        // refuses anything it does not recognise, so the two lists have to be
+        // the SAME list. A row here the validator rejects is a checkbox that
+        // fails every save it is ticked for; a capability missing here is a
+        // grant no role can be given, silently.
+        let rows = list_capabilities();
+        assert_eq!(rows.len(), Capability::ALL.len());
+        for row in &rows {
+            assert!(
+                Capability::parse(&row.slug).is_some(),
+                "the tab would offer {}, which the validator rejects",
+                row.slug
+            );
+        }
+        // And ticking every box is itself a saveable role: each capability's
+        // dependencies are elsewhere in the same list, so "select all" can
+        // never be the one combination the backend refuses.
+        let slugs: Vec<String> = rows.iter().map(|r| r.slug.clone()).collect();
+        assert!(
+            validated_capabilities(&slugs).is_ok(),
+            "ticking every offered box must save: {:?}",
+            validated_capabilities(&slugs)
+        );
+    }
+
+    #[test]
+    fn every_checklist_row_carries_its_dependencies() {
+        // `gated_bash` without `run_bash` is the refusal the user is most
+        // likely to hit, so the checklist has to be able to say so before the
+        // save rather than only through the error afterwards.
+        let rows = list_capabilities();
+        let gated = rows
+            .iter()
+            .find(|r| r.slug == "gated_bash")
+            .expect("gated_bash must be offered");
+        assert_eq!(gated.requires, ["run_bash"]);
+        assert!(!gated.label.is_empty() && !gated.description.is_empty());
+        assert_eq!(gated.group, "Execution");
+        // A capability with no dependency sends an empty list, not a missing
+        // field — the checklist reads `requires` unconditionally.
+        let read = rows
+            .iter()
+            .find(|r| r.slug == "read_channel")
+            .expect("read_channel must be offered");
+        assert!(read.requires.is_empty());
     }
 
     #[test]
