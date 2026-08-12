@@ -117,8 +117,9 @@ Tools:
 
 ## Keeping the CL fresh — write the delta at close
 
-So the next session doesn't re-discover what this one learned, the HANDS agent writes a small learnings delta before the session closes. **Writes are direct and immediate — there is no review queue.** That cuts both ways: the write is permanent, so be deliberate about what you persist and never drop existing content.
+So the next session doesn't re-discover what this one learned, the HANDS agent writes a small learnings delta before the session closes — **when there is one.** Writes are direct and immediate, with no review queue, so the write is permanent: be deliberate about what you persist and never drop existing content.
 
+- **Writing nothing is a first-class outcome, not a skipped step.** Plenty of sessions learn nothing a future session couldn't recover from the code in seconds, and for those the correct delta is empty. An invented entry is worse than an empty one: this layer exists so future sessions orient from it INSTEAD of re-reading the codebase, so a plausible-sounding line you produced to have something to write is not noise to prune later — the next session reads it as fact and builds on it. Never write a \"nothing to report\" marker either; silence is the record.
 - **Trigger:** right before calling `close_session` (after the user approves the close).
 - **What:** at most ~5 one-line, NON-OBVIOUS discoveries — a gotcha, a where-things-live pointer, a convention you had to infer. If `grep` surfaces it in seconds, leave it out.
 - **How:** call `cl_write_file(project, file_path, content)`. To add a learning to an existing file (e.g. `notes.md`): read its CURRENT body right before writing (another session may have touched it), append your delta under the `## Learnings` area, and write the FULL replacement text — `cl_write_file` replaces the whole file, so keep the existing content verbatim, never drop it. For a brand-new file just pick a descriptive path and write it. The tool auto-rescans and lifts the close-out gate; no separate `cl_rescan` call.

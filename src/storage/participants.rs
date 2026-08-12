@@ -2240,18 +2240,36 @@ mod tests {
         })
     }
 
-    /// One of `0049_role_prose_drops_the_names.sql`'s two UPDATEs, read out of
-    /// the migration itself so the test cannot drift from what actually ran.
-    fn drops_the_names_statement(section: &str) -> String {
-        let sql = include_str!("../../migrations/0049_role_prose_drops_the_names.sql");
+    /// A prose-reseed UPDATE, read out of the migration itself so the test
+    /// cannot drift from what actually ran.
+    ///
+    /// Each statement ends at `);\n` — the closing paren of its guard — which
+    /// no line of the prose contains, unlike a bare `;`.
+    fn reseed_statement(sql: &str, which: &str, section: &str) -> String {
         let from = sql
             .find(section)
-            .unwrap_or_else(|| panic!("0049 lost its {section:?} marker"));
+            .unwrap_or_else(|| panic!("{which} lost its {section:?} marker"));
         let start = sql[from..].find("UPDATE").expect("no UPDATE after the marker") + from;
-        // Each statement ends at `);\n` — the closing paren of its guard — which
-        // no line of the prose contains, unlike a bare `;`.
         let end = sql[start..].find(");\n").expect("unterminated statement") + start + 2;
         sql[start..end].to_string()
+    }
+
+    /// One of `0049_role_prose_drops_the_names.sql`'s two UPDATEs.
+    fn drops_the_names_statement(section: &str) -> String {
+        reseed_statement(
+            include_str!("../../migrations/0049_role_prose_drops_the_names.sql"),
+            "0049",
+            section,
+        )
+    }
+
+    /// `0050_close_learnings_ask_is_conditional.sql`'s single UPDATE (HANDS).
+    fn close_learnings_ask_statement() -> String {
+        reseed_statement(
+            include_str!("../../migrations/0050_close_learnings_ask_is_conditional.sql"),
+            "0050",
+            "-- 1. HANDS",
+        )
     }
 
     /// **The guard on migration 0049, both directions.**
@@ -2312,6 +2330,57 @@ mod tests {
                 "0049 clobbered a user-edited prompt for {slug}"
             );
         }
+    }
+
+    /// **The guard on migration 0050, both directions** — the same instrument as
+    /// the 0049 test above, for the reseed rc3 D15 needed.
+    ///
+    /// D15 made HANDS' close-out learnings ask conditional ("writing nothing is
+    /// the expected outcome"), which changes `HANDS_ROLE`, which 0049 had
+    /// already seeded byte-for-byte into the database. 0049 is applied and
+    /// immutable, so the only correct move is this new migration — and it needs
+    /// the same two-sided proof: it must overwrite 0049's seed, and it must
+    /// leave a row the user has edited alone.
+    #[tokio::test]
+    async fn the_0050_prose_reseed_overwrites_0049s_seed_but_not_a_user_edit() {
+        let s = storage_with_0044().await;
+
+        // Half 1 — a stock migrated database is on the CONDITIONAL wording.
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        let prose = hands.description_prompt.expect("hands prose seeded");
+        assert_eq!(
+            prose,
+            crate::agents::prompts::HANDS_ROLE,
+            "0050 did not overwrite 0049's seed for hands"
+        );
+        // The point of the migration, spelled out: the ask is conditional and
+        // silence is blameless (D15).
+        assert!(prose.contains("only if this session turned up something"));
+        assert!(prose.contains("Writing nothing is the expected outcome"));
+
+        // Half 2 — replayed against a row the user has edited, it leaves it be.
+        let edit = "You are HANDS. Ship small, verified changes.";
+        sqlx::query("UPDATE roles SET description_prompt = ? WHERE slug = 'hands'")
+            .bind(edit)
+            .execute(s.pool())
+            .await
+            .unwrap();
+        sqlx::query(&close_learnings_ask_statement())
+            .execute(s.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            s.role_by_slug("hands").await.unwrap().unwrap().description_prompt.as_deref(),
+            Some(edit),
+            "0050 clobbered a user-edited prompt"
+        );
+
+        // And EYES is untouched by 0050 — the ask was never addressed to a role
+        // with no `write_context_library` grant.
+        assert_eq!(
+            s.role_by_slug("eyes").await.unwrap().unwrap().description_prompt.as_deref(),
+            Some(crate::agents::prompts::EYES_ROLE),
+        );
     }
 
     // ---- 0046: role prose lives in the database --------------------------

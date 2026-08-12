@@ -8,6 +8,7 @@
 
 pub mod activity;
 mod broadcast;
+pub mod close_learnings;
 pub mod duo;
 pub mod ipav;
 pub mod router;
@@ -20,6 +21,7 @@ pub mod watchdog;
 pub mod worktree;
 
 pub use activity::{ActivityTracker, SessionActivity};
+pub use close_learnings::{decide as decide_close_epilogue, Epilogue};
 pub use ipav::{IpavPhase, IpavState};
 pub use router::{run_router, RouterControl, RouterDeps};
 pub use session::{open_session, OpenSessionRequest, SessionHandle};

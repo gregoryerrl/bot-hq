@@ -1,6 +1,7 @@
 //! `AppState`: top-level handle the UI layer holds.
 
 use crate::core::broadcast::broadcast_user_message;
+use crate::core::close_learnings;
 use crate::core::ipav::IpavPhase;
 use crate::core::session::{
     open_session, spawn_existing_session, OpenSessionRequest, SessionAgent, SessionHandle,
@@ -172,6 +173,15 @@ pub struct AppState {
     /// `terminal_open`, killed on `close_session`. Shared as an `Arc` so the
     /// signaling bridge's MCP handlers can reach the same PTYs.
     pub terminals: Arc<crate::core::TerminalRegistry>,
+    /// Sessions currently running rc3 D15's close-out learnings turn.
+    ///
+    /// The epilogue leaves the session handle ALIVE while it runs, so a second
+    /// `close_session` in that window still finds a live session and would
+    /// otherwise start a second epilogue — a double-clicked Close button, or
+    /// the epilogue's own agent calling the `close_session` MCP tool on the
+    /// turn we just gave it, which is the likely one. A session in this set
+    /// skips straight to teardown.
+    epilogue_in_flight: Mutex<HashSet<String>>,
 }
 
 impl AppState {
@@ -192,6 +202,7 @@ impl AppState {
             pending_reconcile: Mutex::new(HashSet::new()),
             pending_paused_wakes: Mutex::new(std::collections::HashMap::new()),
             terminals: Arc::new(crate::core::TerminalRegistry::new()),
+            epilogue_in_flight: Mutex::new(HashSet::new()),
         }
     }
 
@@ -575,7 +586,185 @@ impl AppState {
         }
     }
 
-    pub async fn close_session(&self, id: &str, archive: bool) -> Result<()> {
+    /// Close a session — both the user's Close button (`tauri_cmd::sessions`)
+    /// and the agent's own `close_session` MCP tool (via the control-event
+    /// worker in `main.rs`) land here.
+    ///
+    /// **rc3 D15 splits this.** When the session qualifies for a close-out
+    /// learnings turn ([`close_learnings::decide`]), the row is closed and the
+    /// UI is told immediately, the turn runs DETACHED, and teardown follows it.
+    /// The close itself never waits: D15's *"a failed or slow write never
+    /// delays the close and never leaves the session un-closable."* Every other
+    /// session takes [`Self::teardown_session`] directly, which is this
+    /// function's pre-D15 body unchanged.
+    ///
+    /// The ordering inside the epilogue arm is the load-bearing part. The row
+    /// must be closed and `SessionClosed` fired BEFORE the turn, or the close
+    /// blocks on it; teardown must come AFTER, or the agent's `cl_write_file`
+    /// reaches a bridge that has already forgotten the session
+    /// (`unregister_session` drops both the project map and the close gate).
+    pub async fn close_session(self: &Arc<Self>, id: &str, archive: bool) -> Result<()> {
+        let decision = self.close_epilogue_decision(id).await;
+        // Claim only when the decision wants a turn. `insert` returns false
+        // when the id is already there, so the claim is atomic in one short
+        // hold and the decision runs outside it — no `epilogue_in_flight` →
+        // `sessions` lock nesting.
+        let claimed = decision == close_learnings::Epilogue::Run
+            && self
+                .epilogue_in_flight
+                .lock()
+                .await
+                .insert(id.to_string());
+        // Exhaustive on purpose — see `ClosePlan`. Deleting the epilogue arm
+        // has to be a compile error, not a silently inert feature.
+        match close_learnings::plan(decision, claimed) {
+            close_learnings::ClosePlan::TearDownNow => {
+                self.teardown_session(id, Some(archive)).await
+            }
+            close_learnings::ClosePlan::RunEpilogueFirst => {
+                // Closed and off the UI's hands from here; the turn is epilogue.
+                self.storage.close_session(id, archive).await?;
+                self.bridge.notify_session_closed(id.to_string());
+                let this = Arc::clone(self);
+                let sid = id.to_string();
+                tokio::spawn(async move {
+                    this.run_close_epilogue(&sid).await;
+                    // Release the claim BEFORE teardown, so a teardown failure
+                    // can never leave a session marked mid-epilogue forever.
+                    this.epilogue_in_flight.lock().await.remove(&sid);
+                    // `archive` is already applied — the row closed before the
+                    // turn.
+                    if let Err(e) = this.teardown_session(&sid, None).await {
+                        tracing::warn!(?e, session_id = %sid, "close epilogue: teardown failed");
+                    }
+                });
+                Ok(())
+            }
+        }
+    }
+
+    /// Does this session get a close-out learnings turn (rc3 D15)?
+    ///
+    /// Reads the three live facts [`close_learnings::decide`] needs and hands
+    /// them over; the policy is entirely in `decide`, so the arms are unit-
+    /// tested without a session. A session that is not live at all cannot take
+    /// a turn, and an unreadable roster is treated as "no writer" — the silent
+    /// skip, which is the safe direction: D15 would rather nothing happen than
+    /// have a session prompted into writing the library on a guess.
+    async fn close_epilogue_decision(&self, id: &str) -> close_learnings::Epilogue {
+        let activity = {
+            let sessions = self.sessions.lock().await;
+            match sessions.get(id) {
+                Some(handle) => handle.activity.current(),
+                None => return close_learnings::Epilogue::SkipNoWriter,
+            }
+        };
+        let any_writer = match self.storage.participants_for_session(id).await {
+            Ok(roster) => roster.iter().any(|p| {
+                p.enabled
+                    && crate::agents::CapabilitySet::from_json(&p.capabilities)
+                        .is_some_and(|caps| {
+                            caps.contains(crate::agents::Capability::WriteContextLibrary)
+                        })
+            }),
+            Err(e) => {
+                tracing::warn!(?e, session_id = %id, "close epilogue: roster unreadable; skipping");
+                false
+            }
+        };
+        let (cl_written, close_nudged) = self.bridge.close_gate_flags(id).await;
+        close_learnings::decide(activity, any_writer, cl_written, close_nudged)
+    }
+
+    /// The detached half of D15: ask, wait, and record what happened.
+    ///
+    /// Never returns an error — it is fire-and-forget by construction, and its
+    /// only product is the row. A delivery failure and a decline both end here
+    /// with a `system_notice`, saying different things, which is the D15 item
+    /// this closes: *"a fire-and-forget write that FAILS looks identical to one
+    /// that correctly declined."*
+    async fn run_close_epilogue(&self, id: &str) {
+        use close_learnings::Outcome;
+        let outcome = match self
+            .broadcast(id, close_learnings::CLOSE_LEARNINGS_PROMPT)
+            .await
+        {
+            Err(e) => Outcome::Failed(e.to_string()),
+            Ok(()) => {
+                let activity = {
+                    let sessions = self.sessions.lock().await;
+                    sessions.get(id).map(|h| Arc::clone(&h.activity))
+                };
+                match activity {
+                    // The handle vanished under us (a concurrent close). Not a
+                    // failure to report — nothing was asked and nothing hung.
+                    None => return,
+                    Some(activity) => {
+                        let deadline = tokio::time::Instant::now()
+                            + close_learnings::CLOSE_EPILOGUE_TIMEOUT;
+                        // The turn has to START before going idle can mean it
+                        // FINISHED — `broadcast` returns once the bytes are on
+                        // stdin, and the pump sets `busy` when the agent's first
+                        // event arrives. Without this the wait reads the
+                        // pre-turn idle and every epilogue reports "declined".
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        if activity.await_both_idle(deadline).await {
+                            let (wrote, _) = self.bridge.close_gate_flags(id).await;
+                            if wrote {
+                                Outcome::Wrote
+                            } else {
+                                Outcome::Declined
+                            }
+                        } else {
+                            Outcome::TimedOut
+                        }
+                    }
+                }
+            }
+        };
+        self.post_close_learnings_row(id, &outcome).await;
+    }
+
+    /// Post the epilogue's outcome as a `system_notice`, exactly as the D7
+    /// capped-halt notice does (`sequencer::announce_round_cap`): host-authored,
+    /// so `origin = 'system'` with a NULL participant.
+    ///
+    /// **The post is the contract; the notification is the nicety** — a missed
+    /// `notify_message_persisted` costs a refetch, a missed row costs the only
+    /// account of what the close decided.
+    async fn post_close_learnings_row(&self, id: &str, outcome: &close_learnings::Outcome) {
+        let body = close_learnings::outcome_notice(outcome);
+        match self
+            .storage
+            .post_to_channel(
+                Arc::from(id),
+                "system",
+                None,
+                MessageKind::SystemNotice.as_str(),
+                body,
+                None,
+            )
+            .await
+        {
+            Ok(row) => self
+                .bridge
+                .notify_message_persisted(Arc::from(id), row.message_id()),
+            Err(e) => tracing::warn!(
+                ?e,
+                session_id = %id,
+                ?outcome,
+                "close epilogue: outcome row not posted; the close has no on-screen account"
+            ),
+        }
+    }
+
+    /// Kill the session's processes and drop every trace of it from memory.
+    ///
+    /// `archive` is `Some(_)` on the direct path (this call closes the row too)
+    /// and `None` when [`Self::close_session`]'s D15 epilogue arm already
+    /// closed it — the row is closed once, before the epilogue, so the UI never
+    /// waits on a learnings turn.
+    async fn teardown_session(&self, id: &str, archive: Option<bool>) -> Result<()> {
         let mut sessions = self.sessions.lock().await;
         if let Some(mut handle) = sessions.remove(id) {
             for agent in handle.agents_mut() {
@@ -588,7 +777,9 @@ impl AppState {
         }
         // Reap the session's PTY terminal alongside the agent subprocesses.
         self.terminals.kill_and_remove(id).await;
-        self.storage.close_session(id, archive).await?;
+        if let Some(archive) = archive {
+            self.storage.close_session(id, archive).await?;
+        }
         // The session's pending tray items are moot now the agents are gone —
         // withdraw them so a closed session doesn't leave dead `pending` rows.
         if let Err(e) = self.storage.withdraw_pending_tray_for_session(id).await {

@@ -805,6 +805,22 @@ impl SignalingBridge {
         ))
     }
 
+    /// `(cl_written, close_nudged)` for a session — the two facts rc3 D15's
+    /// close epilogue needs to decide whether this session has already had its
+    /// chance to write a learnings delta.
+    ///
+    /// **Read it BEFORE teardown.** [`Self::unregister_session`] drops the gate
+    /// entry, so a caller that tears the session down first sees `(false,
+    /// false)` and would ask an agent that already declined. A session with no
+    /// entry has never touched the CL and was never nudged, which is what the
+    /// default says.
+    pub async fn close_gate_flags(&self, session_id: &str) -> (bool, bool) {
+        let gate = self.session_close_gate.lock().await;
+        gate.get(session_id)
+            .map(|s| (s.cl_written, s.close_nudged))
+            .unwrap_or((false, false))
+    }
+
     /// A3b: should the agent's `close_session` be soft-gated with a
     /// write-then-prune reminder instead of closing? True only on the FIRST
     /// close when adherence nudges are on and no CL write happened this session;

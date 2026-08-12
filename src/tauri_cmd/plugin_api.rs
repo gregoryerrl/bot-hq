@@ -198,10 +198,14 @@ struct PluginClFolderView {
 /// Catalog dispatch. `core` is `Option` ONLY so unit tests can exercise the
 /// storage/bridge arms without booting a full `CoreAppState` (which needs a
 /// live signaling server); the production shim always passes `Some`.
+///
+/// It is the `Arc`, not a plain ref, because `close_session` takes
+/// `self: &Arc<Self>` — rc3 D15's close epilogue detaches a task that outlives
+/// the call. Every arm that only reads gets `&CoreAppState` by deref for free.
 pub(crate) async fn dispatch(
     storage: &Storage,
     bridge: &SignalingBridge,
-    core: Option<&CoreAppState>,
+    core: Option<&Arc<CoreAppState>>,
     plugin_id: &str,
     command: &str,
     args: &Value,
