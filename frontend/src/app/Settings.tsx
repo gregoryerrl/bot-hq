@@ -268,9 +268,14 @@ function SessionDefaults() {
           className="size-4 accent-primary"
         />
         <span className="font-body-md text-body-md text-on-surface">
-          Disable Rain by default (new sessions start solo)
+          Start solo by default (new sessions invite one participant)
         </span>
       </label>
+      <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+        Only applies where there is no New-session dialog to pick participants —
+        the external driver and the Maintain-CL button. A solo session invites
+        the first of your roles and leaves the rest disabled.
+      </p>
       {setAppSetting.error && (
         <p className="mt-2 inline-block rounded border border-error/40 bg-error-container/20 px-2 py-1 font-code-sm text-code-sm text-on-error-container">
           Couldn’t save: {setAppSetting.error.message}

@@ -209,10 +209,12 @@ impl AppState {
         brian_model_id: Option<String>,
         rain_model_id: Option<String>,
     ) -> Result<String> {
-        let mut req = OpenSessionRequest::duo(title, working_repo_path);
-        req.rain_enabled = self.storage.default_rain_enabled().await;
-        req.brian_model_id = brian_model_id;
-        req.rain_model_id = rain_model_id;
+        let mut req = OpenSessionRequest::full(title, working_repo_path);
+        req.solo = !self.storage.default_rain_enabled().await;
+        // Positional over the default roster's turn order. The two parameter
+        // NAMES are the external driver's wire contract and are left alone; what
+        // they mean here is slot 0 and slot 1 (rc3 D10).
+        req.models = vec![brian_model_id, rain_model_id];
         let handle = open_session(
             req,
             &self.paths,
@@ -403,7 +405,8 @@ impl AppState {
             let Some(handle) = sessions.get(session_id) else {
                 return; // session gone → nothing to cancel
             };
-            // EYES (Rain) first (review-only, side-effect-safe), then HANDS —
+            // Participants that CANNOT edit files go first (side-effect-safe), then
+            // the ones that can —
             // mirrors cancel_kill_now. `interrupt` is best-effort (&self try_send);
             // a full/closed control channel returns false and the idle-watch below
             // times out into the SIGKILL fallback.
@@ -412,11 +415,14 @@ impl AppState {
             // interrupt indistinguishable from one the agent received and ignored
             // — two different bugs with the same symptom, and no way to tell them
             // apart after the fact.
-            // Non-HANDS agents first, HANDS last — the ordering is the point,
-            // so iterate by role rather than by turn position (which puts HANDS
-            // at 0). `None` = this session has no peer.
+            // Mutation-capable agents LAST — the ordering is the point, so iterate
+            // by capability rather than by turn position (which puts the
+            // executor at 0). rc3 D10/D11: was `a.slug != "brian"`, and with
+            // role-derived slugs that predicate matched EVERY agent, so the
+            // executor would have been interrupted first, mid-tool. `None` =
+            // this session has no non-mutating peer.
             let mut rain_queued: Option<bool> = None;
-            for agent in handle.agents().filter(|a| a.slug != "brian") {
+            for agent in handle.agents().filter(|a| !a.edits_files()) {
                 let queued = agent.handle.interrupt("cancel");
                 if !queued {
                     tracing::warn!(session_id, slug = %agent.slug, "cancel: peer interrupt was NOT queued");
@@ -517,12 +523,13 @@ impl AppState {
         let killed = {
             let mut sessions = self.sessions.lock().await;
             if let Some(handle) = sessions.get_mut(session_id) {
-                // Non-HANDS agents are review-only → side-effect-safe; kill them
-                // first. HANDS may be mid-tool, so it goes last. Ordering, not
-                // turn position — same rule as `interrupt_then_escalate`.
+                // Agents that cannot edit files are side-effect-safe; kill them
+                // first. A mutation-capable agent may be mid-tool, so it goes
+                // last. Capability, not turn position — same rule as
+                // `interrupt_then_escalate`.
                 let mut hands: Option<&mut SessionAgent> = None;
                 for agent in handle.agents_mut() {
-                    if agent.slug == "brian" {
+                    if agent.edits_files() {
                         hands = Some(agent);
                     } else {
                         agent.handle.kill();

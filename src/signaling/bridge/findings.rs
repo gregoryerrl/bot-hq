@@ -31,18 +31,23 @@ impl SignalingBridge {
         let storage = self.findings_storage().await?;
 
         // Re-raise dedup: if an OPEN finding with the same summary already exists,
-        // don't insert a duplicate. Bump its raise_count — but ONLY if HANDS has
-        // had a turn since it was last raised, so a double-flag before Brian's
-        // turn (buffer / turn-boundary latency) can't false-escalate.
+        // don't insert a duplicate. Bump its raise_count — but ONLY if somebody
+        // ELSE has had a turn since it was last raised, so a double-flag before
+        // the peer's turn (buffer / turn-boundary latency) can't false-escalate.
+        //
+        // rc3 D10: was `has_message_from_author_since(.., "brian", ..)`, which
+        // under role-derived slugs matches nothing — the escalation would have
+        // stopped firing entirely, silently. "Anyone but the filer" is the same
+        // question asked without naming an agent.
         if let Some(existing) = storage
             .latest_open_finding_by_summary(&session_id, &summary)
             .await?
         {
-            let brian_acted = storage
-                .has_message_from_author_since(&session_id, "brian", &existing.updated_at)
+            let peer_acted = storage
+                .has_message_from_other_participant_since(&session_id, &agent, &existing.updated_at)
                 .await
                 .unwrap_or(false);
-            if brian_acted {
+            if peer_acted {
                 storage.increment_raise_count(&existing.finding_uid).await?;
                 let _ = self
                     .event_tx
@@ -129,18 +134,30 @@ impl SignalingBridge {
         if blocking != "ok" {
             return Ok(blocking); // open blocking findings gate first
         }
-        // Batch 7 fail-closed: in a DUO session, a Stalled/Dead reviewer (Rain)
-        // can't have reviewed this change — block commit unless HANDS overrode it.
-        // No-op in solo (no reviewer) or when Rain is healthy.
-        let duo = storage
-            .get_session(session_id)
-            .await?
-            .map(|s| s.rain_enabled != 0)
-            .unwrap_or(false);
+        // Batch 7 fail-closed: a Stalled/Dead reviewer can't have reviewed this
+        // change — block commit unless the executor overrode it. No-op when the
+        // session has no reviewer, or when every reviewer is healthy.
+        //
+        // **rc3 D10: "the reviewer" is a registered slug, not the literal
+        // `rain`.** Asking for `"rain"`'s health under role-derived slugs would
+        // return `None`, and `None` means "healthy" here — the gate would have
+        // failed OPEN, silently, which is the one direction this gate must never
+        // fail. `session_reviewers` is registered at spawn from the roster's
+        // capability snapshots. With several reviewers, ANY of them being down
+        // blocks: the change is unreviewed by that one either way.
+        let reviewers = self.session_reviewers(session_id);
+        let down = reviewers.iter().find(|slug| {
+            matches!(
+                self.current_agent_health(session_id, slug).as_deref(),
+                Some("stalled") | Some("dead")
+            ) && !self.agent_rpc_recent(session_id, slug, REVIEWER_LIVENESS_WINDOW)
+        });
         let verdict = reviewer_block_decision(
-            duo,
-            self.current_agent_health(session_id, "rain").as_deref(),
-            self.agent_rpc_recent(session_id, "rain", REVIEWER_LIVENESS_WINDOW),
+            !reviewers.is_empty(),
+            down.map(|slug| self.current_agent_health(session_id, slug))
+                .unwrap_or(None)
+                .as_deref(),
+            false,
             self.reviewer_override_reason(session_id).as_deref(),
         );
         Ok(verdict.unwrap_or_else(|| "ok".to_string()))
@@ -208,17 +225,17 @@ const REVIEWER_LIVENESS_WINDOW: std::time::Duration = std::time::Duration::from_
 /// nearly prompting a needless override. An agent talking to the bridge is
 /// alive, whatever the last health event said.
 fn reviewer_block_decision(
-    duo: bool,
-    rain_health: Option<&str>,
+    has_reviewer: bool,
+    reviewer_health: Option<&str>,
     recently_active: bool,
     override_reason: Option<&str>,
 ) -> Option<String> {
-    if !duo || !matches!(rain_health, Some("stalled") | Some("dead")) {
+    if !has_reviewer || !matches!(reviewer_health, Some("stalled") | Some("dead")) {
         return None;
     }
     if recently_active {
         tracing::debug!(
-            health = rain_health,
+            health = reviewer_health,
             "reviewer gate: health says down but the reviewer made an RPC call \
              within the liveness window — treating as alive"
         );
@@ -227,12 +244,12 @@ fn reviewer_block_decision(
     Some(match override_reason {
         Some(r) => format!("ok (reviewer-down overridden: {r})"),
         None => format!(
-            "blocked: reviewer down — review cannot be confirmed (Rain is {} and has \
-             made no tool call in the last {}s). This means the REVIEWER IS GONE, not \
+            "blocked: reviewer down — review cannot be confirmed (the reviewer is {} and \
+             has made no tool call in the last {}s). This means the REVIEWER IS GONE, not \
              that the change is unreviewed — restore the reviewer, or override with \
              override_reviewer_block(reason) if you've confirmed the change is safe to \
              ship unreviewed.",
-            rain_health.unwrap_or("down"),
+            reviewer_health.unwrap_or("down"),
             REVIEWER_LIVENESS_WINDOW.as_secs()
         ),
     })
@@ -281,17 +298,22 @@ mod tests {
 
     #[tokio::test]
     async fn gate_treats_calling_reviewer_as_alive() {
-        // End-to-end through the bridge: mark Rain stalled, then stamp an RPC
-        // call — the gate must return plain ok, not "reviewer down".
+        // End-to-end through the bridge: mark the reviewer stalled, then stamp
+        // an RPC call — the gate must return plain ok, not "reviewer down".
+        //
+        // rc3 D10: the session's reviewers are REGISTERED at spawn from the
+        // roster's capability snapshots, in place of the literal `"rain"` this
+        // gate used to ask about. Without the registration the gate has no
+        // reviewer to watch and returns `ok` unconditionally — which is exactly
+        // the fail-open this test now also rules out.
         let bridge = bridge_with_session("s-live").await;
-        {
-            let storage = bridge.storage.lock().await.clone().unwrap();
-            sqlx::query("UPDATE sessions SET rain_enabled = 1 WHERE id = 's-live'")
-                .execute(storage.pool())
-                .await
-                .unwrap();
-        }
-        bridge.notify_agent_health("s-live".to_string(), "rain", "stalled");
+        assert_eq!(
+            bridge.check_open_findings("s-live").await.unwrap(),
+            "ok",
+            "a session with no registered reviewer has no reviewer to be down"
+        );
+        bridge.register_session_reviewers("s-live".into(), vec!["eyes".into()]);
+        bridge.notify_agent_health("s-live".to_string(), "eyes", "stalled");
         assert!(
             bridge
                 .check_open_findings("s-live")
@@ -300,11 +322,20 @@ mod tests {
                 .starts_with("blocked: reviewer down"),
             "without RPC activity the stalled verdict blocks"
         );
-        bridge.note_agent_rpc("s-live", "rain");
+        bridge.note_agent_rpc("s-live", "eyes");
         assert_eq!(
             bridge.check_open_findings("s-live").await.unwrap(),
             "ok",
             "an actively-calling reviewer is alive regardless of health events"
+        );
+        // And the recovery path, which is what the override auto-clear hangs
+        // off: a registered reviewer back to `running` drops the override.
+        bridge.override_reviewer_block("s-live", "confirmed safe");
+        assert!(bridge.reviewer_override_reason("s-live").is_some());
+        bridge.notify_agent_health("s-live".to_string(), "eyes", "running");
+        assert!(
+            bridge.reviewer_override_reason("s-live").is_none(),
+            "a recovered reviewer must clear the one-incident override"
         );
     }
 

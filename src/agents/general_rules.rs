@@ -1,4 +1,4 @@
-//! Hardcoded universal rules every agent (Brian, Rain) follows.
+//! Hardcoded universal rules every agent follows.
 //!
 //! Baked into the binary so the load-bearing parts (push gates, CL
 //! workflow, IPAV discipline, session-doc usage, prod-data safety)
@@ -19,7 +19,7 @@
 pub const GENERAL_RULES: &str = "\
 # General rules
 
-Universal conventions every agent (Brian, Rain) follows. Baked into the binary — add your own rules in `custom-general-rules.md`.
+Universal conventions every agent follows. Baked into the binary — add your own rules in `custom-general-rules.md`.
 
 ## Commit conventions
 
@@ -110,7 +110,7 @@ Tools:
 - `cl_retrieve(project, query, paths?, budget_tokens?)` — ranked CL CONTENT: returns the best-matching atom bodies inline under a token budget (default 3000). The 95% path for pulling CL knowledge on a topic; atoms flagged `⚠ possibly stale` cite code that drifted — verify before trusting.
 - `cl_write_file(project, file_path, content)` — create or replace a CL file with the FULL new body (read the current body first when appending). Guarded (stays inside the project's CL root; bot-hq-owned `_globals` system files refused), atomic, creates missing parent folders, auto-rescans the index, and lifts the close-out gate — no separate `cl_rescan` needed. HANDS-only; EYES reviews instead of writing.
 - `cl_register_read(project, file_path)` — optional audit insert after reading a file. Powers a future \"what context did this agent have?\" view. Fire-and-forget.
-- `cl_register_folder_description(project, folder_path, description, tags?)` — write a folder description. HANDS (brian) can call this; Rain is denied (read folder descriptions via `cl_folder_search`).
+- `cl_register_folder_description(project, folder_path, description, tags?)` — write a folder description. Requires the context-library write capability; a participant without it reads folder descriptions via `cl_folder_search` instead.
 - `cl_rescan(project)` — re-stat the project's CL directory after you've created a file via `Bash`/`Write` so the index picks it up. Cheap, idempotent.
 
 **`_globals` is not a real working project** — it's a bucket for system-level CL (custom rules, agent custom instructions). When you see a result with `project: \"_globals\"` in `cl_index_search`, treat the file as cross-cutting, not as belonging to a specific project.
@@ -131,7 +131,7 @@ Use `session_doc_write(slug, body, phase?)` for plans, investigation findings, a
 
 **One rewritable doc per phase.** A phase-tagged write is keyed BY PHASE, not by slug — there is exactly ONE `investigate` / `plan` / `apply` / `verify` doc, and re-writing it (even under a different slug) overwrites that single doc. Found new information? REWRITE the whole doc; never spin up a `plan-v2`. Use the phase name as the slug for phase docs. Untagged scratch docs (no `phase`) are keyed by `slug` — pick one that reads well later (e.g. `findings-broadcast`); many are allowed.
 
-**Tag docs with `phase`** (one of `investigate` / `plan` / `apply` / `verify`) to surface them in the session view's matching IPAV document tab and enable cross-phase context retrieval via `session_doc_search(phase=<x>)`. Untagged docs are session-scoped scratch — invisible to the tabs and to phase-filtered searches. Brian in Apply: `session_doc_search(phase=\"plan\")` finds the plan. Rain in Verify: `session_doc_search(phase=\"apply\")` finds the apply summary. Prefer this over scrolling chat history.
+**Tag docs with `phase`** (one of `investigate` / `plan` / `apply` / `verify`) to surface them in the session view's matching IPAV document tab and enable cross-phase context retrieval via `session_doc_search(phase=<x>)`. Untagged docs are session-scoped scratch — invisible to the tabs and to phase-filtered searches. In Apply: `session_doc_search(phase=\"plan\")` finds the plan. In Verify: `session_doc_search(phase=\"apply\")` finds the apply summary. Prefer this over scrolling chat history.
 
 To promote a session doc to the shared CL — only when the user asks — write the body to the project's CL path via `Bash`/`Write` and call `cl_rescan(project)`. There's no dedicated promote tool; the CL write IS the promotion.
 
@@ -161,8 +161,8 @@ Each substantive task walks through four phases. The current phase appears as `[
 **Phases are task-shape-agnostic — \"Apply\" is whatever *doing the work* means here, not just editing code.** The deliverable a task produces lands in **Apply** regardless of shape: a code change is a diff; a deploy/smoke is the merge + smoke output; an investigation, review, or audit is the findings themselves. You do NOT *skip* phases for non-code work — you right-size them. A review still walks all four: Investigate (read the PRs/code), Plan (decide the review strategy), Apply (**produce the findings — that IS the deliverable**), Verify (adversarial proof-read). If you catch yourself thinking \"no Apply needed, nothing to edit,\" that's the trap — the findings are the Apply, and they belong in the `apply` doc, not stranded in `investigate` or chat.
 
 1. **Investigate** — gather facts. **Open `cl_index_search` first** so you know the project conventions before reading code. Then read code, grep, run read-only Bash — reaching for `web_search` only when a question reaches OUTSIDE the repo (a dependency version, an upstream issue, current docs, an unfamiliar error string); skip it for codebase-internal questions. **No** Edit, Write, or mutating Bash. Output: your understanding stated in chat + a `phase=\"investigate\"` doc capturing pipeline traces, constraint discoveries, references consulted — anything reusable in later phases.
-2. **Plan** — **first read the `investigate` doc (`session_doc_search(phase=\"investigate\")`) and build the plan ON it, not from scratch.** Propose the approach in chat. Name files, functions, expected diffs. Surface tradeoffs. **No** Edit/Write yet. Output: the plan in chat + a `phase=\"plan\"` doc with the full plan (especially when >3 batches, multi-file, or anything Brian / Rain will reference during Apply / Verify).
-3. **Apply** — produce the deliverable, implementing against the `plan` doc (read it first). **The `apply` doc IS the deliverable**, shaped to the task: for code, a tight changelog beside the diff; for a deploy, the merge + smoke output; for an investigation or review, the synthesized findings themselves. HANDS (Brian) executes any mutations (Edit/Write/Bash); EYES (Rain) does not write — so Rain in Verify can pull the deliverable via `session_doc_search(phase=\"apply\")` without re-deriving from the diff. The session view's A tab auto-renders your working repo's `git diff` color-coded (GitHub-style: green adds, red removes, blue hunks, yellow file headers); point the user there for visual review instead of pasting diffs into chat. Apply-phase docs render below the diff in the same tab.
+2. **Plan** — **first read the `investigate` doc (`session_doc_search(phase=\"investigate\")`) and build the plan ON it, not from scratch.** Propose the approach in chat. Name files, functions, expected diffs. Surface tradeoffs. **No** Edit/Write yet. Output: the plan in chat + a `phase=\"plan\"` doc with the full plan (especially when >3 batches, multi-file, or anything any participant will reference during Apply / Verify).
+3. **Apply** — produce the deliverable, implementing against the `plan` doc (read it first). **The `apply` doc IS the deliverable**, shaped to the task: for code, a tight changelog beside the diff; for a deploy, the merge + smoke output; for an investigation or review, the synthesized findings themselves. HANDS executes any mutations (Edit/Write/Bash); a review-only participant does not write — so it can pull the deliverable in Verify via `session_doc_search(phase=\"apply\")` without re-deriving from the diff. The session view's A tab auto-renders your working repo's `git diff` color-coded (GitHub-style: green adds, red removes, blue hunks, yellow file headers); point the user there for visual review instead of pasting diffs into chat. Apply-phase docs render below the diff in the same tab.
 4. **Verify** — confirm the deliverable against the `apply` doc (read it first). Check the *thing you produced*: tests / type-check for code, the smoke output for a deploy, an adversarial proof-read for an investigation or review. Cite the output. Output: chat summary + a `phase=\"verify\"` doc capturing commands run, output observed, manual checks, and any flakes / known limits.
 
 **Self-advance via `advance_phase(target)`** when your work crosses a boundary — no user click needed. Phase is a self-discipline signal, not a permission gate. The dashboard chip moves and both agents receive a `[PHASE: X]` transition notice. Push, commit, and destructive ops have their own gates (`request_approval`, `check_commit_message`) — IPAV doesn't double-gate them.
@@ -171,7 +171,7 @@ Use `request_phase_advance(target, reason)` only when you specifically want to p
 
 Trivial single-step tasks (a one-line answer, a quick lookup) don't need a phase walk at all — just do them. The discipline applies to *substantive* work; you decide when it does.
 
-Brian executes Apply (produces the deliverable, whatever its shape). Rain reviews and pushes back adversarially.
+HANDS executes Apply (produces the deliverable, whatever its shape). EYES reviews and pushes back adversarially.
 ";
 
 #[cfg(test)]

@@ -123,9 +123,25 @@ async fn seeded_bridge() -> Arc<SignalingBridge> {
     let storage = Storage::memory().await.unwrap();
     bridge.set_storage(storage.clone()).await;
     storage.create_session("s-parity", "parity", None).await.unwrap();
-    let seeded = storage.ensure_session_roster("s-parity").await.unwrap();
+    let seeded = storage.ensure_session_roster("s-parity", false).await.unwrap();
     assert_eq!(seeded, 2, "the parity roster must hold both participants");
     bridge
+}
+
+/// **The pre-rc3 agent name a role-derived slug now stands in for** (rc3 D10).
+///
+/// The frozen oracle above is a transcription of code that compared
+/// `caller.agent` against the literals `"brian"` and `"rain"`, and a
+/// transcription must not be edited — its whole value is being an INDEPENDENT
+/// statement of the old behaviour. What moved is the ROSTER: the participant
+/// that plays HANDS is slugged `hands` now, and it is the one the old gate would
+/// have called `brian`. This is that mapping, and nothing else.
+fn legacy_name_of(slug: &str) -> &'static str {
+    match slug {
+        "hands" => "brian",
+        "eyes" => "rain",
+        other => panic!("the parity roster grew a participant nothing maps: {other}"),
+    }
 }
 
 /// A `tools/call` carrying a superset of every gated tool's required args, so a
@@ -191,11 +207,11 @@ async fn hands_only_tools_reject_eyes_and_admit_hands() {
     let bridge = seeded_bridge().await;
     for tool in HANDS_ONLY {
         assert!(
-            rejected_by(&bridge, tool, "rain").await,
+            rejected_by(&bridge, tool, "eyes").await,
             "{tool} must reject EYES — it is HANDS-only today"
         );
         assert!(
-            !rejected_by(&bridge, tool, "brian").await,
+            !rejected_by(&bridge, tool, "hands").await,
             "{tool} must NOT be role-rejected for HANDS"
         );
     }
@@ -206,11 +222,11 @@ async fn eyes_only_tools_reject_hands_and_admit_eyes() {
     let bridge = seeded_bridge().await;
     for tool in EYES_ONLY {
         assert!(
-            rejected_by(&bridge, tool, "brian").await,
+            rejected_by(&bridge, tool, "hands").await,
             "{tool} must reject HANDS — EYES files findings, HANDS resolves them"
         );
         assert!(
-            !rejected_by(&bridge, tool, "rain").await,
+            !rejected_by(&bridge, tool, "eyes").await,
             "{tool} must NOT be role-rejected for EYES"
         );
     }
@@ -221,11 +237,11 @@ async fn cl_mutating_tools_reject_eyes_and_admit_hands() {
     let bridge = seeded_bridge().await;
     for tool in CL_MUTATE {
         assert!(
-            rejected_by(&bridge, tool, "rain").await,
+            rejected_by(&bridge, tool, "eyes").await,
             "{tool} must reject EYES — HANDS owns CL content authorship"
         );
         assert!(
-            !rejected_by(&bridge, tool, "brian").await,
+            !rejected_by(&bridge, tool, "hands").await,
             "{tool} must NOT be role-rejected for HANDS"
         );
     }
@@ -238,7 +254,7 @@ async fn ungated_tools_admit_both_roles() {
     // under-gating, and is easier to ship unnoticed.
     let bridge = seeded_bridge().await;
     for tool in UNGATED {
-        for agent in ["brian", "rain"] {
+        for agent in ["hands", "eyes"] {
             assert!(
                 !rejected_by(&bridge, tool, agent).await,
                 "{tool} is ungated today — {agent} must not be role-rejected"
@@ -359,7 +375,8 @@ async fn the_reviewer_down_gate_blocks_only_a_duo_with_a_dead_reviewer() {
     assert_eq!(bridge.check_open_findings("s1").await.unwrap(), "ok");
 
     // Reviewer reported dead, no RPC activity → fail closed.
-    bridge.notify_agent_health("s1".into(), "rain", "dead");
+    bridge.register_session_reviewers("s1".into(), vec!["eyes".into()]);
+    bridge.notify_agent_health("s1".into(), "eyes", "dead");
     let blocked = bridge.check_open_findings("s1").await.unwrap();
     assert!(blocked.starts_with("blocked: reviewer down"), "got: {blocked}");
     assert!(
@@ -377,9 +394,10 @@ async fn the_reviewer_down_gate_blocks_only_a_duo_with_a_dead_reviewer() {
 
     // Recovery: a reviewer back to running clears the block without an override.
     let bridge2 = bridge_with_session("s2").await;
-    bridge2.notify_agent_health("s2".into(), "rain", "dead");
+    bridge2.register_session_reviewers("s2".into(), vec!["eyes".into()]);
+    bridge2.notify_agent_health("s2".into(), "eyes", "dead");
     assert!(bridge2.check_open_findings("s2").await.unwrap().starts_with("blocked:"));
-    bridge2.notify_agent_health("s2".into(), "rain", "running");
+    bridge2.notify_agent_health("s2".into(), "eyes", "running");
     assert_eq!(bridge2.check_open_findings("s2").await.unwrap(), "ok");
 }
 
@@ -405,9 +423,9 @@ async fn the_capability_gate_reproduces_the_name_gate_for_every_tool() {
     let mut checked = 0usize;
     for descriptor in super::protocol::tool_descriptors() {
         let tool = descriptor.name;
-        for agent in ["brian", "rain"] {
+        for agent in ["hands", "eyes"] {
             let now = gate_admits(&bridge, tool, agent).await;
-            let before = legacy_name_gate_admits(tool, agent);
+            let before = legacy_name_gate_admits(tool, legacy_name_of(agent));
             assert_eq!(
                 now, before,
                 "DIVERGENCE on {tool} for {agent}: the capability gate says \
@@ -442,12 +460,12 @@ async fn the_seeded_roster_resolves_to_the_presets() {
     let bridge = seeded_bridge().await;
 
     assert_eq!(
-        resolve_caller_capabilities(&bridge, "s-parity", "brian").await,
+        resolve_caller_capabilities(&bridge, "s-parity", "hands").await,
         ResolvedCapabilities::Known(CapabilitySet::preset_hands()),
         "the seeded HANDS role must decode to preset_hands()"
     );
     assert_eq!(
-        resolve_caller_capabilities(&bridge, "s-parity", "rain").await,
+        resolve_caller_capabilities(&bridge, "s-parity", "eyes").await,
         ResolvedCapabilities::Known(CapabilitySet::preset_eyes()),
         "the seeded EYES role must decode to preset_eyes()"
     );
@@ -474,11 +492,11 @@ async fn the_parity_hold_is_exactly_the_known_divergence() {
     );
     let bridge = seeded_bridge().await;
     assert!(
-        gate_admits(&bridge, "close_session", "rain").await,
+        gate_admits(&bridge, "close_session", "eyes").await,
         "close_session must stay admitted for EYES until the boundary change is \
          taken deliberately"
     );
-    assert!(gate_admits(&bridge, "close_session", "brian").await);
+    assert!(gate_admits(&bridge, "close_session", "hands").await);
 
     // And the hold must not quietly grow into a place to park regressions.
     let held: Vec<&str> = super::protocol::tool_descriptors()
@@ -487,10 +505,10 @@ async fn the_parity_hold_is_exactly_the_known_divergence() {
         .filter(|t| {
             crate::agents::capability::required_for(t).is_some()
                 && CapabilitySet::preset_hands().allows_tool(t)
-                    != legacy_name_gate_admits(t, "brian")
+                    != legacy_name_gate_admits(t, legacy_name_of("hands"))
                 || crate::agents::capability::required_for(t).is_some()
                     && CapabilitySet::preset_eyes().allows_tool(t)
-                        != legacy_name_gate_admits(t, "rain")
+                        != legacy_name_gate_admits(t, legacy_name_of("eyes"))
         })
         .collect();
     assert_eq!(

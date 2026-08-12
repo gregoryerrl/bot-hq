@@ -6039,8 +6039,8 @@ mod tests {
 
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1").await.unwrap();
-        let pid = s.participant_by_slug("s1", "brian").await.unwrap().unwrap().id;
+        s.ensure_session_roster("s1", false).await.unwrap();
+        let pid = s.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
 
         // Warm both paths, so neither measurement pays one-time pool, statement
         // cache or page setup that the other has already paid.

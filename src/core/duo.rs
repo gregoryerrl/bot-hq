@@ -43,17 +43,28 @@ pub struct DuoConfig {
     /// refcount bump beats a heap copy. Threaded as `Arc<str>` through
     /// `MessagePersisted` into the `BatchEmitter` dirty-set / watermark keys (O5).
     pub session_id: Arc<str>,
-    pub author: Author,
-    /// `session_participants.id` for this pump's agent — B4b.3.
+    /// **Router-only two-party discriminant.** `Brian` is turn slot 0 and `Rain`
+    /// is turn slot 1 — that is all either variant means here, because
+    /// `core::router` forwards bilaterally and has no third case. It is set for
+    /// every pump but only READ when a router was actually spawned, which
+    /// `spawn_session_handle` only does for a two-participant session.
     ///
-    /// Added BESIDE `author`, not replacing it: `author` is read on the hottest
-    /// path (`set_busy(cfg.author, false)` fires at every turn end) and the
-    /// router still needs it until B5. Carrying both means B5 flips the hot path
-    /// in one diff instead of mapping `Author` → id on every call.
+    /// Nothing that identifies the participant reads this; that is [`Self::slug`]
+    /// (rc3 D10).
+    pub author: Author,
+    /// This participant's roster slug — its `messages.author` string, its
+    /// `ActivityTracker` key, and its handle in the tray.
+    pub slug: Arc<str>,
+    /// `session_participants.id` for this pump's agent.
     ///
     /// `None` on the test/hardcoded paths and whenever the roster read failed —
     /// same degradation as [`SessionAgent::participant_id`].
     pub participant_id: Option<i64>,
+    /// Does this participant hold `edit_files`? The capability predicate that
+    /// replaced `matches!(cfg.author, Author::Brian)` on the pre-Apply mutation
+    /// nudge — bot-hq must gate on the ticked boxes, never on which role a name
+    /// implies (rc3 D11).
+    pub edits_files: bool,
     /// Sender to the central peer-forward router (`core::router`). The pump emits
     /// a `RouterCommand::Forward` here on each completed turn that buffered prose;
     /// the router is the single decision point (forward / suppress / break the
@@ -111,10 +122,16 @@ pub struct DuoConfig {
 }
 
 impl DuoConfig {
-    pub fn new(session_id: impl Into<Arc<str>>, author: Author) -> Self {
+    pub fn new(
+        session_id: impl Into<Arc<str>>,
+        author: Author,
+        slug: impl Into<Arc<str>>,
+    ) -> Self {
         Self {
             session_id: session_id.into(),
             author,
+            slug: slug.into(),
+            edits_files: false,
             participant_id: None,
             router_tx: None,
             bridge: None,
@@ -330,7 +347,7 @@ pub async fn pump_agent(
                     // The session id is an `Arc<str>` clone — a refcount bump,
                     // not the per-chunk allocation `&*cfg.session_id` would
                     // have cost once the parameter stopped being `&str`.
-                    .insert_message(cfg.session_id.clone(), cfg.author, MessageKind::Text, &text)
+                    .post_to_channel(cfg.session_id.clone(), "participant", Some(&cfg.slug), MessageKind::Text.as_str(), &text, None)
                     .await
                 {
                     Ok(m) => cfg.notify_persisted(m.message_id()),
@@ -379,7 +396,7 @@ pub async fn pump_agent(
                 // a one-time self-nudge to advance first. Brian-only (Rain can't
                 // mutate), gated by adherence_nudges, fired at most once.
                 if !mutate_nudged
-                    && matches!(cfg.author, Author::Brian)
+                    && cfg.edits_files
                     && matches!(name.as_str(), "Edit" | "Write" | "NotebookEdit")
                 {
                     if let Some(tx) = cfg.self_input_tx.as_ref() {
@@ -433,12 +450,14 @@ pub async fn pump_agent(
                     // `payload` MOVES: it is not read again, and a tool_use
                     // input can be large. Borrowing here would copy the whole
                     // body into the receipt on every tool call.
-                    .insert_message(
+                    .post_to_channel(
                         cfg.session_id.clone(),
-                        cfg.author,
-                        MessageKind::ToolUse,
+                        "participant",
+                        Some(&cfg.slug),
+                        MessageKind::ToolUse.as_str(),
                         payload,
-                    )
+                        None,
+                        )
                     .await
                 {
                     Ok(m) => cfg.notify_persisted(m.message_id()),
@@ -471,12 +490,14 @@ pub async fn pump_agent(
                 match storage
                     // `payload` MOVES — same reason, and this is the biggest
                     // body of the three: a tool result can carry a whole file.
-                    .insert_message(
+                    .post_to_channel(
                         cfg.session_id.clone(),
-                        cfg.author,
-                        MessageKind::ToolResult,
+                        "participant",
+                        Some(&cfg.slug),
+                        MessageKind::ToolResult.as_str(),
                         payload,
-                    )
+                        None,
+                        )
                     .await
                 {
                     Ok(m) => cfg.notify_persisted(m.message_id()),
@@ -494,7 +515,7 @@ pub async fn pump_agent(
                 if let (Some(c), Some(bridge)) = (context, &cfg.bridge) {
                     bridge.notify_agent_context(
                         cfg.session_id.to_string(),
-                        cfg.author.as_str(),
+                        &cfg.slug,
                         c.used_tokens,
                         c.context_window,
                     );
@@ -510,14 +531,14 @@ pub async fn pump_agent(
                         .is_some_and(|t| t.elapsed() < LIMIT_NOTICE_DEDUPE);
                     if !deduped {
                         last_limit_notice = Some(std::time::Instant::now());
-                        warn!(agent = ?cfg.author, %line, "provider limit detected; pausing session on the user");
+                        warn!(agent = %cfg.slug, %line, "provider limit detected; pausing session on the user");
                         if let Some(router_tx) = &cfg.router_tx {
                             let notice = format!(
                                 "⚠ [bot-hq] {} hit a provider limit and is paused: \
                                  \"{line}\". Do not expect replies from them, and do \
                                  not take over their work — the session waits on the \
                                  user to resume.",
-                                cfg.author.as_str()
+                                &cfg.slug
                             );
                             // Host-authored, so the row posts as `system` with a
                             // NULL participant like the other host injections —
@@ -576,7 +597,7 @@ pub async fn pump_agent(
                         if let Some(bridge) = &cfg.bridge {
                             bridge.notify_agent_health(
                                 cfg.session_id.to_string(),
-                                cfg.author.as_str(),
+                                &cfg.slug,
                                 "stalled",
                             );
                             // Host-initiated halt: discard the repeat-halt hint.
@@ -586,7 +607,7 @@ pub async fn pump_agent(
                             let _ = bridge
                                 .mark_awaiting_user(
                                     cfg.session_id.to_string(),
-                                    cfg.author.as_str().to_string(),
+                                    cfg.slug.to_string(),
                                     format!(
                                         "⚠ Provider limit: \"{line}\" — the agent can't \
                                          continue until it resets. Send any message (e.g. \
@@ -633,7 +654,7 @@ pub async fn pump_agent(
                     // the peer replies, and that re-triggers this failing agent — an
                     // unbounded error-spam loop (Rain on the DeepSeek gateway,
                     // 2026-05-29). Drain silently.
-                    debug!(agent = ?cfg.author, "errored turn; draining buffer without router-forward");
+                    debug!(agent = %cfg.slug, "errored turn; draining buffer without router-forward");
                     buffer.clear();
                 } else {
                     // Hand the turn's buffered prose to the central router (the
@@ -662,7 +683,7 @@ pub async fn pump_agent(
                                 // DROPPED and never reaches its peer. Was silent —
                                 // the exact invisible one-way break. Make it loud.
                                 Err(_) => warn!(
-                                    agent = ?cfg.author,
+                                    agent = %cfg.slug,
                                     "peer-forward DROPPED: router channel closed (router task gone) — this turn's prose did not reach the peer"
                                 ),
                             }
@@ -694,16 +715,18 @@ pub async fn pump_agent(
                 // session. Same trade every host injection in this file makes.
                 if matches!(ending, crate::core::sequencer::TurnEnding::Passed) {
                     match storage
-                        .insert_message(
+                        .post_to_channel(
                             cfg.session_id.clone(),
-                            cfg.author,
-                            MessageKind::Text,
+                            "participant",
+                            Some(&cfg.slug),
+                            MessageKind::Text.as_str(),
                             PASS_NOTICE,
-                        )
+                            None,
+                            )
                         .await
                     {
                         Ok(m) => cfg.notify_persisted(m.message_id()),
-                        Err(e) => warn!(?e, agent = ?cfg.author, "persisting the pass row"),
+                        Err(e) => warn!(?e, agent = %cfg.slug, "persisting the pass row"),
                     }
                 }
                 // B5: tell the ring the turn ended. Sent for BOTH branches and
@@ -724,7 +747,7 @@ pub async fn pump_agent(
                         .is_err()
                     {
                         warn!(
-                            agent = ?cfg.author,
+                            agent = %cfg.slug,
                             "turn completion DROPPED: sequencer channel closed — the ring \
                              will not step past this participant"
                         );
@@ -742,7 +765,7 @@ pub async fn pump_agent(
                 // momentary `Idle` flicker that would unlock the input mid-handoff).
                 if !router_owns_idle {
                     if let Some(activity) = &cfg.activity {
-                        activity.set_busy(cfg.author, false);
+                        activity.set_busy_slug(&cfg.slug, false);
                     }
                 }
                 // Batch 7: turn done → no tools can still be in flight; reset so a
@@ -764,22 +787,24 @@ pub async fn pump_agent(
                 }
             }
             AgentEvent::Init { session_id, .. } => {
-                debug!(agent = ?cfg.author, ?session_id, "init received");
+                debug!(agent = %cfg.slug, ?session_id, "init received");
                 // Persist the claude-code session UUID so the next reopen of
                 // this bot-hq session can resume each agent's prior context
                 // via `--resume <uuid>`. Idempotent UPDATE — on a resume spawn
                 // the same UUID comes back and we just overwrite with itself.
-                if let Some(claude_id) = session_id {
-                    if let Err(e) = storage
-                        .set_session_claude_id(&cfg.session_id, cfg.author.as_str(), &claude_id)
-                        .await
-                    {
-                        warn!(?e, agent = ?cfg.author, "persisting claude session id");
+                // Stored on the PARTICIPANT row, not in one of two `sessions`
+                // columns keyed by agent name (rc3 D10). The old setter could
+                // only address two agents and returned `Err` for any other, so a
+                // third participant's conversation was dropped and it restarted
+                // blank on every respawn.
+                if let (Some(claude_id), Some(pid)) = (session_id, cfg.participant_id) {
+                    if let Err(e) = storage.set_participant_claude_id(pid, &claude_id).await {
+                        warn!(?e, agent = %cfg.slug, "persisting claude session id");
                     }
                 }
             }
             AgentEvent::Exited(msg) => {
-                warn!(agent = ?cfg.author, msg = %msg, "agent exited");
+                warn!(agent = %cfg.slug, msg = %msg, "agent exited");
                 // Best-effort: forward any trailing buffered prose to the peer
                 // before we go.
                 let body = std::mem::take(&mut buffer);
@@ -796,7 +821,7 @@ pub async fn pump_agent(
                             .is_err()
                         {
                             warn!(
-                                agent = ?cfg.author,
+                                agent = %cfg.slug,
                                 "peer-forward DROPPED on exit: router channel closed — trailing prose did not reach the peer"
                             );
                         }
@@ -805,12 +830,12 @@ pub async fn pump_agent(
                 // The agent is dying → force self-idle unconditionally (the
                 // post-loop cleanup also clears it; idempotent).
                 if let Some(activity) = &cfg.activity {
-                    activity.set_busy(cfg.author, false);
+                    activity.set_busy_slug(&cfg.slug, false);
                 }
                 break;
             }
             AgentEvent::Error(msg) => {
-                warn!(agent = ?cfg.author, msg = %msg, "agent error");
+                warn!(agent = %cfg.slug, msg = %msg, "agent error");
                 // Persist so it RENDERS. **Nothing emits this variant today**:
                 // its only producer was the native loop (rc3 D9), which routed
                 // every user-facing failure through it — API errors, model
@@ -833,7 +858,7 @@ pub async fn pump_agent(
                 match storage
                     // `msg` MOVES — the `warn!` above already consumed what it
                     // needed and nothing reads it after this.
-                    .insert_message(cfg.session_id.clone(), cfg.author, MessageKind::Text, msg)
+                    .post_to_channel(cfg.session_id.clone(), "participant", Some(&cfg.slug), MessageKind::Text.as_str(), msg, None)
                     .await
                 {
                     Ok(m) => cfg.notify_persisted(m.message_id()),
@@ -846,7 +871,7 @@ pub async fn pump_agent(
                 if let Some(bridge) = &cfg.bridge {
                     bridge.notify_agent_health(
                         cfg.session_id.to_string(),
-                        cfg.author.as_str(),
+                        &cfg.slug,
                         state.as_str(),
                     );
                 }
@@ -859,7 +884,7 @@ pub async fn pump_agent(
     // Clear its busy unconditionally so a crashed/stopped agent can't strand the
     // session `Busy` with the chat input locked.
     if let Some(activity) = &cfg.activity {
-        activity.set_busy(cfg.author, false);
+        activity.set_busy_slug(&cfg.slug, false);
     }
     // Batch 3.1 Part 1: crashed/stopped mid-atomic-tool → clear the flag so a
     // pending deferred cancel can proceed (the agent's already dead) and a
@@ -876,7 +901,7 @@ pub async fn pump_agent(
     if let Some(bridge) = &cfg.bridge {
         bridge.notify_agent_health(
             cfg.session_id.to_string(),
-            cfg.author.as_str(),
+            &cfg.slug,
             AgentHealth::Dead.as_str(),
         );
     }
@@ -914,6 +939,10 @@ mod tests {
         DuoConfig {
             session_id: "s1".into(),
             author,
+            // The two seeded roles, whose slugs are what a real session now
+            // carries. `Author` is only the router.s two-party discriminant.
+            slug: if matches!(author, Author::Brian) { "hands".into() } else { "eyes".into() },
+            edits_files: matches!(author, Author::Brian),
             participant_id: None,
             router_tx: None,
             bridge: None,
@@ -1101,7 +1130,7 @@ mod tests {
         assert!(!peer_ack);
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].author, "brian");
+        assert_eq!(msgs[0].author, "hands");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1254,20 +1283,76 @@ mod tests {
     /// and the sequencer reads the next participant's backlog straight out of
     /// storage. Written after the send, the insert races that read, and the
     /// losing side surfaces the pass a round late.
+    /// **The resume chain, through the one function that joins it** (rc3 D10).
+    ///
+    /// An agent's claude-code conversation id used to be stored in one of two
+    /// `sessions` columns picked by a `match agent { "brian" => …, "rain" => …,
+    /// other => bail }`. Under role-derived slugs every write would have hit the
+    /// `bail` arm and been dropped — silently, because the site only `warn`s —
+    /// and every respawn would start blank with a cold cache.
+    ///
+    /// Pinned through the PUMP rather than on `set_participant_claude_id`,
+    /// because the storage call and the `Init` handler are the two halves and it
+    /// was the join that broke: the setter alone would be green with nothing
+    /// calling it.
+    #[tokio::test]
+    async fn an_init_event_persists_the_resume_id_on_the_participants_own_row() {
+        let (storage, state) = setup().await;
+        storage.ensure_session_roster("s1", false).await.unwrap();
+        let eyes = storage
+            .participant_by_slug("s1", "eyes")
+            .await
+            .unwrap()
+            .expect("the seeded reviewer")
+            .id;
+        // Not slot 0, on purpose: the old two-column writer would have put a
+        // slot-1 id in the wrong column had it been keyed positionally.
+        let cfg = DuoConfig { participant_id: Some(eyes), ..fast_cfg(Author::Rain) };
+
+        let (ev_tx, ev_rx) = mpsc::channel(4);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+        ev_tx
+            .send(AgentEvent::Init { session_id: Some("cc-uuid-42".into()) })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let roster = storage.participants_for_session("s1").await.unwrap();
+        let reviewer = roster.iter().find(|p| p.id == eyes).unwrap();
+        assert_eq!(
+            reviewer.claude_session_id.as_deref(),
+            Some("cc-uuid-42"),
+            "the resume id must land on this participant's own row"
+        );
+        // And nobody else's — a mis-keyed write would resume the wrong
+        // conversation into the wrong agent.
+        assert!(
+            roster.iter().filter(|p| p.id != eyes).all(|p| p.claude_session_id.is_none()),
+            "the id leaked onto another participant"
+        );
+        // The spawn path reads exactly this to decide `--resume` vs a cold
+        // start, so the round trip is what makes it load-bearing.
+        assert!(
+            roster.iter().any(|p| p.claude_session_id.is_some()),
+            "spawn would treat this as a first spawn and lose the warm cache"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_pass_posts_its_row_before_the_completion_goes_out() {
         let (storage, state) = setup().await;
         // `create_session` seeds no roster; the participants have to exist for
         // the row to resolve to one.
-        storage.ensure_session_roster("s1").await.unwrap();
+        storage.ensure_session_roster("s1", false).await.unwrap();
         let brian = storage
-            .participant_by_slug("s1", "brian")
+            .participant_by_slug("s1", "hands")
             .await
             .unwrap()
             .expect("ensure_session_roster seeds brian")
             .id;
         let rain = storage
-            .participant_by_slug("s1", "rain")
+            .participant_by_slug("s1", "eyes")
             .await
             .unwrap()
             .expect("ensure_session_roster seeds rain")
@@ -1360,9 +1445,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_substantive_turn_overrides_its_own_pass() {
         let (storage, state) = setup().await;
-        storage.ensure_session_roster("s1").await.unwrap();
+        storage.ensure_session_roster("s1", false).await.unwrap();
         let brian = storage
-            .participant_by_slug("s1", "brian")
+            .participant_by_slug("s1", "hands")
             .await
             .unwrap()
             .unwrap()
@@ -1430,9 +1515,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn the_pass_flag_does_not_leak_into_the_next_turn() {
         let (storage, state) = setup().await;
-        storage.ensure_session_roster("s1").await.unwrap();
+        storage.ensure_session_roster("s1", false).await.unwrap();
         let brian = storage
-            .participant_by_slug("s1", "brian")
+            .participant_by_slug("s1", "hands")
             .await
             .unwrap()
             .unwrap()
@@ -1865,13 +1950,13 @@ mod tests {
         // "dead", which in this test would mask the stalled mark. Poll until
         // the async limit handling lands.
         for _ in 0..100 {
-            if bridge.current_agent_health("s1", "brian").as_deref() == Some("stalled") {
+            if bridge.current_agent_health("s1", "hands").as_deref() == Some("stalled") {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(
-            bridge.current_agent_health("s1", "brian").as_deref(),
+            bridge.current_agent_health("s1", "hands").as_deref(),
             Some("stalled")
         );
         drop(ev_tx);
@@ -1964,7 +2049,7 @@ mod tests {
         // `{line}` being dropped, would leave the equality above green while the
         // peer reads something else.
         assert!(
-            body.contains("brian"),
+            body.contains("hands"),
             "the notice must name the stalled agent: {body}"
         );
         assert!(

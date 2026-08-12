@@ -284,23 +284,34 @@ pub async fn summarize_session_doc(
         )));
     };
 
-    // App-wide default model wins; else the session's chosen Brian model; else
-    // resolve_spawn_config falls through to Brian's agent config / hardcoded.
+    // App-wide default model wins; else the model the session's FIRST
+    // participant runs on; else `resolve_spawn_config` falls through to the
+    // hardcoded default.
+    //
+    // rc3 D10: this read `sessions.brian_model_id`, which the create paths no
+    // longer write — it would have silently degraded to the app default on every
+    // session. The roster is where a participant's model lives now, and slot 0
+    // is the same participant the old column named.
     let default_model_id = storage
         .get_setting("default_model_id")
         .await
         .ok()
         .flatten()
         .filter(|s| !s.is_empty());
-    let session_brian_model = storage
-        .get_session(&session_id)
+    let session_model = storage
+        .participants_for_session(&session_id)
         .await
         .ok()
-        .flatten()
-        .and_then(|s| s.brian_model_id);
-    let model_id = default_model_id.or(session_brian_model);
+        .and_then(|roster| roster.into_iter().next())
+        .and_then(|p| p.model_id)
+        .filter(|m| !m.is_empty());
+    let model_id = default_model_id.or(session_model);
+    // The summarizer is a one-off subprocess, not a session participant; the
+    // name is only the label `resolve_spawn_config` puts on the config it
+    // returns and the `agent_configs` key it may fall back to.
     let cfg =
-        crate::core::session::resolve_spawn_config(&storage, "brian", model_id.as_deref()).await;
+        crate::core::session::resolve_spawn_config(&storage, "doc-summarizer", model_id.as_deref())
+            .await;
 
     let prompt = format!(
         "Summarize the document below in 3-5 concise, plain-English bullet points \
@@ -385,7 +396,10 @@ pub async fn validate_model(
     storage: tauri::State<'_, Arc<Storage>>,
     model_id: String,
 ) -> Result<ValidateResult, AppError> {
-    let cfg = crate::core::session::resolve_spawn_config(&storage, "brian", Some(&model_id)).await;
+    // A one-shot probe of a MODEL, not of any participant — an explicit
+    // `model_id` is always supplied, so the name is only the config's label.
+    let cfg =
+        crate::core::session::resolve_spawn_config(&storage, "model-probe", Some(&model_id)).await;
     Ok(
         match tokio::time::timeout(Duration::from_secs(30), probe_model(cfg)).await {
             Ok(result) => result,
