@@ -291,6 +291,59 @@ async upsertAgentConfig(cfg: AgentConfigView) : Promise<Result<null, AppError>> 
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * `include_archived = false` is what a picker wants; `true` is what the tab's
+ * own list wants, so an archived role can be brought back.
+ */
+async listRoles(includeArchived: boolean) : Promise<Result<RoleView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_roles", { includeArchived }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async createRole(draft: RoleDraftInput) : Promise<Result<RoleView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_role", { draft }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateRole(id: number, draft: RoleDraftInput) : Promise<Result<RoleView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_role", { id, draft }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Decision D8: removing a role is archival. `archived = false` restores.
+ * 
+ * Not named `delete_role`, and not a one-way door, because neither is what it
+ * does — see migration 0047 for why a hard delete is refused by the FK the
+ * moment a single session has used the role.
+ */
+async archiveRole(id: number, archived: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("archive_role", { id, archived }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The capability checklist, in render order.
+ * 
+ * Infallible — it reads a compile-time table, touches no storage, and so takes
+ * no `State`. It is still a command rather than a constant in the frontend for
+ * the reason on [`CapabilityView`].
+ */
+async listCapabilities() : Promise<CapabilityView[]> {
+    return await TAURI_INVOKE("list_capabilities");
+},
 async listModels() : Promise<Result<ModelView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_models") };
@@ -1169,6 +1222,25 @@ export type AppError =
  * in user terms (from the catalog).
  */
 export type CapabilityDescription = { name: string; description: string }
+/**
+ * One row of the Roles tab's capability checklist.
+ * 
+ * The tab ASKS for this list rather than carrying a copy: a slug list
+ * hardcoded in TypeScript drifts the first time a capability is added to
+ * [`Capability`], and the drift is silent — the new grant just never appears
+ * as a box, so no role can be given it.
+ */
+export type CapabilityView = { slug: string; label: string; description: string; 
+/**
+ * Section heading, so 17 checkboxes render as five short groups.
+ */
+group: string; 
+/**
+ * Slugs this one is incoherent without — [`Capability::requires`]. Sent so
+ * the checklist can say so BEFORE a save, rather than only through the
+ * `Validation` error [`validated_capabilities`] returns after one.
+ */
+requires: string[] }
 export type ClFileContentView = { project: string; file_path: string; content: string; 
 /**
  * Byte size of the file as it lives on disk. The `content` field is
@@ -1595,6 +1667,39 @@ export type ResolveResult = { kind: "resolved" } | { kind: "needs_stale_confirm"
  * proxy, stale-hit + empty-return rates should trend toward 0.
  */
 export type RetrievalStatsView = { event_count: number; distinct_sessions: number; total_tokens: number; total_atoms: number; stale_hits: number; empty_returns: number; avg_tokens_per_event: number; avg_tokens_per_session: number; stale_hit_rate: number; empty_return_rate: number }
+/**
+ * What the Roles tab submits, for both create and edit.
+ */
+export type RoleDraftInput = { display_name: string; 
+/**
+ * `None` on create derives the slug from `display_name`; `None` on update
+ * leaves the existing slug ALONE. See [`RoleDraft::slug`] — a rename that
+ * re-derived the slug would break `ensure_session_roster`'s two literal
+ * `WHERE slug = 'hands' / 'eyes'` lookups.
+ */
+slug: string | null; description_prompt: string | null; capabilities: string[]; participation_mode: string; default_model_id: string | null }
+/**
+ * A role as the Roles tab reads it.
+ * 
+ * `capabilities` is a `Vec<String>`, not the raw JSON column: the tab renders
+ * a checklist, and handing it a string would put a JSON parser in the
+ * frontend for a value the backend already has to parse to validate.
+ */
+export type RoleView = { id: number; slug: string; display_name: string; description_prompt: string | null; capabilities: string[]; 
+/**
+ * `active` | `observer` | `on_demand`.
+ */
+participation_mode: string; 
+/**
+ * D8's model control. `None` = the role names no default and the invite
+ * has to choose one.
+ */
+default_model_id: string | null; 
+/**
+ * Seeded by bot-hq. Still editable — the flag exists so the tab can offer
+ * "restore defaults", not to lock the row (migration 0044).
+ */
+builtin: boolean; archived: boolean }
 /**
  * Per-session create-dialog picks beyond the positional args. Bundled into
  * one struct because `create_session` sits at tauri-specta's 10-arg command

@@ -12,6 +12,7 @@ import { SaveIcon } from "./contextLibraryShared";
 import { WrenchIcon, EyeIcon, GearIcon } from "../components/icons";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
 import { ModelsPanel } from "./ModelsPanel";
+import { RolesPanel } from "./RolesPanel";
 import { ViolationsPanel } from "./ViolationsPanel";
 import { FeedbackPanel } from "./FeedbackPanel";
 import { PolicyForm } from "../components/PolicyForm";
@@ -27,6 +28,7 @@ import type {
 
 type SettingsSubTab =
   | "agents"
+  | "roles"
   | "models"
   | "claude"
   | "toolgate"
@@ -62,6 +64,9 @@ export function Settings() {
       <div className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4">
         <SubTabButton active={tab === "agents"} onClick={() => select("agents")}>
           Agents
+        </SubTabButton>
+        <SubTabButton active={tab === "roles"} onClick={() => select("roles")}>
+          Roles
         </SubTabButton>
         <SubTabButton active={tab === "models"} onClick={() => select("models")}>
           Models
@@ -106,6 +111,9 @@ export function Settings() {
       <div className="min-h-0 flex-1">
         <div className={cn("h-full", tab !== "agents" && "hidden")}>
           {visited.has("agents") && <AgentsPanel />}
+        </div>
+        <div className={cn("h-full", tab !== "roles" && "hidden")}>
+          {visited.has("roles") && <RolesPanel />}
         </div>
         <div className={cn("h-full", tab !== "models" && "hidden")}>
           {visited.has("models") && <ModelsPanel />}
