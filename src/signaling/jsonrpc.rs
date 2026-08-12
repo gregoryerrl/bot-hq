@@ -170,9 +170,11 @@ pub async fn dispatch(
 ///   can be taken on its own merits.
 ///
 /// Removing an entry is a one-line change and is the whole mechanism: whoever
-/// decides EYES should lose `close_session` deletes it here and updates
-/// `parity::LEGACY_UNGATED`. `parity::the_parity_hold_is_exactly_the_known_divergence`
-/// fails if this list grows silently.
+/// decides EYES should lose `close_session` deletes it here and moves the tool
+/// off `parity::UNGATED`.
+/// `parity::the_parity_hold_is_exactly_the_known_divergence` fails if this list
+/// grows silently, and the enforcement table in `agents::capability_prompt`'s
+/// module doc records that a held tool is not enforced.
 const PARITY_HOLD: &[&str] = &["close_session"];
 
 /// Is `tool`'s allow/deny decision routed through the caller's capability set?
@@ -257,10 +259,11 @@ fn peer_shaped_reason(reason: &str) -> Option<&'static str> {
 ///
 /// Built from `capability_prompt::phrasing(cap).deny` — the SAME sentence the
 /// agent's prompt already listed under "You may not". That is not decoration:
-/// layer 2 claims the prompt and the gate cannot disagree, and reusing one
-/// string for both is how that stops being a claim. It also carries the
-/// "instead" clause each denial already has, so the refusal keeps the
-/// actionable half of the three name-based messages it replaces.
+/// layer 2 tells the agent it and the gate are never describing different
+/// grants, and reusing one string for both is part of how that stops being a
+/// claim. It also carries the "instead" clause each denial already has, so the
+/// refusal keeps the actionable half of the three name-based messages it
+/// replaces — a bare "denied" would have lost it.
 fn gate_refusal(name: &str, caller: &CallerIdentity) -> String {
     let Some(cap) = crate::agents::capability::required_for(name) else {
         // Unreachable via `call_tool` (the gate runs only when `capability_gated`
