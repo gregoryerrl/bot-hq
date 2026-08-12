@@ -1,15 +1,14 @@
-import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
-import { Link, useBlocker } from "react-router-dom";
+import { useState } from "react";
+import { Link } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
+import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useServerDraft } from "../hooks/useServerDraft";
 import { Button } from "../components/ui/Button";
 import { SubTabButton } from "../components/SubTabButton";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
-import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
+import { terminalInputClass } from "./contextLibraryShared";
 import { SaveIcon } from "./contextLibraryShared";
-import { WrenchIcon, EyeIcon, GearIcon } from "../components/icons";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
 import { ModelsPanel } from "./ModelsPanel";
 import { RolesPanel } from "./RolesPanel";
@@ -18,16 +17,13 @@ import { FeedbackPanel } from "./FeedbackPanel";
 import { PolicyForm } from "../components/PolicyForm";
 import { GatedKeywordList } from "../components/GatedKeywordList";
 import type {
-  AgentConfigView,
   GatedKeyword,
-  ModelView,
   Policy,
   SessionInfo,
   UpdateInfo,
 } from "../lib/bindings";
 
 type SettingsSubTab =
-  | "agents"
   | "roles"
   | "models"
   | "claude"
@@ -39,21 +35,23 @@ type SettingsSubTab =
   | "updates";
 
 /**
- * Settings is a tabbed container. The existing per-agent model/auth cards
- * ("Agents") and the global Tool-Gate list ("Tool Gate") sit alongside the new
- * "Claude Config" subtab, which surfaces the Claude Code config the agents
- * inherit + the per-agent override layer. All three stay mounted (toggled with
- * `hidden`) so in-progress edits — and the Agents route-blocker — survive a
- * subtab switch.
+ * Settings is a tabbed container. Every panel that has been visited stays
+ * mounted (toggled with `hidden`) so in-progress edits survive a subtab switch.
+ *
+ * rc3 D8 retired the "Agents" subtab: a role owns its default model
+ * (`roles.default_model_id`, the Roles tab) and the New Session dialog
+ * overrides it per participant, so there is nothing left for a per-agent
+ * model card to configure. Roles is the landing tab because it is the surface
+ * that replaced it.
  */
 export function Settings() {
-  const [tab, setTab] = useState<SettingsSubTab>("agents");
+  const [tab, setTab] = useState<SettingsSubTab>("roles");
   // Lazy-mount-then-keep: a panel mounts only once its tab has been visited, then
   // STAYS mounted (CSS `hidden` when inactive) so in-progress edits survive a
   // subtab switch. This skips firing the queries of tabs the user never opens —
   // the old code mounted all 6 panels (and all their queries) on first visit.
   const [visited, setVisited] = useState<Set<SettingsSubTab>>(
-    () => new Set<SettingsSubTab>(["agents"]),
+    () => new Set<SettingsSubTab>(["roles"]),
   );
   const select = (t: SettingsSubTab) => {
     setTab(t);
@@ -62,9 +60,6 @@ export function Settings() {
   return (
     <div className="flex h-full flex-col bg-background">
       <div className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4">
-        <SubTabButton active={tab === "agents"} onClick={() => select("agents")}>
-          Agents
-        </SubTabButton>
         <SubTabButton active={tab === "roles"} onClick={() => select("roles")}>
           Roles
         </SubTabButton>
@@ -109,9 +104,6 @@ export function Settings() {
         </SubTabButton>
       </div>
       <div className="min-h-0 flex-1">
-        <div className={cn("h-full", tab !== "agents" && "hidden")}>
-          {visited.has("agents") && <AgentsPanel />}
-        </div>
         <div className={cn("h-full", tab !== "roles" && "hidden")}>
           {visited.has("roles") && <RolesPanel />}
         </div>
@@ -208,121 +200,28 @@ function GlobalPolicyPanel() {
           Save failed: {save.error.message}
         </p>
       )}
-    </div>
-  );
-}
-
-function AgentsPanel() {
-  const { data: configs = [], refetch, isLoading } = useTauriQuery<
-    AgentConfigView[]
-  >("list_agent_configs");
-  const { data: models = [] } = useTauriQuery<ModelView[]>("list_models");
-  const upsert = useTauriMutation<void, { cfg: AgentConfigView }>(
-    "upsert_agent_config",
-  );
-
-  // Per-agent dirty tracking. `dirtyRef` is the source of truth (avoids
-  // re-renders on every keystroke); `dirtyCount` mirrors size so the
-  // blocker's gate-fn closure stays current.
-  const dirtyRef = useRef<Set<string>>(new Set());
-  const [dirtyCount, setDirtyCount] = useState(0);
-
-  const setDirty = useCallback((agentName: string, dirty: boolean) => {
-    const prev = dirtyRef.current.size;
-    if (dirty) {
-      dirtyRef.current.add(agentName);
-    } else {
-      dirtyRef.current.delete(agentName);
-    }
-    const next = dirtyRef.current.size;
-    if ((prev === 0) !== (next === 0)) setDirtyCount(next);
-  }, []);
-
-  const blocker = useBlocker(
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    useCallback(() => dirtyRef.current.size > 0, [dirtyCount]),
-  );
-
-  // Save-all uses a counter as a fan-out signal: incrementing it triggers
-  // every AgentRow's effect, which checks its own dirty state and saves
-  // if needed. Avoids lifting draft state out of AgentRow.
-  const [saveAllSignal, setSaveAllSignal] = useState(0);
-
-  return (
-    <div className="mx-auto h-full max-w-7xl overflow-y-auto overflow-x-hidden px-6 py-6">
-      {blocker.state === "blocked" && (
-        <div className="mb-4 flex items-center gap-3 rounded-lg border border-error/40 bg-error-container/20 px-4 py-3">
-          <p className="flex-1 font-code-sm text-code-sm text-on-error-container">
-            You have unsaved changes. Leave without saving?
-          </p>
-          <Button variant="ghost" size="sm" onClick={() => blocker.reset()}>
-            Stay
-          </Button>
-          <Button variant="danger" size="sm" onClick={() => blocker.proceed()}>
-            Leave
-          </Button>
-        </div>
-      )}
-      <div className="mb-6 flex items-start justify-between gap-4">
-        <div>
-          <h1 className="font-headline-lg text-headline-lg text-on-surface">
-            Agent Configuration
-          </h1>
-          <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
-            Manage connection parameters for individual orchestration agents.
-          </p>
-        </div>
-        {dirtyCount > 0 && (
-          <button
-            type="button"
-            onClick={() => setSaveAllSignal((n) => n + 1)}
-            disabled={upsert.isPending}
-            className="inline-flex items-center gap-2 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
-          >
-            <SaveIcon />
-            Save all ({dirtyCount})
-          </button>
-        )}
-      </div>
-      {isLoading ? (
-        <div className="grid grid-cols-1 gap-gutter xl:grid-cols-2">
-          {[0, 1].map((i) => (
-            <div
-              key={i}
-              className="h-64 animate-pulse rounded-lg border border-outline-variant bg-surface-container"
-            />
-          ))}
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 gap-gutter xl:grid-cols-2">
-          {configs.map((c) => (
-            <AgentCard
-              key={c.agent_name}
-              cfg={c}
-              models={models}
-              onSave={async (next) => {
-                await upsert.mutateAsync({ cfg: next });
-                setDirty(c.agent_name, false);
-                refetch();
-              }}
-              onDirtyChange={(dirty) => setDirty(c.agent_name, dirty)}
-              isSaving={upsert.isPending}
-              saveAllSignal={saveAllSignal}
-            />
-          ))}
-        </div>
-      )}
       <SessionDefaults />
     </div>
   );
 }
 
-/** App-wide defaults applied at session create (not per-agent config). */
+/**
+ * App-wide defaults applied at session create.
+ *
+ * These are `app_settings` rows, not policy YAML, and each toggle persists on
+ * change — the panel's "Save policy" button does not cover them. They lived
+ * under the Agents subtab until rc3 D8 retired it; neither toggle is per-agent
+ * configuration, so they moved here rather than being deleted with it.
+ */
 function SessionDefaults() {
   const { data: worktreeDefault, refetch } = useTauriQuery<string | null>(
     "get_app_setting",
     { key: "worktree_default" },
   );
+  const { data: rainDisabledDefault, refetch: refetchRainDefault } =
+    useTauriQuery<string | null>("get_app_setting", {
+      key: "rain_disabled_default",
+    });
   const setAppSetting = useTauriMutation<void, { key: string; value: string }>(
     "set_app_setting",
   );
@@ -348,11 +247,6 @@ function SessionDefaults() {
           Run repo-backed sessions in isolated git worktrees
         </span>
       </label>
-      {setAppSetting.error && (
-        <p className="mt-2 inline-block rounded border border-error/40 bg-error-container/20 px-2 py-1 font-code-sm text-code-sm text-on-error-container">
-          Couldn’t save: {setAppSetting.error.message}
-        </p>
-      )}
       <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
         Each session gets its own checkout on branch{" "}
         <code className="text-on-surface">bothq/&lt;session-id&gt;</code>, so
@@ -360,243 +254,28 @@ function SessionDefaults() {
         are removed at close; anything uncommitted is kept. The New-session
         dialog can override this per session.
       </p>
-    </section>
-  );
-}
-
-function AgentCard({
-  cfg,
-  models,
-  onSave,
-  onDirtyChange,
-  isSaving,
-  saveAllSignal,
-}: {
-  cfg: AgentConfigView;
-  models: ModelView[];
-  onSave: (next: AgentConfigView) => Promise<void>;
-  onDirtyChange: (dirty: boolean) => void;
-  isSaving?: boolean;
-  saveAllSignal: number;
-}) {
-  const [draft, setDraft] = useState(cfg);
-  const [saved, setSaved] = useState(false);
-  // Inline per-card save error so a rejected upsert (button or Save-all) gives
-  // feedback instead of an unhandled rejection. Scoped to the card that failed.
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const dirty = JSON.stringify(draft) !== JSON.stringify(cfg);
-
-  // Rain-only "disable by default" preference (app_settings). The hooks run for
-  // every card (React Query dedupes) but only Rain renders the checkbox.
-  const { data: rainDisabledDefault, refetch: refetchRainDefault } =
-    useTauriQuery<string | null>("get_app_setting", {
-      key: "rain_disabled_default",
-    });
-  const setAppSetting = useTauriMutation<void, { key: string; value: string }>(
-    "set_app_setting",
-  );
-
-  // Which saved model (if any) the current config corresponds to. Exact match
-  // on the spawn-relevant fields so the dropdown reflects the agent's model.
-  // `native` used to be part of the match — two rows could differ ONLY in that
-  // flag, and the dropdown would then name a model whose runtime contradicted
-  // the one this config would spawn. rc3 D9 left one runtime, so the remaining
-  // three fields are the whole of what a spawn depends on.
-  const selectedModelId =
-    models.find(
-      (m) =>
-        m.provider === draft.provider &&
-        m.model_name === draft.model_name &&
-        (m.base_url ?? "") === (draft.base_url ?? ""),
-    )?.id ?? "";
-
-  // Save-all fan-out: parent increments saveAllSignal; each dirty row
-  // triggers its own save. Skipping initial mount via a ref guards against
-  // saving on first render when saveAllSignal=0.
-  const lastSeenSignal = useRef(saveAllSignal);
-  useEffect(() => {
-    if (saveAllSignal === lastSeenSignal.current) return;
-    lastSeenSignal.current = saveAllSignal;
-    if (!dirty) return;
-    setSaveError(null);
-    onSave(draft)
-      .then(() => setSaved(true))
-      .catch((e) => setSaveError(errorMessage(e)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [saveAllSignal]);
-
-  // Auto-clear the "Saved ✓" badge after 2s so it doesn't linger forever.
-  useEffect(() => {
-    if (!saved) return;
-    const id = setTimeout(() => setSaved(false), 2000);
-    return () => clearTimeout(id);
-  }, [saved]);
-
-  // Push dirty state up to Settings so the route-blocker knows. When the
-  // user resumes editing post-save, clear the green badge so the staleness
-  // is unambiguous.
-  const prevDirty = useRef(dirty);
-  if (prevDirty.current !== dirty) {
-    prevDirty.current = dirty;
-    onDirtyChange(dirty);
-    if (dirty) {
-      setSaved(false);
-      setSaveError(null);
-    }
-  }
-
-  return (
-    <section
-      className={cn(
-        "flex flex-col rounded-lg border bg-surface-container p-4",
-        roleBorder(cfg.agent_name),
-      )}
-    >
-      {/* Header: icon + name + status badges + role chip */}
-      <div className="mb-4 flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="flex items-center leading-none" aria-hidden>
-            {agentIcon(cfg.agent_name)}
-          </span>
-          <h2 className="truncate font-headline-md text-headline-md capitalize text-on-surface">
-            {cfg.agent_name}
-          </h2>
-          {dirty && (
-            <span className="shrink-0 rounded border border-warning/40 bg-warning/15 px-1.5 py-0.5 font-label-caps text-label-caps text-warning">
-              Unsaved
-            </span>
-          )}
-          {saved && !dirty && (
-            <span className="shrink-0 rounded border border-success/40 bg-success/15 px-1.5 py-0.5 font-label-caps text-label-caps text-success">
-              Saved ✓
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* Form fields */}
-      <div className="flex flex-1 flex-col gap-4">
-        {/* Model is chosen from the saved-model registry (Models tab). The
-            provider / endpoint / credential all live on the model — there are
-            no per-agent free-text fields. */}
-        <label className="block">
-          <FieldLabel>Model</FieldLabel>
-          <select
-            value={selectedModelId}
-            onChange={(e) => {
-              const m = models.find((x) => x.id === e.target.value);
-              if (m) {
-                setDraft({
-                  ...draft,
-                  provider: m.provider,
-                  model_name: m.model_name,
-                  base_url: m.base_url,
-                  auth_token: m.auth_token,
-                  // Copied like the rest: every path that doesn't name a model
-                  // id on the session row resolves through this saved config.
-                  context_window: m.context_window,
-                });
-              }
-            }}
-            className="w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-          >
-            {selectedModelId === "" && (
-              <option value="" disabled>
-                {models.length === 0 ? "(no saved models)" : "(select a model)"}
-              </option>
-            )}
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.display_name}
-                {m.model_name ? ` — ${m.model_name}` : ""}
-              </option>
-            ))}
-          </select>
-          {models.length === 0 ? (
-            <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
-              No saved models yet — add them in the Models tab.
-            </span>
-          ) : selectedModelId !== "" ? (
-            <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
-              {draft.provider}
-              {draft.base_url ? ` · ${draft.base_url}` : ""}
-            </span>
-          ) : (
-            <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
-              Current model isn’t in the registry — pick one, or add it in the
-              Models tab.
-            </span>
-          )}
-        </label>
-
-        {cfg.agent_name === "rain" && (
-          <label className="flex items-center gap-2 pt-1">
-            <input
-              type="checkbox"
-              checked={rainDisabledDefault === "1"}
-              onChange={async (e) => {
-                await setAppSetting.mutateAsync({
-                  key: "rain_disabled_default",
-                  value: e.target.checked ? "1" : "",
-                });
-                refetchRainDefault();
-              }}
-              className="size-4 accent-primary"
-            />
-            <span className="font-body-md text-body-md text-on-surface">
-              Disable Rain by default (new sessions start solo)
-            </span>
-          </label>
-        )}
-        {cfg.agent_name === "rain" && setAppSetting.error && (
-          <p className="inline-block rounded border border-error/40 bg-error-container/20 px-2 py-1 font-code-sm text-code-sm text-on-error-container">
-            Couldn’t save: {setAppSetting.error.message}
-          </p>
-        )}
-      </div>
-
-      {saveError && (
-        <p className="mt-4 rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
-          Save failed: {saveError}
+      <label className="mt-4 flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={rainDisabledDefault === "1"}
+          onChange={async (e) => {
+            await setAppSetting.mutateAsync({
+              key: "rain_disabled_default",
+              value: e.target.checked ? "1" : "",
+            });
+            refetchRainDefault();
+          }}
+          className="size-4 accent-primary"
+        />
+        <span className="font-body-md text-body-md text-on-surface">
+          Disable Rain by default (new sessions start solo)
+        </span>
+      </label>
+      {setAppSetting.error && (
+        <p className="mt-2 inline-block rounded border border-error/40 bg-error-container/20 px-2 py-1 font-code-sm text-code-sm text-on-error-container">
+          Couldn’t save: {setAppSetting.error.message}
         </p>
       )}
-
-      {/* Footer: updated-at + reset/save */}
-      <div className="mt-4 flex items-center justify-between gap-2 border-t border-outline-variant/30 pt-3">
-        <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
-          updated {formatTimestamp(cfg.updated_at) || "—"}
-        </span>
-        <div className="flex shrink-0 gap-2">
-          <button
-            type="button"
-            disabled={!dirty || isSaving}
-            onClick={() => {
-              setDraft(cfg);
-              onDirtyChange(false);
-            }}
-            className="rounded border border-outline-variant bg-transparent px-3 py-1.5 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
-          >
-            Reset
-          </button>
-          <button
-            type="button"
-            disabled={!dirty || isSaving}
-            onClick={async () => {
-              setSaveError(null);
-              try {
-                await onSave(draft);
-                setSaved(true);
-              } catch (e) {
-                setSaveError(errorMessage(e));
-              }
-            }}
-            className="inline-flex items-center gap-1.5 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
-          >
-            <SaveIcon />
-            {isSaving ? "Saving…" : "Save Configuration"}
-          </button>
-        </div>
-      </div>
     </section>
   );
 }
@@ -871,31 +550,3 @@ function ToolGateSection() {
     </section>
   );
 }
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-function roleBorder(name: string): string {
-  switch (name) {
-    case "brian":
-      return "border-primary/60";
-    case "rain":
-      return "border-outline-variant";
-    default:
-      return "border-outline-variant";
-  }
-}
-
-function agentIcon(name: string): ReactElement {
-  switch (name) {
-    case "brian":
-      return <WrenchIcon size={18} className="text-primary" />;
-    case "rain":
-      return <EyeIcon size={18} className="text-on-surface-variant" />;
-    default:
-      return <GearIcon size={18} className="text-on-surface-variant" />;
-  }
-}
-
-
