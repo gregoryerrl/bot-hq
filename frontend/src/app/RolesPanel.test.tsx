@@ -54,6 +54,17 @@ const MODELS: ModelView[] = [
   },
 ];
 
+/**
+ * `builtin: false` is not a choice — it is the only value the database can
+ * hold. Migration 0048 set the column to 0 on every row, `create_role`
+ * hardcodes 0 and `update_role` never writes it. The fixture used to default it
+ * to `true`, which is why the panel could branch on it wrongly for every real
+ * role while these tests stayed green: a fixture asserting a state the schema
+ * can no longer produce tests nothing.
+ *
+ * `has_builtin_prose` is the real question and is derived in Rust from the
+ * slug, so it defaults to `true` here to match this fixture's `hands`.
+ */
 function role(over: Partial<RoleView> = {}): RoleView {
   return {
     id: 1,
@@ -63,7 +74,8 @@ function role(over: Partial<RoleView> = {}): RoleView {
     capabilities: ["read_channel", "post_channel", "run_bash"],
     participation_mode: "active",
     default_model_id: null,
-    builtin: true,
+    builtin: false,
+    has_builtin_prose: true,
     archived: false,
     ...over,
   };
@@ -75,7 +87,6 @@ const EYES = role({
   display_name: "EYES",
   description_prompt: "You are the eyes.",
   capabilities: ["read_channel", "post_channel"],
-  builtin: true,
 });
 
 /** Wires the three reads the panel makes; `roles` overrides the list. */
@@ -118,11 +129,16 @@ describe("RolesPanel", () => {
     mockBackend();
     renderPanel();
 
-    // Both roles reach the rail, each with its slug and the built-in mark.
+    // Both roles reach the rail, each with its slug.
     expect(await screen.findByText("HANDS")).toBeInTheDocument();
     expect(screen.getByText("EYES")).toBeInTheDocument();
     expect(within(screen.getByRole("list")).getByText("hands")).toBeInTheDocument();
-    expect(screen.getAllByText("built-in")).toHaveLength(2);
+    // No "built-in" chip. It branched on `builtin`, which 0048 made 0 for every
+    // row, so it was dead markup claiming bot-hq ships these roles; the markup
+    // is gone too. This asserts the rendered state, not the deletion — with the
+    // flag false the chip could not appear either way. What keeps the flag
+    // false is `no_role_is_flagged_builtin_after_0048` on the Rust side.
+    expect(screen.queryByText("built-in")).toBeNull();
     // ...and the first is open in the detail pane, prose and all.
     expect(prose()).toHaveValue("You are the hands.");
     expect(mockInvoke).toHaveBeenCalledWith("list_roles", {
@@ -301,10 +317,13 @@ describe("RolesPanel", () => {
     // Clearing the box does NOT give the role a blank instruction: `submit`
     // sends `description_prompt: null` and the spawn path reads NULL as "use
     // the built-in", so emptying it reinstates the shipped prose. Correct
-    // behaviour — it is the "restore defaults" route 0044's schema comment
-    // describes — but it was invisible, so a user clearing the box to silence a
+    // behaviour, but it was invisible, so a user clearing the box to silence a
     // role got the opposite.
-    mockBackend([role({ builtin: true })]);
+    //
+    // `builtin` is deliberately NOT set here. It is false on every real row,
+    // and this arm must still be reached — that is the whole regression: the
+    // panel branched on `builtin` and sent HANDS down the "no instruction" arm.
+    mockBackend([role({ has_builtin_prose: true })]);
     renderPanel();
     await screen.findByText("HANDS");
 
@@ -314,10 +333,12 @@ describe("RolesPanel", () => {
     fireEvent.change(prose(), { target: { value: "   \n  " } });
 
     const notice = await screen.findByText(/empty is not a blank instruction/i);
-    // `&rsquo;`, so the apostrophe on screen is U+2019, not U+0027.
+    // `’` in the source, so the apostrophe on screen is U+2019, not U+0027.
     expect(notice).toHaveTextContent(/falls back to bot-hq[’']s built-in text/i);
-    // A seeded row is the "restore defaults" case, and the copy says so.
+    // A role with prose behind it is the "restore defaults" case, and the copy
+    // says so rather than warning about an instruction-less spawn.
     expect(notice).toHaveTextContent(/restore the default/i);
+    expect(notice).not.toHaveTextContent(/no instruction of its own/i);
 
     // And the save really does send `null`, so the notice is describing what
     // happens rather than a second, separate rule.
@@ -330,19 +351,26 @@ describe("RolesPanel", () => {
     );
   });
 
-  it("does not promise a built-in for a role bot-hq never seeded", async () => {
-    // `role_for` only knows the seeded slugs; anything else falls back to an
-    // empty string and the section is skipped. Telling the author of a new role
-    // that clearing the box "restores the default" would be a promise with
-    // nothing behind it.
-    mockBackend([role({ id: 5, slug: "auditor", display_name: "Auditor", builtin: false })]);
+  it("does not promise a built-in for a role bot-hq carries no prose for", async () => {
+    // `role_for` only knows the seeded agent slugs; anything else falls back to
+    // an empty string and the section is skipped. Telling the author of a new
+    // role that clearing the box "restores the default" would be a promise with
+    // nothing behind it. The backend decides this via `has_builtin_prose`.
+    mockBackend([
+      role({
+        id: 5,
+        slug: "auditor",
+        display_name: "Auditor",
+        has_builtin_prose: false,
+      }),
+    ]);
     renderPanel();
     await screen.findByText("Auditor");
 
     fireEvent.change(prose(), { target: { value: "" } });
 
     const notice = await screen.findByText(/empty is not a blank instruction/i);
-    expect(notice).toHaveTextContent(/ships no built-in text for a role you added/i);
+    expect(notice).toHaveTextContent(/no instruction of its own/i);
     expect(notice).not.toHaveTextContent(/restore the default/i);
   });
 
@@ -417,7 +445,7 @@ describe("RolesPanel", () => {
       id: 3,
       slug: "retired",
       display_name: "Retired",
-      builtin: false,
+      has_builtin_prose: false,
       archived: true,
     });
     mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
@@ -455,7 +483,7 @@ describe("RolesPanel", () => {
           display_name: "Code Reviewer",
           description_prompt: "Be terse.",
           capabilities: [],
-          builtin: false,
+          has_builtin_prose: false,
         });
         list.push(created);
         return created;

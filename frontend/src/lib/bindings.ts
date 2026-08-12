@@ -1698,8 +1698,24 @@ default_model_id: string | null;
 /**
  * Seeded by bot-hq. Still editable — the flag exists so the tab can offer
  * "restore defaults", not to lock the row (migration 0044).
+ * 
+ * **Permanently `false` since migration 0048**, which set it to 0 on every
+ * row to state that bot-hq ships no roles; `create_role` hardcodes 0 and
+ * `update_role` never writes it. Nothing may branch on it — use
+ * [`Self::has_builtin_prose`] for "does this role have a default to
+ * restore", which is the question the tab was really asking.
  */
-builtin: boolean; archived: boolean }
+builtin: boolean; 
+/**
+ * True when clearing `description_prompt` restores built-in prose rather
+ * than leaving the role with no instruction of its own.
+ * 
+ * Answered in Rust, not by a slug list in TypeScript, for the same reason
+ * [`CapabilityView`] is: the set of roles the binary carries prose for
+ * lives in `agents::prompts`, and a copy in the frontend drifts silently
+ * the first time it changes.
+ */
+has_builtin_prose: boolean; archived: boolean }
 /**
  * Per-session create-dialog picks beyond the positional args. Bundled into
  * one struct because `create_session` sits at tauri-specta's 10-arg command

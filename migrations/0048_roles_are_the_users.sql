@@ -11,12 +11,26 @@
 -- 1. `builtin = 0`. 0044 seeded both rows with `builtin = 1`, so the product
 --    claimed to own them. Verified 2026-08-12 by grepping every read of the
 --    column: it reaches `Role.builtin` (storage/participants.rs:131) →
---    `RoleView.builtin` (tauri_cmd/roles.rs:79) → exactly two display surfaces
---    in `frontend/src/app/RolesPanel.tsx` — the "built-in" chip in the list
---    rail (:213) and the " · seeded by bot-hq, and fully editable" suffix in
---    the detail header (:419). Nothing in Rust branches on it: `create_role`
---    hardcodes 0 and `update_role` never writes it. So flipping it changes two
---    strings and no behaviour.
+--    `RoleView.builtin` (tauri_cmd/roles.rs:79) → `RolesPanel.tsx`. Nothing in
+--    Rust branches on it: `create_role` hardcodes 0 and `update_role` never
+--    writes it, so after this statement the flag is false for every row,
+--    permanently.
+--
+--    CORRECTED 2026-08-12: that grep found TWO display surfaces and there were
+--    THREE. The third was added the same day on a parallel branch (`cd2e83b`)
+--    and was not a badge — it chose which half of a warning to show when the
+--    user clears a role's instruction, and with `builtin` false it always chose
+--    "bot-hq ships no built-in text for a role you added, so this one would
+--    join a session with no instruction of its own". For `hands`/`eyes` the
+--    opposite is true: `read_system_prompt` falls back to `role_for(<agent>)`
+--    and reinstates the full constant. Neither branch could see the other.
+--
+--    Fixed by asking the honest question instead: `RoleView.has_builtin_prose`,
+--    computed from `agents::prompts::builtin_prose_for_role`. The two real
+--    badges (the rail chip and the " · seeded by bot-hq" suffix) were dead once
+--    this statement ran and have been removed, so nothing reads `builtin` now.
+--    "Flipping it changes two strings and no behaviour" was therefore wrong on
+--    both counts at the time it was written.
 --
 --    SCOPE LIMIT, deliberate: this does NOT stop a fresh install from getting
 --    the rows. `ensure_session_roster` resolves the roster through two literal
@@ -44,18 +58,33 @@
 --
 -- 3. Re-seed `roles.description_prompt` for 'eyes'. B7 layer 2
 --    (`agents/capability_prompt.rs`) now GENERATES refusals from the
---    capabilities a participant does NOT hold, so three hand-written refusals
+--    capabilities a participant does NOT hold, so two hand-written refusals
 --    in `RAIN_ROLE` were duplicated prose — exactly what rc3 D3 exists to
 --    prevent. They have left `src/agents/prompts.rs`; each one's replacement
 --    is named in that file's module header table. Everything layer 2 does not
 --    generate STAYED in the constant.
+--
+--    CORRECTED IN PLACE, 2026-08-12: this file first removed a THIRD refusal,
+--    the `Edit`/`Write`/`NotebookEdit` bullet, because `EditFiles`'s generated
+--    denial named all three tools. A branch authored 92 seconds later removed
+--    every claude-code tool name from layer 2 — rightly: a `Capability` is
+--    runtime-independent, and `Edit`/`Write` are claude-code spellings bot-hq's
+--    native loop does not implement. Neither branch could see the other, and
+--    the merge left EYES refused three tools nothing in her briefing named
+--    (caught by `core::session::tests::role_deny_prose_removed_from_the_
+--    constant_is_regenerated_by_layer_2`). The bullet is back in `RAIN_ROLE`
+--    and back in the seed below. Correcting this file rather than adding 0049
+--    is right because 0048 has never been applied anywhere — verified against
+--    `_sqlx_migrations`, whose MAX(version) is 45 — so there is no checksum to
+--    invalidate and no deployed row to migrate off.
 --
 --    'hands' is NOT re-seeded: `BRIAN_ROLE` is unchanged, still 10291 bytes,
 --    the count 0046 recorded.
 --
 --    THE TEXT BELOW IS VERBATIM `RAIN_ROLE`, NOT A REWRITE — dumped by rustc
 --    from the resolved literal, as 0046 was. Byte count measured 2026-08-12:
---    13411 (was 13976).
+--    13466 (was 13976; 13411 before the correction above put the 55-byte
+--    file-write bullet back).
 --
 --    WHY THE `description_prompt = '<the 0046 text>'` GUARD rather than an
 --    unconditional SET: 0046 is UNAPPLIED on the authoring machine, so 0046
@@ -117,6 +146,7 @@ Tools you may use:
 
 Tools that are Brian''s, NOT yours — they MUTATE state:
 
+- **`Edit`, `Write`, `NotebookEdit`** — file writes.
 - **`Bash` mutations** — `git checkout`, `git commit`, `git push`, `git merge`, `git rebase`, `git reset`, `git restore`, `git stash`, `git tag`, `git add`, `gh pr create`, `gh pr merge`, `gh issue close`, `gh issue create`, `rm`, `mv`, `cp` (except read-only diffs), `mkdir`, `chmod`, `npm install`, `composer install`, `composer require`, `php artisan migrate`/`db:seed`/anything that writes, `psql -c "INSERT/UPDATE/DELETE/ALTER/..."`, running test suites (they change DB state — Brian runs).
 - **Browser-automation mutators** — `click`, `fill`, `navigate_page`, `type_text`, etc.
 - **DB writes** — any `psql` / Eloquent / artisan call that touches DB rows.
