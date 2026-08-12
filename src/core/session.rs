@@ -1284,7 +1284,6 @@ async fn spawn_agent_for(
     session_ultracode: Option<bool>,
     capabilities: crate::agents::ResolvedCapabilities,
 ) -> Result<AgentHandle> {
-    let native = config.native;
     // The assembled prompt is multi-KB. Hand it to claude-code via a file
     // (`--append-system-prompt-file`) rather than an inline arg so the command
     // line stays under Windows' 32,767-char `CreateProcessW` limit. Co-located
@@ -1322,57 +1321,18 @@ async fn spawn_agent_for(
         session_ultracode,
         capabilities,
     };
-    match resolve_agent_kind(agent_name, native) {
-        AgentKind::Native => {
-            info!(agent = agent_name, "spawning via the native agent loop");
-            crate::agents::native::spawn_native_agent(spawn_cfg).await
-        }
-        AgentKind::ClaudeCode => {
-            if native {
-                warn!(
-                    agent = agent_name,
-                    "model is flagged native but HANDS requires claude-code; spawning the CLI instead"
-                );
-            }
-            // Supervised: a transient upstream API error (e.g. 529 Overloaded)
-            // auto-resumes the agent with capped backoff instead of stranding
-            // the session.
-            spawn_supervised_agent(spawn_cfg, RetryPolicy::default()).await
-        }
-    }
-}
-
-/// Which agent implementation backs a spawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentKind {
-    ClaudeCode,
-    Native,
-}
-
-/// Pick the implementation for `agent_name` given its model's `native` flag.
-///
-/// `AgentHandle` is a pure channel struct, so nothing downstream — the
-/// supervisor, the duo pump, the router, the policy layer, the UI — can tell
-/// which one it got. The only thing that has to be right is this choice.
-///
-/// **v1 is EYES-only, and HANDS is hard-guarded rather than merely
-/// discouraged.** Brian's subscription binds server-side to claude-code, so a
-/// native loop would have no valid credential; he also depends on the CLI's
-/// skills, plugins and full built-in tool surface, none of which the native path
-/// implements. A `native` model assigned to Brian is therefore a
-/// misconfiguration — fall back and say so rather than fail the spawn.
-///
-/// Asks [`AgentRole`] rather than testing `!= "brian"`. The deny-list read the
-/// wrong way round: an unrecognised agent name satisfied it and was put on the
-/// native loop. An unknown name now has no role and stays on the CLI.
-pub(crate) fn resolve_agent_kind(agent_name: &str, native: bool) -> AgentKind {
-    let may_run_native = crate::agents::AgentRole::for_agent(agent_name)
-        .is_some_and(|r| r.may_run_native());
-    if native && may_run_native {
-        AgentKind::Native
-    } else {
-        AgentKind::ClaudeCode
-    }
+    // Supervised: a transient upstream API error (e.g. 529 Overloaded)
+    // auto-resumes the agent with capped backoff instead of stranding the
+    // session.
+    //
+    // **The claude CLI is the only connector (rc3 D9).** This used to branch on
+    // the model's `native` flag and hand EYES to a second, in-process Rust loop.
+    // That runtime is deleted, so every participant — whatever model row it
+    // carries — spawns the same subprocess. A model whose gateway does not speak
+    // the Anthropic Messages API now simply fails here rather than being routed
+    // somewhere else; `validate_model`'s pre-flight is what surfaces that at
+    // configure time.
+    spawn_supervised_agent(spawn_cfg, RetryPolicy::default()).await
 }
 
 /// Decide which user MCP servers to expose to an agent at spawn time.
@@ -1716,9 +1676,6 @@ fn default_agent_config(name: &str) -> AgentConfig {
         base_url: None,
         auth_token: None,
         updated_at: String::new(),
-        // Ambient Anthropic auth is a claude-code path; the native loop needs an
-        // explicit credential this tier does not have.
-        native: false,
         context_window: None,
     }
 }
@@ -1742,7 +1699,6 @@ pub(crate) async fn resolve_spawn_config(
                 base_url: m.base_url,
                 auth_token: m.auth_token,
                 updated_at: m.updated_at,
-                native: m.native,
                 context_window: m.context_window,
             };
         }
@@ -1764,11 +1720,6 @@ pub(crate) async fn resolve_spawn_config(
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    #[test]
-    fn eyes_takes_the_native_loop_when_its_model_opts_in() {
-        assert_eq!(resolve_agent_kind("rain", true), AgentKind::Native);
-    }
 
     /// A throwaway handle — `AgentHandle` is a pure channel struct, so the
     /// receivers are dropped and only the identity/order matters here.
@@ -2049,65 +2000,40 @@ mod tests {
         assert_eq!(agents[1].turn_position, i64::MAX);
     }
 
-    #[test]
-    fn hands_never_takes_the_native_loop_even_when_flagged() {
-        // Brian's subscription binds server-side to claude-code, so a native
-        // loop has no valid credential. Fall back, don't fail the spawn.
-        assert_eq!(resolve_agent_kind("brian", true), AgentKind::ClaudeCode);
-    }
-
-    #[test]
-    fn an_unflagged_model_stays_on_claude_code() {
-        assert_eq!(resolve_agent_kind("rain", false), AgentKind::ClaudeCode);
-        assert_eq!(resolve_agent_kind("brian", false), AgentKind::ClaudeCode);
-    }
-
-    #[test]
-    fn an_unrecognised_agent_never_reaches_the_native_loop() {
-        // The old check was `native && agent_name != "brian"` — a deny-list, so
-        // any name that wasn't Brian's satisfied it. Asking for a ROLE fails
-        // closed instead.
-        for name in ["emma", "", "Rain", "root"] {
-            assert_eq!(
-                resolve_agent_kind(name, true),
-                AgentKind::ClaudeCode,
-                "{name} was put on the native loop"
-            );
-        }
-        // …and the agent that IS allowed still is.
-        assert_eq!(resolve_agent_kind("rain", true), AgentKind::Native);
-    }
-
+    /// The fallback path, minus the runtime question rc3 D9 deleted.
+    ///
+    /// `dispatch_session` ("Maintain CL"), the plugin proxy and any driver
+    /// `create_session` without model ids all leave `*_model_id` NULL ON PURPOSE,
+    /// so this fallback is the ONLY thing that carries the assigned model's
+    /// gateway and credential to the spawner. It used to carry `native` too;
+    /// what is left to prove is that the row's own fields still arrive.
     #[tokio::test]
-    async fn the_agent_default_can_carry_native_when_no_model_id_is_given() {
-        // The finding-5/6 regression. `dispatch_session` ("Maintain CL"), the
-        // plugin proxy and any driver `create_session` without model ids all leave
-        // `*_model_id` NULL ON PURPOSE, so this fallback is what decides their
-        // runtime. Before 0038 it could only ever answer `false`, which made a
-        // native model assigned on the Agents tab silently spawn claude-code.
+    async fn the_agent_default_reaches_the_spawner_when_no_model_id_is_given() {
         let s = Storage::memory().await.unwrap();
         let mut cfg = s.get_agent_config("rain").await.unwrap().unwrap();
-        cfg.native = true;
-        cfg.context_window = Some(1_000_000);
+        cfg.model_name = "kimi-k3".into();
+        cfg.base_url = Some("https://gw.example/anthropic".into());
+        cfg.auth_token = Some("tok-from-the-agent-row".into());
         s.upsert_agent_config(&cfg).await.unwrap();
 
         let resolved = resolve_spawn_config(&s, "rain", None).await;
-        assert!(resolved.native, "the agent default must reach the spawner");
-        assert_eq!(resolved.context_window, Some(1_000_000));
-        // …and the choice must actually reach the spawn branch.
+        assert_eq!(resolved.model_name, "kimi-k3");
         assert_eq!(
-            resolve_agent_kind("rain", resolved.native),
-            AgentKind::Native
+            resolved.base_url.as_deref(),
+            Some("https://gw.example/anthropic"),
+            "the agent default's gateway must reach the spawner"
         );
+        assert_eq!(resolved.auth_token.as_deref(), Some("tok-from-the-agent-row"));
     }
 
     #[tokio::test]
     async fn an_explicit_model_id_still_wins_over_the_agent_default() {
-        // The fallback gaining a native flag must not shadow an explicit choice:
-        // picking a CLI model in the create dialog has to beat a native default.
+        // Picking a model in the create dialog has to beat whatever the per-agent
+        // row says — every field, not just the name.
         let s = Storage::memory().await.unwrap();
         let mut cfg = s.get_agent_config("rain").await.unwrap().unwrap();
-        cfg.native = true;
+        cfg.model_name = "from-the-agent-row".into();
+        cfg.auth_token = Some("agent-row-token".into());
         s.upsert_agent_config(&cfg).await.unwrap();
 
         s.upsert_model(&crate::storage::Model {
@@ -2119,15 +2045,18 @@ mod tests {
             auth_token: Some("tok".into()),
             created_at: String::new(),
             updated_at: String::new(),
-            native: false,
             context_window: None,
         })
         .await
         .unwrap();
 
         let resolved = resolve_spawn_config(&s, "rain", Some("m-cli")).await;
-        assert!(!resolved.native, "the explicit model must win");
         assert_eq!(resolved.model_name, "claude-opus-5");
+        assert_eq!(
+            resolved.auth_token.as_deref(),
+            Some("tok"),
+            "the explicit model must win"
+        );
     }
 
     #[tokio::test]
@@ -2533,13 +2462,14 @@ mod tests {
     /// **This test has already earned its keep.** 0048 removed a fourth line,
     /// the `Edit`/`Write`/`NotebookEdit` bullet, when `EditFiles`'s denial still
     /// named all three. A branch authored 92 seconds later took every
-    /// claude-code tool name out of layer 2 — correctly: a `Capability` is
-    /// runtime-independent and `Edit` is a claude-code spelling the native loop
-    /// does not implement. Neither branch could see the other, and the merge
-    /// left EYES refused a tool nothing in her briefing named. This test failed
-    /// on `main` and the bullet went back into the constant, which is why it is
-    /// no longer in the table below. The remaining entries name MCP tools, whose
-    /// spelling does not vary by runtime, so layer 2 can keep naming them.
+    /// claude-code tool name out of layer 2 — correctly, though for a reason rc3
+    /// D9 has since retired (a `Capability` is runtime-independent and `Edit` was
+    /// a spelling the second runtime did not implement). Neither branch could see
+    /// the other, and the merge left EYES refused a tool nothing in her briefing
+    /// named. This test failed on `main` and the bullet went back into the
+    /// constant, which is why it is no longer in the table below. The remaining
+    /// entries name MCP tools, which bot-hq itself defines, so layer 2 keeps
+    /// naming them.
     ///
     /// It composes through `ensure_session_roster` → `resolve_roster_facts` →
     /// `read_system_prompt`, i.e. the real spawn path, because the claim is that
@@ -2645,14 +2575,18 @@ mod tests {
         // names a tool is fine in general and `RunTerminal`'s does, which is why
         // it is still in the table above. What is not fine is BOTH sources
         // naming the same three, because then they drift.
+        //
+        // rc3 D9 removed the ORIGINAL reason for this direction (layer 2 must
+        // not promise a tool the native loop lacks) and left the rule standing on
+        // the reason that was always also true: one rule, one editable source.
         let edit_deny = crate::agents::capability_prompt::phrasing(Capability::EditFiles).deny;
         for tool in ["`Edit`", "`Write`", "`NotebookEdit`"] {
             assert!(
                 !edit_deny.contains(tool),
                 "edit_files' denial names {tool} and so does RAIN_ROLE — one rule, two \
                  sources. Layer 2 is the wrong one to hold it: it is rendered from a \
-                 runtime-independent `Capability`, and {tool} is a claude-code spelling \
-                 the native loop does not implement."
+                 `Capability`, which is a bot-hq concept, while {tool} is the CLI's own \
+                 spelling — and `prompts.rs` is where the spellings live."
             );
         }
     }
@@ -2803,26 +2737,36 @@ mod tests {
         assert!(!without.contains("## Capabilities — generated from this session's grants"));
     }
 
-    /// **D6.** The native loop strips claude-code's tool inventory from the
-    /// ASSEMBLED prompt, not from the constant, so the property has to be
-    /// asserted on the assembled prompt. `## Observations only` was inside the
-    /// stripped span and no test noticed.
+    /// **What is left of D6 once the native loop is gone (rc3 D9).**
+    ///
+    /// D6 restored `## Observations only` to the NATIVE EYES prompt: a strip span
+    /// had been swallowing it, so native EYES ran without a rule CLI EYES
+    /// received, and no test noticed. There is no strip and no native prompt
+    /// any more, so that half of D6 is moot — but the rule it was about is not,
+    /// and the lesson (a prompt section can go missing with a green suite)
+    /// applies to the one prompt that is left.
+    ///
+    /// So this is now the assembled-prompt pin: whatever else composes into an
+    /// EYES briefing, these two sections reach the spawned agent. Asserted on the
+    /// COMPOSED prompt rather than on `RAIN_ROLE`, because composition — not the
+    /// constant — is where a section has actually been lost before.
     #[test]
-    fn the_composed_native_eyes_prompt_keeps_observations_only() {
+    fn the_composed_eyes_prompt_carries_observations_only_and_the_tool_inventory() {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
         let composed = read_system_prompt(&paths, "rain", None, None, None, None, None).unwrap();
-        let native = crate::agents::prompts::strip_claude_code_tool_inventory(&composed);
         assert!(
-            native.contains("## Observations only"),
-            "the native EYES prompt lost the observations-only rule"
+            composed.contains("## Observations only"),
+            "the composed EYES prompt lost the observations-only rule"
         );
-        assert!(native.contains("a reviewer who guesses is worse than no reviewer"));
-        // The strip still does its actual job on the composed prompt.
+        assert!(composed.contains("a reviewer who guesses is worse than no reviewer"));
+        // The claude-code tool inventory is now unconditionally part of the
+        // briefing — it used to be removed for the second runtime, and there is
+        // no second runtime.
         assert!(
-            !native.contains("**Read-only file tools**"),
-            "the claude-code tool inventory survived into the native prompt"
+            composed.contains("**Read-only file tools**"),
+            "the composed EYES prompt lost the tool inventory"
         );
     }
 

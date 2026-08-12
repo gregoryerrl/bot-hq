@@ -9,6 +9,112 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-12 — rc3 D9: the claude CLI is the only connector; the native loop is deleted
+
+The user: *"I actually want to commit using the claude cli as the model
+connector, defer the native loop/connector as a plugin I'll build in the future.
+The reason is uniformity."* Chosen over dormant-code and feature-flag options
+because a second runtime nobody builds still costs every reviewer a re-read and
+every refactor a second case.
+
+**Git history is the archive.** The future plugin starts from
+`git show c7bba28:src/agents/native/`.
+
+**What came out.** `src/agents/native/` (6,290 lines, 9 modules), the `native`
+spawn branch in `core::session::spawn_agent_for` with `AgentKind` /
+`resolve_agent_kind`, the native pre-flight in `tauri_cmd::docs`, the
+`.local/native-accounting.jsonl` and `.local/native-history/` writers with their
+session-close clear and startup orphan sweep, `tests/native_mcp_test.rs`, and
+`examples/refusal_probe.rs`.
+
+**`src/agents/roles.rs` went too, which the brief did not ask for.** After
+removing `may_run_native`, `tool_policy` (returns a native `ToolPolicy`) and
+`command_policy` (returns a native `CommandPolicy`), what was left — the
+`AgentRole` enum, `for_agent` and `NAMES` — had **zero callers**: its three
+consumers were the native spawn branch, the native-history sweep and one test
+premise, all deleted. Its own module doc lists four motivating bugs and all four
+are native. Leaving it would be the dormant code D9 exists to remove.
+
+**`models.native` is now UNREAD, and the column stays.** The user is starting the
+database over, so an unused column costs nothing and dropping it needs a
+migration this phase must not write. `MODEL_COLUMNS` and `AGENT_CONFIG_COLUMNS`
+no longer project it, the `Model` / `AgentConfig` structs no longer carry it, and
+an upsert leaves it at its `NOT NULL DEFAULT 0`. Same for `agent_configs.native`
+(0038). **`context_window` (0037/0038) turns out to be unread too** — its only
+consumer was the native loop's own accounting; on claude-code the meter comes
+from the CLI's per-turn `contextWindow` report. It is still round-tripped through
+the Models tab so an edit does not destroy a saved value, and now says so.
+
+**Two saved models become unspawnable, and the UI says where it can.**
+`deepseek-v4-pro` and `moonshotai/kimi-k3` carried `native = 1`. Nothing
+distinguishes them now, so the honest move is not to guess which gateways work —
+it is to say what every model is subject to and point at the check:
+
+- The **New Session dialog** names it beside the model picker: every model spawns
+  through the claude CLI, so its endpoint must speak the Anthropic Messages API;
+  use **Test**. Shown only when there are models to pick, so it cannot contradict
+  the empty-registry hint. Two `Dashboard.test.tsx` tests hold both arms.
+- The **Models panel** replaces the "Native loop" checkbox with the same
+  statement, and its context-window help now says the field is unread rather than
+  "used only by the native loop".
+- **`validate_model` is the check, and it now tests the real runtime.** It used
+  to fork on `native` and ping the gateway over HTTP; with one connector, `claude
+  -p` through the model's own env IS what will spawn. That made
+  `headless_claude_cmd` load-bearing and it was untested — two new tests assert
+  the built command carries the model's own gateway and credential, and that a
+  model with neither is given neither (so first-party ambient auth still works).
+
+**D6 is retired, and the rule it was about is pinned instead.** D6 restored
+`## Observations only` to the NATIVE EYES prompt after a strip span had been
+swallowing it. `strip_claude_code_tool_inventory`, `RAIN_TOOLS_CLI`,
+`RAIN_TOOLS_END`, `NATIVE_TOOL_ADDENDUM` and the six tests about them are gone —
+but three of those tests were the only guard on text CLI EYES still receives, so
+the guards moved rather than going with them:
+
+| was pinned by | now pinned by |
+|---|---|
+| `the_native_prompt_keeps_the_observations_only_rule` | `prompts::tests::rain_carries_the_observations_only_rule` (on the constant) + `core::session::tests::the_composed_eyes_prompt_carries_observations_only_and_the_tool_inventory` (on the composed prompt) |
+| `RAIN_TOOLS_END` as a strip boundary | `"Tools that are Brian's, NOT yours"` added to `the_surviving_deny_list_is_exactly_what_layer_2_cannot_generate` |
+| `the_native_prompt_keeps_the_mutation_deny_list` | already covered by that same list |
+
+**No prompt bytes changed.** `BRIAN_ROLE`, `RAIN_ROLE` and every layer-2 phrasing
+are byte-identical — verified by diffing the non-comment lines of `prompts.rs`
+and `capability_prompt.rs`. What changed is only which tests hold them and why.
+
+**Layer 2 still names no claude-code tool, deliberately.** D9's brief permitted
+restoring concrete names now that the "a promise the native loop cannot keep"
+argument is dead. It was NOT restored: `prompts.rs` names `Edit`/`Write`/
+`NotebookEdit` and layer 2 does not, and that split is what a merge broke
+yesterday — one branch removed the names from the constant while another removed
+them from layer 2, and the result was an EYES briefing refusing three tools
+nothing named. Naming them in both places is one rule with two editable sources,
+which is the drift D3 exists to prevent. `no_permission_line_names_a_claude_code
+_tool` keeps the rule and loses only its dead premise (it asserted
+`AgentRole::Eyes.may_run_native()`).
+
+**`AgentEvent::Error` now has no emitter — the handler stays anyway.** The
+native loop was its only producer: it routed API errors, model refusals, the
+max-tool-cycle cap and the context-ceiling stop through that variant. The
+`core::duo` handler that persists it is kept, and now says so out loud, because
+it is the rendering path a future connector inherits and because losing it is
+silent — before it persisted, every agent failure rendered in the UI as an empty
+turn and the text lived only as long as the launching terminal's scrollback. The
+no-buffering decision beside it was justified by a property of that emitter
+("every native error is followed by an errored `TurnComplete`"); restated as
+what it always was, since nothing constrains a new emitter to pair them.
+**Flagged for review** — deleting the variant instead is a defensible call, and
+one for the person who owns the connector plugin.
+
+**Tests: 1274 → 1094 in Rust** (lib 1208 → 1034; `native_mcp_test.rs`'s 5 gone;
+`storage_test` 14 → 13), **222 → 224 in the frontend**. The drop is the native
+modules' own coverage, which is correct — every test deleted was about code that
+no longer exists. Four tests were narrowed rather than deleted (both storage
+round-trips, the `AgentConfigView` round-trip, the external-MCP `list_models`
+payload), because each also guarded a hand-maintained column/bind sequence that
+D9 shortened by one — a shift that would otherwise ship silently.
+
+---
+
 ## 2026-08-12 — closing the review findings on the round cap, layer 2 and the Roles tab
 
 Seven non-blocking findings from two adversarial reviews of the merges below.

@@ -178,25 +178,6 @@ impl AppState {
     pub async fn new(paths: Paths, storage: Storage, server: SignalingServer) -> Self {
         let bridge = Arc::clone(&server.bridge);
         let addr = server.local_addr;
-        // Sweep native conversations orphaned by a force-quit or a session
-        // deleted without a clean close — `close_session` clears its own, but
-        // nothing else ever did, so the directory accumulated one full
-        // transcript per unclean end. Skipped entirely (never fail-open into
-        // deleting live histories) if the session list can't be read.
-        match storage.list_active_sessions().await {
-            Ok(sessions) => {
-                let keep: std::collections::HashSet<String> =
-                    sessions.into_iter().map(|s| s.id).collect();
-                let removed =
-                    crate::agents::native::history::sweep_orphans(&paths.data_dir, &keep);
-                if removed > 0 {
-                    tracing::info!(removed, "swept orphaned native-history conversations");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(?e, "could not list sessions; skipping native-history sweep")
-            }
-        }
         Self {
             paths,
             storage,
@@ -218,11 +199,9 @@ impl AppState {
     ///
     /// `brian_model_id` / `rain_model_id` are saved-model ids; `None` falls back
     /// to the per-agent config, which is the historical behaviour. Pass them when
-    /// the caller wants a SPECIFIC model for this session; since 0038 the
-    /// per-agent fallback carries `native` / `context_window` itself, so omitting
-    /// them still reaches the native loop whenever the Agents tab assigned a
-    /// native model. Solo/duo still comes from the user's `rain_disabled_default`
-    /// setting; there is no create dialog here.
+    /// the caller wants a SPECIFIC model for this session. Solo/duo still comes
+    /// from the user's `rain_disabled_default` setting; there is no create dialog
+    /// here.
     pub async fn open_session(
         &self,
         title: impl Into<String>,
@@ -608,18 +587,6 @@ impl AppState {
         // Drop the bridge's in-memory per-session state (project map + awaiting
         // flag) so closed sessions don't leak map entries for the process life.
         self.bridge.unregister_session(id).await;
-        // Drop any persisted native-agent conversations. These exist so a native
-        // agent survives an app restart (a CLI agent comes back via `--resume`),
-        // which is meaningless once the session is closed — and without this the
-        // directory accumulates one file per native session forever, each holding
-        // the full transcript.
-        for agent in crate::agents::AgentRole::NAMES {
-            crate::agents::native::history::clear(&crate::agents::native::history::history_path(
-                &self.paths.data_dir,
-                id,
-                agent,
-            ));
-        }
         // Drop any queued post-cancel reconciliation flag (a session cancelled
         // then closed without a follow-up message would otherwise linger).
         self.pending_reconcile.lock().await.remove(id);
@@ -986,9 +953,8 @@ impl AppState {
     /// reached idle gets force-killed as the user asked.
     ///
     /// This is a SAFETY NET against any agent that doesn't honor a
-    /// `control_request` in time (a native-loop model, a future tool that blocks
-    /// on stdin, a dropped interrupt), NOT a fix for a confirmed claude-code
-    /// behavior. An earlier version of this comment asserted that claude-code
+    /// `control_request` in time (a future tool that blocks on stdin, a dropped
+    /// interrupt), NOT a fix for a confirmed claude-code behavior. An earlier version of this comment asserted that claude-code
     /// cannot see interrupts while blocked on a synchronous Bash call; a live
     /// test on 2026-07-29 disproved that — it aborted a running `cargo build`
     /// ~2s after Stop and the process survived (PID unchanged), i.e.

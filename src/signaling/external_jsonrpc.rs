@@ -101,12 +101,12 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "list_models",
-            description: "List saved models from the Models registry. Returns id, display_name, provider, model_name, base_url, native, context_window and updated_at for each. Use this to obtain the `brian_model_id` / `rain_model_id` values `create_session` accepts — they are ids from here, not model names. `native` tells you whether the model runs on bot-hq's own agent loop instead of a claude-code subprocess. Auth tokens are redacted.",
+            description: "List saved models from the Models registry. Returns id, display_name, provider, model_name, base_url, context_window and updated_at for each. Use this to obtain the `brian_model_id` / `rain_model_id` values `create_session` accepts — they are ids from here, not model names. Every model spawns through the claude CLI. Auth tokens are redacted.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDescriptor {
             name: "create_session",
-            description: "Open a new bot-hq session. Spawns Brian (HANDS) + Rain (EYES); returns the session id. The call blocks until both agents have spawned (typically 1-3 seconds). `working_repo_path` is optional — if set, the project name is derived from the path's last component and project-specific policy.yaml is resolved. `brian_model_id` / `rain_model_id` are saved-model ids from `list_models`; omit them to fall back to each agent's stored config, which since migration 0038 carries the `native` flag too — so an agent assigned a native model on the Agents tab reaches the native loop with or without an id here. Pass them when THIS session needs a specific model.",
+            description: "Open a new bot-hq session. Spawns Brian (HANDS) + Rain (EYES); returns the session id. The call blocks until both agents have spawned (typically 1-3 seconds). `working_repo_path` is optional — if set, the project name is derived from the path's last component and project-specific policy.yaml is resolved. `brian_model_id` / `rain_model_id` are saved-model ids from `list_models`; omit them to fall back to each agent's stored config. Pass them when THIS session needs a specific model.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -529,7 +529,6 @@ async fn call_external_tool(
                         // driver every gateway credential would be a worse bug
                         // than the discoverability gap it closes.
                         "auth_token": redact_auth_token(&m.auth_token),
-                        "native": m.native,
                         "context_window": m.context_window,
                         "updated_at": m.updated_at,
                     })
@@ -552,11 +551,6 @@ async fn call_external_tool(
                         "model_name": c.model_name,
                         "base_url": c.base_url,
                         "auth_token": redact_auth_token(&c.auth_token),
-                        // Since 0038 these decide the runtime whenever a session
-                        // carries no model id — which is every session the driver
-                        // opens without naming one. Without them a driver cannot
-                        // see what it is about to get.
-                        "native": c.native,
                         "context_window": c.context_window,
                         "updated_at": c.updated_at,
                     })
@@ -585,9 +579,6 @@ async fn call_external_tool(
                     base_url: None,
                     auth_token: None,
                     updated_at: String::new(),
-                    // `agent_configs` has no native column — the flag is
-                    // per-saved-model only.
-                    native: false,
                     context_window: None,
                 });
             let provider = args
@@ -611,9 +602,8 @@ async fn call_external_tool(
                 base_url,
                 auth_token,
                 updated_at: String::new(), // upsert sets datetime('now')
-                // Not settable here: the native flag and the context window
-                // live on saved `models`, not the per-agent fallback config.
-                native: false,
+                // Not settable here: the context window lives on saved `models`,
+                // not the per-agent fallback config.
                 context_window: None,
             };
             core.storage
@@ -773,9 +763,8 @@ mod tests {
     #[test]
     fn create_session_accepts_per_agent_model_ids() {
         // Without these, a driver-created session leaves brian/rain_model_id NULL
-        // and falls back to `agent_configs` — which has no `native` column, so the
-        // flag resolves false and a native agent can NEVER be spawned
-        // programmatically, whatever the agent config says.
+        // and falls back to `agent_configs` — so a driver could never name the
+        // model a session runs on, whatever the create call said.
         let d = external_tool_descriptors()
             .iter()
             .find(|d| d.name == "create_session")

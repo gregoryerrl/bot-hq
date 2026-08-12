@@ -158,24 +158,22 @@ pub fn phrasing(cap: Capability) -> Phrasing {
             peer: "edits files",
         },
         RunBash => Phrasing {
-            // **Names no TOOL, on purpose.** A `Capability` is runtime-
-            // independent — it is what the session granted — and the two
-            // runtimes spell this one differently: claude-code exposes `Bash`,
-            // bot-hq's native loop exposes `run_command` and implements no
-            // `Bash` at all (`native::agent::NATIVE_TOOL_ADDENDUM`). Naming the
-            // CLI tool here promised native EYES a call it does not have, and
-            // did it inside a section whose preamble declares itself the
-            // authority over the text above it — the same "two contradictory
-            // tool lists" defect `strip_claude_code_tool_inventory` exists to
-            // remove, in a span the strip cannot reach because layer 2 is
-            // appended after it. EYES holds `run_bash` and EYES is the one role
-            // that may run native, so this was reachable, not theoretical.
+            // **Names no TOOL, on purpose.** The original reason was that the
+            // two runtimes spelled this one differently — claude-code exposes
+            // `Bash`, the native loop exposed `run_command` — so naming the CLI
+            // tool here promised one of them a call it did not have.
             //
-            // The refusals lose their tool names for the same reason. That
-            // direction was never the contradiction — `prompts.rs` says so in
-            // as many words, "a PROMISE of a tool that does not exist, not a
-            // refusal of one" — so the wording change there keeps the claim
-            // exactly as strong as it was and only stops it naming a phantom.
+            // rc3 D9 deleted the second runtime, and this wording deliberately
+            // did NOT change with it. The rule now rests on the reason that was
+            // always also true: layer 2 is GENERATED from a `Capability`, which
+            // is a bot-hq concept, while the CLI's tool names are hand-written
+            // into `prompts.rs`. Naming them in both places puts one rule in two
+            // editable sources, which is the drift D3 exists to prevent — and
+            // that is not hypothetical here: a merge in which one branch removed
+            // the names from the constant while another removed them from layer 2
+            // shipped an EYES briefing that refused three tools nothing named.
+            // See `core::session::tests::role_deny_prose_removed_from_the
+            // _constant_is_regenerated_by_layer_2`, which is what caught it.
             //
             // Also deliberately not "run any shell command". `RunBash` is one
             // grant with no read-only variant, while the spawn path can hand a
@@ -417,42 +415,38 @@ mod tests {
     }
 
     /// **No permission line names a claude-code tool.** Layer 2 is generated
-    /// from the capability set, which is runtime-independent; the runtimes are
-    /// not. `Bash`, `Read`, `Edit` and the rest exist on claude-code and do not
-    /// exist on bot-hq's native loop, which spells the same capabilities
-    /// `run_command`, `read_file`, `search_files` and offers no write call at
-    /// all (`native::agent::NATIVE_TOOL_ADDENDUM`).
+    /// from the capability set; the CLI's tool names are hand-written into
+    /// `prompts.rs`. Keeping the two apart is what stops one rule having two
+    /// editable sources.
     ///
-    /// So a grant that names a CLI tool is a PROMISE the native runtime cannot
-    /// keep, made inside a section that declares itself the authority over
-    /// everything above it. That is the same contradiction
-    /// `strip_claude_code_tool_inventory` was written to remove, in a place the
-    /// strip structurally cannot reach: the strip runs over the role prose, and
-    /// layer 2 is appended after it.
+    /// **The original argument was a different one, and rc3 D9 retired it.**
+    /// This rule was written because `Bash`, `Read` and `Edit` did not exist on
+    /// bot-hq's second runtime, so a grant naming one was a promise that runtime
+    /// could not keep — made inside a section that declares itself the authority
+    /// over everything above it. There is one runtime now, so a named tool would
+    /// no longer be a phantom. The rule stays anyway, because the merge that
+    /// removed these names from layer 2 at the same moment another branch removed
+    /// them from `RAIN_ROLE` shipped an EYES briefing that refused three tools no
+    /// layer named. One naming source, and it is the hand-written one.
     ///
-    /// **Grants only.** A refusal that names a tool the runtime lacks is not the
-    /// same defect — `prompts.rs` puts it exactly: *"a PROMISE of a tool that
-    /// does not exist, not a refusal of one"* — and a deny-list that names both
-    /// runtimes' spellings is useful. The asymmetry is the point of the test.
+    /// **Grants only.** A refusal that names a tool is not the same defect —
+    /// `prompts.rs` puts it exactly: *"a PROMISE of a tool that does not exist,
+    /// not a refusal of one"* — and `RunTerminal`'s denial does name its tools.
+    /// The asymmetry is the point of the test.
     #[test]
     fn no_permission_line_names_a_claude_code_tool() {
-        // The reachable case is not hypothetical, and these two assertions are
-        // what keep that true: EYES is the one role allowed on the native loop,
-        // and its seeded grant set includes `run_bash`. If either stops holding,
-        // this test's motivation changed and someone should read it again.
-        assert!(
-            crate::agents::AgentRole::Eyes.may_run_native(),
-            "the native-eligible role changed; re-check what layer 2 promises it"
-        );
+        // The case is reachable rather than theoretical: EYES holds `run_bash`,
+        // so `RunBash`'s grant line is one an agent really receives. If that
+        // stops holding, this test's motivation changed and someone should read
+        // it again.
         assert!(
             CapabilitySet::preset_eyes().contains(Capability::RunBash),
-            "EYES no longer holds run_bash; re-check which grant reaches a native agent"
+            "EYES no longer holds run_bash; re-check which grant this test is about"
         );
 
-        // Every claude-code built-in the native loop does not implement. The
-        // first five are exactly what `strip_claude_code_tool_inventory`
-        // removes from the role prose; the rest are the write tools
-        // `NATIVE_TOOL_ADDENDUM` refuses by name.
+        // The claude-code built-ins named in `RAIN_ROLE`. The first five are the
+        // read surface EYES is granted there; the rest are the write tools that
+        // constant refuses by name.
         const CLI_ONLY: [&str; 11] = [
             "`Bash`",
             "`Read`",
@@ -471,8 +465,8 @@ mod tests {
             for tool in CLI_ONLY {
                 assert!(
                     !grant.contains(tool),
-                    "{}'s permission line promises {tool}, which does not exist on the native \
-                     loop — describe the capability instead: {grant:?}",
+                    "{}'s permission line names {tool}, which `prompts.rs` also names — one \
+                     rule, two editable sources. Describe the capability instead: {grant:?}",
                     cap.slug()
                 );
             }

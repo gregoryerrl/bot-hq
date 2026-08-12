@@ -2,9 +2,14 @@
 
 use super::*;
 
-const MODEL_COLUMNS: &str =
-    "id, display_name, provider, model_name, base_url, auth_token, created_at, updated_at, native, \
-     context_window";
+/// The projection [`Model`] is read through.
+///
+/// `native` is NOT here. The column survives (0036, `NOT NULL DEFAULT 0`) but
+/// rc3 D9 deleted the runtime it selected, so nothing reads or writes it — an
+/// upsert now leaves it at the column default. Dropping it needs a migration
+/// this phase does not write.
+const MODEL_COLUMNS: &str = "id, display_name, provider, model_name, base_url, auth_token, \
+     created_at, updated_at, context_window";
 
 /// Key in `app_settings`: "1" = new sessions default to solo-Brian. The create
 /// dialog reads it to pre-check "Disable Rain"; backend dispatch paths with no
@@ -55,8 +60,8 @@ impl Storage {
         let now = now_utc();
         sqlx::query(
             "INSERT INTO models \
-                (id, display_name, provider, model_name, base_url, auth_token, created_at, updated_at, native, context_window) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                (id, display_name, provider, model_name, base_url, auth_token, created_at, updated_at, context_window) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
                 display_name = excluded.display_name, \
                 provider = excluded.provider, \
@@ -64,7 +69,6 @@ impl Storage {
                 base_url = excluded.base_url, \
                 auth_token = excluded.auth_token, \
                 updated_at = excluded.updated_at, \
-                native = excluded.native, \
                 context_window = excluded.context_window",
         )
         .bind(&m.id)
@@ -75,7 +79,6 @@ impl Storage {
         .bind(&m.auth_token)
         .bind(&now)
         .bind(&now)
-        .bind(m.native)
         .bind(m.context_window)
         .execute(&self.pool)
         .await
@@ -162,7 +165,6 @@ mod tests {
             auth_token: Some("sk-test".into()),
             created_at: String::new(),
             updated_at: String::new(),
-            native: false,
             context_window: None,
         }
     }

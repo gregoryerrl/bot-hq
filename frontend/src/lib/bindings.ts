@@ -1127,15 +1127,9 @@ async checkForUpdate() : Promise<Result<UpdateInfo, AppError>> {
 
 export type AgentConfigView = { agent_name: string; provider: string; model_name: string; base_url: string | null; auth_token: string | null; updated_at: string; 
 /**
- * Carried from the saved model the user assigned. This is the ONLY way a
- * native agent can be reached from any path that doesn't name a model id
- * on the session row — "Maintain CL", the plugin proxy, and a driver
- * `create_session` without ids all resolve through here.
- */
-native: boolean; 
-/**
- * Likewise: the context window the user supplied for the assigned model.
- * `None` = unknown, which keeps the meter a visible gap.
+ * The context window the user supplied for the assigned model. `None` =
+ * unknown. Carried but unread since rc3 D9 — see
+ * [`AgentConfig::context_window`](crate::storage::AgentConfig).
  */
 context_window: number | null }
 /**
@@ -1461,23 +1455,12 @@ projects_with_memory: number; inheritance: Inheritance }
  */
 export type ModelView = { id: string; display_name: string; provider: string; model_name: string; base_url: string | null; auth_token: string | null; created_at: string; updated_at: string; 
 /**
- * Drive this model through bot-hq's native Rust agent loop instead of a
- * claude-code subprocess. EYES-only in v1 — a native-flagged model assigned
- * to HANDS falls back to the CLI with a warning.
- * 
- * No `#[serde(default)]`: this view is built fresh on every call and never
- * read back from stored JSON, so making it optional would only weaken the
- * generated TS type into `boolean | undefined` and hand the checkbox an
- * uncontrolled-input warning.
- */
-native: boolean; 
-/**
  * Context window in tokens, or `null` when unknown.
  * 
- * A window is a per-MODEL fact, so it comes from the user rather than from a
- * provider table — `ProviderProfile` deliberately declares none. Left unset,
- * the meter shows a visible gap and the native loop's high-context notice
- * never fires, which is the documented contract: never a guessed percentage.
+ * **Carried but unread since rc3 D9.** Its only consumer was the native
+ * loop's own accounting; on claude-code the meter comes from the CLI's
+ * `contextWindow` report. Still round-tripped so the saved value is not
+ * silently destroyed by an edit through this view.
  */
 context_window: number | null }
 /**

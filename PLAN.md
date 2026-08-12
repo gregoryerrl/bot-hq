@@ -126,12 +126,15 @@ classification.
 
 ## In flight
 
-The current arc is the **native agent loop** (2026-07-26/27): an agent
-can run on bot-hq's own Rust loop instead of a claude-code subprocess,
-opted into per saved model, EYES-only in v1. It shipped along with the
-audit remediation that followed it — see PROGRESS.md for the arc and
-"Native agent loop — open items" below for what's left, chiefly **B6
-auto-compaction**.
+The current arc is **rc3** — see
+[`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md).
+
+The arc before it was the **native agent loop** (2026-07-26/27): an agent
+could run on bot-hq's own Rust loop instead of a claude-code subprocess,
+opted into per saved model, EYES-only. **rc3 D9 deleted it** (2026-08-12):
+the claude CLI is the only model connector, and the native connector
+returns later as a plugin built from `git show c7bba28:src/agents/native/`.
+See "Native agent loop — CLOSED by rc3 D9" below for what closed with it.
 
 Before that, the arc was duo-reliability + UX: the interrupt redesign
 (stdin `control_request` cancel + `SessionActivity`), the peer-forward
@@ -329,65 +332,39 @@ loading for the icon font.
   reads pass. If any pure-`&&` denial independent of a denied segment remains,
   that's a separate claude-code matcher question — untested (needs a live
   non-Anthropic EYES session to confirm); not a known bot-hq gate bug. HANDS is
-  unaffected (substring Tool Gate + PreToolUse hook). **Moot on the native
-  loop** (2026-07-27): a native EYES has no shell at all — commands are
-  validated against an allow-list and executed as argv, and shell
-  metacharacters are refused outright. This only remains open for a
-  CLI-backed EYES.
+  unaffected (substring Tool Gate + PreToolUse hook). This was once
+  described as moot on the native loop, whose EYES had no shell at all;
+  rc3 D9 deleted that loop, so the CLI case is the only case and this is
+  simply open.
 
 ---
 
-## Native agent loop — open items
+## Native agent loop — CLOSED by rc3 D9 (2026-08-12)
 
-The loop shipped 2026-07-26/27 (see PROGRESS.md). What's left:
+The loop shipped 2026-07-26/27 and was **deleted** on 2026-08-12: the user
+committed to the claude CLI as the only model connector, "for uniformity",
+and will rebuild the native connector as a plugin. `src/agents/native/`
+(6,290 lines), the `models.native` flag's readers, `may_run_native`, the
+native spawn branch and `AgentRole` all came out.
 
-- **B6 — overflow handling (auto-compaction or otherwise).** The largest
-  open item. claude-code auto-compacts silently; the native loop does
-  nothing yet — it reports occupancy every turn, says so once past 85%,
-  and keeps working. Past 100% the gateway decides: DeepSeek truncates
-  rather than erroring, so the agent quietly loses its oldest turns.
+Every open item that lived here — **B6 overflow handling**, the no-native-HANDS
+dependency, `search_files`'s 500-file cap, `user_mcp_servers_for_agent`'s
+placement, and the missing live-run coverage — was a property of that loop and
+is closed with it, not deferred. Two of them are worth carrying forward when
+the plugin is built rather than rediscovering:
 
-  **This is a deliberate interim, decided 2026-07-27.** An earlier
-  version hard-stopped at 85%, which on a 1M window discarded 150K
-  tokens of usable capacity and ended the session for the user rather
-  than by them. The current stance is that losing old context is a real
-  cost but the *user's* to weigh against finishing the work — so bot-hq
-  shows the number and they choose. What replaces this (compaction,
-  summarisation, selective eviction) is open and intended to be designed
-  deliberately rather than defaulted into.
+- **Overflow is still unsolved, just not ours right now.** claude-code
+  auto-compacts silently; whatever replaces it in a connector plugin should be
+  designed against measurement rather than defaulted into. The measurement
+  input was `<data_dir>/.local/native-accounting.jsonl` — kept unrotated for
+  exactly that, and no longer written.
+- **`BRIAN_ROLE` assumes the CLI.** It promises `terminal_exec`, the visible
+  PTY and ordinary `Bash`. A connector that does not implement those makes the
+  prompt wrong with no test failing. That was true of the native loop and will
+  be true of the plugin.
 
-  Design input already exists: `<data_dir>/.local/native-accounting.jsonl`
-  records tokens occupied, conversation length and stop reason for every
-  native turn, append-only and unrotated precisely so the long-horizon
-  growth curve survives. Measure before designing — the question is what
-  to drop and when, and the answer depends on how a real session actually
-  fills.
+Start from `git show c7bba28:src/agents/native/`.
 
-- **No native HANDS.** `AgentRole::Hands.may_run_native()` is `false`:
-  Brian's subscription binds server-side to claude-code, and he depends
-  on skills, plugins and the full built-in tool surface the native path
-  doesn't implement. If that ever changes, `BRIAN_ROLE` in `prompts.rs`
-  becomes wrong (it promises `terminal_exec`, the visible PTY, ordinary
-  `Bash`) with no test failing — the dependency is only recorded here.
-
-- **`search_files` caps at 500 files.** Enumeration asks git, which is
-  the right set, but a repo with more than 500 tracked files still
-  truncates. The cap is *visible* on every outcome now, including "no
-  matches", so it reads as incomplete rather than as absence — but it is
-  not raised.
-
-- **`user_mcp_servers_for_agent` sits outside `AgentRole`.** It is a
-  capability question by the same logic as the four that were collapsed;
-  left alone because the role mapping would be behaviour-identical there
-  and it is on the CLI spawn path.
-
-- **No live-run coverage of the audit fixes.** Every remediation batch
-  was verified at unit level plus real-tree measurement; none of it has
-  been exercised by an actual native session. The project's own history
-  says live runs find what unit tests structurally cannot — three times
-  out of three during the build.
-
----
 
 ## Out of scope
 

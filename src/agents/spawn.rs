@@ -1,11 +1,12 @@
 //! Spawn a `claude-code` subprocess wired up with stream-json IO + the
 //! MCP-signaling server. Returns an `AgentHandle` the core layer drives.
 //!
-//! This module also owns the types **both** agent backends speak —
-//! `AgentHandle`, `AgentEvent`, `AgentHealth`, `ContextUsage`, `RetryPolicy`,
-//! `SpawnConfig` — so `agents::native` builds against them rather than
-//! duplicating a parallel vocabulary. Nothing downstream of `AgentHandle` can
-//! tell a subprocess from the native loop.
+//! This module also owns the vocabulary everything downstream of a spawn
+//! speaks — `AgentHandle`, `AgentEvent`, `AgentHealth`, `ContextUsage`,
+//! `RetryPolicy`, `SpawnConfig`. It was written so a SECOND backend could build
+//! against it rather than duplicate a parallel vocabulary; rc3 D9 deleted that
+//! backend, and the separation stays because it is what made the deletion a
+//! no-op downstream — nothing past `AgentHandle` ever knew which one it had.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -288,7 +289,7 @@ pub struct SpawnConfig {
 ///
 /// A `ParticipantInput` built from a channel of your own is harmless — it
 /// writes to that channel, not to an agent. The only senders that reach a live
-/// subprocess come from [`spawn_agent`] / the native loop.
+/// subprocess come from [`spawn_agent`].
 #[derive(Clone, Debug)]
 pub struct ParticipantInput {
     /// The session whose rows this stdin accepts — see [`deliver`](Self::deliver).
@@ -363,9 +364,9 @@ impl ParticipantInput {
     ///   agent's raw `Sender<OutgoingUserMessage>`, and no public API returns
     ///   one: the field on this type is private, so is `AgentHandle::input_tx`,
     ///   and no function anywhere in the crate has that sender as a return type.
-    ///   The senders that reach a subprocess are created inside [`spawn_agent`],
-    ///   `spawn_supervised_agent` and `agents::native`, so misfiling one stays a
-    ///   build-time obligation on those three — the same obligation
+    ///   The senders that reach a subprocess are created inside [`spawn_agent`]
+    ///   and `spawn_supervised_agent`, so misfiling one stays a build-time
+    ///   obligation on those two — the same obligation
     ///   [`crate::core::sequencer::SequencerDeps::inputs`] carries for its map
     ///   keys.
     ///
@@ -473,18 +474,19 @@ pub struct AgentHandle {
 }
 
 impl AgentHandle {
-    /// Assemble a handle from channels an alternative agent implementation owns.
+    /// Assemble a handle from channels a caller owns, rather than from a spawn.
     ///
-    /// Exists for `agents::native`, which drives a Rust loop instead of a
-    /// subprocess. Nothing downstream distinguishes the two — the handle is a
-    /// pure channel struct — so the native path plugs into `supervise` and the
-    /// duo pump unchanged. `kill_tx` stays private, hence this constructor.
+    /// **Its production caller was the native loop, which rc3 D9 deleted.** What
+    /// still uses it is `core::session`'s test scaffolding, and it stays `pub`
+    /// for the same reason it was written: an alternative agent implementation
+    /// needs a way in, and the handle is a pure channel struct so anything that
+    /// produces one plugs into `supervise` and the duo pump unchanged.
+    /// `kill_tx` stays private, hence this constructor.
     ///
     /// `session_id` is the session this agent belongs to, and it is what
     /// [`ParticipantInput::deliver`] compares a receipt against. It is a
     /// parameter rather than something read off the channels because the
-    /// channels carry no identity — the caller (`agents::native`, which has
-    /// `cfg.session_id`) is the last place that knows.
+    /// channels carry no identity — the caller is the last place that knows.
     pub fn from_parts(
         name: String,
         session_id: impl Into<Arc<str>>,
@@ -1374,7 +1376,6 @@ mod tests {
                 base_url: None,
                 auth_token: Some("sk-test".into()),
                 updated_at: String::new(),
-                native: false,
                 context_window: None,
             },
             system_prompt_path: Path::new("/tmp/bot-hq-test-prompt.txt").to_path_buf(),

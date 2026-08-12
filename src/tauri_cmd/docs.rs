@@ -401,16 +401,13 @@ pub async fn validate_model(
 /// exit or empty output ⇒ failure with the captured detail (the API error
 /// usually lands on stderr — e.g. a 401 for a bad token).
 async fn probe_model(cfg: AgentConfig) -> ValidateResult {
-    // Probe the runtime that will actually run. A native model never spawns
-    // claude-code, so checking `claude -p` tested something unrelated — and
-    // worse, `headless_claude_cmd` passes the token only when non-empty and
-    // otherwise falls back to claude's ambient auth, while `spawn_native_agent`
-    // hard-bails on a missing token and that bail fails the WHOLE duo spawn. So a
-    // token-less native model tested green and then made the session unopenable,
-    // which is the one failure a pre-flight exists to catch.
-    if cfg.native {
-        return probe_native_model(&cfg).await;
-    }
+    // One connector, so one probe (rc3 D9). This used to fork on the model's
+    // `native` flag and ping the gateway over HTTP instead — the fork existed
+    // because a native model never spawned claude-code, so `claude -p` tested
+    // something unrelated. With the native loop deleted, `claude -p` through the
+    // model's own env IS the runtime that will spawn, which is the only property
+    // a pre-flight has to have. A gateway the CLI cannot talk to fails here,
+    // named, at configure time.
     if let Err(e) = crate::agents::spawn::ensure_claude_runnable("claude") {
         return ValidateResult {
             ok: false,
@@ -451,129 +448,9 @@ async fn probe_model(cfg: AgentConfig) -> ValidateResult {
     }
 }
 
-/// Pre-flight a model that is set to the native loop.
-///
-/// Deliberately built from the loop's OWN machinery — `ProviderProfile` for the
-/// endpoint and auth style, `HttpTransport` for the request, `build_request` for
-/// the body — rather than an approximation of it. A probe that reimplements the
-/// request can pass on a configuration the real loop rejects, which is exactly
-/// the bug this replaces.
-async fn probe_native_model(cfg: &AgentConfig) -> ValidateResult {
-    use crate::agents::native::agent::{HttpTransport, MessagesTransport};
-    use crate::agents::native::profile::ProviderProfile;
-    use crate::agents::native::wire::{build_request, RequestSpec};
-
-    // Checked first because it is the condition that used to test green: unlike
-    // claude-code, the native loop has no ambient-auth fallback, so a blank token
-    // is fatal at spawn rather than at first request.
-    let token = cfg.auth_token.as_deref().map(str::trim).unwrap_or_default();
-    if token.is_empty() {
-        return ValidateResult {
-            ok: false,
-            message: "This model is set to the native loop but has no API key. The native \
-                      loop has no ambient-auth fallback (unlike claude-code) — add the key \
-                      above, or untick \"Native loop\"."
-                .into(),
-        };
-    }
-
-    let profile = ProviderProfile::for_provider(&cfg.provider);
-    let url = profile.messages_url(cfg.base_url.as_deref());
-    let transport = match HttpTransport::new(url, profile.auth, Some(token.to_string())) {
-        Ok(t) => t,
-        Err(e) => {
-            return ValidateResult {
-                ok: false,
-                message: format!("Couldn't build the request: {e}"),
-            }
-        }
-    };
-
-    let messages = vec![serde_json::json!({ "role": "user", "content": "Reply with: ok" })];
-    let body = build_request(&RequestSpec {
-        model: &cfg.model_name,
-        // Enough to come back with something; the point is a 2xx, not the text.
-        max_tokens: 16,
-        system: None,
-        tools: &[],
-        messages: &messages,
-    });
-
-    match transport.send(body).await {
-        Ok(_) => ValidateResult {
-            ok: true,
-            message: "Connected — the model responded on the native loop.".into(),
-        },
-        Err(f) => {
-            let detail: String = f.detail.chars().take(300).collect();
-            let status = f
-                .status
-                .map(|s| format!("HTTP {s}: "))
-                .unwrap_or_else(|| "Couldn't reach the endpoint: ".into());
-            ValidateResult {
-                ok: false,
-                message: format!("Check failed: {status}{detail}"),
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn native_cfg(token: Option<&str>) -> AgentConfig {
-        AgentConfig {
-            agent_name: "rain".into(),
-            provider: "deepseek".into(),
-            model_name: "deepseek-v4-pro".into(),
-            base_url: Some("https://api.deepseek.com/anthropic".into()),
-            auth_token: token.map(str::to_string),
-            updated_at: String::new(),
-            native: true,
-            context_window: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn a_native_model_without_a_token_fails_the_probe_and_names_the_fix() {
-        // This is the case that used to test GREEN: `headless_claude_cmd` passes
-        // the token only when non-empty and otherwise falls back to claude's
-        // ambient auth, while `spawn_native_agent` hard-bails on a missing token —
-        // and that bail fails the whole duo spawn. So the pre-flight passed and the
-        // session then would not open.
-        //
-        // No network and no subprocess: the guard fires before either.
-        for token in [None, Some(""), Some("   ")] {
-            let res = probe_model(native_cfg(token)).await;
-            assert!(!res.ok, "a token-less native model must not pass");
-            assert!(
-                res.message.contains("no API key"),
-                "must name the cause; got: {}",
-                res.message
-            );
-            assert!(
-                res.message.contains("Native loop"),
-                "must name the fix; got: {}",
-                res.message
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn a_native_probe_reports_an_unreachable_endpoint_rather_than_passing() {
-        // Nothing is listening. The probe must fail closed — and it must have gone
-        // over HTTP rather than spawning claude, which is what the base_url proves.
-        let mut cfg = native_cfg(Some("tok"));
-        cfg.base_url = Some("http://127.0.0.1:1".into());
-        let res = probe_model(cfg).await;
-        assert!(!res.ok);
-        assert!(
-            res.message.contains("Check failed"),
-            "got: {}",
-            res.message
-        );
-    }
 
     #[tokio::test]
     async fn session_doc_search_empty_when_storage_absent() {
@@ -615,6 +492,91 @@ rename to new";
     #[test]
     fn parse_diff_lines_empty_input_returns_empty() {
         assert!(parse_diff_lines("").is_empty());
+    }
+
+    /// **The pre-flight has to carry the model's OWN gateway and credential**,
+    /// or it tests something other than the model under test.
+    ///
+    /// This became load-bearing with rc3 D9. `probe_model` used to fork: a
+    /// `native` model was pinged over HTTP through the loop's own machinery, and
+    /// only a CLI model reached `claude -p`. The fork is gone, so this one
+    /// command is now the only runtime check any saved model gets — including
+    /// the two rows that carried `native = 1` because of their gateway, which
+    /// nothing distinguishes any more. If the env did not follow the config,
+    /// every model would test green against whatever ambient auth the host has
+    /// and fail at spawn instead, which is the exact failure a pre-flight exists
+    /// to prevent.
+    ///
+    /// Asserts on the built `Command` rather than running it: the subprocess is
+    /// the part that needs a real `claude` and a real network, and the part
+    /// worth pinning is what it would be handed.
+    #[test]
+    fn the_preflight_command_carries_the_models_own_gateway_and_credential() {
+        let cfg = AgentConfig {
+            agent_name: "brian".into(),
+            provider: "deepseek".into(),
+            model_name: "deepseek-v4-pro".into(),
+            base_url: Some("https://api.deepseek.com/anthropic".into()),
+            auth_token: Some("ds-token".into()),
+            updated_at: String::new(),
+            context_window: None,
+        };
+        let cmd = headless_claude_cmd(&cfg, "ping");
+        let env: std::collections::HashMap<String, String> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned()))
+            })
+            .collect();
+
+        assert_eq!(env.get("ANTHROPIC_MODEL").map(String::as_str), Some("deepseek-v4-pro"));
+        assert_eq!(env.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str), Some("ds-token"));
+        // Routed through the same `resolve_anthropic_base_url` the live spawn
+        // uses, so the probe meets the gateway the same way the agent will. The
+        // proxy is not running under test, which is exactly the fall-through
+        // that function documents — so the raw base_url is what lands.
+        assert_eq!(
+            env.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://api.deepseek.com/anthropic")
+        );
+    }
+
+    /// The other half: a model with no explicit credential must NOT have one
+    /// invented for it. `ANTHROPIC_AUTH_TOKEN` unset is what lets a first-party
+    /// Anthropic model fall through to claude-code's ambient auth — the case
+    /// every seeded model row is in.
+    #[test]
+    fn the_preflight_sets_no_token_when_the_model_carries_none() {
+        // A whitespace-only token is deliberately NOT in this list: the filter is
+        // `!is_empty()`, so `"   "` IS passed and the gateway answers 401 — a
+        // legible failure, and not one this test claims otherwise about.
+        for token in [None, Some("")] {
+            let cfg = AgentConfig {
+                agent_name: "brian".into(),
+                provider: "anthropic".into(),
+                model_name: "claude-opus-5".into(),
+                base_url: None,
+                auth_token: token.map(str::to_string),
+                updated_at: String::new(),
+                context_window: None,
+            };
+            let cmd = headless_claude_cmd(&cfg, "ping");
+            let names: Vec<String> = cmd
+                .as_std()
+                .get_envs()
+                .filter(|(_, v)| v.is_some())
+                .map(|(k, _)| k.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                !names.iter().any(|n| n == "ANTHROPIC_AUTH_TOKEN"),
+                "an empty token was passed through as a credential: {names:?}"
+            );
+            assert!(
+                !names.iter().any(|n| n == "ANTHROPIC_BASE_URL"),
+                "a model with no gateway was given one: {names:?}"
+            );
+        }
     }
 
     #[test]

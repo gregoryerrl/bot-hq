@@ -23,7 +23,6 @@ const MODELS: ModelView[] = [
     auth_token: null,
     created_at: "",
     updated_at: "",
-    native: false,
     context_window: null,
   },
 ];
@@ -184,6 +183,34 @@ describe("New session dialog — participants", () => {
     expect(
       screen.getByRole("button", { name: /add participant/i }),
     ).toBeInTheDocument();
+  });
+
+  it("says a picked model runs through the claude CLI, and only when there is one to pick", async () => {
+    // rc3 D9 deleted the second runtime, so the picker can no longer tell a
+    // model the CLI can talk to from one it cannot — `models.native`, which was
+    // that distinction, is unread. Two saved models were flagged `native = 1`
+    // exactly because of their gateway, and they are now offered here like any
+    // other. The dialog must name the constraint where the choice is made
+    // rather than let it arrive as a spawn error.
+    mockBackend();
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    expect(screen.getByText(/spawns through the claude CLI/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Anthropic Messages API/i),
+    ).toBeInTheDocument();
+  });
+
+  it("drops the CLI note when there are no models, so it cannot contradict the empty-registry hint", async () => {
+    mockBackend();
+    const withModels = mockInvoke.getMockImplementation()!;
+    mockInvoke.mockImplementation(async (cmd, ...rest) =>
+      cmd === "list_models" ? [] : withModels(cmd, ...rest),
+    );
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    expect(screen.getByText(/No saved models yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/spawns through the claude CLI/i)).toBeNull();
   });
 
   it("does not offer an on-demand role", async () => {

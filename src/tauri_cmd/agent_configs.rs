@@ -14,13 +14,9 @@ pub struct AgentConfigView {
     pub base_url: Option<String>,
     pub auth_token: Option<String>,
     pub updated_at: String,
-    /// Carried from the saved model the user assigned. This is the ONLY way a
-    /// native agent can be reached from any path that doesn't name a model id
-    /// on the session row — "Maintain CL", the plugin proxy, and a driver
-    /// `create_session` without ids all resolve through here.
-    pub native: bool,
-    /// Likewise: the context window the user supplied for the assigned model.
-    /// `None` = unknown, which keeps the meter a visible gap.
+    /// The context window the user supplied for the assigned model. `None` =
+    /// unknown. Carried but unread since rc3 D9 — see
+    /// [`AgentConfig::context_window`](crate::storage::AgentConfig).
     pub context_window: Option<i64>,
 }
 
@@ -33,7 +29,6 @@ impl From<AgentConfig> for AgentConfigView {
             base_url: c.base_url,
             auth_token: c.auth_token,
             updated_at: c.updated_at,
-            native: c.native,
             context_window: c.context_window,
         }
     }
@@ -48,7 +43,6 @@ impl From<AgentConfigView> for AgentConfig {
             base_url: v.base_url,
             auth_token: v.auth_token,
             updated_at: v.updated_at,
-            native: v.native,
             context_window: v.context_window,
         }
     }
@@ -107,7 +101,6 @@ mod tests {
             base_url: None,
             auth_token: Some("secret".to_string()),
             updated_at: String::new(),
-            native: false,
             context_window: None,
         };
         storage.upsert_agent_config(&cfg).await.unwrap();
@@ -118,12 +111,15 @@ mod tests {
         assert_eq!(view.model_name, "fast-thinker-1");
     }
 
+    /// The view is the ONLY channel between the Agents tab and the saved config,
+    /// so a field missing here is a control the user can set and never persist.
+    ///
+    /// **The `native` half of this test went with rc3 D9** — the flag is gone
+    /// from both structs, so there is nothing left to round-trip. The window
+    /// stays: it is still written, still returned, and still the field an edit
+    /// through this view could silently destroy.
     #[test]
-    fn the_view_round_trips_the_native_flag_and_context_window() {
-        // The view is the ONLY channel between the Agents tab and the saved
-        // config, so a field missing here is a control the user can set and never
-        // persist — which is exactly how a native model assigned to Rain silently
-        // spawned claude-code.
+    fn the_view_round_trips_the_context_window() {
         let cfg = AgentConfig {
             agent_name: "rain".into(),
             provider: "deepseek".into(),
@@ -131,12 +127,10 @@ mod tests {
             base_url: Some("https://api.deepseek.com/anthropic".into()),
             auth_token: Some("tok".into()),
             updated_at: "2026-07-27T00:00:00.000Z".into(),
-            native: true,
             context_window: Some(1_000_000),
         };
         let back: AgentConfig = AgentConfigView::from(cfg.clone()).into();
 
-        assert!(back.native);
         assert_eq!(back.context_window, Some(1_000_000));
         assert_eq!(back.model_name, cfg.model_name);
         assert_eq!(back.auth_token, cfg.auth_token);

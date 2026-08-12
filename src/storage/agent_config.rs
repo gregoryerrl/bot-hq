@@ -4,8 +4,11 @@ use super::*;
 
 /// Full column projection for an `AgentConfig` — shared by every read so they
 /// can't drift (mirrors `sessions.rs::SESSION_COLUMNS`).
+///
+/// `native` is NOT here, for the same reason as `models::MODEL_COLUMNS`: the
+/// 0038 column survives, unread, because rc3 D9 deleted the runtime it chose.
 const AGENT_CONFIG_COLUMNS: &str =
-    "agent_name, provider, model_name, base_url, auth_token, updated_at, native, context_window";
+    "agent_name, provider, model_name, base_url, auth_token, updated_at, context_window";
 
 impl Storage {
     pub async fn get_agent_config(&self, name: &str) -> Result<Option<AgentConfig>> {
@@ -30,15 +33,14 @@ impl Storage {
     pub async fn upsert_agent_config(&self, cfg: &AgentConfig) -> Result<()> {
         sqlx::query(
             "INSERT INTO agent_configs \
-                 (agent_name, provider, model_name, base_url, auth_token, updated_at, native, context_window) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 (agent_name, provider, model_name, base_url, auth_token, updated_at, context_window) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(agent_name) DO UPDATE SET \
                  provider = excluded.provider, \
                  model_name = excluded.model_name, \
                  base_url = excluded.base_url, \
                  auth_token = excluded.auth_token, \
                  updated_at = excluded.updated_at, \
-                 native = excluded.native, \
                  context_window = excluded.context_window",
         )
         .bind(&cfg.agent_name)
@@ -47,7 +49,6 @@ impl Storage {
         .bind(&cfg.base_url)
         .bind(&cfg.auth_token)
         .bind(now_utc())
-        .bind(cfg.native)
         .bind(cfg.context_window)
         .execute(&self.pool)
         .await

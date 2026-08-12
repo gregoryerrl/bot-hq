@@ -18,18 +18,18 @@ session spawns two agents:
 
 - **Brian** (HANDS) — executes: edits, commits, runs bash, calls tools.
 - **Rain** (EYES) — reviews: read-only, adversarial counterpart. HANDS-only
-  signaling MCP tools are gated server-side; how her *write* tools are
-  denied depends on which backend she is running (below).
+  signaling MCP tools are gated server-side.
 
-An agent is backed by **either** a `claude-code` subprocess **or** bot-hq's
-own native Rust agent loop, chosen per saved model. Nothing downstream can
-tell the difference — see "Process model → Two agent backends". Rain's write
-denial differs by backend: on the CLI path it is `--disallowedTools`
-subtraction, which is fail-open (a deny-list cannot anticipate every mutation
-verb — `rm -rf`, `mv`, `chmod`, `npm install` all pass it, and are forbidden
-only by her role prompt); on the native path write tools are absent from the
-advertised tool list *and* refused at execution, and commands run against an
-allow-list with no shell.
+Every agent is backed by a `claude-code` subprocess. Rain's write denial is
+`--disallowedTools` subtraction, which is fail-open: a deny-list cannot
+anticipate every mutation verb — `rm -rf`, `mv`, `chmod`, `npm install` all
+pass it, and are forbidden only by her role prompt.
+
+**There used to be a second backend** — bot-hq's own native Rust agent loop,
+opted into per saved model. rc3 D9 deleted it (2026-08-12): the claude CLI is
+the only model connector, "for uniformity", and the native connector returns
+later as a plugin. Git history is the archive — `git show
+c7bba28:src/agents/native/` is where it starts from.
 
 bot-hq is a two-agent duo (Brian + Rain). A former solo helper agent,
 **Emma**, has been removed from the core (code + data purged); she is
@@ -63,67 +63,37 @@ multi-thread runtime. Tauri owns the OS main thread.
                     │   │   - internal MCP HTTP server    │  │
                     │   │   - external MCP HTTP server    │  │
                     │   │   - per-session duo coordinator │  │
-                    │   │                                 │  │
-                    │   │   - native agent loop  ── OR ───┼──┼──┐
-                    │   │     (in-process; Rain only)     │  │  │
-                    │   └─────────────────────────────────┘  │  │
-                    └────────┬────────────┬──────────────────┘  │
-                             │            │                     │
-                    ┌────────▼─────┐  ┌───▼─────────┐           │
-                    │ claude-code  │  │ claude-code │◄──────────┘
-                    │   (Brian)    │  │   (Rain)    │   one or
-                    │ stream-json  │  │ stream-json │   the other
+                    │   └─────────────────────────────────┘  │
+                    └────────┬────────────┬──────────────────┘
+                             │            │
+                    ┌────────▼─────┐  ┌───▼─────────┐
+                    │ claude-code  │  │ claude-code │
+                    │   (Brian)    │  │   (Rain)    │
+                    │ stream-json  │  │ stream-json │
                     └──────────────┘  └─────────────┘
 ```
 
-Brian is always a subprocess. Rain is a subprocess *or* an in-process
-native loop, depending on her model — never both.
+Every agent is a subprocess.
 
-### Two agent backends
+### One agent backend
 
-An agent is backed by a `claude-code` subprocess **or** by bot-hq's own
-native Rust loop (`src/agents/native/`), chosen per saved model via the
-`models.native` flag. Both return an `AgentHandle`, which is a pure
-channel struct — `core/duo.rs`, `core/router.rs`, the policy layer, the
-UI event path and the context meter speak only `AgentEvent` and
-`OutgoingUserMessage`, so **nothing downstream knows which it got**. That
-is why the native connector was additive rather than a rewrite.
+`spawn_agent_for` has no branch: every participant goes through
+`spawn_supervised_agent`, whatever model row it carries. A model whose
+gateway does not speak the Anthropic Messages API therefore fails at spawn —
+`validate_model`'s pre-flight (the **Test** button in Settings → Models) is
+what surfaces that at configure time instead.
 
-The native loop exists because on a third-party API key the CLI buys
-nothing: subscription OAuth is bound server-side to claude-code, so an
-agent on a gateway key pays ~418 MB RSS for an opaque loop and context
-accounting we can only scrape. Owning the loop means computing
-`ContextUsage` from our own request accounting, gating tools inline
-instead of through the exit-2 PreToolUse hook, and enforcing a read root
-— which `Read`/`Grep`/`Glob` never had, since they are not `Bash` and so
-never reached the Tool Gate.
+**A second backend existed until rc3 D9** (2026-08-12): a native Rust agent
+loop, in-process, opted into per saved model, EYES-only. It was deleted
+outright rather than feature-flagged, because a second runtime nobody builds
+still costs every reviewer a re-read and every refactor a second case. What
+made the deletion cheap is what made the loop additive in the first place:
+`AgentHandle` is a pure channel struct — `core/duo.rs`, `core/router.rs`, the
+policy layer, the UI event path and the context meter speak only `AgentEvent`
+and `OutgoingUserMessage` — so nothing downstream ever knew which backend it
+had, and nothing downstream changed when one went away.
 
-**v1 is EYES-only, hard-guarded** (`resolve_agent_kind`). Brian's
-subscription pins him to the CLI, and he depends on skills, plugins and
-the full built-in tool surface the native path does not implement; a
-`native` model assigned to him falls back to claude-code with a warning
-rather than failing the spawn. A native model **must** carry an explicit
-`auth_token` — unlike claude-code there is no ambient-auth fallback, and
-spawn fails the whole duo without one.
-
-Two behavioural differences worth knowing:
-
-- **Retry.** The native path does NOT go through `spawn_supervised_agent`.
-  That supervisor ends an incarnation on event-channel *closure*, and a
-  loop that survives API errors never closes — so recovery is in-loop
-  (`send_with_retry`), using the same `RetryPolicy` and
-  `is_transient_api_error` classifier. Better than a respawn: the
-  conversation stays in memory, so there is nothing to resume.
-- **No auto-compaction yet, and no stop either.** claude-code compacts
-  silently. The native loop reports occupancy every turn, says so once
-  past 85%, and then **keeps working**. Past 100% the gateway decides —
-  DeepSeek truncates rather than erroring — so the agent gradually loses
-  its oldest turns. That trade (finish the work vs. start clean) is the
-  user's to make from the meter, not one bot-hq pre-empts. An earlier
-  version hard-stopped at 85%, which on a 1M window discarded 150K
-  tokens of usable capacity. See PLAN.md ("B6").
-
-Each agent **subprocess** is spawned with:
+Each agent subprocess is spawned with:
 
 ```
 claude -p \
@@ -155,10 +125,10 @@ hoists the `role:"system"` entry claude-code injects into the
 into the top-level `system` field, which strict gateways require.
 Agents on the real first-party API (Brian) bypass it.
 
-The proxy is a **CLI-path fixup only**. A native agent never routes
-through it: it builds the request body itself and puts `system` at the
-top level to begin with (`native/wire.rs::build_request`), which is
-precisely the shape the proxy exists to rewrite back into.
+The proxy sits on the only path there is. It used to be described as a
+"CLI-path fixup", because the native loop built its request body itself and
+put `system` at the top level to begin with; with one connector left, every
+gateway-backed agent routes through it.
 
 ---
 
@@ -190,16 +160,11 @@ System-prompt layering at session spawn (`src/core/session.rs::read_system_promp
    `agents/<name>/custom-instruction.md` files)
 6. Resolved policy directive block (forbidden words list, push-gate
    mode, etc.)
-7. **Native agents only** — a *subtraction* followed by a replacement:
-   `prompts::strip_claude_code_tool_inventory` removes the CLI tool
-   inventory from the role prompt, then `NATIVE_TOOL_ADDENDUM` appends
-   the tools that actually exist on the loop (`read_file`, `list_files`,
-   `search_files`, `run_command`, plus every signaling MCP tool), and
-   `NO_READ_ROOT_ADDENDUM` on top of that when the session has no working
-   repo. Steps 1–6 are purely additive; this is the one layer that takes
-   something away, because leaving the CLI inventory in place left the
-   prompt carrying two contradictory tool lists for the model to
-   reconcile.
+Every step is additive. There used to be a step 7 that took something
+away — for native agents only, `strip_claude_code_tool_inventory` removed
+the CLI tool inventory from the role prompt and `NATIVE_TOOL_ADDENDUM`
+appended the loop's own tools in its place. It went with the loop (rc3 D9);
+nothing subtracts from a prompt now.
 
 Project conventions/notes **bodies** are deliberately NOT injected —
 agents pull those via the `cl_index_search` MCP tool + `Read` on-demand.
@@ -357,7 +322,7 @@ warning preserved.
 
 **Per-agent model selection:** the user maintains a registry of saved
 models (`models` table — label + provider + base_url + auth_token +
-`native` + `context_window`) in Settings → Models. The New-session dialog
+`context_window`) in Settings → Models. The New-session dialog
 exposes a Brian + Rain model dropdown (each seeded from that agent's
 `agent_configs` entry when it matches a saved model) plus a "disable
 Rain" checkbox (solo Brian) seeded from the `rain_disabled_default` app
@@ -372,26 +337,22 @@ driver's `create_session` — honor `rain_disabled_default` via
 `Storage::default_rain_enabled` and leave the model ids NULL, which means
 the per-agent config decides.
 
-Two per-model settings drive the native loop (Settings → Models):
+**Two per-model columns are now unread** (rc3 D9). Both survive in the
+schema — dropping either needs a migration, and the user is starting the
+database over, so they are left in place rather than migrated away:
 
-- **Native loop** (`models.native`, migration 0036) — run this model on
-  bot-hq's own agent loop instead of a claude-code subprocess. **EYES
-  only**: assigning a native model to Brian falls back to the CLI with a
-  warning. A native model must also carry an explicit **auth token** —
-  there is no ambient-auth fallback, and spawn fails without one.
-- **Context window** (`models.context_window`, migration 0037) — total
-  tokens this specific model accepts. Read **only** by the native loop;
-  on a CLI-backed model the meter comes from claude-code and this field
-  is inert. Left blank, the meter renders a visible gap and the native
-  loop's high-context notice never fires — bot-hq never guesses a window, because a
-  wrong one renders as a confident percentage.
+- **`models.native`** (migration 0036) — opted a model into the native
+  loop. Nothing reads or writes it; `MODEL_COLUMNS` does not project it,
+  so an upsert leaves it at the column default. There is no checkbox for
+  it in Settings → Models any more.
+- **`models.context_window`** (migration 0037) — total tokens this model
+  accepts. Its only reader was the native loop's own accounting; on
+  claude-code the meter comes from the CLI's per-turn `contextWindow`
+  report. Still round-tripped through the Models tab so a saved value is
+  not destroyed by an edit, but nothing acts on it.
 
-Both columns are mirrored onto `agent_configs` (migration 0038), because
-the per-agent row is the fallback every session that names no model
-resolves through — the Agents tab, the Maintain-CL dispatcher, the plugin
-proxy and a driver `create_session` without ids. Before 0038 that
-fallback could not express "native", so a native model assigned on the
-Agents tab silently spawned claude-code.
+Both are mirrored onto `agent_configs` (migration 0038), with the same
+status there.
 
 **Claude Config surface** (`src/claude_config/`,
 `tauri_cmd/claude_config.rs`, `frontend/src/app/ClaudeConfig.tsx`):
@@ -438,12 +399,11 @@ submodule tree). Surface:
 - **Bind:** `127.0.0.1:<ephemeral>` (chosen at startup; ephemeral port).
 - **URL per agent:** `http://127.0.0.1:<port>/sessions/<id>/<agent>/mcp`.
   Each agent's `--mcp-config` file points at its own URL so the bridge
-  knows which agent is calling. A **native** agent reads that same file
-  and speaks the same HTTP JSON-RPC (`native/mcp_client.rs`) rather than
-  calling `SignalingBridge` in-process — deliberately, since the HTTP
-  dispatch is where `HANDS_ONLY_TOOLS` / `EYES_ONLY_TOOLS` role
-  enforcement lives, and going around it would give a native agent a
-  second, unenforced path to the same tools.
+  knows which agent is calling. The HTTP dispatch is where role
+  enforcement lives, which is why the deleted native loop spoke the same
+  HTTP JSON-RPC rather than calling `SignalingBridge` in-process: an
+  in-process path would have been a second, unenforced route to the same
+  tools.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
 **Internal tools (36)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
@@ -590,14 +550,11 @@ replacing the per-project `tool_blocklist` role (post-2026-05-29
 fabricated-comment incident) with a single list that can also EXECUTE the
 command on approval.
 
-**Scope:** this gates the *CLI* path, and only HANDS — the PreToolUse
-hook is injected via `--settings`, which Rain does not receive. A native
-agent has no hook at all; it gates inline instead, and more strictly: an
-allow-list of read-only commands executed as argv with **no shell** (so
-`&&`, `;`, `|`, `` ` ``, `$( )` and redirection cannot chain or
-redirect), plus a read root that `Read`/`Grep`/`Glob` never had, since
-they are not `Bash` and so never reached this gate at all. Two gates,
-different paths — neither is a fallback for the other.
+**Scope:** only HANDS — the PreToolUse hook is injected via `--settings`,
+which Rain does not receive. Rain is held read-only by `--disallowedTools`
+instead, which is fail-open for verbs a deny-list did not anticipate; the
+inline allow-list gate that used to hold her more strictly belonged to the
+native loop and went with it (rc3 D9).
 
 - **Config:** one global list at `<data_dir>/config/tool-gate.json` —
   `[{keyword, mode}]`, `mode` ∈ `gate | auto_allow`, edited in Settings
@@ -708,20 +665,21 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   `working_repo_path.file_name()` — and no `phase` column (IPAV phase is
   in-memory; see "IPAV state").
 - `agent_configs` (agent_name PK, provider, model_name, base_url,
-  auth_token, `native`, `context_window`). CHECK constraint still lists
+  auth_token, `native` — unread, `context_window` — unread). CHECK
+  constraint still lists
   `agent_name ∈ {'emma','brian','rain'}` (migration 0001 created it
   permissive; migration 0017 purges the `emma` row but leaves the CHECK
   as-is for legacy reasons) — only `brian`/`rain` are used. The fallback
   for the `models` registry below (see "Per-agent model selection") —
-  and the row that decides the runtime for **every session that names no
-  model**, which is why `native`/`context_window` are mirrored here by
+  and the row that supplies the model for **every session that names no
+  model**, which is why `native`/`context_window` were mirrored here by
   migration 0038.
 - `models` (id PK, label, provider, model_name, base_url, auth_token,
-  `native`, `context_window`) — saved-model registry the per-session
-  pickers reference by id. `native` (0036) opts the model into bot-hq's
-  own agent loop; `context_window` (0037, nullable) is the per-model
-  token budget the native context meter and ceiling need. Both default
-  to off/unknown, so every pre-existing row keeps spawning claude-code.
+  `native` — unread, `context_window` — unread) — saved-model registry
+  the per-session pickers reference by id. `native` (0036) opted the
+  model into bot-hq's own agent loop and `context_window` (0037,
+  nullable) fed that loop's context meter; rc3 D9 deleted the loop, and
+  neither column is read now. Both are still in the table.
 - `app_settings` (key PK, value) — key/value app settings
   (`default_model_id`, `rain_disabled_default`, …).
 - `session_tray` (choice_id PK, session_id, agent, kind, prompt,
@@ -774,16 +732,14 @@ see them as natural switch prompts.
 In-memory cache: `HashMap<SessionId, IpavState>` where `IpavState {
 current_phase, phase_log }`. Not persisted.
 
-CLI-backed agents die with the app, so a restart gives fresh sessions
-(they resume their own transcript via `--resume` off the
-`brian/rain_claude_session_id` columns). **Native agents are the
-exception**: their conversation is persisted per (session, agent) at
-`.local/native-history/` and reloaded at spawn, because a native loop
-holds `messages` in the task and would otherwise come back blank while
-still talking as though it remembered — worse than failing loudly. Those
-files are cleared on session close, plus a startup sweep that removes any
-whose session is gone (force-quit, or a session deleted without a clean
-close).
+Agents die with the app, so a restart gives fresh sessions; they resume
+their own transcript via `--resume` off the
+`brian/rain_claude_session_id` columns. The native loop was the exception
+— it held `messages` in the task, so bot-hq persisted them under
+`.local/native-history/` and reloaded them at spawn. That store, its
+session-close clear and its startup orphan sweep all went with the loop
+(rc3 D9); a leftover directory from a pre-D9 install is inert and can be
+deleted by hand.
 
 ---
 
@@ -873,16 +829,6 @@ Defaults (env-overridable via `BOT_HQ_DATA_DIR`):
 - **Single-instance lock:** `<data_dir>/.local/lock`
 - **External MCP token:** `<data_dir>/.local/mcp-token`
 - **Violations log:** `<data_dir>/.local/violations.jsonl`
-- **Native turn accounting:** `<data_dir>/.local/native-accounting.jsonl`
-  — one record per native turn (tokens occupied, history length, stop
-  reason). Append-only and **unrotated on purpose**: it is the
-  measurement input for the compaction design (PLAN.md "B6"), and
-  rotating it would discard the long-horizon growth curve being measured.
-  Safe to delete; every line is self-contained.
-- **Native conversations:** `<data_dir>/.local/native-history/<session>-<agent>.json`
-  — a native agent's persisted `messages`, so an app restart resumes
-  instead of silently starting blank. Cleared on session close and by a
-  startup orphan sweep.
 - **Policy-hash cache:** `<data_dir>/.local/.policy-hashes.json`
 - **Screenshots:** `<data_dir>/.local/screenshots/`
 - **Session policy snapshot:** `<data_dir>/.local/session-policies/<sid>.yaml`
@@ -965,23 +911,14 @@ the `bot-hq` binary and does not run at app startup. See
   first bot-hq plugin — TBD).
 - **claude-code:** the upstream CLI tool that wraps a language model.
   One subprocess per **CLI-backed** agent.
-- **Native loop:** bot-hq's own Rust agent loop (`src/agents/native/`),
-  an alternative backend to a claude-code subprocess. Opted into per
-  saved model (`models.native`); EYES-only in v1. Owns the turn cycle,
-  tool execution, context accounting and retry, and returns the same
-  `AgentHandle` the subprocess path does. See "Process model → Two agent
-  backends".
-- **High-context notice:** the native loop says once, at 85% occupancy,
-  that the window is filling — and then keeps working. It does not stop
-  and does not auto-compact (PLAN.md "B6"). Past 100% the gateway drops
-  the oldest turns, so the agent forgets the start of the session; the
-  user weighs that against finishing the work and closes the session or
-  carries on. Requires a known `context_window`, or there is no
-  percentage to warn about.
-- **`AgentRole`:** the single mapping from an agent name to what it may
-  do (`src/agents/roles.rs`) — whether it may run native, which built-in
-  tools it gets, and what it may execute. Distinct from
-  `prompts::role_for`, which selects prompt *text*.
+- **Native loop:** *removed.* bot-hq's own in-process Rust agent loop,
+  a second backend opted into per saved model, EYES-only. Deleted by rc3
+  D9 (2026-08-12) so the claude CLI is the only model connector; it
+  returns later as a plugin, starting from `git show
+  c7bba28:src/agents/native/`. Its two data files
+  (`.local/native-accounting.jsonl`, `.local/native-history/`), the
+  `models.native` checkbox, `AgentRole`, `may_run_native` and the
+  high-context notice went with it.
 - **stream-json:** claude-code's `--output-format stream-json` mode.
   One JSON event per line on stdout. See
   [`docs/stream-json-events.md`](docs/stream-json-events.md).

@@ -148,20 +148,14 @@ pub struct AgentConfig {
     pub base_url: Option<String>,
     pub auth_token: Option<String>,
     pub updated_at: String,
-    /// Drive this agent through bot-hq's native Rust loop rather than a
-    /// claude-code subprocess. Set from the chosen [`Model`], and persisted on
-    /// `agent_configs` since 0038 — before that the per-agent fallback could
-    /// only ever resolve to `false`, so a native model assigned on the Agents
-    /// tab silently spawned claude-code anyway.
-    ///
-    /// `#[sqlx(default)]` is kept as belt-and-braces for any projection that
-    /// omits the column; it is no longer load-bearing.
-    #[serde(default)]
-    #[sqlx(default)]
-    pub native: bool,
-    /// Context window in tokens, when the user has told us. `None` = unknown,
-    /// which renders as a visible gap and leaves the native loop's ceiling dark.
+    /// Context window in tokens, when the user has told us. `None` = unknown.
     /// Set from the chosen [`Model`]; persisted on `agent_configs` since 0038.
+    ///
+    /// **Nothing reads this today.** Its only consumer was the native loop's own
+    /// context accounting, deleted with that runtime (rc3 D9) — on claude-code
+    /// the meter comes from the CLI's own `contextWindow` report
+    /// (`agents::events`), not from here. Kept because the column is still
+    /// written and this phase writes no migration.
     #[serde(default)]
     #[sqlx(default)]
     pub context_window: Option<i64>,
@@ -170,6 +164,12 @@ pub struct AgentConfig {
 /// A saved model in the user-managed registry (`models` table). Bundles the
 /// provider + model id + optional gateway (`base_url`) and credential
 /// (`auth_token`) an agent spawns with. Referenced by id from session-create.
+///
+/// **`models.native` is deliberately absent.** The column still exists (0036)
+/// and still carries whatever the user last ticked, but rc3 D9 deleted the
+/// runtime it selected, so nothing reads it and this struct does not project it.
+/// Dropping the column would need a migration; the user is starting the database
+/// over, so it is left in place and unread rather than migrated away.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Model {
     pub id: String,
@@ -180,16 +180,9 @@ pub struct Model {
     pub auth_token: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    /// Opt in to the native Rust agent loop instead of a claude-code
-    /// subprocess. Per-model, not per-provider: the same provider can back a
-    /// model you want on the CLI (skills, plugins, the full built-in tool
-    /// surface) and one you want native (own context accounting, inline tool
-    /// gating, an enforceable read root).
-    #[serde(default)]
-    pub native: bool,
-    /// Context window in tokens. `None` = unknown — never guessed. A window is a
-    /// per-model fact, which is why it lives here rather than in
-    /// `ProviderProfile`'s provider-keyed table.
+    /// Context window in tokens. `None` = unknown — never guessed.
+    ///
+    /// **Nothing reads this today** — see [`AgentConfig::context_window`].
     #[serde(default)]
     pub context_window: Option<i64>,
 }
