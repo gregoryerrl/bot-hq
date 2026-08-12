@@ -12,6 +12,7 @@ import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useChatStore } from "../stores/chat";
 import { ChatMessage } from "./ChatMessage";
 import { cn } from "../lib/cn";
+import { authorLabel, useParticipantLabels } from "../lib/participants";
 import type { AgentMessage } from "../lib/bindings";
 
 // Stable reference so the zustand selector doesn't return a fresh array per
@@ -45,6 +46,10 @@ export function ChatPane({ sessionId }: { sessionId: string }) {
     { sessionId, sinceId: null },
     { enabled: !!sessionId },
   );
+
+  // rc3 D10: a message's stored `author` is a participant slug and is never
+  // shown. The roster turns it into `ROLE · Model` for the byline.
+  const { labels } = useParticipantLabels(sessionId);
 
   const messages = useChatStore(
     (s) => s.messages[sessionId] ?? EMPTY_MESSAGES,
@@ -175,6 +180,7 @@ export function ChatPane({ sessionId }: { sessionId: string }) {
               >
                 <ChatMessage
                   message={m}
+                  authorLabel={authorLabel(m.author, labels)}
                   groupedWithPrev={
                     prev !== null &&
                     m.kind !== "phase_change" &&

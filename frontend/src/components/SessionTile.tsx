@@ -8,6 +8,7 @@ import { useHealthStore, worstHealth } from "../stores/health";
 import { HealthDot, RouterHealthDot } from "./HealthDot";
 import { authorColorClass } from "./authorColor";
 import { WarnIcon } from "./icons";
+import { authorLabel } from "../lib/participants";
 
 interface SessionTileProps {
   session: SessionInfo;
@@ -16,18 +17,25 @@ interface SessionTileProps {
   pendingCount?: number;
   /** Current IPAV phase (lowercase) from `get_session_phase`. Null when unknown. */
   phase?: string | null;
+  /** Participant slug → `ROLE · Model`, from the session's roster (rc3 D10).
+   *  Empty is safe: an unknown author falls back to its own slug. */
+  authorLabels?: Record<string, string>;
 }
+
+const NO_LABELS: Record<string, string> = {};
 
 function SessionTileImpl({
   session,
   pendingCount = 0,
   phase = null,
+  authorLabels = NO_LABELS,
 }: SessionTileProps) {
   const navigate = useNavigate();
   const closed = session.closed_at !== null;
   const needsInput = pendingCount > 0;
   const tint = phaseTintClasses(phase, closed);
-  // B2: session-level health dot (problem-only on the tile). Worst-of Brian+Rain.
+  // B2: session-level health dot (problem-only on the tile). Worst of the
+  // session's agents.
   const health = useHealthStore((s) => s.bySession[session.id]);
   const routerAlive = useHealthStore((s) => s.routerBySession[session.id]);
   // Idle-unflagged watchdog: the session sat idle past grace with no question
@@ -109,7 +117,7 @@ function SessionTileImpl({
             {!session.rain_enabled && (
               <span
                 className="shrink-0 rounded border border-primary/40 bg-primary/15 px-1.5 py-0.5 font-label-caps text-label-caps text-primary"
-                title="Solo Brian — Rain disabled"
+                title="One participant — this session runs a single agent"
               >
                 SOLO
               </span>
@@ -160,7 +168,7 @@ function SessionTileImpl({
                 authorColorClass(session.last_author ?? ""),
               )}
             >
-              {authorLabel(session.last_author)}
+              {authorLabel(session.last_author, authorLabels)}
             </span>
             {quickview}
           </div>
@@ -211,16 +219,3 @@ function firstLine(text: string | null): string | null {
   return line ? line.trim() : null;
 }
 
-/** Short, friendly author label for the Quickview tag. */
-function authorLabel(author: string | null): string {
-  switch (author) {
-    case "brian":
-      return "Brian";
-    case "rain":
-      return "Rain";
-    case "user":
-      return "You";
-    default:
-      return author ? author.charAt(0).toUpperCase() + author.slice(1) : "";
-  }
-}

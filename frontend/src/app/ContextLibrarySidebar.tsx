@@ -223,7 +223,7 @@ export function WorkspaceSidebar({
             type="button"
             onClick={onRequestMaintain}
             aria-label="Maintain CL"
-            title="Dispatch a Brian + Rain session to maintain a project's Context Library"
+            title="Dispatch a session to maintain a project's Context Library"
             className={cn(headerIconButtonClass, "text-primary")}
           >
             <WrenchIcon size={14} />

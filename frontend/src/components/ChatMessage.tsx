@@ -9,6 +9,9 @@ interface ChatMessageProps {
   message: AgentMessage;
   /** Hide the author header (consecutive messages from the same author). */
   groupedWithPrev?: boolean;
+  /** What to PRINT for `message.author`. rc3 D10: the stored author is a
+   *  participant slug and is never shown; the header renders this instead. */
+  authorLabel?: string;
   /** Lifted tool-pill expand state, keyed by message id. Virtualized parents
    * own it (rows unmount when scrolled away, which would reset local state);
    * when omitted, ToolMessage falls back to its own local state. */
@@ -22,11 +25,18 @@ interface ChatMessageProps {
 
 // Author + relative-timestamp header. Shared by the text and tool message rows
 // (the markup was byte-identical) so the two can't drift.
+//
+// `author` is the stored slug — it picks the colour and NOTHING else. `label`
+// is what the user reads (rc3 D10). No label means the roster has not loaded or
+// has no row for this author; the slug is then the only attribution left, which
+// beats an unattributed line.
 function MessageHeader({
   author,
+  label,
   createdAt,
 }: {
   author: string;
+  label?: string;
   createdAt: string;
 }) {
   return (
@@ -37,7 +47,7 @@ function MessageHeader({
           authorColorClass(author),
         )}
       >
-        {author}
+        {label || author}
       </span>
       <span className="text-[0.65rem] text-on-surface-variant">
         {formatRelative(createdAt)}
@@ -57,6 +67,7 @@ function MessageHeader({
 export const ChatMessage = memo(function ChatMessage({
   message,
   groupedWithPrev,
+  authorLabel,
   expanded,
   onToggleExpand,
   resolvedToolIds,
@@ -85,6 +96,7 @@ export const ChatMessage = memo(function ChatMessage({
       <ToolMessage
         message={message}
         groupedWithPrev={groupedWithPrev}
+        authorLabel={authorLabel}
         expanded={expanded}
         onToggleExpand={onToggleExpand}
         resolvedToolIds={resolvedToolIds}
@@ -95,7 +107,11 @@ export const ChatMessage = memo(function ChatMessage({
   return (
     <article className={cn("mb-2", groupedWithPrev ? "mt-0" : "mt-3")}>
       {!groupedWithPrev && (
-        <MessageHeader author={message.author} createdAt={message.created_at} />
+        <MessageHeader
+          author={message.author}
+          label={authorLabel}
+          createdAt={message.created_at}
+        />
       )}
       <Markdown>{message.content}</Markdown>
     </article>
@@ -111,12 +127,14 @@ export const ChatMessage = memo(function ChatMessage({
 function ToolMessage({
   message,
   groupedWithPrev,
+  authorLabel,
   expanded: controlledExpanded,
   onToggleExpand,
   resolvedToolIds,
 }: {
   message: AgentMessage;
   groupedWithPrev?: boolean;
+  authorLabel?: string;
   expanded?: boolean;
   onToggleExpand?: (id: number) => void;
   resolvedToolIds?: ReadonlySet<string>;
@@ -153,7 +171,11 @@ function ToolMessage({
   return (
     <article className={cn("mb-1", groupedWithPrev ? "mt-0" : "mt-2")}>
       {!groupedWithPrev && (
-        <MessageHeader author={message.author} createdAt={message.created_at} />
+        <MessageHeader
+          author={message.author}
+          label={authorLabel}
+          createdAt={message.created_at}
+        />
       )}
       <button
         type="button"

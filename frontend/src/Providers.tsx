@@ -177,6 +177,9 @@ function GlobalEventSync() {
       brian_busy: boolean;
       rain_busy: boolean;
     }) => {
+      // Backend payload field -> participant slug. Both sides are internal
+      // wire values; nothing here reaches the screen (rc3 D10 — the status
+      // line resolves each slug through the session's roster).
       setActivity(p.session_id, p.state as SessionActivity, {
         brian: p.brian_busy,
         rain: p.rain_busy,

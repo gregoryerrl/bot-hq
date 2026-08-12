@@ -124,7 +124,7 @@ export function RescanIcon(props: IconProps) {
   );
 }
 
-/** Wrench / HANDS agent (Brian) — replaces the 👷 avatar. */
+/** Wrench — the HANDS role's icon; replaces the 👷 avatar. */
 export function WrenchIcon(props: IconProps) {
   return (
     <Svg {...props}>
@@ -133,7 +133,7 @@ export function WrenchIcon(props: IconProps) {
   );
 }
 
-/** Eye / EYES agent (Rain) — replaces the 💧 avatar; matches the role name. */
+/** Eye — the EYES role's icon; replaces the 💧 avatar. */
 export function EyeIcon(props: IconProps) {
   return (
     <Svg {...props}>

@@ -9,7 +9,7 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   size?: Size;
 }
 
-// Migrated to Industrial Terminal tokens. `primary` is the role-Brian
+// Migrated to Industrial Terminal tokens. `primary` is the first-author
 // orange (`bg-primary` → `#ffb68b`), `secondary` is the muted surface tier,
 // `ghost` is transparent on a hovered surface, `danger` uses the error
 // container token for destructive intent.

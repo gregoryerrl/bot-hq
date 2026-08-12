@@ -17,8 +17,8 @@ interface MaintainCLModalProps {
 
 /**
  * "Maintain CL" dispatcher. Pick a project; this creates a session, spawns
- * your default agent setup (duo, or solo Brian when "disable Rain by default"
- * is set), and seeds it with the hardcoded CL-maintenance prompt (all via the
+ * your default agent setup (the session-defaults roster in Settings → Policy),
+ * and seeds it with the hardcoded CL-maintenance prompt (all via the
  * `dispatch_session` command), then navigates into it. The agents start
  * maintaining that project's Context Library immediately — no follow-up needed.
  */

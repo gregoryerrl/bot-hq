@@ -268,7 +268,7 @@ function SessionDefaults() {
           className="size-4 accent-primary"
         />
         <span className="font-body-md text-body-md text-on-surface">
-          Disable Rain by default (new sessions start solo)
+          Start new sessions with one participant (the second is opt-in)
         </span>
       </label>
       {setAppSetting.error && (

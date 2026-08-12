@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import { ChatPane } from "./ChatPane";
 import { useChatStore } from "../stores/chat";
 import type { AgentMessage } from "../lib/bindings";
@@ -41,7 +42,7 @@ function msg(
   id: number,
   content: string,
   kind: AgentMessage["kind"] = "text",
-  author = "brian",
+  author = "hands",
 ): AgentMessage {
   return {
     id,
@@ -55,16 +56,45 @@ function msg(
 
 const initialMessages: AgentMessage[] = [
   msg(1, "hello one"),
-  msg(2, "hello two", "text", "rain"),
+  msg(2, "hello two", "text", "eyes"),
   msg(3, JSON.stringify({ name: "Bash", input: { command: "ls -la" } }), "tool_use"),
 ];
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn((cmd: string) => {
-    if (cmd === "get_session_messages") return Promise.resolve(initialMessages);
-    return Promise.resolve([]);
-  }),
-}));
+/**
+ * The session's roster, as `list_session_participants` returns it (rc3 D10).
+ * Two participants sharing a role, with different models — the configuration
+ * the user could not tell apart until the agents said so.
+ */
+const PARTICIPANTS = [
+  {
+    id: 1,
+    slug: "hands",
+    role_display_name: "HANDS",
+    model_display_name: "Claude Opus 5",
+    turn_position: 0,
+    participation_mode: "active",
+    enabled: true,
+  },
+  {
+    id: 2,
+    slug: "eyes",
+    role_display_name: "EYES",
+    model_display_name: "DeepSeek R2",
+    turn_position: 1,
+    participation_mode: "active",
+    enabled: true,
+  },
+];
+
+/** The default backend for these tests; restored before each one so a test
+ *  that swaps it (to stage a different roster) cannot leak into the next. */
+const defaultInvoke = (cmd: string) => {
+  if (cmd === "get_session_messages") return Promise.resolve(initialMessages);
+  if (cmd === "list_session_participants") return Promise.resolve(PARTICIPANTS);
+  return Promise.resolve([]);
+};
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 // Capture event handlers so tests can push live batches like the backend does.
 const eventHandlers: Record<string, (ev: { payload: unknown }) => void> = {};
@@ -92,6 +122,7 @@ describe("ChatPane", () => {
   beforeEach(() => {
     // The zustand store is module-global — reset between tests.
     useChatStore.setState({ messages: {}, watermarks: {} });
+    vi.mocked(invoke).mockImplementation(defaultInvoke);
   });
 
   it("renders the fetched history", async () => {
@@ -100,6 +131,63 @@ describe("ChatPane", () => {
     expect(screen.getByText("hello two")).toBeInTheDocument();
     // The tool_use row renders as a collapsed pill, not raw JSON.
     expect(screen.getByText(/Bash/)).toBeInTheDocument();
+  });
+
+  it("bylines each message as ROLE · Model, resolved through the roster", async () => {
+    // rc3 D10, tested as ONE chain: the stored `author` slug goes through
+    // `list_session_participants` and comes out as the rendered byline. Pinning
+    // the lookup and the render separately would not catch a pane that renders
+    // the slug it holds instead of the label it resolved.
+    renderPane();
+    await screen.findByText("hello one");
+
+    // Two rows carry the `hands` slug (a text message and a tool call), so
+    // findAll — one byline per ungrouped header.
+    expect(
+      (await screen.findAllByText("HANDS · Claude Opus 5")).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText("EYES · DeepSeek R2")).toBeInTheDocument();
+    // The slug is an internal key; it must not reach the screen.
+    expect(screen.queryByText("hands")).toBeNull();
+    expect(screen.queryByText("eyes")).toBeNull();
+  });
+
+  it("keeps two participants of the SAME role apart by their models", async () => {
+    // The live complaint: "I accidentally set the two agents to EYES + EYES,
+    // there's no way for me to know that until they explicitly said in the
+    // session". Same role, different model — the byline has to distinguish them.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "get_session_messages")
+        return Promise.resolve([
+          msg(1, "first reviewer speaks", "text", "eyes"),
+          msg(2, "second reviewer speaks", "text", "eyes-2"),
+        ]);
+      if (cmd === "list_session_participants")
+        return Promise.resolve([
+          { ...PARTICIPANTS[1], id: 1, slug: "eyes", model_display_name: "Claude Opus 5" },
+          { ...PARTICIPANTS[1], id: 2, slug: "eyes-2", model_display_name: "DeepSeek R2" },
+        ]);
+      return Promise.resolve([]);
+    });
+
+    renderPane();
+    await screen.findByText("first reviewer speaks");
+    expect(await screen.findByText("EYES · Claude Opus 5")).toBeInTheDocument();
+    expect(screen.getByText("EYES · DeepSeek R2")).toBeInTheDocument();
+  });
+
+  it("falls back to the author slug when the roster has no row for it", async () => {
+    // A legacy row, or a participant that has left: the line still has to be
+    // attributable, and an internal key beats no attribution at all.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "get_session_messages")
+        return Promise.resolve([msg(1, "orphan line", "text", "departed")]);
+      if (cmd === "list_session_participants") return Promise.resolve([]);
+      return Promise.resolve([]);
+    });
+
+    renderPane();
+    expect(await screen.findByText("departed")).toBeInTheDocument();
   });
 
   it("appends live batches for this session and ignores other sessions", async () => {

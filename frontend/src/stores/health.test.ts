@@ -9,6 +9,22 @@ describe("worstHealth", () => {
     expect(worstHealth({ brian: "running", rain: "running" })).toBe("running");
   });
 
+  it("ranks every tier against its neighbour", () => {
+    // The pairwise cases the tier list actually encodes. `dead` vs `stalled`
+    // was untested, so an inverted order between them passed silently.
+    expect(worstHealth({ a: "dead", b: "stalled" })).toBe("dead");
+    expect(worstHealth({ a: "stalled", b: "retrying" })).toBe("stalled");
+    expect(worstHealth({ a: "retrying", b: "running" })).toBe("retrying");
+  });
+
+  it("scans every agent, not just the first two", () => {
+    // The map is keyed by participant slug and a session can hold more than
+    // two, so a third agent's state has to count.
+    expect(worstHealth({ one: "running", two: "running", three: "dead" })).toBe(
+      "dead",
+    );
+  });
+
   it("returns undefined when there is no health data", () => {
     expect(worstHealth(undefined)).toBeUndefined();
     expect(worstHealth({})).toBeUndefined();
