@@ -321,6 +321,9 @@ function RoleForm({
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   const pending = create.isPending || update.isPending;
+  // The same `.trim() === ""` reading `submit` uses to decide `null`, so what
+  // the notice below promises and what the save actually sends are one test.
+  const promptCleared = (draft.description_prompt ?? "").trim() === "";
 
   // Slugs the checklist knows about. Anything on the role that is NOT in here
   // is shown separately rather than as a silent omission — see below.
@@ -529,6 +532,27 @@ function RoleForm({
           rules derived from the capabilities below are composed on top at
           spawn, so a role cannot write itself out of them here.
         </span>
+        {/* **Emptying the box is not "no instruction".** `submit` sends
+            `description_prompt: null` for an all-whitespace value, and the
+            spawn path treats a NULL row as "use the built-in", so clearing it
+            silently reinstates the shipped prose. That is the right behaviour —
+            it is the "restore defaults" affordance 0044's schema comment
+            describes `builtin` as existing for — but it was invisible, and a
+            user who cleared the box to silence a role got the opposite of what
+            they asked for. Said here, at the box, rather than in a doc. */}
+        {promptCleared && (
+          <span
+            role="note"
+            className="mt-1 block max-w-prose font-code-sm text-code-sm text-warning"
+          >
+            Empty is not a blank instruction. Saving now stores no prose for
+            this role, and the prompt falls back to bot-hq&rsquo;s built-in text
+            for it —{" "}
+            {role?.builtin
+              ? "for a seeded role that is the wording it shipped with, so clearing the box is how you restore the default."
+              : "and bot-hq ships no built-in text for a role you added, so this one would join a session with no instruction of its own."}
+          </span>
+        )}
       </label>
 
       <fieldset
@@ -616,7 +640,7 @@ function RoleForm({
       )}
 
       <div className="flex items-center justify-between gap-2 border-t border-outline-variant/30 pt-4">
-        <div>
+        <div className="flex flex-col items-start gap-2">
           {role && (
             <Button
               variant={role.archived ? "secondary" : "danger"}
@@ -624,9 +648,20 @@ function RoleForm({
               disabled={archive.isPending}
               onClick={async () => {
                 if (role.archived) {
-                  // Restoring is not destructive — no confirmation.
-                  await archive.mutateAsync({ id: role.id, archived: false });
-                  onArchived();
+                  // Restoring is not destructive, so it gets no confirmation —
+                  // but it still has to REPORT. Awaiting the mutation bare left
+                  // the rejection unhandled and the screen unchanged: the role
+                  // simply stayed archived, which is indistinguishable from the
+                  // click not registering. The archive path below already wraps
+                  // and renders; this is the same treatment, and the asymmetry
+                  // was the bug.
+                  try {
+                    await archive.mutateAsync({ id: role.id, archived: false });
+                    onArchived();
+                  } catch {
+                    // Rendered by the alert below — the form stays put so the
+                    // message has somewhere to sit.
+                  }
                 } else {
                   setConfirmArchive(true);
                 }
@@ -634,6 +669,18 @@ function RoleForm({
             >
               {role.archived ? "Restore role" : "Archive role"}
             </Button>
+          )}
+          {/* Scoped to the archived case on purpose: the only way to reach
+              `archive.error` while `!role.archived` is the confirm dialog,
+              which renders it itself. Gating here keeps one failure from
+              showing up in two places. */}
+          {role?.archived && archive.error && (
+            <p
+              role="alert"
+              className="rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
+            >
+              Restore failed: {archive.error.message}
+            </p>
           )}
         </div>
         <div className="flex shrink-0 gap-2">

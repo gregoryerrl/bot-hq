@@ -100,6 +100,12 @@ function renderPanel() {
   );
 }
 
+/** Just enough of `process` to watch for a promise nobody caught. */
+type RejectionHub = {
+  on(event: "unhandledRejection", handler: (reason: unknown) => void): void;
+  off(event: "unhandledRejection", handler: (reason: unknown) => void): void;
+};
+
 const prose = () => screen.getByRole("textbox", { name: /role instruction/i });
 const nameField = () => screen.getByRole("textbox", { name: /display name/i });
 const modeSelect = () =>
@@ -239,6 +245,105 @@ describe("RolesPanel", () => {
         archived: true,
       }),
     );
+  });
+
+  it("reports a failed Restore instead of leaving the role archived in silence", async () => {
+    // Restore had no try/catch and rendered nothing: the mutation rejected
+    // unhandled, the role stayed archived, and the screen was identical to the
+    // click never having registered. Archive, one button away, wraps its call
+    // and renders `archive.error` in its dialog — the asymmetry was the bug.
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_roles") return [role({ archived: true })];
+      if (cmd === "list_models") return MODELS;
+      if (cmd === "list_capabilities") return CAPS;
+      if (cmd === "archive_role")
+        throw { kind: "Internal", message: "database is locked" };
+      return undefined;
+    });
+    renderPanel();
+    await screen.findByText("HANDS");
+
+    // Both halves of the defect are asserted, because they are separate: the
+    // rejection escaping is what "unhandled" means, and the missing alert is
+    // what "the user sees nothing" means. Removing either fix alone leaves one
+    // of them live.
+    const escaped: unknown[] = [];
+    const onRejection = (reason: unknown) => escaped.push(reason);
+    // Typed structurally rather than via `@types/node`: the frontend tsconfig
+    // has no `node` types and adding them to see one event is a bad trade.
+    // jsdom does not track unhandled rejections, so the host does.
+    const hub = (globalThis as unknown as { process: RejectionHub }).process;
+    hub.on("unhandledRejection", onRejection);
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /restore role/i }));
+
+      // The failure reaches the user, and says what went wrong.
+      expect(await screen.findByText(/restore failed/i)).toHaveTextContent(
+        "database is locked",
+      );
+      // Drain the microtask queue and one macrotask, which is when node
+      // decides a rejection was never handled.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(escaped).toEqual([]);
+    } finally {
+      hub.off("unhandledRejection", onRejection);
+    }
+    // And it is announced, not just drawn — this is the only signal that the
+    // role is still archived.
+    expect(screen.getByText(/restore failed/i)).toHaveAttribute("role", "alert");
+    // The button is still there to try again; nothing pretended to succeed.
+    expect(
+      screen.getByRole("button", { name: /restore role/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("says an emptied instruction falls back to the built-in text", async () => {
+    // Clearing the box does NOT give the role a blank instruction: `submit`
+    // sends `description_prompt: null` and the spawn path reads NULL as "use
+    // the built-in", so emptying it reinstates the shipped prose. Correct
+    // behaviour — it is the "restore defaults" route 0044's schema comment
+    // describes — but it was invisible, so a user clearing the box to silence a
+    // role got the opposite.
+    mockBackend([role({ builtin: true })]);
+    renderPanel();
+    await screen.findByText("HANDS");
+
+    // Nothing shouts while there is prose in the box.
+    expect(screen.queryByText(/empty is not a blank instruction/i)).toBeNull();
+
+    fireEvent.change(prose(), { target: { value: "   \n  " } });
+
+    const notice = await screen.findByText(/empty is not a blank instruction/i);
+    // `&rsquo;`, so the apostrophe on screen is U+2019, not U+0027.
+    expect(notice).toHaveTextContent(/falls back to bot-hq[’']s built-in text/i);
+    // A seeded row is the "restore defaults" case, and the copy says so.
+    expect(notice).toHaveTextContent(/restore the default/i);
+
+    // And the save really does send `null`, so the notice is describing what
+    // happens rather than a second, separate rule.
+    fireEvent.click(screen.getByRole("button", { name: /save role/i }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("update_role", {
+        id: 1,
+        draft: expect.objectContaining({ description_prompt: null }),
+      }),
+    );
+  });
+
+  it("does not promise a built-in for a role bot-hq never seeded", async () => {
+    // `role_for` only knows the seeded slugs; anything else falls back to an
+    // empty string and the section is skipped. Telling the author of a new role
+    // that clearing the box "restores the default" would be a promise with
+    // nothing behind it.
+    mockBackend([role({ id: 5, slug: "auditor", display_name: "Auditor", builtin: false })]);
+    renderPanel();
+    await screen.findByText("Auditor");
+
+    fireEvent.change(prose(), { target: { value: "" } });
+
+    const notice = await screen.findByText(/empty is not a blank instruction/i);
+    expect(notice).toHaveTextContent(/ships no built-in text for a role you added/i);
+    expect(notice).not.toHaveTextContent(/restore the default/i);
   });
 
   it("never offers on_demand as a participation mode", async () => {
