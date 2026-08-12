@@ -1325,7 +1325,12 @@ mod tests {
         let (btx, _brx) = stub_input();
         let (rtx, mut rrx) = stub_input();
         let bridge = SignalingBridge::new();
-        let tracker = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), bridge);
+        let tracker = ActivityTracker::new(
+            "s1",
+            Arc::new(AtomicBool::new(false)),
+            bridge,
+            vec!["hands".into(), "eyes".into()],
+        );
         let mut d = deps(
             btx,
             Some(rtx),

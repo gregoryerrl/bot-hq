@@ -2397,7 +2397,7 @@ mod tests {
     #[tokio::test]
     async fn rain_untagged_doc_write_allowed() {
         // The gate is narrow: Rain may still keep her own UNTAGGED scratch doc
-        // (RAIN_ROLE explicitly permits this). Only the phase-tagged form is
+        // (EYES_ROLE explicitly permits this). Only the phase-tagged form is
         // HANDS-only.
         let bridge = SignalingBridge::new();
         let storage = crate::storage::Storage::memory().await.unwrap();

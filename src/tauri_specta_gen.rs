@@ -34,6 +34,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         sessions::get_session,
         sessions::get_session_runtime,
         sessions::get_session_project_info,
+        // rc3 D10: the roster read that replaced every brian_*/rain_* pair.
+        sessions::list_session_participants,
         sessions::check_session_dirty,
         sessions::session_worktree_kept,
         sessions::list_sessions,

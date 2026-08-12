@@ -157,9 +157,10 @@ pub(crate) fn idle_unflagged_decision(
 /// readable.
 pub struct IdleWatch {
     pub storage: Storage,
-    /// HANDS' stdin — the nudge goes to Brian only (EYES has no state-declaring
-    /// verbs; her settles resolve to whatever Brian flags).
-    pub brian_input_tx: crate::agents::ParticipantInput,
+    /// The stdin of the participant that can act on the nudge — the first one
+    /// holding `edit_files` (rc3 D10/D11: a capability, not a name). A
+    /// review-only participant has no state-declaring verbs to answer with.
+    pub hands_input_tx: crate::agents::ParticipantInput,
     pub ipav: Arc<tokio::sync::Mutex<IpavState>>,
     /// Bumped by `AppState::broadcast` on every user prompt. In-memory on
     /// purpose: a storage count races the first poll at session start.
@@ -189,13 +190,20 @@ pub struct RouterWatch {
 /// task. Emits health only on change via the bridge registry. Also watches the
 /// peer-forward router (`router`): a dead router while agents are live is an
 /// anomaly (forwarding is down) — warn + emit a router-health event once.
+///
+/// `agents` is keyed by participant SLUG, so a session with three participants
+/// gets three health streams instead of two (rc3 D10 — it was a `Vec<(Author,
+/// …)>`, and `Author` has exactly two agent variants). `hands_slug` names the
+/// participant whose health the idle nudge is suppressed on; `None` when this
+/// session has nobody that can act on it.
 pub async fn run_stall_watchdog(
     session_id: String,
-    agents: Vec<(Author, Weak<AgentLiveness>)>,
+    agents: Vec<(String, Weak<AgentLiveness>)>,
+    hands_slug: Option<String>,
     activity: Arc<ActivityTracker>,
     bridge: Arc<SignalingBridge>,
     router: Option<RouterWatch>,
-    idle_watch: IdleWatch,
+    idle_watch: Option<IdleWatch>,
 ) {
     // Idle-unflagged tracking (loop-local; see `idle_unflagged_decision`).
     let mut idle_since: Option<Instant> = None;
@@ -203,21 +211,21 @@ pub async fn run_stall_watchdog(
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
         let mut any_alive = false;
-        for (author, weak) in &agents {
+        for (slug, weak) in &agents {
             let Some(liveness) = weak.upgrade() else {
                 continue; // this agent's pump has exited
             };
             any_alive = true;
-            let current = bridge.current_agent_health(&session_id, author.as_str());
+            let current = bridge.current_agent_health(&session_id, slug);
             let decision = stall_decision(
-                activity.is_busy(*author),
+                activity.is_busy_slug(slug),
                 liveness.tools_in_flight(),
                 liveness.idle_for(),
                 current.as_deref(),
                 STALL_THRESHOLD,
             );
             if let Some(next) = decision {
-                bridge.notify_agent_health(session_id.clone(), author.as_str(), next);
+                bridge.notify_agent_health(session_id.clone(), slug, next);
             }
         }
         // Router liveness: flag ONLY the anomaly — router dead while agents still
@@ -249,7 +257,7 @@ pub async fn run_stall_watchdog(
         // user-silence window. Detection is host-side because only the host
         // has post-settlement truth (a Stop hook fires before the final text
         // is routed and would false-block turns whose text wakes the peer).
-        {
+        if let Some(idle_watch) = idle_watch.as_ref() {
             let state = activity.current();
             // declare_working expiry runs EVERY poll (not just while idle) so
             // the WORKING badge cannot linger past its TTL through a busy
@@ -290,12 +298,18 @@ pub async fn run_stall_watchdog(
                 } else {
                     true // not a candidate yet — value unused beyond suppressing
                 };
-                let hands_down = matches!(
-                    bridge
-                        .current_agent_health(&session_id, Author::Brian.as_str())
-                        .as_deref(),
-                    Some("dead") | Some("retrying") | Some("stalled")
-                );
+                // Suppress the nudge when the participant it is addressed to is
+                // down — it would be pushed into a dead stdin. Keyed on that
+                // participant's slug (rc3 D10); no `hands_slug` means nobody can
+                // act on the nudge, which is not the same as "the actor is
+                // down", so the decision runs unsuppressed and the chip still
+                // reaches the user.
+                let hands_down = hands_slug.as_deref().is_some_and(|s| {
+                    matches!(
+                        bridge.current_agent_health(&session_id, s).as_deref(),
+                        Some("dead") | Some("retrying") | Some("stalled")
+                    )
+                });
                 let decision = idle_unflagged_decision(
                     candidate.then(|| since.elapsed()),
                     broadcasts,
@@ -319,7 +333,7 @@ pub async fn run_stall_watchdog(
                         && !activity.holds_wakes()
                     {
                         nudged_at = Some(broadcasts);
-                        deliver_idle_nudge(&session_id, &idle_watch, &activity, &bridge)
+                        deliver_idle_nudge(&session_id, idle_watch, &activity, &bridge)
                             .await;
                     }
                 }
@@ -394,7 +408,7 @@ async fn deliver_idle_nudge(
         }
     };
     bridge.notify_message_persisted(Arc::from(session_id), nudge.message_id());
-    if idle_watch.brian_input_tx.deliver(&nudge).await {
+    if idle_watch.hands_input_tx.deliver(&nudge).await {
         // Mirror the dispatch sites: input sent → HANDS is mid-turn, so the
         // session reads Busy (and the chip clears) while he declares state.
         activity.set_busy(Author::Brian, true);
@@ -553,14 +567,19 @@ mod tests {
         ipav.lock().await.advance(crate::core::ipav::IpavPhase::Apply);
         let idle_watch = IdleWatch {
             storage: storage.clone(),
-            brian_input_tx: crate::agents::ParticipantInput::new("s1", tx),
+            hands_input_tx: crate::agents::ParticipantInput::new("s1", tx),
             ipav,
             user_broadcasts: Arc::new(AtomicU64::new(1)),
             working: Arc::new(Mutex::new(None)),
         };
         let bridge = SignalingBridge::new();
         let activity =
-            ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), Arc::clone(&bridge));
+            ActivityTracker::new(
+                "s1",
+                Arc::new(AtomicBool::new(false)),
+                Arc::clone(&bridge),
+                vec!["hands".into(), "eyes".into()],
+            );
         deliver_idle_nudge("s1", &idle_watch, &activity, &bridge).await;
 
         let rows = storage.channel_after("s1", 0, 100).await.unwrap().rows;

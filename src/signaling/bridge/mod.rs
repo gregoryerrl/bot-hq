@@ -368,6 +368,20 @@ pub struct SignalingBridge {
     /// session_id → reason. Set by `override_reviewer_block`, honored by
     /// `check_open_findings`, auto-cleared when the reviewer recovers to running.
     reviewer_override: std::sync::Mutex<HashMap<String, String>>,
+    /// session_id → the slugs of the participants that can file findings.
+    ///
+    /// **What "the reviewer" means now that no agent is called Rain** (rc3
+    /// D10/D11). The commit gate used to ask `current_agent_health(session,
+    /// "rain")` and the override auto-clear used to fire on `agent == "rain"`;
+    /// with role-derived slugs both would silently stop matching, and the gate
+    /// fails OPEN — a review that cannot have happened would stop blocking the
+    /// commit, with nothing to notice.
+    ///
+    /// Registered at spawn from the roster's capability snapshots — a reviewer is
+    /// a participant that holds `file_finding`, which is bot-hq's own definition
+    /// and not a guess about what a role MEANS. Empty (or unregistered) = this
+    /// session has no reviewer, which is exactly what a solo session was.
+    session_reviewers: std::sync::Mutex<HashMap<String, Vec<String>>>,
     /// Latest peer-forward-router liveness per session_id (true = alive). Written
     /// by `notify_router_health`; read by `get_session_runtime` to seed the UI
     /// router-health dot on mount (the event fires only on change, like
@@ -414,6 +428,7 @@ impl SignalingBridge {
             agent_health: std::sync::Mutex::new(HashMap::new()),
             agent_rpc_seen: std::sync::Mutex::new(HashMap::new()),
             reviewer_override: std::sync::Mutex::new(HashMap::new()),
+            session_reviewers: std::sync::Mutex::new(HashMap::new()),
             router_health: std::sync::Mutex::new(HashMap::new()),
             session_attention: std::sync::Mutex::new(HashMap::new()),
             session_working_flag: Mutex::new(HashMap::new()),
@@ -593,6 +608,34 @@ impl SignalingBridge {
     /// shared `Arc` the router reads LOCK-FREE per forward. Seeds from storage so a
     /// re-spawned session with pre-existing findings starts at the right value (not
     /// 0). Mirrors `register_session_awaiting`.
+    /// Record which participants of a session can file findings — the reviewers
+    /// the commit gate watches. Called once per spawn with the roster's own
+    /// answer; an empty list means this session has no reviewer at all.
+    pub fn register_session_reviewers(&self, session_id: String, slugs: Vec<String>) {
+        self.session_reviewers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(session_id, slugs);
+    }
+
+    /// This session's reviewer slugs (empty when none are registered).
+    pub(crate) fn session_reviewers(&self, session_id: &str) -> Vec<String> {
+        self.session_reviewers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn is_reviewer(&self, session_id: &str, agent: &str) -> bool {
+        self.session_reviewers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(session_id)
+            .is_some_and(|slugs| slugs.iter().any(|s| s == agent))
+    }
+
     pub async fn register_open_blocking(&self, session_id: String) -> Arc<AtomicUsize> {
         let count = self.open_blocking_count(&session_id).await;
         let arc = Arc::new(AtomicUsize::new(count));
@@ -1003,8 +1046,10 @@ impl SignalingBridge {
             .unwrap_or_else(|p| p.into_inner())
             .insert((session_id.clone(), agent.to_string()), health.to_string());
         // Batch 7: a recovered reviewer auto-clears any reviewer-down override —
-        // the override is scoped to one down-incident, never persistent.
-        if agent == "rain" && health == "running" {
+        // the override is scoped to one down-incident, never persistent. Keyed on
+        // the session's REGISTERED reviewers (rc3 D10) rather than on the literal
+        // slug `rain`, which no participant is called any more.
+        if health == "running" && self.is_reviewer(&session_id, agent) {
             self.reviewer_override
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())

@@ -3,7 +3,7 @@
 use crate::core::session::{resolve_session_project, ProjectProvenance};
 use crate::core::AppState as CoreAppState;
 use crate::signaling::SignalingBridge;
-use crate::storage::{Author, Session, SessionWithPreview, Storage};
+use crate::storage::{Session, SessionWithPreview, Storage};
 use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -118,69 +118,42 @@ pub struct SessionCreateOptions {
     pub participants: Option<Vec<ParticipantPick>>,
 }
 
-/// One row of the dialog's participant list: a role, and optionally a model
-/// that overrides the role's default (rc3 **D8**).
+/// One row of the dialog's participant list: a role, optionally a model that
+/// overrides the role's default (rc3 **D8**), and that row's own spawn knobs
+/// (rc3 **D12**).
+///
+/// **There is no name field, and that is rc3 D10.** The slug and the display
+/// name are derived from the role by `Storage::seed_session_roster`.
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ParticipantPick {
     pub role_id: i64,
     pub model_id: Option<String>,
+    /// `None` = inherit. Per participant since rc3 D12; the dialog used to
+    /// carry one effort select per AGENT, in two fixed blocks.
+    pub effort: Option<String>,
+    pub ultracode: Option<bool>,
 }
 
-/// How many participants a session can be created with **today**.
+/// How many participants a session can be created with.
 ///
-/// Not a design limit — the runtime limit, and it is enforced here because the
-/// alternative is a dialog that offers a third row and produces a participant
-/// with no process behind it. `core::session::spawn_session_handle` spawns two
-/// literally-named agents and finds their rows with
-/// `roster_row(&roster, "brian")` / `"rain"`; a third row would be scheduled by
-/// the ring, never woken, and the consensus halt would then wait forever on a
-/// vote it can never cast. Raise this when spawning stops being name-keyed.
-pub const MAX_SESSION_PARTICIPANTS: usize = 2;
+/// **Not the runtime limit any more.** This used to be 2 because
+/// `spawn_session_handle` spawned two literally-named agents, so a third row
+/// would be scheduled by the ring, never woken, and the consensus halt would
+/// wait forever on a vote nobody could cast. rc3 D10 made spawn iterate the
+/// roster, so the cap is now only a sanity bound on what one session can
+/// usefully run — every participant is a claude-code subprocess with its own
+/// context window and its own bill.
+pub const MAX_SESSION_PARTICIPANTS: usize = 8;
 
-/// The slug and display name a participant takes, by turn slot.
-///
-/// **What the user picks is the ROLE each slot plays; the two runtime
-/// identities are not yet theirs to name.** Both halves are forced, and by
-/// different things:
-///
-/// * the **slug** is the wire. `spawn_session_handle` finds a participant's row
-///   with `roster_row(&roster, "brian")` / `"rain"`, and `insert_message`'s
-///   dual-write resolves `participant_id` by matching it against the legacy
-///   `author` string. A row slugged anything else has no process behind it.
-/// * the **display name** is what layer 2 calls the participant
-///   (`RosterFacts::display_name`, rendered as `**Brian** (HANDS)`), and layer 3
-///   — the role prose migration 0046 seeded from `BRIAN_ROLE` / `RAIN_ROLE` —
-///   opens with `You are **Brian**`. Naming the participant after its role
-///   would put `**HANDS** (HANDS)` two paragraphs from `You are **Brian**` in
-///   one prompt.
-///
-/// Both lift together when the name removal
-/// (`docs/plans/2026-08-11-agent-name-removal.md`) takes the names out of the
-/// prose and the spawn path.
-const PARTICIPANT_SLOTS: [(&str, &str); MAX_SESSION_PARTICIPANTS] =
-    [("brian", "Brian"), ("rain", "Rain")];
-
-/// What a resolved participant list means for the columns spawn still reads.
-///
-/// The reframe in one struct: the dialog now picks participants, and the values
-/// that used to come from the dialog's "Disable Rain" checkbox and its two
-/// model selects are DERIVED from those picks instead. They land in the same
-/// `sessions` columns as before, so spawn behaves identically — the source
-/// moved, the behaviour did not.
+/// What a resolved participant list means beyond the roster rows themselves.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ResolvedRoster {
     pub drafts: Vec<crate::storage::ParticipantDraft>,
-    /// `sessions.rain_enabled`: two participants is a duo, one is solo — the
-    /// same flag the checkbox set, read off the roster's length.
+    /// `sessions.rain_enabled`, which is now only a solo/duo BOOKKEEPING flag:
+    /// spawn reads the roster, not this column. It is still written because
+    /// `SessionInfo.rain_enabled` is part of the frozen frontend shape.
     pub rain_enabled: bool,
-    /// `sessions.brian_model_id` / `rain_model_id`. **Load-bearing, not
-    /// bookkeeping:** `spawn_session_handle` resolves each agent's model from
-    /// these columns, not from the roster, so a per-participant model pick that
-    /// only reached `session_participants.model_id` would be a picker that
-    /// changes nothing.
-    pub brian_model_id: Option<String>,
-    pub rain_model_id: Option<String>,
 }
 
 /// Turn the dialog's picks into a roster, refusing the ones that cannot run.
@@ -200,19 +173,11 @@ pub(crate) async fn resolve_participant_picks(
     }
     if picks.len() > MAX_SESSION_PARTICIPANTS {
         return Err(AppError::Validation(format!(
-            "a session can run at most {MAX_SESSION_PARTICIPANTS} participants today, \
-             not {}",
+            "a session can run at most {MAX_SESSION_PARTICIPANTS} participants, not {}",
             picks.len()
         )));
     }
-    // The effort/ultracode picks are still per-SLOT in the dialog, because they
-    // are still per-slot in the columns spawn reads.
-    let per_slot_effort = [
-        (options.brian_effort.clone(), options.brian_ultracode),
-        (options.rain_effort.clone(), options.rain_ultracode),
-    ];
     let mut drafts = Vec::with_capacity(picks.len());
-    let mut models: Vec<Option<String>> = Vec::with_capacity(picks.len());
     let mut any_active = false;
     for (slot, pick) in picks.iter().enumerate() {
         let role = storage
@@ -238,21 +203,24 @@ pub(crate) async fn resolve_participant_picks(
             )));
         }
         any_active |= role.participation_mode == "active";
-        let (effort, ultracode) = per_slot_effort[slot].clone();
-        // D8's fallback, resolved ONCE: the same value goes into the
-        // participant row and into the `sessions` column spawn reads, so the
-        // two cannot disagree about which model this participant runs.
-        let model_id = pick.model_id.clone().or_else(|| role.default_model_id.clone());
-        let (slug, display_name) = PARTICIPANT_SLOTS[slot];
+        // rc3 D12: the knobs come off the participant's own row. The two
+        // legacy per-agent fields on `SessionCreateOptions` still apply to
+        // slots 0 and 1 when the pick leaves them unset, so a caller that has
+        // not been updated to the per-row form keeps working unchanged.
+        let legacy = match slot {
+            0 => (options.brian_effort.clone(), options.brian_ultracode),
+            1 => (options.rain_effort.clone(), options.rain_ultracode),
+            _ => (None, None),
+        };
         drafts.push(crate::storage::ParticipantDraft {
-            slug: slug.to_string(),
-            display_name: display_name.to_string(),
             role_id: role.id,
-            model_id: model_id.clone(),
-            effort,
-            ultracode,
+            // D8's fallback is applied again inside `seed_session_roster`;
+            // resolving it here too keeps the value the dialog SAW and the value
+            // stored identical when the role's default changes between the two.
+            model_id: pick.model_id.clone().or_else(|| role.default_model_id.clone()),
+            effort: pick.effort.clone().or(legacy.0),
+            ultracode: pick.ultracode.or(legacy.1),
         });
-        models.push(model_id);
     }
     if !any_active {
         // Every participant an observer is a session that can never take a
@@ -264,10 +232,91 @@ pub(crate) async fn resolve_participant_picks(
     }
     Ok(ResolvedRoster {
         rain_enabled: picks.len() >= 2,
-        brian_model_id: models.first().cloned().flatten(),
-        rain_model_id: models.get(1).cloned().flatten(),
         drafts,
     })
+}
+
+/// One participant of a session, as the UI names it (rc3 **D10**).
+///
+/// The two display halves are returned SEPARATELY, and the join is the display
+/// rule — `role_display_name · model_display_name`, falling back to the model
+/// alone and then to the slug. Returning them apart lets the UI style them
+/// differently; `storage::participant_display_name` is the backend's
+/// implementation of the same rule for the prompt.
+#[derive(Debug, Clone, Serialize, Type, PartialEq)]
+pub struct ParticipantView {
+    pub id: i64,
+    /// The internal key — the `@mention` handle and the `messages.author`
+    /// string. **Never displayed.** It is the tiebreaker between two
+    /// participants of one role on one model, whose display names are identical
+    /// by construction.
+    pub slug: String,
+    /// `null` when the role row is gone.
+    pub role_display_name: Option<String>,
+    /// `null` when the participant has no model, or the model row is gone.
+    pub model_display_name: Option<String>,
+    pub turn_position: i64,
+    /// `active` | `observer` (| `on_demand`, which create refuses today).
+    pub participation_mode: String,
+    pub enabled: bool,
+}
+
+/// A session's roster in turn order — the read side of rc3 D10.
+///
+/// This is what replaces every `brian_*` / `rain_*` pair the session view read:
+/// there is no fixed number of participants any more, so the UI has to ask.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_session_participants(
+    storage: tauri::State<'_, Arc<Storage>>,
+    session_id: String,
+) -> Result<Vec<ParticipantView>, AppError> {
+    participant_views(&storage, &session_id).await
+}
+
+/// Testable body of [`list_session_participants`] — the command is a thin
+/// `State`-unwrapping shim, matching `dispatch_session_inner`.
+pub(crate) async fn participant_views(
+    storage: &Storage,
+    session_id: &str,
+) -> Result<Vec<ParticipantView>, AppError> {
+    let roster = storage
+        .participants_for_session(session_id)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?;
+    let mut out = Vec::with_capacity(roster.len());
+    for p in roster {
+        // Both halves are read LIVE rather than off the row's frozen
+        // `display_name`, so renaming a role or swapping a model shows up
+        // without waiting for a respawn. Each failure is `None` on its own — a
+        // deleted model must not also hide the role.
+        let role_display_name = match p.role_id {
+            Some(id) => storage
+                .role_by_id(id)
+                .await
+                .map_err(|e| AppError::DbError(e.to_string()))?
+                .map(|r| r.display_name),
+            None => None,
+        };
+        let model_display_name = match p.model_id.as_deref().filter(|m| !m.is_empty()) {
+            Some(id) => storage
+                .get_model(id)
+                .await
+                .map_err(|e| AppError::DbError(e.to_string()))?
+                .map(|m| m.display_name),
+            None => None,
+        };
+        out.push(ParticipantView {
+            id: p.id,
+            slug: p.slug,
+            role_display_name,
+            model_display_name,
+            turn_position: p.turn_position,
+            participation_mode: p.participation_mode,
+            enabled: p.enabled,
+        });
+    }
+    Ok(out)
 }
 
 /// Where a new session runs: `(working_repo_path, base_repo_path)`.
@@ -334,15 +383,13 @@ pub async fn create_session(
         Some(picks) => Some(resolve_participant_picks(storage, picks, &options).await?),
         None => None,
     };
-    // With a roster, the solo/duo flag and both model columns are DERIVED from
-    // it — same columns, same spawn, a different source. Without one this is
-    // the pre-rc3 path, argument for argument.
+    // With a roster, the solo/duo flag is DERIVED from it. The two model
+    // arguments now reach the participant ROWS (spawn reads those), so they are
+    // only written to `sessions` on the legacy path, where they are the caller's
+    // only way to say which model a slot runs — and `ensure_session_roster`'s
+    // seed is what carries them there.
     let (rain_enabled, brian_model_id, rain_model_id) = match &roster {
-        Some(r) => (
-            r.rain_enabled,
-            r.brian_model_id.clone(),
-            r.rain_model_id.clone(),
-        ),
+        Some(r) => (r.rain_enabled, None, None),
         None => (rain_enabled.unwrap_or(true), brian_model_id, rain_model_id),
     };
     let (working, base) = resolve_session_placement(
@@ -387,13 +434,31 @@ pub async fn create_session(
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
     // The picked roster, written before the background spawn below reaches
-    // `ensure_session_roster` — which seeds the default pair only into a
-    // session that has none, so the two never both fire.
-    if let Some(roster) = &roster {
-        storage
+    // `ensure_session_roster` — which seeds the default only into a session
+    // that has none, so the two never both fire.
+    match &roster {
+        Some(roster) => storage
             .seed_session_roster(&id, &roster.drafts)
             .await
-            .map_err(|e| AppError::DbError(format!("{e:#}")))?;
+            .map(|_| ())
+            .map_err(|e| AppError::DbError(format!("{e:#}")))?,
+        // The pre-rc3 path: no participant list, so the default roster takes the
+        // caller's per-slot model + effort picks. Spawn reads them off the
+        // participant rows now, so writing them only to `sessions` above would
+        // be a picker that changes nothing.
+        None => {
+            crate::core::session::seed_default_roster(
+                storage,
+                &id,
+                !rain_enabled,
+                &[brian_model_id.clone(), rain_model_id.clone()],
+                &[
+                    (options.brian_effort.clone(), options.brian_ultracode),
+                    (options.rain_effort.clone(), options.rain_ultracode),
+                ],
+            )
+            .await
+        }
     }
     core.bridge.register_session(id.clone(), project).await;
     // Re-fetch so the returned SessionInfo reflects the persisted config.
@@ -531,8 +596,16 @@ pub async fn get_session(
 pub struct SessionRuntime {
     pub session_id: String,
     pub activity: String,
-    /// Per-agent busy flags (the derived `activity` collapses them) so the chat
-    /// input can label which agent is working after a backfill, not just guess.
+    /// Per-slot busy flags (the derived `activity` collapses them) so the chat
+    /// input can label who is working after a backfill, not just guess.
+    ///
+    /// **The field NAMES are frozen wire, and they name TURN SLOTS, not agents**
+    /// (rc3 D10). `brian_*` is the participant at turn position 0 and `rain_*`
+    /// the one at position 1; a session with one participant leaves the second
+    /// pair at its empty value and a session with three does not report the
+    /// rest here — `list_session_participants` is the roster-shaped read. They
+    /// keep these names only until the session view that consumes them is
+    /// rewritten.
     pub brian_busy: bool,
     pub rain_busy: bool,
     pub brian_health: Option<String>,
@@ -557,13 +630,18 @@ pub async fn get_session_runtime(
     let sessions = core.sessions.lock().await;
     let mut out = Vec::with_capacity(sessions.len());
     for (id, handle) in sessions.iter() {
+        // Slot lookup off the LIVE handle, whose `participants` are already in
+        // turn order — the slugs are role-derived now, so `"brian"` / `"rain"`
+        // would match nothing and every backfill would report both agents idle
+        // and healthless.
+        let slot = |i: usize| handle.participants.get(i).map(|a| a.slug.as_str());
         out.push(SessionRuntime {
             session_id: id.clone(),
             activity: handle.activity.current().as_str().to_string(),
-            brian_busy: handle.activity.is_busy(Author::Brian),
-            rain_busy: handle.activity.is_busy(Author::Rain),
-            brian_health: core.bridge.current_agent_health(id, "brian"),
-            rain_health: core.bridge.current_agent_health(id, "rain"),
+            brian_busy: slot(0).is_some_and(|s| handle.activity.is_busy_slug(s)),
+            rain_busy: slot(1).is_some_and(|s| handle.activity.is_busy_slug(s)),
+            brian_health: slot(0).and_then(|s| core.bridge.current_agent_health(id, s)),
+            rain_health: slot(1).and_then(|s| core.bridge.current_agent_health(id, s)),
             attention: core.bridge.current_session_attention(id),
             working: core.bridge.current_session_working(id),
             router_alive: core.bridge.current_router_health(id),
@@ -844,6 +922,99 @@ mod tests {
         (s, b)
     }
 
+    /// The read side of the rc3 contract, on real rows.
+    ///
+    /// Asserted through the same body the command runs (`participant_views`),
+    /// because a `#[tauri::command]` takes `tauri::State`, which cannot be built
+    /// in a unit test — the convention `resolve_participant_picks` already
+    /// follows.
+    #[tokio::test]
+    async fn participant_views_are_turn_ordered_and_name_no_agent() {
+        let (storage, _b) = setup().await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        sqlx::query(
+            "INSERT INTO models (id, display_name, provider, model_name) \
+             VALUES ('m-opus', 'Claude Opus 5', 'anthropic', 'claude-opus-5')",
+        )
+        .execute(storage.pool())
+        .await
+        .unwrap();
+        let hands = storage.role_by_slug("hands").await.unwrap().unwrap();
+        let eyes = storage.role_by_slug("eyes").await.unwrap().unwrap();
+        storage
+            .seed_session_roster(
+                "s1",
+                &[
+                    crate::storage::ParticipantDraft {
+                        role_id: hands.id,
+                        model_id: Some("m-opus".into()),
+                        ..Default::default()
+                    },
+                    crate::storage::ParticipantDraft { role_id: eyes.id, ..Default::default() },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let views = participant_views(&storage, "s1").await.unwrap();
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].turn_position, 0);
+        assert_eq!(views[0].slug, "hands");
+        assert_eq!(views[0].role_display_name.as_deref(), Some("HANDS"));
+        assert_eq!(views[0].model_display_name.as_deref(), Some("Claude Opus 5"));
+        assert_eq!(views[0].participation_mode, "active");
+        assert!(views[0].enabled);
+        // The second row picked no model, and its role has no default either, so
+        // the model half is genuinely absent — `null`, not an invented string.
+        assert_eq!(views[1].slug, "eyes");
+        assert_eq!(views[1].role_display_name.as_deref(), Some("EYES"));
+        assert_eq!(views[1].model_display_name, None);
+
+        // The display rule, over exactly the halves this command returns. The
+        // frontend joins them the same way; this is the shared implementation.
+        assert_eq!(
+            crate::storage::participant_display_name(
+                views[0].role_display_name.as_deref(),
+                views[0].model_display_name.as_deref(),
+                &views[0].slug,
+            ),
+            "HANDS · Claude Opus 5"
+        );
+        assert_eq!(
+            crate::storage::participant_display_name(
+                views[1].role_display_name.as_deref(),
+                views[1].model_display_name.as_deref(),
+                &views[1].slug,
+            ),
+            "EYES",
+            "no model means the role alone, never a placeholder"
+        );
+
+        // A participant with no role is `null` rather than an error — the row is
+        // still real and still has a handle to render. `role_id` is nullable and
+        // FK-constrained, so this (not a dangling id) is how "no role" occurs.
+        sqlx::query("UPDATE session_participants SET role_id = NULL WHERE slug = 'eyes'")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let views = participant_views(&storage, "s1").await.unwrap();
+        assert_eq!(views[1].role_display_name, None);
+        assert_eq!(
+            crate::storage::participant_display_name(None, None, &views[1].slug),
+            "eyes",
+            "with both halves gone the slug is the last resort"
+        );
+
+        // rc3 D10's line, on the payload the UI actually renders.
+        for v in &views {
+            for banned in ["Brian", "Rain"] {
+                assert!(!v.slug.contains(banned));
+                assert!(!v.role_display_name.as_deref().unwrap_or_default().contains(banned));
+                assert!(!v.model_display_name.as_deref().unwrap_or_default().contains(banned));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn placement_repo_less_and_blank_are_direct_none() {
         let (storage, _b) = setup().await;
@@ -948,6 +1119,8 @@ mod tests {
         ParticipantPick {
             role_id,
             model_id: model_id.map(str::to_string),
+            effort: None,
+            ultracode: None,
         }
     }
 
@@ -965,46 +1138,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn picks_derive_the_solo_flag_and_the_columns_spawn_reads() {
-        // The reframe, at the layer that does it: the dialog's "Disable Rain"
-        // checkbox and its two model selects are GONE, and the values they used
-        // to write are read off the participant list instead. Spawn still reads
-        // `sessions.rain_enabled` / `brian_model_id` / `rain_model_id`, so a
-        // pick that did not reach those columns would be a picker that changes
-        // nothing.
+    async fn picks_carry_a_model_and_per_participant_spawn_knobs() {
+        // rc3 D12: the dialog's effort section was two fixed blocks keyed on an
+        // agent name; it is one select per participant ROW now, and the value
+        // has to reach that row or the select changes nothing.
         let (storage, _b) = setup().await;
         let hands = storage.role_by_slug("hands").await.unwrap().unwrap();
         let eyes = storage.role_by_slug("eyes").await.unwrap().unwrap();
-        let options = SessionCreateOptions {
-            brian_effort: Some("max".into()),
-            rain_effort: Some("low".into()),
-            brian_ultracode: Some(true),
-            ..Default::default()
-        };
 
-        let solo = resolve_participant_picks(&storage, &[pick(hands.id, Some("opus"))], &options)
+        let mut picks = vec![pick(hands.id, Some("opus")), pick(eyes.id, Some("sonnet"))];
+        picks[0].effort = Some("max".into());
+        picks[0].ultracode = Some(true);
+        picks[1].effort = Some("low".into());
+        let duo = resolve_participant_picks(&storage, &picks, &Default::default())
             .await
             .unwrap();
-        assert!(!solo.rain_enabled, "one participant is a solo session");
-        assert_eq!(solo.brian_model_id.as_deref(), Some("opus"));
-        assert_eq!(solo.rain_model_id, None);
-        assert_eq!(solo.drafts.len(), 1);
-        assert_eq!(solo.drafts[0].slug, "brian", "slot 0 is the handle spawn looks up");
-        assert_eq!(solo.drafts[0].effort.as_deref(), Some("max"));
-        assert_eq!(solo.drafts[0].ultracode, Some(true));
+        assert!(duo.rain_enabled, "two participants is not a solo session");
+        assert_eq!(duo.drafts.len(), 2);
+        assert_eq!(duo.drafts[0].model_id.as_deref(), Some("opus"));
+        assert_eq!(duo.drafts[0].effort.as_deref(), Some("max"));
+        assert_eq!(duo.drafts[0].ultracode, Some(true));
+        assert_eq!(duo.drafts[1].model_id.as_deref(), Some("sonnet"));
+        assert_eq!(duo.drafts[1].effort.as_deref(), Some("low"));
+        assert_eq!(duo.drafts[1].ultracode, None, "an unset knob inherits");
 
-        let duo = resolve_participant_picks(
+        // The pre-D12 per-agent fields still land on slots 0 and 1 when the row
+        // says nothing, so a caller that has not been updated keeps working.
+        let legacy = SessionCreateOptions {
+            brian_effort: Some("high".into()),
+            rain_effort: Some("none".into()),
+            brian_ultracode: Some(false),
+            ..Default::default()
+        };
+        let inherited = resolve_participant_picks(
             &storage,
-            &[pick(hands.id, Some("opus")), pick(eyes.id, Some("sonnet"))],
-            &options,
+            &[pick(hands.id, None), pick(eyes.id, None)],
+            &legacy,
         )
         .await
         .unwrap();
-        assert!(duo.rain_enabled, "two participants is the duo");
-        assert_eq!(duo.rain_model_id.as_deref(), Some("sonnet"));
-        let slugs: Vec<&str> = duo.drafts.iter().map(|d| d.slug.as_str()).collect();
-        assert_eq!(slugs, ["brian", "rain"], "in the order they were picked");
-        assert_eq!(duo.drafts[1].effort.as_deref(), Some("low"), "slot 1 takes Rain's knobs");
+        assert_eq!(inherited.drafts[0].effort.as_deref(), Some("high"));
+        assert_eq!(inherited.drafts[0].ultracode, Some(false));
+        assert_eq!(inherited.drafts[1].effort.as_deref(), Some("none"));
+
+        let solo = resolve_participant_picks(&storage, &[pick(hands.id, None)], &Default::default())
+            .await
+            .unwrap();
+        assert!(!solo.rain_enabled, "one participant is a solo session");
     }
 
     #[tokio::test]
@@ -1029,14 +1209,12 @@ mod tests {
             resolve_participant_picks(&storage, &[pick(role.id, None)], &Default::default())
                 .await
                 .unwrap();
-        assert_eq!(inherited.brian_model_id.as_deref(), Some("role-default"));
         assert_eq!(inherited.drafts[0].model_id.as_deref(), Some("role-default"));
 
         let overridden =
             resolve_participant_picks(&storage, &[pick(role.id, Some("chosen"))], &Default::default())
                 .await
                 .unwrap();
-        assert_eq!(overridden.brian_model_id.as_deref(), Some("chosen"));
         assert_eq!(overridden.drafts[0].model_id.as_deref(), Some("chosen"));
     }
 
@@ -1050,14 +1228,19 @@ mod tests {
             resolve_participant_picks(&storage, &[], &opts).await.is_err(),
             "a session with nobody in it"
         );
-        // One more than the two agents `spawn_session_handle` spawns. Offering
-        // a third row would produce a participant the ring schedules and
-        // nothing ever wakes — and the consensus halt would then wait forever
-        // on its vote.
+        // THREE is now fine — rc3 D10 made spawn iterate the roster instead of
+        // naming two rows — so the refusal has to be tested at the actual cap.
         let three = vec![pick(hands.id, None), pick(hands.id, None), pick(hands.id, None)];
         assert!(
-            resolve_participant_picks(&storage, &three, &opts).await.is_err(),
-            "more participants than the runtime can spawn"
+            resolve_participant_picks(&storage, &three, &opts).await.is_ok(),
+            "three participants is a session the runtime can now spawn"
+        );
+        let too_many: Vec<ParticipantPick> = (0..MAX_SESSION_PARTICIPANTS + 1)
+            .map(|_| pick(hands.id, None))
+            .collect();
+        assert!(
+            resolve_participant_picks(&storage, &too_many, &opts).await.is_err(),
+            "more participants than the cap allows"
         );
         assert!(
             resolve_participant_picks(&storage, &[pick(9999, None)], &opts).await.is_err(),

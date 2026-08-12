@@ -88,6 +88,34 @@ impl Storage {
         Ok(exists != 0)
     }
 
+    /// True if any participant OTHER than `author` posted in `session_id` after
+    /// `since` (an RFC3339-Z timestamp).
+    ///
+    /// The name-free form of [`Self::has_message_from_author_since`], and what
+    /// the findings re-raise guard asks: a reviewer only escalates once its peer
+    /// has actually had a turn since the last raise. Scoped to
+    /// `origin = 'participant'` so a host `system_notice` or the user's own reply
+    /// cannot stand in for a peer turn.
+    pub async fn has_message_from_other_participant_since(
+        &self,
+        session_id: &str,
+        author: &str,
+        since: &str,
+    ) -> Result<bool> {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM messages \
+             WHERE session_id = ? AND origin = 'participant' AND author <> ? \
+               AND created_at > ?)",
+        )
+        .bind(session_id)
+        .bind(author)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("checking non-{author} participant messages since {since}"))?;
+        Ok(exists != 0)
+    }
+
     /// Count of user-authored TEXT rows for a session. Seeds the in-memory
     /// `SessionHandle.user_broadcasts` counter at spawn, so an app restart
     /// mid-task doesn't disarm the idle-unflagged watchdog until the next
@@ -218,9 +246,9 @@ mod tests {
         s.create_session("s1", "S", None).await.unwrap();
         // `create_session` seeds no roster — 0044 backfilled the sessions that
         // already existed, and every one created since is seeded here, pre-spawn.
-        s.ensure_session_roster("s1").await.unwrap();
+        s.ensure_session_roster("s1", false).await.unwrap();
         let pid = s
-            .participant_by_slug("s1", "brian")
+            .participant_by_slug("s1", "hands")
             .await
             .unwrap()
             .expect("ensure_session_roster seeds brian")
@@ -229,7 +257,7 @@ mod tests {
         let post = |kind: MessageKind, body: &'static str| {
             let s = &s;
             async move {
-                s.post_to_channel("s1", "participant", Some("brian"), kind.as_str(), body, None)
+                s.post_to_channel("s1", "participant", Some("hands"), kind.as_str(), body, None)
                     .await
                     .unwrap();
             }

@@ -260,31 +260,50 @@ impl Storage {
         Ok(())
     }
 
-    /// Persist the claude-code session UUID for one agent in a bot-hq session.
-    /// Called by `core/duo.rs::pump_agent` when the agent's `init` stream-json
-    /// event fires. The next time the bot-hq session is reopened, the spawn
-    /// path reads this column and passes `--resume <uuid>` to claude.
-    /// `agent` must be `"brian"` or `"rain"`; other values return Err.
-    pub async fn set_session_claude_id(
+    /// Record the model one TURN SLOT spawned with (slot 0 → `brian_model_at_spawn`,
+    /// slot 1 → `rain_model_at_spawn`).
+    ///
+    /// The session header reads those two columns, so they are still written —
+    /// but positionally, off the roster's turn order, rather than off an agent
+    /// name. Slots past 1 have nowhere to go and are simply not recorded; the
+    /// live model for any participant is on its own row.
+    pub async fn set_session_spawn_model_slot(
         &self,
         session_id: &str,
-        agent: &str,
-        claude_session_id: &str,
+        slot: usize,
+        model: &str,
     ) -> Result<()> {
-        let column = match agent {
-            "brian" => "brian_claude_session_id",
-            "rain" => "rain_claude_session_id",
-            other => anyhow::bail!("set_session_claude_id: unsupported agent {other:?}"),
+        let column = match slot {
+            0 => "brian_model_at_spawn",
+            1 => "rain_model_at_spawn",
+            _ => return Ok(()),
         };
-        let sql = format!("UPDATE sessions SET {column} = ? WHERE id = ?");
-        sqlx::query(&sql)
-            .bind(claude_session_id)
+        sqlx::query(&format!("UPDATE sessions SET {column} = ? WHERE id = ?"))
+            .bind(model)
             .bind(session_id)
             .execute(&self.pool)
             .await
-            .with_context(|| {
-                format!("recording {agent} claude session id on session {session_id}")
-            })?;
+            .with_context(|| format!("recording the slot-{slot} spawn model on {session_id}"))?;
+        Ok(())
+    }
+
+    /// NULL out one turn slot's spawn model — the header's "this session has no
+    /// participant in that slot" state.
+    pub async fn clear_session_spawn_model_slot(
+        &self,
+        session_id: &str,
+        slot: usize,
+    ) -> Result<()> {
+        let column = match slot {
+            0 => "brian_model_at_spawn",
+            1 => "rain_model_at_spawn",
+            _ => return Ok(()),
+        };
+        sqlx::query(&format!("UPDATE sessions SET {column} = NULL WHERE id = ?"))
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("clearing the slot-{slot} spawn model on {session_id}"))?;
         Ok(())
     }
 }

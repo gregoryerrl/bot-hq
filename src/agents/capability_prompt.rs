@@ -215,11 +215,16 @@ pub fn phrasing(cap: Capability) -> Phrasing {
 /// One other participant, as the roster knows them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerFact {
-    /// `session_participants.display_name` — what the user named them.
-    pub display_name: String,
-    /// The role's `display_name` (e.g. `EYES`), when the participant row points
-    /// at one.
-    pub role: Option<String>,
+    /// Already composed by the display rule —
+    /// [`participant_display_name`](crate::storage::participant_display_name),
+    /// e.g. `EYES · Claude Opus 5`. Composed by the caller rather than here so
+    /// the prompt and every other surface that names a participant share one
+    /// implementation of that rule (rc3 D10).
+    pub name: String,
+    /// The per-session handle. This is what a user types to address the
+    /// participant, and what distinguishes two participants that play the same
+    /// role on the same model — their `name` is then identical by construction.
+    pub slug: String,
     /// The peer's invite-time snapshot, so the section can say what to hand
     /// them without naming a tool they do not hold.
     pub capabilities: CapabilitySet,
@@ -231,19 +236,21 @@ pub struct PeerFact {
 /// Assembled at spawn from `session_participants` — never from an agent name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterFacts {
-    pub display_name: String,
-    pub role: Option<String>,
+    pub name: String,
+    pub slug: String,
     pub capabilities: CapabilitySet,
     /// The other ENABLED participants, in turn order.
     pub peers: Vec<PeerFact>,
 }
 
-/// `**Name** (ROLE)`, or `**Name**` when the row points at no role.
-fn titled(display_name: &str, role: Option<&str>) -> String {
-    match role.map(str::trim).filter(|r| !r.is_empty()) {
-        Some(r) => format!("**{display_name}** ({r})"),
-        None => format!("**{display_name}**"),
-    }
+/// `**HANDS · Claude Opus 5** (`hands`)` — the display rule's output, plus the
+/// handle that addresses it.
+///
+/// The handle is carried because the name is not unique: two participants of one
+/// role on one model render identically, and the slug is what tells them apart
+/// (and what `@mention` parses).
+fn titled(name: &str, slug: &str) -> String {
+    format!("**{name}** (`{slug}`)")
 }
 
 /// Render layer 2: the capability rules, then the live roster.
@@ -301,7 +308,7 @@ pub fn render(facts: &RosterFacts) -> String {
 
     out.push_str("\n## Participants in this session\n\n");
     out.push_str("You are ");
-    out.push_str(&titled(&facts.display_name, facts.role.as_deref()));
+    out.push_str(&titled(&facts.name, &facts.slug));
     out.push_str(". ");
     if facts.peers.is_empty() {
         out.push_str(
@@ -321,7 +328,7 @@ pub fn render(facts: &RosterFacts) -> String {
             .map(|c| phrasing(c).peer)
             .collect();
         out.push_str("- ");
-        out.push_str(&titled(&peer.display_name, peer.role.as_deref()));
+        out.push_str(&titled(&peer.name, &peer.slug));
         if extra.is_empty() {
             out.push_str(" — holds no capability you lack.\n");
         } else {
@@ -339,8 +346,8 @@ mod tests {
 
     fn facts(caps: &[&str]) -> RosterFacts {
         RosterFacts {
-            display_name: "Brian".into(),
-            role: Some("HANDS".into()),
+            name: "HANDS · Claude Opus 5".into(),
+            slug: "hands".into(),
             capabilities: CapabilitySet::from_slugs(caps),
             peers: Vec::new(),
         }
@@ -426,7 +433,7 @@ mod tests {
     /// over everything above it. There is one runtime now, so a named tool would
     /// no longer be a phantom. The rule stays anyway, because the merge that
     /// removed these names from layer 2 at the same moment another branch removed
-    /// them from `RAIN_ROLE` shipped an EYES briefing that refused three tools no
+    /// them from `EYES_ROLE` shipped an EYES briefing that refused three tools no
     /// layer named. One naming source, and it is the hand-written one.
     ///
     /// **Grants only.** A refusal that names a tool is not the same defect —
@@ -444,7 +451,7 @@ mod tests {
             "EYES no longer holds run_bash; re-check which grant this test is about"
         );
 
-        // The claude-code built-ins named in `RAIN_ROLE`. The first five are the
+        // The claude-code built-ins named in `EYES_ROLE`. The first five are the
         // read surface EYES is granted there; the rest are the write tools that
         // constant refuses by name.
         const CLI_ONLY: [&str; 11] = [
@@ -532,13 +539,13 @@ mod tests {
     fn peer_names_come_from_the_roster_not_from_a_constant() {
         let mut f = facts(&["read_channel", "post_channel", "edit_files"]);
         f.peers = vec![PeerFact {
-            display_name: "Ripley".into(),
-            role: Some("AUDITOR".into()),
+            name: "AUDITOR · DeepSeek V4".into(),
+            slug: "auditor".into(),
             capabilities: CapabilitySet::from_slugs(&["read_channel", "file_finding"]),
         }];
         let rendered = render(&f);
         assert!(
-            rendered.contains("- **Ripley** (AUDITOR) —"),
+            rendered.contains("- **AUDITOR · DeepSeek V4** (`auditor`) —"),
             "the peer's roster name and role did not reach the prompt:\n{rendered}"
         );
         assert!(
@@ -549,7 +556,7 @@ mod tests {
         // the one a hand-written peer paragraph would still be carrying.
         assert!(!rendered.contains("Rain"), "a hardcoded peer name survived");
         // The participant's OWN roster identity is rendered the same way.
-        assert!(rendered.contains("You are **Brian** (HANDS)."), "{rendered}");
+        assert!(rendered.contains("You are **HANDS · Claude Opus 5** (`hands`)."), "{rendered}");
     }
 
     /// The delta is what the PEER holds and YOU do not — the actionable half.
@@ -559,13 +566,13 @@ mod tests {
     fn a_peer_delta_is_relative_to_your_own_set() {
         let mut f = facts(&["read_channel", "post_channel", "edit_files", "run_bash"]);
         f.peers = vec![PeerFact {
-            display_name: "Echo".into(),
-            role: None,
+            name: "Echo".into(),
+            slug: "echo".into(),
             capabilities: CapabilitySet::from_slugs(&["read_channel", "run_bash"]),
         }];
         let rendered = render(&f);
         assert!(
-            rendered.contains("- **Echo** — holds no capability you lack.\n"),
+            rendered.contains("- **Echo** (`echo`) — holds no capability you lack.\n"),
             "a subset peer must not be listed as holding anything extra:\n{rendered}"
         );
         assert!(

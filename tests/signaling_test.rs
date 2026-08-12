@@ -17,7 +17,7 @@ async fn seeded_bridge() -> Arc<SignalingBridge> {
         .create_session("s1", "signaling", None)
         .await
         .unwrap();
-    storage.ensure_session_roster("s1").await.unwrap();
+    storage.ensure_session_roster("s1", false).await.unwrap();
     bridge
 }
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -53,7 +53,7 @@ async fn server_initialize_round_trip() {
     let addr = server.local_addr;
     let body = http_post_json(
         addr,
-        "/sessions/s1/brian/mcp",
+        "/sessions/s1/hands/mcp",
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
     )
     .await;
@@ -69,7 +69,7 @@ async fn server_tools_list_round_trip() {
     let addr = server.local_addr;
     let body = http_post_json(
         addr,
-        "/sessions/s1/brian/mcp",
+        "/sessions/s1/hands/mcp",
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
     )
     .await;
@@ -89,7 +89,7 @@ async fn server_ask_user_choice_parks_immediately() {
 
     let body = http_post_json(
         addr,
-        "/sessions/s1/brian/mcp",
+        "/sessions/s1/hands/mcp",
         &json!({
             "jsonrpc": "2.0",
             "id": 3,
@@ -170,7 +170,7 @@ async fn server_parse_error_returns_jsonrpc_envelope() {
     let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
     let addr = server.local_addr;
     let (status, body) =
-        http_post_with_status(addr, "/sessions/s1/brian/mcp", "{ not valid json").await;
+        http_post_with_status(addr, "/sessions/s1/hands/mcp", "{ not valid json").await;
     assert!(status.contains("200"), "got: {status}");
     assert!(
         body.contains(r#""code":-32700"#),
@@ -187,7 +187,7 @@ async fn server_notification_returns_202_accepted() {
     let addr = server.local_addr;
     let (status, body) = http_post_with_status(
         addr,
-        "/sessions/s1/brian/mcp",
+        "/sessions/s1/hands/mcp",
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
     )
     .await;

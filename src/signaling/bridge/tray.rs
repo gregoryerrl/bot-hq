@@ -1162,7 +1162,12 @@ mod tests {
             .register_session_awaiting("s1".into(), Arc::clone(&awaiting))
             .await;
         // A real tracker sharing the same awaiting flag, registered as a Weak.
-        let tracker = ActivityTracker::new("s1", Arc::clone(&awaiting), bridge.clone());
+        let tracker = ActivityTracker::new(
+            "s1",
+            Arc::clone(&awaiting),
+            bridge.clone(),
+            vec!["hands".into(), "eyes".into()],
+        );
         bridge
             .register_session_activity("s1".into(), Arc::downgrade(&tracker))
             .await;

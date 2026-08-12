@@ -64,6 +64,20 @@ async getSessionProjectInfo(sessionId: string) : Promise<Result<SessionProjectIn
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * A session's roster in turn order — the read side of rc3 D10.
+ * 
+ * This is what replaces every `brian_*` / `rain_*` pair the session view read:
+ * there is no fixed number of participants any more, so the UI has to ask.
+ */
+async listSessionParticipants(sessionId: string) : Promise<Result<ParticipantView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_session_participants", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async checkSessionDirty(sessionId: string) : Promise<Result<SessionDirty, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_session_dirty", { sessionId }) };
@@ -1464,10 +1478,48 @@ export type ModelView = { id: string; display_name: string; provider: string; mo
  */
 context_window: number | null }
 /**
- * One row of the dialog's participant list: a role, and optionally a model
- * that overrides the role's default (rc3 **D8**).
+ * One row of the dialog's participant list: a role, optionally a model that
+ * overrides the role's default (rc3 **D8**), and that row's own spawn knobs
+ * (rc3 **D12**).
+ * 
+ * **There is no name field, and that is rc3 D10.** The slug and the display
+ * name are derived from the role by `Storage::seed_session_roster`.
  */
-export type ParticipantPick = { roleId: number; modelId: string | null }
+export type ParticipantPick = { roleId: number; modelId: string | null; 
+/**
+ * `None` = inherit. Per participant since rc3 D12; the dialog used to
+ * carry one effort select per AGENT, in two fixed blocks.
+ */
+effort: string | null; ultracode: boolean | null }
+/**
+ * One participant of a session, as the UI names it (rc3 **D10**).
+ * 
+ * The two display halves are returned SEPARATELY, and the join is the display
+ * rule — `role_display_name · model_display_name`, falling back to the model
+ * alone and then to the slug. Returning them apart lets the UI style them
+ * differently; `storage::participant_display_name` is the backend's
+ * implementation of the same rule for the prompt.
+ */
+export type ParticipantView = { id: number; 
+/**
+ * The internal key — the `@mention` handle and the `messages.author`
+ * string. **Never displayed.** It is the tiebreaker between two
+ * participants of one role on one model, whose display names are identical
+ * by construction.
+ */
+slug: string; 
+/**
+ * `null` when the role row is gone.
+ */
+role_display_name: string | null; 
+/**
+ * `null` when the participant has no model, or the model row is gone.
+ */
+model_display_name: string | null; turn_position: number; 
+/**
+ * `active` | `observer` (| `on_demand`, which create refuses today).
+ */
+participation_mode: string; enabled: boolean }
 /**
  * Permission posture summary (counts only; bot-hq overrides per agent anyway).
  */
@@ -1774,8 +1826,16 @@ provenance: ProjectProvenance }
  */
 export type SessionRuntime = { session_id: string; activity: string; 
 /**
- * Per-agent busy flags (the derived `activity` collapses them) so the chat
- * input can label which agent is working after a backfill, not just guess.
+ * Per-slot busy flags (the derived `activity` collapses them) so the chat
+ * input can label who is working after a backfill, not just guess.
+ * 
+ * **The field NAMES are frozen wire, and they name TURN SLOTS, not agents**
+ * (rc3 D10). `brian_*` is the participant at turn position 0 and `rain_*`
+ * the one at position 1; a session with one participant leaves the second
+ * pair at its empty value and a session with three does not report the
+ * rest here — `list_session_participants` is the roster-shaped read. They
+ * keep these names only until the session view that consumes them is
+ * rewritten.
  */
 brian_busy: boolean; rain_busy: boolean; brian_health: string | null; rain_health: string | null; 
 /**

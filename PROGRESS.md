@@ -9,6 +9,90 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-12 — rc3 D10/D12: the agent names are gone, and the 2-participant cap with them
+
+The user, repeatedly: *"I already said multiple times that I'm dropping the
+names, only the Role + Model Name."* A participant is now identified by the ROLE
+it plays and displayed as **`role · model`**; nothing in the runtime, the schema
+writes, or the prompts is keyed on an agent's name.
+
+**What the cap actually was.** `spawn_session_handle` bound its two subprocesses
+with `roster_row(&roster, "brian")` / `"rain"`. A third roster row was scheduled
+by the ring, never woken, and the consensus halt then waited forever on a vote
+nobody could cast — so `MAX_SESSION_PARTICIPANTS` was 2. Spawn iterates the
+roster now (`spawnable`, one agent per enabled non-`on_demand` row in turn
+order), and the cap is 8: a sanity bound on subprocesses, not a runtime limit.
+
+**Identity.** `session_participants.slug` is the ROLE's slug; the second
+participant of a role in one session takes `<role>-2` (`participant_slug`, which
+reuses `first_free_slug` so a handle and a role slug are suffixed by one
+function). `display_name` snapshots the role's display name; the model half is
+resolved live, so a model swap is not stale on screen.
+
+**Per participant, not per agent.** `effort`, `ultracode` and
+`claude_session_id` come off `session_participants` (columns since 0044, unread
+until now). `set_session_claude_id`'s `match agent { "brian" =>, "rain" =>,
+other => bail }` is replaced by `set_participant_claude_id`: a third
+participant's conversation used to hit the `bail` arm and restart blank on every
+respawn.
+
+**New read command `list_session_participants` → `ParticipantView`**, returning
+`role_display_name` and `model_display_name` SEPARATELY with
+`storage::participant_display_name` as the one implementation of the join.
+
+**Capability predicates replaced four name checks**, per D11 (bot-hq must not
+encode what a role means):
+
+| was | now |
+|---|---|
+| `SessionHandle::hands()` = `by_slug("brian")` | the first participant holding `edit_files` |
+| `agents().filter(\|a\| a.slug != "brian")` (cancel/kill order) | `!a.edits_files()` |
+| `matches!(cfg.author, Author::Brian)` (pre-Apply nudge) | `cfg.edits_files` |
+| `current_agent_health(session, "rain")` (reviewer-down commit gate) | the session's registered reviewers — participants holding `file_finding` |
+
+The last two were **fail-quiet**, which is why they are called out: under
+role-derived slugs the reviewer gate would have returned `ok` forever (a review
+that cannot have happened stops blocking the commit) and the findings re-raise
+guard's `has_message_from_author_since(.., "brian", ..)` would have stopped
+escalating. Both now read the roster.
+
+**`Author` survives as the router's two-party discriminant and nothing else.**
+`core::router` forwards bilaterally and has no third case, so it runs only for a
+two-participant session; `Brian` means turn slot 0 and `Rain` slot 1 there.
+`ActivityTracker` holds the session's slugs in turn order and translates.
+
+**Prompts.** `BRIAN_ROLE`/`RAIN_ROLE` are `HANDS_ROLE`/`EYES_ROLE`, and
+`builtin_prose_for_role` is keyed on the ROLE slug (it went role → agent name →
+constant, which breaks the moment a participant is slugged `hands-2`). The
+opening roster sentence is DELETED rather than reworded — layer 2 already
+generates `## Participants in this session` from the live roster (D4) — and every
+other `Brian`/`Rain` became `HANDS`/`EYES`. `GENERAL_RULES` and the
+`custom-instructions.md` template lost their name references too.
+
+**Migration 0049 re-seeds both roles' prose**, guarded on the exact bytes
+0046/0048 wrote so a user-edited row is never clobbered. Generated from the
+resolved literals by `cargo run --example dump_role_prose`, and pinned to the
+constants by the existing byte-parity oracle.
+
+**Unread now, columns left in place** (the database is being reset, so dropping
+them buys nothing and costs a migration): `sessions.brian_effort`,
+`rain_effort`, `brian_ultracode`, `rain_ultracode`, `brian_claude_session_id`,
+`rain_claude_session_id`, `brian_model_id`, `rain_model_id`.
+`brian_model_at_spawn` / `rain_model_at_spawn` are still WRITTEN, positionally
+from turn slots 0 and 1, because `SessionInfo` is frozen frontend shape;
+`rain_enabled` is still written and read only as the solo/duo default for the
+create paths that have no dialog.
+
+**Behaviour changes, stated rather than buried.** A dialog-less session now
+invites every live non-`on_demand` role in creation order, so a user with three
+roles gets three participants (it was always exactly `hands` + `eyes`). And the
+model chain's `agent_configs` tier is unreachable for a role-derived slug — the
+row keys are CHECK-constrained to `('emma','brian','rain')` — so a participant
+with no model and no role default falls to the built-in Anthropic default; that
+branch now `warn!`s instead of being silent.
+
+---
+
 ## 2026-08-12 — rc3 D9: the claude CLI is the only connector; the native loop is deleted
 
 The user: *"I actually want to commit using the claude cli as the model
