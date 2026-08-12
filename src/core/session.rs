@@ -646,13 +646,19 @@ async fn spawn_session_handle(
     let rain_effort = session.rain_effort.clone();
     let rain_ultracode = session.rain_ultracode;
 
-    // Layer-3 role prose, read from each participant's `roles` row. Resolved
-    // here — once per spawn, alongside the other pre-resolved prompt inputs —
-    // so `read_system_prompt` stays a pure function of its arguments. `None`
-    // means "use the built-in constant", which until the user edits the row is
-    // the identical text (migration 0046 seeded it verbatim).
-    let brian_prose = resolve_role_prose(&storage, &roster, "brian").await;
-    let rain_prose = resolve_role_prose(&storage, &roster, "rain").await;
+    // Each agent's full system prompt, composed once per spawn from the
+    // database — see `compose_system_prompt` for why the role-prose read and the
+    // prompt assembly are joined there rather than inside `spawn_agent_for`.
+    let brian_prompt = compose_system_prompt(
+        &storage,
+        &roster,
+        paths,
+        "brian",
+        project.as_deref(),
+        project_root.as_deref(),
+        cl_index.as_deref(),
+    )
+    .await?;
 
     let brian = spawn_agent_for(
         &session.id,
@@ -660,9 +666,7 @@ async fn spawn_session_handle(
         brian_cfg,
         paths,
         &project,
-        project_root.as_deref(),
-        cl_index.as_deref(),
-        brian_prose.as_deref(),
+        brian_prompt,
         signaling_addr,
         mcp_temp.path(),
         working_repo_path.clone(),
@@ -672,6 +676,18 @@ async fn spawn_session_handle(
     )
     .await?;
     let rain = if let Some(rc) = rain_cfg {
+        // Composed inside the branch: a solo-Brian session never assembles a
+        // prompt for an agent it does not spawn.
+        let rain_prompt = compose_system_prompt(
+            &storage,
+            &roster,
+            paths,
+            "rain",
+            project.as_deref(),
+            project_root.as_deref(),
+            cl_index.as_deref(),
+        )
+        .await?;
         Some(
             spawn_agent_for(
                 &session.id,
@@ -679,9 +695,7 @@ async fn spawn_session_handle(
                 rc,
                 paths,
                 &project,
-                project_root.as_deref(),
-                cl_index.as_deref(),
-                rain_prose.as_deref(),
+                rain_prompt,
                 signaling_addr,
                 mcp_temp.path(),
                 working_repo_path.clone(),
@@ -1091,6 +1105,44 @@ async fn resolve_role_prose(
     Some(prose)
 }
 
+/// One agent's finished system prompt, composed from the database.
+///
+/// This is the JOIN between [`resolve_role_prose`] — which reads the
+/// user-editable `roles.description_prompt` through the participant's `role_id`
+/// — and [`read_system_prompt`], which lays that prose down as layer 1. Both
+/// halves have their own tests; neither relates the two, so before this function
+/// existed the prose argument could be dropped at the spawn call site and the
+/// whole suite stayed green. Verified: replacing it with `None` for either agent
+/// left 1149 lib tests passing.
+///
+/// Composing here rather than inside `spawn_agent_for` is what makes the join
+/// reachable from a test — `spawn_agent_for` goes on to launch a real
+/// claude-code subprocess, and no test can follow it there. It now receives a
+/// finished `String` it can only write down, instead of an `Option` that
+/// silently degrades to a plausible-looking default when it goes missing.
+async fn compose_system_prompt(
+    storage: &Storage,
+    roster: &[crate::storage::Participant],
+    paths: &Paths,
+    agent_name: &str,
+    project: Option<&str>,
+    project_root: Option<&Path>,
+    cl_index: Option<&[ClIndexEntry]>,
+) -> Result<String> {
+    // Layer-3 role prose, read from this participant's `roles` row. `None` means
+    // "use the built-in constant", which until the user edits the row is the
+    // identical text (migration 0046 seeded it verbatim).
+    let role_prose = resolve_role_prose(storage, roster, agent_name).await;
+    read_system_prompt(
+        paths,
+        agent_name,
+        project,
+        project_root,
+        cl_index,
+        role_prose.as_deref(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn_agent_for(
     session_id: &str,
@@ -1098,9 +1150,7 @@ async fn spawn_agent_for(
     config: AgentConfig,
     paths: &Paths,
     project: &Option<String>,
-    project_root: Option<&Path>,
-    cl_index: Option<&[ClIndexEntry]>,
-    role_prose: Option<&str>,
+    system_prompt: String,
     signaling_addr: SocketAddr,
     mcp_temp_dir: &std::path::Path,
     working_dir: Option<PathBuf>,
@@ -1109,14 +1159,6 @@ async fn spawn_agent_for(
     session_ultracode: Option<bool>,
 ) -> Result<AgentHandle> {
     let native = config.native;
-    let system_prompt = read_system_prompt(
-        paths,
-        agent_name,
-        project.as_deref(),
-        project_root,
-        cl_index,
-        role_prose,
-    )?;
     // The assembled prompt is multi-KB. Hand it to claude-code via a file
     // (`--append-system-prompt-file`) rather than an inline arg so the command
     // line stays under Windows' 32,767-char `CreateProcessW` limit. Co-located
@@ -2159,6 +2201,86 @@ mod tests {
             .await
             .unwrap();
         assert!(resolve_role_prose(&s, &roster, "brian").await.is_none());
+    }
+
+    /// **The join.** An edit to a role row must reach the prompt the agent is
+    /// actually spawned with.
+    ///
+    /// The two tests above cover the halves — `resolve_role_prose` reads the row,
+    /// `read_system_prompt` lays the prose down — and neither relates them. That
+    /// gap was real: dropping the prose argument at the spawn call site (`None`
+    /// for brian, then for rain) left all 1149 lib tests passing, which is the
+    /// entire feature (B7a: role prose read from the database rather than the
+    /// binary) sitting inert behind a green suite. An install would seed
+    /// migration 0046's verbatim copy of the constant, serve exactly that
+    /// forever, and every edit the user made in the Roles tab would be written,
+    /// stored, re-read on the next spawn — and thrown away one frame before it
+    /// mattered.
+    ///
+    /// Each role gets its OWN sentinel so the cross-checks below can tell "the
+    /// join works" apart from "every agent gets brian's prose", which is what a
+    /// hardcoded slug at the resolve site would produce.
+    #[tokio::test]
+    async fn an_edited_role_row_reaches_the_prompt_the_agent_is_spawned_with() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+
+        // Edited by raw UPDATE rather than through `update_role`, matching the
+        // test above: the write path has its own coverage in `storage`, and what
+        // is under test here is everything downstream of the stored row.
+        for (slug, prose) in [
+            ("hands", "You are HANDS. SENTINEL_HANDS_R7Q"),
+            ("eyes", "You are EYES. SENTINEL_EYES_R7Q"),
+        ] {
+            sqlx::query("UPDATE roles SET description_prompt = ? WHERE slug = ?")
+                .bind(prose)
+                .bind(slug)
+                .execute(s.pool())
+                .await
+                .unwrap();
+        }
+
+        let brian = compose_system_prompt(&s, &roster, &paths, "brian", None, None, None)
+            .await
+            .unwrap();
+        let rain = compose_system_prompt(&s, &roster, &paths, "rain", None, None, None)
+            .await
+            .unwrap();
+
+        assert!(
+            brian.contains("SENTINEL_HANDS_R7Q"),
+            "the edited 'hands' prose never reached brian's prompt"
+        );
+        assert!(
+            rain.contains("SENTINEL_EYES_R7Q"),
+            "the edited 'eyes' prose never reached rain's prompt"
+        );
+
+        // Each agent gets ITS role's prose, not the other's and not both.
+        assert!(
+            !brian.contains("SENTINEL_EYES_R7Q"),
+            "brian was briefed with the 'eyes' role"
+        );
+        assert!(
+            !rain.contains("SENTINEL_HANDS_R7Q"),
+            "rain was briefed with the 'hands' role"
+        );
+
+        // And the edit REPLACED the built-in prose rather than landing next to
+        // it. Without this the assertions above would also pass for a prompt
+        // carrying two contradictory role sections.
+        let builtin =
+            crate::agents::prompts::BRIAN_ROLE.replace("<your project>", "\"_globals\"");
+        assert!(
+            !brian.contains(&builtin),
+            "the built-in role survived alongside the edited one"
+        );
     }
 
     #[test]
