@@ -11,7 +11,7 @@ use crate::core::activity::{ActivityTracker, SessionActivity};
 use crate::core::ipav::IpavState;
 use crate::signaling::SignalingBridge;
 use crate::storage::{Author, Envelope, MessageKind, Storage};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use tracing::warn;
@@ -174,17 +174,6 @@ pub struct IdleWatch {
     pub working: Arc<Mutex<Option<(Instant, String)>>>,
 }
 
-/// Weak refs to a duo session's router liveness + per-direction counters, so the
-/// watchdog can surface a router that died while agents are still live (the
-/// peer-forward subsystem going down without taking the agents with it). `Weak`
-/// so the watchdog never keeps the router state alive past the session. `None`
-/// for solo sessions (no router).
-pub struct RouterWatch {
-    pub alive: Weak<AtomicBool>,
-    pub fwd_brian_to_rain: Weak<AtomicU64>,
-    pub fwd_rain_to_brian: Weak<AtomicU64>,
-}
-
 /// Per-session watchdog loop. Holds `Weak<AgentLiveness>` per agent so it
 /// self-terminates once every pump has exited (the session ended) — no leaked
 /// task. Emits health only on change via the bridge registry. Also watches the
@@ -202,7 +191,6 @@ pub async fn run_stall_watchdog(
     hands_slug: Option<String>,
     activity: Arc<ActivityTracker>,
     bridge: Arc<SignalingBridge>,
-    router: Option<RouterWatch>,
     idle_watch: Option<IdleWatch>,
 ) {
     // Idle-unflagged tracking (loop-local; see `idle_unflagged_decision`).
@@ -226,28 +214,6 @@ pub async fn run_stall_watchdog(
             );
             if let Some(next) = decision {
                 bridge.notify_agent_health(session_id.clone(), slug, next);
-            }
-        }
-        // Router liveness: flag ONLY the anomaly — router dead while agents still
-        // live. At session end agents are gone too (`any_alive` false → we break
-        // below), so a normal shutdown never trips this. Emit once on transition
-        // (the registry is the only-on-change guard, like agent health).
-        if let (true, Some(rw)) = (any_alive, &router) {
-            if let Some(alive) = rw.alive.upgrade() {
-                if !alive.load(Ordering::Acquire)
-                    && bridge.current_router_health(&session_id) != Some(false)
-                {
-                    let load = |w: &Weak<AtomicU64>| {
-                        w.upgrade().map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)
-                    };
-                    warn!(
-                        session_id = %session_id,
-                        fwd_brian_to_rain = load(&rw.fwd_brian_to_rain),
-                        fwd_rain_to_brian = load(&rw.fwd_rain_to_brian),
-                        "peer-forward router DIED while agents are live — forwarding is DOWN"
-                    );
-                    bridge.notify_router_health(session_id.clone(), false);
-                }
             }
         }
         // ── Idle-unflagged watchdog (the "What happened?" fix) ──────────────
@@ -418,6 +384,7 @@ async fn deliver_idle_nudge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     /// `recv()` with a deadline.
     ///

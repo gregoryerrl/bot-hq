@@ -4,44 +4,10 @@
 
 use crate::agents::ParticipantInput;
 use crate::core::ipav::IpavPhase;
-use crate::storage::{render_wire, Author, Envelope, MessageKind, Storage};
+use crate::storage::{Envelope, MessageKind, Storage};
 use anyhow::Result;
 use tracing::warn;
 
-/// The IPAV phase tag plus a persistent EYES-findings banner when
-/// `open_blocking > 0`, so the banner rides every turn (it can't scroll away)
-/// until the findings are dispositioned — the salience half of the
-/// EYES-sign-off gate (post-mortem §5.2). `open_blocking == 0` renders the
-/// plain phase envelope, so an absent banner costs nothing: `render_wire` skips
-/// its `format!` entirely.
-///
-/// Builds an [`Envelope`] and hands it to [`render_wire`] rather than
-/// formatting the tag itself. There must be exactly one place that decides how
-/// a phase tag is spelled: every other wire is now rendered from a receipt
-/// through `render_wire`, so a second spelling here would mean the peer forward
-/// and the user broadcast disagreed about what an agent's stdin looks like, and
-/// only one of them would show up in the chat.
-///
-/// That consolidation is not literally free, and this used to claim it was. The
-/// `Envelope` owns its phase name, so every call heap-allocates a ≤11-byte
-/// `String` that the old single `format!` did not — on the peer-forward path,
-/// once per delivered forward. Kept anyway: a forward already allocates the
-/// whole wire, and buying a second spelling of the phase tag back would cost
-/// far more than it saves.
-///
-/// The sole production caller is [`peer_forward_message`] — the one wire that
-/// still carries a string with no row of its own. Everything else supplies its
-/// `Envelope` to `post_to_channel` and lets the receipt render it.
-pub fn with_phase_and_findings_envelope(
-    phase: IpavPhase,
-    open_blocking: usize,
-    body: &str,
-) -> String {
-    render_wire(
-        Some(&Envelope::phase(phase.name()).with_open_blocking(open_blocking)),
-        body,
-    )
-}
 
 /// Persist a user-originated message and fan it out to both agents.
 pub async fn broadcast_user_message(
@@ -104,81 +70,11 @@ pub async fn broadcast_user_message(
     Ok(persisted.message_id())
 }
 
-/// Forward a peer's prose chunk into an agent's stdin. Called by
-/// `core::router::route_forward` once the forward ladder decides to forward.
-/// The message is rendered as if from the user but tagged so the agent knows
-/// who said it.
-///
-/// **The one wire B5 Task 2 did not gate on a receipt**, and the only caller of
-/// `ParticipantInput::send_unrouted`.
-///
-/// Three `RouterCommand::Forward` producers reach here. An agent's turn buffer
-/// (`core::duo`, at flush) and its on-exit prose are accumulations of
-/// `AgentEvent::Text` chunks the pump persists as they arrive. The
-/// provider-limit peer notice is host-authored, and posts its own `system` row
-/// in the pump before handing the same string to the router.
-///
-/// That last one is a row BESIDE the forward rather than through it, on purpose.
-/// What reaches the peer is decided here and in `route_forward`, out of the
-/// peer's identity, the phase and the open-findings count read at forward time,
-/// and only after a ladder that can hold the forward (hard cap) or drop it
-/// (convergence). Delivering the receipt straight to the peer's stdin would skip
-/// that ladder and wake it in cases where today it is not woken — a behaviour
-/// change, not a serialisation one.
-///
-/// So the TEXT is on record and the DECORATION is not. Four pieces of it, none
-/// recorded anywhere, in the order the peer reads them:
-///
-/// 1. the phase tag — `with_phase_and_findings_envelope` above, from the phase
-///    `route_forward` reads at forward time;
-/// 2. the findings banner — same envelope, from `deps.open_blocking`;
-/// 3. the peer provenance tag — the `prefix` match immediately below;
-/// 4. the `peer_ack` override tag (`router.rs`, in `route_forward` just before
-///    the call to this function), prepended when a turn that called `peer_ack`
-///    carried substantive text anyway. The only one of the four that changes
-///    what the message MEANS rather than framing it.
-///
-/// Note that 3 wraps 4 even though `route_forward` applies 4 first: the override
-/// tag is already inside `text` by the time `format!("{prefix}{text}")` below
-/// puts the provenance tag in front of it. Assembly order is the reverse of read
-/// order, which is why the list is numbered by what the peer sees.
-///
-/// Recording them means threading a receipt through `RouterCommand` and moving
-/// all four decisions with it, which is the turn sequencer's work.
-pub async fn peer_forward_message(
-    peer_author: Author,
-    sender_label: &str,
-    text: &str,
-    phase: IpavPhase,
-    open_blocking: usize,
-    input_tx: &ParticipantInput,
-) {
-    // **rc3 D10: the provenance tag names the SENDER off the roster.** It was
-    // two hardcoded person names, one per `Author` slot, and this is the DEFAULT
-    // runtime path — the sequencer is opt-in — so it is what agents actually
-    // read on every peer forward today. `sender_label` is resolved once at spawn
-    // by the display rule (role · model), so a third role or a renamed one is
-    // announced as itself. An empty label degrades to an unattributed tag, which
-    // still says the message is not from the user — the load-bearing half.
-    let prefix = if sender_label.is_empty() {
-        "[PEER MESSAGE — from another participant, not the user]\n".to_string()
-    } else {
-        format!("[PEER MESSAGE — from {sender_label}, not the user]\n")
-    };
-    let inner = format!("{prefix}{text}");
-    let wire = with_phase_and_findings_envelope(phase, open_blocking, &inner);
-    // A send failure means this agent's input pump has exited (stdin gone) and it
-    // won't SEE the peer's message. Mirrors broadcast_user_message: log per agent
-    // so a one-sided peer-forward loss is diagnosable instead of silent (the same
-    // invisible-desync failure mode, on the peer path).
-    if !input_tx.send_unrouted(wire).await {
-        warn!(agent = ?peer_author, "peer forward not delivered (input pump closed)");
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::render_wire;
 
     /// `recv()` with a deadline.
     ///
@@ -295,64 +191,6 @@ mod tests {
         let bm = next_wire(&mut brx).await;
         assert_eq!(bm.message.content, "[PHASE: Apply]\nhi");
         assert_eq!(s.messages_for_session("solo", None).await.unwrap().len(), 1);
-    }
-
-    /// The provenance tag names the SENDER from the roster (rc3 D4/D10).
-    ///
-    /// It used to be one of two hardcoded person names selected by `Author`, on
-    /// the DEFAULT runtime path — the sequencer is opt-in — so this string is
-    /// what agents read on every peer forward. A label is passed in rather than
-    /// derived here so a renamed or third role is announced as itself.
-    #[tokio::test]
-    async fn peer_forward_envelopes_then_author_tags() {
-        // `peer_forward_message` writes through `send_unrouted`, which carries
-        // no receipt and so has no session to be checked against; the id here is
-        // therefore arbitrary.
-        let (tx, mut rx) = stub_input("s1");
-        peer_forward_message(
-            Author::Rain,
-            "AUDITOR · Claude Opus 5",
-            "concerns?",
-            IpavPhase::Plan,
-            0,
-            &tx,
-        )
-        .await;
-        let m = next_wire(&mut rx).await;
-        assert!(
-            m.message.content.starts_with(
-                "[PHASE: Plan]\n[PEER MESSAGE — from AUDITOR · Claude Opus 5, not the user]\n"
-            ),
-            "expected phase envelope wrapping peer provenance tag, got: {}",
-            m.message.content
-        );
-        assert!(m.message.content.contains("concerns?"));
-
-        // An unnameable sender still says "not the user", which is the tag's
-        // load-bearing half — better an unattributed peer than a wrong name.
-        peer_forward_message(Author::Rain, "", "again?", IpavPhase::Plan, 0, &tx).await;
-        let m = next_wire(&mut rx).await;
-        assert!(
-            m.message.content.contains("from another participant, not the user"),
-            "got: {}",
-            m.message.content
-        );
-    }
-
-    #[test]
-    fn findings_envelope_plain_when_none_else_banner() {
-        // 0 open → identical to the plain phase envelope (zero overhead).
-        assert_eq!(
-            with_phase_and_findings_envelope(IpavPhase::Apply, 0, "hi"),
-            "[PHASE: Apply]\nhi"
-        );
-        // >0 → a ⚠ banner rides between the phase tag and the body.
-        let w = with_phase_and_findings_envelope(IpavPhase::Apply, 2, "hi");
-        assert!(
-            w.starts_with("[PHASE: Apply]\n⚠ 2 unresolved EYES blocking finding(s)"),
-            "got: {w}"
-        );
-        assert!(w.ends_with("\nhi"), "body still trails the envelope: {w}");
     }
 
     #[tokio::test]

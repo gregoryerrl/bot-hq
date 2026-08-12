@@ -2254,10 +2254,6 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
     jaccard_from_sets(&token_set(a), &token_set(b))
 }
 
-/// Jaccard similarity at or above which two consecutive forwards count as "the
-/// same content" for convergence detection.
-pub(super) const VOLLEY_SIMILARITY_THRESHOLD: f64 = 0.85;
-
 // --- spin detection --------------------------------------------------------
 // Router inventory #2 (`single_stream_cross_agent_same_phrase_breaks_fast`),
 // guarded by #3 (`varied_substantive_cross_agent_never_breaks`). Reframed for
@@ -2267,12 +2263,11 @@ pub(super) const VOLLEY_SIMILARITY_THRESHOLD: f64 = 0.85;
 /// Jaccard bar at or above which a turn counts as a repeat of the same
 /// participant's previous one.
 ///
-/// **Deliberately not [`VOLLEY_SIMILARITY_THRESHOLD`], despite the same value.**
-/// `core::router` imports that one for the convergence breaker it still runs, so
-/// until task 14 deletes that file, retuning it would retune a shipped path.
-/// They also measure different things: that one compares consecutive forwards
-/// across a single interleaved stream of two agents, this one compares one
-/// participant against its own last turn. They start equal because the number
+/// **Was deliberately split from the router's convergence threshold**, which
+/// task 14 deleted along with `core::router`. They measured different things:
+/// that one compared consecutive forwards across a single interleaved stream of
+/// two agents, this one compares one participant against its own last turn.
+/// They started equal because the number
 /// was calibrated on the same material, not because they are one knob.
 const SPIN_SIMILARITY_THRESHOLD: f64 = 0.85;
 
@@ -6248,7 +6243,7 @@ mod tests {
         assert_eq!(jaccard_similarity("alpha beta", "gamma delta"), 0.0);
         let partial = jaccard_similarity("the quick brown fox", "the quick red hen");
         assert!(
-            partial > 0.0 && partial < VOLLEY_SIMILARITY_THRESHOLD,
+            partial > 0.0 && partial < SPIN_SIMILARITY_THRESHOLD,
             "partial overlap should not trip the breaker: {partial}"
         );
     }

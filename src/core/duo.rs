@@ -4,7 +4,6 @@
 use crate::agents::{AgentEvent, AgentHealth};
 use crate::core::activity::ActivityTracker;
 use crate::core::ipav::{IpavPhase, IpavState};
-use crate::core::router::RouterCommand;
 use crate::signaling::SignalingBridge;
 use crate::storage::{Author, MessageKind, Storage};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,12 +64,6 @@ pub struct DuoConfig {
     /// nudge — bot-hq must gate on the ticked boxes, never on which role a name
     /// implies (rc3 D11).
     pub edits_files: bool,
-    /// Sender to the central peer-forward router (`core::router`). The pump emits
-    /// a `RouterCommand::Forward` here on each completed turn that buffered prose;
-    /// the router is the single decision point (forward / suppress / break the
-    /// volley) and owns the interleaved convergence stream + the await-halt check.
-    /// `None` = solo session (no peer, no router) or tests that don't route.
-    pub router_tx: Option<mpsc::Sender<RouterCommand>>,
     /// Optional bridge for firing MessagePersisted events after every
     /// successful storage.insert_message. None in tests that don't need
     /// event-driven readers.
@@ -133,7 +126,6 @@ impl DuoConfig {
             slug: slug.into(),
             edits_files: false,
             participant_id: None,
-            router_tx: None,
             bridge: None,
             self_input_tx: None,
             activity: None,
@@ -532,67 +524,34 @@ pub async fn pump_agent(
                     if !deduped {
                         last_limit_notice = Some(std::time::Instant::now());
                         warn!(agent = %cfg.slug, %line, "provider limit detected; pausing session on the user");
-                        if let Some(router_tx) = &cfg.router_tx {
-                            let notice = format!(
-                                "⚠ [bot-hq] {} hit a provider limit and is paused: \
-                                 \"{line}\". Do not expect replies from them, and do \
-                                 not take over their work — the session waits on the \
-                                 user to resume.",
-                                &cfg.slug
-                            );
-                            // Host-authored, so the row posts as `system` with a
-                            // NULL participant like the other host injections —
-                            // even though the Forward below carries
-                            // `from: cfg.author`, so the wire is tagged as a peer
-                            // message from that agent. The row records who WROTE
-                            // it; the tag is the router's and is unchanged.
-                            //
-                            // The row goes BESIDE the Forward, not in place of it.
-                            // The peer's copy has to keep going through
-                            // `route_forward`: that ladder can hold this forward
-                            // (hard cap) or drop it (convergence), so delivering
-                            // the receipt straight to the peer's stdin would wake
-                            // it in cases where today it is not woken. Row for the
-                            // text, string on the wire — the shape the turn buffer
-                            // below already has, and the reason `send_unrouted`
-                            // still takes a `String`.
-                            //
-                            // No envelope: the phase tag and findings banner the
-                            // peer reads are read at FORWARD time, which a hold
-                            // can put long after this post, so an envelope written
-                            // here would be a guess at a decision the router has
-                            // not made yet.
-                            match storage
-                                .post_to_channel(
-                                    cfg.session_id.clone(),
-                                    "system",
-                                    None,
-                                    MessageKind::SystemNotice.as_str(),
-                                    notice.as_str(),
-                                    None,
-                                )
-                                .await
-                            {
-                                Ok(m) => {
-                                    cfg.notify_persisted(m.message_id());
-                                    let _ = router_tx
-                                        .send(RouterCommand::Forward {
-                                            // A host-authored notice, not an agent ack.
-                                            peer_ack: false,
-                                            peer_ack_final: false,
-                                            from: cfg.author,
-                                            body: notice,
-                                        })
-                                        .await;
-                                }
-                                // No row, no wire — the trade every host injection
-                                // in this batch makes. The health mark and the
-                                // tray halt below are deliberately NOT gated on
-                                // it: those tell the USER the session is parked,
-                                // which stays true whether or not the peer's copy
-                                // got written.
-                                Err(e) => warn!(?e, "persisting the provider-limit peer notice"),
-                            }
+                        let notice = format!(
+                            "⚠ [bot-hq] {} hit a provider limit and is paused: \
+                             \"{line}\". Do not expect replies from them, and do \
+                             not take over their work — the session waits on the \
+                             user to resume.",
+                            &cfg.slug
+                        );
+                        // Host-authored, so the row posts as `system` with a NULL
+                        // participant like the other host injections. The ring
+                        // delivers it to every peer off its cursor — no separate
+                        // wire copy, and none of the hold/drop ladder the router
+                        // used to put between this row and the peer reading it.
+                        match storage
+                            .post_to_channel(
+                                cfg.session_id.clone(),
+                                "system",
+                                None,
+                                MessageKind::SystemNotice.as_str(),
+                                notice.as_str(),
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(m) => cfg.notify_persisted(m.message_id()),
+                            // No row. The health mark and the tray halt below are
+                            // deliberately NOT gated on it: those tell the USER
+                            // the session is parked, which stays true either way.
+                            Err(e) => warn!(?e, "persisting the provider-limit notice"),
                         }
                         if let Some(bridge) = &cfg.bridge {
                             bridge.notify_agent_health(
@@ -622,7 +581,6 @@ pub async fn pump_agent(
                 // peer-busy BEFORE this agent's idle → no momentary Idle flicker).
                 // The pump owns self-idle only when it does NOT hand a Forward to
                 // the router: an errored turn, an empty buffer, or a solo session.
-                let mut router_owns_idle = false;
                 // B5: what this ending MEANS, derived before the buffer is taken
                 // below. An errored turn ends `Spoke` — it produced nothing, but
                 // the ring has to step or the cycle stalls on a participant that
@@ -657,38 +615,12 @@ pub async fn pump_agent(
                     debug!(agent = %cfg.slug, "errored turn; draining buffer without router-forward");
                     buffer.clear();
                 } else {
-                    // Hand the turn's buffered prose to the central router (the
-                    // single forward decision point). Empty/whitespace buffers and
-                    // solo sessions (no router_tx) forward nothing.
-                    let body = std::mem::take(&mut buffer);
-                    if !body.trim().is_empty() {
-                        if let Some(router_tx) = &cfg.router_tx {
-                            // Only delegate self-idle to the router if the Forward
-                            // actually reached it. If the router is gone (channel
-                            // closed — e.g. it panicked), fall through to clear our
-                            // own busy below, so a dead router can't strand this
-                            // agent Busy with the chat input locked.
-                            match router_tx
-                                .send(RouterCommand::Forward {
-                                    from: cfg.author,
-                                    body,
-                                    peer_ack: peer_ack_pending,
-                                    peer_ack_final: peer_ack_final_pending,
-                                })
-                                .await
-                            {
-                                Ok(()) => router_owns_idle = true,
-                                // The router task is gone (channel closed — panic or
-                                // an early exit). This agent's whole turn of prose is
-                                // DROPPED and never reaches its peer. Was silent —
-                                // the exact invisible one-way break. Make it loud.
-                                Err(_) => warn!(
-                                    agent = %cfg.slug,
-                                    "peer-forward DROPPED: router channel closed (router task gone) — this turn's prose did not reach the peer"
-                                ),
-                            }
-                        }
-                    }
+                    // The turn's prose is already posted as rows by the pump
+                    // above; the ring delivers those to every peer off its
+                    // cursor. Nothing extra to hand anywhere — the router that
+                    // used to own this second delivery path is gone (task 14),
+                    // and it was already bypassed on every sequencer session.
+                    buffer.clear();
                 }
                 // A pass gets a ROW, so declining a turn is something the user can
                 // see rather than a gap in the transcript (design §1).
@@ -763,7 +695,7 @@ pub async fn pump_agent(
                 // Turn ended → this agent is idle, UNLESS we handed off to the
                 // router (which clears it after setting the peer busy, avoiding the
                 // momentary `Idle` flicker that would unlock the input mid-handoff).
-                if !router_owns_idle {
+                {
                     if let Some(activity) = &cfg.activity {
                         activity.set_busy_slug(&cfg.slug, false);
                     }
@@ -805,28 +737,10 @@ pub async fn pump_agent(
             }
             AgentEvent::Exited(msg) => {
                 warn!(agent = %cfg.slug, msg = %msg, "agent exited");
-                // Best-effort: forward any trailing buffered prose to the peer
-                // before we go.
-                let body = std::mem::take(&mut buffer);
-                if !body.trim().is_empty() {
-                    if let Some(router_tx) = &cfg.router_tx {
-                        if router_tx
-                            .send(RouterCommand::Forward {
-                                from: cfg.author,
-                                body,
-                                peer_ack: peer_ack_pending,
-                                peer_ack_final: peer_ack_final_pending,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            warn!(
-                                agent = %cfg.slug,
-                                "peer-forward DROPPED on exit: router channel closed — trailing prose did not reach the peer"
-                            );
-                        }
-                    }
-                }
+                // Trailing prose is already in the channel as rows; a peer
+                // reads it off its cursor whenever it next takes a turn, so a
+                // dying agent no longer needs to push a final copy anywhere.
+                buffer.clear();
                 // The agent is dying → force self-idle unconditionally (the
                 // post-loop cleanup also clears it; idempotent).
                 if let Some(activity) = &cfg.activity {
@@ -913,7 +827,6 @@ mod tests {
             slug: if matches!(author, Author::Brian) { "hands".into() } else { "eyes".into() },
             edits_files: matches!(author, Author::Brian),
             participant_id: None,
-            router_tx: None,
             bridge: None,
             self_input_tx: None,
             activity: None,
@@ -928,42 +841,65 @@ mod tests {
     /// test can assert WHICH `RouterCommand`s the pump emits. The pump's contract
     /// is "emit the right Forward on a completed turn"; the router's decision logic
     /// (forward / suppress / break) is tested in `core::router`.
-    fn cfg_with_route(author: Author) -> (DuoConfig, mpsc::Receiver<RouterCommand>) {
-        let (route_tx, route_rx) = mpsc::channel(16);
+    /// A pump wired to the ring. `participant_id` is required: the pump only
+    /// reports a turn end when it knows which participant ended it.
+    fn cfg_with_ring(
+        author: Author,
+    ) -> (
+        DuoConfig,
+        mpsc::Receiver<crate::core::sequencer::SequencerCommand>,
+    ) {
+        let (tx, rx) = mpsc::channel(16);
         let cfg = DuoConfig {
-            router_tx: Some(route_tx),
+            sequencer_tx: Some(tx),
+            participant_id: Some(1),
             ..fast_cfg(author)
         };
-        (cfg, route_rx)
+        (cfg, rx)
     }
 
-    /// Pull one `RouterCommand::Forward` from `rx` →
-    /// (from, body, peer_ack, peer_ack_final).
-    fn next_forward(
-        rx: &mut mpsc::Receiver<RouterCommand>,
-    ) -> Option<(Author, String, bool, bool)> {
+    /// Pull one `TurnComplete` off the ring channel → its [`TurnEnding`].
+    ///
+    /// Replaces the old `next_forward`, which read the body off a
+    /// `RouterCommand::Forward`. The prose is no longer on this wire at all —
+    /// it is a channel ROW, so body assertions read storage (see
+    /// [`turn_bodies`]) and this returns only how the turn ended.
+    fn next_turn_end(
+        rx: &mut mpsc::Receiver<crate::core::sequencer::SequencerCommand>,
+    ) -> Option<crate::core::sequencer::TurnEnding> {
         match rx.try_recv() {
-            Ok(RouterCommand::Forward {
-                from,
-                body,
-                peer_ack,
-                peer_ack_final,
-            }) => Some((from, body, peer_ack, peer_ack_final)),
-            // Pumps only emit Forward; FlushHeld comes from `broadcast`.
-            Ok(RouterCommand::FlushHeld) => None,
-            Err(_) => None,
+            Ok(crate::core::sequencer::SequencerCommand::TurnComplete { ending, .. }) => {
+                Some(ending)
+            }
+            _ => None,
         }
+    }
+
+    /// The agent-authored text rows this pump persisted, in order.
+    async fn turn_bodies(storage: &Storage) -> Vec<String> {
+        storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == MessageKind::Text.as_str())
+            .map(|m| m.content)
+            .collect()
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn errored_turn_emits_no_forward() {
         // Regression (Rain on the DeepSeek gateway, 2026-05-29): a turn that ends
-        // in an API error must NOT be forwarded. Forwarding the error bounces it to
-        // the peer, the peer replies, and that re-triggers the failing agent — an
-        // unbounded error-spam loop. The pump must emit NO RouterCommand; the error
-        // text is still persisted (UI visibility).
+        // in an API error must not bounce to the peer: the peer replies, and that
+        // re-triggers the failing agent — an unbounded error-spam loop.
+        //
+        // **Under the ring this assertion inverts, and that is the point.** The
+        // router was told "do not forward"; the sequencer must still be told the
+        // turn ENDED, or the cycle freezes on this participant forever. The loop
+        // is prevented by the ending being `done: false` with no prose row to
+        // wake anyone with — not by withholding the completion.
         let (storage, state) = setup().await;
-        let (cfg, mut route_rx) = cfg_with_route(Author::Rain);
+        let (cfg, mut ring_rx) = cfg_with_ring(Author::Rain);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
@@ -985,8 +921,8 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
         assert!(
-            next_forward(&mut route_rx).is_none(),
-            "errored turn must emit no Forward (would re-trigger the loop)"
+            next_turn_end(&mut ring_rx).is_some(),
+            "an errored turn must still report its end, or the ring never steps past it"
         );
         // Persisted for UI visibility even though not forwarded.
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
@@ -999,14 +935,14 @@ mod tests {
         // I/P is turn-based: text does NOT emit a Forward mid-turn; the pump emits
         // exactly one Forward on TurnComplete carrying the buffered text.
         let (storage, state) = setup().await; // default phase = Investigate
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
         ev_tx.send(AgentEvent::Text("hello".into())).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
-            next_forward(&mut route_rx).is_none(),
+            next_turn_end(&mut ring_rx).is_none(),
             "must not emit a Forward mid-turn (before TurnComplete)"
         );
 
@@ -1023,11 +959,15 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        let (from, body, peer_ack, _) =
-            next_forward(&mut route_rx).expect("Forward on turn complete");
-        assert_eq!(from, Author::Brian);
-        assert!(body.contains("hello"));
-        assert!(!peer_ack);
+        let ending = next_turn_end(&mut ring_rx).expect("the turn end must reach the ring");
+        assert!(
+            matches!(ending, crate::core::sequencer::TurnEnding::Spoke { .. }),
+            "a substantive turn is not a done-vote — the cycle must continue: {ending:?}"
+        );
+        // The prose is a row now; `from` is implicit in the participant the
+        // completion carries, so there is no author field on this wire to check.
+        let bodies = turn_bodies(&storage).await;
+        assert!(bodies.iter().any(|b| b.contains("hello")));
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].author, "hands");
@@ -1038,14 +978,14 @@ mod tests {
         let (storage, state) = setup().await;
         state.lock().await.current_phase = IpavPhase::Apply;
 
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
         ev_tx.send(AgentEvent::Text("step 1".into())).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
-            next_forward(&mut route_rx).is_none(),
+            next_turn_end(&mut ring_rx).is_none(),
             "no Forward mid-turn in Apply"
         );
 
@@ -1063,17 +1003,32 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        let (_, body, _, _) = next_forward(&mut route_rx).expect("Forward on turn complete");
-        assert!(body.contains("step 1"));
-        assert!(body.contains("step 2"));
+        assert!(
+            next_turn_end(&mut ring_rx).is_some(),
+            "the turn end must reach the ring"
+        );
+        // What coalescing MEANS changed with the transport, so the assertion had
+        // to move rather than be dropped. The router coalesced a turn's text into
+        // one Forward so the peer was woken once; the ring gets that structurally
+        // — one turn is one handover however many Text events it carried. So the
+        // surviving property is that the ring stepped EXACTLY once.
+        assert!(
+            next_turn_end(&mut ring_rx).is_none(),
+            "one turn must hand over once, however many text events it carried"
+        );
+        // Each Text event still gets its own row: the user reads the turn as it
+        // arrives, and the peer reads the same rows off its cursor.
+        let bodies = turn_bodies(&storage).await;
+        assert!(bodies.iter().any(|b| b.contains("step 1")));
+        assert!(bodies.iter().any(|b| b.contains("step 2")));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn turn_complete_emits_forward() {
         let (storage, state) = setup().await;
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
-        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
         ev_tx.send(AgentEvent::Text("quick".into())).await.unwrap();
         ev_tx
@@ -1089,14 +1044,18 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        let (_, body, _, _) = next_forward(&mut route_rx).expect("flushed to router");
-        assert!(body.contains("quick"));
+        assert!(
+            next_turn_end(&mut ring_rx).is_some(),
+            "the turn end must reach the ring"
+        );
+        let bodies = turn_bodies(&storage).await;
+        assert!(bodies.iter().any(|b| b.contains("quick")));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn tool_use_persists_but_emits_no_forward() {
         let (storage, state) = setup().await;
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -1112,7 +1071,7 @@ mod tests {
         task.await.unwrap();
 
         assert!(
-            next_forward(&mut route_rx).is_none(),
+            next_turn_end(&mut ring_rx).is_none(),
             "tool use alone emits no Forward"
         );
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
@@ -1486,7 +1445,7 @@ mod tests {
         // peer_ack is PASSED THROUGH to the router (which suppresses the wake): the
         // pump emits a Forward with peer_ack=true. The text is still persisted.
         let (storage, state) = setup().await;
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -1516,8 +1475,11 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        let (_, _, peer_ack, _) = next_forward(&mut route_rx).expect("Forward emitted");
-        assert!(peer_ack, "peer_ack tool must set peer_ack=true in the Forward");
+        let ending = next_turn_end(&mut ring_rx).expect("turn end emitted");
+        assert!(
+            matches!(ending, crate::core::sequencer::TurnEnding::Done),
+            "a content-free peer_ack turn must end the turn as a done-vote: {ending:?}"
+        );
         // The agent's text is still persisted for the user.
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert!(
@@ -1532,7 +1494,7 @@ mod tests {
         // The peer_ack flag applies only to the turn it was called in: turn 1's
         // Forward carries peer_ack=true, turn 2's (no ack) carries peer_ack=false.
         let (storage, state) = setup().await;
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -1575,10 +1537,21 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        let (_, b1, ack1, _) = next_forward(&mut route_rx).expect("turn 1 Forward");
-        assert!(ack1 && b1.contains("acked"));
-        let (_, b2, ack2, _) = next_forward(&mut route_rx).expect("turn 2 Forward");
-        assert!(!ack2 && b2.contains("real follow-up"));
+        // Turn 1 acked → a done-vote. Turn 2 did NOT ack, so the flag must have
+        // been reset between turns; if it leaked, turn 2 would vote done too.
+        let t1 = next_turn_end(&mut ring_rx).expect("turn 1 end");
+        assert!(
+            matches!(t1, crate::core::sequencer::TurnEnding::Done),
+            "an acked turn votes done: {t1:?}"
+        );
+        let t2 = next_turn_end(&mut ring_rx).expect("turn 2 end");
+        assert!(
+            matches!(t2, crate::core::sequencer::TurnEnding::Spoke { .. }),
+            "peer_ack must not leak into the next turn: {t2:?}"
+        );
+        let bodies = turn_bodies(&storage).await;
+        assert!(bodies.iter().any(|b| b.contains("acked")));
+        assert!(bodies.iter().any(|b| b.contains("real follow-up")));
     }
 
     #[test]
@@ -1634,7 +1607,7 @@ mod tests {
             in_atomic_tool: Some(Arc::clone(&flag)),
             ..fast_cfg(Author::Brian)
         };
-        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
         ev_tx
             .send(AgentEvent::ToolUse {
@@ -1690,7 +1663,7 @@ mod tests {
             in_atomic_tool: Some(Arc::clone(&flag)),
             ..fast_cfg(Author::Brian)
         };
-        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
         ev_tx
             .send(AgentEvent::ToolUse {
@@ -1734,7 +1707,7 @@ mod tests {
             self_input_tx: Some(crate::agents::ParticipantInput::new("s1", self_tx)),
             ..fast_cfg(Author::Brian)
         };
-        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
         ev_tx
             .send(AgentEvent::ToolUse {
@@ -1763,7 +1736,7 @@ mod tests {
             self_input_tx: Some(crate::agents::ParticipantInput::new("s1", self_tx)),
             ..fast_cfg(Author::Brian)
         };
-        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
         ev_tx
             .send(AgentEvent::ToolUse {
@@ -1820,7 +1793,7 @@ mod tests {
         // rendering as ordinary speech in a merely-quiet session (3h13m dead in
         // the archive study).
         let (storage, state) = setup().await;
-        let (mut cfg, mut route_rx) = cfg_with_route(Author::Brian);
+        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
         let bridge = SignalingBridge::new();
         bridge.set_storage(storage.clone()).await;
         cfg.bridge = Some(Arc::clone(&bridge));
@@ -1862,15 +1835,25 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        // Exactly ONE peer notice despite two limit turns (dedupe window).
-        let mut notices = 0;
-        while let Some((from, body, _, _)) = next_forward(&mut route_rx) {
-            if body.contains("hit a provider limit") {
-                assert_eq!(from, Author::Brian);
-                notices += 1;
-            }
-        }
+        // Exactly ONE notice despite two limit turns (dedupe window). Counted on
+        // ROWS now: the ring delivers the row off each peer's cursor, so the row
+        // is both the record and the delivery, and a duplicate would be visible
+        // to the user rather than only on a wire.
+        let notices = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.content.contains("hit a provider limit"))
+            .count();
         assert_eq!(notices, 1, "one notice per incident, not per retry");
+        // The turn still has to be reported, or the ring freezes on a
+        // participant the provider has stopped answering for — the same property
+        // the errored-turn test pins, on the other path that can strand a turn.
+        assert!(
+            next_turn_end(&mut ring_rx).is_some(),
+            "a limit-stalled turn must still report its end to the ring"
+        );
         let tray = storage.tray_entries_for_session("s1").await.unwrap();
         assert!(
             tray.iter()
@@ -1889,7 +1872,7 @@ mod tests {
         // that matters is the pairing: a row exists AND the router still receives
         // the same command it always did.
         let (storage, state) = setup().await;
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
@@ -1927,27 +1910,16 @@ mod tests {
         // one here would record a wire the peer may never get.
         assert_eq!(notice.envelope, None);
 
-        // The forward still goes through the router — `from` the agent and
-        // un-acked, so `route_forward`'s ladder sees the command it always saw.
-        let mut forwards = Vec::new();
-        while let Some(f) = next_forward(&mut route_rx) {
-            forwards.push(f);
-        }
-        let (from, body, peer_ack, peer_ack_final) = forwards
-            .iter()
-            .find(|(_, b, _, _)| b.contains("hit a provider limit"))
-            .expect("the peer still gets the notice through the router, not by receipt");
-        assert_eq!(*from, Author::Brian);
-        assert!(!*peer_ack && !*peer_ack_final);
-        // Row and forward must not diverge. Note what this does NOT prove: both
-        // sides come from one `format!`, so they would drift together and this
-        // would still pass.
-        assert_eq!(body, &notice.content, "the row records the forwarded bytes");
+        // The router copy this used to assert is gone with `core::router`
+        // (task 14): the notice is a row, and the ring delivers rows off each
+        // peer's cursor. What still matters — and is checked below — is that the
+        // row's TEXT is the thing the peer will read.
         // So pin the interpolation itself, which is the part that can change
         // under both at once. The peer is told WHO stalled and WHAT the provider
         // said; `as_str()` quietly becoming a display name, or the quoted
         // `{line}` being dropped, would leave the equality above green while the
         // peer reads something else.
+        let body = &notice.content;
         assert!(
             body.contains("hands"),
             "the notice must name the stalled agent: {body}"
@@ -1959,7 +1931,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_provider_limit_with_no_peer_writes_no_notice_row() {
+    async fn a_provider_limit_writes_its_notice_row_even_with_no_peer() {
         // The post sits INSIDE the `router_tx` guard, so a solo session still
         // records nothing here. Parity: there is no peer to notify, the notice
         // text is addressed to one ("do not take over their work"), and this
@@ -1997,22 +1969,22 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        assert!(
-            !storage
-                .channel_after("s1", 0, 100)
-                .await
-                .unwrap()
-                .rows
-                .iter()
-                .any(|m| m.content.contains("hit a provider limit")),
-            "no peer, no peer notice — and so no row for one"
-        );
-        // …but the user is still told, on the path that is theirs.
-        let tray = storage.tray_entries_for_session("s1").await.unwrap();
-        assert!(
-            tray.iter()
-                .any(|q| q.status == "pending" && q.prompt.contains("Provider limit")),
-            "the halt fires with or without a peer: {tray:?}"
-        );
+        // **This assertion inverted with task 14, deliberately.** The post used
+        // to sit inside the `router_tx` guard, so a solo session hit a provider
+        // limit and wrote NOTHING — the record was conflated with the delivery,
+        // and with nobody to deliver to there was also nothing to see. That is
+        // the exact defect rc3 exists to remove. The row is now written
+        // unconditionally; whether anyone is there to read it is the ring's
+        // question, not the recording's.
+        let notice = storage
+            .channel_after("s1", 0, 100)
+            .await
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|m| m.content.contains("hit a provider limit"));
+        let notice = notice.expect("a solo session must still record the limit it hit");
+        assert_eq!(notice.origin, "system");
+        assert_eq!(notice.participant_id, None);
     }
 }

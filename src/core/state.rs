@@ -928,15 +928,6 @@ impl AppState {
         handle
             .user_silent_forwards
             .store(0, std::sync::atomic::Ordering::Release);
-        // Same hard boundary for the router's convergence streak: clear it so a
-        // pre-message streak (surviving an honored interrupt) can't suppress the
-        // first post-message peer-forward. Router consumes the flag at its
-        // convergence stage; no-op for a solo session (no router).
-        if let Some(router) = &handle.router {
-            router
-                .convergence_reset
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
         // Flip every pending `mark_awaiting_user` row to 'answered' — the
         // user's reply IS the answer to a halt. `choice` rows stay pending
         // until the user actually picks an option. Emit HaltsCleared only when
@@ -1019,7 +1010,6 @@ impl AppState {
         for wake in &held_wakes {
             handle.send_to_all(wake).await;
         }
-        flush_held(handle.router.as_ref().map(|r| &r.tx), session_id);
         Ok(())
     }
 
@@ -1121,10 +1111,6 @@ impl AppState {
                 }
             }
         }
-        // A phase advance clears `awaiting` (above), so it must also release what
-        // the router held during that halt — otherwise the held forward waits for
-        // the user to type, which a phase click is not.
-        flush_held(handle.router.as_ref().map(|r| &r.tx), session_id);
         Ok(())
     }
 
@@ -1311,8 +1297,7 @@ impl AppState {
                 // does, so release what the router held behind it — after the
                 // answer, so the peer's held chatter lands behind it.
                 if step.flush {
-                    flush_held(handle.router.as_ref().map(|r| &r.tx), session_id);
-                }
+                            }
             }
             // else: session closed in the gap between resolve and wake — the OOB
             // message persists in storage, so a future reopen still sees it.
@@ -1354,35 +1339,6 @@ impl AppState {
     }
 }
 
-/// Release any peer-forwards the router is holding.
-///
-/// The router holds forwards while the duo is halted on the user. Something has
-/// to tell it the halt is over, and for a long time only `broadcast` did — so a
-/// forward parked behind a question stayed parked when the user ANSWERED that
-/// question from the tray, or when the phase advanced. It surfaced only on the
-/// next typed message, leaving the peer half-deaf in between (observed live,
-/// 2026-08-04). Every path that clears `awaiting` now ends here.
-///
-/// **Call it at the END of the path, never inside `clear_awaiting`.** Clearing
-/// happens BEFORE the user's own message is delivered; flushing there would
-/// release held peer chatter AHEAD of what the user just said. `broadcast`'s
-/// ordering — message, then held paused-wakes, then this — is the contract.
-///
-/// Never blocks and never fails a caller: a full/closed channel just means the
-/// forwards stay held until the next flush. `None` (solo session) is a no-op.
-fn flush_held(
-    router_tx: Option<&tokio::sync::mpsc::Sender<crate::core::router::RouterCommand>>,
-    session_id: &str,
-) {
-    let Some(tx) = router_tx else { return };
-    if tx
-        .try_send(crate::core::router::RouterCommand::FlushHeld)
-        .is_err()
-    {
-        tracing::warn!(session_id, "router FlushHeld not sent (channel full/closed)");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1414,22 +1370,6 @@ mod tests {
             nudge.contains("forwarded"),
             "must name the real wake mechanism: turn output forwards to the peer"
         );
-    }
-
-    #[tokio::test]
-    async fn flush_held_sends_on_a_live_router_and_no_ops_without_one() {
-        use crate::core::router::RouterCommand;
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        super::flush_held(Some(&tx), "s1");
-        assert!(
-            matches!(rx.try_recv(), Ok(RouterCommand::FlushHeld)),
-            "a live router must receive FlushHeld"
-        );
-
-        // Solo session: no router, no panic, nothing sent.
-        super::flush_held(None, "s1");
-        assert!(rx.try_recv().is_err(), "None router must be a silent no-op");
     }
 
     #[test]

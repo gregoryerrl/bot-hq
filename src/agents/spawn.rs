@@ -405,32 +405,6 @@ impl ParticipantInput {
             .is_ok()
     }
 
-    /// The one remaining string wire: `core::broadcast::peer_forward_message`.
-    ///
-    /// Greppable on purpose, but note what the grep gives you — CALL SITES, not
-    /// messages. Three `RouterCommand::Forward` producers reach this one call
-    /// site, and none of them is text with nothing on record any more:
-    ///
-    /// * an agent's turn buffer and its on-exit prose are built from
-    ///   `AgentEvent::Text` chunks the pump persists as they arrive —
-    ///   BEST-EFFORT per chunk: a failed insert warns and the pump keeps
-    ///   buffering, so the turn still forwards with that chunk unwritten;
-    /// * the provider-limit peer notice (`core::duo`) is host-authored, and
-    ///   posts its own `system` row before handing the same string to the
-    ///   router — the stricter shape, forwarding only if that row was written.
-    ///
-    /// What is ungated outright is the WIRE, not the text. No row reproduces
-    /// what the peer actually reads, because four separate decorations are
-    /// assembled at forward time and recorded nowhere: the phase tag and the
-    /// findings banner (`core::broadcast::with_phase_and_findings_envelope`),
-    /// the `peer_ack` override tag (`core::router::route_forward`), and the peer
-    /// provenance tag (`core::broadcast::peer_forward_message`) — and the ladder
-    /// may hold or drop the forward before any of it happens. Recording them
-    /// means threading a receipt through `RouterCommand` and moving all four
-    /// decisions with it, which is the turn sequencer's work.
-    pub(crate) async fn send_unrouted(&self, wire: String) -> bool {
-        self.tx.send(OutgoingUserMessage::text(wire)).await.is_ok()
-    }
 
     /// True once the receiving half is gone — a permanent API error or an
     /// exhausted retry budget drops the supervisor's receiver.

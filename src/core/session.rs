@@ -158,9 +158,6 @@ pub struct SessionHandle {
     /// escalation skips its SIGKILL (the user superseded the cancel). Reset by
     /// `cancel_session_turn`. Shared with `interrupt_then_escalate`.
     pub cancel_superseded: Arc<std::sync::atomic::AtomicBool>,
-    /// Handle-side control for the duo peer-forward router (`None` = solo). Lets
-    /// `broadcast` reset the router's convergence streak on each user message.
-    pub router: Option<crate::core::RouterControl>,
     /// Keeps the mcp-config temp files alive for the lifetime of the session.
     _mcp_temp: TempDir,
 }
@@ -891,88 +888,22 @@ async fn spawn_session_handle(
     // explicit teardown). The shared `awaiting`/`user_silent_forwards` Arcs are
     // cloned in, so the bridge's awaiting set + broadcast's counter reset are
     // visible here with no extra plumbing.
-    // Shared across the user boundary: `broadcast` sets it on each user message;
-    // the router consumes it to clear its convergence streak (so a pre-message
-    // streak can't suppress the first post-message peer-forward).
-    let convergence_reset = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Per-direction delivered-forward counters (diagnostics).
-    let fwd_brian_to_rain = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let fwd_rain_to_brian = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    // Router liveness flag (true while the task runs; the router's AliveGuard flips
-    // it false on exit/panic). The watchdog reads it via a Weak.
-    let router_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    // **The router is a two-party mechanism and only runs for a two-party
-    // session.** It forwards `Author::Brian ↔ Author::Rain`, so with one
-    // participant there is nobody to forward to and with three there is no
-    // answer to "which peer". A session of any other size runs on the sequencer,
-    // which is roster-shaped — see the ring below.
-    let (router_tx, router_control, router_watch) = match handles.as_slice() {
-        [first, second] => {
-            let (router_tx, router_rx) = tokio::sync::mpsc::channel(256);
-            // O1: seed + register the session's open-blocking-findings count cache;
-            // the router reads this Arc lock-free per forward instead of a
-            // per-forward SELECT COUNT(*) + storage-lock.
-            let open_blocking = bridge.register_open_blocking(session.id.clone()).await;
-            let deps = crate::core::RouterDeps {
-                awaiting: Arc::clone(&awaiting),
-                session_id: session.id.as_str().into(),
-                storage: Some(storage.clone()),
-                user_silent_forwards: Arc::clone(&user_silent_forwards),
-                convergence_reset: Arc::clone(&convergence_reset),
-                fwd_brian_to_rain: Arc::clone(&fwd_brian_to_rain),
-                fwd_rain_to_brian: Arc::clone(&fwd_rain_to_brian),
-                alive: Arc::clone(&router_alive),
-                activity: Some(Arc::clone(&activity)),
-                open_blocking,
-                ipav: Arc::clone(&ipav),
-                brian_input: first.input().clone(),
-                rain_input: Some(second.input().clone()),
-                // How each slot announces itself on the DEFAULT peer-forward
-                // path. Read off the roster by the display rule, in turn order,
-                // so the tag names the role and model rather than a person
-                // (rc3 D4/D10). `live` is the same slice `handles` was built
-                // from, so slot 0/1 line up with `first`/`second`.
-                slot_labels: [
-                    display_name_for(&storage, live[0]).await,
-                    display_name_for(&storage, live[1]).await,
-                ],
-            };
-            let task = tokio::spawn(crate::core::run_router(deps, router_rx));
-            // Seed the router-health dot "up" — also clears any stale `false` left
-            // by a prior (pre-rebuild) router for this same session id.
-            bridge.notify_router_health(session.id.clone(), true);
-            let watch = crate::core::watchdog::RouterWatch {
-                alive: Arc::downgrade(&router_alive),
-                fwd_brian_to_rain: Arc::downgrade(&fwd_brian_to_rain),
-                fwd_rain_to_brian: Arc::downgrade(&fwd_rain_to_brian),
-            };
-            (
-                Some(router_tx.clone()),
-                Some(crate::core::RouterControl {
-                    tx: router_tx,
-                    convergence_reset,
-                    fwd_brian_to_rain,
-                    fwd_rain_to_brian,
-                    alive: router_alive,
-                    task,
-                }),
-                Some(watch),
-            )
-        }
-        _ => (None, None, None),
-    };
-    // B5: the turn sequencer, opt-in per run while `router.rs` still ships.
-    // `BOT_HQ_SEQUENCER=1` spawns the ring for this session; without it nothing
-    // changes and the router keeps every forward. Opt-in is what makes this
-    // landable BEFORE task 14 deletes that path — the ring has to earn the
-    // deletion on a real session first, and it cannot do that from a test.
-    let sequencer_enabled = std::env::var("BOT_HQ_SEQUENCER").as_deref() == Ok("1");
-    let mut sequencer_tx = None;
+    // **The turn ring drives every session** (task 14, 2026-08-12). The
+    // bilateral router it replaced forwarded `Author::Brian ↔ Author::Rain` and
+    // had no third case, so it could not serve a roster — which is what made it
+    // the last thing keeping a session to two participants. It earned its
+    // deletion on real sessions first: 1,145 delivery rows across two
+    // production sessions on 2026-08-12, none withheld.
+    //
+    // Every behaviour it encoded has a verdict in
+    // `docs/plans/2026-08-06-router-behaviour-inventory.md` — 12 PRESERVED (each
+    // with a named test in `core::sequencer`), 6 DISSOLVED (structurally
+    // impossible in a ring), 2 DROPPED with stated reasons.
     // One epoch cell per spawned agent, in the same order as `live` / `handles`,
     // so a pump can be handed its own.
     let mut turn_epochs: Vec<Option<Arc<std::sync::atomic::AtomicU64>>> =
         vec![None; handles.len()];
-    if sequencer_enabled {
+    let sequencer_tx = {
         let mut inputs = std::collections::HashMap::new();
         let mut epochs = std::collections::HashMap::new();
         // The map is keyed by participant id and the value is that participant's
@@ -1016,21 +947,13 @@ async fn spawn_session_handle(
                 .send(crate::core::sequencer::SequencerCommand::UserMessage)
                 .await;
         });
-        sequencer_tx = Some(tx);
-        tracing::warn!(
+        tracing::info!(
             session = %session.id,
             participants = ring,
-            "B5: turn sequencer spawned (BOT_HQ_SEQUENCER=1) — the router is still live \
-             alongside it"
+            "turn sequencer spawned"
         );
-    }
-    // EXCLUSIVE, not additive. Both paths deliver to the same stdin — the router
-    // pushes a peer forward, the ring drains everything past a cursor — so
-    // running them together hands every peer message over twice and the test
-    // measures the duplication rather than the ring. The router task stays
-    // spawned and simply receives nothing, which keeps its health dot and the
-    // watchdog wiring untouched.
-    let duo_router_tx = if sequencer_enabled { None } else { router_tx.clone() };
+        Some(tx)
+    };
     // One pump per spawned agent. The two hand-written pump blocks this replaced
     // differed in exactly three things — the author, the participant id, and
     // whether `self_input_tx` was set — and every one of them is now read off
@@ -1040,7 +963,6 @@ async fn spawn_session_handle(
         let cfg = DuoConfig {
             sequencer_tx: sequencer_tx.clone(),
             turn_epoch: turn_epochs[slot].clone(),
-            router_tx: duo_router_tx.clone(),
             bridge: Some(Arc::clone(&bridge)),
             activity: Some(Arc::clone(&activity)),
             in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
@@ -1115,7 +1037,6 @@ async fn spawn_session_handle(
         hands_slug,
         Arc::clone(&activity),
         Arc::clone(&bridge),
-        router_watch,
         idle_watch,
     ));
 
@@ -1190,7 +1111,6 @@ async fn spawn_session_handle(
         activity,
         in_atomic_tool,
         cancel_superseded,
-        router: router_control,
         _mcp_temp: mcp_temp,
     })
 }
@@ -2039,7 +1959,6 @@ mod tests {
             ),
             in_atomic_tool: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cancel_superseded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            router: None,
             _mcp_temp: TempDir::new().unwrap(),
         };
         (handle, irx)
