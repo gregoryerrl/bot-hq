@@ -101,9 +101,11 @@ export const UNKNOWN_PARTICIPANT = "Unknown participant";
  * The frontend used to unpack them under the literal keys `"brian"` / `"rain"`,
  * which no rc3 roster has — so every lookup keyed by a roster slug missed, the
  * mount backfill left every health dot blank, and the turn-status line printed
- * the raw key. A `#`-prefixed key cannot collide with a slug (slugs are
- * role-derived identifiers), which keeps the two spaces distinguishable in one
- * map instead of silently overwriting each other.
+ * the raw key.
+ *
+ * The `#` prefix is what keeps the two spaces from overwriting each other in
+ * one map: `slugify` (`src/storage/participants.rs`) emits `[a-z0-9-]` only,
+ * trimmed of leading dashes and never empty, so no slug can start with `#`.
  */
 export function slotKey(turnPosition: number): string {
   return `#slot${turnPosition}`;

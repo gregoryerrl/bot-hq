@@ -133,11 +133,14 @@ describe("the two runtime key spaces", () => {
   });
 
   it("keeps a slot key from ever colliding with a slug", () => {
-    // A role-derived slug cannot start with `#`, so one map holds both spaces
-    // without either silently overwriting the other.
+    // `slugify` (src/storage/participants.rs) emits `[a-z0-9-]` only, trimmed
+    // of leading dashes and never empty — so a key outside that alphabet can
+    // share one map with slugs and neither space can overwrite the other.
     expect(slotKey(0)).toBe("#slot0");
     expect(slotKey(1)).not.toBe(slotKey(0));
-    expect(slotKey(0).startsWith("#")).toBe(true);
+    for (const k of [slotKey(0), slotKey(1), slotKey(2)]) {
+      expect(k).not.toMatch(/^[a-z0-9-]+$/);
+    }
   });
 
   it("resolves a participant's runtime state through EITHER key space", () => {
