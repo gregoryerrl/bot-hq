@@ -240,6 +240,38 @@ describe("Claude Config panel", () => {
     );
   });
 
+  it("keeps two same-named roles apart, and writes each under its own slug", async () => {
+    // `roles.display_name` carries no UNIQUE constraint (only `roles.slug`
+    // does), so the title alone cannot say which entry a block writes.
+    mockBackend({}, [
+      role({ id: 1, slug: "hands", display_name: "HANDS" }),
+      role({ id: 2, slug: "hands-review", display_name: "HANDS" }),
+    ]);
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /core knobs/i }));
+
+    // The slug is what tells them apart on screen.
+    expect(await screen.findByText("hands-review")).toBeInTheDocument();
+
+    const efforts = await screen.findAllByRole("combobox", {
+      name: "HANDS effort level",
+    });
+    expect(efforts).toHaveLength(2);
+    fireEvent.change(efforts[1], { target: { value: "low" } });
+    fireEvent.click(await screen.findByRole("button", { name: /save changes/i }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "set_claude_overrides",
+        expect.objectContaining({
+          overrides: expect.objectContaining({
+            per_role: { "hands-review": expect.objectContaining({ effort: "low" }) },
+          }),
+        }),
+      ),
+    );
+  });
+
   it("shows a stored per-role override in that role's block, and only there", async () => {
     mockBackend({ per_role: { eyes: { effort: "low" } } });
     renderPanel();

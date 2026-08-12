@@ -729,6 +729,7 @@ function CorePane({
             <AgentEffortOverride
               key={r.slug}
               title={r.display_name}
+              subtitle={r.slug}
               ov={roleOverride(overrides, r.slug)}
               patch={(p) => patchRole(r.slug, p)}
               inheritedEffort={all.effort}
@@ -745,11 +746,14 @@ function CorePane({
  *  pair (ultracode IS xhigh + dynamic workflows). */
 export function AgentEffortOverride({
   title,
+  subtitle,
   ov,
   patch,
   inheritedEffort,
 }: {
   title: string;
+  /** Secondary identifying line, e.g. the role's slug. */
+  subtitle?: string;
   ov: EffortOverrideValue;
   patch: (p: EffortOverrideValue) => void;
   inheritedEffort?: string | null;
@@ -783,7 +787,20 @@ export function AgentEffortOverride({
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-outline-variant bg-surface-container p-3">
       <div className="flex items-center justify-between">
-        <span className="font-code-sm text-code-sm text-on-surface">{title}</span>
+        <span className="min-w-0">
+          <span className="block truncate font-code-sm text-code-sm text-on-surface">
+            {title}
+          </span>
+          {/* `roles.display_name` is not unique — only `roles.slug` is — so two
+              roles can be named the same and the title alone would not say
+              which block writes which entry. Same title-over-slug idiom the
+              Roles tab lists them with. */}
+          {subtitle && (
+            <span className="block truncate font-label-caps text-label-caps text-on-surface-variant">
+              {subtitle}
+            </span>
+          )}
+        </span>
       </div>
       <label className="flex items-center justify-between gap-3">
         <span className="font-code-sm text-code-sm text-on-surface">
