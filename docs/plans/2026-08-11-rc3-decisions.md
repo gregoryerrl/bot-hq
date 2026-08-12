@@ -300,7 +300,25 @@ never delays the close and never leaves the session un-closable. If the session
 has no participant holding `write_context_library`, it is skipped silently —
 that is a capability answer, not a special case.
 
-Open, for whoever implements it: whether an empty-handed session should write
-nothing at all (agent's judgement) or a one-line "nothing worth keeping" marker.
-Prefer nothing — an accreting pile of null entries is the CL bloat the maintain
-prompt exists to fight.
+**SETTLED — an empty-handed session writes NOTHING to the Context Library.**
+Not a marker, not a stub, not a "nothing worth keeping" line. The user's reason,
+which is stronger than the bloat argument it replaces: *"empty handed sessions
+might risk corrupting the CL."*
+
+That is the right frame. An agent with nothing to say, prompted at close to write
+its learnings, does not return empty — it produces plausible filler. That filler
+lands in a layer whose entire purpose is that future sessions **orient from it
+instead of re-reading the codebase**, so invented content is not noise to be
+pruned later, it is fabricated knowledge presented as experience, and it
+compounds: the next session reads it as fact and builds on it.
+
+Implementation consequence: the close-time write must be genuinely optional, and
+the prompt must make "write nothing" an expected, blameless outcome rather than
+a failure to complete a task. A close-time instruction phrased as *"write what
+you learned"* produces filler by construction; it has to permit, and expect,
+silence.
+
+Still open, and smaller: a fire-and-forget write that FAILS looks identical to
+one that correctly declined. Record the decision where session state already
+lives — a visible row, as the capped halt posts one — so the two are
+distinguishable without the Context Library carrying anything.
