@@ -26,9 +26,11 @@ use uuid::Uuid;
 pub struct OpenSessionRequest {
     pub title: String,
     pub working_repo_path: Option<PathBuf>,
-    /// Run only the FIRST participant of the default roster (`true`) or all of
-    /// them (`false`). The external driver has no create dialog, so this comes
-    /// from the user's solo/duo default setting.
+    /// Seed only the FIRST active role (`true`) or every one of them (`false`).
+    ///
+    /// The external driver has no create dialog and the setting that used to
+    /// answer for it is deleted, so it passes `true` — the rc3 D13 product
+    /// default of one participant. See [`Storage::ensure_session_roster`].
     pub solo: bool,
     /// Per-slot saved-model ids, positional over the default roster's turn
     /// order — `models[0]` overrides the first participant's model, `models[1]`
