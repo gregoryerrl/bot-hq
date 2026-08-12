@@ -2442,6 +2442,62 @@ mod tests {
         );
     }
 
+    /// **A disabled participant is not a peer.** `resolve_roster_facts` filters
+    /// on `p.enabled`, and nothing pinned that filter: deleting it left the
+    /// whole lib suite green while telling a solo HANDS session that a reviewer
+    /// is watching. That is the worst shape a prompt error takes — not a missing
+    /// instruction but a confident false one, and the specific false one that
+    /// makes an agent hand work off and wait for a review nobody will file.
+    ///
+    /// `participants_for_session` deliberately returns disabled rows (they are
+    /// still roster history, and re-enabling is a column flip), so the filter is
+    /// the ONLY thing standing between the row and the prompt.
+    #[tokio::test]
+    async fn a_disabled_participant_is_not_named_as_a_peer() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+
+        // Both enabled first, so the assertions below cannot pass by the peer
+        // never having been there.
+        let roster = s.participants_for_session("s1").await.unwrap();
+        let facts = resolve_roster_facts(&s, &roster, "brian").await.unwrap();
+        assert_eq!(facts.peers.len(), 1, "the fixture must start with a live peer");
+
+        sqlx::query("UPDATE session_participants SET enabled = 0 WHERE slug = 'rain'")
+            .execute(s.pool())
+            .await
+            .unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+        assert_eq!(roster.len(), 2, "the disabled row is still in the roster read");
+
+        let facts = resolve_roster_facts(&s, &roster, "brian").await.unwrap();
+        assert!(
+            facts.peers.is_empty(),
+            "a disabled participant reached the peer list: {:?}",
+            facts.peers
+        );
+
+        // And what the agent is actually told. The renderer takes the two
+        // branches on `peers.is_empty()`, so the assertion is on the sentence
+        // that only the solo branch can produce, plus the absence of the peer's
+        // name from the GENERATED section.
+        let prompt = read_system_prompt(&paths, "brian", None, None, None, None, Some(&facts))
+            .unwrap();
+        let generated = &prompt[prompt.rfind("## Participants in this session").unwrap()..];
+        assert!(
+            generated.contains("no peer will review it"),
+            "HANDS was not told it is alone:\n{generated}"
+        );
+        assert!(
+            !generated.contains("Rain"),
+            "the disabled participant was named as a peer:\n{generated}"
+        );
+    }
+
     /// The degraded path. A roster read that failed leaves an empty vec, and an
     /// empty `CapabilitySet` would render as "you may do nothing" — a prompt
     /// that is WRONG rather than merely quiet. No facts means no layer 2, which
