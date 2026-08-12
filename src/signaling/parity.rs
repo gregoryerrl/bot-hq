@@ -531,6 +531,13 @@ async fn an_unreadable_roster_refuses_gated_tools_and_leaves_ungated_ones_alone(
         rendered.contains("ask_user"),
         "the refusal must name the capability it needed: {rendered}"
     );
+    // And the specific reason, interpolated — "could not be read" alone tells
+    // nobody whether the roster is missing, corrupt, or simply not wired yet,
+    // which is the whole difference between "restart" and "repair the row".
+    assert!(
+        rendered.contains("storage is not wired up yet"),
+        "the refusal must carry the resolver's reason, not just that there was one: {rendered}"
+    );
 }
 
 #[tokio::test]

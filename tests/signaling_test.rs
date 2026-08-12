@@ -1,8 +1,25 @@
 //! End-to-end HTTP test of the MCP signaling server.
 
 use bot_hq::signaling::{start_signaling_server, SignalingBridge};
+use bot_hq::storage::Storage;
 use serde_json::json;
 use std::sync::Arc;
+
+/// A bridge holding session `s1` with the roster every real session is seeded
+/// with. Needed by any test that calls a GATED tool: the gate resolves the
+/// caller's grants from `session_participants`, and a bridge with no storage
+/// resolves to "unreadable", which fails closed.
+async fn seeded_bridge() -> Arc<SignalingBridge> {
+    let bridge = SignalingBridge::new();
+    let storage = Storage::memory().await.unwrap();
+    bridge.set_storage(storage.clone()).await;
+    storage
+        .create_session("s1", "signaling", None)
+        .await
+        .unwrap();
+    storage.ensure_session_roster("s1").await.unwrap();
+    bridge
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -66,7 +83,7 @@ async fn server_ask_user_choice_parks_immediately() {
     // ask_user_choice is non-blocking: the HTTP tool call returns a parked ack
     // (`{status:"parked", choice_id}`) immediately, without waiting for any
     // resolution. The pick is delivered later out-of-band.
-    let bridge = SignalingBridge::new();
+    let bridge = seeded_bridge().await;
     let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
     let addr = server.local_addr;
 

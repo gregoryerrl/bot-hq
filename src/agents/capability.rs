@@ -634,6 +634,45 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_set_denies_gated_tools_and_leaves_ungated_ones_alone() {
+        // The degradation contract, at the type rather than through dispatch.
+        // The gate short-circuits ungated tools before it ever asks
+        // (`jsonrpc::capability_gated`), so nothing reaching `dispatch` can
+        // exercise the `None` arm below — and an arm no test reaches is an arm
+        // that can be changed without anything going red. This is that test.
+        let broken = ResolvedCapabilities::Unreadable {
+            reason: "the session roster could not be read",
+        };
+        for tool in HANDS_ONLY.iter().chain(EYES_ONLY).chain(CL_MUTATE) {
+            assert!(
+                !broken.allows_tool(tool),
+                "{tool} is gated — an unreadable set must refuse it"
+            );
+        }
+        for tool in ["session_doc_write", "cl_retrieve", "peer_ack", "pass_turn"] {
+            assert!(
+                broken.allows_tool(tool),
+                "{tool} was never gated — an unreadable set must not start gating it"
+            );
+        }
+        // No capability is held, and the reason survives for the refusal text.
+        for cap in Capability::ALL {
+            assert!(!broken.grants(cap), "{} must not be granted", cap.slug());
+        }
+        assert_eq!(
+            broken.unreadable_reason(),
+            Some("the session roster could not be read")
+        );
+
+        // A resolved-but-EMPTY set is a different thing: a real configuration
+        // with no grants, and it must not claim to be a read failure.
+        let observer = ResolvedCapabilities::Known(CapabilitySet::default());
+        assert_eq!(observer.unreadable_reason(), None);
+        assert!(!observer.allows_tool("ask_user_choice"));
+        assert!(observer.allows_tool("pass_turn"));
+    }
+
+    #[test]
     fn slugs_round_trip() {
         // The set is persisted as JSON slugs; a parse/render asymmetry would
         // silently drop a grant on read.

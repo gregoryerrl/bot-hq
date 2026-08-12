@@ -8,10 +8,30 @@
 
 use bot_hq::agents::native::mcp_client::{mcp_tools_to_anthropic, McpClient};
 use bot_hq::signaling::{start_signaling_server, SignalingBridge};
+use bot_hq::storage::Storage;
 use std::sync::Arc;
 
 fn client_for(addr: std::net::SocketAddr, agent: &str) -> McpClient {
     McpClient::new(format!("http://{addr}/sessions/s1/{agent}/mcp")).unwrap()
+}
+
+/// A bridge whose storage holds session `s1` with the roster every real session
+/// is seeded with.
+///
+/// The gate resolves the caller's grants from `session_participants`, so a
+/// bridge with no storage refuses every gated tool to every caller for the same
+/// reason — which would let the two role tests below pass while distinguishing
+/// nothing. Seeding is what keeps them about the roles.
+async fn seeded_bridge() -> Arc<SignalingBridge> {
+    let bridge = SignalingBridge::new();
+    let storage = Storage::memory().await.unwrap();
+    bridge.set_storage(storage.clone()).await;
+    storage
+        .create_session("s1", "native-mcp", None)
+        .await
+        .unwrap();
+    storage.ensure_session_roster("s1").await.unwrap();
+    bridge
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -64,7 +84,7 @@ async fn listed_tools_convert_into_valid_messages_api_entries() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hands_only_tools_are_still_denied_to_eyes_over_this_path() {
-    let bridge = SignalingBridge::new();
+    let bridge = seeded_bridge().await;
     let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
     let client = client_for(server.local_addr, "rain");
 
@@ -78,9 +98,16 @@ async fn hands_only_tools_are_still_denied_to_eyes_over_this_path() {
 
     assert!(
         outcome.is_error,
-        "routing through HTTP must not bypass HANDS_ONLY_TOOLS"
+        "routing through HTTP must not bypass the tool gate"
     );
-    assert!(outcome.content.contains("HANDS"));
+    // Named against EYES's actual grants rather than the role name: the gate
+    // reads `session_participants.capabilities` now, and this path has to reach
+    // the same verdict the in-process dispatch does.
+    assert!(
+        outcome.content.contains("needs the `ask_user` capability"),
+        "got: {}",
+        outcome.content
+    );
     assert_eq!(outcome.tool_use_id, "tu_1");
 
     server.shutdown();
@@ -88,7 +115,7 @@ async fn hands_only_tools_are_still_denied_to_eyes_over_this_path() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn eyes_only_tools_are_still_denied_to_hands_over_this_path() {
-    let bridge = SignalingBridge::new();
+    let bridge = seeded_bridge().await;
     let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
     let client = client_for(server.local_addr, "brian");
 
@@ -98,9 +125,13 @@ async fn eyes_only_tools_are_still_denied_to_hands_over_this_path() {
 
     assert!(
         outcome.is_error,
-        "routing through HTTP must not bypass EYES_ONLY_TOOLS"
+        "routing through HTTP must not bypass the tool gate"
     );
-    assert!(outcome.content.contains("EYES"));
+    assert!(
+        outcome.content.contains("needs the `file_finding` capability"),
+        "got: {}",
+        outcome.content
+    );
 
     server.shutdown();
 }

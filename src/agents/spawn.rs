@@ -1998,6 +1998,60 @@ mod tests {
     }
 
     #[test]
+    fn posture_follows_the_capability_set_not_the_name() {
+        // The reframe, at the spawn seam. `agent_name` used to pick the branch;
+        // now `edit_files` does, and these four cases are what "the name is
+        // inert" means concretely. Without this, the gate could quietly go on
+        // keying off the name for every session the user actually runs — because
+        // in those sessions the name and the capability agree.
+        use crate::agents::{CapabilitySet, ResolvedCapabilities};
+
+        let bypass = |c: &SpawnConfig| {
+            debug_command(c)
+                .iter()
+                .any(|a| a == "--dangerously-skip-permissions")
+        };
+
+        // Named "rain", but granted edit_files → the permissive posture.
+        let mut c = eyes_cfg();
+        c.capabilities = ResolvedCapabilities::Known(CapabilitySet::preset_hands());
+        assert!(
+            bypass(&c),
+            "a role holding `edit_files` must get bypass mode whatever it is called"
+        );
+
+        // Named "brian", but NOT granted edit_files → the restrictive posture.
+        let mut c = cfg();
+        c.capabilities = ResolvedCapabilities::Known(CapabilitySet::preset_eyes());
+        assert!(
+            !bypass(&c),
+            "a role without `edit_files` must not get bypass mode whatever it is called"
+        );
+
+        // A third role nobody hardcoded, granted nothing → restrictive. Under
+        // the name check this landed in the `else` branch and silently got
+        // bypass mode for the sole reason that it was not called "rain".
+        let mut c = cfg();
+        c.agent_name = "scout".into();
+        c.config.agent_name = "scout".into();
+        c.capabilities = ResolvedCapabilities::Known(CapabilitySet::default());
+        assert!(
+            !bypass(&c),
+            "an unrecognised role with no grants must not get bypass mode"
+        );
+
+        // An unreadable roster → restrictive. Fail closed, same as the gate.
+        let mut c = cfg();
+        c.capabilities = ResolvedCapabilities::Unreadable {
+            reason: "no participant row",
+        };
+        assert!(
+            !bypass(&c),
+            "an unreadable capability set must not get bypass mode"
+        );
+    }
+
+    #[test]
     fn rain_gets_deny_by_default_not_bypass() {
         // EYES enforcement: Rain must NOT get bypass mode (which nullifies
         // deny rules); she gets dontAsk + an allowlist + a mutation denylist.
