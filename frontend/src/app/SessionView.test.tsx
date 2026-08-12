@@ -60,6 +60,29 @@ vi.mock("@tauri-apps/api/core", () => ({
         });
       case "get_session_phase":
         return Promise.resolve(null);
+      // rc3 D10: the header roster. Two rows sharing a role is the exact
+      // configuration the user could not see until the agents said so.
+      case "list_session_participants":
+        return Promise.resolve([
+          {
+            id: 1,
+            slug: "eyes",
+            role_display_name: "EYES",
+            model_display_name: "Claude Opus 5",
+            turn_position: 0,
+            participation_mode: "active",
+            enabled: true,
+          },
+          {
+            id: 2,
+            slug: "eyes-2",
+            role_display_name: "EYES",
+            model_display_name: "DeepSeek R2",
+            turn_position: 1,
+            participation_mode: "active",
+            enabled: true,
+          },
+        ]);
       case "compute_apply_diff":
         return Promise.resolve({ files: [], truncated: false });
       default:
@@ -93,6 +116,26 @@ function panel(name: string): HTMLElement {
   return screen.getByRole("tabpanel", { name });
 }
 
+describe("SessionView header roster (rc3 D10)", () => {
+  it("names every participant as ROLE · Model while the session runs", async () => {
+    // The user's live complaint: "I accidentally set the two agents to EYES +
+    // EYES, there's no way for me to know that until they explicitly said in
+    // the session, so I forced closed the session." The composition has to be
+    // legible from the header, not inferred from what the agents say.
+    renderSessionView();
+    await screen.findByRole("button", { name: "Workspace" });
+
+    const header = screen.getByRole("banner");
+    expect(header).toHaveTextContent("EYES · Claude Opus 5");
+    expect(header).toHaveTextContent("EYES · DeepSeek R2");
+    // Slugs are internal keys — the header must not print them.
+    expect(header.textContent).not.toMatch(/eyes-2/);
+    // …and no participant is named after an agent (rc3 D10).
+    expect(header.textContent).not.toMatch(/\bbrian\b/i);
+    expect(header.textContent).not.toMatch(/\brain\b/i);
+  });
+});
+
 describe("SessionView subtabs", () => {
   it("renders the Workspace | Context | Terminal pill row", async () => {
     renderSessionView();
@@ -113,7 +156,7 @@ describe("SessionView subtabs", () => {
     expect(panel("Terminal").className).toContain("hidden");
     // Workspace content is intact: chat input + pane splitter.
     expect(
-      screen.getByPlaceholderText("Broadcast to Brian + Rain…"),
+      screen.getByPlaceholderText("Broadcast to every participant…"),
     ).toBeInTheDocument();
     expect(screen.getByRole("separator")).toBeInTheDocument();
   });
@@ -125,7 +168,7 @@ describe("SessionView subtabs", () => {
     expect(panel("Workspace").className).toContain("hidden");
     // Keep-mounted: the workspace chat input is still in the DOM while hidden.
     expect(
-      screen.getByPlaceholderText("Broadcast to Brian + Rain…"),
+      screen.getByPlaceholderText("Broadcast to every participant…"),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Terminal" }));

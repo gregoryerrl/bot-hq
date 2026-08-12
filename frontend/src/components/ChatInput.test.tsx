@@ -65,50 +65,80 @@ describe("ChatInput draft persistence", () => {
   });
 });
 
+/**
+ * The slug -> display resolver SessionView hands down (rc3 D10). Slugs are
+ * internal; what the line prints is `ROLE · Model`.
+ */
+const LABEL = (slug: string) =>
+  ({ hands: "HANDS · Opus", eyes: "EYES · Sonnet" })[slug] ?? slug;
+
 describe("ChatInput turn-status + Stop", () => {
   it("hides the textarea and shows the turn-status + Stop while busy", () => {
     render(
       <ChatInput
         activity="busy"
-        busy={{ brian: true, rain: false }}
+        busy={{ hands: true, eyes: false }}
+        busyLabel={LABEL}
         onSend={() => {}}
         onCancel={() => {}}
       />,
     );
-    // While the duo works the input is replaced by the status line — no textarea.
+    // While a turn is in flight the input is replaced by the status line.
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
-    // Per-agent label: Brian (HANDS) is working.
-    expect(screen.getByText("Brian")).toBeInTheDocument();
+    // rc3 D10: the busy participant is named ROLE · Model, never by a slug or
+    // an agent name.
+    expect(screen.getByText("HANDS · Opus")).toBeInTheDocument();
+    expect(screen.queryByText("hands")).toBeNull();
     expect(screen.getByText("is working")).toBeInTheDocument();
   });
 
-  it("labels Rain reviewing when only Rain is busy", () => {
+  it("names the busy participant by role and model whichever slot it is in", () => {
+    // The old line hardcoded slot 1 = "Rain" + the verb "is reviewing", which
+    // is bot-hq claiming to know what a role MEANS. It knows only that a turn
+    // is in flight, and who the roster says that participant is.
     render(
       <ChatInput
         activity="busy"
-        busy={{ brian: false, rain: true }}
+        busy={{ hands: false, eyes: true }}
+        busyLabel={LABEL}
         onSend={() => {}}
         onCancel={() => {}}
       />,
     );
-    expect(screen.getByText("Rain")).toBeInTheDocument();
-    expect(screen.getByText("is reviewing")).toBeInTheDocument();
-    expect(screen.queryByText("Brian")).toBeNull();
+    expect(screen.getByText("EYES · Sonnet")).toBeInTheDocument();
+    expect(screen.getByText("is working")).toBeInTheDocument();
+    expect(screen.queryByText("HANDS · Opus")).toBeNull();
   });
 
-  it("shows both agents when a broadcast leaves both busy", () => {
+  it("shows every participant a broadcast left busy", () => {
     render(
       <ChatInput
         activity="busy"
-        busy={{ brian: true, rain: true }}
+        busy={{ hands: true, eyes: true }}
+        busyLabel={LABEL}
         onSend={() => {}}
         onCancel={() => {}}
       />,
     );
-    expect(screen.getByText("Brian")).toBeInTheDocument();
-    expect(screen.getByText("Rain")).toBeInTheDocument();
+    expect(screen.getByText("HANDS · Opus")).toBeInTheDocument();
+    expect(screen.getByText("EYES · Sonnet")).toBeInTheDocument();
+  });
+
+  it("falls back to the slug when the roster has no row for a busy author", () => {
+    // A participant that left the session still has to be attributable — an
+    // unattributed "is working" is worse than an internal key.
+    render(
+      <ChatInput
+        activity="busy"
+        busy={{ ghost: true }}
+        busyLabel={LABEL}
+        onSend={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    expect(screen.getByText("ghost")).toBeInTheDocument();
   });
 
   it("keeps the textarea + Send on idle and awaiting-user (the user's turn)", () => {
@@ -130,11 +160,12 @@ describe("ChatInput turn-status + Stop", () => {
     // The reported bug: `awaiting` outranks `busy` in the backend derive, so
     // parking a question unlocks the textarea while the agent keeps running
     // tools — and the per-agent status used to render only in the LOCKED
-    // branch, so the user saw an open input and assumed the duo had stopped.
+    // branch, so the user saw an open input and assumed the work had stopped.
     render(
       <ChatInput
         activity="awaiting_user"
-        busy={{ brian: true, rain: false }}
+        busy={{ hands: true, eyes: false }}
+        busyLabel={LABEL}
         onSend={() => {}}
         onCancel={() => {}}
       />,
@@ -142,7 +173,7 @@ describe("ChatInput turn-status + Stop", () => {
     // Input stays usable — answering the parked question is the whole point.
     expect(screen.getByRole("textbox")).toBeEnabled();
     expect(screen.getByText("Waiting on your answer ·")).toBeInTheDocument();
-    expect(screen.getByText("Brian")).toBeInTheDocument();
+    expect(screen.getByText("HANDS · Opus")).toBeInTheDocument();
     expect(screen.getByText("— the turn hasn't ended yet.")).toBeInTheDocument();
   });
 
@@ -150,23 +181,25 @@ describe("ChatInput turn-status + Stop", () => {
     const { rerender } = render(
       <ChatInput
         activity="awaiting_user"
-        busy={{ brian: false, rain: false }}
+        busy={{ hands: false, eyes: false }}
+        busyLabel={LABEL}
         onSend={() => {}}
       />,
     );
     expect(screen.queryByText(/still|turn hasn't ended/)).toBeNull();
-    expect(screen.queryByText("Brian")).toBeNull();
+    expect(screen.queryByText("HANDS · Opus")).toBeNull();
 
     // …and none on a plain idle session either.
     rerender(<ChatInput activity="idle" onSend={() => {}} />);
-    expect(screen.queryByText("Brian")).toBeNull();
+    expect(screen.queryByText("HANDS · Opus")).toBeNull();
   });
 
   it("labels a paused session that is still finishing a tool", () => {
     render(
       <ChatInput
         activity="paused"
-        busy={{ brian: true, rain: false }}
+        busy={{ hands: true, eyes: false }}
+        busyLabel={LABEL}
         onSend={() => {}}
         onResume={() => {}}
       />,
@@ -185,7 +218,8 @@ describe("ChatInput turn-status + Stop", () => {
     render(
       <ChatInput
         activity="busy"
-        busy={{ brian: true, rain: false }}
+        busy={{ hands: true, eyes: false }}
+        busyLabel={LABEL}
         onSend={() => {}}
         onCancel={onCancel}
       />,
@@ -201,7 +235,8 @@ describe("ChatInput turn-status + Stop", () => {
     render(
       <ChatInput
         activity="busy"
-        busy={{ brian: true, rain: false }}
+        busy={{ hands: true, eyes: false }}
+        busyLabel={LABEL}
         onSend={() => {}}
       />,
     );
@@ -209,7 +244,7 @@ describe("ChatInput turn-status + Stop", () => {
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
-    expect(screen.getByText("Brian")).toBeInTheDocument();
+    expect(screen.getByText("HANDS · Opus")).toBeInTheDocument();
   });
 
   it("reads Stopping… with a disabled Stop while cancelling", () => {
@@ -263,7 +298,8 @@ describe("ChatInput paused bar", () => {
     rerender(
       <ChatInput
         activity="busy"
-        busy={{ brian: true, rain: true }}
+        busy={{ hands: true, eyes: true }}
+        busyLabel={LABEL}
         onSend={() => {}}
         onResume={onResume}
         onClose={() => {}}

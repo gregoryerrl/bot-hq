@@ -4,7 +4,15 @@ import { create } from "zustand";
  *  (mirrors Rust `AgentHealth::as_str`). */
 export type AgentHealth = "running" | "retrying" | "stalled" | "dead";
 
-type SessionHealth = { brian?: AgentHealth; rain?: AgentHealth };
+/**
+ * Participant slug → liveness. The key is the slug the backend emits on
+ * `session:agent_health`, and it is an INTERNAL key — rc3 D10 keeps it out of
+ * every rendered string (see `lib/participants.ts` for what gets shown).
+ *
+ * A map rather than two named fields because the roster is the session's, not
+ * the product's: the header reads it by the slugs its roster actually has.
+ */
+export type SessionHealth = Record<string, AgentHealth | undefined>;
 
 interface HealthStore {
   /** session_id -> per-agent health. Populated live from the agent_health
@@ -90,15 +98,20 @@ export const useHealthStore = create<HealthStore>((set) => ({
     }),
 }));
 
-/** Worst-of a session's agents, for a single tile-level dot: dead > retrying >
- *  running. Returns undefined when there's no health data (assume healthy). */
+/** Severity order for {@link worstHealth}: worst first. */
+const HEALTH_RANK: AgentHealth[] = ["dead", "stalled", "retrying", "running"];
+
+/** Worst-of a session's agents, for a single tile-level dot: dead > stalled >
+ *  retrying > running. Returns undefined when there's no health data (assume
+ *  healthy).
+ *
+ *  Scans every agent in the map rather than two named ones — same answer for
+ *  the pairs it used to handle, and it keeps answering once a session can hold
+ *  more than two participants. */
 export function worstHealth(h: SessionHealth | undefined): AgentHealth | undefined {
   if (!h) return undefined;
-  if (h.brian === "dead" || h.rain === "dead") return "dead";
-  if (h.brian === "stalled" || h.rain === "stalled") return "stalled";
-  if (h.brian === "retrying" || h.rain === "retrying") return "retrying";
-  if (h.brian === "running" || h.rain === "running") return "running";
-  return undefined;
+  const present = Object.values(h);
+  return HEALTH_RANK.find((rank) => present.includes(rank));
 }
 
 /** App-wide footer summary: the worst state across all sessions + how many

@@ -12,15 +12,16 @@ export type SessionActivity =
   | "cancelling"
   | "paused";
 
-/** Per-agent busy flags. The session-level `SessionActivity` collapses these to
- *  a single `busy`; the chat-input turn-status line needs them split so it can
- *  label WHICH agent is working — and a broadcast sets BOTH busy at once. */
-export interface DuoBusy {
-  brian: boolean;
-  rain: boolean;
-}
+/** Participant slug → mid-turn. The session-level `SessionActivity` collapses
+ *  these to a single `busy`; the chat-input turn-status line needs them split so
+ *  it can say WHICH participant is working — and a broadcast sets every one of
+ *  them busy at once.
+ *
+ *  The slug is an internal key: what the line PRINTS comes from the session's
+ *  roster (rc3 D10), never from this map. */
+export type AgentBusy = Record<string, boolean>;
 
-const NO_BUSY: DuoBusy = { brian: false, rain: false };
+const NO_BUSY: AgentBusy = {};
 
 interface ActivityStore {
   /** session_id -> current activity. Populated live from `session:activity`
@@ -29,11 +30,11 @@ interface ActivityStore {
   bySession: Record<string, SessionActivity>;
   /** session_id -> per-agent busy flags, carried alongside the collapsed
    *  `bySession` activity. A missing entry reads as neither-busy. */
-  busyBySession: Record<string, DuoBusy>;
+  busyBySession: Record<string, AgentBusy>;
   setActivity: (
     sessionId: string,
     activity: SessionActivity,
-    busy?: DuoBusy,
+    busy?: AgentBusy,
   ) => void;
   clearSession: (sessionId: string) => void;
 }

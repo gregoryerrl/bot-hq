@@ -16,8 +16,12 @@ import type {
 import { cn } from "../lib/cn";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTauriEvent } from "../hooks/useTauriEvent";
-import { AgentEffortOverride } from "./ClaudeConfig";
 import { pickFolder } from "./contextLibraryShared";
+import {
+  capabilityGapWarning,
+  EDIT_FILES,
+  useParticipantLabels,
+} from "../lib/participants";
 
 /**
  * How many participants a session can be created with.
@@ -30,6 +34,9 @@ import { pickFolder } from "./contextLibraryShared";
  */
 const MAX_PARTICIPANTS = 2;
 
+/** Effort levels claude-code accepts. Mirrors `EFFORT_OPTS` in ClaudeConfig. */
+const EFFORT_OPTS = ["low", "medium", "high", "xhigh", "max"];
+
 /** One row of the dialog's participant list. */
 type ParticipantRow = {
   /** Stable React key — rows are added, removed and reordered by index. */
@@ -38,6 +45,10 @@ type ParticipantRow = {
   roleId: number | null;
   /** `""` = inherit the role's default model (rc3 D8). */
   modelId: string;
+  /** rc3 **D12**: effort is per participant. `null` = inherit the default. */
+  effort: string | null;
+  /** rc3 **D12**: ultracode is per participant. `null` = inherit. */
+  ultracode: boolean | null;
 };
 
 let nextParticipantKey = 1;
@@ -45,6 +56,8 @@ const emptyParticipant = (): ParticipantRow => ({
   key: nextParticipantKey++,
   roleId: null,
   modelId: "",
+  effort: null,
+  ultracode: null,
 });
 
 // Quickview liveness throttle: collapse bursts of agent:messages:batch into at
@@ -52,10 +65,14 @@ const emptyParticipant = (): ParticipantRow => ({
 const QUICKVIEW_REFRESH_THROTTLE_MS = 2500;
 
 /**
- * Thin wrapper that drives the per-session phase query, so `SessionTile`
- * stays pure presentational (test-friendly without a QueryClient). Each
- * loader is its own hook call — fine for the typical bot-hq session count
- * (< 20). React Query dedupes by `["get_session_phase", { sessionId }]`.
+ * Thin wrapper that drives the per-session phase + roster queries, so
+ * `SessionTile` stays pure presentational (test-friendly without a
+ * QueryClient). Each loader is its own hook call — fine for the typical bot-hq
+ * session count (< 20). React Query dedupes by `[command, { sessionId }]`.
+ *
+ * The roster is here for the Quickview byline: `last_author` is a participant
+ * slug, and rc3 D10 forbids showing one. The tile needs the roster to turn it
+ * into `ROLE · Model`.
  */
 function SessionTileLoader({
   session,
@@ -68,8 +85,14 @@ function SessionTileLoader({
     "get_session_phase",
     { sessionId: session.id },
   );
+  const { labels } = useParticipantLabels(session.id);
   return (
-    <SessionTile session={session} pendingCount={pendingCount} phase={phase} />
+    <SessionTile
+      session={session}
+      pendingCount={pendingCount}
+      phase={phase}
+      authorLabels={labels}
+    />
   );
 }
 
@@ -155,23 +178,33 @@ export function Dashboard() {
     { key: "worktree_default" },
   );
 
-  // Persistent effort defaults, so the dialog's "Inherit" option can show what
-  // it resolves to (e.g. "Inherit (max)") rather than a bare "(default)".
-  // Mirrors the spawn fall-through: per-agent override > _all > settings.json
+  // Persistent effort defaults, so a row's "Inherit" option can show what it
+  // resolves to (e.g. "Inherit (max)") rather than a bare "(default)".
+  // Mirrors the spawn fall-through: per-slot override > _all > settings.json
   // env. Called exactly as ClaudeConfig does (no args) so the React Query cache
   // is shared — a cache-hit if the Settings → Claude Config tab was opened.
   const { data: claudeOverrides } =
     useTauriQuery<ClaudeOverrides>("get_claude_overrides");
   const { data: claudeConfig } =
     useTauriQuery<ClaudeConfigView>("claude_config_read");
-  const inheritedEffort = useMemo(() => {
+  /**
+   * What a row's effort inherits if left alone, by TURN SLOT.
+   *
+   * `claude-overrides.json` still stores its per-agent scopes under the two
+   * runtime keys spawn passes to `resolve_agent_overrides`; those keys are
+   * backend-owned and are not shown to anyone (rc3 D10) — they are read here
+   * only so the hint matches what spawn will actually resolve. Rows past the
+   * second fall through to `_all`, which is exactly what an unrecognised agent
+   * name resolves to in `resolve_agent_overrides`.
+   */
+  const inheritedEffortAt = useMemo(() => {
     const knob =
       claudeConfig?.core_knobs.find(
         (k) => k.key === "env.CLAUDE_CODE_EFFORT_LEVEL",
       )?.value ?? null;
-    const at = (a: "brian" | "rain") =>
-      claudeOverrides?.[a]?.effort ?? claudeOverrides?._all?.effort ?? knob ?? null;
-    return { brian: at("brian"), rain: at("rain") };
+    const perSlot = [claudeOverrides?.brian, claudeOverrides?.rain];
+    return (slot: number) =>
+      perSlot[slot]?.effort ?? claudeOverrides?._all?.effort ?? knob ?? null;
   }, [claudeOverrides, claudeConfig]);
 
   const createSession = useTauriMutation<
@@ -183,19 +216,29 @@ export function Dashboard() {
       project: string | null;
       // Null: derived from `options.participants` by the backend, which is the
       // single source now that the dialog picks participants rather than
-      // toggling Rain and choosing two models by name.
+      // toggling a second agent and choosing two models by name.
       rainEnabled: boolean | null;
       brianModelId: string | null;
       rainModelId: string | null;
       // Effort/ultracode/worktree/participant picks (bundled — at the tauri
       // 10-arg limit).
       options: {
+        // Slot projections of `participants[0]` / `participants[1]`, kept
+        // because they are the columns spawn reads TODAY. Not a second source
+        // — nothing writes them but the projection in `handleCreate`, so they
+        // cannot disagree with the roster they are derived from.
         brianEffort: string | null;
         rainEffort: string | null;
         brianUltracode: boolean | null;
         rainUltracode: boolean | null;
         useWorktree: boolean | null;
-        participants: { roleId: number; modelId: string | null }[];
+        participants: {
+          roleId: number;
+          modelId: string | null;
+          // rc3 D12 — per-participant, per the shared contract.
+          effort: string | null;
+          ultracode: boolean | null;
+        }[];
       };
     }
   >("create_session");
@@ -241,11 +284,6 @@ export function Dashboard() {
   ]);
   // Worktree isolation for this session (seeded from the app default).
   const [useWorktree, setUseWorktree] = useState(true);
-  // Per-session effort/ultracode picks (null = inherit the Settings defaults).
-  const [brianEffort, setBrianEffort] = useState<string | null>(null);
-  const [rainEffort, setRainEffort] = useState<string | null>(null);
-  const [brianUltracode, setBrianUltracode] = useState<boolean | null>(null);
-  const [rainUltracode, setRainUltracode] = useState<boolean | null>(null);
 
   // Case-insensitive substring filter on session title. In-memory so no
   // debounce needed — the list isn't a paginated query.
@@ -264,11 +302,8 @@ export function Dashboard() {
     setUseWorktree(worktreeDefault !== "0");
     setSelectedProject("");
     setAdHocRepo("");
-    // Effort/ultracode default to inherit (the Settings defaults) each open.
-    setBrianEffort(null);
-    setRainEffort(null);
-    setBrianUltracode(null);
-    setRainUltracode(null);
+    // Each row's effort/ultracode reset with it — `emptyParticipant()` opens
+    // them on Inherit, so there is nothing else to clear here.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [creating]);
 
@@ -283,11 +318,25 @@ export function Dashboard() {
       rows.map((row, i) => (i === index ? { ...row, ...patch } : row)),
     );
 
-  // The role a slot is playing, for the effort block's label. Empty until the
-  // row has a role — the label is context, so it stays blank rather than
-  // guessing.
-  const roleLabelAt = (index: number) =>
-    roles.find((r) => r.id === participants[index]?.roleId)?.display_name ?? "";
+  /** The role a row picked, or null while it has none. */
+  const roleAt = (row: ParticipantRow) =>
+    roles.find((r) => r.id === row.roleId) ?? null;
+
+  /**
+   * rc3 **D11** — what the picked roster, taken together, cannot do.
+   *
+   * Computed from ticked capability boxes only: rows with no role yet are
+   * excluded, so a half-filled dialog makes no claim. Advisory — Create is
+   * never disabled by it (see the button's `disabled`, which this does not
+   * appear in).
+   */
+  const rosterWarning = useMemo(() => {
+    const picked = participants
+      .map((row) => roles.find((r) => r.id === row.roleId))
+      .filter((r): r is RoleView => r !== undefined);
+    if (picked.length !== participants.length) return null;
+    return capabilityGapWarning(picked);
+  }, [participants, roles]);
 
   const handleCreate = async () => {
     if (!title.trim() || !rosterReady) return;
@@ -297,7 +346,6 @@ export function Dashboard() {
     // derives it from the path basename (general policy tier).
     const repoPath = adHocRepo.trim() || proj?.working_repo_path || null;
     const project = adHocRepo.trim() ? null : selectedProject || null;
-    const solo = participants.length < 2;
     setCreateError(null);
     let ok = false;
     try {
@@ -313,14 +361,20 @@ export function Dashboard() {
         brianModelId: null,
         rainModelId: null,
         options: {
-          brianEffort,
-          rainEffort: solo ? null : rainEffort,
-          brianUltracode,
-          rainUltracode: solo ? null : rainUltracode,
+          // rc3 D12: the ROW is the source. The per-slot fields below are a
+          // mechanical projection of rows 0 and 1 — the columns spawn reads
+          // today are still per-slot, so dropping them here would silently
+          // stop honouring effort until the backend reads the new fields.
+          brianEffort: participants[0]?.effort ?? null,
+          rainEffort: participants[1]?.effort ?? null,
+          brianUltracode: participants[0]?.ultracode ?? null,
+          rainUltracode: participants[1]?.ultracode ?? null,
           useWorktree,
           participants: participants.map((p) => ({
             roleId: p.roleId as number,
             modelId: p.modelId || null,
+            effort: p.effort,
+            ultracode: p.ultracode,
           })),
         },
       });
@@ -572,6 +626,69 @@ export function Dashboard() {
                             ))}
                           </select>
                         </label>
+                        {/* rc3 D12: effort belongs to the PARTICIPANT, next to
+                            the role and model it applies to — not to a fixed
+                            block named after an agent. */}
+                        <label className="block">
+                          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                            Effort
+                          </span>
+                          <select
+                            aria-label={`Participant ${index + 1} effort`}
+                            value={row.effort ?? ""}
+                            onChange={(e) =>
+                              patchParticipant(index, {
+                                effort: e.target.value || null,
+                                // `max` and ultracode are mutually exclusive in
+                                // claude-code, so picking `max` clears it.
+                                ...(e.target.value === "max"
+                                  ? { ultracode: null }
+                                  : {}),
+                              })
+                            }
+                            className={cn(
+                              "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
+                              "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
+                            )}
+                          >
+                            <option value="">
+                              Inherit
+                              {inheritedEffortAt(index)
+                                ? ` (${inheritedEffortAt(index)})`
+                                : " (default)"}
+                            </option>
+                            {EFFORT_OPTS.map((v) => (
+                              <option key={v} value={v}>
+                                {v}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        {/* Ultracode rides in on `--settings`, which spawn
+                            injects only for a role holding `edit_files` — so
+                            offering it to a role without that box would be a
+                            control that changes nothing. Capability, not role
+                            name: bot-hq does not know what a role means. */}
+                        <label className="flex items-end gap-2 pb-1.5">
+                          <input
+                            type="checkbox"
+                            aria-label={`Participant ${index + 1} ultracode`}
+                            checked={row.ultracode === true}
+                            disabled={
+                              !roleAt(row)?.capabilities.includes(EDIT_FILES) ||
+                              row.effort === "max"
+                            }
+                            onChange={(e) =>
+                              patchParticipant(index, {
+                                ultracode: e.target.checked ? true : null,
+                              })
+                            }
+                            className="size-4 accent-primary"
+                          />
+                          <span className="font-code-sm text-code-sm text-on-surface">
+                            Ultracode
+                          </span>
+                        </label>
                       </div>
                     </div>
                   ))}
@@ -588,8 +705,21 @@ export function Dashboard() {
                   </button>
                 )}
                 <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
-                  Row order sets each participant's turn slot.
+                  Row order sets each participant's turn slot. Effort applies to
+                  this session only — leave it on Inherit to use your configured
+                  defaults.
                 </p>
+                {/* rc3 D11. Advisory, never blocking: it names a gap in what
+                    the roster's ticked boxes allow, and the user decides
+                    whether that is what they meant. */}
+                {rosterWarning && (
+                  <p
+                    role="status"
+                    className="mt-2 rounded border border-warning/50 bg-warning/15 px-3 py-2 font-code-sm text-code-sm text-warning"
+                  >
+                    ⚠ {rosterWarning}
+                  </p>
+                )}
                 {invitableRoles.length === 0 && (
                   <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
                     No roles yet — add one in <b>Settings → Roles</b> before
@@ -632,44 +762,6 @@ export function Dashboard() {
                   </span>
                 </label>
               )}
-              <div>
-                <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                  Effort & ultracode (this session)
-                </span>
-                {/* Still per-SLOT, because the columns spawn reads are still
-                    per-slot: slot 0's knobs land in `sessions.brian_effort`,
-                    slot 1's in `rain_effort`. The role label follows the pick. */}
-                <div className="flex flex-col gap-2">
-                  <AgentEffortOverride
-                    title="Brian"
-                    roleLabel={roleLabelAt(0)}
-                    ov={{ effort: brianEffort, ultracode: brianUltracode }}
-                    patch={(p) => {
-                      if ("effort" in p) setBrianEffort(p.effort ?? null);
-                      if ("ultracode" in p) setBrianUltracode(p.ultracode ?? null);
-                    }}
-                    inheritedEffort={inheritedEffort.brian}
-                    isEyes={false}
-                  />
-                  {participants.length > 1 && (
-                    <AgentEffortOverride
-                      title="Rain"
-                      roleLabel={roleLabelAt(1)}
-                      ov={{ effort: rainEffort, ultracode: rainUltracode }}
-                      patch={(p) => {
-                        if ("effort" in p) setRainEffort(p.effort ?? null);
-                        if ("ultracode" in p) setRainUltracode(p.ultracode ?? null);
-                      }}
-                      inheritedEffort={inheritedEffort.rain}
-                      isEyes={true}
-                    />
-                  )}
-                </div>
-                <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
-                  Overrides the Settings defaults for this session only. Leave on
-                  Inherit to use your configured defaults.
-                </span>
-              </div>
             </div>
             {createError && (
               <p className="mt-4 rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
@@ -740,8 +832,8 @@ export function Dashboard() {
             Welcome to bot-hq
           </p>
           <p className="mx-auto mt-2 max-w-md text-sm text-on-surface-variant">
-            A session is a scoped piece of work — Brian (HANDS) executes, Rain
-            (EYES) reviews, and you stay the conductor.
+            A session is a scoped piece of work — you pick which of your roles
+            take part, what each one runs on, and you stay the conductor.
           </p>
           <ol className="mx-auto mt-5 max-w-sm space-y-2.5 text-left">
             {[
@@ -772,7 +864,7 @@ export function Dashboard() {
                     <kbd className="rounded border border-outline-variant bg-surface-container-lowest px-1 py-0.5 font-mono text-[0.65rem]">
                       ⌘N
                     </kbd>
-                    ) to put Brian + Rain to work.
+                    ) and choose its participants.
                   </>
                 ),
               },

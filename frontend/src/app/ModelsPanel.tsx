@@ -25,9 +25,9 @@ const rowGridClass =
 
 /**
  * Settings → Models. A pure registry of saved LLM endpoints (display name +
- * provider + model id + optional base_url/auth_token). Agents pick from these
- * on their own card in the Agents tab; sessions pick at create time. No default
- * lives here — each agent's selected model on the Agents tab IS its default.
+ * provider + model id + optional base_url/auth_token). A role names one of
+ * these as its default on the Roles tab; the New Session dialog can override it
+ * per participant at create time. No default lives here.
  *
  * Rendered as a list; create/edit go through ModelDialog. The row is only
  * upserted when the dialog confirms, so cancelling "Add model" leaves no
@@ -79,8 +79,8 @@ export function ModelsPanel() {
             Models
           </h1>
           <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
-            Saved LLM endpoints. Assign one to each agent on the Agents tab, or
-            pick per-agent when you create a session.
+            Saved LLM endpoints. Name one as a role's default on the Roles
+            tab, or pick per participant when you create a session.
           </p>
         </div>
         <Button variant="primary" onClick={() => setDialog({ mode: "create" })}>

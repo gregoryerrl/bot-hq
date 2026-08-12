@@ -12,7 +12,9 @@ import { create } from "zustand";
  *  *empty*, and the UI must render a gap rather than 0%. */
 export type AgentContext = { usedTokens: number; contextWindow: number };
 
-type SessionContext = { brian?: AgentContext; rain?: AgentContext };
+/** Participant slug → context occupancy. The slug is an internal key and is
+ *  never rendered (rc3 D10) — see `lib/participants.ts` for what is. */
+type SessionContext = Record<string, AgentContext | undefined>;
 
 interface ContextStore {
   /** session_id -> per-agent context occupancy. Populated live from the

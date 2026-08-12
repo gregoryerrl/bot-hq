@@ -147,17 +147,20 @@ export function ClaudeConfigPanel() {
     useServerDraft<ClaudeOverrides>(serverOverrides ?? {});
   const dirty = overridesDirty || pendingCount > 0;
   const all: AgentOverride = draft._all ?? emptyAll();
-  const brian: AgentOverride = draft.brian ?? emptyAll();
-  const rain: AgentOverride = draft.rain ?? emptyAll();
+  // The store's two per-agent scopes, read by TURN SLOT. `brian` / `rain` are
+  // the keys `resolve_agent_overrides` matches on (backend-owned, never shown);
+  // slot 0 and slot 1 are what they resolve for.
+  const firstTurn: AgentOverride = draft.brian ?? emptyAll();
+  const secondTurn: AgentOverride = draft.rain ?? emptyAll();
 
   // ---- override mutators (all write the `_all` fan-out: applies to every
-  // agent; Rain ignores skill/plugin entries under --bare). ----
+  // agent). ----
   const patchAll = (patch: Partial<AgentOverride>) =>
     setDraft((d) => ({ ...d, _all: { ...(d._all ?? {}), ...patch } }));
   // Per-agent effort/ultracode overrides (layered over `_all` at resolve time).
-  const patchBrian = (patch: Partial<AgentOverride>) =>
+  const patchFirstTurn = (patch: Partial<AgentOverride>) =>
     setDraft((d) => ({ ...d, brian: { ...(d.brian ?? {}), ...patch } }));
-  const patchRain = (patch: Partial<AgentOverride>) =>
+  const patchSecondTurn = (patch: Partial<AgentOverride>) =>
     setDraft((d) => ({ ...d, rain: { ...(d.rain ?? {}), ...patch } }));
 
   const setSkill = (name: string, vis: SkillVisibility | null) =>
@@ -333,10 +336,10 @@ export function ClaudeConfigPanel() {
             <CorePane
               config={config}
               all={all}
-              brian={brian}
-              rain={rain}
-              patchBrian={patchBrian}
-              patchRain={patchRain}
+              firstTurn={firstTurn}
+              secondTurn={secondTurn}
+              patchFirstTurn={patchFirstTurn}
+              patchSecondTurn={patchSecondTurn}
               pendingStrings={pendingStrings}
               pendingBools={pendingBools}
               stageString={stageString}
@@ -591,10 +594,10 @@ const KNOB_NOTES: Record<string, string> = {
 function CorePane({
   config,
   all,
-  brian,
-  rain,
-  patchBrian,
-  patchRain,
+  firstTurn,
+  secondTurn,
+  patchFirstTurn,
+  patchSecondTurn,
   pendingStrings,
   pendingBools,
   stageString,
@@ -602,10 +605,10 @@ function CorePane({
 }: {
   config: ClaudeConfigView;
   all: AgentOverride;
-  brian: AgentOverride;
-  rain: AgentOverride;
-  patchBrian: (p: Partial<AgentOverride>) => void;
-  patchRain: (p: Partial<AgentOverride>) => void;
+  firstTurn: AgentOverride;
+  secondTurn: AgentOverride;
+  patchFirstTurn: (p: Partial<AgentOverride>) => void;
+  patchSecondTurn: (p: Partial<AgentOverride>) => void;
   pendingStrings: Record<string, string | null>;
   pendingBools: Record<string, boolean>;
   stageString: (key: string, value: string | null) => void;
@@ -655,26 +658,28 @@ function CorePane({
         Agent runtime overrides
       </h3>
       <p className="mb-2 max-w-prose font-body-md text-body-md text-on-surface-variant">
-        Per-agent effort & ultracode, applied on the next agent spawn. Set each
-        agent independently so a deep-reasoning effort isn&apos;t pushed blindly
-        onto a non-Anthropic model.
+        Defaults by TURN SLOT, applied on the next agent spawn. Set each slot
+        independently so a deep-reasoning effort isn&apos;t pushed blindly onto
+        a non-Anthropic model. A session&apos;s own New Session dialog overrides
+        these per participant.
       </p>
+      {/* rc3 D10: these blocks are not named after anyone. `claude-overrides.json`
+          scopes its per-agent entries by the name spawn passes to
+          `resolve_agent_overrides`, and that name is an internal key — the slot
+          it resolves for is what the user can actually act on. Which ROLE fills
+          a slot is chosen per session, so this tab cannot say. */}
       <div className="flex flex-col gap-2">
         <AgentEffortOverride
-          title="Brian"
-          roleLabel="HANDS"
-          ov={brian}
-          patch={patchBrian}
+          title="Turn 1"
+          ov={firstTurn}
+          patch={patchFirstTurn}
           inheritedEffort={all.effort}
-          isEyes={false}
         />
         <AgentEffortOverride
-          title="Rain"
-          roleLabel="EYES"
-          ov={rain}
-          patch={patchRain}
+          title="Turn 2"
+          ov={secondTurn}
+          patch={patchSecondTurn}
           inheritedEffort={all.effort}
-          isEyes={true}
         />
       </div>
     </div>
@@ -686,25 +691,26 @@ function CorePane({
  *  pair (ultracode IS xhigh + dynamic workflows). */
 export function AgentEffortOverride({
   title,
-  roleLabel,
   ov,
   patch,
   inheritedEffort,
-  isEyes,
 }: {
   title: string;
-  roleLabel: string;
   ov: EffortOverrideValue;
   patch: (p: EffortOverrideValue) => void;
   inheritedEffort?: string | null;
-  isEyes: boolean;
 }) {
   const ultracodeOn = ov.ultracode === true;
   const effortMax = ov.effort === "max";
   // Conflict-aware disabling: never disable BOTH at once, so a pre-existing
   // (e.g. legacy) override that set max + ultracode together stays escapable.
   const effortDisabled = ultracodeOn && !effortMax;
-  const ultracodeDisabled = isEyes || (effortMax && !ultracodeOn);
+  // Only the max/ultracode conflict disables the box now. It used to also be
+  // disabled for the second slot, which encoded "slot 2 is the reviewer" — a
+  // claim rc3 D10/D11 removes: which role fills a slot is chosen per session,
+  // and whether ultracode lands is decided by that role's `edit_files` box (see
+  // the note below), not by position.
+  const ultracodeDisabled = effortMax && !ultracodeOn;
   const onEffort = (val: string | undefined) => {
     // Selecting `max` clears ultracode (they conflict); other values are kept
     // as-is — `xhigh` + ultracode is the intended pair.
@@ -724,9 +730,6 @@ export function AgentEffortOverride({
     <div className="flex flex-col gap-2 rounded-lg border border-outline-variant bg-surface-container p-3">
       <div className="flex items-center justify-between">
         <span className="font-code-sm text-code-sm text-on-surface">{title}</span>
-        <span className="rounded border border-outline-variant/50 px-1.5 py-0.5 font-label-caps text-label-caps text-on-surface-variant">
-          {roleLabel}
-        </span>
       </div>
       <label className="flex items-center justify-between gap-3">
         <span className="font-code-sm text-code-sm text-on-surface">
@@ -759,15 +762,16 @@ export function AgentEffortOverride({
         onChange={onUltracode}
         disabled={ultracodeDisabled}
       />
-      {effortMax && !isEyes && (
+      {effortMax && (
         <p className="font-label-caps text-label-caps text-on-surface-variant">
           max can&apos;t combine with ultracode.
         </p>
       )}
       <p className="font-label-caps text-label-caps text-on-surface-variant">
-        {isEyes
-          ? "EYES runs without --settings, so ultracode can't be injected. Effort may have limited effect on non-Anthropic models (e.g. DeepSeek)."
-          : "ultracode = xhigh + dynamic workflows (Opus 4.8/4.7); higher token use."}
+        ultracode = xhigh + dynamic workflows (Opus 4.8/4.7); higher token use.
+        It rides in on <code>--settings</code>, which spawn injects only for a
+        role that can edit files — a role without that box ignores it. Effort
+        may have limited effect on non-Anthropic models.
       </p>
     </div>
   );
@@ -1001,7 +1005,7 @@ function McpPane({
     <div>
       <PaneHeader
         title="MCP servers"
-        blurb="Servers forwarded into Brian (bot-hq + claude-in-chrome are always filtered; Rain gets none). 'settings.json (ignored)' means claude-code itself doesn't load it — but bot-hq still forwards it."
+        blurb="Servers forwarded into a participant whose role can edit files (bot-hq + claude-in-chrome are always filtered; a role without edit_files gets none). 'settings.json (ignored)' means claude-code itself doesn't load it — but bot-hq still forwards it."
       />
       {config.mcp_servers.length === 0 ? (
         <Empty>No MCP servers configured.</Empty>
@@ -1082,7 +1086,7 @@ function MemoryPane({
     <div>
       <PaneHeader
         title="Memory & instructions"
-        blurb="CLAUDE.md + auto-memory your agents autodiscover. Suppress them for agents (Brian; Rain already skips them via --bare)."
+        blurb="CLAUDE.md + auto-memory your agents autodiscover. Suppress them for agents."
       />
       <ul className="mb-4 flex flex-col gap-2">
         <FileRow label="User CLAUDE.md" stat={m.user_claude_md} />

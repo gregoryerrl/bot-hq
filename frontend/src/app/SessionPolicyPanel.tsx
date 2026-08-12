@@ -4,7 +4,6 @@ import { useServerDraft } from "../hooks/useServerDraft";
 import type {
   GatedKeyword,
   Policy,
-  SessionInfo,
   SessionProjectInfo,
 } from "../lib/bindings";
 import { PolicyForm } from "../components/PolicyForm";
@@ -13,6 +12,7 @@ import { CloseIcon, SaveIcon } from "./contextLibraryShared";
 import { cn } from "../lib/cn";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
+import { participantLabel, useSessionParticipants } from "../lib/participants";
 
 /**
  * Right-side drawer for editing a session's canonical policy snapshot
@@ -24,12 +24,10 @@ import { useEscapeKey } from "../hooks/useEscapeKey";
  * tool_gate keywords (those are managed globally in Settings → Tool Gate).
  */
 export function SessionPolicyPanel({
-  session,
   sessionId,
   open,
   onClose,
 }: {
-  session: SessionInfo | null;
   sessionId: string;
   open: boolean;
   onClose: () => void;
@@ -42,6 +40,10 @@ export function SessionPolicyPanel({
   const save = useTauriMutation<void, { sessionId: string; policy: Policy }>(
     "set_session_policy",
   );
+  // The roster, shared with the session header via React Query's cache — the
+  // panel used to read the two model columns off `SessionInfo`, which could
+  // only ever name two agents.
+  const { participants } = useSessionParticipants(sessionId);
 
   // Re-hydrate the draft whenever the server snapshot changes (initial load +
   // post-save refetch), matching the Settings draft/dirty idiom.
@@ -125,24 +127,23 @@ export function SessionPolicyPanel({
           way).
         </p>
         <PolicyOriginBadge sessionId={sessionId} open={open} />
-        {session?.brian_model_at_spawn && (
+        {/* rc3 D10: the roster, as ROLE · Model — the same rule the header
+            uses, so a session reads the same wherever you look at it. */}
+        {participants.length > 0 && (
           <div className="mb-4 rounded border border-outline-variant/40 bg-surface-container/60 px-3 py-2">
             <p className="mb-1 font-label-caps text-label-caps text-on-surface-variant">
-              Models (captured at spawn)
+              Participants (turn order)
             </p>
-            <p className="font-code-sm text-code-sm text-on-surface-variant">
-              Brian:{" "}
-              <span className="text-on-surface">
-                {session.brian_model_at_spawn}
-              </span>
-              <span className="mx-2 text-outline-variant">·</span>
-              Rain:{" "}
-              <span className="text-on-surface">
-                {session.rain_enabled
-                  ? (session.rain_model_at_spawn ?? "—")
-                  : "off"}
-              </span>
-            </p>
+            <ol className="font-code-sm text-code-sm text-on-surface-variant">
+              {participants.map((p) => (
+                <li key={p.id}>
+                  <span className="text-on-surface">{participantLabel(p)}</span>
+                  <span className="mx-2 text-outline-variant">·</span>
+                  {p.participation_mode}
+                  {!p.enabled && " · disabled"}
+                </li>
+              ))}
+            </ol>
           </div>
         )}
         {isLoading ? (

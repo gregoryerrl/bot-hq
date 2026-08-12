@@ -17,6 +17,10 @@ import { type Phase } from "../components/PhasePill";
 import { SessionFindingsBanner } from "../components/SessionFindingsBanner";
 import { SessionPolicyPanel } from "./SessionPolicyPanel";
 import { cn } from "../lib/cn";
+import {
+  participantLabel,
+  useSessionParticipants,
+} from "../lib/participants";
 import type { AppError, SessionInfo } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -62,10 +66,13 @@ export function SessionView() {
     SessionInfo | null
   >("get_session", { sessionId });
 
+  // Who is in this session, in turn order — the header roster (rc3 D10).
+  const { participants } = useSessionParticipants(sessionId);
+
   // Respawn agents on mount. Idempotent — `ensure_session_started` is a no-op
-  // if Brian/Rain are already running. Reads `brian_claude_session_id` /
-  // `rain_claude_session_id` from the session row + passes `--resume <uuid>`
-  // so the agents come back with full memory.
+  // if the session's agents are already running. Reads each agent's stored
+  // claude session id from the session row + passes `--resume <uuid>` so they
+  // come back with full memory.
   const respawn = useTauriMutation<void, { sessionId: string }>(
     "respawn_session",
   );
@@ -110,8 +117,8 @@ export function SessionView() {
   const working = useHealthStore((s) => s.workingBySession[sessionId]);
   const agentContext = useContextStore((s) => s.bySession[sessionId]);
   const activity = useActivityStore((s) => s.bySession[sessionId]);
-  // Per-agent busy flags for the chat-input turn-status line ("Brian is
-  // working… / Rain is reviewing…"). Parallel to `activity`.
+  // Per-agent busy flags for the chat-input turn-status line. Parallel to
+  // `activity`; keyed by participant slug, rendered as ROLE · Model.
   const busy = useActivityStore((s) => s.busyBySession[sessionId]);
 
   // Inline title rename. `editingTitle === null` = display mode; a string =
@@ -288,30 +295,41 @@ export function SessionView() {
                 </span>
               </>
             )}
-            {session.brian_model_at_spawn && (
-              <>
+            {/* rc3 D10 + the roster the user asked for: who is IN this session,
+                as ROLE · Model, legible while it runs. The live complaint was
+                that a duplicate-role roster was invisible until the agents said
+                so — this is where it becomes visible. */}
+            {participants.map((p) => (
+              <span key={p.id}>
                 <span className="mx-2 text-outline-variant">·</span>
                 <span
-                  className="text-on-surface-variant"
-                  title="Live agent health (models are in Session Settings)"
-                >
-                  Brian <HealthDot health={health?.brian} name="Brian" />
-                  <ContextMeter context={agentContext?.brian} name="Brian" />
-                  {session.rain_enabled && (
-                    <>
-                      <span className="mx-1.5 text-outline-variant">·</span>
-                      Rain <HealthDot health={health?.rain} name="Rain" />
-                      <ContextMeter context={agentContext?.rain} name="Rain" />
-                      {routerAlive === false && (
-                        <>
-                          <span className="mx-1.5 text-outline-variant">·</span>
-                          <span className="text-error">
-                            router <RouterHealthDot alive={routerAlive} />
-                          </span>
-                        </>
-                      )}
-                    </>
+                  className={cn(
+                    "text-on-surface-variant",
+                    !p.enabled && "opacity-50",
                   )}
+                  title={
+                    p.enabled
+                      ? `Participant ${p.turn_position + 1} — ${p.participation_mode}. Live agent health.`
+                      : `Participant ${p.turn_position + 1} — not running in this session.`
+                  }
+                >
+                  {participantLabel(p)}{" "}
+                  <HealthDot
+                    health={health?.[p.slug]}
+                    name={participantLabel(p)}
+                  />
+                  <ContextMeter
+                    context={agentContext?.[p.slug]}
+                    name={participantLabel(p)}
+                  />
+                </span>
+              </span>
+            ))}
+            {participants.length > 1 && routerAlive === false && (
+              <>
+                <span className="mx-2 text-outline-variant">·</span>
+                <span className="text-error">
+                  router <RouterHealthDot alive={routerAlive} />
                 </span>
               </>
             )}
@@ -352,7 +370,7 @@ export function SessionView() {
           <Button
             variant="ghost"
             size="sm"
-            title="Force-close session — ends Brian + Rain and archives it"
+            title="Force-close session — ends its agents and archives it"
             aria-label="Close session"
             disabled={closing}
             onClick={onCloseClick}
@@ -368,8 +386,8 @@ export function SessionView() {
         message={
           <>
             This <strong className="text-on-surface">force-closes</strong> the
-            session and stops Brian + Rain immediately — their subprocesses are
-            killed regardless of any in-flight work. The session moves to
+            session and stops every participant immediately — their subprocesses
+            are killed regardless of any in-flight work. The session moves to
             Settings → Archive; reopening later resumes them via{" "}
             <code className="text-on-surface">--resume</code>.
             {dirtyCount > 0 && (
@@ -485,9 +503,13 @@ export function SessionView() {
             <ChatInput
               key={sessionId}
               draftKey={`bothq:draft:${sessionId}`}
-              placeholder="Broadcast to Brian + Rain…"
+              placeholder="Broadcast to every participant…"
               activity={activity}
               busy={busy}
+              busyLabel={(slug) => {
+                const p = participants.find((row) => row.slug === slug);
+                return p ? participantLabel(p) : slug;
+              }}
               onSend={async (text) => {
                 await invoke("broadcast_message", { sessionId, text });
               }}
@@ -537,7 +559,6 @@ export function SessionView() {
       </div>
 
       <SessionPolicyPanel
-        session={session}
         sessionId={sessionId}
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}

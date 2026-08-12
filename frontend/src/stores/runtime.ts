@@ -1,4 +1,4 @@
-import type { DuoBusy, SessionActivity } from "./activity";
+import type { AgentBusy, SessionActivity } from "./activity";
 import type { AgentHealth } from "./health";
 
 /** One live session's runtime snapshot from the backend `get_session_runtime`
@@ -24,13 +24,15 @@ export interface SessionRuntime {
  *  → skip (a missing entry reads as healthy, same as a missing event). */
 export function seedRuntimeStores(
   rows: SessionRuntime[],
-  setActivity: (id: string, a: SessionActivity, busy?: DuoBusy) => void,
+  setActivity: (id: string, a: SessionActivity, busy?: AgentBusy) => void,
   setHealth: (id: string, agent: string, h: AgentHealth) => void,
   setRouterHealth: (id: string, alive: boolean) => void,
   setAttention?: (id: string, state: string | null) => void,
   setWorking?: (id: string, reason: string | null) => void,
 ): void {
   for (const r of rows) {
+    // Backend payload field -> participant slug; internal keys on both
+    // sides, never rendered (rc3 D10).
     setActivity(r.session_id, r.activity as SessionActivity, {
       brian: r.brian_busy,
       rain: r.rain_busy,

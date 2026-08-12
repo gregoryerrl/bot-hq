@@ -4,28 +4,32 @@ import { Textarea } from "./ui/Textarea";
 import { ErrorBanner } from "./ErrorBanner";
 import { errorMessage } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
-import { isLocked, type DuoBusy, type SessionActivity } from "../stores/activity";
+import { authorColorClass } from "./authorColor";
+import { isLocked, type AgentBusy, type SessionActivity } from "../stores/activity";
 
 interface ChatInputProps {
   placeholder?: string;
   onSend: (text: string) => Promise<void> | void;
   disabled?: boolean;
   /**
-   * The session's duo activity. While `busy`/`cancelling` the textarea is
-   * REPLACED by a turn-status line (which agent is working) + the Stop button —
+   * The session's activity. While `busy`/`cancelling` the textarea is
+   * REPLACED by a turn-status line (which participants are working) + Stop —
    * the user stops the turn to reclaim the input, then types. `idle` /
    * `awaiting_user` show the normal textarea + Send.
    */
   activity?: SessionActivity;
-  /** Per-agent busy flags, for the turn-status line. The collapsed `activity`
-   *  says "someone is busy"; this says who (Brian working / Rain reviewing). */
-  busy?: DuoBusy;
-  /** Pause the in-flight turn (the Stop button — interrupts both agents and
+  /** Per-participant busy flags, for the turn-status line. The collapsed
+   *  `activity` says "someone is busy"; this says which participants. */
+  busy?: AgentBusy;
+  /** Participant slug -> what to PRINT for it (rc3 D10: `ROLE · Model`, never
+   *  an agent name). Without it the status line falls back to the slug. */
+  busyLabel?: (slug: string) => string;
+  /** Pause the in-flight turn (the Stop button — interrupts the agents and
    *  lands the session in `paused`). Without it a locked session shows the
    *  status line but no Stop. */
   onCancel?: () => Promise<void> | void;
   /** Resume a paused session (the paused bar's Resume button). The backend
-   *  releases the latch, nudges both agents, and flushes anything held. */
+   *  releases the latch, nudges the agents, and flushes anything held. */
   onResume?: () => Promise<void> | void;
   /** Open the force-close flow from the paused bar (the parent owns the
    *  confirm dialog — same flow as the header ✕). */
@@ -46,6 +50,7 @@ export function ChatInput({
   disabled,
   activity,
   busy,
+  busyLabel,
   onCancel,
   onResume,
   onClose,
@@ -60,7 +65,7 @@ export function ChatInput({
   const [resuming, setResuming] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // The duo is working (busy/cancelling). While locked we hide the textarea and
+  // A turn is in flight (busy/cancelling). While locked we hide the textarea and
   // show the turn-status line + Stop, rather than leaving the input typeable.
   const locked = isLocked(activity);
   // Once the turn actually stops (activity leaves busy/cancelling) drop the
@@ -180,14 +185,16 @@ export function ChatInput({
         </div>
       )}
       {/* Unlocked but still working — the locked branch has its own TurnStatus. */}
-      {!locked && <StillWorkingNotice activity={activity} busy={busy} />}
+      {!locked && (
+        <StillWorkingNotice activity={activity} busy={busy} label={busyLabel} />
+      )}
       <form
         onSubmit={handleSubmit}
         className={cn("flex gap-2 p-3", locked ? "items-center" : "items-end")}
       >
         {locked ? (
           <>
-            <TurnStatus activity={activity} busy={busy} />
+            <TurnStatus activity={activity} busy={busy} label={busyLabel} />
             {onCancel && (
               <Button
                 type="button"
@@ -256,29 +263,39 @@ export function ChatInput({
   );
 }
 
-/** Is either agent mid-turn? Separate from the collapsed `activity`, which can
+/** Is any agent mid-turn? Separate from the collapsed `activity`, which can
  *  read `awaiting_user` / `paused` while an agent is still running. */
-function anyBusy(busy?: DuoBusy): boolean {
-  return Boolean(busy?.brian || busy?.rain);
+function anyBusy(busy?: AgentBusy): boolean {
+  return Object.values(busy ?? {}).some(Boolean);
 }
 
-// Which agents are mid-turn, as a labelled list. Brian (HANDS) = orange/primary
-// "working"; Rain (EYES) = purple/secondary "reviewing"; a broadcast can have
-// both busy at once. Shared by the locked turn-status line and the unlocked
-// still-working notice so the two labels can never drift apart.
-function WorkerLine({ busy }: { busy?: DuoBusy }) {
-  const workers: { name: string; verb: string; color: string }[] = [];
-  if (busy?.brian)
-    workers.push({ name: "Brian", verb: "working", color: "text-primary" });
-  if (busy?.rain)
-    workers.push({ name: "Rain", verb: "reviewing", color: "text-secondary" });
+// Which participants are mid-turn, as a labelled list — a broadcast can have
+// every one of them busy at once. Shared by the locked turn-status line and the
+// unlocked still-working notice so the two labels can never drift apart.
+//
+// One verb for everyone. The old line said Brian "is working" and Rain "is
+// reviewing", which is bot-hq claiming to know what a role MEANS; it knows only
+// that a participant's turn is in flight (rc3 D10/D11). The colour still comes
+// from the slug, matching the same author's chat byline.
+function WorkerLine({
+  busy,
+  label,
+}: {
+  busy?: AgentBusy;
+  label?: (slug: string) => string;
+}) {
+  const workers = Object.entries(busy ?? {})
+    .filter(([, isBusy]) => isBusy)
+    .map(([slug]) => slug);
   return (
     <>
-      {workers.map((w, i) => (
-        <span key={w.name} className="flex items-center gap-1.5">
+      {workers.map((slug, i) => (
+        <span key={slug} className="flex items-center gap-1.5">
           {i > 0 && <span className="text-on-surface-variant/40">·</span>}
-          <span className={cn("font-semibold", w.color)}>{w.name}</span>
-          <span>is {w.verb}</span>
+          <span className={cn("font-semibold", authorColorClass(slug))}>
+            {label?.(slug) ?? slug}
+          </span>
+          <span>is working</span>
         </span>
       ))}
     </>
@@ -294,7 +311,7 @@ function WorkerLine({ busy }: { busy?: DuoBusy }) {
  * is still in flight, or the user couldn't answer it. But `TurnStatus` only ever
  * rendered inside the locked branch, so the per-agent flags — which the backend
  * emits on EVERY activity event, whatever the derived state — had nowhere to go.
- * The user saw an open input, assumed the duo was done, and then watched more
+ * The user saw an open input, assumed the work was done, and then watched more
  * output arrive seconds later.
  *
  * The textarea stays enabled here. This line only says the work hasn't stopped.
@@ -302,9 +319,11 @@ function WorkerLine({ busy }: { busy?: DuoBusy }) {
 function StillWorkingNotice({
   activity,
   busy,
+  label,
 }: {
   activity?: SessionActivity;
-  busy?: DuoBusy;
+  busy?: AgentBusy;
+  label?: (slug: string) => string;
 }) {
   if (!anyBusy(busy)) return null;
   const paused = activity === "paused";
@@ -313,7 +332,7 @@ function StillWorkingNotice({
       <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
         {activity === "awaiting_user" && <span>Waiting on your answer ·</span>}
         {paused && <span>Stopping ·</span>}
-        <WorkerLine busy={busy} />
+        <WorkerLine busy={busy} label={label} />
         <span>
           {paused
             ? "— finishing the current tool."
@@ -325,15 +344,17 @@ function StillWorkingNotice({
   );
 }
 
-// Shown in place of the textarea while the duo is working: which agent is doing
-// what, with a little animated spice. The user Stops the turn to reclaim the
-// input.
+// Shown in place of the textarea while a turn is in flight: which participants
+// are working, with a little animated spice. The user Stops the turn to reclaim
+// the input.
 function TurnStatus({
   activity,
   busy,
+  label,
 }: {
   activity?: SessionActivity;
-  busy?: DuoBusy;
+  busy?: AgentBusy;
+  label?: (slug: string) => string;
 }) {
   // A cancel-in-flight reads as "Stopping…" regardless of who was busy.
   if (activity === "cancelling") {
@@ -347,10 +368,10 @@ function TurnStatus({
     <div className="flex flex-1 items-center gap-2 px-1 text-xs text-on-surface-variant">
       <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
         {anyBusy(busy) ? (
-          <WorkerLine busy={busy} />
+          <WorkerLine busy={busy} label={label} />
         ) : (
           // Locked but no per-agent flag yet (e.g. a stale snapshot): stay generic.
-          <span>The duo is working</span>
+          <span>A participant is working</span>
         )}
       </span>
       <BouncingDots />

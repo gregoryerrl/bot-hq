@@ -104,7 +104,9 @@ describe("Settings", () => {
     renderSettings();
     await openPolicy();
 
-    const box = screen.getByRole("checkbox", { name: /start solo/i });
+    // rc3 D10: the label no longer names an agent — it states what the
+    // setting does (start with one participant).
+    const box = screen.getByRole("checkbox", { name: /one participant/i });
     await waitFor(() => expect(box).toBeChecked());
 
     // Cleared, not "0": `default_rain_enabled` only treats the literal "1" as

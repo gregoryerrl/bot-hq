@@ -65,14 +65,18 @@ describe("SessionTile", () => {
   });
 
   it("shows the first line of the latest message + author tag in Quickview", () => {
+    // rc3 D10: `last_author` is a participant slug and is never shown — the
+    // roster the dashboard loads turns it into ROLE · Model.
     renderTile({
       session: {
         ...session,
         last_message: "Looking at the storage layer now\nsecond line",
-        last_author: "brian",
+        last_author: "hands",
       },
+      authorLabels: { hands: "HANDS · Claude Opus 5" },
     });
-    expect(screen.getByText("Brian")).toBeInTheDocument();
+    expect(screen.getByText("HANDS · Claude Opus 5")).toBeInTheDocument();
+    expect(screen.queryByText("hands")).toBeNull();
     expect(
       screen.getByText(/looking at the storage layer now/i),
     ).toBeInTheDocument();

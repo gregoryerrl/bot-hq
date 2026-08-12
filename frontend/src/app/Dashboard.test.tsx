@@ -97,8 +97,18 @@ const roleSelect = (n: number) =>
   screen.getByRole("combobox", { name: `Participant ${n} role` });
 const modelSelect = (n: number) =>
   screen.getByRole("combobox", { name: `Participant ${n} model` });
+const effortSelect = (n: number) =>
+  screen.getByRole("combobox", { name: `Participant ${n} effort` });
+const ultracodeBox = (n: number) =>
+  screen.getByRole("checkbox", { name: `Participant ${n} ultracode` });
 const createButton = () =>
   screen.getByRole("button", { name: /create session/i });
+
+/** The options object the dialog actually sent. */
+function sentOptions() {
+  const call = mockInvoke.mock.calls.find((c) => c[0] === "create_session");
+  return (call?.[1] as { options: Record<string, unknown> }).options;
+}
 
 describe("New session dialog — participants", () => {
   beforeEach(() => mockInvoke.mockReset());
@@ -144,8 +154,8 @@ describe("New session dialog — participants", () => {
         expect.objectContaining({
           options: expect.objectContaining({
             participants: [
-              { roleId: 1, modelId: null },
-              { roleId: 2, modelId: "m-opus" },
+              { roleId: 1, modelId: null, effort: null, ultracode: null },
+              { roleId: 2, modelId: "m-opus", effort: null, ultracode: null },
             ],
           }),
         }),
@@ -228,5 +238,202 @@ describe("New session dialog — participants", () => {
     );
     expect(options).toContain("HANDS");
     expect(options).not.toContain("SPECIALIST");
+  });
+});
+
+// ===========================================================================
+// rc3 D12 — effort is per participant
+// ===========================================================================
+
+describe("New session dialog — per-participant effort (D12)", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  it("carries each row's own effort into that row's payload entry", async () => {
+    // The effort section used to be two fixed blocks labelled Brian and Rain.
+    // The pick now belongs to the ROW, and what this asserts is the CHAIN from
+    // a row's select to the entry it lands in — not the select and the payload
+    // as two separate facts.
+    mockBackend();
+    await openDialog();
+    fireEvent.change(screen.getByPlaceholderText(/refactor auth flow/i), {
+      target: { value: "a task" },
+    });
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: /add participant/i }));
+    fireEvent.change(roleSelect(2), { target: { value: "2" } });
+
+    // Two DIFFERENT values, so a row wired to the other row's state fails.
+    fireEvent.change(effortSelect(1), { target: { value: "max" } });
+    fireEvent.change(effortSelect(2), { target: { value: "low" } });
+
+    fireEvent.click(createButton());
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("create_session", expect.anything()),
+    );
+    expect(sentOptions().participants).toEqual([
+      { roleId: 1, modelId: null, effort: "max", ultracode: null },
+      { roleId: 2, modelId: null, effort: "low", ultracode: null },
+    ]);
+    // The per-slot columns spawn still reads are a projection of those same
+    // rows, so they cannot disagree with the roster they came from.
+    expect(sentOptions().brianEffort).toBe("max");
+    expect(sentOptions().rainEffort).toBe("low");
+  });
+
+  it("carries a row's ultracode tick into that row's payload entry", async () => {
+    mockBackend();
+    await openDialog();
+    fireEvent.change(screen.getByPlaceholderText(/refactor auth flow/i), {
+      target: { value: "a task" },
+    });
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+    fireEvent.click(ultracodeBox(1));
+
+    fireEvent.click(createButton());
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("create_session", expect.anything()),
+    );
+    expect(sentOptions().participants).toEqual([
+      { roleId: 1, modelId: null, effort: null, ultracode: true },
+    ]);
+    expect(sentOptions().brianUltracode).toBe(true);
+  });
+
+  it("offers ultracode only to a role that can edit files", async () => {
+    // Ultracode rides in on `--settings`, which spawn injects only on the
+    // `edit_files` branch. Gating on the ticked box rather than on slot
+    // position is the same rule D11 uses: capability, never role meaning.
+    mockBackend([
+      role(), // id 1 — read_channel + edit_files
+      role({ id: 9, slug: "watcher", display_name: "WATCHER", capabilities: ["read_channel"] }),
+    ]);
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+    expect(ultracodeBox(1)).toBeEnabled();
+
+    fireEvent.change(roleSelect(1), { target: { value: "9" } });
+    expect(ultracodeBox(1)).toBeDisabled();
+  });
+
+  it("keeps max and ultracode mutually exclusive within a row", async () => {
+    mockBackend();
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+    fireEvent.click(ultracodeBox(1));
+    expect(ultracodeBox(1)).toBeChecked();
+
+    // Picking `max` clears the conflicting tick rather than sending both.
+    fireEvent.change(effortSelect(1), { target: { value: "max" } });
+    expect(ultracodeBox(1)).not.toBeChecked();
+    expect(ultracodeBox(1)).toBeDisabled();
+  });
+});
+
+// ===========================================================================
+// rc3 D11 — the capability warning
+// ===========================================================================
+
+describe("New session dialog — capability warning (D11)", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  /** A role with no write capability ticked. */
+  const READ_ONLY = role({
+    id: 5,
+    slug: "eyes",
+    display_name: "EYES",
+    capabilities: ["read_channel", "post_channel"],
+  });
+
+  it("warns when no participant can edit files — including two of the same role", async () => {
+    // The user's framing: bot-hq must not know that EYES are reviewers. It
+    // knows only the ticked boxes, so it names what the UNION cannot do.
+    // Duplicate roles are NOT special-cased; this is simply one roster whose
+    // union is missing `edit_files`.
+    mockBackend([READ_ONLY]);
+    await openDialog();
+    fireEvent.change(screen.getByPlaceholderText(/refactor auth flow/i), {
+      target: { value: "a task" },
+    });
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+
+    fireEvent.change(roleSelect(1), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: /add participant/i }));
+    fireEvent.change(roleSelect(2), { target: { value: "5" } });
+
+    const warning = screen.getByRole("status");
+    expect(warning).toHaveTextContent(/no participant can edit files/i);
+    expect(warning).toHaveTextContent(/review, but nothing in it can act/i);
+    // It says what the SET cannot do — never who the roles are.
+    expect(warning.textContent).not.toMatch(/reviewer|EYES|HANDS/i);
+  });
+
+  it("does not block Create", async () => {
+    mockBackend([READ_ONLY]);
+    await openDialog();
+    fireEvent.change(screen.getByPlaceholderText(/refactor auth flow/i), {
+      target: { value: "a task" },
+    });
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    fireEvent.change(roleSelect(1), { target: { value: "5" } });
+
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(createButton()).toBeEnabled();
+    fireEvent.click(createButton());
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("create_session", expect.anything()),
+    );
+  });
+
+  it("clears once ONE participant holds edit_files", async () => {
+    mockBackend([role(), READ_ONLY]);
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+
+    fireEvent.change(roleSelect(1), { target: { value: "5" } });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /no participant can edit files/i,
+    );
+
+    // The union is what is checked, so one editing participant is enough.
+    fireEvent.click(screen.getByRole("button", { name: /add participant/i }));
+    fireEvent.change(roleSelect(2), { target: { value: "1" } });
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("says nothing while a row still has no role", async () => {
+    // A half-picked roster has not made a statement to warn about.
+    mockBackend([READ_ONLY]);
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+// ===========================================================================
+// rc3 D10 — no participant is displayed by an agent name
+// ===========================================================================
+
+describe("New session dialog — no agent names (D10)", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  it("names nobody Brian or Rain, anywhere in the dialog", async () => {
+    mockBackend();
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+
+    const dialog = screen.getByRole("dialog", { name: /new session/i });
+    expect(dialog.textContent).not.toMatch(/\bbrian\b/i);
+    expect(dialog.textContent).not.toMatch(/\brain\b/i);
+    // …and the roles the user DID pick from are still offered by their own
+    // display names, so this is not passing by rendering nothing.
+    expect(dialog.textContent).toMatch(/HANDS/);
   });
 });

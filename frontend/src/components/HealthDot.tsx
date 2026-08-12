@@ -38,7 +38,8 @@ export function HealthDot({
  *  nothing). `alive` undefined = assume alive (the event fires on transitions). */
 export function RouterHealthDot({ alive }: { alive?: boolean }) {
   if (alive !== false) return null;
-  const label = "peer-forward router DOWN — Brian↔Rain messages may not be delivered";
+  const label =
+    "peer-forward router DOWN — messages between participants may not be delivered";
   return (
     <span
       className="inline-block size-2 shrink-0 rounded-full align-middle bg-error animate-pulse"
