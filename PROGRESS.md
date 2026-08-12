@@ -9,6 +9,62 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-12 — the Roles tab is live, and HANDS/EYES are rows you can edit
+
+**Settings → Roles ships** (`frontend/src/app/RolesPanel.tsx`), on top of the
+role CRUD commands merged earlier. Master/detail rather than a modal: a rail of
+roles on the left, one role's whole form on the right, because the **role
+instruction** — the `description_prompt` prose injected into every session the
+role joins — is the point of the tab and does not fit in a dialog. It gets a
+tall resizable monospace editor.
+
+The tab does list (with a **Show archived** toggle), create, edit, and
+**archive/restore**. Archive is confirmed and the copy says outright that
+nothing is deleted; migration 0047 explains why removal cannot be a delete.
+`builtin` rows render a badge and are otherwise ordinary — HANDS and EYES are
+editable like anything else, which is the whole point of seeding them.
+
+**New backend: `list_capabilities`** (`src/tauri_cmd/roles.rs`), plus
+`Capability::ALL` / `label` / `description` / `group` in
+`src/agents/capability.rs`. The checklist is served, never hardcoded in
+TypeScript — a hardcoded slug list drifts silently the first time a capability
+is added, and the new grant simply never appears as a box.
+
+**Two modes only — `active` and `observer`.** rc3 D1 makes `on_demand` wake on a
+user `@mention` and mention-wake is not built, so offering it would ship a role
+that is enabled, rostered and never handed a turn. A role *already stored* as
+`on_demand` still shows it, disabled: a picker that hides a value the row holds
+is how editing the prose silently rewrites the mode.
+
+**Default model** comes from the saved-model registry, with an explicit "none"
+(rc3 D8). **The Agents tab is untouched** — D8 retires it, but that waits on
+N-participant session create.
+
+**Three defects found while building it, all fixed and pinned by tests:**
+
+1. Re-seeding the form from each new server row let a background `list_roles`
+   refetch discard a half-written instruction. The draft is now seeded once and
+   moves only when a save returns a stored row.
+2. Toggling **Show archived** changes the query key, so the list went
+   `undefined` for a frame and unmounted the editor with the draft inside it.
+   Fixed with `placeholderData`.
+3. Saving with the capability list not yet loaded would have written an empty
+   grant list, stripping a role's permissions with nothing on screen that looked
+   like a change. Save is held until the checklist arrives.
+
+**One thing the tab works around rather than fixes:** migration 0044 seeded the
+`hands` role with `route_gated_command`, which `Capability::parse` does not
+know. Submitting the stored list back verbatim makes HANDS permanently
+unsaveable, so the form shows unrecognised slugs in a marked block and drops
+them on save. Lossless here — the seed also carries `gated_bash`, and
+`CapabilitySet::from_slugs` already discards the stray slug at spawn — but the
+row itself still holds it. Migrations are immutable, so correcting the stored
+value needs a new one.
+
+Suite: 1152 lib + 66 integration Rust, 212 frontend.
+
+---
+
 ## 2026-08-11 — the ring ran live; a drift audit found three unscheduled decisions
 
 **The sequencer drove a real session for the first time.** `BOT_HQ_SEQUENCER=1`
