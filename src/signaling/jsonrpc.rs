@@ -13,10 +13,75 @@ use std::sync::Arc;
 
 /// Identity of the (session, agent) pair making the call. Comes from the
 /// URL path the agent's mcp-config points at.
+///
+/// `capabilities` is resolved from `session_participants` by
+/// [`resolve_caller_capabilities`] before dispatch, so [`call_tool`] stays a
+/// pure function of its arguments — the reason this module exists apart from
+/// the HTTP layer. It is the ONLY thing the tool gate consults: nothing below
+/// compares an agent name.
 #[derive(Debug, Clone)]
 pub struct CallerIdentity {
     pub session_id: String,
     pub agent: String,
+    pub capabilities: crate::agents::ResolvedCapabilities,
+}
+
+/// Read one caller's invite-time capability snapshot out of the roster.
+///
+/// Called once per RPC by the HTTP layer. Every failure resolves to
+/// [`ResolvedCapabilities::Unreadable`], which denies every GATED tool and
+/// leaves ungated ones alone — see that type's docs for why a gate degrades in
+/// the opposite direction from the prompt layer.
+///
+/// The reasons are short fixed strings rather than formatted errors because
+/// they are quoted into the refusal an agent reads; a sqlx error rendered into
+/// an agent's transcript is noise it cannot act on, while "the session roster
+/// could not be read" is something it can report.
+pub async fn resolve_caller_capabilities(
+    bridge: &SignalingBridge,
+    session_id: &str,
+    agent: &str,
+) -> crate::agents::ResolvedCapabilities {
+    use crate::agents::{CapabilitySet, ResolvedCapabilities};
+
+    let Some(storage) = bridge.storage_handle().await else {
+        return ResolvedCapabilities::Unreadable {
+            reason: "bot-hq's storage is not wired up yet",
+        };
+    };
+    let row = match storage.participant_by_slug(session_id, agent).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            tracing::warn!(
+                %session_id,
+                %agent,
+                "no participant row for this caller; every gated tool is refused"
+            );
+            return ResolvedCapabilities::Unreadable {
+                reason: "you are not on this session's roster",
+            };
+        }
+        Err(e) => {
+            tracing::warn!(%session_id, %agent, ?e, "reading the caller's participant row failed");
+            return ResolvedCapabilities::Unreadable {
+                reason: "the session roster could not be read",
+            };
+        }
+    };
+    match CapabilitySet::from_json(&row.capabilities) {
+        Some(set) => ResolvedCapabilities::Known(set),
+        None => {
+            tracing::warn!(
+                %session_id,
+                %agent,
+                capabilities = %row.capabilities,
+                "capabilities column is not a JSON array of slugs; every gated tool is refused"
+            );
+            ResolvedCapabilities::Unreadable {
+                reason: "your capability set did not decode",
+            }
+        }
+    }
 }
 
 /// Dispatch one JSON-RPC request. Returns the response value (which the HTTP
@@ -84,46 +149,40 @@ pub async fn dispatch(
     }
 }
 
-/// Tools that affect the user (block on a choice, set "awaiting" state, or
-/// request approval) must come from Brian — the HANDS role. Rain is EYES, a
-/// read-only reviewer. Letting both agents race on these tools produced
-/// duplicate prompts and bounced awaiting state.
-const HANDS_ONLY_TOOLS: &[&str] = &[
-    "ask_user_choice",
-    "mark_awaiting_user",
-    "request_approval",
-    "action_gate",
-    "supersede_question",
-    // EYES files findings; HANDS resolves them — so disposition is HANDS-only.
-    "disposition_finding",
-    // HANDS overrides the reviewer-down commit block (fail-closed escape valve).
-    "override_reviewer_block",
-    // `halt` yields the session to the USER (sets awaiting) — user-facing, so it
-    // follows mark_awaiting_user's HANDS-only precedent. EYES converges via
-    // peer_ack (not HANDS-only) instead of yielding to the user.
-    "halt",
-    // Declares HANDS-side background work to the idle watchdog; EYES has no
-    // background execution surface, so it follows halt's HANDS-only precedent.
-    "declare_working",
-    // Runs arbitrary shell commands (HANDS executes; EYES is read-only —
-    // her terminal surface is terminal_read).
-    "terminal_exec",
-];
+/// Tools whose decision the capability gate deliberately does NOT take yet.
+///
+/// rc3 is a reframe: the SOURCE of the gate moves from an agent name to a
+/// capability set, and the decision itself must not move
+/// (`docs/plans/2026-08-12-rc3-reframe-contract.md`, rule 1). Exactly one tool
+/// would decide differently under the capability model than under the name gate
+/// it replaces:
+///
+/// * **`close_session`** is UNGATED today — any agent may call it, EYES
+///   included. `capability::required_for` maps it to `Capability::CloseSession`,
+///   which the `eyes` role is not seeded with, so routing it through
+///   capabilities would newly REFUSE it for EYES. That is a real fix for a real
+///   gap (CL issues #5: a reviewer closed a session while unwritten CL learnings
+///   were still pending) and it is already blessed in the capability model's own
+///   test, `capability::tests::close_session_is_the_one_intended_boundary_change`
+///   — but blessing a boundary change in the model is not the same as shipping
+///   it in the runtime, and this change is not the place to do that. Held here
+///   so the reframe lands with byte-identical decisions and the boundary change
+///   can be taken on its own merits.
+///
+/// Removing an entry is a one-line change and is the whole mechanism: whoever
+/// decides EYES should lose `close_session` deletes it here and moves the tool
+/// off `parity::UNGATED`.
+/// `parity::the_parity_hold_is_exactly_the_known_divergence` fails if this list
+/// grows silently, and the enforcement table in `agents::capability_prompt`'s
+/// module doc records that a held tool is not enforced.
+const PARITY_HOLD: &[&str] = &["close_session"];
 
-/// The inverse of [`HANDS_ONLY_TOOLS`]: tools only EYES (rain) may call.
-/// `eyes_flag` is EYES's state-writing tool — HANDS must not file blocking
-/// findings against its own work, or the independent-review gate is meaningless.
-/// `approve_finding` is EYES's sign-off that an escalated fix is real — only the
-/// reviewer who raised it can clear the escalation, so HANDS can't self-approve.
-const EYES_ONLY_TOOLS: &[&str] = &["eyes_flag", "approve_finding"];
-
-/// Tools that mutate CL content (file bodies, folder descriptions). Brian
-/// (HANDS) owns mutations; Rain (EYES) reviews via the read
-/// counterparts (`cl_folder_search`, `cl_index_search`) and should not write.
-/// `cl_register_read` is deliberately NOT gated: it writes an AUDIT row (who
-/// read what), not CL content, and Rain recording her own reads is correct —
-/// the gate is about content authorship, not any write to a CL table.
-const CL_MUTATE_TOOLS: &[&str] = &["cl_register_folder_description", "cl_write_file"];
+/// Is `tool`'s allow/deny decision routed through the caller's capability set?
+///
+/// False for a tool on [`PARITY_HOLD`], which keeps the pre-rc3 answer.
+fn capability_gated(tool: &str) -> bool {
+    !PARITY_HOLD.contains(&tool) && crate::agents::capability::required_for(tool).is_some()
+}
 
 /// Parse + validate the optional `phase` arg shared by session_doc_write and
 /// session_doc_search. Returns Ok(None) when absent; Err with INVALID_PARAMS
@@ -196,6 +255,37 @@ fn peer_shaped_reason(reason: &str) -> Option<&'static str> {
     })
 }
 
+/// The refusal a gated tool returns when the caller's set does not admit it.
+///
+/// Built from `capability_prompt::phrasing(cap).deny` — the SAME sentence the
+/// agent's prompt already listed under "You may not". That is not decoration:
+/// layer 2 tells the agent it and the gate are never describing different
+/// grants, and reusing one string for both is part of how that stops being a
+/// claim. It also carries the "instead" clause each denial already has, so the
+/// refusal keeps the actionable half of the three name-based messages it
+/// replaces — a bare "denied" would have lost it.
+fn gate_refusal(name: &str, caller: &CallerIdentity) -> String {
+    let Some(cap) = crate::agents::capability::required_for(name) else {
+        // Unreachable via `call_tool` (the gate runs only when `capability_gated`
+        // is true, which implies a mapping). Kept total rather than panicking.
+        return format!("tool '{name}' is not available to you");
+    };
+    match caller.capabilities.unreadable_reason() {
+        Some(reason) => format!(
+            "tool '{name}' needs the `{}` capability, and bot-hq could not read your \
+             capability set — {reason}. Every gated tool is refused until that is fixed; \
+             report this rather than working around it.",
+            cap.slug()
+        ),
+        None => format!(
+            "tool '{name}' needs the `{}` capability, which this session did not grant you. \
+             You may not {}.",
+            cap.slug(),
+            crate::agents::capability_prompt::phrasing(cap).deny
+        ),
+    }
+}
+
 async fn call_tool(
     name: &str,
     args: Value,
@@ -205,22 +295,17 @@ async fn call_tool(
     // Liveness ground truth: any tool call proves the agent is there. The
     // reviewer commit gate consults this to overrule a stale Stalled verdict.
     bridge.note_agent_rpc(&caller.session_id, &caller.agent);
-    if HANDS_ONLY_TOOLS.contains(&name) && caller.agent != "brian" {
-        return Ok(ToolCallResult::error(format!(
-            "tool '{name}' is reserved for the HANDS agent (brian); {} is the EYES role and should not invoke user-facing tools",
-            caller.agent
-        )));
-    }
-    if CL_MUTATE_TOOLS.contains(&name) && caller.agent == "rain" {
-        return Ok(ToolCallResult::error(format!(
-            "tool '{name}' is reserved for HANDS (brian); rain is EYES and does not write CL content — review via cl_index_search / cl_folder_search instead",
-        )));
-    }
-    if EYES_ONLY_TOOLS.contains(&name) && caller.agent != "rain" {
-        return Ok(ToolCallResult::error(format!(
-            "tool '{name}' is reserved for the EYES agent (rain); {} is HANDS — EYES files review findings, HANDS resolves them via disposition_finding",
-            caller.agent
-        )));
+    // THE TOOL GATE. One check, reading the caller's capability snapshot — no
+    // agent name appears in it. Which capability a tool needs lives in
+    // `capability::required_for`, the same map the prompt's layer 2 is generated
+    // from, so the section that tells an agent what it may do and the gate that
+    // enforces it are the same data.
+    //
+    // Ungated tools never reach the roster at all: `capability_gated` is false
+    // for them, so a call that was never gated cannot be affected by a roster
+    // that will not read.
+    if capability_gated(name) && !caller.capabilities.allows_tool(name) {
+        return Ok(ToolCallResult::error(gate_refusal(name, caller)));
     }
     match name {
         "ask_user_choice" => {
@@ -1066,17 +1151,31 @@ mod tests {
     use super::*;
     use crate::signaling::bridge::SignalingEvent;
 
+    /// A HANDS caller, carrying the grants a real spawn resolves for one.
+    ///
+    /// The presets are not a stand-in for the database: `parity::
+    /// the_seeded_roster_resolves_to_the_presets` reads a migrated database
+    /// through `resolve_caller_capabilities` and asserts it produces exactly
+    /// these, so a seed that drifted from the presets fails there rather than
+    /// leaving every test in this module quietly asserting against fiction.
     fn caller() -> CallerIdentity {
         CallerIdentity {
             session_id: "s1".into(),
             agent: "brian".into(),
+            capabilities: crate::agents::ResolvedCapabilities::Known(
+                crate::agents::CapabilitySet::preset_hands(),
+            ),
         }
     }
 
+    /// An EYES caller. See [`caller`] for why the preset is trustworthy here.
     fn rain_caller() -> CallerIdentity {
         CallerIdentity {
             session_id: "s1".into(),
             agent: "rain".into(),
+            capabilities: crate::agents::ResolvedCapabilities::Known(
+                crate::agents::CapabilitySet::preset_eyes(),
+            ),
         }
     }
 
@@ -1348,9 +1447,12 @@ mod tests {
                 "tool {tool} should return is_error=true for rain"
             );
             let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
+            // The refusal names the CAPABILITY it needed, not the role that has
+            // it: what an agent can act on is "you were not granted this", and a
+            // role name is not something it can check.
             assert!(
-                text.contains("reserved for the HANDS"),
-                "tool {tool} should explain HANDS-only restriction, got: {text}"
+                text.contains("which this session did not grant you"),
+                "tool {tool} should explain the missing grant, got: {text}"
             );
         }
     }
@@ -1374,7 +1476,8 @@ mod tests {
         let v = serde_json::to_value(&res).unwrap();
         assert_eq!(v["result"]["isError"], json!(true));
         let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
-        assert!(text.contains("reserved for the EYES"), "got: {text}");
+        assert!(text.contains("needs the `file_finding` capability"), "got: {text}");
+        assert!(text.contains("which this session did not grant you"), "got: {text}");
     }
 
     #[tokio::test]
@@ -1396,7 +1499,11 @@ mod tests {
         let v = serde_json::to_value(&res).unwrap();
         assert_eq!(v["result"]["isError"], json!(true));
         let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
-        assert!(text.contains("reserved for the HANDS"), "got: {text}");
+        assert!(
+            text.contains("needs the `disposition_finding` capability"),
+            "got: {text}"
+        );
+        assert!(text.contains("which this session did not grant you"), "got: {text}");
     }
 
     #[tokio::test]
@@ -1440,7 +1547,7 @@ mod tests {
         assert!(v["result"]["content"][0]["text"]
             .as_str()
             .unwrap_or("")
-            .contains("reserved for the EYES"));
+            .contains("needs the `approve_finding` capability"));
     }
 
     #[tokio::test]
@@ -1695,7 +1802,10 @@ mod tests {
         let v = serde_json::to_value(&res).unwrap();
         assert_eq!(v["result"]["isError"], json!(true));
         let text = v["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("reserved for HANDS"), "got: {text}");
+        assert!(
+            text.contains("needs the `write_context_library` capability"),
+            "got: {text}"
+        );
         assert!(!tmp.path().join("library/projects/bot-hq/notes.md").exists());
 
         // Brian writes directly; the response names the outcome.

@@ -377,6 +377,85 @@ impl CapabilitySet {
     }
 }
 
+/// What a gated decision site actually has to work with: either a participant's
+/// decoded grants, or the fact that they could not be read.
+///
+/// # Why this is not `Option<CapabilitySet>`
+///
+/// `None` and `Some(empty)` would both spell "holds nothing", and they must not.
+/// An empty set is a real configuration — an observer, deliberately granted
+/// nothing. An unreadable roster is a *read failure*, and the two want different
+/// error text and different reasoning at the site.
+///
+/// # Degradation: gated decisions fail CLOSED, and say why
+///
+/// [`Self::Unreadable`] denies every gated tool and withholds every capability.
+/// This is the OPPOSITE of the choice `resolve_roster_facts` makes for the
+/// prompt layer (which renders no layer 2 at all rather than a prompt that
+/// denies everything), and deliberately so — the two have inverted risk
+/// profiles:
+///
+/// * The prompt is *advice*. Advice that wrongly says "you may do nothing"
+///   strands an agent that demonstrably can, so silence is the safer failure.
+/// * A gate is *enforcement*. Failing open silently means EYES quietly gains
+///   HANDS's tools and nothing in the UI, the logs or the transcript says so —
+///   the adversarial split the whole session rests on evaporates without a
+///   symptom. Failing closed is loud: the refusal names the missing capability
+///   and the reason the roster could not answer, so the failure is reported by
+///   the agent on its next turn instead of being discovered later in a diff.
+///
+/// The blast radius is bounded by design: an UNGATED tool stays allowed even
+/// when unreadable (see [`Self::allows_tool`]), so a roster failure cannot deny
+/// a call the name gate never gated either. What an unreadable roster costs is
+/// exactly the set of tools that were always gated.
+///
+/// **Known interaction, not hypothetical.** `ensure_session_roster` is called
+/// pre-spawn and its failure is warned-and-continued
+/// (`core::session::ensure_session_started`), so a session CAN reach a spawn
+/// with no participant rows. Before capability enforcement that session ran
+/// normally on the name gate; now its gated tools are refused. That is the
+/// price of fail-closed, taken knowingly: the alternative is a session that
+/// looks fine while nothing is enforced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedCapabilities {
+    /// The participant row was found and its `capabilities` column decoded.
+    Known(CapabilitySet),
+    /// The roster could not answer for this caller. `reason` is a short,
+    /// stable phrase quoted into the refusal so the failure is diagnosable
+    /// from the agent's transcript alone.
+    Unreadable { reason: &'static str },
+}
+
+impl ResolvedCapabilities {
+    /// May this caller call `tool`?
+    ///
+    /// An ungated tool is allowed unconditionally — including when the roster is
+    /// unreadable. Over-gating is as much a parity break as under-gating, and a
+    /// read failure is not a reason to start gating calls that were never gated.
+    pub fn allows_tool(&self, tool: &str) -> bool {
+        match required_for(tool) {
+            None => true,
+            Some(cap) => self.grants(cap),
+        }
+    }
+
+    /// Does this caller hold `cap`? `false` when the roster is unreadable.
+    pub fn grants(&self, cap: Capability) -> bool {
+        match self {
+            Self::Known(set) => set.contains(cap),
+            Self::Unreadable { .. } => false,
+        }
+    }
+
+    /// The read failure's reason, for the refusal text. `None` when resolved.
+    pub fn unreadable_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Known(_) => None,
+            Self::Unreadable { reason } => Some(reason),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,6 +631,75 @@ mod tests {
             // metadata matches were left to fall through to a placeholder.
             assert_ne!(cap.label(), cap.slug(), "{} is unlabelled", cap.slug());
         }
+    }
+
+    #[test]
+    fn exactly_four_capabilities_gate_no_tool() {
+        // `capability_prompt`'s module doc publishes a table of WHERE each
+        // capability is enforced, and tells the agent to treat a refusal as
+        // binding precisely because a few are carried by the prompt alone. That
+        // is a factual claim about this file, so it is pinned here rather than
+        // left to rot the first time a tool mapping is added.
+        //
+        // A capability with no tool in `required_for` is not enforced by the
+        // tool gate. Of the four below, `edit_files` IS enforced — at spawn, by
+        // the child's permission posture and its MCP servers
+        // (`spawn::build_command`, `core::session::user_mcp_servers_for_agent`).
+        // The other three have no enforcement site at all today.
+        let registry = crate::signaling::protocol::tool_descriptors();
+        let unmapped: Vec<&'static str> = Capability::ALL
+            .into_iter()
+            // No tool in the live registry maps to this capability, so no call
+            // the gate sees can ever depend on holding it.
+            .filter(|c| !registry.iter().any(|d| required_for(d.name) == Some(*c)))
+            .map(|c| c.slug())
+            .collect();
+        assert_eq!(
+            unmapped,
+            vec!["read_channel", "post_channel", "edit_files", "run_bash"],
+            "the set of capabilities the TOOL GATE cannot enforce changed — \
+             update the enforcement table in `capability_prompt`'s module doc \
+             and the Roles tab's capability hint before changing this"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_set_denies_gated_tools_and_leaves_ungated_ones_alone() {
+        // The degradation contract, at the type rather than through dispatch.
+        // The gate short-circuits ungated tools before it ever asks
+        // (`jsonrpc::capability_gated`), so nothing reaching `dispatch` can
+        // exercise the `None` arm below — and an arm no test reaches is an arm
+        // that can be changed without anything going red. This is that test.
+        let broken = ResolvedCapabilities::Unreadable {
+            reason: "the session roster could not be read",
+        };
+        for tool in HANDS_ONLY.iter().chain(EYES_ONLY).chain(CL_MUTATE) {
+            assert!(
+                !broken.allows_tool(tool),
+                "{tool} is gated — an unreadable set must refuse it"
+            );
+        }
+        for tool in ["session_doc_write", "cl_retrieve", "peer_ack", "pass_turn"] {
+            assert!(
+                broken.allows_tool(tool),
+                "{tool} was never gated — an unreadable set must not start gating it"
+            );
+        }
+        // No capability is held, and the reason survives for the refusal text.
+        for cap in Capability::ALL {
+            assert!(!broken.grants(cap), "{} must not be granted", cap.slug());
+        }
+        assert_eq!(
+            broken.unreadable_reason(),
+            Some("the session roster could not be read")
+        );
+
+        // A resolved-but-EMPTY set is a different thing: a real configuration
+        // with no grants, and it must not claim to be a read failure.
+        let observer = ResolvedCapabilities::Known(CapabilitySet::default());
+        assert_eq!(observer.unreadable_reason(), None);
+        assert!(!observer.allows_tool("ask_user_choice"));
+        assert!(observer.allows_tool("pass_turn"));
     }
 
     #[test]

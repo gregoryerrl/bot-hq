@@ -149,7 +149,7 @@ async fn handle_request(
         return Ok(handle_tool_gate(req.into_body(), bridge).await);
     }
 
-    let caller = match parse_path(&path) {
+    let who = match parse_path(&path) {
         Some(c) => c,
         None => {
             return Ok(text_response(
@@ -157,6 +157,21 @@ async fn handle_request(
                 "expected /sessions/<id>/<agent>/mcp",
             ));
         }
+    };
+    // Resolve the caller's grants ONCE per request, here, so `jsonrpc::dispatch`
+    // stays a pure function of its arguments (the reason it lives apart from
+    // this module) and one request costs one roster read rather than one per
+    // gate. A read failure is not fatal here — it resolves to `Unreadable`, and
+    // the gate refuses every gated tool with the reason attached.
+    let caller = CallerIdentity {
+        capabilities: crate::signaling::jsonrpc::resolve_caller_capabilities(
+            &bridge,
+            &who.session_id,
+            &who.agent,
+        )
+        .await,
+        session_id: who.session_id,
+        agent: who.agent,
     };
 
     let rpc = match decode_jsonrpc_body(req.into_body()).await {
@@ -302,12 +317,21 @@ async fn handle_tool_gate(body: Incoming, bridge: Arc<SignalingBridge>) -> Respo
     }
 }
 
-fn parse_path(path: &str) -> Option<CallerIdentity> {
+/// The (session, agent) pair a request URL names, before the roster has been
+/// consulted. Deliberately NOT a [`CallerIdentity`]: that type now carries the
+/// caller's capability snapshot, and a value that could be built without one
+/// would let a future call site dispatch with an unresolved gate by accident.
+struct CallerPath {
+    session_id: String,
+    agent: String,
+}
+
+fn parse_path(path: &str) -> Option<CallerPath> {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     if parts.len() != 4 || parts[0] != "sessions" || parts[3] != "mcp" {
         return None;
     }
-    Some(CallerIdentity {
+    Some(CallerPath {
         session_id: parts[1].to_string(),
         agent: parts[2].to_string(),
     })

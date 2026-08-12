@@ -2064,6 +2064,9 @@ mod tests {
             data_dir: std::path::PathBuf::from("/tmp"),
             session_effort: None,
             session_ultracode: None,
+            capabilities: crate::agents::ResolvedCapabilities::Known(
+                crate::agents::CapabilitySet::preset_eyes(),
+            ),
         }
     }
 

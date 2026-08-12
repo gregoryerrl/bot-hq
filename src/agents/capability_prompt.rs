@@ -16,8 +16,28 @@
 //! Hand-writing them is the drift §2 exists to prevent — CL
 //! `learnings-2026-08-04` records *"a prompt can order a call a guard
 //! refuses"*, three times in one session. Generating BOTH directions from one
-//! `CapabilitySet` means the prompt and the enforced set cannot disagree,
-//! because they are the same data.
+//! `CapabilitySet` means this section and the tool gate never describe
+//! different grants: both decode `session_participants.capabilities` with the
+//! same [`CapabilitySet::from_json`], so neither can be talking about a set the
+//! other does not have. The refusal `signaling::jsonrpc::gate_refusal` returns
+//! is literally [`Phrasing::deny`], so an agent that trips a gate reads back
+//! the sentence this section already gave it.
+//!
+//! **What that does NOT buy is that every line is enforced.** A capability is
+//! only as binding as its enforcement site, and as of 2026-08-12 the seventeen
+//! do not all have one:
+//!
+//! | | enforced where |
+//! |---|---|
+//! | the twelve in [`capability::required_for`] minus `close_session` | the tool gate, per call |
+//! | `close_session` | nowhere yet — held at its pre-rc3 behaviour by `jsonrpc::PARITY_HOLD`, so an agent WITHOUT it can still close |
+//! | `edit_files` | spawn: the child's permission posture + which MCP servers it inherits |
+//! | `read_channel`, `post_channel`, `run_bash` | nowhere — described here only |
+//!
+//! Those last four rows are why the preamble in [`render`] tells the agent to
+//! treat a refusal as binding rather than promising that the call would fail.
+//! Wording it the other way would be the exact defect this module was written
+//! against, pointed in the opposite direction.
 //!
 //! **D4 — peer names come from the live roster.** "Rain (EYES) can file
 //! BLOCKING findings on your work" is a roster fact, not a constant. A session
@@ -218,12 +238,16 @@ pub fn render(facts: &RosterFacts) -> String {
     out.push_str(
         "## Capabilities — generated from this session's grants\n\n\
          Generated at spawn from the capability set this session gave you: the permissions \
-         below from what it CONTAINS, the refusals from what it does NOT. It is one set, so \
-         this section and the tool gate cannot disagree. **This section is the authority on \
-         WHICH capabilities you hold** — a role description cannot widen or narrow the set, \
-         so where the text above claims otherwise, this list is what actually happens. It is \
-         not a licence to ignore narrower limits stated above: where a rule above CONSTRAINS \
-         how you use something you hold, that constraint still binds.\n\n",
+         below from what it CONTAINS, the refusals from what it does NOT. The tool gate reads \
+         that same set, so this list and the gate are never describing different grants — a \
+         refused call comes back naming the capability it needed, in the same words used \
+         below. **This section is the authority on WHICH capabilities you hold** — a role \
+         description cannot widen or narrow the set, so where the text above claims \
+         otherwise, this list is what actually happens. It is not a licence to ignore \
+         narrower limits stated above: where a rule above CONSTRAINS how you use something \
+         you hold, that constraint still binds. Treat every refusal below as binding even if \
+         a call would happen to go through — a few are carried by this list alone, and the \
+         list is the contract.\n\n",
     );
 
     let held: Vec<Capability> = Capability::ALL

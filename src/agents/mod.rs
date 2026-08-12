@@ -15,7 +15,7 @@ pub mod protocol;
 pub mod roles;
 pub mod spawn;
 
-pub use capability::{Capability, CapabilitySet};
+pub use capability::{Capability, CapabilitySet, ResolvedCapabilities};
 pub use capability_prompt::{PeerFact, RosterFacts};
 pub use general_rules::GENERAL_RULES;
 pub use prompts::role_for;

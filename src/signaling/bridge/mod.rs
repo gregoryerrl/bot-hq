@@ -456,6 +456,17 @@ impl SignalingBridge {
         *self.storage.lock().await = Some(storage);
     }
 
+    /// The wired storage handle, or `None` before `set_storage`.
+    ///
+    /// Exposed so the tool gate can read the caller's participant row
+    /// (`jsonrpc::resolve_caller_capabilities`) without the bridge growing a
+    /// method per query. `None` is a real answer there, not an inconvenience:
+    /// it is what makes "the roster could not be read" a distinct outcome from
+    /// "the roster says you hold nothing".
+    pub async fn storage_handle(&self) -> Option<Storage> {
+        self.storage.lock().await.clone()
+    }
+
     /// Hand the bridge a shared awaiting-flag pointer owned by the SessionHandle.
     /// The duo pump reads this same flag to decide whether to forward chunks
     /// to the peer. Setting it from inside the bridge (in mark_awaiting_user /

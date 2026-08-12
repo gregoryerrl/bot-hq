@@ -674,6 +674,7 @@ async fn spawn_session_handle(
         brian_resume,
         brian_effort,
         brian_ultracode,
+        participant_capabilities(&roster, "brian"),
     )
     .await?;
     let rain = if let Some(rc) = rain_cfg {
@@ -703,6 +704,7 @@ async fn spawn_session_handle(
                 rain_resume,
                 rain_effort,
                 rain_ultracode,
+                participant_capabilities(&roster, "rain"),
             )
             .await?,
         )
@@ -1156,6 +1158,45 @@ async fn compose_system_prompt(
     )
 }
 
+/// One participant's grants, out of a roster already read for this spawn.
+///
+/// The spawn-time twin of `signaling::jsonrpc::resolve_caller_capabilities`
+/// (which reads the row per RPC): both answer "what may this participant do",
+/// both from the same `session_participants.capabilities` column, and both
+/// degrade to [`ResolvedCapabilities::Unreadable`] rather than to an empty set,
+/// so a failed read is never mistaken for a role that was granted nothing.
+///
+/// Deliberately NOT folded into [`resolve_roster_facts`], which returns `None`
+/// for the whole roster when ANY participant fails to decode — right for a
+/// prompt that describes everyone, wrong for a gate that only ever asks about
+/// the caller. A peer with a corrupt column must not change what THIS
+/// participant is allowed to do.
+fn participant_capabilities(
+    roster: &[crate::storage::Participant],
+    slug: &str,
+) -> crate::agents::ResolvedCapabilities {
+    use crate::agents::{CapabilitySet, ResolvedCapabilities};
+    let Some(row) = roster_row(roster, slug) else {
+        warn!(participant = %slug, "no participant row at spawn; the restrictive posture applies");
+        return ResolvedCapabilities::Unreadable {
+            reason: "no participant row",
+        };
+    };
+    match CapabilitySet::from_json(&row.capabilities) {
+        Some(set) => ResolvedCapabilities::Known(set),
+        None => {
+            warn!(
+                participant = %slug,
+                capabilities = %row.capabilities,
+                "capabilities column is not a JSON array of slugs; the restrictive posture applies"
+            );
+            ResolvedCapabilities::Unreadable {
+                reason: "capabilities did not decode",
+            }
+        }
+    }
+}
+
 /// Layer 2's inputs for one participant: its own capability snapshot plus the
 /// other enabled participants, read from `session_participants`.
 ///
@@ -1241,6 +1282,7 @@ async fn spawn_agent_for(
     resume_session_id: Option<String>,
     session_effort: Option<String>,
     session_ultracode: Option<bool>,
+    capabilities: crate::agents::ResolvedCapabilities,
 ) -> Result<AgentHandle> {
     let native = config.native;
     // The assembled prompt is multi-KB. Hand it to claude-code via a file
@@ -1251,7 +1293,7 @@ async fn spawn_agent_for(
     std::fs::write(&system_prompt_path, &system_prompt)
         .with_context(|| format!("writing system prompt to {}", system_prompt_path.display()))?;
     let mcp_config_path = mcp_temp_dir.join(format!("{agent_name}-mcp.json"));
-    let mut user_servers = user_mcp_servers_for_agent(agent_name);
+    let mut user_servers = user_mcp_servers_for_agent(&capabilities);
     // Apply per-agent MCP overrides (Settings → Claude Config): a server the
     // user disabled for this agent is dropped from its forwarded mcp-config.
     let agent_override = crate::claude_config::resolve_agent_overrides(
@@ -1278,6 +1320,7 @@ async fn spawn_agent_for(
         data_dir: paths.data_dir.clone(),
         session_effort,
         session_ultracode,
+        capabilities,
     };
     match resolve_agent_kind(agent_name, native) {
         AgentKind::Native => {
@@ -1334,24 +1377,34 @@ pub(crate) fn resolve_agent_kind(agent_name: &str, native: bool) -> AgentKind {
 
 /// Decide which user MCP servers to expose to an agent at spawn time.
 ///
-/// EYES (Rain) gets an empty map — only `bot-hq-signaling` will be in the
+/// Asks the participant's capability snapshot, not its name: a role WITHOUT
+/// `edit_files` gets an empty map — only `bot-hq-signaling` will be in the
 /// generated mcp-config.json. Without external MCPs (`brave-devtools`,
-/// `chrome-devtools`, `discord`, etc.) Rain literally cannot drive
+/// `chrome-devtools`, `discord`, etc.) such a role literally cannot drive
 /// side-effects: the role contract is enforced at the tool boundary
 /// instead of relying on prompt discipline the model rationalizes around
-/// when a "next step" looks obvious. Rain still has claude-code's
+/// when a "next step" looks obvious. It still has claude-code's
 /// built-in read-only tools (`Read`, `Grep`, `Glob`, `WebFetch`,
-/// `WebSearch`, `ToolSearch`, `TodoWrite`), which are what
-/// EYES needs to review HANDS' work.
+/// `WebSearch`, `ToolSearch`, `TodoWrite`), which are what a reviewer
+/// needs to review the work.
 ///
-/// HANDS (Brian) gets the full merged set from the
-/// user's claude-code config so they can drive browsers, talk to Discord,
+/// A role that MAY edit gets the full merged set from the
+/// user's claude-code config so it can drive browsers, talk to Discord,
 /// etc.
-pub fn user_mcp_servers_for_agent(agent_name: &str) -> serde_json::Map<String, serde_json::Value> {
-    if agent_name == "rain" {
-        serde_json::Map::new()
-    } else {
+///
+/// This is the sibling of `spawn::build_command`'s permission posture and asks
+/// the same question for the same reason — the two together are what "cannot
+/// mutate" means mechanically, so they must not split on different predicates.
+/// Parity: the seeded HANDS set holds `edit_files` and the seeded EYES set does
+/// not, so both roles resolve exactly as `agent_name == "rain"` resolved them.
+/// An unreadable roster gets the empty map (fail closed).
+pub fn user_mcp_servers_for_agent(
+    capabilities: &crate::agents::ResolvedCapabilities,
+) -> serde_json::Map<String, serde_json::Value> {
+    if capabilities.grants(crate::agents::Capability::EditFiles) {
         load_user_mcp_servers(&default_user_settings_paths())
+    } else {
+        serde_json::Map::new()
     }
 }
 
@@ -2126,17 +2179,100 @@ mod tests {
     }
 
     #[test]
-    fn rain_gets_no_user_mcps_brian_gets_inherited() {
-        // EYES enforcement: Rain must not have any external MCP servers
-        // beyond the bot-hq-signaling one added by mcp_config_json. Brian
-        // (HANDS) keeps whatever the user has in ~/.claude.json.
-        // Mocking the file isn't worth it — we just verify Rain's map is
-        // empty and Brian's matches what load_user_mcp_servers returns.
-        let rain = user_mcp_servers_for_agent("rain");
-        assert!(rain.is_empty(), "Rain must spawn with no external MCPs");
-        let brian = user_mcp_servers_for_agent("brian");
-        let expected_brian = load_user_mcp_servers(&default_user_settings_paths());
-        assert_eq!(brian, expected_brian);
+    fn a_role_without_edit_files_gets_no_user_mcps_one_with_them_gets_inherited() {
+        // Same boundary the `agent_name == "rain"` check drew, asked of the
+        // capability set instead: a role that may not edit must have no external
+        // MCP servers beyond the bot-hq-signaling one added by mcp_config_json;
+        // a role that may keeps whatever the user has in ~/.claude.json.
+        // Mocking the file isn't worth it — we just verify one map is empty and
+        // the other matches what load_user_mcp_servers returns.
+        use crate::agents::{CapabilitySet, ResolvedCapabilities};
+        let eyes = user_mcp_servers_for_agent(&ResolvedCapabilities::Known(
+            CapabilitySet::preset_eyes(),
+        ));
+        assert!(
+            eyes.is_empty(),
+            "a role without `edit_files` must spawn with no external MCPs"
+        );
+        let hands = user_mcp_servers_for_agent(&ResolvedCapabilities::Known(
+            CapabilitySet::preset_hands(),
+        ));
+        let expected_hands = load_user_mcp_servers(&default_user_settings_paths());
+        assert_eq!(hands, expected_hands);
+    }
+
+    #[test]
+    fn an_unreadable_roster_spawns_with_no_user_mcps() {
+        // Fail closed, deliberately: the side-effect surface is the last thing
+        // to hand out on a read failure. `ResolvedCapabilities` documents the
+        // reasoning; this pins that the spawn path actually follows it.
+        let unknown = crate::agents::ResolvedCapabilities::Unreadable {
+            reason: "no participant row",
+        };
+        assert!(
+            user_mcp_servers_for_agent(&unknown).is_empty(),
+            "an unreadable capability set must not inherit the user's MCP servers"
+        );
+    }
+
+    #[test]
+    fn participant_capabilities_reads_the_row_and_fails_closed_otherwise() {
+        use crate::agents::{Capability, ResolvedCapabilities};
+        let mut row = stub_participant(1, "brian", 0);
+        row.capabilities = r#"["edit_files","run_bash"]"#.into();
+        let roster = vec![row];
+
+        match participant_capabilities(&roster, "brian") {
+            ResolvedCapabilities::Known(set) => {
+                assert!(set.contains(Capability::EditFiles));
+                assert!(set.contains(Capability::RunBash));
+                assert!(!set.contains(Capability::AskUser));
+            }
+            other => panic!("expected the row's grants, got {other:?}"),
+        }
+
+        // No row at all — NOT an empty set. A missing participant is a read
+        // failure, and the spawn posture must be able to tell it apart from a
+        // role deliberately granted nothing.
+        assert!(
+            matches!(
+                participant_capabilities(&roster, "nobody"),
+                ResolvedCapabilities::Unreadable { .. }
+            ),
+            "a caller with no participant row must resolve as unreadable"
+        );
+
+        // A column that is not a JSON array of slugs — same answer.
+        let mut broken = stub_participant(2, "rain", 1);
+        broken.capabilities = "not json".into();
+        assert!(
+            matches!(
+                participant_capabilities(&[broken], "rain"),
+                ResolvedCapabilities::Unreadable { .. }
+            ),
+            "a capabilities column that will not decode must resolve as unreadable"
+        );
+    }
+
+    #[test]
+    fn one_participants_broken_column_does_not_disarm_another() {
+        // The prompt layer is all-or-nothing (`resolve_roster_facts` returns
+        // None when ANY row fails to decode) because it describes everyone. A
+        // GATE only ever asks about the caller, so a peer's corrupt column must
+        // not change what this participant is allowed to do — otherwise one bad
+        // row silently strips the other role's grants.
+        use crate::agents::{Capability, ResolvedCapabilities};
+        let mut hands = stub_participant(1, "brian", 0);
+        hands.capabilities = r#"["edit_files"]"#.into();
+        let mut broken = stub_participant(2, "rain", 1);
+        broken.capabilities = "{}".into();
+
+        match participant_capabilities(&[hands, broken], "brian") {
+            ResolvedCapabilities::Known(set) => {
+                assert!(set.contains(Capability::EditFiles))
+            }
+            other => panic!("a peer's broken column must not affect brian: {other:?}"),
+        }
     }
 
     #[test]
