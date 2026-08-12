@@ -261,6 +261,20 @@ pub struct SpawnConfig {
     /// wins over the persistent per-agent override. Brian-only at runtime (EYES
     /// gets no --settings).
     pub session_ultracode: Option<bool>,
+    /// This participant's invite-time capability snapshot, read from
+    /// `session_participants` at spawn.
+    ///
+    /// It is what decides the child's PERMISSION POSTURE in [`build_command`] —
+    /// previously `cfg.agent_name == "rain"`. A role holding
+    /// [`Capability::EditFiles`] gets bypass mode plus the Tool Gate hook; a
+    /// role without it gets `dontAsk` + the read-only allow/deny lists. That is
+    /// the same split the name check made (the seeded HANDS set holds
+    /// `edit_files`, the seeded EYES set does not) sourced from the role
+    /// instead of from who the agent is.
+    ///
+    /// [`ResolvedCapabilities::Unreadable`] takes the RESTRICTIVE branch — see
+    /// that type for why every gated decision fails closed.
+    pub capabilities: crate::agents::ResolvedCapabilities,
 }
 
 /// One participant's stdin, reachable only with a receipt for a row in THIS
@@ -1117,16 +1131,17 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         cmd.args(["--resume", resume_id]);
     }
 
-    // Permission posture is role-dependent.
+    // Permission posture is CAPABILITY-dependent — it asks whether this
+    // participant's role was granted `edit_files`, not what the agent is called.
     //
-    // Brian (HANDS) runs with `--dangerously-skip-permissions`:
-    // bot-hq is their permission layer (policy.yaml + UI dialogs + git hooks),
+    // A role that MAY edit runs with `--dangerously-skip-permissions`:
+    // bot-hq is its permission layer (policy.yaml + UI dialogs + git hooks),
     // and letting claude-code prompt in parallel would double-gate, leak
     // prompts into stream-json (never reaching our UI), and hang the agent.
     //
-    // Rain (EYES) is review-only and must be MECHANICALLY unable to mutate.
-    // A prompt instruction alone failed (2026-05-28: Rain ran Edit + git
-    // commit + gh issue create on a client repo). `--dangerously-skip-
+    // A role that may NOT edit is review-only and must be MECHANICALLY unable
+    // to mutate. A prompt instruction alone failed (2026-05-28: Rain ran Edit +
+    // git commit + gh issue create on a client repo). `--dangerously-skip-
     // permissions` (bypass mode) CANNOT be used to enforce this because bypass
     // mode disables the permission layer entirely — deny rules are ignored.
     // Instead: `dontAsk` (no prompts, deny-by-default) + an allowlist of read-
@@ -1134,9 +1149,16 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     // over allow, so `Bash` is allowed wholesale for read-only investigation
     // while mutating git/gh invocations are blocked (verified: colon-form
     // `Bash(cmd:*)` matching holds under dontAsk on claude 2.1.x). The
-    // internal MCP server `bot-hq-signaling` is allowed as a unit; its
-    // HANDS-only tools are gated server-side (signaling/jsonrpc.rs).
-    if cfg.agent_name == "rain" {
+    // internal MCP server `bot-hq-signaling` is allowed as a unit; its gated
+    // tools are checked server-side against this same set
+    // (signaling/jsonrpc.rs).
+    //
+    // Parity: `edit_files` is in the seeded HANDS set and absent from the
+    // seeded EYES set, so the two roles land on exactly the branches
+    // `agent_name == "rain"` used to send them to. What changes is that a THIRD
+    // role now lands somewhere deliberate instead of silently getting bypass
+    // mode for not being called "rain".
+    if !cfg.capabilities.grants(crate::agents::Capability::EditFiles) {
         // Rain reaches her model through a third-party Anthropic-compatible
         // gateway (DeepSeek, via ANTHROPIC_BASE_URL). claude-code >= 2.1.156
         // serializes a SessionStart hook's `additionalContext` (a plugin's
@@ -1181,9 +1203,9 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     } else {
         cmd.arg("--dangerously-skip-permissions");
 
-        // Mechanical backstop for HANDS. It runs in bypass mode, where
-        // claude-code's native deny rules are IGNORED — so the only thing that
-        // can hard-stop an outward/mutating command is a hook. Inject a
+        // Mechanical backstop for a role that may edit. It runs in bypass mode,
+        // where claude-code's native deny rules are IGNORED — so the only thing
+        // that can hard-stop an outward/mutating command is a hook. Inject a
         // PreToolUse Bash hook that calls back into THIS binary's `policy-check
         // tool-gate` to match each Bash command against the GLOBAL Tool Gate
         // keyword config BEFORE it executes: a `gate` keyword blocks the direct
@@ -1191,11 +1213,11 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // which surfaces Approve/Reject and runs the command on approval; an
         // `auto_allow`/unmatched command is allowed through. This replaces the
         // per-project `tool_blocklist` role after the 2026-05-29 fabricated-
-        // comment incident. Rain is exempt: this hook is injected only here in
-        // the HANDS branch, and she's already mechanically read-only via the
-        // deny list above (her mutation surface is blocked regardless of any
-        // hook). Injected via `--settings` (a process arg) so NOTHING is
-        // written into the working repo's tree — it lives bot-hq-side, never in the working repo.
+        // comment incident. A role WITHOUT `edit_files` is exempt: this hook is
+        // injected only on this branch, and that role is already mechanically
+        // read-only via the deny list above (its mutation surface is blocked
+        // regardless of any hook). Injected via `--settings` (a process arg) so
+        // NOTHING is written into the working repo's tree — it lives bot-hq-side, never in the working repo.
         match std::env::current_exe() {
             Ok(exe) => {
                 let mut hook_cmd = format!(
@@ -1365,7 +1387,27 @@ mod tests {
             data_dir: Path::new("/tmp/data").to_path_buf(),
             session_effort: None,
             session_ultracode: None,
+            capabilities: crate::agents::ResolvedCapabilities::Known(
+                crate::agents::CapabilitySet::preset_hands(),
+            ),
         }
+    }
+
+    /// A config for a role WITHOUT `edit_files` — the read-only spawn posture.
+    ///
+    /// It still sets the agent name, but the name no longer decides anything
+    /// here: it is kept because the per-agent claude-overrides lookup
+    /// (`resolve_agent_overrides`) is keyed on it. What moves the posture is the
+    /// capability set — `posture_follows_the_capability_set_not_the_name` is the
+    /// test that proves the name is inert.
+    fn eyes_cfg() -> SpawnConfig {
+        let mut c = cfg();
+        c.agent_name = "rain".into();
+        c.config.agent_name = "rain".into();
+        c.capabilities = crate::agents::ResolvedCapabilities::Known(
+            crate::agents::CapabilitySet::preset_eyes(),
+        );
+        c
     }
 
     #[test]
@@ -1619,9 +1661,7 @@ mod tests {
         store.all.disable_auto_memory = Some(true); // fan-out default
         save_overrides(dir.path(), &store).unwrap();
 
-        let mut c = cfg();
-        c.agent_name = "rain".into();
-        c.config.agent_name = "rain".into();
+        let mut c = eyes_cfg();
         c.data_dir = dir.path().to_path_buf();
 
         let args = debug_command(&c);
@@ -1961,9 +2001,7 @@ mod tests {
     fn rain_gets_deny_by_default_not_bypass() {
         // EYES enforcement: Rain must NOT get bypass mode (which nullifies
         // deny rules); she gets dontAsk + an allowlist + a mutation denylist.
-        let mut c = cfg();
-        c.agent_name = "rain".into();
-        c.config.agent_name = "rain".into();
+        let c = eyes_cfg();
         let argv = debug_command(&c);
 
         assert!(
@@ -2021,9 +2059,7 @@ mod tests {
         // while every mutating `gh` form stays blocked. Deny wins over allow, so
         // the denylist must NOT contain a blanket `gh <noun>:*` (that would also
         // kill the read forms) and MUST enumerate the write verbs.
-        let mut c = cfg();
-        c.agent_name = "rain".into();
-        c.config.agent_name = "rain".into();
+        let c = eyes_cfg();
         let argv = debug_command(&c);
         let denied = argv
             .windows(2)
@@ -2086,9 +2122,7 @@ mod tests {
         // legit `git branch --show-current`/`-a` reads (incl. compound
         // `git branch … && echo …`). Mirror the gh deny-by-write-verb shape: only
         // mutating git-branch forms denied, read forms fall through to allowed Bash.
-        let mut c = cfg();
-        c.agent_name = "rain".into();
-        c.config.agent_name = "rain".into();
+        let c = eyes_cfg();
         let argv = debug_command(&c);
         let denied = argv
             .windows(2)
@@ -2145,9 +2179,7 @@ mod tests {
         // neutralized by `llm_proxy` (it hoists every such entry out of
         // `messages[]` into the top-level `system` field), so dropping --bare
         // restores the tool surface at no safety cost.
-        let mut c = cfg();
-        c.agent_name = "rain".into();
-        c.config.agent_name = "rain".into();
+        let c = eyes_cfg();
         let argv = debug_command(&c);
         assert!(
             !argv.iter().any(|a| a == "--bare"),
@@ -2196,9 +2228,7 @@ mod tests {
         // The tool-gate PreToolUse hook is injected via --settings in the HANDS
         // (Brian) branch only; Rain is already mechanically read-only via the
         // deny list, so she gets no --settings at all.
-        let mut c = cfg();
-        c.agent_name = "rain".into();
-        c.config.agent_name = "rain".into();
+        let c = eyes_cfg();
         let argv = debug_command(&c);
         assert!(
             !argv.iter().any(|a| a == "--settings"),
