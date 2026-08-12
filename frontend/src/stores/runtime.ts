@@ -1,8 +1,13 @@
 import type { AgentBusy, SessionActivity } from "./activity";
 import type { AgentHealth } from "./health";
+import { slotKey } from "../lib/participants";
 
 /** One live session's runtime snapshot from the backend `get_session_runtime`
- *  command (Bug C backfill). Mirrors the Rust `SessionRuntime` (snake_case). */
+ *  command (Bug C backfill). Mirrors the Rust `SessionRuntime` (snake_case).
+ *
+ *  The `brian_*` / `rain_*` field names are frozen wire and name **turn slots 0
+ *  and 1**, not agents — `src/tauri_cmd/sessions.rs` fills them from
+ *  `handle.participants.get(0)` / `.get(1)`. See {@link slotKey}. */
 export interface SessionRuntime {
   session_id: string;
   activity: string;
@@ -13,6 +18,28 @@ export interface SessionRuntime {
   router_alive: boolean | null;
   attention: string | null;
   working: string | null;
+}
+
+/**
+ * The two busy booleans of a SLOT-SHAPED payload, as a keyed busy map.
+ *
+ * **The single place the frozen pair is unpacked.** Both producers of a busy
+ * map are this shape — the live `session:activity` event
+ * (`SessionActivityEvent { brian_busy, rain_busy }`, filled in
+ * `src/core/activity.rs` from `slugs.get(0)` / `.get(1)`) and the
+ * `get_session_runtime` backfill below — and both go through here, so they
+ * cannot land under different keys and leave the turn-status line resolving one
+ * and not the other.
+ *
+ * Keying it by the literal `brian` / `rain` is what made the line print
+ * "brian is working": no rc3 roster has those slugs, so the roster lookup missed
+ * and the raw key rendered (rc3 D10).
+ */
+export function busyBySlot(p: {
+  brian_busy: boolean;
+  rain_busy: boolean;
+}): AgentBusy {
+  return { [slotKey(0)]: p.brian_busy, [slotKey(1)]: p.rain_busy };
 }
 
 /** Seed the event-driven activity + health stores from a one-shot runtime
@@ -31,16 +58,15 @@ export function seedRuntimeStores(
   setWorking?: (id: string, reason: string | null) => void,
 ): void {
   for (const r of rows) {
-    // Backend payload field -> participant slug; internal keys on both
-    // sides, never rendered (rc3 D10).
-    setActivity(r.session_id, r.activity as SessionActivity, {
-      brian: r.brian_busy,
-      rain: r.rain_busy,
-    });
+    // Slot-shaped wire -> slot keys, through the same unpacking the live event
+    // uses. Keying these by the literal slugs `"brian"` / `"rain"` is what
+    // blanked every health dot after a restart: no rc3 roster has those slugs,
+    // so `SessionView`'s per-participant lookup missed every entry this seeded.
+    setActivity(r.session_id, r.activity as SessionActivity, busyBySlot(r));
     if (r.brian_health)
-      setHealth(r.session_id, "brian", r.brian_health as AgentHealth);
+      setHealth(r.session_id, slotKey(0), r.brian_health as AgentHealth);
     if (r.rain_health)
-      setHealth(r.session_id, "rain", r.rain_health as AgentHealth);
+      setHealth(r.session_id, slotKey(1), r.rain_health as AgentHealth);
     // Null = solo / never reported → leave it (a missing entry reads as alive).
     if (r.router_alive !== null && r.router_alive !== undefined)
       setRouterHealth(r.session_id, r.router_alive);

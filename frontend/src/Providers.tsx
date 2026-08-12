@@ -15,7 +15,11 @@ import { useTauriEvent } from "./hooks/useTauriEvent";
 import { useHealthStore, type AgentHealth } from "./stores/health";
 import { useContextStore } from "./stores/context";
 import { useActivityStore, type SessionActivity } from "./stores/activity";
-import { seedRuntimeStores, type SessionRuntime } from "./stores/runtime";
+import {
+  busyBySlot,
+  seedRuntimeStores,
+  type SessionRuntime,
+} from "./stores/runtime";
 
 export function Providers({ children }: { children: ReactNode }) {
   const [queryClient] = useState(
@@ -177,13 +181,15 @@ function GlobalEventSync() {
       brian_busy: boolean;
       rain_busy: boolean;
     }) => {
-      // Backend payload field -> participant slug. Both sides are internal
-      // wire values; nothing here reaches the screen (rc3 D10 — the status
-      // line resolves each slug through the session's roster).
-      setActivity(p.session_id, p.state as SessionActivity, {
-        brian: p.brian_busy,
-        rain: p.rain_busy,
-      });
+      // `brian_busy` / `rain_busy` are frozen wire naming TURN SLOTS 0 and 1,
+      // not agents — `src/core/activity.rs` fills them from `slugs.get(0)` /
+      // `.get(1)`. Keying them by the literal slugs is what made the
+      // turn-status line print "brian is working": no rc3 roster has that
+      // slug, so the lookup missed and the raw key rendered (rc3 D10).
+      //
+      // Shared with the `get_session_runtime` backfill so the live event and
+      // the mount snapshot cannot key the same session two ways.
+      setActivity(p.session_id, p.state as SessionActivity, busyBySlot(p));
     },
     [setActivity],
   );

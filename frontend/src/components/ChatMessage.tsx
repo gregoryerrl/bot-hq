@@ -3,6 +3,7 @@ import { Markdown } from "./Markdown";
 import { authorColorClass } from "./authorColor";
 import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/time";
+import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import type { AgentMessage } from "../lib/bindings";
 
 interface ChatMessageProps {
@@ -26,28 +27,28 @@ interface ChatMessageProps {
 // Author + relative-timestamp header. Shared by the text and tool message rows
 // (the markup was byte-identical) so the two can't drift.
 //
-// `author` is the stored slug — it picks the colour and NOTHING else. `label`
-// is what the user reads (rc3 D10). No label means the roster has not loaded or
-// has no row for this author; the slug is then the only attribution left, which
-// beats an unattributed line.
+// `label` is what the user reads AND what picks the colour (rc3 D10). The
+// stored `message.author` slug reaches neither: printing it was the fallback
+// that put "brian" back on screen for every legacy row, and colouring by it
+// went neutral for every role-derived slug. No label at all means no roster was
+// consulted, which is what `UNKNOWN_PARTICIPANT` says.
 function MessageHeader({
-  author,
   label,
   createdAt,
 }: {
-  author: string;
   label?: string;
   createdAt: string;
 }) {
+  const shown = label || UNKNOWN_PARTICIPANT;
   return (
     <header className="mb-1 flex items-center gap-2">
       <span
         className={cn(
           "text-[0.65rem] font-semibold uppercase tracking-wide",
-          authorColorClass(author),
+          authorColorClass(shown),
         )}
       >
-        {label || author}
+        {shown}
       </span>
       <span className="text-[0.65rem] text-on-surface-variant">
         {formatRelative(createdAt)}
@@ -107,11 +108,7 @@ export const ChatMessage = memo(function ChatMessage({
   return (
     <article className={cn("mb-2", groupedWithPrev ? "mt-0" : "mt-3")}>
       {!groupedWithPrev && (
-        <MessageHeader
-          author={message.author}
-          label={authorLabel}
-          createdAt={message.created_at}
-        />
+        <MessageHeader label={authorLabel} createdAt={message.created_at} />
       )}
       <Markdown>{message.content}</Markdown>
     </article>
@@ -171,11 +168,7 @@ function ToolMessage({
   return (
     <article className={cn("mb-1", groupedWithPrev ? "mt-0" : "mt-2")}>
       {!groupedWithPrev && (
-        <MessageHeader
-          author={message.author}
-          label={authorLabel}
-          createdAt={message.created_at}
-        />
+        <MessageHeader label={authorLabel} createdAt={message.created_at} />
       )}
       <button
         type="button"

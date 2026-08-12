@@ -1,5 +1,62 @@
 import { describe, it, expect, vi } from "vitest";
-import { seedRuntimeStores, type SessionRuntime } from "./runtime";
+import { busyBySlot, seedRuntimeStores, type SessionRuntime } from "./runtime";
+import {
+  authorLabel,
+  participantLabelIndex,
+  participantRuntime,
+  slotKey,
+  type ParticipantView,
+} from "../lib/participants";
+
+/** The roster both key spaces have to reach, in turn order. */
+const ROSTER: ParticipantView[] = [
+  {
+    id: 1,
+    slug: "eyes",
+    role_display_name: "EYES",
+    model_display_name: "Claude Opus 5",
+    turn_position: 0,
+    participation_mode: "active",
+    enabled: true,
+  },
+  {
+    id: 2,
+    slug: "eyes-2",
+    role_display_name: "EYES",
+    model_display_name: "DeepSeek R2",
+    turn_position: 1,
+    participation_mode: "active",
+    enabled: true,
+  },
+];
+
+describe("busyBySlot — the frozen pair, unpacked once", () => {
+  // `Providers.tsx` calls this on every `session:activity` event and
+  // `seedRuntimeStores` calls it on the mount snapshot. It is the ONLY place
+  // the pair is unpacked, so the live event and the backfill cannot key the
+  // same session two different ways.
+  it("keys the pair by turn slot, never by an agent name", () => {
+    const busy = busyBySlot({ brian_busy: true, rain_busy: false });
+    expect(busy).toEqual({ "#slot0": true, "#slot1": false });
+    expect(Object.keys(busy)).not.toContain("brian");
+    expect(Object.keys(busy)).not.toContain("rain");
+  });
+
+  it("lands under keys the turn-status line resolves to a participant", () => {
+    // The wire, end to end: the event payload goes in, and the label the status
+    // line prints comes out — via the same index the chat byline uses. Cutting
+    // either half (the unpack keys, or the label index's slot entries) fails.
+    const busy = busyBySlot({ brian_busy: false, rain_busy: true });
+    const labels = participantLabelIndex(ROSTER);
+    const working = Object.keys(busy).filter((k) => busy[k]);
+    expect(working.map((k) => authorLabel(k, labels))).toEqual([
+      "EYES · DeepSeek R2",
+    ]);
+    // …and it is reachable as runtime state for that same participant row.
+    expect(participantRuntime(busy, ROSTER[1])).toBe(true);
+    expect(participantRuntime(busy, ROSTER[0])).toBe(false);
+  });
+});
 
 describe("seedRuntimeStores", () => {
   it("seeds activity for every row and health for non-null agents", () => {
@@ -33,23 +90,72 @@ describe("seedRuntimeStores", () => {
 
     seedRuntimeStores(rows, setActivity, setHealth, setRouterHealth);
 
+    // The `brian_*` / `rain_*` field names are frozen wire naming TURN SLOTS 0
+    // and 1 — `src/tauri_cmd/sessions.rs` fills them from
+    // `handle.participants.get(0)` / `.get(1)`. Unpacking them under the
+    // LITERAL slugs `"brian"` / `"rain"` is what blanked every health dot after
+    // a restart: no rc3 roster has those slugs, so the session header's
+    // per-participant lookup missed every entry this seeds.
     expect(setActivity).toHaveBeenCalledWith("s1", "busy", {
-      brian: true,
-      rain: false,
+      [slotKey(0)]: true,
+      [slotKey(1)]: false,
     });
     expect(setActivity).toHaveBeenCalledWith("s2", "awaiting_user", {
-      brian: false,
-      rain: false,
+      [slotKey(0)]: false,
+      [slotKey(1)]: false,
     });
-    expect(setHealth).toHaveBeenCalledWith("s1", "brian", "running");
-    expect(setHealth).toHaveBeenCalledWith("s1", "rain", "retrying");
-    expect(setHealth).toHaveBeenCalledWith("s2", "brian", "dead");
-    // s2.rain_health is null → no setHealth call for it.
-    expect(setHealth).not.toHaveBeenCalledWith("s2", "rain", expect.anything());
+    expect(setHealth).toHaveBeenCalledWith("s1", slotKey(0), "running");
+    expect(setHealth).toHaveBeenCalledWith("s1", slotKey(1), "retrying");
+    expect(setHealth).toHaveBeenCalledWith("s2", slotKey(0), "dead");
+    // No agent name reaches the store as a key.
+    expect(setHealth).not.toHaveBeenCalledWith("s1", "brian", expect.anything());
+    expect(setHealth).not.toHaveBeenCalledWith("s1", "rain", expect.anything());
+    // s2.rain_health is null → no setHealth call for slot 1.
+    expect(setHealth).not.toHaveBeenCalledWith(
+      "s2",
+      slotKey(1),
+      expect.anything(),
+    );
     expect(setHealth).toHaveBeenCalledTimes(3);
     // s1.router_alive is false → seeded; s2.router_alive is null → skipped.
     expect(setRouterHealth).toHaveBeenCalledWith("s1", false);
     expect(setRouterHealth).toHaveBeenCalledTimes(1);
+  });
+
+  it("seeds under keys the session header can actually resolve", () => {
+    // The producer and the consumer are pinned separately everywhere else, so
+    // this asserts the WIRE: what `seedRuntimeStores` writes is what
+    // `participantRuntime` reads back for the participant occupying that slot.
+    // A rekey on either side that forgets the other fails here.
+    const health: Record<string, string | undefined> = {};
+    const busy: Record<string, Record<string, boolean>> = {};
+    seedRuntimeStores(
+      [
+        {
+          session_id: "s1",
+          activity: "busy",
+          brian_busy: true,
+          rain_busy: false,
+          brian_health: "stalled",
+          rain_health: "dead",
+          router_alive: null,
+          attention: null,
+          working: null,
+        },
+      ],
+      (id, _a, b) => {
+        busy[id] = b as Record<string, boolean>;
+      },
+      (_id, agent, h) => {
+        health[agent] = h;
+      },
+      () => {},
+    );
+
+    expect(participantRuntime(health, ROSTER[0])).toBe("stalled");
+    expect(participantRuntime(health, ROSTER[1])).toBe("dead");
+    expect(participantRuntime(busy["s1"], ROSTER[0])).toBe(true);
+    expect(participantRuntime(busy["s1"], ROSTER[1])).toBe(false);
   });
 
   it("is a no-op for an empty snapshot", () => {

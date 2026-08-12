@@ -437,3 +437,89 @@ describe("New session dialog — no agent names (D10)", () => {
     expect(dialog.textContent).toMatch(/HANDS/);
   });
 });
+
+describe("Dashboard tiles — the Quickview byline (rc3 D10)", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  /** One session with a Quickview to attribute, plus the roster for it. */
+  function mockTile(participants: unknown[], lastAuthor: string) {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "list_sessions":
+          return [
+            {
+              id: "s1",
+              title: "Refactor auth flow",
+              working_repo_path: null,
+              base_repo_path: null,
+              archived: false,
+              created_at: "2026-08-12T00:00:00Z",
+              closed_at: null,
+              brian_model_at_spawn: null,
+              rain_model_at_spawn: null,
+              rain_enabled: true,
+              last_message: "Looking at the storage layer now",
+              last_author: lastAuthor,
+            },
+          ];
+        case "list_session_participants":
+          return participants;
+        case "list_pending_tray":
+        case "list_projects":
+        case "list_models":
+        case "list_roles":
+          return [];
+        case "get_claude_overrides":
+          return {};
+        case "claude_config_read":
+          return { core_knobs: [] };
+        // `get_app_setting` / `get_session_phase` are nullable reads; React
+        // Query rejects an `undefined` result, so answer them explicitly.
+        default:
+          return null;
+      }
+    });
+  }
+
+  const ROSTER = [
+    {
+      id: 1,
+      slug: "hands",
+      role_display_name: "HANDS",
+      model_display_name: "Claude Opus 5",
+      turn_position: 0,
+      participation_mode: "active",
+      enabled: true,
+    },
+  ];
+
+  it("attributes the Quickview as ROLE · Model, resolved through the session's roster", async () => {
+    // Tested as ONE chain: the stored `last_author` slug goes through
+    // `list_session_participants` and comes out as the tile's byline.
+    // `SessionTileLoader` exists ONLY to deliver that roster to the tile, and
+    // its `authorLabels` prop could be deleted with the suite still green —
+    // both halves were pinned and the wire between them was not.
+    mockTile(ROSTER, "hands");
+    renderDashboard();
+
+    expect(
+      await screen.findByText("HANDS · Claude Opus 5"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/looking at the storage layer now/i),
+    ).toBeInTheDocument();
+    // The slug is an internal key; it must not reach the tile.
+    expect(screen.queryByText("hands")).toBeNull();
+  });
+
+  it("does not print a legacy agent name when the roster cannot place the author", async () => {
+    // Historic rows keep `author = 'brian'` forever (rc3 D10 — "brian and
+    // rain's history can be legacy data"), so the tile has to stay attributed
+    // without naming an agent.
+    mockTile([], "brian");
+    renderDashboard();
+
+    expect(await screen.findByText("Unknown participant")).toBeInTheDocument();
+    expect(screen.queryByText(/^brian$/i)).toBeNull();
+  });
+});

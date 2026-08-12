@@ -15,6 +15,7 @@ import { Button } from "./ui/Button";
 import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/time";
 import { groupDiffByFile, type DiffLine } from "../lib/diffGroups";
+import { authorLabel, useParticipantLabels } from "../lib/participants";
 import type {
   ResolveResult,
   SessionDocumentView,
@@ -443,6 +444,11 @@ function TrayPill({
 // accumulated while the user was AFK (and survived a restart) still appear.
 function TrayList({ sessionId }: { sessionId: string }) {
   const queryClient = useQueryClient();
+  // rc3 D10: a tray card is asked BY a participant, and `entry.agent` is that
+  // participant's stored slug — an internal key, and on legacy rows literally
+  // "brian" / "rain". The roster turns it into `ROLE · Model`; the tray was
+  // named in the sweep list and was still printing the raw field.
+  const { labels } = useParticipantLabels(sessionId);
   // Refreshed event-driven by GlobalEventSync (invalidates queries on the
   // session:* events) — newly-parked pending appear and answered items drop
   // without a poll or a manual tab-switch.
@@ -619,6 +625,7 @@ function TrayList({ sessionId }: { sessionId: string }) {
           <TrayChoice
             entry={e}
             sessionId={sessionId}
+            askedByLabel={authorLabel(e.agent, labels)}
             pendingOption={resolving.get(e.choice_id)}
             onResolve={onResolve}
             onDiscard={() => setDiscardTarget(e)}
@@ -633,11 +640,12 @@ function TrayList({ sessionId }: { sessionId: string }) {
 }
 
 // One pending tray item, answered via the shared ChoicePrompt (preset options
-// + mandatory "Other"). Shows the kind/agent and, for an action_gate approval,
-// the gated command above the prompt for context.
+// + mandatory "Other"). Shows the kind + who asked and, for an action_gate
+// approval, the gated command above the prompt for context.
 function TrayChoice({
   entry,
   sessionId,
+  askedByLabel,
   pendingOption,
   onResolve,
   onDiscard,
@@ -646,6 +654,9 @@ function TrayChoice({
 }: {
   entry: SessionTrayView;
   sessionId: string;
+  /** Who asked, as `ROLE · Model` — resolved by the list, which holds the
+   *  roster. Never `entry.agent` itself (rc3 D10). */
+  askedByLabel: string;
   pendingOption: string | undefined;
   onResolve: (choiceId: string, picked: string) => void;
   onDiscard: () => void;
@@ -666,7 +677,7 @@ function TrayChoice({
           {entry.kind}
         </span>
         <span className="text-[0.7rem] text-on-surface-variant">
-          {entry.agent}
+          {askedByLabel}
         </span>
         <button
           type="button"

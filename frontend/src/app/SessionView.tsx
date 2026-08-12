@@ -18,8 +18,10 @@ import { SessionFindingsBanner } from "../components/SessionFindingsBanner";
 import { SessionPolicyPanel } from "./SessionPolicyPanel";
 import { cn } from "../lib/cn";
 import {
+  authorLabel,
   participantLabel,
-  useSessionParticipants,
+  participantRuntime,
+  useParticipantLabels,
 } from "../lib/participants";
 import type { AppError, SessionInfo } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
@@ -66,8 +68,10 @@ export function SessionView() {
     SessionInfo | null
   >("get_session", { sessionId });
 
-  // Who is in this session, in turn order — the header roster (rc3 D10).
-  const { participants } = useSessionParticipants(sessionId);
+  // Who is in this session, in turn order — the header roster (rc3 D10) — plus
+  // the key → `ROLE · Model` index every author-keyed surface below resolves
+  // through (the turn-status line, and the roster row itself).
+  const { participants, labels } = useParticipantLabels(sessionId);
 
   // Respawn agents on mount. Idempotent — `ensure_session_started` is a no-op
   // if the session's agents are already running. Reads each agent's stored
@@ -314,12 +318,19 @@ export function SessionView() {
                   }
                 >
                   {participantLabel(p)}{" "}
+                  {/* Both stores hold TWO key spaces: the live
+                      `session:agent_health` / `session:agent_context` events
+                      key by the participant's slug, while the mount backfill
+                      unpacks the slot-shaped `get_session_runtime` pair. A bare
+                      `[p.slug]` read the first and missed the second, so every
+                      dot and meter went blank after a restart until the next
+                      transition — `participantRuntime` spans both. */}
                   <HealthDot
-                    health={health?.[p.slug]}
+                    health={participantRuntime(health, p)}
                     name={participantLabel(p)}
                   />
                   <ContextMeter
-                    context={agentContext?.[p.slug]}
+                    context={participantRuntime(agentContext, p)}
                     name={participantLabel(p)}
                   />
                 </span>
@@ -506,10 +517,10 @@ export function SessionView() {
               placeholder="Broadcast to every participant…"
               activity={activity}
               busy={busy}
-              busyLabel={(slug) => {
-                const p = participants.find((row) => row.slug === slug);
-                return p ? participantLabel(p) : slug;
-              }}
+              // The busy map's keys are slot keys (Providers.tsx unpacks the
+              // frozen `brian_busy`/`rain_busy` pair); `labels` indexes both
+              // key spaces, so one lookup names the participant either way.
+              busyLabel={(key) => authorLabel(key, labels)}
               onSend={async (text) => {
                 await invoke("broadcast_message", { sessionId, text });
               }}

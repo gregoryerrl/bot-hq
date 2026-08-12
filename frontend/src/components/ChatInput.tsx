@@ -5,6 +5,7 @@ import { ErrorBanner } from "./ErrorBanner";
 import { errorMessage } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import { authorColorClass } from "./authorColor";
+import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import { isLocked, type AgentBusy, type SessionActivity } from "../stores/activity";
 
 interface ChatInputProps {
@@ -21,9 +22,11 @@ interface ChatInputProps {
   /** Per-participant busy flags, for the turn-status line. The collapsed
    *  `activity` says "someone is busy"; this says which participants. */
   busy?: AgentBusy;
-  /** Participant slug -> what to PRINT for it (rc3 D10: `ROLE · Model`, never
-   *  an agent name). Without it the status line falls back to the slug. */
-  busyLabel?: (slug: string) => string;
+  /** Busy-map key -> what to PRINT for it (rc3 D10: `ROLE · Model`, never an
+   *  agent name). `SessionView` resolves it through the session's roster.
+   *  Without it the status line has no roster to consult and says so, rather
+   *  than printing the internal key it happens to hold. */
+  busyLabel?: (key: string) => string;
   /** Pause the in-flight turn (the Stop button — interrupts the agents and
    *  lands the session in `paused`). Without it a locked session shows the
    *  status line but no Stop. */
@@ -289,15 +292,22 @@ function WorkerLine({
     .map(([slug]) => slug);
   return (
     <>
-      {workers.map((slug, i) => (
-        <span key={slug} className="flex items-center gap-1.5">
-          {i > 0 && <span className="text-on-surface-variant/40">·</span>}
-          <span className={cn("font-semibold", authorColorClass(slug))}>
-            {label?.(slug) ?? slug}
+      {workers.map((key, i) => {
+        // Resolve ONCE: the label is both what this line prints and what tints
+        // it, so a participant keeps one colour here and in its chat byline.
+        // Tinting by `key` instead would tint by the busy map's slot key, which
+        // no other surface holds — same participant, two colours.
+        const shown = label?.(key) ?? UNKNOWN_PARTICIPANT;
+        return (
+          <span key={key} className="flex items-center gap-1.5">
+            {i > 0 && <span className="text-on-surface-variant/40">·</span>}
+            <span className={cn("font-semibold", authorColorClass(shown))}>
+              {shown}
+            </span>
+            <span>is working</span>
           </span>
-          <span>is working</span>
-        </span>
-      ))}
+        );
+      })}
     </>
   );
 }
