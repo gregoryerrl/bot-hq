@@ -31,20 +31,28 @@ pub fn gate_age_secs(asked_at: &str) -> Option<i64> {
 }
 
 impl SignalingBridge {
-    async fn set_session_awaiting(&self, session_id: &str) {
+    async fn set_session_awaiting(&self, session_id: &str, halt_ring: bool) {
         if let Some(flag) = self.session_awaiting.lock().await.get(session_id) {
             flag.store(true, Ordering::Release);
         }
-        // HALT THE RING, not just the cursors. Both parking paths funnel through
-        // here (`ask_user_choice` and `mark_awaiting_user`), so this is the one
-        // place that knows a human is now the blocker. Without it the ring keeps
-        // dealing turns to participants that have no legal move — see
-        // `register_session_sequencer` for what that looked like live.
+        // HALT THE RING, not just the cursors — but only for a park that YIELDS
+        // the session to the user.
+        //
+        // `halt_ring` is false for `request_approval` / the action gate, which
+        // set the same flag while a git hook blocks on a yes/no. That is
+        // transient: the tool call is still in flight, the holder still holds the
+        // turn, and the ring is already waiting on its completion. Halting there
+        // stops a cycle that was not stuck and — until the release below existed
+        // — stopped it forever.
         //
         // `try_send`, not `send`: this runs inside a tool call that must not
         // block on the ring's queue, and a full channel already has a halt or a
         // completion in it. A closed channel means the session is tearing down.
-        let seq = self.session_sequencer.lock().await.get(session_id).cloned();
+        let seq = if halt_ring {
+            self.session_sequencer.lock().await.get(session_id).cloned()
+        } else {
+            None
+        };
         if let Some(tx) = seq {
             if tx
                 .try_send(crate::core::sequencer::SequencerCommand::QuestionParked)
@@ -323,9 +331,11 @@ impl SignalingBridge {
         )
         .await;
 
-        // Halt the duo BEFORE emitting the event — the agent's next chunk
-        // shouldn't volley to its peer while we wait for the user.
-        self.set_session_awaiting(&session_id).await;
+        // Halt BEFORE emitting the event — the agent's next chunk shouldn't
+        // reach its peers while we wait for the user. `!blocking` is the
+        // distinction: a parked CHOICE yields the session, a blocking approval
+        // is a hook waiting on a bool and must not stop the cycle.
+        self.set_session_awaiting(&session_id, !blocking).await;
 
         // Best-effort broadcast. If no subscribers, the request still parks
         // until resolve_choice is called (mostly a concern for tests).
@@ -852,7 +862,7 @@ impl SignalingBridge {
     /// don't populate — and it survives a restart), then emit `AwaitingUser` so
     /// the duo's peer-forward halts until the user acts.
     async fn emit_halt_row(&self, session_id: String, agent: String, text: String) {
-        self.set_session_awaiting(&session_id).await;
+        self.set_session_awaiting(&session_id, true).await;
         let choice_id = Uuid::new_v4().to_string();
         self.persist_question(
             &session_id,
@@ -1016,6 +1026,88 @@ mod tests {
                 "{door} parked a question and the ring was never told to halt"
             );
         }
+    }
+
+    /// **The RELEASE, which is the half that was missing.**
+    ///
+    /// A halt with no release is worse than no halt: `QuestionParked` sets
+    /// `holder = None`, and the sequencer's only un-halt is a `UserMessage`. When
+    /// this shipped without a release path, the first `mark_awaiting_user` of a
+    /// session stopped the cycle permanently — the participants kept their
+    /// subprocesses, received zero deliveries, and ran blind on whatever was
+    /// already in their stdin. It looked like three agents working; it was three
+    /// agents talking past each other.
+    ///
+    /// So this asserts the PAIR. Halting alone passing a test is exactly what
+    /// let the bug through.
+    #[tokio::test]
+    async fn a_parked_question_halts_the_ring_and_a_user_message_releases_it() {
+        use crate::core::sequencer::SequencerCommand;
+        use std::sync::atomic::AtomicBool;
+
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        bridge
+            .register_session_awaiting("s1".into(), Arc::new(AtomicBool::new(false)))
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+
+        bridge
+            .mark_awaiting_user("s1".into(), "hands".into(), "blocked".into())
+            .await;
+        assert!(
+            matches!(rx.try_recv(), Ok(SequencerCommand::QuestionParked)),
+            "parking must halt the ring"
+        );
+
+        bridge.notify_ring_user_message("s1").await;
+        assert!(
+            matches!(rx.try_recv(), Ok(SequencerCommand::UserMessage)),
+            "a user message must RELEASE the halt — without this the cycle never restarts"
+        );
+    }
+
+    /// A blocking approval is a hook waiting on a bool, not the session yielding.
+    /// It must NOT halt the cycle: the holder still holds its turn, the ring is
+    /// already waiting on the completion, and halting there stopped a cycle that
+    /// was not stuck. Every gated `git commit` goes through this path.
+    #[tokio::test]
+    async fn a_blocking_approval_does_not_halt_the_ring() {
+        use std::sync::atomic::AtomicBool;
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        bridge
+            .register_session_awaiting("s1".into(), Arc::new(AtomicBool::new(false)))
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+
+        // The real path with `blocking = true` — what `request_approval` and the
+        // action gate use. It holds open until resolved, so it is spawned.
+        let bridge2 = bridge.clone();
+        tokio::spawn(async move {
+            let _ = bridge2
+                .ask_user_choice_inner(
+                    "s1".into(),
+                    "hands".into(),
+                    "run it?".into(),
+                    vec!["yes".into(), "no".into()],
+                    None,
+                    None,
+                    true,
+                )
+                .await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "a blocking approval must not halt the ring — it is a hook waiting on a bool"
+        );
     }
 
     /// A session with no ring registered must not panic or block — the bridge is

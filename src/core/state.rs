@@ -904,8 +904,16 @@ impl AppState {
             .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("no live session {session_id}"))?;
         // Clear the awaiting halt BEFORE forwarding the user's reply so the
-        // duo pumps see chunks again.
+        // pumps see chunks again.
         self.clear_awaiting(handle, session_id).await;
+        // And RELEASE THE RING. `clear_awaiting` only lowers a flag; the
+        // sequencer halted on `QuestionParked` and a user message is the only
+        // thing that un-halts it. Without this line a parked question stops the
+        // cycle for the rest of the session — participants keep their
+        // subprocesses, receive no deliveries, and run blind on whatever was in
+        // their stdin. That shipped for two hours on 2026-08-13; see
+        // `SignalingBridge::notify_ring_user_message`.
+        self.bridge.notify_ring_user_message(session_id).await;
         // A user message supersedes any in-flight cancel escalation: set this so
         // `interrupt_then_escalate` skips its SIGKILL (the message + its own
         // preempt-interrupt below already abort the stuck turn — a kill would

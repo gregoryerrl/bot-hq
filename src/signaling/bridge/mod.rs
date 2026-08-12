@@ -520,6 +520,32 @@ impl SignalingBridge {
         self.session_sequencer.lock().await.insert(session_id, tx);
     }
 
+    /// **Tell the ring the user spoke.** This is the RELEASE for a halt — the
+    /// only one the sequencer has — and without it a parked question stops the
+    /// cycle permanently.
+    ///
+    /// Shipped broken on 2026-08-13 for about two hours: `QuestionParked` was
+    /// wired with no release path, so the first `mark_awaiting_user` of a session
+    /// halted the ring and nothing could restart it. The participants then ran
+    /// on their initial prompt with no turn-taking and no delivery at all — 105
+    /// messages and zero `participant_deliveries` rows in the session that caught
+    /// it. Halting and releasing are two halves of one mechanism; ship them
+    /// together or neither.
+    pub async fn notify_ring_user_message(&self, session_id: &str) {
+        let seq = self.session_sequencer.lock().await.get(session_id).cloned();
+        if let Some(tx) = seq {
+            if tx
+                .try_send(crate::core::sequencer::SequencerCommand::UserMessage)
+                .is_err()
+            {
+                tracing::warn!(
+                    session_id,
+                    "a user message did not reach the ring — a halted cycle will stay halted"
+                );
+            }
+        }
+    }
+
     /// Whether a turn ring is reachable for this session — the observable half
     /// of [`Self::register_session_sequencer`], so the spawn-time join can be
     /// pinned by a test.
