@@ -9,6 +9,112 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-12 — closing the review findings on the round cap, layer 2 and the Roles tab
+
+Seven non-blocking findings from two adversarial reviews of the merges below.
+Each was re-checked against the tree before it was touched; **one did not
+reproduce and is recorded as not-reproducing rather than quietly "fixed"**.
+
+**The round cap's two unread-snapshot paths are pinned.** `round_cap_laps`
+resolves four ways and only two were held by a test. A data dir with no snapshot
+yet (`Ok(None)`) and one that will not parse (`Err`) could each be changed to
+return `0` — which turns the cap **off** — with the whole lib suite green,
+contradicting the doc directly above them.
+`core::sequencer::tests::a_snapshot_that_is_missing_or_unreadable_leaves_the_cap_armed`
+holds both arms and asserts *not zero* separately from asserting the default, so
+a rewrite to some other non-zero number still has to be deliberate.
+
+**N=1 was unguarded, and it is the roster the product is moving toward.** The
+lap-wrap test is `<=` because a one-member ring steps to *itself*, where the
+`(turn_position, id)` key is equal rather than smaller. Narrowing it to `<`
+disables the round cap completely for a solo session — measured on this tree:
+**1177 of 1178 lib tests still passed**, and the one that did not is the new
+`core::sequencer::tests::a_solo_ring_spends_a_whole_lap_on_every_turn`. Every
+other cap test runs on a ring of two, where the wrap step goes strictly backwards
+and `<` is enough.
+
+**The 3.4× safety margin was an N=2 number quoted as a universal one.** The
+corpus is counted in messages and the cap in laps, and the conversion divides by
+N: the largest observed stretch (294 messages) is ~147 laps at N=2 but ~294 laps
+at N=1, so the same 500 is ~3.4× at N=2 and only ~**1.7×** on a solo ring. The
+constant's doc now states the dependence, and the second copy of the claim in
+`advance_turn`'s wrap comment goes with it. **The default is unchanged** — 500
+laps with `0` = off is the user's settled decision; the claim was wrong, not the
+number.
+
+**A disabled participant could be described as a live peer.** The `p.enabled`
+filter in `resolve_roster_facts` was killed by no test, and without it a solo
+HANDS session is told a reviewer is watching work nobody will review — a
+confident false statement, which is the worst shape a prompt error takes.
+`core::session::tests::a_disabled_participant_is_not_named_as_a_peer` asserts the
+peer list AND the sentence the renderer only produces when it is empty.
+
+**Layer 2 promised native EYES a tool the native loop does not have.**
+`run_bash`'s permission line read "run shell commands with `Bash`" — but the
+native loop implements `run_command` and no `Bash` at all, and EYES both holds
+`run_bash` and is the one role allowed on that loop. It was inside the section
+whose preamble declares itself authoritative over everything above it, which is
+the "two contradictory tool lists" defect `strip_claude_code_tool_inventory`
+exists to remove, in a span the strip cannot reach (layer 2 is appended after
+it). **Fix: the generated section names no claude-code tool at all** — a
+`Capability` is runtime-independent, so it describes the capability and points at
+the runtime's own inventory for the call. `edit_files` loses its tool names for
+the same reason. Pinned as a property over every variant by
+`agents::capability_prompt::tests::no_permission_line_names_a_claude_code_tool`,
+which also asserts the reachable case is still reachable (EYES may run native and
+still holds `run_bash`) so the test cannot outlive its own motivation.
+
+The refusals lose their tool names too, at unchanged claim strength: that
+direction was never the contradiction — `prompts.rs` puts it as *"a PROMISE of a
+tool that does not exist, not a refusal of one"*. The whole prompt delta is
+**four lines**, verified by rendering both presets before and after: two on
+HANDS' permission list, one on EYES', one on EYES' refusal list. Nothing else in
+the section moved, and the CLI role prose still names `Bash`, `Edit`, `Write` and
+`NotebookEdit` itself, so a claude-code agent loses no information.
+
+**Two documentation overclaims.**
+(a) The strip-span claim — *"exactly the CLI tool promises the native loop cannot
+keep … and nothing else"* — was false in both `src/agents/prompts.rs` and the
+entry below. The span is one contiguous slice, so it also carries `terminal_read`
+and the `mcp__bot-hq-signaling__web_search` half of the web bullet, both of which
+the native loop DOES have and `NATIVE_TOOL_ADDENDUM` grants a few lines later. A
+redundant strip, not a lost capability. Corrected in both places and pinned by
+`agents::prompts::tests::the_stripped_span_also_takes_two_tools_the_native_loop_does_have`.
+(b) **Did not reproduce.** The finding was that the reported test paths in these
+entries lack their `agents::` prefix, so `cargo test --exact` matches nothing.
+The two 2026-08-12 entries name **no test paths at all** — zero `::tests::`, zero
+`cargo test`, zero `--exact` across all 97 lines. The only `::`-bearing tokens
+are three type names in prose (`Capability::ALL`, `Capability::parse`,
+`CapabilitySet::from_slugs`), which `cargo test` was never going to run. Nothing
+was rewritten for it. What the finding was really after is served instead: every
+test this batch adds is cited above by its full path, and each was run under
+`cargo test --lib <path> -- --exact` before being written down.
+
+**Two Roles-tab defects, both user-visible.**
+1. **Restore failed silently.** The handler awaited `archive.mutateAsync` bare —
+   the rejection escaped unhandled and nothing rendered, so a failed restore was
+   indistinguishable from the click not registering, one button away from an
+   Archive path that wraps and displays its error. Restore now does both, and the
+   test asserts both halves separately (the alert, and that no rejection escapes)
+   because either fix alone leaves the other live.
+2. **Clearing the instruction is a silent revert.** An emptied box sends
+   `description_prompt: null`, and the spawn path reads NULL as "use the
+   built-in" — so clearing it to *silence* a role reinstates the shipped prose
+   instead. The behaviour is right (it is the "restore defaults" affordance
+   0044's schema comment describes `builtin` as existing for) and is unchanged;
+   what was missing was saying so. The textarea now warns while the box is empty,
+   and branches on `builtin`: a seeded row is told this restores the default, a
+   role the user added is told bot-hq ships no built-in for it.
+
+Gates: **1181 lib + 66 integration Rust** (from 1176 + 66; five new tests),
+**218 frontend** (from 215; three new). `cargo build` clean, `cargo clippy
+--all-targets` byte-identical to the pre-change baseline, `tsc --noEmit` clean.
+Every new test mutation-verified: twelve mutations applied one at a time to the
+exact production line each test claims to catch, all twelve red, all reverted
+green.
+
+---
+
 ## 2026-08-12 — B7 layer 2: the prompt's permissions and refusals are one set
 
 **`src/agents/capability_prompt.rs` generates layer 2 of every spawned agent's
@@ -34,9 +140,19 @@ to author rules that contradict its own capability set."*
 `strip_claude_code_tool_inventory` ran to `## Silence on transitions and holds`,
 which swallowed the mutation deny-list, the user-facing-tools paragraph and the
 whole never-assert-what-you-did-not-read rule. The span now ends at the deny-list
-heading — exactly the CLI tool promises the native loop cannot keep, and nothing
-else. Confirmed by reverting the boundary: three tests go red, and the suite was
-green with the old one.
+heading, which restores all four and keeps the CLI promises the native loop
+cannot keep — `Read`/`Grep`/`Glob`, `WebFetch`/`ToolSearch`, `TodoWrite`,
+read-only `Bash` — inside it. Confirmed by reverting the boundary: three tests go
+red, and the suite was green with the old one.
+
+**Corrected 2026-08-12** — this originally read "exactly the CLI tool promises …
+and nothing else", which is not true. The span is one contiguous slice of the
+role, so it also carries two bullets naming tools the native loop DOES have:
+`terminal_read`, and the `mcp__bot-hq-signaling__web_search` half of the
+web/reference bullet. `NATIVE_TOOL_ADDENDUM` grants the whole
+`mcp__bot-hq-signaling__*` set and names both a few lines later, so this is a
+redundant strip rather than a lost capability. Pinned by
+`agents::prompts::tests::the_stripped_span_also_takes_two_tools_the_native_loop_does_have`.
 
 **Nothing user-visible was deleted.** `BRIAN_ROLE` / `RAIN_ROLE` are untouched —
 migration 0046 pins them byte-for-byte, so retiring the now-duplicated
