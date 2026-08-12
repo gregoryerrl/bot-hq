@@ -238,9 +238,21 @@ pub const RAIN_TOOLS_CLI: &str = "Tools you may use:";
 /// `## Observations only` rule. Native EYES has therefore been running without
 /// the never-assert-what-you-did-not-read instruction that CLI EYES receives,
 /// and no test noticed (rc3 decision D6: *"it was lost by accident, not by
-/// decision"*). Ending the span at the deny-list heading strips exactly what the
-/// strip is FOR — the `Read`/`Grep`/`Glob`/`TodoWrite`/read-only-`Bash` promises
-/// the native loop does not implement — and nothing else.
+/// decision"*). Ending the span at the deny-list heading restores those four
+/// sections and keeps the promises the strip is FOR — `Read`/`Grep`/`Glob`,
+/// `WebFetch`/`ToolSearch`, `TodoWrite` and read-only `Bash`, none of which the
+/// native loop implements — inside the span.
+///
+/// **The span is not exactly those promises, and it must not be described as
+/// if it were.** It is a contiguous slice of the role, so it also carries two
+/// bullets naming tools the native loop DOES have: `terminal_read`, and the
+/// `mcp__bot-hq-signaling__web_search` half of the web/reference bullet. Both
+/// are `mcp__bot-hq-signaling__*` tools, which `NATIVE_TOOL_ADDENDUM` grants in
+/// full and re-describes a few lines later — so the native prompt loses their
+/// CLI-flavoured wording and immediately regains the tools themselves. That is
+/// a redundant strip, not a lost capability, and it is the price of a
+/// substring span. Narrowing it further would mean splitting the inventory
+/// into non-contiguous pieces, which is more boundary constants to drift.
 ///
 /// The deny-list that now survives is consistent with the native loop rather
 /// than contradictory: `NATIVE_TOOL_ADDENDUM` refuses the same writes
@@ -413,6 +425,50 @@ mod tests {
                 "layer 2 does not generate this, so removing it deletes it outright: {kept}"
             );
         }
+    }
+
+    /// **What the span takes BESIDES the promises the strip is for.**
+    ///
+    /// [`RAIN_TOOLS_END`]'s doc used to claim the span was "exactly the CLI
+    /// tool promises the native loop cannot keep … and nothing else", and the
+    /// PROGRESS entry repeated it. It is not: the span is one contiguous slice
+    /// of the role, and two of its bullets name `mcp__bot-hq-signaling__*`
+    /// tools the native loop DOES implement. This test is the correction, so
+    /// the sentence cannot quietly become false again — and so that anyone
+    /// narrowing the span later is told what they are changing.
+    ///
+    /// The cost is redundancy, not capability: `NATIVE_TOOL_ADDENDUM` grants
+    /// the whole `mcp__bot-hq-signaling__*` set a few lines further down, and
+    /// names these two specifically, so the native prompt re-states them
+    /// immediately after losing the CLI wording.
+    #[test]
+    fn the_stripped_span_also_takes_two_tools_the_native_loop_does_have() {
+        let start = RAIN_ROLE.find(RAIN_TOOLS_CLI).unwrap();
+        let end = RAIN_ROLE.find(RAIN_TOOLS_END).unwrap();
+        let span = &RAIN_ROLE[start..end];
+        let native = strip_claude_code_tool_inventory(RAIN_ROLE);
+
+        for tool in ["terminal_read", "mcp__bot-hq-signaling__web_search"] {
+            assert!(
+                span.contains(tool),
+                "{tool} is no longer inside the stripped span — the doc at RAIN_TOOLS_END \
+                 says it is, so one of the two is now wrong"
+            );
+            assert!(
+                crate::agents::native::agent::NATIVE_TOOL_ADDENDUM.contains(
+                    tool.trim_start_matches("mcp__bot-hq-signaling__")
+                ),
+                "{tool} is stripped for the native prompt and the addendum does not give it \
+                 back — that would be a lost capability, not a redundant strip"
+            );
+        }
+        // The bullets themselves are gone from the native prompt: it is the
+        // CLI-flavoured wording that goes, and only the addendum's version that
+        // remains.
+        assert!(
+            !native.contains("**`terminal_read(lines?)`**"),
+            "the CLI wording of terminal_read survived the strip"
+        );
     }
 
     #[test]

@@ -150,21 +150,43 @@ pub fn phrasing(cap: Capability) -> Phrasing {
             peer: "overrides a reviewer's block",
         },
         EditFiles => Phrasing {
-            grant: "edit files — `Edit`, `Write` and the mutating `Bash` forms are yours",
-            deny: "edit files — `Edit`, `Write`, `NotebookEdit` and every mutating `Bash` form \
-                   are blocked for you; propose the change instead of making it",
+            // No tool name, for the reason spelled out at `RunBash` below.
+            grant: "edit files — creating them, changing them and deleting them, with whichever \
+                    call your runtime's own tool list names for it",
+            deny: "edit files — every write call your runtime offers is blocked for you; \
+                   propose the change instead of making it",
             peer: "edits files",
         },
         RunBash => Phrasing {
-            // Deliberately not "run any shell command". `RunBash` is one grant
-            // with no read-only variant, while the spawn path can hand a
+            // **Names no TOOL, on purpose.** A `Capability` is runtime-
+            // independent — it is what the session granted — and the two
+            // runtimes spell this one differently: claude-code exposes `Bash`,
+            // bot-hq's native loop exposes `run_command` and implements no
+            // `Bash` at all (`native::agent::NATIVE_TOOL_ADDENDUM`). Naming the
+            // CLI tool here promised native EYES a call it does not have, and
+            // did it inside a section whose preamble declares itself the
+            // authority over the text above it — the same "two contradictory
+            // tool lists" defect `strip_claude_code_tool_inventory` exists to
+            // remove, in a span the strip cannot reach because layer 2 is
+            // appended after it. EYES holds `run_bash` and EYES is the one role
+            // that may run native, so this was reachable, not theoretical.
+            //
+            // The refusals lose their tool names for the same reason. That
+            // direction was never the contradiction — `prompts.rs` says so in
+            // as many words, "a PROMISE of a tool that does not exist, not a
+            // refusal of one" — so the wording change there keeps the claim
+            // exactly as strong as it was and only stops it naming a phantom.
+            //
+            // Also deliberately not "run any shell command". `RunBash` is one
+            // grant with no read-only variant, while the spawn path can hand a
             // participant a `--disallowedTools` list that denies the mutating
             // forms (`build_rain_disallowed_tools`). Wording the grant as
             // unconditional would make this section — which claims to be the
             // authority — overclaim against a restriction that really applies.
-            grant: "run shell commands with `Bash`, within whatever your spawn's tool denies \
-                    and the Tool Gate allow",
-            deny: "run shell commands — `Bash` is blocked for you",
+            grant: "run shell commands, within whatever your spawn's tool denies and the Tool \
+                    Gate allow — your runtime's own tool list names the call and says how far \
+                    it reaches",
+            deny: "run shell commands — every shell call your runtime offers is blocked for you",
             peer: "runs shell commands",
         },
         GatedBash => Phrasing {
@@ -391,6 +413,69 @@ mod tests {
                 assert!(!text.trim().is_empty(), "{}'s {what} is empty", cap.slug());
             }
             assert_ne!(p.grant, p.deny, "{}'s grant and deny are identical", cap.slug());
+        }
+    }
+
+    /// **No permission line names a claude-code tool.** Layer 2 is generated
+    /// from the capability set, which is runtime-independent; the runtimes are
+    /// not. `Bash`, `Read`, `Edit` and the rest exist on claude-code and do not
+    /// exist on bot-hq's native loop, which spells the same capabilities
+    /// `run_command`, `read_file`, `search_files` and offers no write call at
+    /// all (`native::agent::NATIVE_TOOL_ADDENDUM`).
+    ///
+    /// So a grant that names a CLI tool is a PROMISE the native runtime cannot
+    /// keep, made inside a section that declares itself the authority over
+    /// everything above it. That is the same contradiction
+    /// `strip_claude_code_tool_inventory` was written to remove, in a place the
+    /// strip structurally cannot reach: the strip runs over the role prose, and
+    /// layer 2 is appended after it.
+    ///
+    /// **Grants only.** A refusal that names a tool the runtime lacks is not the
+    /// same defect — `prompts.rs` puts it exactly: *"a PROMISE of a tool that
+    /// does not exist, not a refusal of one"* — and a deny-list that names both
+    /// runtimes' spellings is useful. The asymmetry is the point of the test.
+    #[test]
+    fn no_permission_line_names_a_claude_code_tool() {
+        // The reachable case is not hypothetical, and these two assertions are
+        // what keep that true: EYES is the one role allowed on the native loop,
+        // and its seeded grant set includes `run_bash`. If either stops holding,
+        // this test's motivation changed and someone should read it again.
+        assert!(
+            crate::agents::AgentRole::Eyes.may_run_native(),
+            "the native-eligible role changed; re-check what layer 2 promises it"
+        );
+        assert!(
+            CapabilitySet::preset_eyes().contains(Capability::RunBash),
+            "EYES no longer holds run_bash; re-check which grant reaches a native agent"
+        );
+
+        // Every claude-code built-in the native loop does not implement. The
+        // first five are exactly what `strip_claude_code_tool_inventory`
+        // removes from the role prose; the rest are the write tools
+        // `NATIVE_TOOL_ADDENDUM` refuses by name.
+        const CLI_ONLY: [&str; 11] = [
+            "`Bash`",
+            "`Read`",
+            "`Grep`",
+            "`Glob`",
+            "`TodoWrite`",
+            "`Edit`",
+            "`Write`",
+            "`NotebookEdit`",
+            "`ToolSearch`",
+            "`WebFetch`",
+            "`WebSearch`",
+        ];
+        for cap in Capability::ALL {
+            let grant = phrasing(cap).grant;
+            for tool in CLI_ONLY {
+                assert!(
+                    !grant.contains(tool),
+                    "{}'s permission line promises {tool}, which does not exist on the native \
+                     loop — describe the capability instead: {grant:?}",
+                    cap.slug()
+                );
+            }
         }
     }
 

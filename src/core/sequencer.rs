@@ -682,15 +682,27 @@ const MAX_TURN_BATCHES: usize = 32;
 /// **What was measured, in the unit it was measured in.** Across **3,561**
 /// uninterrupted stretches in the existing corpus (D2, 2026-08-11) the largest
 /// was **294 agent text messages**, which at N=2 participants is roughly **147
-/// laps**. 500 laps is therefore about **3.4× the largest observed real run**,
-/// which is what design §1b means by "high enough to be invisible in normal
-/// use".
+/// laps**. 500 laps is therefore about **3.4× the largest observed real run
+/// AT N=2** — which is what design §1b means by "high enough to be invisible in
+/// normal use", at that N.
+///
+/// **The 3.4× is an N=2 number and does not carry to other rosters.** The
+/// corpus is counted in MESSAGES, this cap is counted in LAPS, and the
+/// conversion divides by N — so the same 294-message stretch is ~147 laps at
+/// N=2 but ~294 laps at N=1. The same 500 is therefore about **1.7×** on a solo
+/// ring, half the headroom, and the margin scales roughly as `500·N / 294`.
+/// That is the number to quote as rc3 moves toward a one-participant default;
+/// quoting 3.4× for a solo session overstates the margin by 2×.
 ///
 /// **That is a messages-to-laps CONVERSION of one stretch, not a corpus-wide
 /// organic maximum in laps, and it must not be quoted as one.** The available
 /// proxies for a per-lap count are rain-only and undercount laps badly in the
 /// tail, so the only honest statement about the corpus is the one above: the
 /// biggest stretch anyone has actually run, converted at the N it ran at.
+///
+/// **The default is not being changed to compensate.** 500 laps with `0` = off
+/// is the user's settled decision; what is corrected here is a claim that read
+/// as if the margin were a property of the constant rather than of the roster.
 ///
 /// `0` means the cap is OFF — a deliberate unattended run. Per-session
 /// override: `round_cap` in [`crate::policy::Policy`], inherited
@@ -1646,9 +1658,11 @@ async fn advance_turn(
             // on `ring[0]`, and the comparison below reads that as forward
             // motion rather than as the wrap it also is. The
             // alternative is tracking who has already held the turn this lap —
-            // more state, for a backstop whose whole design is to sit ~3.4×
-            // above real work. Erring one lap LATE is the safe direction for a
-            // net that must never fire on legitimate work.
+            // more state, for a backstop whose whole design is to sit well
+            // above real work (~3.4× at N=2, ~1.7× at N=1; see
+            // [`DEFAULT_ROUND_CAP_LAPS`] for why the margin depends on N).
+            // Erring one lap LATE is the safe direction for a net that must
+            // never fire on legitimate work.
             let wrapped = match (current_key, next.as_ref()) {
                 (Some(cur), Some(n)) => (n.turn_position, n.id) <= cur,
                 _ => false,
@@ -5703,6 +5717,112 @@ mod tests {
         assert_eq!(round_cap_laps(&deps), 40);
         let (deps, _storage, _seats, _dir) = capped_ring(&[("a", "active")], Some(0)).await;
         assert_eq!(round_cap_laps(&deps), 0, "0 is a value, not an absence");
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_that_is_missing_or_unreadable_leaves_the_cap_armed() {
+        // The two arms the test above cannot reach. It covers "no data dir"
+        // (`None`, the unit-test shape) and "a snapshot that parses" — so the
+        // failure paths through a data dir that EXISTS were pinned by nothing,
+        // and both could be changed to return `0` with the whole lib suite
+        // green. `0` means the cap is OFF, so that is not a cosmetic default:
+        // it silently disarms the backstop on exactly the sessions whose state
+        // is already suspect, which is the lean the constant's doc rejects in
+        // as many words.
+        //
+        // Asserted against `DEFAULT_ROUND_CAP_LAPS` AND against `0`
+        // separately. The first alone passes if the function is rewritten to
+        // return some other non-zero number; the second is the property that
+        // actually matters and it is worth failing on its own terms.
+        let (mut deps, _storage, _seats) = ring(&[("a", "active")]).await;
+        let dir = tempdir().unwrap();
+        deps.data_dir = Some(dir.path().to_path_buf());
+
+        // Arm 1 — `Ok(None)`: the data dir is real, the snapshot is not there
+        // yet. Every session looks like this between spawn and the first
+        // policy write.
+        assert!(
+            !crate::policy::session_policy::session_policy_path(dir.path(), "s1").exists(),
+            "the fixture has to start with NO snapshot or this arm tests nothing"
+        );
+        assert_eq!(
+            round_cap_laps(&deps),
+            DEFAULT_ROUND_CAP_LAPS,
+            "a session with no snapshot yet must keep the default cap"
+        );
+        assert_ne!(round_cap_laps(&deps), 0, "a missing snapshot must not read as `off`");
+
+        // Arm 2 — `Err(_)`: the file is there and does not parse. Written as
+        // raw bytes rather than through `write_session_policy`, because the
+        // whole point is a file that serializer could never have produced.
+        let path = crate::policy::session_policy::session_policy_path(dir.path(), "s1");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "policy: {round_cap: 3\ntool_gate: [\n").unwrap();
+        assert!(
+            crate::policy::session_policy::read_session_policy(dir.path(), "s1").is_err(),
+            "the fixture has to actually be unreadable, or this arm silently \
+             re-tests the `Ok(Some(..))` path"
+        );
+        assert_eq!(
+            round_cap_laps(&deps),
+            DEFAULT_ROUND_CAP_LAPS,
+            "a snapshot that cannot be read must keep the default cap"
+        );
+        assert_ne!(round_cap_laps(&deps), 0, "an unreadable snapshot must not read as `off`");
+    }
+
+    #[tokio::test]
+    async fn a_solo_ring_spends_a_whole_lap_on_every_turn() {
+        // **N=1, and it is not an edge case** — rc3's default roster is heading
+        // toward one participant, so this is the configuration the product is
+        // moving to. `next_in_ring` steps a one-member ring to ITSELF, where
+        // the `(turn_position, id)` key is EQUAL rather than smaller, so the
+        // wrap test has to be `<=`. Narrowing it to `<` turns the round cap
+        // completely OFF for a solo session, and the whole lib suite stays
+        // green: every other cap test runs on a ring of two, where the wrap
+        // step goes strictly backwards and `<` is enough.
+        //
+        // Cap 2, so the assertions separate "counts laps" from "never fires":
+        // turn 1 closes lap 1 and the ring keeps moving, turn 2 closes lap 2
+        // and the cap fires.
+        let (deps, storage, mut seats, _dir) = capped_ring(&[("a", "active")], Some(2)).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // Lap 1: A hands to itself. One turn IS one full pass over the active
+        // participants when there is only one of them.
+        let w = lap_step(&storage, &tx, &mut seats[0], a, 1, "t1").await;
+        assert!(
+            w.contains(&"t1".to_string()),
+            "lap 1 of 2 closed and the solo ring kept its turn"
+        );
+        assert_eq!(notices(&storage).await, nothing(), "one lap of two announced nothing");
+
+        // Lap 2 is the cap.
+        post(&storage, "user", None, "t2").await;
+        assert!(
+            !storage.unread_for_participant(a).await.unwrap().rows.is_empty(),
+            "the silence below has to be the cap, not an empty backlog"
+        );
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 2, ending: SPOKE },
+        )
+        .await;
+        // Control channel still OPEN — see `the_round_cap_counts_laps_of_the_ring_not_turns`.
+        seats[0].quiet().await;
+
+        let posted = notices(&storage).await;
+        assert_eq!(posted.len(), 1, "the cap must fire on a solo ring too: {posted:?}");
+        assert!(posted[0].contains("round cap"), "{:?}", posted[0]);
+
+        drop(tx);
+        assert!(exited(task).await);
     }
 
     // ---- what a completed turn means (inventory #8-#11) --------------------
