@@ -1316,6 +1316,28 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     cmd
 }
 
+/// The environment `build_command` would hand the child, as owned strings.
+///
+/// The sibling of [`debug_command`] for the half that does not ride on argv:
+/// effort and the auto-memory/CLAUDE.md switches are env vars, so a test that
+/// only reads args cannot see them. Exists so a spawn assembled in
+/// `core::session` can be asserted through the ACTUAL command rather than
+/// through the `SpawnConfig` field it was built from — the difference between
+/// pinning a wire and pinning its two halves.
+#[cfg(test)]
+pub fn debug_env(cfg: &SpawnConfig) -> Vec<(String, String)> {
+    let cmd = build_command(cfg);
+    cmd.as_std()
+        .get_envs()
+        .filter_map(|(k, v)| {
+            Some((
+                k.to_string_lossy().to_string(),
+                v?.to_string_lossy().to_string(),
+            ))
+        })
+        .collect()
+}
+
 /// Build the path-string form of the claude command for diagnostics / logging.
 /// Not used by spawn; tests use it to assert flag set.
 #[cfg(test)]
