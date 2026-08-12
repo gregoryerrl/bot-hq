@@ -21,6 +21,7 @@ import type {
   Inheritance,
   McpServerItem,
   PluginItem,
+  RoleView,
   SessionInfo,
   SettingItem,
   SkillItem,
@@ -66,6 +67,43 @@ function emptyAll(): AgentOverride {
   return {};
 }
 
+/**
+ * One role's entry in the override store, or the all-inherited baseline.
+ *
+ * The key is `roles.slug` — the same string `resolve_participant_overrides`
+ * (`src/core/session.rs`) hands to `resolve_agent_overrides` after walking
+ * participant → role. Reading and writing by any other key would store settings
+ * spawn never looks up, which is the exact failure rc3 D10 closed.
+ */
+export function roleOverride(
+  store: ClaudeOverrides,
+  roleSlug: string,
+): AgentOverride {
+  return store.per_role?.[roleSlug] ?? emptyAll();
+}
+
+/**
+ * `store` with `patch` merged into one role's entry, leaving every other role
+ * and the `_all` fan-out untouched.
+ *
+ * Pure so the key it writes under is pinnable without a save round-trip: the
+ * panel's whole job is putting a value where spawn will find it, and an editor
+ * that writes the wrong key looks identical on screen.
+ */
+export function patchRoleOverride(
+  store: ClaudeOverrides,
+  roleSlug: string,
+  patch: Partial<AgentOverride>,
+): ClaudeOverrides {
+  return {
+    ...store,
+    per_role: {
+      ...(store.per_role ?? {}),
+      [roleSlug]: { ...roleOverride(store, roleSlug), ...patch },
+    },
+  };
+}
+
 export function ClaudeConfigPanel() {
   const {
     data: config,
@@ -74,6 +112,13 @@ export function ClaudeConfigPanel() {
   } = useTauriQuery<ClaudeConfigView>("claude_config_read");
   const { data: serverOverrides, refetch: refetchOverrides } =
     useTauriQuery<ClaudeOverrides>("get_claude_overrides");
+  // The roles the override store is keyed by (rc3 D10). Same read the Roles tab
+  // uses, so the blocks below are exactly the roles a session can invite —
+  // archived ones are excluded by the backend and cannot be invited, so an
+  // override block for one would configure a spawn that never happens.
+  const { data: roles = [] } = useTauriQuery<RoleView[]>("list_roles", {
+    includeArchived: false,
+  });
   const save = useTauriMutation<void, { overrides: ClaudeOverrides }>(
     "set_claude_overrides",
   );
@@ -147,21 +192,14 @@ export function ClaudeConfigPanel() {
     useServerDraft<ClaudeOverrides>(serverOverrides ?? {});
   const dirty = overridesDirty || pendingCount > 0;
   const all: AgentOverride = draft._all ?? emptyAll();
-  // The store's two per-agent scopes, read by TURN SLOT. `brian` / `rain` are
-  // the keys `resolve_agent_overrides` matches on (backend-owned, never shown);
-  // slot 0 and slot 1 are what they resolve for.
-  const firstTurn: AgentOverride = draft.brian ?? emptyAll();
-  const secondTurn: AgentOverride = draft.rain ?? emptyAll();
 
   // ---- override mutators (all write the `_all` fan-out: applies to every
   // agent). ----
   const patchAll = (patch: Partial<AgentOverride>) =>
     setDraft((d) => ({ ...d, _all: { ...(d._all ?? {}), ...patch } }));
-  // Per-agent effort/ultracode overrides (layered over `_all` at resolve time).
-  const patchFirstTurn = (patch: Partial<AgentOverride>) =>
-    setDraft((d) => ({ ...d, brian: { ...(d.brian ?? {}), ...patch } }));
-  const patchSecondTurn = (patch: Partial<AgentOverride>) =>
-    setDraft((d) => ({ ...d, rain: { ...(d.rain ?? {}), ...patch } }));
+  // Per-ROLE effort/ultracode overrides (layered over `_all` at resolve time).
+  const patchRole = (roleSlug: string, patch: Partial<AgentOverride>) =>
+    setDraft((d) => patchRoleOverride(d, roleSlug, patch));
 
   const setSkill = (name: string, vis: SkillVisibility | null) =>
     setDraft((d) => {
@@ -336,10 +374,9 @@ export function ClaudeConfigPanel() {
             <CorePane
               config={config}
               all={all}
-              firstTurn={firstTurn}
-              secondTurn={secondTurn}
-              patchFirstTurn={patchFirstTurn}
-              patchSecondTurn={patchSecondTurn}
+              roles={roles}
+              overrides={draft}
+              patchRole={patchRole}
               pendingStrings={pendingStrings}
               pendingBools={pendingBools}
               stageString={stageString}
@@ -594,10 +631,9 @@ const KNOB_NOTES: Record<string, string> = {
 function CorePane({
   config,
   all,
-  firstTurn,
-  secondTurn,
-  patchFirstTurn,
-  patchSecondTurn,
+  roles,
+  overrides,
+  patchRole,
   pendingStrings,
   pendingBools,
   stageString,
@@ -605,15 +641,19 @@ function CorePane({
 }: {
   config: ClaudeConfigView;
   all: AgentOverride;
-  firstTurn: AgentOverride;
-  secondTurn: AgentOverride;
-  patchFirstTurn: (p: Partial<AgentOverride>) => void;
-  patchSecondTurn: (p: Partial<AgentOverride>) => void;
+  roles: RoleView[];
+  overrides: ClaudeOverrides;
+  patchRole: (roleSlug: string, p: Partial<AgentOverride>) => void;
   pendingStrings: Record<string, string | null>;
   pendingBools: Record<string, boolean>;
   stageString: (key: string, value: string | null) => void;
   stageBool: (key: string, value: boolean) => void;
 }) {
+  // Nothing configured under the ROLE key. Distinguishes "you have set no
+  // per-role override" from "your per-agent overrides no longer exist", which
+  // the panel otherwise renders identically — see the notice below.
+  const noRoleOverrides =
+    Object.keys(overrides.per_role ?? {}).length === 0;
   return (
     <div>
       <PaneHeader
@@ -658,30 +698,45 @@ function CorePane({
         Agent runtime overrides
       </h3>
       <p className="mb-2 max-w-prose font-body-md text-body-md text-on-surface-variant">
-        Defaults by TURN SLOT, applied on the next agent spawn. Set each slot
+        Defaults by ROLE, applied on the next agent spawn. Set each role
         independently so a deep-reasoning effort isn&apos;t pushed blindly onto
         a non-Anthropic model. A session&apos;s own New Session dialog overrides
         these per participant.
       </p>
-      {/* rc3 D10: these blocks are not named after anyone. `claude-overrides.json`
-          scopes its per-agent entries by the name spawn passes to
-          `resolve_agent_overrides`, and that name is an internal key — the slot
-          it resolves for is what the user can actually act on. Which ROLE fills
-          a slot is chosen per session, so this tab cannot say. */}
-      <div className="flex flex-col gap-2">
-        <AgentEffortOverride
-          title="Turn 1"
-          ov={firstTurn}
-          patch={patchFirstTurn}
-          inheritedEffort={all.effort}
-        />
-        <AgentEffortOverride
-          title="Turn 2"
-          ov={secondTurn}
-          patch={patchSecondTurn}
-          inheritedEffort={all.effort}
-        />
-      </div>
+      {/* rc3 D10: one block per ROLE, because the role slug is the key
+          `resolve_agent_overrides` matches. Not the participant slug — those
+          are per-session and gain numeric suffixes (`hands-2`), so this tab
+          could neither enumerate nor address them; and not a turn slot, which
+          this tab cannot know the occupant of. */}
+      {noRoleOverrides && (
+        <p
+          role="status"
+          className="mb-2 max-w-prose rounded border border-warning/50 bg-warning/15 px-3 py-2 font-code-sm text-code-sm text-warning"
+        >
+          No per-role override is stored. These blocks are keyed by role — an
+          override entered before that change was keyed by agent name and no
+          longer applies, so re-enter anything you had set here.
+        </p>
+      )}
+      {roles.length === 0 ? (
+        <p className="max-w-prose font-code-sm text-code-sm text-on-surface-variant">
+          No roles yet — add one in Settings → Roles and its override block
+          appears here.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {roles.map((r) => (
+            <AgentEffortOverride
+              key={r.slug}
+              title={r.display_name}
+              subtitle={r.slug}
+              ov={roleOverride(overrides, r.slug)}
+              patch={(p) => patchRole(r.slug, p)}
+              inheritedEffort={all.effort}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -691,11 +746,14 @@ function CorePane({
  *  pair (ultracode IS xhigh + dynamic workflows). */
 export function AgentEffortOverride({
   title,
+  subtitle,
   ov,
   patch,
   inheritedEffort,
 }: {
   title: string;
+  /** Secondary identifying line, e.g. the role's slug. */
+  subtitle?: string;
   ov: EffortOverrideValue;
   patch: (p: EffortOverrideValue) => void;
   inheritedEffort?: string | null;
@@ -729,13 +787,29 @@ export function AgentEffortOverride({
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-outline-variant bg-surface-container p-3">
       <div className="flex items-center justify-between">
-        <span className="font-code-sm text-code-sm text-on-surface">{title}</span>
+        <span className="min-w-0">
+          <span className="block truncate font-code-sm text-code-sm text-on-surface">
+            {title}
+          </span>
+          {/* `roles.display_name` is not unique — only `roles.slug` is — so two
+              roles can be named the same and the title alone would not say
+              which block writes which entry. Same title-over-slug idiom the
+              Roles tab lists them with. */}
+          {subtitle && (
+            <span className="block truncate font-label-caps text-label-caps text-on-surface-variant">
+              {subtitle}
+            </span>
+          )}
+        </span>
       </div>
       <label className="flex items-center justify-between gap-3">
         <span className="font-code-sm text-code-sm text-on-surface">
           Effort level
         </span>
         <select
+          // The visible "Effort level" text repeats in every block, so the
+          // accessible name has to carry the title to say WHOSE effort this is.
+          aria-label={`${title} effort level`}
           className={selectClass}
           value={effortValue}
           disabled={effortDisabled}

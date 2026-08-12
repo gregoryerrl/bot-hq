@@ -34,6 +34,12 @@ export interface SessionRuntime {
  * Keying it by the literal `brian` / `rain` is what made the line print
  * "brian is working": no rc3 roster has those slugs, so the roster lookup missed
  * and the raw key rendered (rc3 D10).
+ *
+ * **The pin that matters is in `Providers.test.tsx`, not the one below.** This
+ * function being correct says nothing about whether anything calls it: re-keying
+ * the map inline at the `session:activity` handler left the whole suite green
+ * while every test here still passed. Those tests fire the event and read the
+ * store, so they fail when the wire is cut rather than when the unpacker is.
  */
 export function busyBySlot(p: {
   brian_busy: boolean;

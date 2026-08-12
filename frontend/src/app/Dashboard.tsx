@@ -24,13 +24,19 @@ import {
 } from "../lib/participants";
 
 /**
- * How many participants a session can be created with.
+ * How many participants this dialog offers to add.
  *
- * Mirrors `MAX_SESSION_PARTICIPANTS` in `src/tauri_cmd/sessions.rs`, which is
- * where it is ENFORCED — this constant only stops the dialog offering a row the
- * backend would refuse. It is the runtime's limit, not a design one: spawn
- * still starts two literally-named agents, so a third participant would have no
+ * **It no longer mirrors the backend.** `MAX_SESSION_PARTICIPANTS`
+ * (`src/tauri_cmd/sessions.rs`), which is where the limit is ENFORCED, is 8:
+ * this was 2 because `spawn_session_handle` started two literally-named agents,
+ * and rc3 D10 made spawn iterate the roster instead, so a third row now has a
  * process behind it.
+ *
+ * Left at 2 deliberately rather than raised silently — every participant is a
+ * claude-code subprocess with its own context window and its own bill, so how
+ * many the dialog should offer is a product call, not a consequence of this
+ * change. Nothing here refuses a wider roster: a session seeded through
+ * `seed_session_roster` already runs at whatever size its creator chose.
  */
 const MAX_PARTICIPANTS = 2;
 
@@ -188,24 +194,26 @@ export function Dashboard() {
   const { data: claudeConfig } =
     useTauriQuery<ClaudeConfigView>("claude_config_read");
   /**
-   * What a row's effort inherits if left alone, by TURN SLOT.
+   * What a row's effort inherits if left alone, given the ROLE it picked.
    *
-   * `claude-overrides.json` still stores its per-agent scopes under the two
-   * runtime keys spawn passes to `resolve_agent_overrides`; those keys are
-   * backend-owned and are not shown to anyone (rc3 D10) — they are read here
-   * only so the hint matches what spawn will actually resolve. Rows past the
-   * second fall through to `_all`, which is exactly what an unrecognised agent
-   * name resolves to in `resolve_agent_overrides`.
+   * `claude-overrides.json` keys its per-agent scopes by role slug — the same
+   * string `resolve_participant_overrides` (`src/core/session.rs`) walks
+   * participant → role to produce — so this reads the entry spawn will actually
+   * resolve. A row with no role yet, and a role with no entry, both fall
+   * through to `_all`, matching `resolve_agent_overrides`.
    */
-  const inheritedEffortAt = useMemo(() => {
+  const inheritedEffortFor = useMemo(() => {
     const knob =
       claudeConfig?.core_knobs.find(
         (k) => k.key === "env.CLAUDE_CODE_EFFORT_LEVEL",
       )?.value ?? null;
-    const perSlot = [claudeOverrides?.brian, claudeOverrides?.rain];
-    return (slot: number) =>
-      perSlot[slot]?.effort ?? claudeOverrides?._all?.effort ?? knob ?? null;
-  }, [claudeOverrides, claudeConfig]);
+    return (roleId: number | null) => {
+      const slug =
+        roleId === null ? null : roles.find((r) => r.id === roleId)?.slug ?? null;
+      const perRole = slug ? claudeOverrides?.per_role?.[slug] : undefined;
+      return perRole?.effort ?? claudeOverrides?._all?.effort ?? knob ?? null;
+    };
+  }, [claudeOverrides, claudeConfig, roles]);
 
   const createSession = useTauriMutation<
     SessionInfo,
@@ -653,8 +661,8 @@ export function Dashboard() {
                           >
                             <option value="">
                               Inherit
-                              {inheritedEffortAt(index)
-                                ? ` (${inheritedEffortAt(index)})`
+                              {inheritedEffortFor(row.roleId)
+                                ? ` (${inheritedEffortFor(row.roleId)})`
                                 : " (default)"}
                             </option>
                             {EFFORT_OPTS.map((v) => (

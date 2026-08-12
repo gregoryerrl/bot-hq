@@ -6,6 +6,7 @@ import {
   participantLabel,
   participantRuntime,
   slotKey,
+  spawnSlotOf,
   UNKNOWN_PARTICIPANT,
   type ParticipantView,
 } from "./participants";
@@ -131,6 +132,7 @@ describe("the two runtime key spaces", () => {
     model_display_name: "DeepSeek R2",
     turn_position: 1,
   });
+  const ROSTER = [first, second];
 
   it("keeps a slot key from ever colliding with a slug", () => {
     // `slugify` (src/storage/participants.rs) emits `[a-z0-9-]` only, trimmed
@@ -146,38 +148,120 @@ describe("the two runtime key spaces", () => {
   it("resolves a participant's runtime state through EITHER key space", () => {
     // The backfill seeds health by slot; the live event seeds it by slug. A
     // reader keyed to one space alone goes blank the moment the other produces.
-    expect(participantRuntime({ [slotKey(0)]: "stalled" }, first)).toBe(
-      "stalled",
+    expect(
+      participantRuntime({ [slotKey(0)]: "stalled" }, ROSTER, first),
+    ).toBe("stalled");
+    expect(participantRuntime({ eyes: "dead" }, ROSTER, first)).toBe("dead");
+    expect(participantRuntime({ [slotKey(1)]: "dead" }, ROSTER, second)).toBe(
+      "dead",
     );
-    expect(participantRuntime({ eyes: "dead" }, first)).toBe("dead");
-    expect(participantRuntime({ [slotKey(1)]: "dead" }, second)).toBe("dead");
   });
 
   it("prefers the live slug over the snapshot slot", () => {
     // The slug comes from an event, the slot key from a mount-time snapshot.
     expect(
-      participantRuntime({ eyes: "running", [slotKey(0)]: "dead" }, first),
+      participantRuntime(
+        { eyes: "running", [slotKey(0)]: "dead" },
+        ROSTER,
+        first,
+      ),
     ).toBe("running");
   });
 
   it("reads nothing for a participant nothing has reported", () => {
-    expect(participantRuntime({ "eyes-2": "dead" }, first)).toBeUndefined();
-    expect(participantRuntime(undefined, first)).toBeUndefined();
+    expect(
+      participantRuntime({ "eyes-2": "dead" }, ROSTER, first),
+    ).toBeUndefined();
+    expect(participantRuntime(undefined, ROSTER, first)).toBeUndefined();
     // A third participant has no slot on the wire at all (the pair reports 0
     // and 1) — it resolves by slug once the live events supply one.
     const third = p({ id: 3, slug: "hands-2", turn_position: 2 });
-    expect(participantRuntime({ [slotKey(0)]: "dead" }, third)).toBeUndefined();
-    expect(participantRuntime({ "hands-2": "running" }, third)).toBe("running");
+    const trio = [...ROSTER, third];
+    expect(
+      participantRuntime({ [slotKey(0)]: "dead" }, trio, third),
+    ).toBeUndefined();
+    expect(participantRuntime({ "hands-2": "running" }, trio, third)).toBe(
+      "running",
+    );
   });
 
   it("indexes a label under BOTH keys, so one lookup serves either producer", () => {
     // This is what lets `authorLabel` be the single lookup for the chat byline
     // (slug-keyed) and the turn-status line (slot-keyed) at once.
-    const labels = participantLabelIndex([first, second]);
+    const labels = participantLabelIndex(ROSTER);
     expect(labels["eyes"]).toBe("EYES · Claude Opus 5");
     expect(labels[slotKey(0)]).toBe("EYES · Claude Opus 5");
     expect(labels[slotKey(1)]).toBe("EYES · DeepSeek R2");
     expect(authorLabel(slotKey(0), labels)).toBe("EYES · Claude Opus 5");
+  });
+});
+
+describe("spawnSlotOf — a slot is a place in the SPAWNABLE roster", () => {
+  // `turn_position` counts every roster row (`insert_roster` writes the
+  // un-filtered enumerate index), while both slot-shaped producers index
+  // `spawnable(roster)` — `SessionHandle.participants.get(0)/.get(1)` in
+  // `get_session_runtime`, and `slugs.get(0)/.get(1)` in `ActivityTracker`.
+  // The two agree only while every row is spawnable.
+  const hands = p({ id: 1, slug: "hands", turn_position: 0 });
+  const eyes = p({
+    id: 2,
+    slug: "eyes",
+    role_display_name: "EYES",
+    turn_position: 1,
+  });
+
+  it("is the turn position when every row spawns", () => {
+    expect(spawnSlotOf([hands, eyes], hands)).toBe(0);
+    expect(spawnSlotOf([hands, eyes], eyes)).toBe(1);
+  });
+
+  it("closes the gap a disabled row leaves, instead of shifting everyone", () => {
+    // `spawnable` drops `enabled = 0`, so the row at turn position 1 IS the
+    // backend's slot 0. Keying off `turn_position` would look up `#slot1`,
+    // which nothing fills, and hand `#slot0` to the row that is not running.
+    const roster = [{ ...hands, enabled: false }, eyes];
+    expect(spawnSlotOf(roster, eyes)).toBe(0);
+    expect(spawnSlotOf(roster, roster[0])).toBeNull();
+  });
+
+  it("gives an on_demand row no slot either", () => {
+    // Nothing wakes one yet (rc3 D1), so `spawnable` excludes it for the same
+    // reason: no subprocess, nothing to report.
+    const specialist = p({
+      id: 3,
+      slug: "specialist",
+      turn_position: 0,
+      participation_mode: "on_demand",
+    });
+    const roster = [specialist, hands, eyes];
+    expect(spawnSlotOf(roster, specialist)).toBeNull();
+    expect(spawnSlotOf(roster, hands)).toBe(0);
+    expect(spawnSlotOf(roster, eyes)).toBe(1);
+  });
+
+  it("keeps an observer in the slot count", () => {
+    // Observers ARE spawned — they read the channel and may post, they just
+    // never get a scheduled turn — so they take a slot like anyone else.
+    const observer = p({ id: 4, slug: "watcher", participation_mode: "observer" });
+    expect(spawnSlotOf([observer, eyes], eyes)).toBe(1);
+  });
+
+  it("does not hand one participant's runtime state to another", () => {
+    // The defect in one assertion: the backfill reports `brian_health` for its
+    // slot 0, which here is EYES. Reading by turn position showed it on the
+    // disabled row and left EYES blank.
+    const roster = [{ ...hands, enabled: false }, eyes];
+    const health = { [slotKey(0)]: "stalled" };
+    expect(participantRuntime(health, roster, eyes)).toBe("stalled");
+    expect(participantRuntime(health, roster, roster[0])).toBeUndefined();
+  });
+
+  it("labels the slot key after the participant that actually fills it", () => {
+    const roster = [{ ...hands, enabled: false }, eyes];
+    const labels = participantLabelIndex(roster);
+    expect(labels[slotKey(0)]).toBe("EYES · Claude Opus 5");
+    // The non-running row is still nameable by its own slug.
+    expect(labels["hands"]).toBe("HANDS · Claude Opus 5");
   });
 });
 

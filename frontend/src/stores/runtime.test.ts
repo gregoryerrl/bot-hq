@@ -53,8 +53,8 @@ describe("busyBySlot — the frozen pair, unpacked once", () => {
       "EYES · DeepSeek R2",
     ]);
     // …and it is reachable as runtime state for that same participant row.
-    expect(participantRuntime(busy, ROSTER[1])).toBe(true);
-    expect(participantRuntime(busy, ROSTER[0])).toBe(false);
+    expect(participantRuntime(busy, ROSTER, ROSTER[1])).toBe(true);
+    expect(participantRuntime(busy, ROSTER, ROSTER[0])).toBe(false);
   });
 });
 
@@ -152,10 +152,10 @@ describe("seedRuntimeStores", () => {
       () => {},
     );
 
-    expect(participantRuntime(health, ROSTER[0])).toBe("stalled");
-    expect(participantRuntime(health, ROSTER[1])).toBe("dead");
-    expect(participantRuntime(busy["s1"], ROSTER[0])).toBe(true);
-    expect(participantRuntime(busy["s1"], ROSTER[1])).toBe(false);
+    expect(participantRuntime(health, ROSTER, ROSTER[0])).toBe("stalled");
+    expect(participantRuntime(health, ROSTER, ROSTER[1])).toBe("dead");
+    expect(participantRuntime(busy["s1"], ROSTER, ROSTER[0])).toBe(true);
+    expect(participantRuntime(busy["s1"], ROSTER, ROSTER[1])).toBe(false);
   });
 
   it("is a no-op for an empty snapshot", () => {
