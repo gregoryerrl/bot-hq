@@ -66,6 +66,24 @@ pub struct Policy {
     /// Surfaced to the agent in its system prompt.
     #[serde(default)]
     pub commit_style: String,
+
+    /// Turn-cycle round cap, in LAPS of the ring
+    /// ([`crate::core::sequencer::DEFAULT_ROUND_CAP_LAPS`] documents the unit
+    /// and the number). A backstop the sequencer enforces, NOT an enforcement
+    /// rule the agents are told about — it is deliberately absent from
+    /// [`Policy::render_system_prompt_block`] and from
+    /// [`Policy::is_effectively_empty`], both of which are about what the
+    /// agents must obey.
+    ///
+    /// **Three-valued on purpose, which is why it is an `Option` and the other
+    /// scalars are not.** `None` = not set at this tier, so the next tier down
+    /// (and finally the built-in default) decides; `Some(0)` = the backstop is
+    /// OFF, for a deliberate unattended run; `Some(n)` = halt after `n` laps.
+    /// A plain `u32` would collapse the first two — a missing key deserializes
+    /// as `0`, which is the one value that means "never halt", so every policy
+    /// file that had never heard of this key would silently disarm the cap.
+    #[serde(default)]
+    pub round_cap: Option<u32>,
 }
 
 /// `git push` gate. Set per tier (global/project/session); a session inherits
@@ -282,6 +300,7 @@ pub(crate) const POLICY_KNOWN_KEYS: &[&str] = &[
     "per_action_approval",
     "branch_pattern",
     "commit_style",
+    "round_cap",
     "tool_blocklist",
 ];
 
@@ -294,6 +313,7 @@ pub(crate) const SESSION_POLICY_KNOWN_KEYS: &[&str] = &[
     "per_action_approval",
     "branch_pattern",
     "commit_style",
+    "round_cap",
     "tool_blocklist",
     "tool_gate",
 ];
@@ -447,6 +467,13 @@ fn merge(base: Policy, overlay: Option<Policy>) -> Policy {
         } else {
             o.commit_style
         },
+        // `or`, not a "non-default wins" test like the scalars above. The
+        // three-valued encoding is exactly what buys that: `None` is
+        // unambiguously "this tier said nothing", so a project setting `0`
+        // (cap off) overrides a general `500` rather than reading as unset —
+        // which is the case the `matches!(.., Auto)` shape below cannot
+        // express for a gate whose permissive value is also a real choice.
+        round_cap: o.round_cap.or(base.round_cap),
     }
 }
 
@@ -491,8 +518,14 @@ mod tests {
     #[test]
     fn known_policy_keys_are_silent() {
         let path = Path::new("policy.yaml");
-        let body = "push_gate: ask\nforce_push: blocked\ncommit_style: house-style\n";
+        // `round_cap` is here rather than in its own test because the failure
+        // mode is this function's: a key serde parses but this list omits warns
+        // "SILENTLY IGNORED — that setting falls back to the permissive
+        // default", which for the round cap would be advice to disarm it.
+        let body =
+            "push_gate: ask\nforce_push: blocked\ncommit_style: house-style\nround_cap: 500\n";
         assert!(check_unknown_policy_keys(path, body, POLICY_KNOWN_KEYS).is_empty());
+        assert!(check_unknown_policy_keys(path, body, SESSION_POLICY_KNOWN_KEYS).is_empty());
         // tool_gate is allowed only for the session-snapshot key set.
         let with_gate = "tool_gate: []\npush_gate: auto\n";
         assert!(check_unknown_policy_keys(path, with_gate, POLICY_KNOWN_KEYS)
@@ -528,6 +561,57 @@ mod tests {
         );
         let p = Policy::resolve(dir.path(), Some("foo"), None).unwrap();
         assert!(matches!(p.push_gate, PushGateMode::Ask));
+    }
+
+    #[test]
+    fn a_project_round_cap_overrides_general_including_turning_it_off() {
+        // The round cap rides the same general -> project -> session chain as
+        // `push_gate`, but with a three-valued field, and the difference shows
+        // exactly here. `0` means OFF, so a project has to be able to override
+        // a general 500 DOWN to it — which the "non-default value wins" test
+        // the scalar gates use cannot express, because `0` is `u32::default()`.
+        let dir = tempdir().unwrap();
+        write(&general_policy_path(dir.path()), "round_cap: 500\n");
+        write(
+            &dir.path().join("library/projects/off/policy.yaml"),
+            "round_cap: 0\n",
+        );
+        write(
+            &dir.path().join("library/projects/tight/policy.yaml"),
+            "round_cap: 40\n",
+        );
+        // A project that says nothing about it inherits general's.
+        write(
+            &dir.path().join("library/projects/quiet/policy.yaml"),
+            "push_gate: ask\n",
+        );
+
+        assert_eq!(
+            Policy::resolve(dir.path(), Some("off"), None)
+                .unwrap()
+                .round_cap,
+            Some(0),
+            "a project can turn the backstop off over an inherited 500"
+        );
+        assert_eq!(
+            Policy::resolve(dir.path(), Some("tight"), None)
+                .unwrap()
+                .round_cap,
+            Some(40)
+        );
+        assert_eq!(
+            Policy::resolve(dir.path(), Some("quiet"), None)
+                .unwrap()
+                .round_cap,
+            Some(500),
+            "and a project that omits it inherits, rather than reading as 0"
+        );
+        assert_eq!(
+            Policy::default().round_cap,
+            None,
+            "unset at every tier is None — the sequencer, not this file, owns \
+             the number that means"
+        );
     }
 
     #[test]

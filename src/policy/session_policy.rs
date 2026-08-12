@@ -117,6 +117,11 @@ mod tests {
                 per_action_approval: vec!["terraform apply".into()],
                 branch_pattern: "feature/.*".into(),
                 commit_style: "house-style".into(),
+                // Non-default and non-`None` so the round-trip below actually
+                // carries the field: `None` is what a dropped key deserializes
+                // to, so a snapshot that lost `round_cap` on write would still
+                // compare equal.
+                round_cap: Some(120),
             },
             tool_gate: vec![
                 GatedKeyword {
