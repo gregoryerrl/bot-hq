@@ -657,8 +657,8 @@ Repo-backed sessions default to an **isolated git worktree** so two or
 more sessions can work the same project in parallel (per-session index,
 checkout, and branch — no file races). Opt-out per session in the
 New-session dialog, or globally via the `worktree_default` app setting
-(Settings → Agents → Session defaults). Dialog-less paths (Maintain CL)
-follow the setting.
+(Settings → Policy → Session defaults; it lived under the retired Agents
+subtab until rc3 D8). Dialog-less paths (Maintain CL) follow the setting.
 
 - **Placement:** `<data_dir>/.local/worktrees/<session-id>/<repo-basename>/`.
   The repo basename stays the final path segment because
