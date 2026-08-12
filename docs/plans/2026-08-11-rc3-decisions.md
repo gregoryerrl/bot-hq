@@ -215,3 +215,34 @@ agent name.
 
 Session `s-15090a`: gates and questions parked on the tray correctly, and
 `close_session` worked when asked. Session `s-bc50f2` surfaced D10 and D11.
+
+### D13 — `rain_disabled_default` is deleted, not renamed
+
+The user: *"There's no 'disable rain by default' on rc3, thats moot. Just don't
+add the role to your session creation."*
+
+Right — the setting is a pre-rc3 answer to a question rc3 deletes. Solo-vs-duo
+was a toggle only because the roster was fixed at two; now the New Session dialog
+picks the roster, so "start solo" is just not adding a second participant.
+
+Remove: the toggle in Settings → Policy → Session defaults, the
+`app_settings.rain_disabled_default` key, `Storage::default_rain_enabled`
+(`src/storage/models.rs`), and its two readers at `src/tauri_cmd/sessions.rs`
+and `src/core/state.rs`.
+
+**Consequence that needs an answer, not a silent default.** Those two readers are
+the create paths with NO dialog — the Maintain-CL button and plugin-created
+sessions. They have no user to pick a roster, so deleting the setting leaves them
+needing one. Per design §1 ("how many agents, **default 1**") they should seed a
+single participant rather than the historical pair. Whatever is chosen must be
+stated where `ensure_session_roster` seeds it, because it is now a product
+default with no UI behind it.
+
+### D14 — `AgentEvent::Error` is deleted
+
+The user, on the variant D9 left with no emitter: *"Delete it. I'll think about
+the plugin later."*
+
+Remove the variant, its handler in `src/core/duo.rs` and its two tests. The
+native loop was its only producer; a future connector plugin can reintroduce the
+rendering path it needs rather than inheriting a dead one kept on speculation.
