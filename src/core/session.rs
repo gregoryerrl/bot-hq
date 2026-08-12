@@ -271,6 +271,48 @@ fn spawnable(roster: &[crate::storage::Participant]) -> Vec<&crate::storage::Par
         .collect()
 }
 
+/// **The spawn's roster decisions, resolved together and registered once.**
+///
+/// Two answers come off one roster read, and they must agree:
+///   1. WHO SPAWNS — [`spawnable`], the list this function returns;
+///   2. WHO THE COMMIT GATE WATCHES — the participants holding
+///      [`Capability::FileFinding`](crate::agents::Capability::FileFinding),
+///      handed to the bridge's reviewer registry. bot-hq's own definition of a
+///      reviewer, from the ticked boxes, never from what a role's name implies
+///      (rc3 D10/D11). An empty list means this session has no reviewer, and
+///      `check_open_findings` then has nothing to fail closed on.
+///
+/// **Why this is a function and not two lines in `spawn_session_handle`.**
+/// The registration used to sit inline, and it was the ONLY production site
+/// that populated the registry — every test registered reviewers by hand.
+/// Verified by mutation on 2026-08-12: deleting the inline call left the whole
+/// suite green (1102 passed), i.e. the reviewer-down commit gate could fail
+/// OPEN and nothing would say so. Routing both answers through one function
+/// closes that in both directions: `spawn_session_handle` cannot drop the call
+/// without losing `live` and failing to COMPILE, and it cannot lose the
+/// registration without `the_spawn_roster_registers_every_reviewer_it_returns`
+/// going red.
+///
+/// The side effect is deliberate and is why the bridge is a parameter. Reviewer
+/// registration is not incidental to resolving the spawn roster — it is the
+/// same decision, read off the same rows, and separating them is exactly how
+/// they came apart.
+fn resolve_spawn_roster<'a>(
+    bridge: &SignalingBridge,
+    session_id: &str,
+    roster: &'a [crate::storage::Participant],
+) -> Vec<&'a crate::storage::Participant> {
+    let live = spawnable(roster);
+    bridge.register_session_reviewers(
+        session_id.to_string(),
+        live.iter()
+            .filter(|p| participant_capabilities(p).grants(crate::agents::Capability::FileFinding))
+            .map(|p| p.slug.clone())
+            .collect(),
+    );
+    live
+}
+
 pub async fn open_session(
     req: OpenSessionRequest,
     paths: &Paths,
@@ -683,7 +725,9 @@ async fn spawn_session_handle(
     // Everything the two branches read off `sessions.brian_*` / `rain_*` now
     // comes off the participant row: `effort`, `ultracode` (rc3 D12) and
     // `claude_session_id`. Those columns are left in place and UNREAD.
-    let live = spawnable(&roster);
+    // Resolves WHO SPAWNS and registers WHO THE COMMIT GATE WATCHES off the same
+    // rows — see `resolve_spawn_roster` for why those are one call.
+    let live = resolve_spawn_roster(&bridge, &session.id, &roster);
     if live.is_empty() {
         warn!(session_id = %session.id, "session has no spawnable participant");
     }
@@ -765,18 +809,7 @@ async fn spawn_session_handle(
     bridge
         .register_session_awaiting(session.id.clone(), Arc::clone(&awaiting))
         .await;
-    // Who the commit gate watches for "the reviewer is down": the participants
-    // that hold `file_finding`. bot-hq's own definition of a reviewer, from the
-    // ticked boxes, never from what a role's name implies (rc3 D10/D11).
-    bridge.register_session_reviewers(
-        session.id.clone(),
-        live.iter()
-            .filter(|p| {
-                participant_capabilities(p).grants(crate::agents::Capability::FileFinding)
-            })
-            .map(|p| p.slug.clone())
-            .collect(),
-    );
+    // (Who the commit gate watches was registered with the spawn roster above.)
 
     // Shared "HANDS mid-atomic-tool" flag (interrupt redesign, Batch 3.1 Part
     // 1) — lets a cancel defer the kill until a git commit/push/migration
@@ -2134,6 +2167,88 @@ mod tests {
         assert_eq!(
             spawnable(&roster).iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
             ["hands", "specialist"]
+        );
+    }
+
+    /// **The wire between the roster and the reviewer-down commit gate.**
+    ///
+    /// `spawn_session_handle` is the ONLY production caller that ever populates
+    /// the reviewer registry; every other test in the tree registers reviewers
+    /// by hand. Proven on 2026-08-12 by deleting the inline registration: the
+    /// entire suite stayed green (1102 passed), so the gate could fail OPEN —
+    /// commit allowed with the reviewer stalled — and nothing would have said
+    /// so. That is why the registration now rides inside
+    /// [`resolve_spawn_roster`], whose RETURN VALUE the spawn cannot proceed
+    /// without.
+    ///
+    /// The assertions walk the real chain rather than reading the registry back:
+    /// capabilities column → `file_finding` → registry → `check_open_findings`.
+    #[tokio::test]
+    async fn the_spawn_roster_registers_every_reviewer_it_returns() {
+        let bridge = SignalingBridge::new();
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+
+        // Two reviewers and a non-reviewer, keyed only by the capabilities
+        // column — no slug here spells any of the answers.
+        let caps = |slugs: &[&str]| {
+            serde_json::to_string(&slugs.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+        };
+        let mut roster = vec![
+            stub_participant(4, "hands", 0),
+            stub_participant(7, "eyes", 1),
+            stub_participant(9, "auditor", 2),
+        ];
+        roster[0].capabilities = caps(&["edit_files"]);
+        roster[1].capabilities = caps(&["file_finding"]);
+        roster[2].capabilities = caps(&["file_finding"]);
+
+        let live = resolve_spawn_roster(&bridge, "s1", &roster);
+        assert_eq!(live.len(), 3, "all three take a subprocess");
+        assert_eq!(
+            bridge.session_reviewers("s1"),
+            vec!["eyes".to_string(), "auditor".to_string()],
+            "every returned participant holding file_finding is registered"
+        );
+
+        // The join that matters: a registered reviewer going down BLOCKS the
+        // commit gate. Unregistered, the gate has no reviewer to watch and
+        // returns plain `ok` — the fail-open this wire exists to prevent.
+        bridge.notify_agent_health("s1".to_string(), "auditor", "stalled");
+        assert!(
+            bridge
+                .check_open_findings("s1")
+                .await
+                .unwrap()
+                .starts_with("blocked: reviewer down"),
+            "a registered reviewer that is down must gate the commit"
+        );
+    }
+
+    /// The other half: a roster where NOBODY reviews registers nobody, so the
+    /// gate stays open. Without this, a registration that indiscriminately
+    /// registered the whole roster would pass the test above.
+    #[tokio::test]
+    async fn a_roster_with_no_finder_registers_no_reviewer() {
+        let bridge = SignalingBridge::new();
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+
+        let mut roster = vec![stub_participant(4, "hands", 0)];
+        roster[0].capabilities = "[\"edit_files\"]".into();
+
+        resolve_spawn_roster(&bridge, "s1", &roster);
+        assert!(
+            bridge.session_reviewers("s1").is_empty(),
+            "a session nobody reviews has no reviewer to be down"
+        );
+        bridge.notify_agent_health("s1".to_string(), "hands", "stalled");
+        assert_eq!(
+            bridge.check_open_findings("s1").await.unwrap(),
+            "ok",
+            "a stalled non-reviewer must not gate the commit"
         );
     }
 
