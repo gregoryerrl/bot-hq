@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { Dashboard } from "./Dashboard";
 import { invoke } from "@tauri-apps/api/core";
-import type { ModelView, RoleView } from "../lib/bindings";
+import type { ClaudeOverrides, ModelView, RoleView } from "../lib/bindings";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 // The dashboard subscribes to `agent:messages:batch` for Quickview liveness.
@@ -47,8 +47,14 @@ function role(over: Partial<RoleView> = {}): RoleView {
 
 const EYES = role({ id: 2, slug: "eyes", display_name: "EYES" });
 
-/** Wires every read the dashboard makes; `roles` overrides the role list. */
-function mockBackend(roles: RoleView[] = [role(), EYES]) {
+/**
+ * Wires every read the dashboard makes; `roles` overrides the role list and
+ * `claude` the effort-inheritance sources (override store + settings.json knob).
+ */
+function mockBackend(
+  roles: RoleView[] = [role(), EYES],
+  claude: { overrides?: ClaudeOverrides; knob?: string | null } = {},
+) {
   mockInvoke.mockImplementation(async (cmd: string) => {
     switch (cmd) {
       case "list_sessions":
@@ -64,9 +70,27 @@ function mockBackend(roles: RoleView[] = [role(), EYES]) {
       case "get_app_setting":
         return null;
       case "get_claude_overrides":
-        return {};
+        return claude.overrides ?? {};
       case "claude_config_read":
-        return { core_knobs: [] };
+        return {
+          core_knobs:
+            claude.knob === undefined
+              ? []
+              : [
+                  {
+                    key: "env.CLAUDE_CODE_EFFORT_LEVEL",
+                    label: "Effort level",
+                    value: claude.knob,
+                    source: "~/.claude/settings.json",
+                    inheritance: {
+                      inherited_by: [],
+                      skipped_by: [],
+                      note: "",
+                      overridable: true,
+                    },
+                  },
+                ],
+        };
       case "create_session":
         return { id: "s-new" };
       default:
@@ -103,6 +127,10 @@ const ultracodeBox = (n: number) =>
   screen.getByRole("checkbox", { name: `Participant ${n} ultracode` });
 const createButton = () =>
   screen.getByRole("button", { name: /create session/i });
+
+/** The row's "Inherit (…)" option text — what its effort resolves to today. */
+const inheritOption = (n: number) =>
+  effortSelect(n).querySelector('option[value=""]')!.textContent;
 
 /** The options object the dialog actually sent. */
 function sentOptions() {
@@ -414,6 +442,46 @@ describe("New session dialog — capability warning (D11)", () => {
     await openDialog();
     await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
     expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+// ===========================================================================
+// rc3 D10 — the effort hint reads the override store by ROLE SLUG
+// ===========================================================================
+
+describe("New session dialog — inherited effort", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  it("hints the effort the row's ROLE inherits, and re-resolves when the role changes", async () => {
+    // One chain: the row's picked role → its slug → that slug's entry in
+    // `claude-overrides.json`. The store used to be keyed by two agent names,
+    // which no role slug matches, so the hint silently showed `_all` for
+    // everyone — the same miss `resolve_agent_overrides` had.
+    mockBackend([role(), EYES], {
+      overrides: { _all: { effort: "medium" }, per_role: { eyes: { effort: "max" } } },
+    });
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+
+    // No role picked yet → nothing role-specific to resolve, so `_all`.
+    expect(inheritOption(1)).toBe("Inherit (medium)");
+
+    fireEvent.change(roleSelect(1), { target: { value: "2" } });
+    expect(inheritOption(1)).toBe("Inherit (max)");
+
+    // The role with no entry of its own falls back to `_all`, exactly as
+    // `resolve_agent_overrides` does for an unconfigured role.
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+    expect(inheritOption(1)).toBe("Inherit (medium)");
+  });
+
+  it("falls through to the settings.json knob when the store says nothing", async () => {
+    mockBackend([role(), EYES], { overrides: {}, knob: "high" });
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+    await waitFor(() => expect(inheritOption(1)).toBe("Inherit (high)"));
   });
 });
 
