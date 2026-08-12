@@ -292,6 +292,11 @@ pub struct SignalingBridge {
     /// fires, the bridge sets the flag synchronously BEFORE returning so
     /// Brian's next chunk doesn't volley to Rain before the halt takes effect.
     session_awaiting: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Per-session turn-ring control channel, so parking a question can HALT the
+    /// ring and not merely set a flag. See [`Self::register_session_sequencer`].
+    session_sequencer: Mutex<
+        HashMap<String, tokio::sync::mpsc::Sender<crate::core::sequencer::SequencerCommand>>,
+    >,
     /// Per-session `declare_working` flag, registered at spawn (mirrors
     /// `session_awaiting`). `Some((until, reason))` while active. Tuple —
     /// not a core type — so the signaling layer stays decoupled from core.
@@ -419,6 +424,7 @@ impl SignalingBridge {
             data_dir,
             session_projects: Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
+            session_sequencer: Mutex::new(HashMap::new()),
             session_activity: Mutex::new(HashMap::new()),
             session_phase: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
@@ -488,6 +494,34 @@ impl SignalingBridge {
     /// ask_user_choice) is what gives us a race-free halt.
     pub async fn register_session_awaiting(&self, session_id: String, flag: Arc<AtomicBool>) {
         self.session_awaiting.lock().await.insert(session_id, flag);
+    }
+
+    /// Hand the bridge the session's turn-ring control channel.
+    ///
+    /// **This is what makes a parked question actually halt the cycle.** The
+    /// awaiting FLAG alone only stops cursors advancing, so before this the ring
+    /// kept handing out turns while the session was blocked on a human: each
+    /// participant woke with nothing new delivered, had no legal move, and
+    /// passed. Observed live on 2026-08-12 as ~15 model calls in 1m44s, both
+    /// participants alternating "standing by" — and it could not self-terminate,
+    /// because a pass retracts its own done vote and any prose at all counts as
+    /// substantive output, which clears the whole tally.
+    ///
+    /// `SequencerCommand::QuestionParked` was written, documented and tested for
+    /// exactly this, and had no production sender until now.
+    pub async fn register_session_sequencer(
+        &self,
+        session_id: String,
+        tx: tokio::sync::mpsc::Sender<crate::core::sequencer::SequencerCommand>,
+    ) {
+        self.session_sequencer.lock().await.insert(session_id, tx);
+    }
+
+    /// Whether a turn ring is reachable for this session — the observable half
+    /// of [`Self::register_session_sequencer`], so the spawn-time join can be
+    /// pinned by a test.
+    pub async fn session_sequencer_registered(&self, session_id: &str) -> bool {
+        self.session_sequencer.lock().await.contains_key(session_id)
     }
 
     /// Register the session's `declare_working` flag at spawn (mirrors

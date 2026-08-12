@@ -937,16 +937,7 @@ async fn spawn_session_handle(
             data_dir: Some(paths.data_dir.clone()),
             bridge: Some(Arc::clone(&bridge)),
         };
-        let (tx, rx) = tokio::sync::mpsc::channel(256);
-        tokio::spawn(crate::core::sequencer::run_sequencer(deps, rx));
-        // Hand out the first turn. Nothing else mints a `UserMessage` yet, so
-        // without this the ring sits with no holder and never starts.
-        let kick = tx.clone();
-        tokio::spawn(async move {
-            let _ = kick
-                .send(crate::core::sequencer::SequencerCommand::UserMessage)
-                .await;
-        });
+        let tx = spawn_ring(deps, &bridge, &session.id).await;
         tracing::info!(
             session = %session.id,
             participants = ring,
@@ -1830,6 +1821,39 @@ async fn role_default_model(
             None
         }
     }
+}
+
+/// Start the turn ring for a session and hand its control channel to the bridge.
+///
+/// **Creating the channel and registering it are one operation on purpose.** The
+/// registration is what lets a parked question halt the cycle
+/// (`SignalingBridge::register_session_sequencer`), and it is invisible when it
+/// is missing: the ring runs, turns are handed out, everything looks alive — and
+/// a session blocked on a human spins its participants against a question they
+/// cannot answer. Verified by mutation: with the registration as a separate line
+/// at the call site, deleting it left all 1036 tests green.
+///
+/// So the channel cannot be obtained without the bridge having it. A caller that
+/// wants one calls this; there is no other constructor to reach for.
+async fn spawn_ring(
+    deps: crate::core::sequencer::SequencerDeps,
+    bridge: &Arc<SignalingBridge>,
+    session_id: &str,
+) -> tokio::sync::mpsc::Sender<crate::core::sequencer::SequencerCommand> {
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    tokio::spawn(crate::core::sequencer::run_sequencer(deps, rx));
+    bridge
+        .register_session_sequencer(session_id.to_string(), tx.clone())
+        .await;
+    // Hand out the first turn. Nothing else mints a `UserMessage` yet, so
+    // without this the ring sits with no holder and never starts.
+    let kick = tx.clone();
+    tokio::spawn(async move {
+        let _ = kick
+            .send(crate::core::sequencer::SequencerCommand::UserMessage)
+            .await;
+    });
+    tx
 }
 
 /// One participant's finished spawn config — **the whole D8 model chain in one
@@ -3458,6 +3482,51 @@ mod tests {
         assert!(
             composed.contains("**Read-only file tools**"),
             "the composed EYES prompt lost the tool inventory"
+        );
+    }
+
+    /// **The join for the halt.** Starting the ring must register it with the
+    /// bridge, or a parked question cannot stop the cycle.
+    ///
+    /// Pinned here rather than at the spawn call site because that site goes on
+    /// to launch real claude-code subprocesses and no test can follow it there —
+    /// the same reason `compose_system_prompt` and `resolve_participant_config`
+    /// exist. Verified by mutation: with the registration written as its own
+    /// line beside the channel, deleting it left all 1036 tests green.
+    #[tokio::test]
+    async fn starting_the_ring_registers_it_so_a_parked_question_can_halt_it() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", false).await.unwrap();
+        let bridge = Arc::new(SignalingBridge::new());
+        bridge.set_storage(s.clone()).await;
+        bridge
+            .register_session_awaiting(
+                "s1".into(),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .await;
+
+        let deps = crate::core::sequencer::SequencerDeps {
+            session_id: "s1".into(),
+            storage: s.clone(),
+            inputs: std::collections::HashMap::new(),
+            epochs: std::collections::HashMap::new(),
+            data_dir: None,
+            bridge: Some(Arc::clone(&bridge)),
+        };
+        let _tx = spawn_ring(deps, &bridge, "s1").await;
+
+        // Park a question the way an agent does, and require that the ring was
+        // reachable to be halted. A ring nobody registered swallows this
+        // silently, which is exactly the live failure.
+        bridge
+            .mark_awaiting_user("s1".into(), "hands".into(), "blocked".into())
+            .await;
+        assert!(
+            bridge.session_sequencer_registered("s1").await,
+            "the ring was started without being registered — a parked question \
+             cannot halt a cycle the bridge cannot reach"
         );
     }
 

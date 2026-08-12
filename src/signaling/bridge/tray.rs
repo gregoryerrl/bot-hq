@@ -35,6 +35,28 @@ impl SignalingBridge {
         if let Some(flag) = self.session_awaiting.lock().await.get(session_id) {
             flag.store(true, Ordering::Release);
         }
+        // HALT THE RING, not just the cursors. Both parking paths funnel through
+        // here (`ask_user_choice` and `mark_awaiting_user`), so this is the one
+        // place that knows a human is now the blocker. Without it the ring keeps
+        // dealing turns to participants that have no legal move — see
+        // `register_session_sequencer` for what that looked like live.
+        //
+        // `try_send`, not `send`: this runs inside a tool call that must not
+        // block on the ring's queue, and a full channel already has a halt or a
+        // completion in it. A closed channel means the session is tearing down.
+        let seq = self.session_sequencer.lock().await.get(session_id).cloned();
+        if let Some(tx) = seq {
+            if tx
+                .try_send(crate::core::sequencer::SequencerCommand::QuestionParked)
+                .is_err()
+            {
+                tracing::warn!(
+                    session_id,
+                    "parked question did not reach the ring — the cycle may keep \
+                     handing out turns nobody can use"
+                );
+            }
+        }
         // Reflect the flag flip into the derived activity NOW — emit AwaitingUser
         // immediately instead of waiting for the agent's TurnComplete set_busy
         // (the dot-lag bug). Weak upgrade: the tracker may be gone if the session
@@ -937,6 +959,82 @@ impl SignalingBridge {
 mod tests {
     use super::*;
     use crate::policy::ViolationOutcome;
+
+    /// **Parking a question must HALT THE RING, not merely set a flag.**
+    ///
+    /// The regression this pins was live on 2026-08-12: `ask_user_choice` set
+    /// the awaiting flag, which only gates cursor advance, so the ring kept
+    /// dealing turns while the session was blocked on a human. Each participant
+    /// woke with nothing new delivered and no legal move, and passed — ~15 model
+    /// calls in 1m44s with both alternating "standing by".
+    ///
+    /// It could not self-terminate, which is why the flag was not enough: a pass
+    /// casts no vote AND retracts its own, and any prose at all is a substantive
+    /// ending that clears the whole tally. So the agents kept resetting the very
+    /// consensus that would have stopped them, by saying they had nothing to say.
+    ///
+    /// `SequencerCommand::QuestionParked` was written, documented in six places
+    /// and covered by two sequencer tests — with no production sender. This is
+    /// that sender.
+    #[tokio::test]
+    async fn parking_a_question_halts_the_ring_through_both_doors() {
+        use crate::core::sequencer::SequencerCommand;
+        use std::sync::atomic::AtomicBool;
+
+        for door in ["ask_user_choice", "mark_awaiting_user"] {
+            let bridge = SignalingBridge::new();
+            let storage = crate::storage::Storage::memory().await.unwrap();
+            bridge.set_storage(storage.clone()).await;
+            storage.create_session("s1", "t", None).await.unwrap();
+            bridge
+                .register_session_awaiting("s1".into(), Arc::new(AtomicBool::new(false)))
+                .await;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            bridge.register_session_sequencer("s1".into(), tx).await;
+
+            match door {
+                "ask_user_choice" => {
+                    bridge
+                        .ask_user_choice(
+                            "s1".into(),
+                            "hands".into(),
+                            "close?".into(),
+                            vec!["yes".into(), "no".into()],
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => {
+                    bridge
+                        .mark_awaiting_user("s1".into(), "hands".into(), "blocked".into())
+                        .await;
+                }
+            }
+
+            assert!(
+                matches!(rx.try_recv(), Ok(SequencerCommand::QuestionParked)),
+                "{door} parked a question and the ring was never told to halt"
+            );
+        }
+    }
+
+    /// A session with no ring registered must not panic or block — the bridge is
+    /// shared with tests and with sessions torn down mid-flight.
+    #[tokio::test]
+    async fn parking_a_question_without_a_ring_is_a_silent_no_op() {
+        use std::sync::atomic::AtomicBool;
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        bridge
+            .register_session_awaiting("s1".into(), Arc::new(AtomicBool::new(false)))
+            .await;
+        // No `register_session_sequencer`.
+        bridge
+            .mark_awaiting_user("s1".into(), "hands".into(), "blocked".into())
+            .await;
+    }
 
     #[tokio::test]
     async fn ask_user_choice_parks_and_returns_immediately() {
