@@ -713,6 +713,58 @@ mod tests {
         }
     }
 
+    /// **The provenance tag names the SLOT that spoke.**
+    ///
+    /// `label_for` was the unpinned half. The formatting has its own test
+    /// (`broadcast::tests::peer_forward_envelopes_then_author_tags`) and the
+    /// labels are resolved off the roster at spawn, but the map from `Author` to
+    /// `slot_labels[i]` — the thing that decides WHICH participant a forward is
+    /// attributed to — was covered by nothing: swapping slot 0 and slot 1 left
+    /// all 1049 tests green. Every peer message in every session would then be
+    /// signed by the other participant, which is worse than no attribution, because
+    /// the tag is the only thing telling an agent whose words it is reading.
+    ///
+    /// Both directions in ONE test, because a swap is only visible as a
+    /// difference: either direction asserted alone still passes under a mapping
+    /// that labels everybody slot 0.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_peer_tag_names_the_slot_that_sent_it() {
+        let (btx, mut brx) = stub_input();
+        let (rtx, mut rrx) = stub_input();
+        let d = deps(
+            btx,
+            Some(rtx),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(0)),
+        );
+        let (slot0, slot1) = (d.slot_labels[0].clone(), d.slot_labels[1].clone());
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_router(d, rx));
+        // Unrelated bodies: the convergence breaker suppresses a near-repeat, and
+        // a suppressed second forward would leave this test asserting one label.
+        tx.send(fwd(Author::Brian, "migrations 0048 and 0049 both touch roles"))
+            .await
+            .unwrap();
+        tx.send(fwd(Author::Rain, "who reads the capabilities column at spawn?"))
+            .await
+            .unwrap();
+        drop(tx);
+        task.await.unwrap();
+
+        let to_slot1 = rrx.try_recv().expect("slot 0's turn reaches slot 1");
+        assert!(
+            to_slot1.message.content.contains(&format!("from {slot0},")),
+            "slot 1 must be told slot 0 sent this: {}",
+            to_slot1.message.content
+        );
+        let to_slot0 = brx.try_recv().expect("slot 1's turn reaches slot 0");
+        assert!(
+            to_slot0.message.content.contains(&format!("from {slot1},")),
+            "slot 0 must be told slot 1 sent this: {}",
+            to_slot0.message.content
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn hard_cap_breaks_after_cap() {
         // Distinct bodies so convergence never trips first — the cap is the sole

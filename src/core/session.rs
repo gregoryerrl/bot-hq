@@ -246,37 +246,11 @@ impl SessionHandle {
     }
 }
 
-/// The roster rows this spawn actually starts a subprocess for, in turn order.
-///
-/// **The N-participant unlock, as one function.** Spawn used to name two rows
-/// (`roster_row(&roster, "brian")` / `"rain"`), which is the only reason the
-/// create dialog capped a session at two; it now takes whatever the roster
-/// holds. Split out of `spawn_session_handle` so the selection rule is reachable
-/// from a test — that function goes on to launch claude-code subprocesses and no
-/// test can follow it there.
-///
-/// Two exclusions, both because the process would have nothing to do:
-///   * `enabled = 0` — the row a solo session keeps for the participant it did
-///     not invite, exactly as 0044 wrote it,
-///   * `participation_mode = 'on_demand'` — nothing wakes one yet (rc3 D1), so a
-///     subprocess would idle for the life of the session.
-///
-/// Observers ARE spawned: they read the channel and may post, they simply never
-/// receive a scheduled turn.
-///
-/// `participants_for_session` already orders by `(turn_position, id)`, so the
-/// filter preserves turn order and the returned order IS the spawn order.
-fn spawnable(roster: &[crate::storage::Participant]) -> Vec<&crate::storage::Participant> {
-    roster
-        .iter()
-        .filter(|p| p.enabled && p.participation_mode != "on_demand")
-        .collect()
-}
-
 /// **The spawn's roster decisions, resolved together and registered once.**
 ///
 /// Two answers come off one roster read, and they must agree:
-///   1. WHO SPAWNS — [`spawnable`], the list this function returns;
+///   1. WHO SPAWNS — the rows this spawn actually starts a subprocess for, in
+///      turn order, which is what the function returns;
 ///   2. WHO THE COMMIT GATE WATCHES — the participants holding
 ///      [`Capability::FileFinding`](crate::agents::Capability::FileFinding),
 ///      handed to the bridge's reviewer registry. bot-hq's own definition of a
@@ -284,7 +258,21 @@ fn spawnable(roster: &[crate::storage::Participant]) -> Vec<&crate::storage::Par
 ///      (rc3 D10/D11). An empty list means this session has no reviewer, and
 ///      `check_open_findings` then has nothing to fail closed on.
 ///
-/// **Why this is a function and not two lines in `spawn_session_handle`.**
+/// **The selection rule.** Spawn used to name two rows
+/// (`roster_row(&roster, "brian")` / `"rain"`), which is the only reason the
+/// create dialog capped a session at two; it now takes whatever the roster
+/// holds, minus two exclusions where the process would have nothing to do:
+///   * `enabled = 0` — the row a solo session keeps for the participant it did
+///     not invite, exactly as 0044 wrote it,
+///   * `participation_mode = 'on_demand'` — nothing wakes one yet (rc3 D1), so a
+///     subprocess would idle for the life of the session.
+///
+/// Observers ARE spawned: they read the channel and may post, they simply never
+/// receive a scheduled turn. `participants_for_session` already orders by
+/// `(turn_position, id)`, so the filter preserves turn order and the returned
+/// order IS the spawn order.
+///
+/// **Why this is one function and not two lines in `spawn_session_handle`.**
 /// The registration used to sit inline, and it was the ONLY production site
 /// that populated the registry — every test registered reviewers by hand.
 /// Verified by mutation on 2026-08-12: deleting the inline call left the whole
@@ -295,6 +283,15 @@ fn spawnable(roster: &[crate::storage::Participant]) -> Vec<&crate::storage::Par
 /// registration without `the_spawn_roster_registers_every_reviewer_it_returns`
 /// going red.
 ///
+/// **And the filter is inlined here rather than kept as a `spawnable` sibling.**
+/// It was extracted, with the same signature and return type, which left the
+/// production call site one word away from the unregistered version — verified
+/// on 2026-08-12: swapping `resolve_spawn_roster` back to `spawnable` compiled
+/// and left all 1049 tests green, reopening the exact fail-open this function
+/// was written to close. A second way to answer "who spawns" is the hole, not
+/// the convenience; the tests that used to call it call this instead, which is
+/// also what makes them tests of the thing production runs.
+///
 /// The side effect is deliberate and is why the bridge is a parameter. Reviewer
 /// registration is not incidental to resolving the spawn roster — it is the
 /// same decision, read off the same rows, and separating them is exactly how
@@ -304,7 +301,10 @@ fn resolve_spawn_roster<'a>(
     session_id: &str,
     roster: &'a [crate::storage::Participant],
 ) -> Vec<&'a crate::storage::Participant> {
-    let live = spawnable(roster);
+    let live: Vec<&crate::storage::Participant> = roster
+        .iter()
+        .filter(|p| p.enabled && p.participation_mode != "on_demand")
+        .collect();
     bridge.register_session_reviewers(
         session_id.to_string(),
         live.iter()
@@ -748,7 +748,7 @@ async fn spawn_session_handle(
         let cfg = resolve_participant_config(&storage, p).await;
         // Composed per participant from the database — see
         // `compose_system_prompt` for why the layer-2 and layer-3 reads and the
-        // prompt assembly are joined there rather than inside `spawn_agent_for`.
+        // prompt assembly are joined there rather than inside the spawn.
         let prompt = compose_system_prompt(
             &storage,
             &roster,
@@ -770,13 +770,12 @@ async fn spawn_session_handle(
                 warn!(?e, slot, "set_session_spawn_model_slot");
             }
         }
-        // Claude-config overrides for the ROLE this participant plays — see
-        // `resolve_participant_overrides` for why they resolve here rather than
-        // twice inside the spawner off an agent name.
-        let overrides = resolve_participant_overrides(&storage, &paths.data_dir, p).await;
-        let handle = spawn_agent_for(
-            &session.id,
-            &p.slug,
+        // Everything this participant spawns WITH — its role's Claude-config
+        // overrides included — is decided in one place off the participant row;
+        // see `participant_spawn_config` for why they are not unpacked here.
+        let spawn_cfg = participant_spawn_config(
+            &storage,
+            p,
             cfg,
             paths,
             &project,
@@ -784,13 +783,20 @@ async fn spawn_session_handle(
             signaling_addr,
             mcp_temp.path(),
             working_repo_path.clone(),
-            p.claude_session_id.clone(),
-            p.effort.clone(),
-            p.ultracode,
-            participant_capabilities(p),
-            overrides,
         )
         .await?;
+        // Supervised: a transient upstream API error (e.g. 529 Overloaded)
+        // auto-resumes the agent with capped backoff instead of stranding the
+        // session.
+        //
+        // **The claude CLI is the only connector (rc3 D9).** This used to branch
+        // on the model's `native` flag and hand the reviewer to a second,
+        // in-process Rust loop. That runtime is deleted, so every participant —
+        // whatever model row it carries — spawns the same subprocess. A model
+        // whose gateway does not speak the Anthropic Messages API now simply
+        // fails here rather than being routed somewhere else; `validate_model`'s
+        // pre-flight is what surfaces that at configure time.
+        let handle = spawn_supervised_agent(spawn_cfg, RetryPolicy::default()).await?;
         spawned.push((slot, handle));
     }
     // The second slot's spawn model is NULL when this session runs one agent —
@@ -1163,7 +1169,7 @@ async fn spawn_session_handle(
         working_repo_path,
         session_start_sha,
         ipav,
-        // Already in turn order: `spawnable` preserves
+        // Already in turn order: `resolve_spawn_roster` preserves
         // `participants_for_session`'s `(turn_position, id)` sort and `handles`
         // was built from it index for index, so no re-sort is needed and none
         // can silently disagree with the ring's order.
@@ -1248,12 +1254,17 @@ async fn participant_role_slug(
 /// `<data_dir>/config/claude-overrides.json`, layered over the `_all` fan-out.
 ///
 /// It is a function for the reason [`compose_system_prompt`] and
-/// [`resolve_participant_config`] are: `spawn_agent_for` goes on to launch a
-/// claude-code subprocess and no test can follow it there, so a chain assembled
-/// inline is a chain nothing pins. This one had already broken that way — the
-/// resolver matched the literals `"brian"` / `"rain"` while both callers passed
-/// a role-derived participant slug, so every per-agent override resolved to the
+/// [`resolve_participant_config`] are: the spawn goes on to launch a claude-code
+/// subprocess and no test can follow it there, so a chain assembled inline is a
+/// chain nothing pins. This one had already broken that way — the resolver
+/// matched the literals `"brian"` / `"rain"` while both callers passed a
+/// role-derived participant slug, so every per-agent override resolved to the
 /// global config and no test noticed.
+///
+/// Being correct in isolation is not the same as being reached, and the second
+/// half of that lesson cost a second review: proving this function right left
+/// the one line that CALLED it covered by nothing. Its only caller is now
+/// [`participant_spawn_config`], which a test can run end-to-end.
 ///
 /// Fail-open at both ends: an unreadable store loads empty (logged there), and a
 /// participant with no role resolves to `_all` alone. A spawn must not fail
@@ -1316,9 +1327,9 @@ async fn resolve_role_prose(
 /// stayed green. Verified: replacing it with `None` for either agent left 1149
 /// lib tests passing.
 ///
-/// Composing here rather than inside `spawn_agent_for` is what makes the join
-/// reachable from a test — `spawn_agent_for` goes on to launch a real
-/// claude-code subprocess, and no test can follow it there. It now receives a
+/// Composing here rather than inside the spawn is what makes the join reachable
+/// from a test — the spawn goes on to launch a real claude-code subprocess, and
+/// no test can follow it there. [`participant_spawn_config`] now receives a
 /// finished `String` it can only write down, instead of an `Option` that
 /// silently degrades to a plausible-looking default when it goes missing.
 async fn compose_system_prompt(
@@ -1443,10 +1454,33 @@ async fn display_name_for(storage: &Storage, p: &crate::storage::Participant) ->
     storage.display_name_of(p).await
 }
 
+/// **Everything about one participant's spawn that is decided before the
+/// subprocess exists** — the files it will read and the `SpawnConfig` that
+/// becomes its command line.
+///
+/// It stops one line short of launching, and that is the point. The launch is
+/// `spawn_supervised_agent`, which no test can follow, so anything assembled on
+/// the far side of it is unpinnable by construction. Everything on THIS side —
+/// the participant's role overrides, its capability snapshot, its resume id, the
+/// MCP servers its capabilities allow minus the ones its role disabled — is a
+/// value a test can read back off the returned `SpawnConfig` and run through
+/// `spawn::build_command`.
+///
+/// **It takes the participant, not five fields off it.** The caller used to
+/// unpack `slug`, `claude_session_id`, `effort`, `ultracode` and the capability
+/// snapshot and hand them over individually, alongside an `overrides` argument
+/// resolved beside the call. Every one of those is a wire that can be pointed at
+/// the wrong participant or at a default, silently: verified on 2026-08-12 by
+/// replacing the resolved overrides with `AgentOverride::default()` at the call
+/// site — all 1049 tests stayed green, i.e. the whole per-role Claude-config
+/// feature could stop working with nothing to say so. Reading them from `p`
+/// here removes the wires rather than testing them, and
+/// `a_participant_spawns_with_the_overrides_its_role_resolves` covers what
+/// remains.
 #[allow(clippy::too_many_arguments)]
-async fn spawn_agent_for(
-    session_id: &str,
-    agent_name: &str,
+async fn participant_spawn_config(
+    storage: &Storage,
+    p: &crate::storage::Participant,
     config: AgentConfig,
     paths: &Paths,
     project: &Option<String>,
@@ -1454,12 +1488,18 @@ async fn spawn_agent_for(
     signaling_addr: SocketAddr,
     mcp_temp_dir: &std::path::Path,
     working_dir: Option<PathBuf>,
-    resume_session_id: Option<String>,
-    session_effort: Option<String>,
-    session_ultracode: Option<bool>,
-    capabilities: crate::agents::ResolvedCapabilities,
-    overrides: crate::claude_config::AgentOverride,
-) -> Result<AgentHandle> {
+) -> Result<SpawnConfig> {
+    let agent_name = p.slug.as_str();
+    // The participant's OWN session, not one passed alongside it. A mismatch
+    // here is the failure `ParticipantInput`'s receipt scoping exists to catch
+    // at delivery time; taking it off the row means it cannot arise.
+    let session_id = p.session_id.as_str();
+    let capabilities = participant_capabilities(p);
+    // Claude-config overrides for the ROLE this participant plays. Resolved
+    // HERE, from the participant, so the set that filters the mcp-config below
+    // and the set that reaches `SpawnConfig` are the same one — see
+    // `resolve_participant_overrides`.
+    let overrides = resolve_participant_overrides(storage, &paths.data_dir, p).await;
     // The assembled prompt is multi-KB. Hand it to claude-code via a file
     // (`--append-system-prompt-file`) rather than an inline arg so the command
     // line stays under Windows' 32,767-char `CreateProcessW` limit. Co-located
@@ -1471,7 +1511,6 @@ async fn spawn_agent_for(
     let mut user_servers = user_mcp_servers_for_agent(&capabilities);
     // Apply the role's MCP overrides (Settings → Claude Config): a server the
     // user disabled for this role is dropped from its forwarded mcp-config.
-    // `overrides` arrives resolved — see `resolve_participant_overrides`.
     for name in crate::claude_config::overrides::disabled_mcp(&overrides) {
         user_servers.remove(&name);
     }
@@ -1479,7 +1518,7 @@ async fn spawn_agent_for(
     std::fs::write(&mcp_config_path, json)
         .with_context(|| format!("writing mcp-config to {}", mcp_config_path.display()))?;
 
-    let spawn_cfg = SpawnConfig {
+    Ok(SpawnConfig {
         agent_name: agent_name.to_string(),
         config,
         system_prompt_path,
@@ -1487,26 +1526,14 @@ async fn spawn_agent_for(
         working_dir,
         claude_bin: None,
         session_id: session_id.to_string(),
-        resume_session_id,
+        resume_session_id: p.claude_session_id.clone(),
         project: project.clone(),
         data_dir: paths.data_dir.clone(),
-        session_effort,
-        session_ultracode,
+        session_effort: p.effort.clone(),
+        session_ultracode: p.ultracode,
         capabilities,
         overrides,
-    };
-    // Supervised: a transient upstream API error (e.g. 529 Overloaded)
-    // auto-resumes the agent with capped backoff instead of stranding the
-    // session.
-    //
-    // **The claude CLI is the only connector (rc3 D9).** This used to branch on
-    // the model's `native` flag and hand EYES to a second, in-process Rust loop.
-    // That runtime is deleted, so every participant — whatever model row it
-    // carries — spawns the same subprocess. A model whose gateway does not speak
-    // the Anthropic Messages API now simply fails here rather than being routed
-    // somewhere else; `validate_model`'s pre-flight is what surfaces that at
-    // configure time.
-    spawn_supervised_agent(spawn_cfg, RetryPolicy::default()).await
+    })
 }
 
 /// Decide which user MCP servers to expose to an agent at spawn time.
@@ -2174,6 +2201,10 @@ mod tests {
     /// consensus halt then waited forever on a vote nobody could cast. This
     /// walks a three-row roster whose slugs are role-derived and asserts every
     /// one of them is spawned, in turn order.
+    ///
+    /// Through `resolve_spawn_roster` — the function production calls — because
+    /// the filter used to be reachable on its own and the call site could be
+    /// pointed back at it with the suite green.
     #[test]
     fn every_enabled_participant_is_spawned_in_turn_order() {
         let roster = vec![
@@ -2181,7 +2212,7 @@ mod tests {
             stub_participant(7, "eyes", 1),
             stub_participant(9, "auditor", 2),
         ];
-        let live = spawnable(&roster);
+        let live = resolve_spawn_roster(&SignalingBridge::new(), "s1", &roster);
         assert_eq!(
             live.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
             ["hands", "eyes", "auditor"],
@@ -2191,7 +2222,7 @@ mod tests {
     }
 
     #[test]
-    fn spawnable_is_turn_order_even_when_the_roster_is_not_alphabetical() {
+    fn the_spawn_roster_is_turn_order_even_when_the_rows_are_not_alphabetical() {
         // `participants_for_session` sorts by `(turn_position, id)`, and the
         // filter must not reorder: seeding the reviewer at slot 0 would make it
         // speak before there is anything to review.
@@ -2200,7 +2231,10 @@ mod tests {
             stub_participant(4, "hands", 1),
         ];
         assert_eq!(
-            spawnable(&roster).iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
+            resolve_spawn_roster(&SignalingBridge::new(), "s1", &roster)
+                .iter()
+                .map(|p| p.slug.as_str())
+                .collect::<Vec<_>>(),
             ["eyes", "hands"]
         );
     }
@@ -2218,8 +2252,12 @@ mod tests {
         ];
         roster[1].enabled = false;
         roster[2].participation_mode = "on_demand".into();
+        let bridge = SignalingBridge::new();
         assert_eq!(
-            spawnable(&roster).iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
+            resolve_spawn_roster(&bridge, "s1", &roster)
+                .iter()
+                .map(|p| p.slug.as_str())
+                .collect::<Vec<_>>(),
             ["hands"],
             "a solo session spawns one agent and the on-demand row stays asleep"
         );
@@ -2227,7 +2265,10 @@ mod tests {
         // never receives a scheduled turn.
         roster[2].participation_mode = "observer".into();
         assert_eq!(
-            spawnable(&roster).iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
+            resolve_spawn_roster(&bridge, "s1", &roster)
+                .iter()
+                .map(|p| p.slug.as_str())
+                .collect::<Vec<_>>(),
             ["hands", "specialist"]
         );
     }
@@ -2344,8 +2385,8 @@ mod tests {
     /// **THE BAR, as one chain.** rc3 is a reframe: a HANDS + EYES session must
     /// behave exactly as it did, and N=1 / N=3 are the new capability.
     ///
-    /// Run through the REAL join — `seed_session_roster` → `spawnable` → the
-    /// ring → the consensus halt — rather than against each link separately.
+    /// Run through the REAL join — `seed_session_roster` → `resolve_spawn_roster`
+    /// → the ring → the consensus halt — rather than against each link separately.
     /// The two halves were pinned apart before and the join was not: dropping
     /// the roster read at the spawn site would have left both halves green while
     /// no agent was spawned at all.
@@ -2372,7 +2413,7 @@ mod tests {
 
             // 1. Spawn: one agent per roster row, in turn order.
             let roster = s.participants_for_session("s1").await.unwrap();
-            let live = spawnable(&roster);
+            let live = resolve_spawn_roster(&SignalingBridge::new(), "s1", &roster);
             assert_eq!(live.len(), n, "N={n}: every participant must get a process");
             assert_eq!(
                 live.iter().map(|p| p.id).collect::<Vec<_>>(),
@@ -2445,7 +2486,7 @@ mod tests {
         s.create_session("s1", "t", None).await.unwrap();
         s.ensure_session_roster("s1", false).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
-        let live = spawnable(&roster);
+        let live = resolve_spawn_roster(&SignalingBridge::new(), "s1", &roster);
 
         let caps = |slug: &str| {
             participant_capabilities(live.iter().find(|p| p.slug == slug).expect(slug))
@@ -2662,29 +2703,63 @@ mod tests {
         let reviewer = roster.iter().find(|p| p.slug == "eyes").expect("the reviewer");
         let executor = roster.iter().find(|p| p.slug == "hands").expect("the executor");
 
-        let for_reviewer = resolve_participant_overrides(&s, data_dir.path(), reviewer).await;
+        // Through the PRODUCTION join, not through the resolver alone. The
+        // resolver was proven correct on its own and the one line that called it
+        // was still covered by nothing: replacing its result with a default at
+        // the spawn site left all 1049 tests green. `participant_spawn_config`
+        // is that call site, so this walks row → role → store → SpawnConfig →
+        // the actual command line.
+        let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
+        let mcp_temp = TempDir::new().unwrap();
+        let spawn_of = |p: crate::storage::Participant| {
+            let (s, paths, dir) = (s.clone(), &paths, mcp_temp.path().to_path_buf());
+            async move {
+                participant_spawn_config(
+                    &s,
+                    &p,
+                    resolve_participant_config(&s, &p).await,
+                    paths,
+                    &None,
+                    "prompt".into(),
+                    "127.0.0.1:1".parse().unwrap(),
+                    &dir,
+                    None,
+                )
+                .await
+                .expect("spawn config")
+            }
+        };
+
+        let for_reviewer = spawn_of(reviewer.clone()).await;
         assert_eq!(
-            for_reviewer.effort.as_deref(),
+            for_reviewer.overrides.effort.as_deref(),
             Some("xhigh"),
-            "the EYES role's override never reached its participant"
+            "the reviewer role's override never reached its participant"
+        );
+        assert!(
+            crate::agents::spawn::debug_env(&for_reviewer)
+                .contains(&("CLAUDE_CODE_EFFORT_LEVEL".into(), "xhigh".into())),
+            "the override reached the SpawnConfig but not the command it builds"
         );
         assert_eq!(
-            crate::claude_config::overrides::disabled_mcp(&for_reviewer),
+            crate::claude_config::overrides::disabled_mcp(&for_reviewer.overrides),
             vec!["discord".to_string()],
             "the role's MCP opt-out must reach the forwarded mcp-config"
         );
 
         // The other role is untouched and falls back to `_all`, which is what
         // makes the assertion above about the ROLE and not about the store.
-        let for_executor = resolve_participant_overrides(&s, data_dir.path(), executor).await;
-        assert_eq!(for_executor.effort.as_deref(), Some("medium"));
-        assert!(crate::claude_config::overrides::disabled_mcp(&for_executor).is_empty());
+        let for_executor = spawn_of(executor.clone()).await;
+        assert_eq!(for_executor.overrides.effort.as_deref(), Some("medium"));
+        assert!(crate::agents::spawn::debug_env(&for_executor)
+            .contains(&("CLAUDE_CODE_EFFORT_LEVEL".into(), "medium".into())));
+        assert!(crate::claude_config::overrides::disabled_mcp(&for_executor.overrides).is_empty());
 
         // A participant with no role has no per-role entry to find.
         let mut roleless = reviewer.clone();
         roleless.role_id = None;
-        let for_roleless = resolve_participant_overrides(&s, data_dir.path(), &roleless).await;
-        assert_eq!(for_roleless.effort.as_deref(), Some("medium"));
+        let for_roleless = spawn_of(roleless).await;
+        assert_eq!(for_roleless.overrides.effort.as_deref(), Some("medium"));
     }
 
     #[tokio::test]

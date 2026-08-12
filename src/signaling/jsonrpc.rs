@@ -180,7 +180,12 @@ const PARITY_HOLD: &[&str] = &["close_session"];
 /// Is `tool`'s allow/deny decision routed through the caller's capability set?
 ///
 /// False for a tool on [`PARITY_HOLD`], which keeps the pre-rc3 answer.
-fn capability_gated(tool: &str) -> bool {
+///
+/// `pub(crate)` because it is also the answer to "may this tool's DESCRIPTION
+/// say it needs a capability": `protocol`'s gate-line sweep asks it, so a held
+/// tool cannot advertise an enforcement it does not have, and un-holding one
+/// makes the sweep demand the line.
+pub(crate) fn capability_gated(tool: &str) -> bool {
     !PARITY_HOLD.contains(&tool) && crate::agents::capability::required_for(tool).is_some()
 }
 
