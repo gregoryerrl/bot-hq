@@ -246,3 +246,61 @@ the plugin later."*
 Remove the variant, its handler in `src/core/duo.rs` and its two tests. The
 native loop was its only producer; a future connector plugin can reintroduce the
 rendering path it needs rather than inheriting a dead one kept on speculation.
+
+### D15 — the Maintain CL button goes; sessions write their own learnings on close
+
+The user: *"should we remove the maintain CL button and just have the sessions
+automatically do a short maintenance on close session? User can still have a
+dedicated session into maintaining it but they have to do it manually."*
+
+Agreed on removing the button, with one correction to the second half, made after
+reading what the button actually dispatches.
+
+**Remove the button.** It exists only because there was no other way to start a
+scoped, pre-prompted session. The New Session dialog now picks roles and takes a
+prompt, so "start a session and tell it to maintain the CL" *is* the button minus
+a modal, a hardcoded prompt, a bespoke command and a dialog-less create path.
+Removing it also resolves half of [D13] — one of the two pathless creators
+disappears.
+
+Deletes: `frontend/src/app/MaintainCLModal.tsx`,
+`frontend/src/lib/maintainClPrompt.ts` (+ its test), the button and modal wiring
+in `frontend/src/app/ContextManager.tsx`, and the `dispatch_session` command in
+`src/tauri_cmd/sessions.rs` if the plugin arm does not still need it.
+
+**But close-time maintenance is NOT the Maintain-CL job.** Two facts settle this:
+
+1. `maintainClPrompt` is **project-wide housekeeping over a full IPAV cycle** —
+   ground-truth the whole library against the real repo, prune as much as you
+   add, rescan. "Short" and that job are incompatible: a shallow version cannot
+   ground-truth, and a real one on every close is expensive.
+2. **Agents already write CL entries mid-session.** The library's own log is
+   `cl: bcc-ad-manager/conventions.md (brian)`,
+   `cl: bot-hq/learnings-…-b5-channel-batch.md (brian)`. The per-session capture
+   is largely happening already; what is missing is a session that ends before
+   anyone writes anything down.
+
+And a hazard that rules out the naive version: **the Context Library is a git
+repo and the user runs concurrent sessions.** Project-wide maintenance fired on
+every close means two sessions closing near each other rewrite the same
+project's library at once — generating merge conflicts in the knowledge base as
+a side effect of closing a tab.
+
+**So, split by scope:**
+
+- **On close** — the session writes *its own* learnings, if it has any worth
+  writing. Scoped to what happened in that session, so no cross-session
+  contention. This formalises what agents already do ad hoc.
+- **Library-wide maintenance** — a manual session the user starts and instructs.
+  No button, no special path, no hardcoded prompt.
+
+**Close must not become blocking.** Closing is the user saying stop. The
+learnings write is fire-and-forget with a visible row: a failed or slow write
+never delays the close and never leaves the session un-closable. If the session
+has no participant holding `write_context_library`, it is skipped silently —
+that is a capability answer, not a special case.
+
+Open, for whoever implements it: whether an empty-handed session should write
+nothing at all (agent's judgement) or a one-line "nothing worth keeping" marker.
+Prefer nothing — an accreting pile of null entries is the CL bloat the maintain
+prompt exists to fight.
