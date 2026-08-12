@@ -70,15 +70,28 @@ pub struct AgentOverride {
     pub disable_claude_md: Option<bool>,
 }
 
-/// The full override store: a fan-out `_all` default plus per-agent entries.
+/// The full override store: a fan-out `_all` default plus per-ROLE entries.
+///
+/// **rc3 D10 re-key.** The per-agent buckets were two fixed fields named after
+/// people, and `resolve_agent_overrides` matched a participant slug against
+/// those two literals. Role-derived slugs match neither, so every per-agent
+/// override silently resolved to `_all` — the store had an editor, a file and a
+/// resolver, and changed nothing at spawn.
+///
+/// The key is now the **role slug**, which is the unit the user actually
+/// configures (the Roles tab owns a role's prose, capabilities and default
+/// model, so its Claude-config overrides belong beside them). Not the
+/// participant slug: those are per-session and gain numeric suffixes
+/// (`hands-2`), so a global config panel could neither enumerate nor address
+/// them, and two participants of one role would need the override entered
+/// twice.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Type)]
 pub struct ClaudeOverrides {
     #[serde(rename = "_all", default)]
     pub all: AgentOverride,
+    /// role slug → that role's overrides, layered over `_all` at resolve time.
     #[serde(default)]
-    pub brian: AgentOverride,
-    #[serde(default)]
-    pub rain: AgentOverride,
+    pub per_role: BTreeMap<String, AgentOverride>,
 }
 
 /// `<data_dir>/config/claude-overrides.json`.
@@ -128,13 +141,18 @@ fn set_owner_only(path: &Path) {
 #[cfg(not(unix))]
 fn set_owner_only(_path: &Path) {}
 
-/// Resolve the effective override for `agent`: the `_all` default with the
-/// per-agent entry layered on top (per-key, agent wins). Unknown agent → `_all`.
-pub fn resolve_agent_overrides(store: &ClaudeOverrides, agent: &str) -> AgentOverride {
-    let specific = match agent {
-        "brian" => &store.brian,
-        "rain" => &store.rain,
-        _ => return store.all.clone(),
+/// Resolve the effective override for a participant playing `role_slug`: the
+/// `_all` default with that role's entry layered on top (per-key, the role
+/// wins). `None` — a participant with no role row — and an unconfigured role
+/// both resolve to `_all` alone.
+///
+/// **The key is a ROLE slug, not an agent name and not a participant slug.**
+/// This used to match the literals `"brian"` / `"rain"`; both production callers
+/// pass a role-derived value now, so every branch but the fallback was dead and
+/// per-agent overrides resolved to the global config without a word.
+pub fn resolve_agent_overrides(store: &ClaudeOverrides, role_slug: Option<&str>) -> AgentOverride {
+    let Some(specific) = role_slug.and_then(|slug| store.per_role.get(slug)) else {
+        return store.all.clone();
     };
     let mut merged = store.all.clone();
     merged.skills.extend(specific.skills.clone());
@@ -224,12 +242,12 @@ mod tests {
     fn save_then_load_roundtrip() {
         let dir = tempdir().unwrap();
         let mut store = ClaudeOverrides::default();
-        store
-            .brian
+        let hands = store.per_role.entry("hands".into()).or_default();
+        hands
             .skills
             .insert("my-skill".into(), SkillVisibility::UserInvocableOnly);
-        store.brian.plugins.insert("alpha@mkt".into(), false);
-        store.brian.effort = Some("high".into());
+        hands.plugins.insert("alpha@mkt".into(), false);
+        hands.effort = Some("high".into());
         save_overrides(dir.path(), &store).unwrap();
         assert_eq!(load_overrides(dir.path()), store);
     }
@@ -247,12 +265,10 @@ mod tests {
         let mut store = ClaudeOverrides::default();
         store.all.effort = Some("medium".into());
         store.all.skills.insert("a".into(), SkillVisibility::Off);
-        store.brian.effort = Some("xhigh".into());
-        store
-            .brian
-            .skills
-            .insert("b".into(), SkillVisibility::NameOnly);
-        let merged = resolve_agent_overrides(&store, "brian");
+        let hands = store.per_role.entry("hands".into()).or_default();
+        hands.effort = Some("xhigh".into());
+        hands.skills.insert("b".into(), SkillVisibility::NameOnly);
+        let merged = resolve_agent_overrides(&store, Some("hands"));
         assert_eq!(merged.effort.as_deref(), Some("xhigh"));
         // _all's skill "a" survives; brian's "b" is layered on.
         assert_eq!(merged.skills.get("a"), Some(&SkillVisibility::Off));

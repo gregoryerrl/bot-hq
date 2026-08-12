@@ -768,6 +768,10 @@ async fn spawn_session_handle(
                 warn!(?e, slot, "set_session_spawn_model_slot");
             }
         }
+        // Claude-config overrides for the ROLE this participant plays — see
+        // `resolve_participant_overrides` for why they resolve here rather than
+        // twice inside the spawner off an agent name.
+        let overrides = resolve_participant_overrides(&storage, &paths.data_dir, p).await;
         let handle = spawn_agent_for(
             &session.id,
             &p.slug,
@@ -782,6 +786,7 @@ async fn spawn_session_handle(
             p.effort.clone(),
             p.ultracode,
             participant_capabilities(p),
+            overrides,
         )
         .await?;
         spawned.push((slot, handle));
@@ -1207,6 +1212,53 @@ fn cl_opener_nudge(project: Option<&str>) -> Option<String> {
 /// degraded prompt — until a user edits the row it is the *same bytes*. A query
 /// error is logged at `warn` because it is genuinely unexpected; the others are
 /// ordinary states and stay silent.
+/// The slug of the ROLE this participant was invited as, or `None` when the row
+/// has no `role_id`, the role was deleted, or the read failed.
+///
+/// Separate from [`resolve_role_prose`] (which needs the whole row) because the
+/// override store is keyed on this and nothing else about the role.
+async fn participant_role_slug(
+    storage: &Storage,
+    p: &crate::storage::Participant,
+) -> Option<String> {
+    let role_id = p.role_id?;
+    match storage.role_by_id(role_id).await {
+        Ok(r) => r.map(|r| r.slug),
+        Err(e) => {
+            warn!(participant = %p.slug, role_id, ?e, "reading a role's slug failed");
+            None
+        }
+    }
+}
+
+/// **One participant's Claude-config overrides, in one place a test can reach.**
+///
+/// The chain is: participant row → its ROLE's slug → that role's entry in
+/// `<data_dir>/config/claude-overrides.json`, layered over the `_all` fan-out.
+///
+/// It is a function for the reason [`compose_system_prompt`] and
+/// [`resolve_participant_config`] are: `spawn_agent_for` goes on to launch a
+/// claude-code subprocess and no test can follow it there, so a chain assembled
+/// inline is a chain nothing pins. This one had already broken that way — the
+/// resolver matched the literals `"brian"` / `"rain"` while both callers passed
+/// a role-derived participant slug, so every per-agent override resolved to the
+/// global config and no test noticed.
+///
+/// Fail-open at both ends: an unreadable store loads empty (logged there), and a
+/// participant with no role resolves to `_all` alone. A spawn must not fail
+/// because a config file is malformed.
+async fn resolve_participant_overrides(
+    storage: &Storage,
+    data_dir: &Path,
+    p: &crate::storage::Participant,
+) -> crate::claude_config::AgentOverride {
+    let role_slug = participant_role_slug(storage, p).await;
+    crate::claude_config::resolve_agent_overrides(
+        &crate::claude_config::load_overrides(data_dir),
+        role_slug.as_deref(),
+    )
+}
+
 async fn resolve_role_prose(
     storage: &Storage,
     me: &crate::storage::Participant,
@@ -1395,6 +1447,7 @@ async fn spawn_agent_for(
     session_effort: Option<String>,
     session_ultracode: Option<bool>,
     capabilities: crate::agents::ResolvedCapabilities,
+    overrides: crate::claude_config::AgentOverride,
 ) -> Result<AgentHandle> {
     // The assembled prompt is multi-KB. Hand it to claude-code via a file
     // (`--append-system-prompt-file`) rather than an inline arg so the command
@@ -1405,13 +1458,10 @@ async fn spawn_agent_for(
         .with_context(|| format!("writing system prompt to {}", system_prompt_path.display()))?;
     let mcp_config_path = mcp_temp_dir.join(format!("{agent_name}-mcp.json"));
     let mut user_servers = user_mcp_servers_for_agent(&capabilities);
-    // Apply per-agent MCP overrides (Settings → Claude Config): a server the
-    // user disabled for this agent is dropped from its forwarded mcp-config.
-    let agent_override = crate::claude_config::resolve_agent_overrides(
-        &crate::claude_config::load_overrides(&paths.data_dir),
-        agent_name,
-    );
-    for name in crate::claude_config::overrides::disabled_mcp(&agent_override) {
+    // Apply the role's MCP overrides (Settings → Claude Config): a server the
+    // user disabled for this role is dropped from its forwarded mcp-config.
+    // `overrides` arrives resolved — see `resolve_participant_overrides`.
+    for name in crate::claude_config::overrides::disabled_mcp(&overrides) {
         user_servers.remove(&name);
     }
     let json = mcp_config_json(signaling_addr, session_id, agent_name, &user_servers);
@@ -1432,6 +1482,7 @@ async fn spawn_agent_for(
         session_effort,
         session_ultracode,
         capabilities,
+        overrides,
     };
     // Supervised: a transient upstream API error (e.g. 529 Overloaded)
     // auto-resumes the agent with capped backoff instead of stranding the
@@ -2514,6 +2565,70 @@ mod tests {
         let mut roleless = eyes.clone();
         roleless.role_id = None;
         assert!(role_default_model(&s, &roleless).await.is_none());
+    }
+
+    /// **Per-role Claude-config overrides actually reach a spawn.**
+    ///
+    /// They did not. `resolve_agent_overrides` matched the literals `"brian"` /
+    /// `"rain"` while both production callers passed a role-derived participant
+    /// slug, so every branch but the fallback was dead and the whole store
+    /// collapsed to `_all` — an editor, a file and a resolver that changed
+    /// nothing at spawn, with no test to notice.
+    ///
+    /// Walked through the real chain — participant row → role slug → store —
+    /// because that is the link that broke. Two participants, so the assertion
+    /// is a DIFFERENCE between roles rather than a value that `_all` alone would
+    /// also produce.
+    #[tokio::test]
+    async fn a_roles_claude_overrides_reach_its_participants_spawn() {
+        use crate::claude_config::{save_overrides, ClaudeOverrides};
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", false).await.unwrap();
+        let data_dir = TempDir::new().unwrap();
+
+        let mut store = ClaudeOverrides::default();
+        store.all.effort = Some("medium".into()); // the fan-out floor
+        store
+            .per_role
+            .entry("eyes".into())
+            .or_default()
+            .effort = Some("xhigh".into());
+        store
+            .per_role
+            .entry("eyes".into())
+            .or_default()
+            .mcp
+            .insert("discord".into(), false);
+        save_overrides(data_dir.path(), &store).unwrap();
+
+        let roster = s.participants_for_session("s1").await.unwrap();
+        let reviewer = roster.iter().find(|p| p.slug == "eyes").expect("the reviewer");
+        let executor = roster.iter().find(|p| p.slug == "hands").expect("the executor");
+
+        let for_reviewer = resolve_participant_overrides(&s, data_dir.path(), reviewer).await;
+        assert_eq!(
+            for_reviewer.effort.as_deref(),
+            Some("xhigh"),
+            "the EYES role's override never reached its participant"
+        );
+        assert_eq!(
+            crate::claude_config::overrides::disabled_mcp(&for_reviewer),
+            vec!["discord".to_string()],
+            "the role's MCP opt-out must reach the forwarded mcp-config"
+        );
+
+        // The other role is untouched and falls back to `_all`, which is what
+        // makes the assertion above about the ROLE and not about the store.
+        let for_executor = resolve_participant_overrides(&s, data_dir.path(), executor).await;
+        assert_eq!(for_executor.effort.as_deref(), Some("medium"));
+        assert!(crate::claude_config::overrides::disabled_mcp(&for_executor).is_empty());
+
+        // A participant with no role has no per-role entry to find.
+        let mut roleless = reviewer.clone();
+        roleless.role_id = None;
+        let for_roleless = resolve_participant_overrides(&s, data_dir.path(), &roleless).await;
+        assert_eq!(for_roleless.effort.as_deref(), Some("medium"));
     }
 
     #[tokio::test]

@@ -276,6 +276,17 @@ pub struct SpawnConfig {
     /// [`ResolvedCapabilities::Unreadable`] takes the RESTRICTIVE branch — see
     /// that type for why every gated decision fails closed.
     pub capabilities: crate::agents::ResolvedCapabilities,
+    /// This participant's Claude-config overrides, already resolved against its
+    /// ROLE (`claude_config::resolve_agent_overrides`).
+    ///
+    /// Resolved by the caller rather than here because the key is a role slug
+    /// and only the spawn path has the roster to reach one. It arrives resolved
+    /// for the same reason the system prompt does: `build_command` and
+    /// `spawn_agent_for` each used to load and resolve the store separately off
+    /// `agent_name`, which is two reads that can disagree and two places for a
+    /// key to go stale — and both went stale at once when slugs became
+    /// role-derived.
+    pub overrides: crate::claude_config::AgentOverride,
 }
 
 /// One participant's stdin, reachable only with a receipt for a row in THIS
@@ -1087,14 +1098,12 @@ fn build_command(cfg: &SpawnConfig) -> Command {
             &cfg.system_prompt_path.display().to_string(),
         ]);
 
-    // Per-agent Claude-config overrides (Settings → Claude Config). Resolved
-    // from `<data_dir>/config/claude-overrides.json`; merged into the `--settings`
-    // JSON + env below so a user can disable an inherited skill/plugin/MCP/
-    // effort for THIS agent without touching their own ~/.claude. Fail-open.
-    let mut agent_override = crate::claude_config::resolve_agent_overrides(
-        &crate::claude_config::load_overrides(&cfg.data_dir),
-        &cfg.agent_name,
-    );
+    // Per-role Claude-config overrides (Settings → Claude Config), resolved by
+    // the spawn path against this participant's ROLE and merged into the
+    // `--settings` JSON + env below, so a user can disable an inherited
+    // skill/plugin/MCP/effort for THIS role without touching their own
+    // ~/.claude. Fail-open (an unreadable store resolves to nothing).
+    let mut agent_override = cfg.overrides.clone();
     // Per-SESSION overrides (create dialog) win over the persistent defaults.
     if cfg.session_effort.is_some() {
         agent_override.effort = cfg.session_effort.clone();
@@ -1391,6 +1400,7 @@ mod tests {
             capabilities: crate::agents::ResolvedCapabilities::Known(
                 crate::agents::CapabilitySet::preset_hands(),
             ),
+            overrides: crate::claude_config::AgentOverride::default(),
         }
     }
 
@@ -1524,15 +1534,21 @@ mod tests {
         use crate::claude_config::{save_overrides, ClaudeOverrides, SkillVisibility};
         let dir = tempfile::tempdir().unwrap();
         let mut store = ClaudeOverrides::default();
-        store
-            .brian
+        let hands = store.per_role.entry("hands".into()).or_default();
+        hands
             .skills
             .insert("my-skill".into(), SkillVisibility::UserInvocableOnly);
-        store.brian.effort = Some("high".into());
+        hands.effort = Some("high".into());
         save_overrides(dir.path(), &store).unwrap();
 
-        let mut c = cfg(); // brian (non-rain → gets --settings)
+        // The spawn path resolves the store against the ROLE and hands the
+        // result to `build_command` — mirrored here by the caller.
+        let mut c = cfg();
         c.data_dir = dir.path().to_path_buf();
+        c.overrides = crate::claude_config::resolve_agent_overrides(
+            &crate::claude_config::load_overrides(dir.path()),
+            Some("hands"),
+        );
 
         // The injected --settings carries the override fragment alongside the hook.
         let args = debug_command(&c);
@@ -1568,7 +1584,7 @@ mod tests {
         use crate::claude_config::{save_overrides, ClaudeOverrides};
         let dir = tempfile::tempdir().unwrap();
         let mut store = ClaudeOverrides::default();
-        store.brian.effort = Some("high".into()); // persistent default
+        store.per_role.entry("hands".into()).or_default().effort = Some("high".into()); // persistent default
         save_overrides(dir.path(), &store).unwrap();
 
         let mut c = cfg(); // brian (gets --settings)
@@ -1592,7 +1608,7 @@ mod tests {
         use crate::claude_config::{save_overrides, ClaudeOverrides};
         let dir = tempfile::tempdir().unwrap();
         let mut store = ClaudeOverrides::default();
-        store.brian.effort = Some("max".into()); // persistent
+        store.per_role.entry("hands".into()).or_default().effort = Some("max".into()); // persistent
         save_overrides(dir.path(), &store).unwrap();
 
         let mut c = cfg();
@@ -1626,7 +1642,7 @@ mod tests {
         use crate::claude_config::{save_overrides, ClaudeOverrides};
         let dir = tempfile::tempdir().unwrap();
         let mut store = ClaudeOverrides::default();
-        store.brian.ultracode = Some(true); // persistent
+        store.per_role.entry("hands".into()).or_default().ultracode = Some(true); // persistent
         save_overrides(dir.path(), &store).unwrap();
 
         let mut c = cfg();
@@ -1655,8 +1671,9 @@ mod tests {
     }
 
     #[test]
-    fn rain_gets_override_env_but_no_settings_fragment() {
-        use crate::claude_config::{save_overrides, ClaudeOverrides};
+    fn a_read_only_role_gets_override_env_but_no_settings_fragment() {
+        use crate::claude_config::{load_overrides, resolve_agent_overrides, save_overrides,
+                                   ClaudeOverrides};
         let dir = tempfile::tempdir().unwrap();
         let mut store = ClaudeOverrides::default();
         store.all.disable_auto_memory = Some(true); // fan-out default
@@ -1664,19 +1681,21 @@ mod tests {
 
         let mut c = eyes_cfg();
         c.data_dir = dir.path().to_path_buf();
+        c.overrides = resolve_agent_overrides(&load_overrides(dir.path()), Some("eyes"));
 
         let args = debug_command(&c);
         assert!(
             !args.iter().any(|a| a == "--settings"),
-            "rain gets no --settings (the tool-gate PreToolUse hook is Brian-only)"
+            "a role without edit_files gets no --settings (the tool-gate PreToolUse hook \
+             rides with the permissive posture)"
         );
-        // env-based overrides still apply to Rain.
+        // env-based overrides still apply to it.
         let cmd = build_command(&c);
         let has = cmd.as_std().get_envs().any(|(k, v)| {
             k == std::ffi::OsStr::new("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
                 && v == Some(std::ffi::OsStr::new("1"))
         });
-        assert!(has, "auto-memory disable env should apply to Rain too");
+        assert!(has, "the _all fan-out reaches a read-only role too");
     }
 
     // ---- supervisor retry logic (fake incarnations, no real subprocess) ----
