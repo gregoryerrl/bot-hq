@@ -24,13 +24,19 @@ import {
 } from "../lib/participants";
 
 /**
- * How many participants a session can be created with.
+ * How many participants this dialog offers to add.
  *
- * Mirrors `MAX_SESSION_PARTICIPANTS` in `src/tauri_cmd/sessions.rs`, which is
- * where it is ENFORCED — this constant only stops the dialog offering a row the
- * backend would refuse. It is the runtime's limit, not a design one: spawn
- * still starts two literally-named agents, so a third participant would have no
+ * **It no longer mirrors the backend.** `MAX_SESSION_PARTICIPANTS`
+ * (`src/tauri_cmd/sessions.rs`), which is where the limit is ENFORCED, is 8:
+ * this was 2 because `spawn_session_handle` started two literally-named agents,
+ * and rc3 D10 made spawn iterate the roster instead, so a third row now has a
  * process behind it.
+ *
+ * Left at 2 deliberately rather than raised silently — every participant is a
+ * claude-code subprocess with its own context window and its own bill, so how
+ * many the dialog should offer is a product call, not a consequence of this
+ * change. Nothing here refuses a wider roster: a session seeded through
+ * `seed_session_roster` already runs at whatever size its creator chose.
  */
 const MAX_PARTICIPANTS = 2;
 
