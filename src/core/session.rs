@@ -875,6 +875,11 @@ async fn spawn_session_handle(
             storage: storage.clone(),
             inputs,
             epochs,
+            // The round cap re-reads the session-policy snapshot per lap, so it
+            // needs the dir that snapshot lives in. It was seeded (write-if-
+            // absent) earlier in this same function, well before here.
+            data_dir: Some(paths.data_dir.clone()),
+            bridge: Some(Arc::clone(&bridge)),
         };
         let (tx, rx) = tokio::sync::mpsc::channel(256);
         tokio::spawn(crate::core::sequencer::run_sequencer(deps, rx));

@@ -146,11 +146,12 @@
 //! reading, not an oversight: a pass says "not me this round", and a session
 //! where nobody has anything to say has not arrived anywhere.
 //!
-//! **Nothing in this file bounds such a ring**, and the list of what does is
-//! short and worth being exact about, because the obvious candidate is NOT on
-//! it. A [`UserMessage`](SequencerCommand::UserMessage) does not end an
-//! all-pass ring — it resets the cycle to the front and hands out another turn,
-//! which is a redirect, not a stop. What actually stops it is
+//! **What bounds such a ring is the round cap, and nothing else in this file
+//! does** — the list of the alternatives is short and worth being exact about,
+//! because the obvious candidate is NOT on it. A
+//! [`UserMessage`](SequencerCommand::UserMessage) does not end an all-pass ring
+//! — it resets the cycle to the front and hands out another turn, which is a
+//! redirect, not a stop. What else stops it is
 //! [`Pause`](SequencerCommand::Pause), a
 //! [`QuestionParked`](SequencerCommand::QuestionParked), the command channel
 //! closing (the session going away), or a participant that stops completing
@@ -159,8 +160,12 @@
 //! not among them: [`TurnEnding::Passed`] skips it, for the false positive
 //! named at that call site.
 //!
-//! The round cap that would bound this mechanically is a separate unshipped
-//! slice (rc3 decisions D2 — default 500, `0` = off).
+//! The cap counts LAPS of the ring in the current uninterrupted stretch, halts
+//! the cycle when it is reached and posts a row saying so. It is design §1b's
+//! CRUDE second backstop — subordinate to consensus and to spin detection, and
+//! set high enough (500 laps by default, `0` = off) that it should never be
+//! what ends a legitimate run. See [`DEFAULT_ROUND_CAP_LAPS`] for the unit, the
+//! measurement behind the number, and the per-session override.
 //!
 //! That paragraph is about the CONSENSUS halt, which is a tally. The other halt
 //! reason — a parked question — is not, and has its own section below.
@@ -624,8 +629,10 @@
 //! rather than a counter, and so is this.
 
 use crate::agents::ParticipantInput;
-use crate::storage::{Participant, PersistedMessage, Storage};
+use crate::signaling::SignalingBridge;
+use crate::storage::{MessageKind, Participant, PersistedMessage, Storage};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -657,6 +664,91 @@ use tracing::{debug, warn};
 /// that, on a small `max_batches` rather than a 6,401-row fixture — see
 /// [`deliver_backlog`]'s parameter.
 const MAX_TURN_BATCHES: usize = 32;
+
+// --- the round cap ---------------------------------------------------------
+// Design §1b's SECOND backstop, and the crude one. Spin detection is primary
+// and this is subordinate to it and to the consensus halt: it is a safety net,
+// not a checkpoint, and §1b's rejection of a round BUDGET — "the car pulling
+// over every N miles to ask permission to continue" — is why it has to be set
+// high enough never to fire on legitimate work.
+
+/// Laps before the cycle halts itself, when no tier of the policy sets one.
+///
+/// **The unit is a LAP: one full pass of the ring over the ACTIVE
+/// participants** (rc3 decisions D2 left the unit open and flagged it; this is
+/// the resolution). Not messages, not turns, not rounds-per-participant. At
+/// N=2 one lap is two turns; at N=1 a lap is a single turn.
+///
+/// **What was measured, in the unit it was measured in.** Across **3,561**
+/// uninterrupted stretches in the existing corpus (D2, 2026-08-11) the largest
+/// was **294 agent text messages**, which at N=2 participants is roughly **147
+/// laps**. 500 laps is therefore about **3.4× the largest observed real run**,
+/// which is what design §1b means by "high enough to be invisible in normal
+/// use".
+///
+/// **That is a messages-to-laps CONVERSION of one stretch, not a corpus-wide
+/// organic maximum in laps, and it must not be quoted as one.** The available
+/// proxies for a per-lap count are rain-only and undercount laps badly in the
+/// tail, so the only honest statement about the corpus is the one above: the
+/// biggest stretch anyone has actually run, converted at the N it ran at.
+///
+/// `0` means the cap is OFF — a deliberate unattended run. Per-session
+/// override: `round_cap` in [`crate::policy::Policy`], inherited
+/// general → project → session and editable in the gear tab.
+pub const DEFAULT_ROUND_CAP_LAPS: u32 = 500;
+
+/// The cap in force for this session RIGHT NOW, in laps.
+///
+/// Re-read at each lap boundary rather than snapshotted into
+/// [`SequencerDeps`], which is the `push_gate` shape: the session-policy
+/// snapshot is seeded at spawn and then LIVE — the gear tab writes it and the
+/// pre-push hook re-reads it per push — so a cap frozen at spawn would be the
+/// one policy value in that file the user could not actually change. A lap is
+/// N agent turns, so this is one small YAML read per several minutes of work.
+///
+/// **Every failure resolves to [`DEFAULT_ROUND_CAP_LAPS`], never to `0`.** No
+/// data dir (unit tests), no snapshot yet, an unreadable or malformed one:
+/// each leaves the backstop ARMED at its default. Resolving a broken file to
+/// "off" would silently disarm the net on exactly the sessions whose state is
+/// already suspect, and the cost of the other lean is a halt the user releases
+/// with one message.
+fn round_cap_laps(deps: &SequencerDeps) -> u32 {
+    let Some(data_dir) = deps.data_dir.as_ref() else {
+        return DEFAULT_ROUND_CAP_LAPS;
+    };
+    match crate::policy::session_policy::read_session_policy(data_dir, &deps.session_id) {
+        Ok(Some(sp)) => sp.policy.round_cap.unwrap_or(DEFAULT_ROUND_CAP_LAPS),
+        Ok(None) => DEFAULT_ROUND_CAP_LAPS,
+        Err(e) => {
+            warn!(
+                session = %deps.session_id,
+                error = %e,
+                "sequencer: the session policy could not be read; the round cap stays at its \
+                 default"
+            );
+            DEFAULT_ROUND_CAP_LAPS
+        }
+    }
+}
+
+/// The row a capped halt posts, so the halt is VISIBLE (rc3 decision D7: a
+/// silent halt is indistinguishable from a hang).
+///
+/// `system_notice` under `origin = 'system'` with a NULL participant, unlike
+/// the PASS row, which is prose under `origin = 'participant'`. The two differ
+/// because their authors do: a pass is a participant's own line and this is the
+/// host saying it stopped handing out turns. D7 accepted the cost of one more
+/// injection in this lane explicitly.
+///
+/// One line, per that lane's sizing, and it names both ways out: say something
+/// (which restarts the cycle and the lap count with it), or raise the cap.
+fn round_cap_notice(laps: u32) -> String {
+    format!(
+        "[System: round cap reached — {laps} laps of the turn cycle without every participant \
+         agreeing it was done. The cycle is halted and yields to you. Send a message to \
+         continue, or change `round_cap` in Session Settings (0 turns the cap off).]"
+    )
+}
 
 /// What the sequencer task needs, cloned from the session's own state at spawn
 /// — the same arrangement [`RouterDeps`](crate::core::RouterDeps) uses.
@@ -702,6 +794,20 @@ pub struct SequencerDeps {
     /// is therefore the safe default, and it is what the unit tests use — they
     /// are their own sender and mint epochs directly.
     pub epochs: HashMap<i64, Arc<std::sync::atomic::AtomicU64>>,
+    /// Where `.local/session-policies/<sid>.yaml` lives, so the round cap can
+    /// be re-read per lap — see [`round_cap_laps`], which is the only reader.
+    ///
+    /// `None` is not "no cap": it resolves to [`DEFAULT_ROUND_CAP_LAPS`], so a
+    /// caller with no data dir (the unit tests) still runs the backstop.
+    pub data_dir: Option<PathBuf>,
+    /// Where the capped halt's row is announced, so the UI refreshes on it.
+    ///
+    /// Optional for the same reason [`crate::core::duo::DuoConfig`]'s is: the
+    /// unit tests have no bridge, and a missed notification costs a row the
+    /// user sees on their next refetch rather than immediately. The ROW is
+    /// posted either way — that is the half D7 requires, and it does not depend
+    /// on this field.
+    pub bridge: Option<Arc<SignalingBridge>>,
 }
 
 /// A wake for the sequencer.
@@ -986,6 +1092,19 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     // not leave a streak behind for the next one to inherit. Cleared outright by
     // a user message, which is the router's convergence reset in the ring model.
     let mut spin: HashMap<i64, SpinState> = HashMap::new();
+    // Completed laps of the ring in the CURRENT uninterrupted stretch — the
+    // round cap's counter. In the loop's frame for the same reason `spin` is,
+    // and reset the same way: [`advance_turn`] zeroes it whenever it steps to
+    // the front of the rotation, which is where a user message lands.
+    //
+    // **Per stretch, not per session, and that is load-bearing rather than a
+    // convenience.** It is the unit D2's measurement is in — 3,561 UNINTERRUPTED
+    // stretches — so a lifetime counter would be capping something nobody
+    // measured. It is also what keeps the halt releasable: the cap's own halt
+    // yields to the user, and a counter that survived their reply would re-fire
+    // on the very next lap and wedge the session shut instead of backstopping
+    // it. `a_user_message_starts_the_lap_count_over` is that case.
+    let mut laps: u32 = 0;
     loop {
         let cmd = match deferred.pop_front() {
             Some(cmd) => cmd,
@@ -1152,6 +1271,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                                 &mut holder,
                                 &mut epoch,
                                 &mut deferred,
+                                &mut laps,
                                 false,
                             )
                             .await;
@@ -1199,7 +1319,16 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // a path that does not exist yet. If a second restart path ever
                 // lands, this belongs next to the tally clear, not here.
                 spin.clear();
-                advance_turn(&deps, &mut rx, &mut holder, &mut epoch, &mut deferred, true).await;
+                advance_turn(
+                    &deps,
+                    &mut rx,
+                    &mut holder,
+                    &mut epoch,
+                    &mut deferred,
+                    &mut laps,
+                    true,
+                )
+                .await;
             }
             SequencerCommand::ParticipantJoined {
                 participant_id,
@@ -1343,12 +1472,13 @@ fn release_held(
 }
 
 /// Step the ring, stamp the new turn, and deliver its backlog — emptying the
-/// tally first if this step RESTARTS the cycle rather than continuing it.
+/// tally first if this step RESTARTS the cycle rather than continuing it, and
+/// counting the lap if it WRAPS one.
 ///
 /// `reset` is a user message: the ring goes back to its first place instead of
 /// one past the current holder. It is the only restart today, which is exactly
 /// why the tally clear lives in here and not at its call site; see the comment
-/// on the clear.
+/// on the clear. The lap counter is reset by the same test for the same reason.
 ///
 /// Takes `reset` rather than the current participant because `holder` is behind
 /// a `&mut` here — the caller cannot lend it out and have it written back in
@@ -1359,9 +1489,17 @@ async fn advance_turn(
     holder: &mut Option<Participant>,
     epoch: &mut u64,
     deferred: &mut VecDeque<SequencerCommand>,
+    laps: &mut u32,
     reset: bool,
 ) {
     let current = if reset { None } else { holder.as_ref() };
+    // The ring's own ordering key for whoever is handing the turn on, copied
+    // out before `hand_over` so the borrow of `*holder` ends here and the
+    // assignment below can take it mutably. `(turn_position, id)` is exactly
+    // the order `next_in_ring` steps through — the `wrapped` comparison below
+    // is the only reader, and `the_round_cap_counts_laps_of_the_ring_not_turns`
+    // is what pins it.
+    let current_key = current.map(|c| (c.turn_position, c.id));
     // A cycle starting at the front of the ring starts with an empty tally.
     //
     // **Bound to the mechanism, not to a call site.** This lived in the
@@ -1429,6 +1567,11 @@ async fn advance_turn(
     // an arrival come EARLY — but the alternative is refusing to hand out a
     // turn because a write failed, which strands the session outright.
     if current.is_none() {
+        // The lap count belongs to the stretch, and this is where a stretch
+        // begins — see the counter's declaration for why it is not a lifetime
+        // total, and why a cap that could not be released would be worse than
+        // no cap at all.
+        *laps = 0;
         if let Err(e) = deps.storage.clear_done_votes(&deps.session_id).await {
             warn!(
                 session = %deps.session_id,
@@ -1482,6 +1625,65 @@ async fn advance_turn(
         // for how the ring read is broken without breaking the clear.
         Handover::Held => {}
         Handover::To(next) => {
+            // **The ring wrapped iff the participant taking the turn does not
+            // sort strictly AFTER the one handing it on.** `next_in_ring` steps
+            // by position through a ring ordered by `(turn_position, id)`, so
+            // `ring[i] -> ring[i+1]` always moves that key forward and the only
+            // step that does not is `ring[len-1] -> ring[0]`. A one-participant
+            // ring steps to itself, where the key is EQUAL — hence `<=`, and
+            // hence every turn of a solo ring is a whole lap, which is what "one
+            // full pass over the active participants" means at N=1.
+            //
+            // Two steps deliberately do not count. A reset has no `current_key`:
+            // it STARTS a stretch rather than closing a lap, and the counter was
+            // just zeroed above. A `Handover::Held` never reaches this arm at
+            // all, so a ring read that failed does not spend a lap.
+            //
+            // **One roster mutation under-counts by a lap, and it is left
+            // under-counting on purpose.** If the holder is disabled mid-turn
+            // and sat BEFORE `ring[0]` in the order, `next_in_ring` falls
+            // through to its "first member sorting after `current`" arm, lands
+            // on `ring[0]`, and the comparison below reads that as forward
+            // motion rather than as the wrap it also is. The
+            // alternative is tracking who has already held the turn this lap —
+            // more state, for a backstop whose whole design is to sit ~3.4×
+            // above real work. Erring one lap LATE is the safe direction for a
+            // net that must never fire on legitimate work.
+            let wrapped = match (current_key, next.as_ref()) {
+                (Some(cur), Some(n)) => (n.turn_position, n.id) <= cur,
+                _ => false,
+            };
+            if wrapped {
+                *laps += 1;
+                let cap = round_cap_laps(deps);
+                // `0` is off, and it is tested BEFORE the comparison rather than
+                // folded into it: `*laps >= 0` is true on the very first lap, so
+                // a cap of zero written as a plain comparison would halt the
+                // session instantly — the exact inverse of what it means.
+                if cap != 0 && *laps >= cap {
+                    // The same yield the parked question and the spin halt take:
+                    // clear the holder, bump the epoch, hand out no turn. The
+                    // ring step that landed here is dropped with `next` — the
+                    // cap fires INSTEAD of the turn it was about to start, not
+                    // after it — and `halt` supplies the epoch bump that step
+                    // would have made, so the numbering does not skip.
+                    halt(holder, epoch);
+                    // D7: a visible row, not just a log line. Posted after the
+                    // halt so the cycle is already yielded if the write fails —
+                    // a session that halted with no row is a notification gap,
+                    // where one that kept running because a row failed would be
+                    // the backstop not backstopping.
+                    announce_round_cap(deps, *laps).await;
+                    warn!(
+                        session = %deps.session_id,
+                        laps = *laps,
+                        cap,
+                        "sequencer: the round cap was reached; the cycle halts and yields to \
+                         the user"
+                    );
+                    return;
+                }
+            }
             *holder = next;
             // Every step, including a reset that lands on the same participant.
             // That case is exactly why the epoch exists.
@@ -1521,6 +1723,48 @@ async fn advance_turn(
                 deliver_backlog(deps, to, rx, MAX_TURN_BATCHES, deferred).await;
             }
         }
+    }
+}
+
+/// Post [`round_cap_notice`] into the channel and tell the UI it landed.
+///
+/// **The post is the contract; the notification is the nicety.** D7 asks for a
+/// row, and a row is what a reopened session, a scrollback and an agent's next
+/// backlog all read. [`SequencerDeps::bridge`] only decides whether the chat
+/// updates without waiting for the next refetch, so its absence is not a
+/// failure and is not logged as one.
+///
+/// A failed WRITE is logged, and loudly: the cycle is already halted by then,
+/// so what is lost is the only on-screen account of why — the notification gap
+/// the module doc names, which is exactly what D7 exists to close.
+async fn announce_round_cap(deps: &SequencerDeps, laps: u32) {
+    match deps
+        .storage
+        .post_to_channel(
+            Arc::clone(&deps.session_id),
+            // Host-authored, so `origin = 'system'` with a NULL participant
+            // (0044) — the halt is nobody's turn output, and there is no
+            // `system` roster row to attribute it to.
+            "system",
+            None,
+            MessageKind::SystemNotice.as_str(),
+            round_cap_notice(laps),
+            None,
+        )
+        .await
+    {
+        Ok(row) => {
+            if let Some(bridge) = deps.bridge.as_ref() {
+                bridge.notify_message_persisted(Arc::clone(&deps.session_id), row.message_id());
+            }
+        }
+        Err(e) => warn!(
+            session = %deps.session_id,
+            laps,
+            error = %e,
+            "sequencer: the round cap halted the cycle but its notice was not posted; the \
+             session has yielded with nothing on screen to say so"
+        ),
     }
 }
 
@@ -2263,8 +2507,11 @@ pub fn turn_ending(peer_ack: bool, peer_ack_final: bool, passed: bool, body: &st
 mod tests {
     use super::*;
     use crate::agents::OutgoingUserMessage;
-    use crate::storage::{MessageKind, UNREAD_BATCH_LIMIT};
+    use crate::policy::session_policy::write_session_policy;
+    use crate::policy::{Policy, SessionPolicy};
+    use crate::storage::UNREAD_BATCH_LIMIT;
     use std::time::Duration;
+    use tempfile::{tempdir, TempDir};
     use tokio::task::JoinHandle;
 
     /// Every await in this file carries this deadline.
@@ -2382,6 +2629,27 @@ mod tests {
         /// the price of a negative assertion — [`quiet`](Self::quiet) pays it
         /// too — and it buys the half of this contract that was being asserted
         /// nowhere.
+        /// Wait for a wake, then take whatever else lands in one [`QUIET`]
+        /// window.
+        ///
+        /// The positive counterpart of [`quiet`](Self::quiet), and deliberately
+        /// NOT [`expect`](Self::expect): it pins that the ring woke this seat
+        /// and leaves the COUNT to the caller. A seat's backlog is however far
+        /// its cursor was behind, which the round-cap tests do not control and
+        /// are not about — they drive laps, and a wire count asserted there
+        /// would be a delivery assertion wearing a scheduling test's name.
+        async fn woken(&mut self) -> Vec<String> {
+            let first = tokio::time::timeout(DEADLINE, self.rx.recv())
+                .await
+                .expect("the ring never woke this participant")
+                .expect("the sequencer dropped this participant's stdin");
+            let mut out = vec![first.message.content];
+            while let Some(w) = self.extra_wire().await {
+                out.push(w);
+            }
+            out
+        }
+
         async fn expect(&mut self, n: usize) -> Vec<String> {
             let mut out = Vec::new();
             for i in 0..n {
@@ -2406,6 +2674,51 @@ mod tests {
     /// posts and asserts with, and one [`Seat`] per roster entry.
     async fn ring(roster: &[(&str, &str)]) -> (SequencerDeps, Storage, Vec<Seat>) {
         ring_sized(roster, STDIN_CAPACITY).await
+    }
+
+    /// [`ring`], with the session's round cap written to a real policy snapshot
+    /// in a temp dir.
+    ///
+    /// Goes through [`write_session_policy`] and the file the gear tab edits
+    /// rather than poking a number into the deps, because the number is not
+    /// what these tests are about — the RESOLUTION is: `None` inherits the
+    /// default, `Some(0)` is off, `Some(n)` caps at n. A `Fixed(u32)` field
+    /// would let all three of those pass with the policy plumbing deleted.
+    ///
+    /// The [`TempDir`] is returned so the caller keeps it alive; drop it and
+    /// the snapshot vanishes mid-test and every cap resolves to the default.
+    async fn capped_ring(
+        roster: &[(&str, &str)],
+        round_cap: Option<u32>,
+    ) -> (SequencerDeps, Storage, Vec<Seat>, TempDir) {
+        let (mut deps, storage, seats) = ring(roster).await;
+        let dir = tempdir().unwrap();
+        write_session_policy(
+            dir.path(),
+            "s1",
+            &SessionPolicy {
+                policy: Policy {
+                    round_cap,
+                    ..Policy::default()
+                },
+                tool_gate: Vec::new(),
+            },
+        )
+        .unwrap();
+        deps.data_dir = Some(dir.path().to_path_buf());
+        (deps, storage, seats, dir)
+    }
+
+    /// Every `system_notice` row in the session, oldest first.
+    async fn notices(storage: &Storage) -> Vec<String> {
+        storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == MessageKind::SystemNotice.as_str())
+            .map(|m| m.content)
+            .collect()
     }
 
     /// [`ring`], with the stdin buffer named rather than defaulted.
@@ -2435,6 +2748,12 @@ mod tests {
             storage: storage.clone(),
             inputs,
             epochs: HashMap::new(),
+            // No snapshot to read, so the cap resolves to
+            // `DEFAULT_ROUND_CAP_LAPS` — 500 laps, which is far past what any
+            // test here drives. `capped_ring` is how a test opts in to a cap it
+            // can actually reach.
+            data_dir: None,
+            bridge: None,
         };
         (deps, storage, seats)
     }
@@ -5052,6 +5371,340 @@ mod tests {
         assert!(exited(task).await, "no halt, so the loop is still draining");
     }
 
+    // ---- the round cap (design §1b's second backstop; rc3 D2 + D7) ---------
+    //
+    // The unit is the whole point. A cap counted in TURNS or in MESSAGES would
+    // pass most of what follows on a ring of two — it fires, it halts, it posts
+    // a row — and fire at half the work the design sized it for. So the ring is
+    // two participants wherever the count is the subject, and the assertion
+    // that separates the units is always a POSITIVE one: the turn that a
+    // wrongly-scaled cap would have refused to hand out.
+
+    /// Drive one turn and read the wake it produces.
+    ///
+    /// Posts `body` first so the woken participant has something past its
+    /// cursor: a ring step delivers no wire when there is nothing to deliver,
+    /// and a silence that means "nothing was unread" cannot be told from one
+    /// that means "the cap fired" — the trap
+    /// `the_cycle_halts_when_every_active_participant_votes_done` documents.
+    ///
+    /// Returns the wires so the caller can say what the wake proves.
+    async fn lap_step(
+        storage: &Storage,
+        tx: &mpsc::Sender<SequencerCommand>,
+        seat: &mut Seat,
+        holder: i64,
+        epoch: u64,
+        body: &str,
+    ) -> Vec<String> {
+        post(storage, "user", None, body).await;
+        send(
+            tx,
+            SequencerCommand::TurnComplete { participant_id: holder, epoch, ending: SPOKE },
+        )
+        .await;
+        seat.woken().await
+    }
+
+    #[tokio::test]
+    async fn the_round_cap_counts_laps_of_the_ring_not_turns() {
+        // **The measurement this whole feature rests on.** A lap is one full
+        // pass over the ACTIVE participants, so on a ring of two a cap of 2 is
+        // FOUR turns, not two. The load-bearing assertion is the one in the
+        // middle: the third turn is handed out, which is exactly the turn a cap
+        // that counted turns (or messages, or rounds-per-participant) would
+        // have refused.
+        let (deps, storage, mut seats, _dir) =
+            capped_ring(&[("a", "active"), ("b", "active")], Some(2)).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // Lap 1: A hands to B, B hands back to A. Only the second of those two
+        // steps closes a lap — the first moves FORWARD through the ring.
+        let w = lap_step(&storage, &tx, &mut seats[1], a, 1, "t1").await;
+        assert!(w.contains(&"t1".to_string()), "A -> B is mid-lap, not a lap");
+        let w = lap_step(&storage, &tx, &mut seats[0], b, 2, "t2").await;
+        assert!(
+            w.contains(&"t2".to_string()),
+            "the ring wrapped, closing lap 1 of 2 — a cap counting TURNS would have \
+             halted here, two turns in"
+        );
+
+        // Lap 2: same again, and the wrap at the end of it is the cap.
+        let w = lap_step(&storage, &tx, &mut seats[1], a, 3, "t3").await;
+        assert!(
+            w.contains(&"t3".to_string()),
+            "still mid-lap: one lap of the two is spent, so the ring keeps moving"
+        );
+
+        post(&storage, "user", None, "t4").await;
+        assert!(
+            !storage.unread_for_participant(a).await.unwrap().rows.is_empty(),
+            "the silence below has to be the cap, not an empty backlog"
+        );
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 4, ending: SPOKE },
+        )
+        .await;
+        // With the control channel still OPEN — a dropped `tx` aborts an
+        // in-flight delivery, so a halt asserted that way passes with the cap
+        // deleted.
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_round_cap_of_zero_never_halts_the_cycle() {
+        // `0` = the backstop is OFF, for a deliberate unattended run (D2). It
+        // is the one value a plain `laps >= cap` would get exactly backwards:
+        // the first lap already satisfies `>= 0`, so "off" would become "halt
+        // immediately".
+        //
+        // Three laps is arbitrary but not decorative — it is past the point any
+        // off-by-one on a zero cap could still be hiding.
+        let (deps, storage, mut seats, _dir) =
+            capped_ring(&[("a", "active"), ("b", "active")], Some(0)).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        for lap in 1..=3u64 {
+            let to_b = format!("lap {lap} first half");
+            let w = lap_step(&storage, &tx, &mut seats[1], a, lap * 2 - 1, &to_b).await;
+            assert!(w.contains(&to_b), "lap {lap}: A -> B");
+            let to_a = format!("lap {lap} second half");
+            let w = lap_step(&storage, &tx, &mut seats[0], b, lap * 2, &to_a).await;
+            assert!(
+                w.contains(&to_a),
+                "lap {lap} closed and the ring kept going: a zero cap is off, not instant"
+            );
+        }
+
+        assert_eq!(
+            notices(&storage).await,
+            nothing(),
+            "no halt, so nothing announced one"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn the_capped_halt_posts_a_visible_row_and_yields() {
+        // rc3 decision **D7**: a silent halt is indistinguishable from a hang.
+        // Both halves are asserted here because either alone is a different
+        // bug — a row with no halt is a lie, and a halt with no row is the
+        // notification gap D7 exists to close.
+        let (deps, storage, mut seats, _dir) =
+            capped_ring(&[("a", "active"), ("b", "active")], Some(1)).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        let w = lap_step(&storage, &tx, &mut seats[1], a, 1, "t1").await;
+        assert!(w.contains(&"t1".to_string()), "one lap is two turns here");
+        assert_eq!(
+            notices(&storage).await,
+            nothing(),
+            "mid-lap, so nothing has been announced yet — the row below is the CAP \
+             firing, not a notice this path posts on every step"
+        );
+
+        post(&storage, "user", None, "t2").await;
+        assert!(
+            !storage.unread_for_participant(a).await.unwrap().rows.is_empty(),
+            "the silence has to be the cap, not an empty backlog"
+        );
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: SPOKE },
+        )
+        .await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+
+        let posted = notices(&storage).await;
+        assert_eq!(posted.len(), 1, "exactly one row, once: {posted:?}");
+        assert!(
+            posted[0].contains("round cap"),
+            "the row has to say WHY the session stopped: {:?}",
+            posted[0]
+        );
+        assert!(
+            posted[0].contains("Session Settings"),
+            "and where to change it, or the user's only move is to guess: {:?}",
+            posted[0]
+        );
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn the_cap_fires_on_its_last_lap_and_not_before() {
+        // The boundary, on its own, because `>=` off by one in either direction
+        // is a live bug the tests above cannot see: they drive to the cap
+        // exactly, so a cap that fired a lap EARLY and one that fired on time
+        // produce the same trailing silence.
+        //
+        // Cap 3. Laps 1 and 2 must each be followed by a handed-out turn — a
+        // positive assertion, so it cannot pass by the ring being wedged — and
+        // lap 3 must not.
+        let (deps, storage, mut seats, _dir) =
+            capped_ring(&[("a", "active"), ("b", "active")], Some(3)).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        for lap in 1..=2u64 {
+            let to_b = format!("lap {lap} to b");
+            lap_step(&storage, &tx, &mut seats[1], a, lap * 2 - 1, &to_b).await;
+            let to_a = format!("lap {lap} to a");
+            let w = lap_step(&storage, &tx, &mut seats[0], b, lap * 2, &to_a).await;
+            assert!(
+                w.contains(&to_a),
+                "lap {lap} of 3 closed and the turn was handed out: the cap must not \
+                 fire before its last lap"
+            );
+        }
+        assert_eq!(
+            notices(&storage).await,
+            nothing(),
+            "two laps of three announced nothing"
+        );
+
+        // Lap 3 — the one the cap is set to.
+        let w = lap_step(&storage, &tx, &mut seats[1], a, 5, "lap 3 to b").await;
+        assert!(w.contains(&"lap 3 to b".to_string()), "mid-lap still runs");
+        post(&storage, "user", None, "lap 3 to a").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 6, ending: SPOKE },
+        )
+        .await;
+        seats[0].quiet().await;
+        assert_eq!(notices(&storage).await.len(), 1, "and now it fires");
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_user_message_starts_the_lap_count_over() {
+        // The cap's halt is a YIELD, so the user's reply has to be able to
+        // release it — and a counter that survived the reply would re-fire on
+        // the next lap and wedge the session shut, which is the opposite of a
+        // backstop. It is also the unit D2 measured in: 3,561 UNINTERRUPTED
+        // stretches, not sessions.
+        //
+        // Cap 2. One lap is spent, then the user speaks; it must take TWO more
+        // laps to fire, not one.
+        let (deps, storage, mut seats, _dir) =
+            capped_ring(&[("a", "active"), ("b", "active")], Some(2)).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::UserMessage).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // Lap 1 of the first stretch.
+        lap_step(&storage, &tx, &mut seats[1], a, 1, "t1").await;
+        lap_step(&storage, &tx, &mut seats[0], b, 2, "t2").await;
+
+        // The user speaks over A's turn. The ring resets to the front and the
+        // count goes with it; A's in-flight turn is superseded, so the epochs
+        // below carry on from the reset's own step rather than from it.
+        post(&storage, "user", None, "new instruction").await;
+        send(&tx, SequencerCommand::UserMessage).await;
+        let w = seats[0].woken().await;
+        assert!(
+            w.contains(&"new instruction".to_string()),
+            "the reset re-woke the front of the ring"
+        );
+
+        // Two more laps. With the count carried over, the FIRST of these would
+        // have hit the cap.
+        lap_step(&storage, &tx, &mut seats[1], a, 4, "t3").await;
+        let w = lap_step(&storage, &tx, &mut seats[0], b, 5, "t4").await;
+        assert!(
+            w.contains(&"t4".to_string()),
+            "lap 1 after the message: the pre-message lap must not still be counted"
+        );
+        assert_eq!(
+            notices(&storage).await,
+            nothing(),
+            "and nothing was announced on it"
+        );
+
+        lap_step(&storage, &tx, &mut seats[1], a, 6, "t5").await;
+        post(&storage, "user", None, "t6").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 7, ending: SPOKE },
+        )
+        .await;
+        seats[0].quiet().await;
+        assert_eq!(
+            notices(&storage).await.len(),
+            1,
+            "two laps after the message is the cap"
+        );
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn the_round_cap_defaults_to_500_laps_and_the_session_overrides_it() {
+        // The default and the whole resolution table in one place, because they
+        // are one decision: `None` at every tier means "nobody set it", which is
+        // the ONLY reading under which 500 is a default rather than a value the
+        // user happened to be given.
+        assert_eq!(
+            DEFAULT_ROUND_CAP_LAPS, 500,
+            "rc3 D2, converted to laps — see the constant for the measurement"
+        );
+
+        // No data dir at all: the backstop stays ARMED at its default rather
+        // than resolving to `0` (off).
+        let (deps, _storage, _seats) = ring(&[("a", "active")]).await;
+        assert_eq!(round_cap_laps(&deps), DEFAULT_ROUND_CAP_LAPS);
+
+        // A snapshot that sets nothing inherits the same default.
+        let (deps, _storage, _seats, _dir) = capped_ring(&[("a", "active")], None).await;
+        assert_eq!(round_cap_laps(&deps), DEFAULT_ROUND_CAP_LAPS);
+
+        // And the per-session override is read from the file the gear tab
+        // writes — both the ordinary case and the one that turns it off.
+        let (deps, _storage, _seats, _dir) = capped_ring(&[("a", "active")], Some(40)).await;
+        assert_eq!(round_cap_laps(&deps), 40);
+        let (deps, _storage, _seats, _dir) = capped_ring(&[("a", "active")], Some(0)).await;
+        assert_eq!(round_cap_laps(&deps), 0, "0 is a value, not an absence");
+    }
+
     // ---- what a completed turn means (inventory #8-#11) --------------------
     //
     // Pure-function tests, deliberately. What each row means for the RING — a
@@ -5372,6 +6025,8 @@ mod tests {
             storage: storage.clone(),
             inputs,
             epochs: HashMap::new(),
+            data_dir: None,
+            bridge: None,
         };
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));

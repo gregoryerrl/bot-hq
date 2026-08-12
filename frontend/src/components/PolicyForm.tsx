@@ -81,6 +81,29 @@ export function PolicyForm({
           className={terminalInputClass}
         />
       </Field>
+
+      <Field
+        label="Round cap (laps)"
+        hint="Safety net, not a checkpoint: the turn cycle halts and yields to you after this many full passes over the participants. Empty = inherit (500 laps). 0 = off."
+      >
+        <input
+          type="number"
+          min={0}
+          step={1}
+          value={value.round_cap ?? ""}
+          disabled={disabled}
+          // Empty box === `null` === "not set at this tier", which is a
+          // different thing from 0 ("off"): `Number("")` is 0, so coercing
+          // would silently disarm the cap on any edit that cleared the field.
+          onChange={(e) =>
+            patch({
+              round_cap: e.target.value === "" ? null : Math.max(0, e.target.valueAsNumber || 0),
+            })
+          }
+          placeholder="500 (inherited)"
+          className={terminalInputClass}
+        />
+      </Field>
     </div>
   );
 }

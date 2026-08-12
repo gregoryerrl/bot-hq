@@ -207,6 +207,9 @@ mod tests {
             per_action_approval: vec!["terraform apply".into()],
             branch_pattern: "feature/.*".into(),
             commit_style: "house-style".into(),
+            // Non-`None` so the file round-trips below cover it — `None` is
+            // what a key dropped on write reads back as.
+            round_cap: Some(250),
         }
     }
 

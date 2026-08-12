@@ -1508,7 +1508,25 @@ branch_pattern?: string;
  * Free-form commit style note.
  * Surfaced to the agent in its system prompt.
  */
-commit_style?: string }
+commit_style?: string; 
+/**
+ * Turn-cycle round cap, in LAPS of the ring
+ * ([`crate::core::sequencer::DEFAULT_ROUND_CAP_LAPS`] documents the unit
+ * and the number). A backstop the sequencer enforces, NOT an enforcement
+ * rule the agents are told about — it is deliberately absent from
+ * [`Policy::render_system_prompt_block`] and from
+ * [`Policy::is_effectively_empty`], both of which are about what the
+ * agents must obey.
+ * 
+ * **Three-valued on purpose, which is why it is an `Option` and the other
+ * scalars are not.** `None` = not set at this tier, so the next tier down
+ * (and finally the built-in default) decides; `Some(0)` = the backstop is
+ * OFF, for a deliberate unattended run; `Some(n)` = halt after `n` laps.
+ * A plain `u32` would collapse the first two — a missing key deserializes
+ * as `0`, which is the one value that means "never halt", so every policy
+ * file that had never heard of this key would silently disarm the cap.
+ */
+round_cap?: number | null }
 /**
  * Shared spawn logic for both fresh and existing sessions: spawn Brian + Rain,
  * kick the duo pumps, return the handle.
