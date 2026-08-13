@@ -563,9 +563,17 @@ mod tests {
         let wire = next_wire(&mut rx).await.message.content;
         assert_eq!(
             wire,
-            crate::storage::render_wire(rows[1].envelope.as_ref(), &rows[1].content)
+            format!(
+                "[{}] {}",
+                crate::storage::speaker_of(&rows[1].origin, rows[1].author.as_deref()),
+                crate::storage::render_wire(rows[1].envelope.as_ref(), &rows[1].content)
+            )
         );
-        assert!(wire.starts_with("[PHASE: Apply]\n[System: this session went idle"));
+        // rc3 D23: `[system]`, and it matters here more than anywhere. The nudge
+        // is bot-hq talking; an agent that reads it as the USER has been handed
+        // a fabricated instruction, which is the failure the general rules are
+        // built around.
+        assert!(wire.starts_with("[system] [PHASE: Apply]\n[System: this session went idle"));
         assert!(rx.try_recv().is_err(), "the NOTICE is not wired to anyone");
     }
 }

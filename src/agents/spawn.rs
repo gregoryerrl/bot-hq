@@ -1461,7 +1461,10 @@ mod tests {
         assert!(input.deliver(&from_a).await);
         assert_eq!(
             rx.try_recv().unwrap().message.content,
-            "meant for this session"
+            // rc3 D23: the wire says who wrote it. `[user]` here, and that is
+            // the point of the label — a receipt from another session would
+            // arrive looking identical without it.
+            "[user] meant for this session"
         );
     }
 

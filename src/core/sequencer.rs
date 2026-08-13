@@ -2870,6 +2870,36 @@ mod tests {
         rx: mpsc::Receiver<OutgoingUserMessage>,
     }
 
+    /// A wire with its `[speaker]` prefix removed.
+    ///
+    /// **Every assertion in this file is about ROUTING** — who was handed which
+    /// rows, in what order — and names the rows by content only to identify
+    /// them. The speaker (rc3 D23) is a property of the WIRE FORMAT, and
+    /// threading it through forty-five routing assertions would state it forty-
+    /// five times while testing it nowhere: a run that dropped the prefix from
+    /// exactly one path would still redden all of them, and a run that put the
+    /// WRONG name on would redden none, because the expectation would have been
+    /// written from the observed output.
+    ///
+    /// So it is stripped here and pinned where it is the subject:
+    /// `a_delivered_row_says_who_wrote_it` below (end to end, including a peer's
+    /// slug), `the_wire_is_the_row_plus_its_envelope` in `agents::spawn` (what
+    /// reaches stdin), and `render_wire`'s own tests in `storage` (the format).
+    ///
+    /// Only a LEADING `[word] ` goes; `[PHASE: Apply]` survives, because the
+    /// speaker is always first and a phase tag has a space inside the brackets.
+    fn unlabelled(wire: String) -> String {
+        let Some(rest) = wire.strip_prefix('[') else {
+            return wire;
+        };
+        match rest.split_once("] ") {
+            // A speaker is one word. Anything else is envelope decoration that
+            // happens to start with a bracket, and must be left alone.
+            Some((speaker, body)) if !speaker.contains(' ') => body.to_string(),
+            _ => wire,
+        }
+    }
+
     impl Seat {
         /// Everything on this stdin right now.
         ///
@@ -2880,6 +2910,24 @@ mod tests {
         fn drain(&mut self) -> Vec<String> {
             let mut out = Vec::new();
             while let Ok(m) = self.rx.try_recv() {
+                out.push(unlabelled(m.message.content));
+            }
+            out
+        }
+
+        /// [`expect`](Self::expect) with the `[speaker]` prefix left ON — for
+        /// the one test whose subject IS the prefix.
+        ///
+        /// Deliberately NOT a `try_recv` drain: the rows have to be waited for,
+        /// and a drain that read too early would return an empty vec and assert
+        /// nothing while looking like it passed.
+        async fn expect_raw(&mut self, n: usize) -> Vec<String> {
+            let mut out = Vec::new();
+            for i in 0..n {
+                let m = tokio::time::timeout(DEADLINE, self.rx.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("raw wire {} of {n} never arrived", i + 1))
+                    .expect("the sequencer dropped this participant's stdin");
                 out.push(m.message.content);
             }
             out
@@ -2892,7 +2940,7 @@ mod tests {
         /// differ only in what they say when they fail.
         async fn extra_wire(&mut self) -> Option<String> {
             match tokio::time::timeout(QUIET, self.rx.recv()).await {
-                Ok(Some(m)) => Some(m.message.content),
+                Ok(Some(m)) => Some(unlabelled(m.message.content)),
                 // Elapsed, or the sender was dropped. Both are silence.
                 _ => None,
             }
@@ -2953,7 +3001,7 @@ mod tests {
                 .await
                 .expect("the ring never woke this participant")
                 .expect("the sequencer dropped this participant's stdin");
-            let mut out = vec![first.message.content];
+            let mut out = vec![unlabelled(first.message.content)];
             while let Some(w) = self.extra_wire().await {
                 out.push(w);
             }
@@ -2967,7 +3015,7 @@ mod tests {
                     .await
                     .unwrap_or_else(|_| panic!("wire {} of {n} never arrived", i + 1))
                     .expect("the sequencer dropped this participant's stdin");
-                out.push(m.message.content);
+                out.push(unlabelled(m.message.content));
             }
             if let Some(w) = self.extra_wire().await {
                 panic!("expected exactly {n} wires, then {w:?} arrived as well");
@@ -3256,6 +3304,48 @@ mod tests {
              every unread row. A ring that stops at two is two agents and a spectator."
         );
 
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// rc3 **D23**: a delivered row says who wrote it.
+    ///
+    /// The one test here whose subject IS the wire format, which is why it reads
+    /// raw — everything else in this file strips the prefix so its routing
+    /// assertions stay about routing. See [`unlabelled`].
+    ///
+    /// **The wire carried no author at all before this.** A participant handed
+    /// four rows received four anonymous strings and had to infer which was the
+    /// user's task, which was a peer's aside, and which was the host talking.
+    /// `s-81057bde` is what that costs: a reviewer reported "no task from the
+    /// user and no HANDS output" while `participant_deliveries` recorded eight
+    /// rows handed to it. Both statements were true — it had read them and could
+    /// not tell what they were.
+    #[tokio::test]
+    async fn a_delivered_row_says_who_wrote_it() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        // One of each authority a participant can be handed, because telling
+        // them apart is the whole point: the user is who it works for, a peer is
+        // who it argues with, and the host is neither — an agent that reads a
+        // system notice as the user has been handed a fabricated instruction.
+        post(&storage, "user", None, "the task").await;
+        post(&storage, "participant", Some("b"), "a peer's opinion").await;
+        post(&storage, "system", None, "a host notice").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect_raw(3).await,
+            vec![
+                "[user] the task",
+                // The PEER's slug, not "participant" — and the same string
+                // `@mention` parses, so what a participant reads is what the
+                // user would type to summon it.
+                "[b] a peer's opinion",
+                "[system] a host notice",
+            ]
+        );
         drop(tx);
         assert!(exited(task).await);
     }

@@ -1265,7 +1265,7 @@ mod tests {
         };
         let receipt = receipt.expect("storage is wired, so the answer became a row");
         assert_eq!(receipt.body(), body, "the receipt is for THIS answer");
-        assert_eq!(receipt.wire(), format!("[PHASE: Plan]\n{body}"));
+        assert_eq!(receipt.wire(), format!("[user] [PHASE: Plan]\n{body}"));
 
         // Dropping the session's IPAV state (its handle is gone, but nothing
         // called `unregister_session`) leaves a dead `Weak`. That is the honest
@@ -1290,7 +1290,9 @@ mod tests {
         let ResolveOutcome::AgentReceiverDroppedFellBack { body, receipt, .. } = outcome else {
             panic!("expected the OOB fallback path");
         };
-        assert_eq!(receipt.unwrap().wire(), body);
+        // No phase to envelope (the session's IPAV state is gone), so the wire
+        // is the body plus the speaker and nothing else — rc3 D23.
+        assert_eq!(receipt.unwrap().wire(), format!("[user] {body}"));
     }
 
     #[tokio::test]

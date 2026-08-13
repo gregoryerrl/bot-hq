@@ -2086,7 +2086,10 @@ mod tests {
         a.send_to_all(&from_a).await;
         assert_eq!(
             a_rx.try_recv().unwrap().message.content,
-            "meant for this session"
+            // rc3 D23: the wire says who wrote it. `[user]` here, and that is
+            // the point of the label — a receipt from another session would
+            // arrive looking identical without it.
+            "[user] meant for this session"
         );
     }
 
@@ -2137,14 +2140,18 @@ mod tests {
         let wire = irx.recv().await.unwrap().message.content;
         assert_eq!(
             wire,
-            crate::storage::render_wire(receipt.envelope(), receipt.body()),
-            "the wire is the renderer's output and nothing else"
+            format!(
+                "[{}] {}",
+                receipt.speaker(),
+                crate::storage::render_wire(receipt.envelope(), receipt.body())
+            ),
+            "the wire is the speaker plus the renderer's output, and nothing else"
         );
         // Spelled out too, so a renderer change that keeps both sides in step
         // still has to justify the bytes an agent actually reads.
         assert_eq!(
             wire,
-            "[PHASE: Apply]\n⚠ 2 unresolved EYES blocking finding(s) — run \
+            "[system] [PHASE: Apply]\n⚠ 2 unresolved EYES blocking finding(s) — run \
              check_open_findings and disposition each (fix/rebut) before you \
              commit.\n[System: previous turn interrupted]\ndeclare state"
         );
@@ -2154,8 +2161,13 @@ mod tests {
         assert_eq!(row.id, receipt.message_id());
         assert_eq!(
             wire,
-            crate::storage::render_wire(row.envelope.as_ref(), &row.content),
-            "recorded == delivered, re-derived from the stored row"
+            format!(
+                "[{}] {}",
+                crate::storage::speaker_of(&row.origin, row.author.as_deref()),
+                crate::storage::render_wire(row.envelope.as_ref(), &row.content)
+            ),
+            "recorded == delivered, re-derived from the stored row — speaker included, \
+             which is what says the label comes off the ROW and not off the sender"
         );
     }
 

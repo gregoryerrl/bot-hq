@@ -1444,6 +1444,37 @@ impl Envelope {
 /// hand: phase tag, then findings banner, then system prefix, then the body.
 /// The prefix sits closest to the body because those sites concatenated it onto
 /// the body FIRST and wrapped the pair in the phase envelope afterwards.
+/// Who a delivered row is FROM, as the participant reading it sees.
+///
+/// **The wire carried no author at all until rc3 D23**, and three sessions'
+/// worth of confusion trace back to that one gap. A participant handed four rows
+/// received four anonymous strings: it could not tell the user's task from a
+/// peer's aside from a host notice, so it inferred, and the inference showed up
+/// as `s-81057bde`'s reviewer reporting "no task from the user and no HANDS
+/// output" while the delivery table recorded eight rows handed to it. Both were
+/// true. It had read them and could not tell what they were.
+///
+/// The slug rather than the display name (`ROLE · Model`), for two reasons: it
+/// is ON the row, so labelling costs no lookup and cannot go stale mid-session;
+/// and it is the same handle `@mention` parses, so a participant reading
+/// `[eyes-2]` is reading the string the user would type to summon it. rc3 D20's
+/// user-set label supersedes this when it lands — the label the peers read and
+/// the label the user reads should be one string.
+pub fn speaker_of(origin: &str, author: Option<&str>) -> String {
+    match origin {
+        // The host's own injections and the user's typing are both "not a
+        // peer", but they are not the same authority and must not read as one:
+        // a system notice is bot-hq talking, and an agent that mistakes it for
+        // the user has been handed a fabricated instruction.
+        "system" => "system".to_string(),
+        "user" => "user".to_string(),
+        // A participant row whose author is missing predates the dual-write or
+        // was written by a path that did not set it. Naming it `participant` is
+        // less wrong than naming it nothing.
+        _ => author.unwrap_or("participant").to_string(),
+    }
+}
+
 pub fn render_wire(envelope: Option<&Envelope>, body: &str) -> String {
     let Some(envelope) = envelope else {
         return body.to_string();
@@ -1508,6 +1539,10 @@ pub struct ChannelMessage {
     pub content: String,
     pub envelope: Option<Envelope>,
     pub created_at: String,
+    /// Who wrote it — the participant slug for `origin = "participant"`, and
+    /// `"user"` for everything the host or the user authored. Read because the
+    /// WIRE has to say it: see [`speaker_of`].
+    pub author: Option<String>,
     /// See the type doc: zero-sized, private, and the only reason "this value
     /// came out of `messages`" is enforced rather than merely true today.
     _from_table: (),
@@ -1546,7 +1581,7 @@ pub struct ChannelPage {
 pub const UNREAD_BATCH_LIMIT: i64 = 200;
 
 const CHANNEL_COLUMNS: &str =
-    "id, session_id, participant_id, origin, kind, content, envelope, created_at";
+    "id, session_id, participant_id, origin, kind, content, envelope, created_at, author";
 
 fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
     use sqlx::Row;
@@ -1569,6 +1604,7 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
                 None
             }
         }),
+        author: r.get("author"),
         created_at: r.get("created_at"),
         // The one place this may be written: the value is coming off a
         // `SELECT`, which is exactly what the field asserts.
@@ -1672,6 +1708,10 @@ pub struct PersistedMessage {
     session_id: Arc<str>,
     body: String,
     envelope: Option<Envelope>,
+    /// Who wrote it, as the reader sees — see [`speaker_of`]. On the receipt
+    /// rather than resolved at the write, because the write has no roster and
+    /// the row already knows.
+    speaker: String,
 }
 
 impl PersistedMessage {
@@ -1699,7 +1739,14 @@ impl PersistedMessage {
     /// [`render_wire`] on the delivery path goes through here, and the
     /// arguments cannot drift from the row they came from.
     pub fn wire(&self) -> String {
-        render_wire(self.envelope.as_ref(), &self.body)
+        // **The speaker leads.** Everything else in the wire decorates the
+        // message; this says whose message it is, which is the one thing a
+        // participant cannot work out for itself.
+        format!(
+            "[{}] {}",
+            self.speaker,
+            render_wire(self.envelope.as_ref(), &self.body)
+        )
     }
 
     /// A receipt for a row READ BACK from `messages`.
@@ -1756,7 +1803,13 @@ impl PersistedMessage {
             session_id: Arc::from(row.session_id.as_str()),
             body: row.content.clone(),
             envelope: row.envelope.clone(),
+            speaker: speaker_of(&row.origin, row.author.as_deref()),
         }
+    }
+
+    /// Who this row is from — the `[speaker]` the wire carries.
+    pub fn speaker(&self) -> &str {
+        &self.speaker
     }
 }
 
@@ -1880,6 +1933,9 @@ impl Storage {
             session_id,
             body: content,
             envelope,
+            // Resolved from the same two values the INSERT just wrote, so the
+            // receipt says exactly what a re-read of the row would.
+            speaker: speaker_of(origin, Some(legacy_author)),
         })
     }
 
@@ -4559,8 +4615,15 @@ mod tests {
         // stored row does, which is the whole of what a delivery may write.
         assert_eq!(
             pm.wire(),
-            render_wire(rows[0].envelope.as_ref(), &rows[0].content)
+            format!(
+                "[{}] {}",
+                speaker_of(&rows[0].origin, rows[0].author.as_deref()),
+                render_wire(rows[0].envelope.as_ref(), &rows[0].content)
+            )
         );
+        // Spelled out, because "who wrote it" is the half a participant cannot
+        // work out for itself (rc3 D23).
+        assert_eq!(pm.speaker(), "hands");
     }
 
     #[tokio::test]
@@ -4595,7 +4658,7 @@ mod tests {
         assert_eq!(replayed.wire(), posted.wire());
         assert_eq!(
             replayed.wire(),
-            "[PHASE: Verify]\n⚠ 3 unresolved EYES blocking finding(s) — run \
+            "[system] [PHASE: Verify]\n⚠ 3 unresolved EYES blocking finding(s) — run \
              check_open_findings and disposition each (fix/rebut) before you \
              commit.\ndeclare state"
         );
