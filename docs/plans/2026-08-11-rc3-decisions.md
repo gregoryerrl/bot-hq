@@ -588,11 +588,24 @@ A count over the roster would be a SECOND numbering, and two numberings of one
 thing disagree the first time a participant is disabled. The first of a role
 takes no suffix, so a one-reviewer session is unchanged.
 
-**Colour needed no separate mechanism.** `authorColor` hashes the LABEL, so the
-collision was downstream of the identical strings; distinct labels give distinct
-hues and the "rotation" this decision asked for falls out. A per-slot rotation
-would still be stronger — a hash can collide — and is worth doing only if two
-participants are ever seen sharing a hue in practice.
+**Colour needed no separate mechanism** — ❌ **WRONG, and disproved within the
+hour.** The claim was that `authorColor` hashes the LABEL, so distinct labels
+give distinct hues and the rotation falls out. Distinct STRINGS were never the
+constraint; distinct OUTPUTS were, and the palette held exactly **two** hues
+against a roster that caps at four. At N=3 a collision is pigeonhole, not
+chance. The user reported it from the next live session: *"HANDS and EYES-2 have
+the same color."*
+
+Shipped properly in `f78d58e` + `93eed52`: eight named hues, assigned by roster
+position, with a per-participant override (migration 0052 stores the palette
+entry's NAME). **Verified live in `s-991f7416`** — three participants, three
+distinct colours, confirmed on screen.
+
+The lesson worth keeping is the shape of the error rather than the fix: the
+comment beside the two-hue palette said a repeat was *"a shared colour, not a
+wrong one"* — true when a session held two participants, false the moment the cap
+moved to four, and nobody revisited it. A claim that was correct under an old
+constraint reads exactly like a claim that is correct.
 
 **Four frontend fixtures already modelled the exact case** (role `EYES`, slug
 `eyes-2`) and asserted the collision as correct. Their expectations were the bug.
@@ -888,3 +901,34 @@ Two fixes point at this and only one of them has shipped:
 
 An earlier note in this file said coalescing should be measured before being
 built. This is the measurement.
+
+### Live verification of D22–D25 (`s-d8773b42`, `s-991f7416`)
+
+Two sessions on the fixed build, measured with `scripts/turn-latency.py` so the
+before/after is the same query rather than a re-derivation.
+
+| | `s-a4e9a1b4` (before) | `s-d8773b42` | `s-991f7416` |
+|---|---|---|---|
+| `pass_turn` calls | 209 (**45.4%** of all tool calls) | 6 | 5 (**8.6%**) |
+| pass bursts | 9, the largest 178 calls over 10.5 min | 0 | 0 |
+| turn end → handover | 9.5s | 1.0s | 5.0s |
+| handover → first output | 9.5s | 10.3s | 9.3s |
+| model pace | 0.6s | 0.4s | 0.6s |
+
+**D25's refusal has teeth, and it takes one or two rather than none.** This was
+the open question — a unit test can prove the tool returns an error, not that a
+model reads it. In `s-991f7416` EYES passed, retried once, was refused, stopped;
+EYES-2 passed, retried twice, was refused twice, stopped. Bounded at 2–3
+attempts against 141, and structurally incapable of a runaway.
+
+**The wedge is gone.** Every discard in both sessions is the ordinary supersede
+shape (the ring had already moved on); no epoch-0 carrier, and no participant
+carrying the same epoch twice.
+
+**The latency split is confirmed rather than hypothesised.** The "turn ending"
+half was the wedge and has halved or better; the "starting" half is prefill,
+unchanged in every build, and is what the delivery-order work would address.
+
+**Still true, and now the largest open item:** the user's message arrives buried
+3 times in 4, including row 8 of 8. D23's label makes it identifiable; only
+coalescing makes it last.
