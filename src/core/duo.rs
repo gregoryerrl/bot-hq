@@ -1300,7 +1300,7 @@ mod tests {
         let (seq_tx, mut seq_rx) = mpsc::channel(1);
         // The one slot, spent. Anything the pump sends now has to wait.
         seq_tx
-            .send(crate::core::sequencer::SequencerCommand::UserMessage)
+            .send(crate::core::sequencer::SequencerCommand::UserMessage { mentions: Vec::new() })
             .await
             .unwrap();
         let cfg = DuoConfig {
@@ -1351,7 +1351,7 @@ mod tests {
         // Now let the completion through and read what it says.
         assert!(matches!(
             next_wire(&mut seq_rx).await,
-            crate::core::sequencer::SequencerCommand::UserMessage
+            crate::core::sequencer::SequencerCommand::UserMessage { .. }
         ));
         match next_wire(&mut seq_rx).await {
             crate::core::sequencer::SequencerCommand::TurnComplete {

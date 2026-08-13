@@ -167,7 +167,7 @@ describe("RolesPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /\+ new role/i }));
     fireEvent.change(nameField(), { target: { value: "Code Reviewer" } });
     fireEvent.change(prose(), { target: { value: "Be terse." } });
-    fireEvent.change(modeSelect(), { target: { value: "observer" } });
+    fireEvent.change(modeSelect(), { target: { value: "on_mention" } });
     fireEvent.change(screen.getByRole("combobox", { name: /default model/i }), {
       target: { value: "m1" },
     });
@@ -183,7 +183,7 @@ describe("RolesPanel", () => {
           slug: null,
           description_prompt: "Be terse.",
           capabilities: ["read_channel"],
-          participation_mode: "observer",
+          participation_mode: "on_mention",
           default_model_id: "m1",
         },
       }),
@@ -373,7 +373,7 @@ describe("RolesPanel", () => {
     expect(notice).not.toHaveTextContent(/restore the default/i);
   });
 
-  it("never offers on_demand as a participation mode", async () => {
+  it("offers exactly two participation modes, and both of them do something", async () => {
     mockBackend();
     renderPanel();
     await screen.findByText("HANDS");
@@ -381,24 +381,28 @@ describe("RolesPanel", () => {
     const options = within(modeSelect()).getAllByRole("option");
     expect(options.map((o) => o.getAttribute("value"))).toEqual([
       "active",
-      "observer",
+      "on_mention",
     ]);
-    // rc3 D1: mention-wake is not built, so an on_demand role would be
-    // enabled, rostered and never given a turn.
-    expect(modeSelect()).not.toHaveTextContent("on_demand");
+    // rc3 D18: `observer` was the third. It was spawned, handed no turn and
+    // delivered nothing — a process that read nothing, said nothing and billed
+    // for existing.
+    expect(modeSelect()).not.toHaveTextContent(/observer/i);
   });
 
-  it("keeps a stored on_demand mode visible rather than rewriting it", async () => {
+  it("keeps a mode the picker no longer offers visible rather than rewriting it", async () => {
     // The picker omitting a value the row HOLDS is how editing the prose
     // silently changes the mode: the select falls back to its first option and
     // the save writes that back.
-    mockBackend([role({ participation_mode: "on_demand" })]);
+    //
+    // `observer` is the fixture because it is the real case — rc3 D18 retired
+    // it, and a database written before that can still hold one.
+    mockBackend([role({ participation_mode: "observer" })]);
     renderPanel();
     await screen.findByText("HANDS");
 
-    expect(modeSelect()).toHaveValue("on_demand");
+    expect(modeSelect()).toHaveValue("observer");
     const stored = within(modeSelect()).getByRole("option", {
-      name: /on_demand/i,
+      name: /observer/i,
     });
     expect(stored).toBeDisabled();
 
@@ -406,7 +410,7 @@ describe("RolesPanel", () => {
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("update_role", {
         id: 1,
-        draft: expect.objectContaining({ participation_mode: "on_demand" }),
+        draft: expect.objectContaining({ participation_mode: "observer" }),
       }),
     );
   });

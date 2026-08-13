@@ -33,7 +33,7 @@ export type ParticipantView = {
   /** e.g. `"Claude Opus 5"`. Null when no model is set. */
   model_display_name: string | null;
   turn_position: number;
-  /** `"active"` | `"observer"`. */
+  /** `"active"` | `"on_mention"` (rc3 D17/D18). */
   participation_mode: string;
   enabled: boolean;
 };
@@ -310,7 +310,7 @@ export const EDIT_FILES = "edit_files";
  * ## Why this is not `CapabilitySet::warnings()`
  *
  * That Rust function answers a different question: it advises on ONE role's set
- * in isolation (self-review, observer, silent worker). D11 asks what the UNION
+ * in isolation (self-review, read-only, silent worker). D11 asks what the UNION
  * of the picked roster cannot do — a different input and a different output, so
  * calling it would not answer this even with a command built to reach it. The
  * union is a set-membership test over `RoleView.capabilities`, which this

@@ -193,15 +193,10 @@ pub(crate) async fn resolve_participant_picks(
                 role.display_name
             )));
         }
-        if role.participation_mode == "on_mention" {
-            // rc3 D1/D17: an `on_mention` participant wakes when the user names
-            // it, and that is not built. Inviting one produces a participant the
-            // ring skips and nothing ever wakes.
-            return Err(AppError::Validation(format!(
-                "role {} is summoned by mention, and the summons is not built yet",
-                role.display_name
-            )));
-        }
+        // An `on_mention` role is a legal invite as of rc3 D17: it is spawned,
+        // sits out the rotation, and takes a turn when the user names it. It
+        // does not count towards `any_active` — a roster of nothing but
+        // summonable participants has an empty ring, which is the check below.
         any_active |= role.participation_mode == "active";
         // rc3 D12: the knobs come off the participant's own row. The two
         // legacy per-agent fields on `SessionCreateOptions` still apply to
@@ -227,11 +222,10 @@ pub(crate) async fn resolve_participant_picks(
         // a turn: the ring is empty, so `all_active_voted_done` is vacuously
         // true and the session is "finished" before it starts.
         //
-        // **Unreachable while the `on_mention` refusal above stands** — with two
-        // modes and one of them refused, every roster that gets here is
-        // all-active — and kept because rc3 D17 lifts that refusal, at which
-        // point an all-`on_mention` roster reaches this and must be caught. It
-        // is the guard for a state one decision away, not dead code.
+        // **Live again as of rc3 D17**, which lifted the blanket refusal of
+        // `on_mention` picks. An all-summonable roster is the reachable way to
+        // build one — every participant waiting to be named, nobody to name them
+        // into a conversation that has not started.
         return Err(AppError::Validation(
             "at least one participant has to be in the turn rotation".into(),
         ));
@@ -1499,24 +1493,28 @@ mod tests {
             "a role id that names nothing"
         );
 
-        // rc3 D1/D17: an `on_mention` participant wakes when the USER names it,
-        // and the summons is not built. Inviting one is inviting a participant
-        // nothing wakes.
-        //
-        // Paired with an ACTIVE participant on purpose, and the error MESSAGE is
-        // asserted rather than `is_err()` alone: a lone `on_mention` roster also
-        // has an empty rotation, so a bare `is_err()` here would pass whichever
-        // of the two rules fired — including if this one were deleted.
+        // rc3 D17: an `on_mention` participant is a legal invite — spawned,
+        // skipped by the ring, handed a turn when the user names it.
         let summonable = role_with_mode(&storage, "Specialist", "on_mention").await;
-        let refused = resolve_participant_picks(
-            &storage,
-            &[pick(hands.id, None), pick(summonable, None)],
-            &opts,
-        )
-        .await
-        .expect_err("summoning is not built yet, so inviting one must be refused");
         assert!(
-            refused.to_string().contains("summoned by mention"),
+            resolve_participant_picks(
+                &storage,
+                &[pick(hands.id, None), pick(summonable, None)],
+                &opts
+            )
+            .await
+            .is_ok(),
+            "a summonable participant alongside an active one is a legal roster"
+        );
+        // …but it is not IN the rotation, so it cannot be the only member. A
+        // roster of nothing but summonable participants has an empty ring, which
+        // `all_active_voted_done` reports as vacuously done: a session finished
+        // before it starts, with nobody to name anyone into it.
+        let refused = resolve_participant_picks(&storage, &[pick(summonable, None)], &opts)
+            .await
+            .expect_err("an all-summonable roster has nobody in the turn rotation");
+        assert!(
+            refused.to_string().contains("turn rotation"),
             "refused for the wrong reason: {refused}"
         );
 

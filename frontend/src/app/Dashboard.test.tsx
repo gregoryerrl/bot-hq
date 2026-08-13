@@ -265,12 +265,14 @@ describe("New session dialog — participants", () => {
     expect(screen.queryByText(/spawns through the claude CLI/i)).toBeNull();
   });
 
-  it("does not offer an on-demand role", async () => {
-    // rc3 D1: waking one needs a user @mention, which is not built. Offering
-    // it would seed a participant the ring skips and nothing ever wakes.
+  it("offers an on-mention role, because the user can now summon one", async () => {
+    // rc3 D17. This test asserted the OPPOSITE while nothing could wake an
+    // `on_mention` participant: inviting one seeded a participant the ring
+    // skips and nothing ever reaches. The user naming it is what changed —
+    // filtering the mode out of the dialog now hides the whole feature.
     mockBackend([
       role(),
-      role({ id: 7, slug: "specialist", display_name: "SPECIALIST", participation_mode: "on_demand" }),
+      role({ id: 7, slug: "specialist", display_name: "SPECIALIST", participation_mode: "on_mention" }),
     ]);
     await openDialog();
     await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
@@ -279,7 +281,7 @@ describe("New session dialog — participants", () => {
       (o) => o.textContent,
     );
     expect(options).toContain("HANDS");
-    expect(options).not.toContain("SPECIALIST");
+    expect(options).toContain("SPECIALIST");
   });
 });
 

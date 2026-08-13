@@ -16,21 +16,24 @@ const selectClass =
   "w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary";
 
 /**
- * The participation modes the picker OFFERS.
+ * The participation modes the picker OFFERS — **two, and both of them do
+ * something** (rc3 D18).
  *
- * `on_demand` exists in the column (0044) and in `PARTICIPATION_MODES`, and is
- * deliberately absent here — rc3 decision D1 makes an on-demand role wake on a
- * user `@mention`, and mention-wake is not built. Offering the mode would ship
- * a role that is enabled, listed in the roster, and never handed a turn, with
- * nothing to grep for.
+ * `observer` was the third and is gone: it was spawned, handed no turn,
+ * delivered nothing and could not vote, so it read nothing, said nothing and
+ * billed for existing. What it was reached for — a role that watches and speaks
+ * rarely — is `on_mention`.
  *
- * A role ALREADY stored as `on_demand` still renders — see `modeOptions`. The
- * picker refusing to show a value the row holds is how an edit to the prose
+ * A role stored with some OTHER value still renders; see `modeOptions`. A picker
+ * that refuses to show the value a row holds is how an edit to the prose
  * silently rewrites the mode.
  */
 const OFFERED_MODES = [
   { value: "active", label: "Active — takes turns in the rotation" },
-  { value: "observer", label: "Observer — reads the session, never wakes" },
+  {
+    value: "on_mention",
+    label: "On mention — waits; takes a turn when you @ it",
+  },
 ] as const;
 
 const NO_MODEL = "__none__";

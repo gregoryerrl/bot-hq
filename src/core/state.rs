@@ -860,6 +860,49 @@ impl AppState {
         self.bridge.clear_session_awaiting(session_id).await;
     }
 
+    /// The participants a user message summons, in the order they were named
+    /// (rc3 **D17**).
+    ///
+    /// **An `@word` that names nobody is ordinary prose, never an error** (D1).
+    /// The `@` picker in the composer makes the case rare by construction — it
+    /// offers this session's participants and nothing else — but text also
+    /// arrives from the external driver, and a message REFUSED for naming a
+    /// participant that has since left the roster would be a far worse failure
+    /// than a word that did nothing. Same for a read error: the summons is
+    /// dropped and the ring carries on, because the user's message landing one
+    /// turn later beats it not landing.
+    ///
+    /// A disabled participant is dropped too. There is no process behind one, so
+    /// handing it the turn would stop the cycle on a participant that cannot
+    /// complete it — the frozen-cycle case the sequencer's module doc describes,
+    /// reached deliberately instead of by accident.
+    async fn resolve_mentions(&self, session_id: &str, text: &str) -> Vec<i64> {
+        let slugs = crate::core::mentions::parse_mention_slugs(text);
+        let mut ids = Vec::with_capacity(slugs.len());
+        for slug in slugs {
+            match self.storage.participant_by_slug(session_id, &slug).await {
+                Ok(Some(p)) if p.enabled => ids.push(p.id),
+                Ok(Some(_)) => tracing::debug!(
+                    session_id,
+                    %slug,
+                    "a mention named a disabled participant; ignored"
+                ),
+                Ok(None) => tracing::debug!(
+                    session_id,
+                    %slug,
+                    "a mention named nobody in this session; it is ordinary prose"
+                ),
+                Err(e) => tracing::warn!(
+                    session_id,
+                    %slug,
+                    ?e,
+                    "resolving a mention failed; the summons is dropped"
+                ),
+            }
+        }
+        ids
+    }
+
     pub async fn broadcast(&self, session_id: &str, text: &str) -> Result<()> {
         // Auto-heal: if the duo went stale (e.g. an agent's stdin pump died,
         // closing the public input channel — a now-deaf agent that would silently
@@ -973,10 +1016,18 @@ impl AppState {
         // the turn to the front of the rotation and that participant drains the
         // row off its cursor; everyone else reads it when their turn comes.
         let id = broadcast_user_message(&self.storage, session_id, text, phase, reconcile).await?;
+        // **Who did the user name?** (rc3 D17.) Resolved HERE, on the one path
+        // that writes an `origin = "user"` row — which is what makes "only the
+        // user may mention" structural rather than a rule agents are asked to
+        // follow. A participant that types `@advisor` writes text, and there is
+        // no code anywhere that could act on it.
+        let mentions = self.resolve_mentions(session_id, text).await;
         // The ring is told AFTER the row exists, so the participant it wakes has
         // something to drain. Reversing these two hands out a turn over an empty
         // backlog and the message lands a turn late.
-        self.bridge.notify_ring_user_message(session_id).await;
+        self.bridge
+            .notify_ring_user_message(session_id, mentions)
+            .await;
         // The user's message reaches the front of the rotation → busy. The
         // awaiting flag was cleared just above, so this recompute moves the
         // session AwaitingUser/Idle → Busy.
@@ -1296,7 +1347,13 @@ impl AppState {
                         // reason (rc3 D19): the receipt row is already persisted,
                         // and this releases the cycle and hands the turn to the
                         // front rather than waking everyone at once.
-                        self.bridge.notify_ring_user_message(session_id).await;
+                        //
+                        // No mentions: an answer is a pick from a list of
+                        // options, not prose the user composed, so there is no
+                        // `@` in it to honour (rc3 D17).
+                        self.bridge
+                            .notify_ring_user_message(session_id, Vec::new())
+                            .await;
                     }
                 }
                 // Answering a tray card ends the halt just as a typed message
@@ -1591,4 +1648,51 @@ mod tests {
         );
     }
 
+    /// rc3 **D17**: only a USER message is parsed for mentions.
+    ///
+    /// Enforced by construction rather than by asking agents not to: the parse
+    /// lives behind `resolve_mentions`, which is PRIVATE — so no module outside
+    /// `core::state` can reach it, and the compiler is what says so — and inside
+    /// this file it is called from exactly one place, the user's own broadcast.
+    /// A participant that writes `@advisor` writes text; there is no code that
+    /// could act on it.
+    ///
+    /// The count is what this test is for. Adding a second call site is how the
+    /// rule would be lost, and it would be lost SILENTLY — every existing test
+    /// would still pass, because honouring a peer's mention breaks nothing that
+    /// is currently asserted. It would instead compose into the summon loop D17
+    /// describes: every turn substantive, so the tally never completes, spin
+    /// detection never fires, and only the 500-lap round cap ends it.
+    #[test]
+    fn the_mention_parse_has_exactly_one_call_site_and_it_is_the_user_path() {
+        let src = include_str!("state.rs");
+        // Production code only. This test names the function in its own
+        // assertions, and a self-counting test is a test that measures itself.
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        // The definition, plus its one call. Anything above two is a second
+        // path into the summons.
+        assert_eq!(
+            prod.matches("resolve_mentions(").count(),
+            2,
+            "mentions are parsed on the user's message and nowhere else — a \
+             second call site would let a participant summon another"
+        );
+        // …and that call is inside `broadcast`, between the row being persisted
+        // and the ring being told. Bounded at the notify so the haystack is the
+        // step being described.
+        let body = prod
+            .split("pub async fn broadcast(")
+            .nth(1)
+            .expect("the user's broadcast path must exist");
+        let body = &body[..body
+            .find("notify_ring_user_message")
+            .expect("the broadcast tells the ring")];
+        assert!(
+            body.contains("resolve_mentions("),
+            "the parse belongs to the user's own message path"
+        );
+    }
 }

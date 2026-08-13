@@ -239,11 +239,12 @@ describe("spawnSlotOf — a slot is a place in the SPAWNABLE roster", () => {
     expect(spawnSlotOf(roster, eyes)).toBe(1);
   });
 
-  it("keeps an observer in the slot count", () => {
-    // Observers ARE spawned — they read the channel and may post, they just
-    // never get a scheduled turn — so they take a slot like anyone else.
-    const observer = p({ id: 4, slug: "watcher", participation_mode: "observer" });
-    expect(spawnSlotOf([observer, eyes], eyes)).toBe(1);
+  it("keeps a summonable participant in the slot count", () => {
+    // An `on_mention` participant IS spawned (rc3 D17) — the user can hand it
+    // the next turn by name, and a summons cannot reach a process that was
+    // never started — so it takes a slot like anyone else.
+    const summonable = p({ id: 4, slug: "advisor", participation_mode: "on_mention" });
+    expect(spawnSlotOf([summonable, eyes], eyes)).toBe(1);
   });
 
   it("does not hand one participant's runtime state to another", () => {

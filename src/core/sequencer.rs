@@ -933,7 +933,20 @@ pub enum SequencerCommand {
     /// The release is applied where this command is READ off the wire, and the
     /// commands the pause held are replayed AHEAD of it, so the message still
     /// lands in arrival order behind them.
-    UserMessage,
+    ///
+    /// **`mentions` is the participants the user NAMED**, in the order written
+    /// (rc3 D17). Empty is the ordinary case and the one every paragraph above
+    /// describes: reset to the front. Non-empty changes the target and nothing
+    /// else — each named participant takes one turn, in order, and then the
+    /// rotation carries on **from where it was**, because a mention is an
+    /// insertion rather than a reset. Summoning someone must not silently
+    /// restart the cycle at participant 1.
+    ///
+    /// Resolved to ids by the producer, not here: this loop holds no roster and
+    /// an id it cannot find is a state it should not have to reason about. The
+    /// parse itself is `core::mentions`, which runs on exactly one path — the
+    /// user's own message — so a participant cannot summon anyone.
+    UserMessage { mentions: Vec<i64> },
     /// A participant's stdin, arriving after the task was spawned.
     ///
     /// The map in [`SequencerDeps`] is owned by [`run_sequencer`], so this is
@@ -1117,6 +1130,11 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     // on the very next lap and wedge the session shut instead of backstopping
     // it. `a_user_message_starts_the_lap_count_over` is that case.
     let mut laps: u32 = 0;
+    // Who the user has summoned, and where the rotation was when they did
+    // (rc3 D17). In the loop's frame for the same reason `spin` and `laps` are:
+    // it describes THIS stretch, and a queue that outlived one would hand out a
+    // turn nobody asked for.
+    let mut summons = Summons::default();
     loop {
         let cmd = match deferred.pop_front() {
             Some(cmd) => cmd,
@@ -1139,7 +1157,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // loop off the DEFERRED queue was read earlier and must not
                 // release a pause that arrived after it: it falls through to the
                 // gate below and is held like anything else.
-                Some(SequencerCommand::UserMessage) if paused => {
+                Some(cmd @ SequencerCommand::UserMessage { .. }) if paused => {
                     paused = false;
                     // The steer takes its place at the END of the held queue, so
                     // everything the pause caught ahead of it — a park, a
@@ -1147,7 +1165,12 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     // Dropping the queue instead would under-halt (a held park
                     // would never take effect), and applying the message first
                     // would restart a cycle the park is about to stop.
-                    held.push_back(SequencerCommand::UserMessage);
+                    //
+                    // **The command itself is re-queued, not a fresh one.** It
+                    // carries the user's mentions (D17), and minting a
+                    // replacement here would release the pause while silently
+                    // dropping who they summoned.
+                    held.push_back(cmd);
                     let replayed = release_held(&mut held, &mut deferred);
                     debug!(
                         session = %deps.session_id,
@@ -1301,6 +1324,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                                 &mut epoch,
                                 &mut deferred,
                                 &mut laps,
+                                &mut summons,
                                 false,
                             )
                             .await;
@@ -1317,14 +1341,24 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     );
                 }
             }
-            SequencerCommand::UserMessage => {
+            SequencerCommand::UserMessage { mentions } => {
+                // **Whoever the user named takes the next turn, in the order
+                // they were named** (rc3 D17). Appended rather than assigned:
+                // two messages in quick succession queue behind each other, the
+                // same way two mentions in one message do.
+                //
+                // The queue is drained one entry per turn by `advance_turn`, and
+                // it pre-empts the ring step rather than replacing the rotation
+                // — see `Summons` for why the anchor is what makes that an
+                // insertion.
+                summons.queue.extend(mentions);
                 // The user's own output is substantive, so it resets the tally —
                 // but the reset is NOT written here. It rides the restart itself,
                 // in `advance_turn`; see the comment there for why this arm is
                 // the wrong place to own it.
                 //
-                // The user speaking resets the cycle to the front of the
-                // rotation, whoever held the turn — `None` is what
+                // The user speaking with nobody named resets the cycle to the
+                // front of the rotation, whoever held the turn — `None` is what
                 // `next_active_participant` reads as "reset". The previous
                 // holder's turn is not cancelled; nothing here can stop it. What
                 // happens instead is that the epoch moves, so its completion is
@@ -1355,6 +1389,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     &mut epoch,
                     &mut deferred,
                     &mut laps,
+                    &mut summons,
                     true,
                 )
                 .await;
@@ -1519,9 +1554,24 @@ async fn advance_turn(
     epoch: &mut u64,
     deferred: &mut VecDeque<SequencerCommand>,
     laps: &mut u32,
-    reset: bool,
+    summons: &mut Summons,
+    user_spoke: bool,
 ) {
-    let current = if reset { None } else { holder.as_ref() };
+    // **A user message restarts the cycle at the front — UNLESS they named
+    // someone** (rc3 D17 #4). A mention is an insertion: it changes who takes
+    // the next turn and leaves the rotation where it is, because summoning an
+    // advisor must not silently send the ring back to participant 1.
+    //
+    // The two halves of "reset" come apart here, and only the ring half is
+    // conditional. The BOOKKEEPING half — the tally and the lap count — is
+    // cleared by the user speaking either way; see below.
+    let restart = user_spoke && summons.queue.is_empty();
+    // **The ring steps from the ANCHOR, not from the holder** (rc3 D17). For an
+    // ordinary turn the two are the same participant — the anchor is set to
+    // whoever the ring hands to — so this changes nothing on the common path.
+    // It differs after a summons, where the holder is somebody the user pulled
+    // in out of band and the rotation must resume from where it actually was.
+    let current = if restart { None } else { summons.anchor.as_ref() };
     // The ring's own ordering key for whoever is handing the turn on, copied
     // out before `hand_over` so the borrow of `*holder` ends here and the
     // assignment below can take it mutably. `(turn_position, id)` is exactly
@@ -1543,9 +1593,21 @@ async fn advance_turn(
     // prevent, and `a_parked_question_halts_the_cycle_unilaterally` is the test
     // that would go red: delete this clear and its last `expect(3)` times out.
     //
-    // The test is `current.is_none()` rather than `reset` because those are the
-    // two ways to the front of the rotation IN PRINCIPLE: an explicit reset, and
-    // a `None` holder, which is what a halt leaves behind.
+    // The test is `current.is_none()` rather than `restart` because those are
+    // the two ways to the front of the rotation IN PRINCIPLE: an explicit
+    // restart, and a `None` holder, which is what a halt leaves behind.
+    //
+    // **`user_spoke` is now the other half of the condition, and rc3 D17 is why
+    // the two are no longer the same question.** A user message that names
+    // someone does NOT go to the front — the mention is an insertion — so
+    // `current` stays `Some` and this block would be skipped. That would leave
+    // the tally from before the user spoke standing: the summoned participant
+    // takes its turn, PASSES (a pass records no vote and clears nothing), and
+    // the stale votes are still there for the next completion to arrive on,
+    // halting a cycle in which the actives never read the message that started
+    // it. Precisely the false arrival the paragraph above is about, reached down
+    // a second path. The user speaking clears the tally whether or not they
+    // named anyone.
     //
     // **Today they are the same condition and no test can tell them apart.**
     // `reset = false` is reached from exactly one place — inside `if live`,
@@ -1595,7 +1657,7 @@ async fn advance_turn(
     // path. It is the one that leans the wrong way — stale votes can only make
     // an arrival come EARLY — but the alternative is refusing to hand out a
     // turn because a write failed, which strands the session outright.
-    if current.is_none() {
+    if user_spoke || current.is_none() {
         // The lap count belongs to the stretch, and this is where a stretch
         // begins — see the counter's declaration for why it is not a lifetime
         // total, and why a cap that could not be released would be worse than
@@ -1609,6 +1671,18 @@ async fn advance_turn(
                  count votes cast before it"
             );
         }
+    }
+    // **A summons pre-empts the ring step, and takes the turn INSTEAD of it.**
+    // The step it displaces is not owed to anyone afterwards: the ring resumes
+    // from the anchor, which this turn does not move, so nobody's place is lost
+    // — the rotation is simply paused for one turn.
+    if let Some(to) = hand_to_summoned(deps, &mut summons.queue).await {
+        // No lap counting: a summoned turn is not a step through the ring, so
+        // it cannot wrap one. No anchor update either — that IS the mechanism.
+        *holder = Some(to);
+        *epoch += 1;
+        start_turn(deps, holder, epoch, rx, deferred).await;
+        return;
     }
     match hand_over(deps, current).await {
         // The ring could not be read. Keeping the holder AND the epoch is what
@@ -1716,45 +1790,64 @@ async fn advance_turn(
                 }
             }
             *holder = next;
-            // Every step, including a reset that lands on the same participant.
-            // That case is exactly why the epoch exists.
+            // **The ring moved, so the anchor moves with it — and this is the
+            // only place it is written.** Every step through the rotation comes
+            // through this arm; a summons deliberately does not, which is the
+            // whole of D17's "resumes where it was".
+            summons.anchor = holder.clone();
+            // Every step, including a restart that lands on the same
+            // participant. That case is exactly why the epoch exists.
             *epoch += 1;
-            if let Some(to) = holder.as_ref() {
-                // Publish BEFORE the rows go out. The pump snapshots on its
-                // turn's first event, and that event cannot happen until the
-                // agent has read something — so writing first is what makes the
-                // snapshot see this turn's epoch rather than the previous one.
-                // Release-ordered against the pump's Acquire load.
-                //
-                // **A holder with stdin but no epoch cell freezes the cycle**,
-                // and silently, so it is worth a loud line. The pump reads its
-                // cell with `unwrap_or(0)`, so such a participant completes at
-                // epoch 0, fails the `live` guard against any epoch past the
-                // first, and is discarded — for ever. The ring stops on it with
-                // nothing in the log to say why.
-                //
-                // This is a build-time obligation on whoever assembles
-                // [`SequencerDeps`], exactly like the "file A's stdin under B's
-                // id" hazard `inputs` already documents: the two maps must be
-                // keyed identically and nothing in the type system says so.
-                // `session.rs` populates them in one pass, so this is
-                // unreachable today — the warning exists because the next
-                // assembler is the one that will not.
-                match deps.epochs.get(&to.id) {
-                    Some(cell) => cell.store(*epoch, std::sync::atomic::Ordering::Release),
-                    None => warn!(
-                        session = %deps.session_id,
-                        participant_id = to.id,
-                        slug = %to.slug,
-                        epoch = *epoch,
-                        "sequencer: the participant taking the turn has no epoch cell; its \
-                         completions will carry 0, fail the guard, and the cycle will stop here"
-                    ),
-                }
-                deliver_backlog(deps, to, rx, MAX_TURN_BATCHES, deferred).await;
-            }
+            start_turn(deps, holder, epoch, rx, deferred).await;
         }
     }
+}
+
+/// Publish the epoch for the turn just handed out, then hand over the backlog.
+///
+/// Extracted so the ring step and a summons cannot start a turn DIFFERENTLY.
+/// They already share the invariant that matters — publish the epoch before the
+/// rows go out — and two copies of it are two things that can drift, with the
+/// drift costing a participant every completion it ever sends.
+async fn start_turn(
+    deps: &SequencerDeps,
+    holder: &Option<Participant>,
+    epoch: &u64,
+    rx: &mut mpsc::Receiver<SequencerCommand>,
+    deferred: &mut VecDeque<SequencerCommand>,
+) {
+    let Some(to) = holder.as_ref() else {
+        return;
+    };
+    // Publish BEFORE the rows go out. The pump snapshots on its turn's first
+    // event, and that event cannot happen until the agent has read something —
+    // so writing first is what makes the snapshot see this turn's epoch rather
+    // than the previous one. Release-ordered against the pump's Acquire load.
+    //
+    // **A holder with stdin but no epoch cell freezes the cycle**, and silently,
+    // so it is worth a loud line. The pump reads its cell with `unwrap_or(0)`,
+    // so such a participant completes at epoch 0, fails the `live` guard against
+    // any epoch past the first, and is discarded — for ever. The ring stops on
+    // it with nothing in the log to say why.
+    //
+    // This is a build-time obligation on whoever assembles [`SequencerDeps`],
+    // exactly like the "file A's stdin under B's id" hazard `inputs` already
+    // documents: the two maps must be keyed identically and nothing in the type
+    // system says so. `session.rs` populates them in one pass, so this is
+    // unreachable today — the warning exists because the next assembler is the
+    // one that will not.
+    match deps.epochs.get(&to.id) {
+        Some(cell) => cell.store(*epoch, std::sync::atomic::Ordering::Release),
+        None => warn!(
+            session = %deps.session_id,
+            participant_id = to.id,
+            slug = %to.slug,
+            epoch = *epoch,
+            "sequencer: the participant taking the turn has no epoch cell; its \
+             completions will carry 0, fail the guard, and the cycle will stop here"
+        ),
+    }
+    deliver_backlog(deps, to, rx, MAX_TURN_BATCHES, deferred).await;
 }
 
 /// Post [`round_cap_notice`] into the channel and tell the UI it landed.
@@ -1934,11 +2027,83 @@ enum Handover {
     Held,
 }
 
+/// Who the user summoned, and where the rotation sits (rc3 D17).
+///
+/// **`anchor` is the last participant to hold a RING turn, and a summoned turn
+/// does not move it.** That one rule is what makes a mention an insertion rather
+/// than a reset: the ring always steps from the anchor, so after the summoned
+/// participant has spoken the rotation carries on from exactly where it was
+/// interrupted. Stepping from the HOLDER instead would work identically for
+/// ordinary turns and silently reorder the ring around every summons — and for
+/// an `on_mention` participant, which is not in the rotation at all, "one place
+/// along from here" has no answer.
+#[derive(Default)]
+struct Summons {
+    /// Participant ids the user named, in the order written. One turn each,
+    /// popped as the ring hands them out.
+    queue: VecDeque<i64>,
+    /// The last ring turn's holder. `None` is the front of the rotation.
+    anchor: Option<Participant>,
+}
+
+/// Hand the turn to the next participant the user summoned, if there is one.
+///
+/// Pops until it finds one that can actually take a turn, so a participant that
+/// was disabled or removed between the mention and the turn is skipped rather
+/// than freezing the cycle on an id with no process behind it. Returns `None`
+/// when the queue is empty or holds nothing live, which is the caller's signal
+/// to step the ring normally.
+///
+/// **A read failure drops the summons rather than holding the turn**, which is
+/// the opposite of [`hand_over`]'s choice and deliberately so: `hand_over`
+/// holding means "retry the step", and a retry is reachable there because the
+/// same holder's next completion re-attempts it. Here there is nothing to
+/// retry from — the queue entry is already popped — and holding the turn for a
+/// summons that cannot be read would strand the session on a transient error.
+/// The ring still moves; the user's message still lands, one turn later, on
+/// whoever the rotation reaches.
+async fn hand_to_summoned(deps: &SequencerDeps, queue: &mut VecDeque<i64>) -> Option<Participant> {
+    while let Some(id) = queue.pop_front() {
+        match deps.storage.participant_by_id(id).await {
+            Ok(Some(p)) if *p.session_id == *deps.session_id && p.enabled => {
+                debug!(
+                    session = %deps.session_id,
+                    participant_id = p.id,
+                    slug = %p.slug,
+                    queued = queue.len(),
+                    "sequencer: the user summoned this participant; it takes the next turn"
+                );
+                deps.storage
+                    .set_current_turn(&deps.session_id, Some(p.id))
+                    .await;
+                return Some(p);
+            }
+            // Every remaining case is "the summons cannot be honoured": no such
+            // row, another session's row (which delivering into would wire one
+            // session's text to another's process), a disabled row, or a read
+            // that failed. None of them is worth stopping the session over.
+            other => {
+                warn!(
+                    session = %deps.session_id,
+                    participant_id = id,
+                    reason = match other {
+                        Ok(None) => "no such participant",
+                        Ok(Some(_)) => "not a live participant of this session",
+                        Err(_) => "the roster could not be read",
+                    },
+                    "sequencer: a summons was dropped"
+                );
+            }
+        }
+    }
+    None
+}
+
 /// Step the ring past `current`. Delivery is the caller's next move, not this
 /// function's, so a failed step cannot half-deliver.
 ///
 /// `current == None` resets to the front of the rotation, which is what a user
-/// message does.
+/// message with nobody named does.
 async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Handover {
     let next = match deps
         .storage
@@ -2062,7 +2227,7 @@ async fn deliver_backlog(
                     // whole point is that a full stdin cannot hide it.
                     biased;
                     cmd = rx.recv() => match cmd {
-                        Some(cmd @ SequencerCommand::UserMessage) => {
+                        Some(cmd @ SequencerCommand::UserMessage { .. }) => {
                             deferred.push_back(cmd);
                             stop = Some(Stop::Superseded);
                             break 'rows;
@@ -2809,6 +2974,26 @@ mod tests {
             .unwrap();
     }
 
+    /// The user spoke and named nobody — the ordinary message, and what every
+    /// test here meant before mentions existed (rc3 D17).
+    ///
+    /// A helper rather than the literal at 60 call sites, so that adding a field
+    /// to the command does not turn into a mechanical edit across the file where
+    /// the ONE site that should have carried a value is indistinguishable from
+    /// the 59 that should not. [`summoning`] is the other half.
+    fn user_message() -> SequencerCommand {
+        SequencerCommand::UserMessage {
+            mentions: Vec::new(),
+        }
+    }
+
+    /// The user spoke and named these participants, in this order.
+    fn summoning(mentions: &[i64]) -> SequencerCommand {
+        SequencerCommand::UserMessage {
+            mentions: mentions.to_vec(),
+        }
+    }
+
     /// `send` with a deadline. A bounded channel's `send` parks once the buffer
     /// fills, so a sequencer that stopped draining would hang the caller rather
     /// than fail it — the same trap [`exited`] avoids on the other end.
@@ -2867,7 +3052,7 @@ mod tests {
         // goes in: the drain selects commands first and biased, so a closed
         // control channel wins every iteration and would stop the drain before a
         // row landed.
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(2).await,
             vec!["user one", "host note"],
@@ -2918,7 +3103,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
 
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1 → A
+        send(&tx, user_message()).await; // epoch 1 → A
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         post(&storage, "participant", Some("a"), "from a").await;
@@ -2970,7 +3155,7 @@ mod tests {
         // wins every iteration and stops the drain before a row lands — firing
         // everything up front and dropping `tx` would assert against a delivery
         // the sequencer correctly refused to make.
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
         send(
             &tx,
@@ -2996,6 +3181,245 @@ mod tests {
         );
     }
 
+    /// rc3 **D17**, the whole of it: a mention hands the next turn to the named
+    /// participant, and the rotation carries on from where it was.
+    ///
+    /// **Three active participants, not two, and that is what makes the second
+    /// half falsifiable.** With A and B only, "resume where it was" and "reset
+    /// to the front" name the same participant after B's turn, so a summons
+    /// implemented as a reset would pass. With A, B and C the two answers differ
+    /// — C if the rotation resumed, A if it restarted — and only one of them is
+    /// D17 #4.
+    #[tokio::test]
+    async fn a_summons_takes_one_turn_and_the_rotation_resumes_where_it_was() {
+        let (deps, storage, mut seats) = ring(&[
+            ("a", "active"),
+            ("b", "active"),
+            ("c", "active"),
+            ("adv", "on_mention"),
+        ])
+        .await;
+        let (a, b, adv) = (seats[0].id, seats[1].id, seats[3].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+                ending: SPOKE,
+            },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2 → B");
+
+        // The user speaks mid-rotation and names the advisor. The turn is
+        // B's — nothing cancels it, exactly as with any other user message —
+        // but the NEXT one is the advisor's.
+        post(&storage, "user", None, "@adv thoughts?").await;
+        send(&tx, summoning(&[adv])).await;
+        assert_eq!(
+            seats[3].expect(2).await,
+            vec!["go", "@adv thoughts?"],
+            "the summoned participant takes the next turn, not the front of the ring — \
+             and a first wake carries its WHOLE backlog, because a dormant \
+             participant's cursor has never moved"
+        );
+
+        // …and exactly one. After it speaks the rotation resumes from B, which
+        // is where it was interrupted.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: adv,
+                epoch: 3,
+                ending: SPOKE,
+            },
+        )
+        .await;
+        assert_eq!(
+            seats[2].expect(2).await,
+            vec!["go", "@adv thoughts?"],
+            "the ring resumes at C — the place after B — rather than restarting at A"
+        );
+
+        drop(tx);
+        assert!(exited(task).await);
+        assert_eq!(
+            seats[3].drain(),
+            nothing(),
+            "one summons is one turn: the advisor drops back out until named again"
+        );
+        // B's completion never came, so it holds no second turn either. The
+        // point is A: a summons must not have quietly reset the cycle.
+        assert_eq!(seats[0].drain(), nothing(), "A was not woken a second time");
+        let _ = b;
+    }
+
+    #[tokio::test]
+    async fn mentions_take_their_turns_in_the_order_written() {
+        // D17 #3. `@x @y` is two summonses, not a choice between them, and the
+        // order is the user's.
+        let (deps, storage, mut seats) = ring(&[
+            ("a", "active"),
+            ("x", "on_mention"),
+            ("y", "on_mention"),
+        ])
+        .await;
+        let (x, y) = (seats[1].id, seats[2].id);
+        post(&storage, "user", None, "both of you").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, summoning(&[x, y])).await;
+        assert_eq!(seats[1].expect(1).await, vec!["both of you"], "X first");
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: x,
+                epoch: 1,
+                ending: SPOKE,
+            },
+        )
+        .await;
+        assert_eq!(seats[2].expect(1).await, vec!["both of you"], "then Y");
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: y,
+                epoch: 2,
+                ending: SPOKE,
+            },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["both of you"],
+            "the queue empties and the ring takes over"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_summons_that_cannot_be_honoured_is_dropped_and_the_ring_still_moves() {
+        // The race, not the ordinary case: an `@word` naming nobody never
+        // reaches this loop, because `AppState::resolve_mentions` drops it and
+        // the message arrives as a plain reset. What DOES reach here is a
+        // participant that was live when the user typed and is gone by the time
+        // the turn is handed out.
+        //
+        // The cost of getting this wrong is the worst failure the ring has: a
+        // turn handed to a participant with no process behind it completes
+        // never, and the cycle stops there for good.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        post(&storage, "user", None, "go").await;
+        // An id no participant holds — the same state a deleted row leaves.
+        let ghost = 9_999;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, summoning(&[ghost])).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "the summons is dropped and the ring hands the turn out as usual"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_summons_after_a_halt_clears_the_tally_the_halt_was_built_on() {
+        // **The false arrival, reached down the mention path.** A user message
+        // clears the done tally; a message that NAMES someone does not go to the
+        // front of the ring, so the clear cannot ride the restart the way it
+        // does for an ordinary one.
+        //
+        // Left unhandled the sequence is: the ring converges and halts, the user
+        // summons an advisor, the advisor PASSES (a pass records no vote and
+        // clears nothing), `all_active_voted_done` still sees the votes from
+        // before the user spoke, and the session halts again — with the actives
+        // never having read the message that restarted it.
+        //
+        // Delete the `user_spoke ||` in `advance_turn`'s clear and this test
+        // times out on the last `expect`.
+        let (deps, storage, mut seats) = ring(&[
+            ("a", "active"),
+            ("b", "active"),
+            ("adv", "on_mention"),
+        ])
+        .await;
+        let (a, b, adv) = (seats[0].id, seats[1].id, seats[2].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+                ending: TurnEnding::Done,
+            },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: b,
+                epoch: 2,
+                ending: TurnEnding::Done,
+            },
+        )
+        .await;
+        // Both actives have voted done: the cycle has yielded to the user. The
+        // halt wakes nobody, so there is no delivery to await — `quiet` is the
+        // barrier, exactly as in `the_cycle_halts_when_every_active_participant_votes_done`.
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        assert!(
+            storage.all_active_voted_done("s1").await.unwrap(),
+            "the tally is complete — this test is about what happens next"
+        );
+
+        post(&storage, "user", None, "@adv one more thing").await;
+        send(&tx, summoning(&[adv])).await;
+        assert_eq!(
+            seats[2].expect(2).await,
+            vec!["go", "@adv one more thing"],
+            "the summons releases the halt and hands the advisor the turn"
+        );
+        assert!(
+            !storage.all_active_voted_done("s1").await.unwrap(),
+            "the user speaking un-converges the session, whether or not they named someone"
+        );
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: adv,
+                epoch: 4,
+                ending: TurnEnding::Passed,
+            },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["@adv one more thing"],
+            "the ring carries on: A reads the message the halt would have swallowed"
+        );
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
     #[tokio::test]
     async fn a_completion_from_a_superseded_turn_does_not_advance_the_ring() {
         // The hazard `TurnComplete`'s participant id exists for. A user message
@@ -3009,7 +3433,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["r1"]);
         send(
             &tx,
@@ -3021,7 +3445,7 @@ mod tests {
         // The user speaks over B's turn. Waiting on A's wake is what makes the
         // next line's ordering a fact rather than a race.
         post(&storage, "user", None, "r2").await;
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["r2"], "the ring reset to A");
 
         // B's turn ends, late.
@@ -3055,14 +3479,14 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(seats[0].expect(1).await, vec!["r1"]);
 
         // The user speaks over A's own turn. The ring resets to its first place,
         // which IS A — same participant, new turn. Waiting on the wake is what
         // makes the ordering below a fact rather than a race.
         post(&storage, "user", None, "r2").await;
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 2, A again
+        send(&tx, user_message()).await; // epoch 2, A again
         assert_eq!(
             seats[0].expect(1).await,
             vec!["r2"],
@@ -3138,7 +3562,7 @@ mod tests {
         // Each wake is awaited before the next command goes in: the drain selects
         // commands first and biased, so anything sent ahead of a wake can cut
         // short the drain that would have produced it.
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
         send(
             &tx,
@@ -3154,7 +3578,7 @@ mod tests {
         // The user speaks over B's turn. The row is posted BEFORE the command,
         // which is what makes the wire below a fact rather than a race.
         post(&storage, "user", None, "u2").await;
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["u2"],
@@ -3192,7 +3616,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         // A has nothing to add. One vote of two is not consensus, so the ring
@@ -3260,7 +3684,7 @@ mod tests {
         // Halted, not dead. The user speaking restarts the cycle at the front
         // of the ring — without this the silence above would also be what a
         // wedged loop looks like — and it clears the tally on the way in.
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["host note"],
@@ -3295,7 +3719,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         // One vote of two. The tally now needs exactly B.
@@ -3356,7 +3780,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         send(
@@ -3431,7 +3855,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         let mut epoch = 1u64;
@@ -3496,7 +3920,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         for (epoch, tick) in [(1u64, "tick one"), (2, "tick two"), (3, "tick three")] {
@@ -3535,7 +3959,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         // The vote that must not survive what follows.
@@ -3640,7 +4064,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
         send(
             &tx,
@@ -3672,7 +4096,7 @@ mod tests {
         // orders the read below: the tally is emptied before `hand_over`, so a
         // wire that has arrived is a clear that has committed.
         post(&storage, "user", None, "u2").await;
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["u2"],
@@ -3728,7 +4152,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
         send(
             &tx,
@@ -3753,7 +4177,7 @@ mod tests {
 
         // The user speaks.
         post(&storage, "user", None, "u2").await;
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["u2"], "epoch 4, the cycle restarted");
 
         // A's turn produces NOTHING — it writes no row and ends `done: true`.
@@ -3814,7 +4238,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
         // A's done vote — the tally the user's message has to clear.
         send(
@@ -3831,7 +4255,7 @@ mod tests {
             .unwrap();
 
         post(&storage, "user", None, "u2").await;
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         // Nothing was handed out, so there is no wire to synchronise on: the
         // silence IS the failed half. A has `u2` past its cursor, so a rewind
         // that had happened would have delivered it here.
@@ -3908,7 +4332,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         // B is not holding the turn and epoch 0 is spent. Discarded.
@@ -3959,7 +4383,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         // Unread by all three when the vote lands. A ring of one WRAPS, so a
@@ -3996,7 +4420,7 @@ mod tests {
         );
 
         // Halted, not wedged.
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["host note"]);
         drop(tx);
         assert!(exited(task).await);
@@ -4015,7 +4439,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
         send(
             &tx,
@@ -4077,7 +4501,7 @@ mod tests {
         );
 
         // Halted, not dead: the user's message restarts the cycle at the front.
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["note for b"],
@@ -4117,7 +4541,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
@@ -4163,7 +4587,7 @@ mod tests {
         // above would also be what a wedged loop looks like. The wire lands on
         // the stdin that JOINED, which is how the insert above is shown to have
         // taken effect rather than been dropped.
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(
             joined.expect(1).await,
             vec!["while awaiting"],
@@ -4256,7 +4680,7 @@ mod tests {
         let task = tokio::spawn(run_sequencer(deps, rx));
         // Each wake awaited before the next command: the drain selects commands
         // first and biased, so a closed control channel would stop it mid-batch.
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         let _ = seats[0].expect(overflow).await;
         send(
             &tx,
@@ -4316,7 +4740,7 @@ mod tests {
         // commands first and biased, so a closed control channel would stop the
         // drain and this test's "delivery is live" anchor would be the thing
         // that broke, not B's missing stdin.
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
@@ -4366,7 +4790,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         // `expect` is the reader: it drains the seat as the sequencer fills it,
         // so the parking and the unparking both happen inside this call.
         let want: Vec<String> = (0..8).map(|i| format!("row {i}")).collect();
@@ -4469,7 +4893,7 @@ mod tests {
         // No wire to await between these two: A has no stdin yet, so the frozen
         // state has nothing to observe. Ordering is the command channel's — the
         // join is handled after the reset because it was sent after it.
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds, undeliverable
+        send(&tx, user_message()).await; // epoch 1, A holds, undeliverable
         let (input, mut joined) = late_stdin(a);
         send(
             &tx,
@@ -4524,7 +4948,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
@@ -4575,7 +4999,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         let (first_input, mut first_seat) = late_stdin(a);
         send(
             &tx,
@@ -4636,7 +5060,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
@@ -4712,7 +5136,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(seats[0].expect(2).await, vec!["row 0", "row 1"]);
 
         send(&tx, SequencerCommand::Pause).await;
@@ -4876,7 +5300,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         send(
             &tx,
             SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
@@ -4920,7 +5344,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
@@ -4944,7 +5368,7 @@ mod tests {
         // Halted, not dead — and it is still the USER's message that releases
         // it, which is what says the silence above was the halt rather than a
         // wedged loop.
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["while halted"]);
         drop(tx);
         assert!(exited(task).await);
@@ -4980,7 +5404,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         send(&tx, SequencerCommand::Pause).await;
         send(
             &tx,
@@ -5026,7 +5450,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
@@ -5045,7 +5469,7 @@ mod tests {
 
         // The steer. It releases the latch AND does what a user message always
         // does: back to the front of the ring, carrying the row.
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["u2"],
@@ -5089,7 +5513,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
@@ -5129,7 +5553,7 @@ mod tests {
         // because A's cursor is already past `go`, so the restart would otherwise
         // be a silent step.
         post(&storage, "user", None, "u2").await;
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["u2"],
@@ -5162,7 +5586,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         let drained = seats[0].expect(UNREAD_BATCH_LIMIT as usize + 1).await;
         assert_eq!(drained.first().map(String::as_str), Some("row 0"));
 
@@ -5175,7 +5599,7 @@ mod tests {
             SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
         )
         .await;
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         send(&tx, SequencerCommand::Pause).await;
 
         // A is the front of the ring, so a second release would reset to A and
@@ -5227,7 +5651,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
@@ -5306,7 +5730,7 @@ mod tests {
         let task = tokio::spawn(run_sequencer(deps, rx));
         for cmd in [
             SequencerCommand::TurnComplete { participant_id: a, epoch: 0, ending: SPOKE },
-            SequencerCommand::UserMessage,
+            user_message(),
             SequencerCommand::ParticipantJoined { participant_id: a, input: joined_input },
             SequencerCommand::QuestionParked,
             SequencerCommand::Pause,
@@ -5341,7 +5765,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await; // epoch 1, A holds
+        send(&tx, user_message()).await; // epoch 1, A holds
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         // Round one is a BASELINE, not a score — there is nothing to be similar
@@ -5387,7 +5811,7 @@ mod tests {
         // without the clear, the first turn of the new cycle would be judged
         // against prose from before the user spoke and halt on its own step.
         post(&storage, "user", None, "try a different angle").await;
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(2).await,
             vec!["tick three", "try a different angle"],
@@ -5428,7 +5852,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         for (epoch, body, tick) in [
@@ -5505,7 +5929,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         // Lap 1: A hands to B, B hands back to A. Only the second of those two
@@ -5562,7 +5986,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         for lap in 1..=3u64 {
@@ -5599,7 +6023,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         let w = lap_step(&storage, &tx, &mut seats[1], a, 1, "t1").await;
@@ -5658,7 +6082,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         for lap in 1..=2u64 {
@@ -5711,7 +6135,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         // Lap 1 of the first stretch.
@@ -5722,7 +6146,7 @@ mod tests {
         // count goes with it; A's in-flight turn is superseded, so the epochs
         // below carry on from the reset's own step rather than from it.
         post(&storage, "user", None, "new instruction").await;
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         let w = seats[0].woken().await;
         assert!(
             w.contains(&"new instruction".to_string()),
@@ -5861,7 +6285,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
         // Lap 1: A hands to itself. One turn IS one full pass over the active
@@ -6052,7 +6476,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(2).await, vec!["one", "two"]);
         send(
             &tx,
@@ -6220,7 +6644,7 @@ mod tests {
         };
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
 
         // Drain whatever the first turn hands over, stopping on the first gap —
         // the turn is done when nothing more arrives, and a deadline per row
@@ -6285,7 +6709,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
 
-        send(&tx, SequencerCommand::UserMessage).await;
+        send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
         // The wire is the synchronisation point: A cannot have been handed rows
         // before its epoch was stored, because the store happens first.

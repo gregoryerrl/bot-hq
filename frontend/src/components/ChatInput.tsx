@@ -8,10 +8,84 @@ import { authorColorClass } from "./authorColor";
 import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import { isLocked, type AgentBusy, type SessionActivity } from "../stores/activity";
 
+/** One participant the `@` picker can insert (rc3 D17). */
+export type Mentionable = {
+  /** What goes in the text, after the `@`. The backend parses this. */
+  slug: string;
+  /** What the user reads — the display rule's `ROLE · Model`. */
+  label: string;
+};
+
+/**
+ * The `@`-token the caret is sitting in, or `null`.
+ *
+ * Walks BACK from the caret to the nearest `@`, giving up at whitespace — so
+ * `@adv|` is a live token and `@adv thoughts|` is not, which is what makes the
+ * picker close by itself once the user moves on.
+ *
+ * The boundary rule matches the backend parser (`core::mentions`) rather than
+ * approximating it: an `@` preceded by an alphanumeric is part of an email
+ * address, not a mention, and offering a picker there would suggest bot-hq is
+ * about to do something it will not.
+ */
+export function activeMention(
+  text: string,
+  caret: number,
+): { start: number; query: string } | null {
+  let i = caret;
+  while (i > 0) {
+    const ch = text[i - 1];
+    if (ch === "@") {
+      const before = i >= 2 ? text[i - 2] : undefined;
+      if (before !== undefined && /[a-zA-Z0-9]/.test(before)) return null;
+      return { start: i - 1, query: text.slice(i, caret) };
+    }
+    if (/\s/.test(ch)) return null;
+    i -= 1;
+  }
+  return null;
+}
+
+/**
+ * Participants whose slug, or any WORD of whose label, starts with what has
+ * been typed so far.
+ *
+ * **Word-prefix rather than substring**, which is not a detail: the label
+ * carries the model (`EYES · Claude Opus 5`), so a substring match on `@e`
+ * would offer every participant running Claud**e** — and the first of them,
+ * not the one whose slug is `eyes`, is what Enter would then insert. Matching
+ * the label at all is still worth it, because the user reads `EYES` and
+ * `DeepSeek`, never the slug.
+ */
+export function matchMentionables(
+  all: Mentionable[],
+  query: string,
+): Mentionable[] {
+  const q = query.toLowerCase();
+  if (!q) return all;
+  return all.filter((m) => {
+    if (m.slug.toLowerCase().startsWith(q)) return true;
+    return m.label
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .some((word) => word.startsWith(q));
+  });
+}
+
 interface ChatInputProps {
   placeholder?: string;
   onSend: (text: string) => Promise<void> | void;
   disabled?: boolean;
+  /**
+   * This session's participants, for the `@` picker (rc3 **D17**).
+   *
+   * **A picker rather than free text, and that is the design rather than a
+   * nicety**: mentioning somebody who is not in the session becomes impossible
+   * to EXPRESS, instead of an error to detect and report. Left undefined the
+   * textarea behaves exactly as before — typing `@` opens nothing — which is
+   * what every surface that is not a session chat wants.
+   */
+  mentionables?: Mentionable[];
   /**
    * The session's activity. While `busy`/`cancelling` the textarea is
    * REPLACED by a turn-status line (which participants are working) + Stop —
@@ -51,6 +125,7 @@ export function ChatInput({
   placeholder,
   onSend,
   disabled,
+  mentionables,
   activity,
   busy,
   busyLabel,
@@ -67,6 +142,23 @@ export function ChatInput({
   const [cancelling, setCancelling] = useState(false);
   const [resuming, setResuming] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Where the caret is, tracked because the `@` picker is about the token the
+  // caret sits IN — not the last one in the string. Editing an earlier mention
+  // has to reopen the picker there.
+  const [caret, setCaret] = useState(0);
+  const [highlight, setHighlight] = useState(0);
+  // Escape dismisses the picker without dismissing the token: the user keeps
+  // typing a slug the roster does not hold, which is their right. Cleared
+  // whenever the token itself changes, so the next `@` opens normally.
+  const [pickerDismissed, setPickerDismissed] = useState(false);
+
+  const mention =
+    mentionables && mentionables.length > 0
+      ? activeMention(value, caret)
+      : null;
+  const matches = mention ? matchMentionables(mentionables!, mention.query) : [];
+  const pickerOpen = !!mention && matches.length > 0 && !pickerDismissed;
+  const active = matches[Math.min(highlight, matches.length - 1)];
 
   // A turn is in flight (busy/cancelling). While locked we hide the textarea and
   // show the turn-status line + Stop, rather than leaving the input typeable.
@@ -108,8 +200,27 @@ export function ChatInput({
     }
   };
 
+  /** Replace the token the caret is in with `@slug `, and put the caret after it. */
+  const insertMention = (slug: string) => {
+    if (!mention) return;
+    const next = `${value.slice(0, mention.start)}@${slug} ${value.slice(caret)}`;
+    const at = mention.start + slug.length + 2;
+    updateValue(next);
+    setCaret(at);
+    setHighlight(0);
+    // The caret move has to wait for React to write the new value, or the
+    // browser puts it at the end of the old string.
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(at, at);
+    });
+  };
+
   const updateValue = (next: string) => {
     setValue(next);
+    setPickerDismissed(false);
     if (!draftKey) return;
     // Drop the key entirely when the box is emptied so abandoned sessions
     // don't accumulate "" entries in localStorage.
@@ -218,13 +329,91 @@ export function ChatInput({
         ) : (
           <>
             <div className="relative flex-1">
+              {pickerOpen && (
+                <ul
+                  role="listbox"
+                  aria-label="Mention a participant"
+                  className="absolute bottom-full left-0 z-10 mb-1 max-h-48 w-full overflow-y-auto rounded border border-outline-variant bg-surface-container-lowest py-1 shadow-lg"
+                >
+                  {matches.map((m, i) => (
+                    <li key={m.slug}>
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={m.slug === active?.slug}
+                        // `onMouseDown`, not `onClick`: a click blurs the
+                        // textarea first, and the blur closes the picker before
+                        // the click can land on it.
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          insertMention(m.slug);
+                        }}
+                        onMouseEnter={() => setHighlight(i)}
+                        className={cn(
+                          "flex w-full items-baseline gap-2 px-3 py-1.5 text-left text-sm",
+                          m.slug === active?.slug
+                            ? "bg-surface-container-high text-on-surface"
+                            : "text-on-surface-variant",
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "font-semibold",
+                            authorColorClass(m.label),
+                          )}
+                        >
+                          {m.label}
+                        </span>
+                        <span className="font-mono text-xs opacity-60">
+                          @{m.slug}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <Textarea
                 ref={textareaRef}
                 rows={2}
                 placeholder={placeholder ?? "Message…"}
                 value={value}
-                onChange={(e) => updateValue(e.target.value)}
+                onChange={(e) => {
+                  updateValue(e.target.value);
+                  setCaret(e.target.selectionStart ?? e.target.value.length);
+                }}
+                // Clicking or arrowing into an earlier `@token` reopens the
+                // picker there, so a mention can be fixed rather than retyped.
+                onSelect={(e) =>
+                  setCaret(e.currentTarget.selectionStart ?? 0)
+                }
                 onKeyDown={(e) => {
+                  // **The picker owns these keys while it is open**, and Enter
+                  // most of all: an open picker means the user is mid-mention,
+                  // so sending the message on Enter would fire it half-typed.
+                  if (pickerOpen) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setHighlight((h) => (h + 1) % matches.length);
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setHighlight(
+                        (h) => (h - 1 + matches.length) % matches.length,
+                      );
+                      return;
+                    }
+                    if (e.key === "Enter" || e.key === "Tab") {
+                      e.preventDefault();
+                      if (active) insertMention(active.slug);
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setPickerDismissed(true);
+                      return;
+                    }
+                  }
                   // Enter sends; Shift+Enter inserts a newline (so multi-line
                   // messages aren't lost). ⌘/Ctrl+Enter also sends. Skip while an
                   // IME is composing so multibyte input isn't cut mid-character.

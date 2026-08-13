@@ -167,16 +167,15 @@ export function Dashboard() {
     {},
   );
   // The roles a participant can be invited from. Archived ones are excluded by
-  // the backend, and `on_demand` ones are filtered below: waking one needs the
-  // user `@mention` that rc3 D1 defers, so inviting one would produce a
-  // participant the ring skips and nothing ever wakes.
+  // the backend; everything else is invitable.
+  //
+  // **`on_mention` roles are offered as of rc3 D17.** They used to be filtered
+  // out here because nothing could wake one; the user can now summon one by
+  // name, so hiding them would hide the whole mode.
   const { data: roles = [] } = useTauriQuery<RoleView[]>("list_roles", {
     includeArchived: false,
   });
-  const invitableRoles = useMemo(
-    () => roles.filter((r) => r.participation_mode !== "on_demand"),
-    [roles],
-  );
+  const invitableRoles = roles;
   // Worktree isolation default (Settings → Agents → Session defaults).
   // Anything but "0" means on.
   const { data: worktreeDefault } = useTauriQuery<string | null>(

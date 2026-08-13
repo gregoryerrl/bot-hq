@@ -531,11 +531,15 @@ impl SignalingBridge {
     /// messages and zero `participant_deliveries` rows in the session that caught
     /// it. Halting and releasing are two halves of one mechanism; ship them
     /// together or neither.
-    pub async fn notify_ring_user_message(&self, session_id: &str) {
+    ///
+    /// **`mentions` is who the user named** (rc3 D17), already resolved to
+    /// participant ids by the caller — the only caller that can, since it is the
+    /// one holding the text and the session. Empty is the ordinary case.
+    pub async fn notify_ring_user_message(&self, session_id: &str, mentions: Vec<i64>) {
         let seq = self.session_sequencer.lock().await.get(session_id).cloned();
         if let Some(tx) = seq {
             if tx
-                .try_send(crate::core::sequencer::SequencerCommand::UserMessage)
+                .try_send(crate::core::sequencer::SequencerCommand::UserMessage { mentions })
                 .is_err()
             {
                 tracing::warn!(

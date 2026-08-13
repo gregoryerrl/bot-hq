@@ -10,7 +10,7 @@ const mockInvoke = vi.mocked(invoke);
 /**
  * The session's roster, as `list_session_participants` returns it. Two rows
  * sharing a role with different models — the configuration the user could not
- * tell apart until the agents said so — plus a disabled observer, because the
+ * tell apart until the agents said so — plus a disabled row, because the
  * panel is the one surface that shows a participant that is not running.
  */
 const ROSTER = [
@@ -29,7 +29,7 @@ const ROSTER = [
     role_display_name: "EYES",
     model_display_name: "DeepSeek R2",
     turn_position: 1,
-    participation_mode: "observer",
+    participation_mode: "on_mention",
     enabled: false,
   },
 ];
@@ -95,7 +95,7 @@ describe("SessionPolicyPanel roster (rc3 D10)", () => {
     const label = await screen.findByText("EYES · DeepSeek R2");
 
     const row = label.closest("li")!;
-    expect(row.textContent).toMatch(/observer/);
+    expect(row.textContent).toMatch(/on_mention|on mention/i);
     expect(row.textContent).toMatch(/disabled/);
     // Turn order is the list order, and the enabled row comes first.
     const rows = Array.from(row.closest("ol")!.querySelectorAll("li"));

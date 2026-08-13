@@ -1063,9 +1063,9 @@ mod tests {
             "parking must halt the ring"
         );
 
-        bridge.notify_ring_user_message("s1").await;
+        bridge.notify_ring_user_message("s1", Vec::new()).await;
         assert!(
-            matches!(rx.try_recv(), Ok(SequencerCommand::UserMessage)),
+            matches!(rx.try_recv(), Ok(SequencerCommand::UserMessage { .. })),
             "a user message must RELEASE the halt — without this the cycle never restarts"
         );
     }

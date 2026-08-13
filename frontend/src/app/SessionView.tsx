@@ -642,6 +642,13 @@ export function SessionView() {
               // frozen `brian_busy`/`rain_busy` pair); `labels` indexes both
               // key spaces, so one lookup names the participant either way.
               busyLabel={(key) => authorLabel(key, labels)}
+              // rc3 D17: typing `@` offers THIS session's participants and
+              // nothing else, which is what makes mentioning a non-participant
+              // impossible to express rather than an error to report. Disabled
+              // rows are left out — there is no process behind one to summon.
+              mentionables={participants
+                .filter((p) => p.enabled)
+                .map((p) => ({ slug: p.slug, label: participantLabel(p) }))}
               onSend={async (text) => {
                 await invoke("broadcast_message", { sessionId, text });
               }}

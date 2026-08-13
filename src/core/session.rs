@@ -276,13 +276,19 @@ impl SessionHandle {
 /// **The selection rule.** Spawn used to name two rows
 /// (`roster_row(&roster, "brian")` / `"rain"`), which is the only reason the
 /// create dialog capped a session at two; it now takes whatever the roster
-/// holds, minus two exclusions where the process would have nothing to do:
-///   * `enabled = 0` — the row a solo session keeps for the participant it did
-///     not invite, exactly as 0044 wrote it,
-///   * `participation_mode = 'on_mention'` — nothing wakes one yet (rc3 D1), so a
-///     subprocess would idle for the life of the session. **rc3 D17 flips this**:
-///     once the user can summon one by name, not spawning it is what breaks the
-///     summons.
+/// holds, minus the one exclusion where the process would have nothing to do:
+/// `enabled = 0`, the row a solo session keeps for the participant it did not
+/// invite, exactly as 0044 wrote it.
+///
+/// **An `on_mention` participant IS spawned** (rc3 D17), and that is a
+/// deliberate reversal — it was excluded while nothing could wake one. The user
+/// can now summon it by name and the ring hands it the very next turn, so a
+/// process that does not exist is a summons that silently does nothing. The
+/// alternative, spawning lazily on the first mention, would be a SECOND way into
+/// the rotation, which is the exact shape rc3 D19 spent a day deleting: two
+/// paths that can put a participant on a turn, only one of which the ring can
+/// reason about. The cost is one idle subprocess — no tokens are spent until it
+/// is fed, and nothing feeds it until it holds a turn.
 ///
 /// `participants_for_session` already orders by
 /// `(turn_position, id)`, so the filter preserves turn order and the returned
@@ -317,10 +323,7 @@ fn resolve_spawn_roster<'a>(
     session_id: &str,
     roster: &'a [crate::storage::Participant],
 ) -> Vec<&'a crate::storage::Participant> {
-    let live: Vec<&crate::storage::Participant> = roster
-        .iter()
-        .filter(|p| p.enabled && p.participation_mode != "on_mention")
-        .collect();
+    let live: Vec<&crate::storage::Participant> = roster.iter().filter(|p| p.enabled).collect();
     bridge.register_session_reviewers(
         session_id.to_string(),
         live.iter()
@@ -1876,10 +1879,15 @@ async fn spawn_ring(
         .await;
     // Hand out the first turn. Nothing else mints a `UserMessage` yet, so
     // without this the ring sits with no holder and never starts.
+    //
+    // No mentions: nobody has typed anything yet, so this is a plain "start at
+    // the front of the rotation".
     let kick = tx.clone();
     tokio::spawn(async move {
         let _ = kick
-            .send(crate::core::sequencer::SequencerCommand::UserMessage)
+            .send(crate::core::sequencer::SequencerCommand::UserMessage {
+                mentions: Vec::new(),
+            })
             .await;
     });
     tx
@@ -2217,17 +2225,16 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_or_summonable_participant_is_not_spawned() {
-        // Two rows with nothing to do, for two different reasons.
+    fn a_disabled_participant_is_not_spawned_but_a_summonable_one_is() {
+        // Two rows that never take a RING turn, and only one of them is waste.
         //
-        // `enabled = 0` is the row a session keeps for the participant it did
-        // not invite, exactly as 0044 wrote it. `on_mention` is the mode that
-        // sits out the rotation — and while nothing can summon one, a
-        // subprocess for it would idle for the life of the session.
+        // `enabled = 0` is the row a solo session keeps for the participant it
+        // did not invite, exactly as 0044 wrote it. Nothing can ever wake it, so
+        // a process for it would idle for the life of the session.
         //
-        // **The second half is what rc3 D17 changes**, and this test is where
-        // it will be measured: once a mention can hand an `on_mention`
-        // participant a turn, not spawning it is what makes the summons fail.
+        // `on_mention` is the opposite call (rc3 D17). The ring skips it, but
+        // the USER can hand it the next turn by name — and a summons cannot
+        // reach a process that was never started.
         let mut roster = vec![
             stub_participant(4, "hands", 0),
             stub_participant(7, "eyes", 1),
@@ -2241,8 +2248,8 @@ mod tests {
                 .iter()
                 .map(|p| p.slug.as_str())
                 .collect::<Vec<_>>(),
-            ["hands"],
-            "a solo session spawns one agent and the summonable row stays asleep"
+            ["hands", "specialist"],
+            "the summonable participant is spawned and waits; the disabled row is not"
         );
     }
 

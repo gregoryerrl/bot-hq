@@ -336,3 +336,97 @@ describe("ChatInput paused bar", () => {
     expect(screen.queryByRole("button", { name: "Close session" })).toBeNull();
   });
 });
+
+// ===========================================================================
+// rc3 D17 — the `@` picker
+// ===========================================================================
+
+describe("ChatInput mention picker", () => {
+  const ROSTER = [
+    { slug: "hands", label: "HANDS · Claude Opus 5" },
+    { slug: "eyes", label: "EYES · DeepSeek V4 Pro" },
+    { slug: "advisor", label: "ADVISOR · Claude Opus 5" },
+  ];
+
+  beforeEach(() => localStorage.clear());
+
+  /** Type `text` with the caret left at the end, which is where a picker looks. */
+  function type(text: string) {
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(box, {
+      target: { value: text, selectionStart: text.length },
+    });
+    return box;
+  }
+
+  it("offers this session's participants, and only those", () => {
+    render(<ChatInput onSend={() => {}} mentionables={ROSTER} />);
+    type("@");
+    const options = screen.getAllByRole("option").map((o) => o.textContent);
+    expect(options).toHaveLength(3);
+    expect(options.join(" ")).toContain("ADVISOR");
+    // Mentioning a non-participant is not an error to report — it is a thing
+    // the UI cannot express, which is the point of a picker over free text.
+    type("@nobody");
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("filters as you type, by slug or by what is displayed", () => {
+    render(<ChatInput onSend={() => {}} mentionables={ROSTER} />);
+    type("@adv");
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    // The user reads "ADVISOR", not "advisor" — matching the label is what
+    // makes the picker findable by the name that is on screen.
+    type("@DeepSeek");
+    expect(screen.getAllByRole("option")[0]).toHaveTextContent("EYES");
+  });
+
+  it("inserts the slug the backend parses, not the label", () => {
+    render(<ChatInput onSend={() => {}} mentionables={ROSTER} />);
+    type("look @adv");
+    fireEvent.mouseDown(screen.getAllByRole("option")[0]);
+    // `@advisor ` — the trailing space is deliberate, so the next word is not
+    // swallowed into the slug.
+    expect(screen.getByRole("textbox")).toHaveValue("look @advisor ");
+  });
+
+  it("does not open on an email address", () => {
+    render(<ChatInput onSend={() => {}} mentionables={ROSTER} />);
+    type("mail me at someone@ha");
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("Enter picks the highlighted participant instead of sending", () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} mentionables={ROSTER} />);
+    const box = type("@e");
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(box).toHaveValue("@eyes ");
+    // …and with the picker closed, Enter sends as usual.
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith("@eyes");
+  });
+
+  it("arrow keys move the highlight", () => {
+    render(<ChatInput onSend={() => {}} mentionables={ROSTER} />);
+    const box = type("@");
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(box).toHaveValue("@eyes ");
+  });
+
+  it("Escape dismisses the picker without dismissing what was typed", () => {
+    render(<ChatInput onSend={() => {}} mentionables={ROSTER} />);
+    const box = type("@adv");
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(box).toHaveValue("@adv");
+  });
+
+  it("stays out of the way when there is no roster to offer", () => {
+    render(<ChatInput onSend={() => {}} />);
+    type("@anything");
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+});
