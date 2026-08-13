@@ -18,6 +18,60 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-13 — a turn's backlog is one stdin write
+
+**The user's message stops arriving as an interruption.** `deliver_backlog`
+called `input.deliver` once per row, so a nine-row backlog was nine separate
+stdin writes — and since one outgoing message is one stream-json line and
+claude-code opens a TURN on the first line it reads, that did not hand a
+participant nine rows. It handed over row 1 and interrupted the turn eight times.
+Measured across four sessions before the fix: the user's own message arrived
+somewhere other than the front of the batch **37 times out of 44**, including row
+9 of 9 and row 8 of 8. One session's reviewer spent its turn reviewing a peer's
+test run while the user's actual instruction ("prepare to close") sat unread at
+row 9; the user asked *"why does it feel like its not addressing my current
+message?"*. D23 made that row identifiable — this is what makes it read last.
+
+A page now goes out as ONE write: `ParticipantInput::deliver_batch` joins each
+row's own wire with `WIRE_JOIN` (a blank line — D23's `[speaker]` already marks
+where each row starts, so nothing heavier is needed). The **page**, not the turn,
+is the unit: every realistic backlog is one page (the measured ones were nine
+rows against a 200-row page), while a cold `on_demand` wake stays bounded by the
+page instead of becoming one multi-megabyte line. Nothing caps a write by bytes —
+the token cost is identical however the rows are split, and the page bound is
+measured where a byte budget would be a number with nothing behind it.
+
+Two deliberate consequences. The commit is **all-or-nothing per page** where it
+used to be a prefix: there is nothing to cut between now, so a drain stopped by a
+user message, a park or a pause leaves the page wholly past the cursor and the
+next turn to reach it reads the backlog entire. And the `select!` still runs
+biased against the command channel, so a full stdin still cannot hide a command —
+that property was the reason for the row-at-a-time loop and it did not depend on
+it. The rc3 D19a `kind` filter is untouched: it runs inside
+`unread_for_participant`, upstream of the join, so coalescing cannot fold tool
+rows back in.
+
+**The test harness now counts rows, not wires.** A wire and a row stopped being
+the same thing, and ~45 assertions in `sequencer.rs` are about ROUTING — who was
+handed which rows, in what order — not about how many writes that took. `rows_of`
+splits a wire back into rows for those, exactly as `unlabelled` already strips
+D23's speaker prefix out of them, and the shape is pinned where it IS the
+subject: `a_turns_backlog_arrives_as_one_message` and
+`a_page_boundary_is_the_only_thing_that_splits_a_backlog`. Mutation-verified —
+reverting to one write per row, with every row still delivered in order, reddens
+exactly those two plus `a_delivered_row_says_who_wrote_it` and leaves the other
+65 green.
+
+One existing test had to be **refixtured rather than adapted**:
+`a_backlog_larger_than_the_stdin_buffer_lands_in_full` is (by its own doc) the
+only coverage of `deliver`'s parking path, and its 8 rows against a 2-slot stdin
+became a single write that could never fill the buffer — it would have gone on
+passing while covering nothing. It now posts three pages.
+
+1083 lib + 60 integration tests green.
+
+---
+
 ## 2026-08-13 — the wire says who spoke, and a straggler can no longer wedge a session (rc3 D22–D24)
 
 Three fixes, all found by running real sessions and reading what they left behind

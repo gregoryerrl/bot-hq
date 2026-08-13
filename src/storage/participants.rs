@@ -1518,6 +1518,16 @@ pub fn speaker_of(origin: &str, author: Option<&str>) -> String {
     }
 }
 
+/// What separates two rows inside ONE delivery — see
+/// [`PersistedMessage::wire_batch`].
+///
+/// A blank line and nothing heavier. rc3 D23 already leads every row with its
+/// `[speaker]`, so a blank line between them reads as a transcript and teaches
+/// the participant no new format: the delimiter that matters is already there,
+/// on the row, and a rule about `---` fences would be one more thing a prompt
+/// has to explain and a body could counterfeit.
+pub const WIRE_JOIN: &str = "\n\n";
+
 pub fn render_wire(envelope: Option<&Envelope>, body: &str) -> String {
     let Some(envelope) = envelope else {
         return body.to_string();
@@ -1790,6 +1800,24 @@ impl PersistedMessage {
             self.speaker,
             render_wire(self.envelope.as_ref(), &self.body)
         )
+    }
+
+    /// The bytes a BATCH of rows puts on a participant's stdin, as ONE write.
+    ///
+    /// The turn path delivers a whole page at once rather than a row at a time
+    /// — see [`ParticipantInput::deliver_batch`](crate::agents::ParticipantInput::deliver_batch)
+    /// and the "one turn, one write" section of the sequencer's module doc. This
+    /// is the same [`wire`](Self::wire) for each row, in the order given, with
+    /// [`WIRE_JOIN`] between them; there is no batch-level decoration, because
+    /// each row already carries the one thing that identifies it.
+    ///
+    /// **Order is the caller's and is load-bearing.** The backlog arrives in
+    /// ascending id, so the newest row — typically the user's, since a user
+    /// message is what wakes the ring — reads LAST. That is the whole point of
+    /// the coalescing: a participant reads its peer's turn as context and the
+    /// user's instruction as the thing it was just asked to do.
+    pub fn wire_batch(msgs: &[Self]) -> String {
+        msgs.iter().map(Self::wire).collect::<Vec<_>>().join(WIRE_JOIN)
     }
 
     /// A receipt for a row READ BACK from `messages`.

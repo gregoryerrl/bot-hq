@@ -443,15 +443,17 @@ impl ParticipantInput {
     /// with one copy of the comparison. `send_to_all` now delegates rather than
     /// pre-checking.
     ///
-    /// Be exact about the size of the claim. Within this type there are three
-    /// writes to `tx` — this one, [`send_unrouted`](Self::send_unrouted) and the
-    /// private [`relay`](Self::relay) — so what holds is: **every write to a
-    /// participant's stdin that carries a receipt is scope-checked.** The other
-    /// two carry no receipt and put no row on record: `send_unrouted` takes a
-    /// bare `String` and has no session to check it against (the peer-forward
-    /// hole B5 already tracks), and `relay` has one call site that authors its
-    /// own text — see `relay`'s doc. **Two unrecorded stdin writes, not one.**
-    /// Neither is touched here.
+    /// Be exact about the size of the claim. Within this type there are four
+    /// writes to `tx` — this one, [`deliver_batch`](Self::deliver_batch),
+    /// [`send_unrouted`](Self::send_unrouted) and the private
+    /// [`relay`](Self::relay) — so what holds is: **every write to a
+    /// participant's stdin that carries a receipt is scope-checked.**
+    /// `deliver_batch` is the other receipt-carrying one and runs this same
+    /// comparison per row. The remaining two carry no receipt and put no row on
+    /// record: `send_unrouted` takes a bare `String` and has no session to check
+    /// it against (the peer-forward hole B5 already tracks), and `relay` has one
+    /// call site that authors its own text — see `relay`'s doc. **Two unrecorded
+    /// stdin writes, not one.** Neither is touched here.
     ///
     /// And this is a check on the receipt, not on the channel. Two capabilities
     /// have to be told apart, because they are not equally reachable:
@@ -501,6 +503,69 @@ impl ParticipantInput {
             .is_ok()
     }
 
+    /// Write a whole BATCH of persisted rows to this participant's stdin as ONE
+    /// message. Returns whether it landed, on the same terms as
+    /// [`deliver`](Self::deliver).
+    ///
+    /// ## Why this exists, and why it is not a loop over `deliver`
+    ///
+    /// One [`OutgoingUserMessage`] is one stream-json line
+    /// ([`pump_inputs`](crate::agents::input::pump_inputs)), and claude-code
+    /// opens a TURN on the first line it reads. So delivering a nine-row backlog
+    /// row-at-a-time did not hand the participant nine rows to read — it handed
+    /// it one row and then interrupted it eight times, mid-turn. Measured across
+    /// four sessions on 2026-08-13: the user's own message arrived somewhere
+    /// other than the front of the batch **37 times out of 44**, including row 9
+    /// of 9. One session's reviewer spent its turn on a peer's test run while the
+    /// user's actual instruction sat unread at the end of the batch.
+    ///
+    /// Coalescing is therefore not a performance tweak. It is what makes the
+    /// order the ring already establishes — ascending id, so the newest row last
+    /// — the order the participant actually reads in.
+    ///
+    /// ## All or nothing, deliberately
+    ///
+    /// A mismatched receipt refuses the WHOLE batch rather than skipping that
+    /// row. A mismatch is a routing bug in the caller (see
+    /// [`deliver`](Self::deliver)); delivering the remainder would put a
+    /// partially-correct transcript in front of the agent, which is harder to
+    /// reason about than none of it. Same for the send: it either lands whole or
+    /// not at all, and the caller's cursor moves accordingly.
+    ///
+    /// An empty batch sends nothing and reports success — there is no row to
+    /// fail to deliver. The turn path never calls it that way (it returns on an
+    /// empty page first), so this is a total function rather than a live case.
+    ///
+    /// ## The receipt gate
+    ///
+    /// This is the FOURTH write to `tx` in this type, and the second one that
+    /// carries receipts — see the size-of-the-claim paragraph on
+    /// [`deliver`](Self::deliver). It is scope-checked per receipt, so the claim
+    /// there is unchanged in substance: every write to a participant's stdin
+    /// that carries a receipt is compared against the channel it is for.
+    pub async fn deliver_batch(&self, msgs: &[PersistedMessage]) -> bool {
+        // Checked BEFORE anything is sent, across the whole batch, so a bad row
+        // in the middle cannot leave a prefix on the wire.
+        for msg in msgs {
+            if msg.session_id() != &*self.session_id {
+                warn!(
+                    session = %self.session_id,
+                    receipt_session = %msg.session_id(),
+                    message_id = msg.message_id(),
+                    batch = msgs.len(),
+                    "refusing to deliver a batch containing a receipt from another session"
+                );
+                return false;
+            }
+        }
+        if msgs.is_empty() {
+            return true;
+        }
+        self.tx
+            .send(OutgoingUserMessage::text(PersistedMessage::wire_batch(msgs)))
+            .await
+            .is_ok()
+    }
 
     /// True once the receiving half is gone — a permanent API error or an
     /// exhausted retry budget drops the supervisor's receiver.
@@ -1466,6 +1531,67 @@ mod tests {
             // arrive looking identical without it.
             "[user] meant for this session"
         );
+    }
+
+    #[tokio::test]
+    async fn a_batch_carrying_one_foreign_receipt_is_refused_whole() {
+        // The batch form of the test above, and the property is deliberately
+        // stronger than "the foreign row is dropped": a mismatch is a routing
+        // bug in the caller, and handing the agent the REST of the batch would
+        // put a partially-correct transcript in front of it — harder to reason
+        // about, from either side, than none of it. So nothing goes out, and
+        // `deliver_backlog`'s cursor stays put because the write reported
+        // failure.
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s-a", "a", None).await.unwrap();
+        storage.create_session("s-b", "b", None).await.unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        let input = ParticipantInput::new("s-a", tx);
+        let kind = crate::storage::MessageKind::Text.as_str();
+
+        let mine = storage
+            .post_to_channel("s-a", "user", None, kind, "first", None)
+            .await
+            .unwrap();
+        let theirs = storage
+            .post_to_channel("s-b", "user", None, kind, "not mine", None)
+            .await
+            .unwrap();
+        let also_mine = storage
+            .post_to_channel("s-a", "user", None, kind, "third", None)
+            .await
+            .unwrap();
+
+        assert!(
+            !input
+                .deliver_batch(&[mine.clone(), theirs, also_mine.clone()])
+                .await,
+            "one out-of-scope receipt refuses the batch"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "and refusing means NOTHING was written — not the good rows either"
+        );
+
+        // A scope check, not a blanket refusal.
+        assert!(input.deliver_batch(&[mine, also_mine]).await);
+        assert_eq!(
+            rx.try_recv().unwrap().message.content,
+            format!("[user] first{}[user] third", crate::storage::WIRE_JOIN),
+            "the batch is each row's own wire, joined — no batch-level decoration"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_batch_writes_nothing_and_reports_success() {
+        // Total rather than live: `deliver_backlog` returns on an empty page
+        // before it gets here. Reporting failure would be the wrong answer
+        // anyway — there is no row that failed to arrive — and it would stop a
+        // drain that has nothing left to do.
+        let (tx, mut rx) = mpsc::channel(4);
+        let input = ParticipantInput::new("s-a", tx);
+        assert!(input.deliver_batch(&[]).await);
+        assert!(rx.try_recv().is_err(), "an empty batch is not an empty line");
     }
 
     fn cfg() -> SpawnConfig {

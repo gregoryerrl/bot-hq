@@ -354,15 +354,51 @@
 //! [`MAX_TURN_BATCHES`] is a liveness bound for the other case — a writer
 //! appending faster than the drain — not the termination argument.
 //!
+//! ## One turn, one write
+//!
+//! A page goes out as a SINGLE stdin write —
+//! [`ParticipantInput::deliver_batch`](crate::agents::ParticipantInput::deliver_batch),
+//! joining each row's wire with
+//! [`WIRE_JOIN`](crate::storage::WIRE_JOIN) — not one write per row.
+//!
+//! This is a correctness property, not a saving. One outgoing message is one
+//! stream-json line, and claude-code opens a TURN on the first line it reads:
+//! delivering nine rows one at a time handed the participant ONE row and then
+//! interrupted it eight times, mid-turn. Measured across four sessions
+//! (2026-08-13), the user's own message arrived somewhere other than the front
+//! of the batch **37 times out of 44**, including row 9 of 9 — and rc3 D23's
+//! `[speaker]` prefix made that visible without making it stop. The ring already
+//! orders a backlog by ascending id, so the user's newest instruction is its
+//! LAST row; coalescing is what makes the participant read it in that order
+//! rather than race it.
+//!
+//! Two consequences, both deliberate:
+//!
+//! - **the commit is all-or-nothing per page.** It was a PREFIX while a command
+//!   could cut between two rows; there is nothing to cut between now. A stopped
+//!   drain leaves the page wholly past the cursor, so the next turn that reaches
+//!   it reads the backlog entire rather than its tail;
+//! - **the page is the unit, not the turn.** A drain of `n` pages is still `n`
+//!   writes. Every realistic backlog is one page — the measured ones were nine
+//!   rows against a 200-row page — while a cold `on_demand` wake stays bounded
+//!   by the page rather than becoming one multi-megabyte line. Nothing here caps
+//!   a line by BYTES: the token cost is identical however the rows are split,
+//!   and the page bound is a measured one where a byte budget would be a number
+//!   with nothing behind it.
+//!
+//! What does NOT change is the `kind` filter (rc3 D19a). It runs inside
+//! `unread_for_participant`, upstream of this, so coalescing cannot fold tool
+//! rows back in.
+//!
 //! ## The drain does not hold the command channel shut
 //!
-//! Draining is the longest thing this loop does: up to [`MAX_TURN_BATCHES`] ×
-//! [`UNREAD_BATCH_LIMIT`](crate::storage::UNREAD_BATCH_LIMIT) writes into a
-//! 64-slot stdin channel that PARKS when full. Awaited plainly, a participant
-//! whose process has stopped reading would wedge the whole session's sequencer
-//! inside one `deliver` with no way to reach it — session teardown included.
+//! Draining is the longest thing this loop does: up to [`MAX_TURN_BATCHES`]
+//! writes into a 64-slot stdin channel that PARKS when full. Awaited plainly, a
+//! participant whose process has stopped reading would wedge the whole session's
+//! sequencer inside one `deliver_batch` with no way to reach it — session
+//! teardown included.
 //!
-//! So each row is written under a `select!` against the command channel, and
+//! So each page is written under a `select!` against the command channel, and
 //! four things end a drain early:
 //!
 //! - the control channel CLOSING, which is session end. A teardown must not
@@ -2262,13 +2298,13 @@ enum Stop {
     Paused,
     /// The control channel closed — session end.
     SessionEnd,
-    /// `deliver` returned `false`.
+    /// `deliver_batch` returned `false`.
     Unreachable,
 }
 
 /// Hand `to` everything it has not read, and record what it got.
 ///
-/// Drains rather than delivering one batch — see "how far a turn reads" in the
+/// Drains rather than delivering one page — see "how far a turn reads" in the
 /// module doc.
 /// `max_batches` is [`MAX_TURN_BATCHES`] on every production path; it is a
 /// parameter so the cap's own behaviour can be exercised without a 6,401-row
@@ -2276,6 +2312,9 @@ enum Stop {
 /// `the_batch_cap_hands_over_with_the_remainder_still_past_the_cursor`, which
 /// calls this function directly — the loop above has no way to pass anything
 /// but the constant.
+///
+/// **Each page is ONE write.** See "one turn, one write" in the module doc for
+/// why, and for what that costs the `Stop` arms below.
 ///
 /// Commands that arrive mid-drain go onto `deferred` — see "the drain does not
 /// hold the command channel shut" in the module doc for which of them also END
@@ -2313,20 +2352,28 @@ async fn deliver_backlog(
         if page.rows.is_empty() {
             return;
         }
-        let mut landed: Vec<(i64, Option<&str>)> = Vec::with_capacity(page.rows.len());
+        let total = page.rows.len();
+        // `from_row` is what makes a row READ BACK deliverable: receipts are
+        // otherwise minted only by the INSERT, and every row written before a
+        // restart is only ever available this way.
+        //
+        // Built for the WHOLE page up front, because the page is what goes out
+        // — see "one turn, one write" in the module doc. That holds a page of
+        // cloned bodies alongside `page.rows` rather than one at a time; the
+        // total clone count is what it always was, and the page is already
+        // bounded at `UNREAD_BATCH_LIMIT`.
+        let receipts: Vec<PersistedMessage> =
+            page.rows.iter().map(PersistedMessage::from_row).collect();
+        let mut landed: Vec<(i64, Option<&str>)> = Vec::with_capacity(total);
         let mut stop: Option<Stop> = None;
-        'rows: for row in &page.rows {
-            // `from_row` is what makes a row READ BACK deliverable: receipts are
-            // otherwise minted only by the INSERT, and every row written before
-            // a restart is only ever available this way. Built once per row
-            // rather than inside the retry below, because it clones the body.
-            let receipt = PersistedMessage::from_row(row);
-            loop {
-                tokio::select! {
+        // ONE write for the whole page, retried until it lands or a command
+        // takes precedence — see "one turn, one write" in the module doc.
+        loop {
+            tokio::select! {
                     // Commands first. Both futures here are cancel-safe —
                     // `recv` by documentation, and a dropped `Sender::send`
                     // enqueues nothing — so the losing branch costs at most a
-                    // re-attempt of the same row, never a half-written one.
+                    // re-attempt of the same page, never a half-written one.
                     // Biased so a command already waiting always wins: the
                     // whole point is that a full stdin cannot hide it.
                     biased;
@@ -2334,7 +2381,7 @@ async fn deliver_backlog(
                         Some(cmd @ SequencerCommand::UserMessage { .. }) => {
                             deferred.push_back(cmd);
                             stop = Some(Stop::Superseded);
-                            break 'rows;
+                            break;
                         }
                         // Deferred like the user message, and for the same
                         // reason: the ACT is the loop's, not this function's.
@@ -2358,7 +2405,7 @@ async fn deliver_backlog(
                             deferred.push_back(cmd);
                             if mine {
                                 stop = Some(Stop::Parked);
-                                break 'rows;
+                                break;
                             }
                         }
                         // Ends the drain like the two above, and for the same
@@ -2385,34 +2432,39 @@ async fn deliver_backlog(
                         Some(cmd @ SequencerCommand::Pause) => {
                             deferred.push_front(cmd);
                             stop = Some(Stop::Paused);
-                            break 'rows;
+                            break;
                         }
-                        // Set aside and re-attempt this row. Deferring rather
+                        // Set aside and re-attempt this page. Deferring rather
                         // than acting is what keeps the drain-before-handover
                         // rule true.
                         Some(cmd) => deferred.push_back(cmd),
                         None => {
                             stop = Some(Stop::SessionEnd);
-                            break 'rows;
+                            break;
                         }
                     },
-                    landed_ok = input.deliver(&receipt) => {
+                    landed_ok = input.deliver_batch(&receipts) => {
                         if !landed_ok {
                             stop = Some(Stop::Unreachable);
-                            break 'rows;
+                            break;
                         }
                         // `None` = delivered. Nothing on the turn path
                         // withholds; see the module doc.
-                        landed.push((row.id, None));
+                        landed.extend(receipts.iter().map(|m| (m.message_id(), None)));
                         break;
                     }
                 }
-            }
         }
-        // Committing only the PREFIX that landed is what keeps the cursor from
-        // outrunning the transport. It moves to the highest id in whatever is
-        // passed here and never rewinds, so committing the whole page after a
-        // short write would lose the tail forever.
+        // The page either landed whole or not at all, and this commits whichever
+        // it was. It moves the cursor to the highest id passed here and never
+        // rewinds, so recording a row the transport did not take would lose it
+        // forever — which is why nothing is recorded when the write is skipped.
+        //
+        // **This used to be a PREFIX**, because delivery was a row at a time and
+        // a command could cut between two of them. One write per page makes it
+        // all-or-nothing, and that is the intended trade: a stopped drain leaves
+        // the page wholly past the cursor instead of half-read, so the turn that
+        // picks it up gets the backlog entire.
         if let Err(e) = deps.storage.commit_delivery(to.id, &landed).await {
             warn!(
                 session = %deps.session_id,
@@ -2429,7 +2481,7 @@ async fn deliver_backlog(
                     session = %deps.session_id,
                     participant_id = to.id,
                     delivered = landed.len(),
-                    of = page.rows.len(),
+                    of = total,
                     "sequencer: a user message superseded this turn mid-drain"
                 );
                 return;
@@ -2439,21 +2491,21 @@ async fn deliver_backlog(
                     session = %deps.session_id,
                     participant_id = to.id,
                     delivered = landed.len(),
-                    of = page.rows.len(),
+                    of = total,
                     "sequencer: a parked question halted this turn mid-drain"
                 );
                 return;
             }
             Some(Stop::Paused) => {
                 // Costs nothing but the rows read and not delivered, exactly as
-                // the two above: the commit just made records only the prefix
-                // that landed, so the remainder is still past this participant's
-                // cursor and `Resume` re-drains from there.
+                // the two above: the commit just made recorded nothing this page,
+                // so the whole of it is still past this participant's cursor and
+                // `Resume` re-drains from there.
                 debug!(
                     session = %deps.session_id,
                     participant_id = to.id,
                     delivered = landed.len(),
-                    of = page.rows.len(),
+                    of = total,
                     "sequencer: a pause stopped this turn's delivery mid-drain"
                 );
                 return;
@@ -2463,16 +2515,17 @@ async fn deliver_backlog(
                     session = %deps.session_id,
                     participant_id = to.id,
                     delivered = landed.len(),
-                    of = page.rows.len(),
+                    of = total,
                     "sequencer: session ended mid-drain"
                 );
                 return;
             }
             Some(Stop::Unreachable) => {
-                // `deliver` returns `false` for two unrelated reasons — a dead
-                // input pump, and a receipt from another session — and this
-                // warning named only the first for a while, so a routing bug
-                // would have read as a dead pipe. `is_closed` separates them.
+                // `deliver_batch` returns `false` for two unrelated reasons —
+                // a dead input pump, and a receipt from another session — and
+                // this warning named only the first for a while, so a routing
+                // bug would have read as a dead pipe. `is_closed` separates
+                // them.
                 //
                 // It is a second look, not the same observation: the channel
                 // can close between the refusal and this check, which would
@@ -2485,8 +2538,8 @@ async fn deliver_backlog(
                         participant_id = to.id,
                         slug = %to.slug,
                         delivered = landed.len(),
-                        of = page.rows.len(),
-                        "sequencer: stdin closed mid-batch; the rest stays past the cursor"
+                        of = total,
+                        "sequencer: stdin closed before this page went out; it stays past the cursor"
                     );
                 } else {
                     warn!(
@@ -2494,9 +2547,9 @@ async fn deliver_backlog(
                         participant_id = to.id,
                         slug = %to.slug,
                         delivered = landed.len(),
-                        of = page.rows.len(),
-                        "sequencer: a row was refused mid-batch with stdin still open — the \
-                         receipt is out of this participant's session scope"
+                        of = total,
+                        "sequencer: a page was refused with stdin still open — a \
+                         receipt in it is out of this participant's session scope"
                     );
                 }
                 return;
@@ -2906,6 +2959,43 @@ mod tests {
         }
     }
 
+    /// The ROWS inside one wire.
+    ///
+    /// A turn's page reaches stdin as a single write with
+    /// [`WIRE_JOIN`](crate::storage::WIRE_JOIN) between the rows, so a wire and
+    /// a row stopped being the same thing. Every assertion in this file is about
+    /// ROUTING — who was handed which rows, in what order — and none of them is
+    /// about how many writes that took, so the seat helpers below count rows and
+    /// this is where the two are separated. Exactly the treatment
+    /// [`unlabelled`] gives D23's speaker prefix, and for the same reason:
+    /// restating the delivery shape in forty-five routing assertions would test
+    /// it in none of them.
+    ///
+    /// The shape itself is pinned where it IS the subject —
+    /// `a_turns_backlog_arrives_as_one_message` and
+    /// `a_page_boundary_is_the_only_thing_that_splits_a_backlog` below, both of
+    /// which read raw wires and never come through here.
+    ///
+    /// **Splitting on a blank line is exact for these fixtures and not in
+    /// general.** Every row posted in this file is single-line, so each part is
+    /// one row; a body containing a blank line would split into two. That fails
+    /// LOUDLY rather than silently — the second part carries no `[speaker]`, and
+    /// the assert below names it — so a future fixture that grows one is told
+    /// what happened instead of quietly asserting against fragments.
+    fn rows_of(wire: String) -> Vec<String> {
+        wire.split(crate::storage::WIRE_JOIN)
+            .map(|part| {
+                assert!(
+                    part.starts_with('['),
+                    "a delivered row must lead with its [speaker]; got {part:?}. If this \
+                     fired on a multi-line fixture body, that body was split at its blank \
+                     line — see `rows_of`."
+                );
+                unlabelled(part.to_string())
+            })
+            .collect()
+    }
+
     impl Seat {
         /// Everything on this stdin right now.
         ///
@@ -2916,13 +3006,22 @@ mod tests {
         fn drain(&mut self) -> Vec<String> {
             let mut out = Vec::new();
             while let Ok(m) = self.rx.try_recv() {
-                out.push(unlabelled(m.message.content));
+                out.extend(rows_of(m.message.content));
             }
             out
         }
 
-        /// [`expect`](Self::expect) with the `[speaker]` prefix left ON — for
-        /// the one test whose subject IS the prefix.
+        /// [`expect`](Self::expect) with the `[speaker]` prefix left ON, and
+        /// counting WIRES rather than rows — for the three tests whose subject
+        /// IS the delivery shape: `a_delivered_row_says_who_wrote_it`,
+        /// `a_turns_backlog_arrives_as_one_message` and
+        /// `a_page_boundary_is_the_only_thing_that_splits_a_backlog`. Everything
+        /// else goes through [`rows_of`] and asserts routing.
+        ///
+        /// Carries no quiescence window of its own — a caller that needs the
+        /// negative half ("and NOTHING else was written") follows it with
+        /// [`quiet`](Self::quiet), which is exactly what makes those three
+        /// tests able to say a page was one write and not three.
         ///
         /// Deliberately NOT a `try_recv` drain: the rows have to be waited for,
         /// and a drain that read too early would return an empty vec and assert
@@ -2944,9 +3043,9 @@ mod tests {
         /// The shared body of [`quiet`](Self::quiet) and the tail of
         /// [`expect`](Self::expect) — the two negative assertions in this file
         /// differ only in what they say when they fail.
-        async fn extra_wire(&mut self) -> Option<String> {
+        async fn extra_wire(&mut self) -> Option<Vec<String>> {
             match tokio::time::timeout(QUIET, self.rx.recv()).await {
-                Ok(Some(m)) => Some(unlabelled(m.message.content)),
+                Ok(Some(m)) => Some(rows_of(m.message.content)),
                 // Elapsed, or the sender was dropped. Both are silence.
                 _ => None,
             }
@@ -3007,24 +3106,34 @@ mod tests {
                 .await
                 .expect("the ring never woke this participant")
                 .expect("the sequencer dropped this participant's stdin");
-            let mut out = vec![unlabelled(first.message.content)];
+            let mut out = rows_of(first.message.content);
             while let Some(w) = self.extra_wire().await {
-                out.push(w);
+                out.extend(w);
             }
             out
         }
 
         async fn expect(&mut self, n: usize) -> Vec<String> {
-            let mut out = Vec::new();
-            for i in 0..n {
+            let mut out: Vec<String> = Vec::new();
+            while out.len() < n {
                 let m = tokio::time::timeout(DEADLINE, self.rx.recv())
                     .await
-                    .unwrap_or_else(|_| panic!("wire {} of {n} never arrived", i + 1))
+                    .unwrap_or_else(|_| {
+                        panic!("row {} of {n} never arrived", out.len() + 1)
+                    })
                     .expect("the sequencer dropped this participant's stdin");
-                out.push(unlabelled(m.message.content));
+                out.extend(rows_of(m.message.content));
             }
+            // Over-delivery inside the LAST write, which the quiescence window
+            // below cannot see: those rows arrived in a message this call
+            // already consumed.
+            assert!(
+                out.len() <= n,
+                "expected exactly {n} rows, got {}: {out:?}",
+                out.len()
+            );
             if let Some(w) = self.extra_wire().await {
-                panic!("expected exactly {n} wires, then {w:?} arrived as well");
+                panic!("expected exactly {n} rows, then {w:?} arrived as well");
             }
             out
         }
@@ -3341,9 +3450,11 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
         send(&tx, user_message()).await;
+        // ONE raw wire, because a turn's page is one write — so the three
+        // speakers are asserted where they actually appear, inside it.
         assert_eq!(
-            seats[0].expect_raw(3).await,
-            vec![
+            seats[0].expect_raw(1).await,
+            vec![[
                 "[user] the task",
                 // The PEER's slug, not "participant" — and the same string
                 // `@mention` parses, so what a participant reads is what the
@@ -3351,6 +3462,7 @@ mod tests {
                 "[b] a peer's opinion",
                 "[system] a host notice",
             ]
+            .join(crate::storage::WIRE_JOIN)]
         );
         drop(tx);
         assert!(exited(task).await);
@@ -5020,6 +5132,100 @@ mod tests {
         );
     }
 
+    /// **The turn's whole backlog is ONE stdin write.** rc3, 2026-08-13.
+    ///
+    /// The subject is the delivery SHAPE, so it reads raw wires and follows with
+    /// a quiescence window; the routing helpers deliberately cannot see the
+    /// difference (see [`rows_of`]).
+    ///
+    /// **What was wrong.** One outgoing message is one stream-json line, and
+    /// claude-code opens a turn on the first line it reads. Delivering a backlog
+    /// row-at-a-time therefore did not hand a participant its backlog — it
+    /// handed over row 1 and then interrupted the turn with the rest. Measured
+    /// across four sessions: the user's own message arrived somewhere other than
+    /// the front of the batch 37 times out of 44, including row 9 of 9. One
+    /// reviewer spent its turn on a peer's test run while the user's actual
+    /// instruction sat unread at the end of the batch, and the user asked "why
+    /// does it feel like its not addressing my current message?".
+    ///
+    /// So the fixture is that session's shape: peer chatter, a host notice, and
+    /// the user's instruction posted LAST. The assertion is that all three reach
+    /// stdin together, in id order, with the user's row at the end — which is
+    /// what makes it the thing the participant is answering rather than an
+    /// interruption it may already have talked past.
+    #[tokio::test]
+    async fn a_turns_backlog_arrives_as_one_message() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        post(&storage, "participant", Some("b"), "a peer's turn").await;
+        post(&storage, "system", None, "a host notice").await;
+        post(&storage, "user", None, "what I actually want").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+
+        let wires = seats[0].expect_raw(1).await;
+        assert_eq!(
+            wires,
+            vec![[
+                "[b] a peer's turn",
+                "[system] a host notice",
+                "[user] what I actually want",
+            ]
+            .join(crate::storage::WIRE_JOIN)],
+            "three rows, one write, in the order the channel holds them"
+        );
+        assert!(
+            wires[0].ends_with("[user] what I actually want"),
+            "the user's row is the LAST thing the participant reads: {:?}",
+            wires[0]
+        );
+        // The negative half, and the half that fails if the coalescing is
+        // removed: `expect_raw(1)` above would take row 1 and be satisfied.
+        seats[0].quiet().await;
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// A page boundary is the only thing that splits a backlog — the companion
+    /// to the test above, and what stops "one write" being read as a promise the
+    /// drain cannot keep.
+    ///
+    /// `unread_for_participant` is bounded at [`UNREAD_BATCH_LIMIT`], so a
+    /// backlog past it takes more than one read and therefore more than one
+    /// write. That bound is the ONLY splitter: nothing caps a write by bytes,
+    /// deliberately (see "one turn, one write" in the module doc), so 201 rows
+    /// must be exactly two wires of 200 and 1 — not three, and not 201.
+    #[tokio::test]
+    async fn a_page_boundary_is_the_only_thing_that_splits_a_backlog() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let per_page = UNREAD_BATCH_LIMIT as usize;
+        for i in 0..per_page + 1 {
+            post(&storage, "user", None, &format!("row {i}")).await;
+        }
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+
+        let wires = seats[0].expect_raw(2).await;
+        assert_eq!(
+            wires[0].split(crate::storage::WIRE_JOIN).count(),
+            per_page,
+            "the first write is a whole page"
+        );
+        assert_eq!(
+            wires[1],
+            format!("[user] row {per_page}"),
+            "and the second is the remainder, not a re-send"
+        );
+        seats[0].quiet().await;
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
     #[tokio::test]
     async fn a_participant_with_no_stdin_holds_the_turn_rather_than_losing_its_rows() {
         // A spawned agent whose roster read failed has no `participant_id`, so
@@ -5070,17 +5276,22 @@ mod tests {
     #[tokio::test]
     async fn a_backlog_larger_than_the_stdin_buffer_lands_in_full() {
         // The only test here that lets a drain run out of buffer. Production
-        // stdin is 64 slots and `deliver` PARKS when it fills, so a drain of any
-        // real backlog parks and resumes repeatedly; every other test in this
-        // file runs with more slots than it posts rows and would not notice a
-        // drain that dropped a row rather than waiting for one.
+        // stdin is 64 slots and `deliver_batch` PARKS when it fills, so a drain
+        // deep enough to outrun it parks and resumes; every other test in this
+        // file runs with more slots than it posts writes and would not notice a
+        // drain that dropped a page rather than waiting for one.
         //
-        // Two slots against eight rows: the drain cannot finish without the
-        // reader freeing space three times over.
+        // **The fixture had to grow when a page became one write.** It was eight
+        // rows against two slots, which was three writes' worth of pressure when
+        // a row was a write and is ONE write now — the buffer would never fill,
+        // and this test would have gone on passing while covering nothing. What
+        // fills a 2-slot stdin today is three PAGES, so that is what it posts:
+        // the reader has to free space before the third can land.
         let (deps, storage, mut seats) =
             ring_sized(&[("a", "active"), ("b", "active")], 2).await;
         let (a, b) = (seats[0].id, seats[1].id);
-        for i in 0..8 {
+        let rows = 2 * UNREAD_BATCH_LIMIT as usize + 1;
+        for i in 0..rows {
             post(&storage, "user", None, &format!("row {i}")).await;
         }
 
@@ -5089,11 +5300,11 @@ mod tests {
         send(&tx, user_message()).await;
         // `expect` is the reader: it drains the seat as the sequencer fills it,
         // so the parking and the unparking both happen inside this call.
-        let want: Vec<String> = (0..8).map(|i| format!("row {i}")).collect();
+        let want: Vec<String> = (0..rows).map(|i| format!("row {i}")).collect();
         assert_eq!(
-            seats[0].expect(8).await,
+            seats[0].expect(rows).await,
             want,
-            "a full stdin delays a row; it does not lose one"
+            "a full stdin delays a page; it does not lose one"
         );
 
         // And the loop was not wedged by the parking — the turn still hands over.
@@ -5106,7 +5317,7 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(seats[1].expect(8).await, want);
+        assert_eq!(seats[1].expect(rows).await, want);
         drop(tx);
         assert!(exited(task).await);
 

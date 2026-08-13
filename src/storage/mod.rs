@@ -46,6 +46,7 @@ pub use participants::{
     participant_display_name, participant_slug, render_wire, speaker_of, ChannelPage, Envelope,
     Participant,
     ParticipantDraft, PersistedMessage, Role, RoleDraft, PARTICIPATION_MODES, UNREAD_BATCH_LIMIT,
+    WIRE_JOIN,
 };
 pub use feedback::{FEEDBACK_KINDS, FEEDBACK_STATUSES};
 pub use row_types::{

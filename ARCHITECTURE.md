@@ -212,6 +212,16 @@ same handle `@mention` parses), `user`, or `system` (rc3 D23). Before that the
 wire carried no author at all, and a participant handed four rows had to infer
 which was the task and which was a peer's aside.
 
+**A turn's backlog is ONE stdin write.** One outgoing message is one stream-json
+line and claude-code opens a turn on the first line it reads, so delivering rows
+one at a time handed a participant row 1 and then interrupted it with the rest:
+measured over four sessions, the user's own message arrived somewhere other than
+the front of the batch 37 times out of 44. Rows are joined with a blank line and
+written together, so the backlog's last row — normally the user's, since a user
+message is what wakes the ring — reads last. The splitter is the 200-row page
+bound of `unread_for_participant` and nothing else; a deeper backlog is one write
+per page, and the commit is all-or-nothing per page.
+
 **A turn's epoch is bound by the RING, not by the participant's own output.** The
 sequencer publishes the epoch before delivering, and the pump snapshots it on the
 turn's first event — but never on a STRAGGLER, an event arriving after a
