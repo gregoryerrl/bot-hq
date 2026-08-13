@@ -1614,7 +1614,7 @@ role_display_name: string | null;
  */
 model_display_name: string | null; turn_position: number; 
 /**
- * `active` | `observer` (| `on_demand`, which create refuses today).
+ * `active` | `on_mention` (which create refuses today — see rc3 D17).
  */
 participation_mode: string; enabled: boolean; 
 /**
@@ -1837,7 +1837,7 @@ slug: string | null; description_prompt: string | null; capabilities: string[]; 
  */
 export type RoleView = { id: number; slug: string; display_name: string; description_prompt: string | null; capabilities: string[]; 
 /**
- * `active` | `observer` | `on_demand`.
+ * `active` | `on_mention` — see `storage::PARTICIPATION_MODES`.
  */
 participation_mode: string; 
 /**

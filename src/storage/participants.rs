@@ -846,7 +846,7 @@ impl Storage {
         // first.
         let rows = sqlx::query(&format!(
             "SELECT {ROLE_COLUMNS} FROM roles \
-             WHERE archived = 0 AND participation_mode <> 'on_mention' ORDER BY id"
+             WHERE archived = 0 AND participation_mode <> '{MODE_ON_MENTION}' ORDER BY id"
         ))
         .fetch_all(&self.pool)
         .await

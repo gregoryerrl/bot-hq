@@ -642,3 +642,66 @@ participant has read the task before anyone acts, which is the point. But it als
 means three agents have *opinions* ready and the first turn arrives into a room
 where everyone already decided. Try it both ways on a real session before
 settling it.
+
+### D22 — a parked question finishes the lap before it halts
+
+Decided and shipped 2026-08-13, from `s-e8a20797`. The user, shown the three
+options: **"Finish the lap, then halt."**
+
+**The defect, which is a COMPOSITION rather than a bug.** Every mechanism
+involved was individually correct:
+
+1. A participant ends its turn with `ask_user_choice`.
+2. That parks a question, which halted the ring where it stood.
+3. The user answers; the answer is a user message, which restarts the cycle at
+   the FRONT of the rotation.
+4. Which is the same participant. Go to 1.
+
+So a participant that asks the user something at the end of each turn makes its
+peers **structurally unreachable**. Measured in `s-e8a20797`: HANDS held every
+turn of a seven-minute session, four deliveries to slot 0 and **zero** to slots 1
+and 2, with both EYES subprocesses alive and their MCP connections initialised.
+The session before it (`s-81057bde`) diagnosed the same shape from inside and
+called it "EYES has never been handed a turn" without naming the halt as the
+cause.
+
+**This is the rc3 reframe's own requirement failing.** Before rc3 the bilateral
+router forwarded the executor's output to its peer regardless of any halt, so the
+reviewer read everything and reviewed it. The ring turned that forward into a
+turn, and a halt stops turns. The user's brief was explicit: *"What worked
+previously before rc3 must also work on rc3 — HANDS and EYES will work
+adversarially."* A configuration where the reviewer cannot speak does not.
+
+**The rule.** A park ends the ASKER's turn instead of stopping the ring. The
+rotation carries on; the cycle halts when it comes back around to a participant
+that is blocked. Bounded at **N-1 extra turns** — one each for the participants
+waiting on nothing — which is exactly the adversarial pass the roster was built
+for. The reviewer sees the work while the user decides, which also makes the
+answer better informed.
+
+**Mechanics:**
+
+- `QuestionParked` carries `participant_id: Option<i64>`, resolved from the
+  caller's slug by the bridge — the layer that holds both the session and the
+  roster. `None` falls back to halting outright, which is the safe direction and
+  what every park used to do.
+- The sequencer keeps a `blocked` set in its own frame. A user message clears it
+  BEFORE the ring is stepped, or the release would re-halt on the spot.
+- Only a park naming the HOLDER ends a turn. One naming anybody else records the
+  block and leaves the live turn alone; stepping there would put two participants
+  on a turn at once.
+- The drain stops for a park only when it names the participant being fed. While
+  a park stopped the cycle outright, cutting any drain short was right; it now
+  leaves other turns live, and stopping would hand the holder a partial backlog
+  for nothing.
+
+**What this deliberately gives up.** "One participant blocking on the user stops
+the cycle regardless of what the others would have done" was the documented
+meaning of *unilateral*, and it is now narrower: unilateral in that no vote is
+cast and the cycle does stop, but not immediate. The cost is at most N-1 model
+calls per parked question while the user is away.
+
+**Verified by mutation**, three ways: halt at the park instead of stepping, never
+halt on reaching a blocked participant, or leave the block set uncleared by a
+user message — each reddens the tests written for it, and the suite is green with
+all three restored.

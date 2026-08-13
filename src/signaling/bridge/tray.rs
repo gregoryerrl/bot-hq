@@ -31,7 +31,15 @@ pub fn gate_age_secs(asked_at: &str) -> Option<i64> {
 }
 
 impl SignalingBridge {
-    async fn set_session_awaiting(&self, session_id: &str, halt_ring: bool) {
+    /// Flag the session as awaiting the user, and — for a park that YIELDS the
+    /// session — tell the ring who is now blocked.
+    ///
+    /// `asker` is the caller's slug. It is resolved to a participant id here
+    /// because this is the layer that holds both the session and the roster; the
+    /// ring holds neither, and an id it cannot resolve is a state it should not
+    /// have to reason about. An unresolvable slug sends `None`, which the ring
+    /// treats as "halt outright" — the old behaviour, and the safe direction.
+    async fn set_session_awaiting(&self, session_id: &str, asker: &str, halt_ring: bool) {
         if let Some(flag) = self.session_awaiting.lock().await.get(session_id) {
             flag.store(true, Ordering::Release);
         }
@@ -54,8 +62,35 @@ impl SignalingBridge {
             None
         };
         if let Some(tx) = seq {
+            // rc3 D22: WHO parked it. The ring ends that participant's turn and
+            // keeps dealing turns to everyone else, halting when the rotation
+            // comes back to somebody who cannot proceed.
+            let participant_id = {
+                let storage_guard = self.storage.lock().await;
+                let storage = storage_guard.clone();
+                drop(storage_guard);
+                match storage {
+                    Some(s) => s
+                        .participant_by_slug(session_id, asker)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|p| p.id),
+                    None => None,
+                }
+            };
+            if participant_id.is_none() {
+                tracing::warn!(
+                    session_id,
+                    asker,
+                    "a parked question named a participant the roster does not hold; \
+                     the whole cycle halts rather than finishing its lap"
+                );
+            }
             if tx
-                .try_send(crate::core::sequencer::SequencerCommand::QuestionParked)
+                .try_send(crate::core::sequencer::SequencerCommand::QuestionParked {
+                    participant_id,
+                })
                 .is_err()
             {
                 tracing::warn!(
@@ -335,7 +370,7 @@ impl SignalingBridge {
         // reach its peers while we wait for the user. `!blocking` is the
         // distinction: a parked CHOICE yields the session, a blocking approval
         // is a hook waiting on a bool and must not stop the cycle.
-        self.set_session_awaiting(&session_id, !blocking).await;
+        self.set_session_awaiting(&session_id, &agent, !blocking).await;
 
         // Best-effort broadcast. If no subscribers, the request still parks
         // until resolve_choice is called (mostly a concern for tests).
@@ -862,7 +897,7 @@ impl SignalingBridge {
     /// don't populate — and it survives a restart), then emit `AwaitingUser` so
     /// the duo's peer-forward halts until the user acts.
     async fn emit_halt_row(&self, session_id: String, agent: String, text: String) {
-        self.set_session_awaiting(&session_id, true).await;
+        self.set_session_awaiting(&session_id, &agent, true).await;
         let choice_id = Uuid::new_v4().to_string();
         self.persist_question(
             &session_id,
@@ -1022,7 +1057,7 @@ mod tests {
             }
 
             assert!(
-                matches!(rx.try_recv(), Ok(SequencerCommand::QuestionParked)),
+                matches!(rx.try_recv(), Ok(SequencerCommand::QuestionParked { .. })),
                 "{door} parked a question and the ring was never told to halt"
             );
         }
@@ -1059,7 +1094,7 @@ mod tests {
             .mark_awaiting_user("s1".into(), "hands".into(), "blocked".into())
             .await;
         assert!(
-            matches!(rx.try_recv(), Ok(SequencerCommand::QuestionParked)),
+            matches!(rx.try_recv(), Ok(SequencerCommand::QuestionParked { .. })),
             "parking must halt the ring"
         );
 
