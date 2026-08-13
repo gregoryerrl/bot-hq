@@ -859,6 +859,34 @@ pub struct SequencerDeps {
     /// posted either way — that is the half D7 requires, and it does not depend
     /// on this field.
     pub bridge: Option<Arc<SignalingBridge>>,
+    /// Where a participant is marked WORKING when the ring hands it a turn.
+    ///
+    /// **The ring is the only thing that knows a turn started**, and until this
+    /// field existed it could not say so. `SessionActivity::derive` locks the
+    /// chat input while any participant is busy, and busy was set in exactly two
+    /// places — `AppState::broadcast` (every agent, when the user types) and
+    /// `SessionHandle::send_to_all` — while the PUMP cleared each participant's
+    /// own flag at its own turn end. So a user message locked the input, each
+    /// participant unlocked its share as its turn finished, and after ONE lap
+    /// every flag was clear: the input re-opened while the ring was still
+    /// cycling (D22's lap, the consensus tally, the round cap's 500 laps).
+    ///
+    /// The user reported it from the outside — *"I can type while agents are
+    /// working, it might legitimately interrupt your turns"* — and they are
+    /// right about the cost: a message typed mid-lap supersedes the in-flight
+    /// turn, and when the reset target is the participant already holding it
+    /// (the front of the rotation, the common case) its new backlog is written
+    /// to a stdin whose turn is still running.
+    ///
+    /// The guarantee that used to cover this was the ROUTER's ordering —
+    /// peer-busy set before sender-idle, so `derive` never saw both idle
+    /// mid-handoff — and it was deleted with `core/router.rs` in rc3. This is
+    /// its replacement, and it is stronger: the router only closed the gap
+    /// between two agents, where this holds the lock for the whole cycle.
+    ///
+    /// `Option` for the same reason [`Self::bridge`] is: the unit rings
+    /// construct deps directly and most of them are not about the input lock.
+    pub activity: Option<Arc<crate::core::activity::ActivityTracker>>,
 }
 
 /// A wake for the sequencer.
@@ -2218,9 +2246,7 @@ async fn hand_to_summoned(deps: &SequencerDeps, queue: &mut VecDeque<i64>) -> Op
                     queued = queue.len(),
                     "sequencer: the user summoned this participant; it takes the next turn"
                 );
-                deps.storage
-                    .set_current_turn(&deps.session_id, Some(p.id))
-                    .await;
+                hand_turn_to(deps, Some(&p)).await;
                 return Some(p);
             }
             // Every remaining case is "the summons cannot be honoured": no such
@@ -2280,13 +2306,56 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Hando
             "sequencer: no active participant to hand the turn to"
         );
     }
+    hand_turn_to(deps, next.as_ref()).await;
+    Handover::To(next)
+}
+
+/// Hand the turn to `next` — record WHO holds it, and mark it WORKING.
+///
+/// **One function because it is one event.** Recording the holder (rc3 D19b) and
+/// marking it busy are the same fact stated to two readers: the UI's roster, and
+/// the chat input's lock. They were separate once and only one of them existed —
+/// `set_current_turn` was written and the busy flag was not, which is the whole
+/// of the input-unlocks-mid-cycle defect. The CL's remedy for a two-halves join
+/// is to extract it somewhere a test can call, and this is that place: both call
+/// sites (the summons, the ring step) are now one line each, so a future edit
+/// cannot move one half without the other.
+///
+/// `None` is a HALT — consensus, a parked question, the round cap — and it marks
+/// nobody, deliberately. The pump has already cleared the participant that just
+/// finished, so recording no holder leaves every flag clear, the session derives
+/// `Idle`, and the input unlocks. **That is the unlock condition, and it needs no
+/// code of its own.**
+///
+/// **This closes a wedge, not just a cosmetic lock.** A message typed while a
+/// turn is in flight lands on the holder's stdin mid-turn; the pump binds its
+/// epoch at turn-OPEN, so the completion that follows carries the pre-reset
+/// epoch and is discarded — and the discard arm does not step the ring. The
+/// pump has cleared its state, the cursor is already past the message, and the
+/// loop waits in `rx.recv()` with no timeout, so nothing can produce the epoch
+/// the ring is now waiting on. The only exit is another user message, which is
+/// the same action that caused it. Holding the lock for the whole cycle makes
+/// that landing unreachable by construction.
+///
+/// What this does NOT do is clear the PREVIOUS holder. The pump owns that, at
+/// its own turn end, and it stays there: moving the clear here would close the
+/// sub-second gap between a completion and the next handover, and buy a wedge
+/// for it — a completion that never arrives would leave the flag set and the
+/// input locked forever, which `SessionHandle::send_to_all`'s doc records as a
+/// hazard already paid for once. That gap CAN be typed into, and harmlessly: no
+/// turn is in flight there, so the message takes the designed fresh-turn path
+/// rather than landing mid-turn. A permanently locked input is worse than a
+/// window whose worst case is the intended behaviour.
+async fn hand_turn_to(deps: &SequencerDeps, next: Option<&Participant>) {
     // Say who holds it. The ring has always known; the column that exists to
     // report it was never written, so the UI could not tell a participant
     // waiting its turn from one that had died.
     deps.storage
-        .set_current_turn(&deps.session_id, next.as_ref().map(|p| p.id))
+        .set_current_turn(&deps.session_id, next.map(|p| p.id))
         .await;
-    Handover::To(next)
+    if let (Some(activity), Some(p)) = (&deps.activity, next) {
+        activity.set_busy_slug(&p.slug, true);
+    }
 }
 
 /// Why a drain stopped before the end of its page.
@@ -3232,6 +3301,7 @@ mod tests {
             // can actually reach.
             data_dir: None,
             bridge: None,
+            activity: None,
         };
         (deps, storage, seats)
     }
@@ -3541,6 +3611,223 @@ mod tests {
             seats[0].expect_raw(1).await,
             vec!["[b] b's opinion"],
             "whitespace must not put an empty [] on the wire"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// A tracker wired to a real bridge, for the input-lock tests.
+    ///
+    /// `awaiting` is its own flag and stays false here: it OUTRANKS busy in
+    /// `derive`, so a test that let it float would pass on the wrong reason.
+    async fn tracker(slugs: &[&str]) -> Arc<crate::core::activity::ActivityTracker> {
+        crate::core::activity::ActivityTracker::new(
+            "s1",
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            SignalingBridge::new(),
+            slugs.iter().map(|s| s.to_string()).collect(),
+        )
+    }
+
+    /// **rc3 D19b: the ring records WHO holds the turn** — and until now nothing
+    /// pinned it.
+    ///
+    /// Found while mutation-testing `hand_turn_to`: deleting the
+    /// `set_current_turn` call outright left all 1100 tests green. The column
+    /// exists so the UI can tell a participant waiting its turn from one that
+    /// has died, and the write that fills it was silently deletable — the same
+    /// unpinned-wire shape `set_current_turn` was itself introduced to fix, one
+    /// level up.
+    ///
+    /// It is pinned HERE rather than in a test of its own because the extraction
+    /// is what makes the pairing load-bearing: recording the holder and marking
+    /// it busy are one event, and a test covering only the busy half would let
+    /// the other be dropped by anyone tidying the function.
+    #[tokio::test]
+    async fn the_ring_records_who_holds_the_turn() {
+        async fn holder(s: &Storage) -> Option<i64> {
+            let row: Option<(Option<i64>,)> =
+                sqlx::query_as("SELECT current_turn_participant_id FROM sessions WHERE id = ?")
+                    .bind("s1")
+                    .fetch_optional(s.pool())
+                    .await
+                    .unwrap();
+            row.and_then(|(id,)| id)
+        }
+
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        assert_eq!(holder(&storage).await, Some(a), "A holds turn one");
+
+        post(&storage, "participant", Some("a"), "a spoke").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        let _ = seats[1].expect(2).await;
+        assert_eq!(
+            holder(&storage).await,
+            Some(b),
+            "the ring stepped, so the column steps with it"
+        );
+
+        // A halt hands nobody the turn, and the column has to say so — a stale
+        // id here reads as "B is working" forever.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: DONE },
+        )
+        .await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 2, ending: DONE },
+        )
+        .await;
+        seats[0].quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **The ring marks the participant it hands the turn to.**
+    ///
+    /// Until this existed the ring could not say a turn had started: busy was
+    /// set only by `AppState::broadcast` and `SessionHandle::send_to_all`, and
+    /// cleared by each pump at its own turn end. `SequencerDeps` had no tracker
+    /// at all, so the one component that knows a turn began had no way to
+    /// report it.
+    #[tokio::test]
+    async fn the_ring_marks_the_participant_it_hands_the_turn_to() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let act = tracker(&["a", "b"]).await;
+        deps.activity = Some(Arc::clone(&act));
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        assert!(act.is_busy_slug("a"), "the ring handed A the turn and did not mark it");
+        assert_eq!(
+            act.current(),
+            crate::core::activity::SessionActivity::Busy,
+            "a participant holding a turn means the session is working, so the input locks"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **The regression the user reported, and the one that fails today.**
+    ///
+    /// *"I can type while agents are working, it might legitimately interrupt
+    /// your turns, therefore corrupting the quality of work you provide."*
+    ///
+    /// A user message marks every participant busy; each clears its OWN flag as
+    /// its turn ends. So after one full lap every flag is clear and the session
+    /// derives `Idle` — the input re-opens while the ring is still cycling
+    /// (D22's lap, the consensus tally, the round cap's 500). What makes that
+    /// expensive rather than cosmetic: a message typed mid-lap supersedes the
+    /// in-flight turn, and when the reset target is the participant already
+    /// holding it, its new backlog is written to a stdin whose turn is running.
+    ///
+    /// The assertion is on the state AFTER a completed lap, with the ring still
+    /// live — which is exactly the window the user was typing into.
+    #[tokio::test]
+    async fn the_input_stays_locked_across_a_whole_lap() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        let act = tracker(&["a", "b"]).await;
+        deps.activity = Some(Arc::clone(&act));
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // A finishes — the PUMP would clear A here, so simulate that faithfully
+        // rather than leaving a flag the real system would have dropped.
+        act.set_busy_slug("a", false);
+        post(&storage, "participant", Some("a"), "a spoke").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        let _ = seats[1].expect(2).await;
+        assert!(act.is_busy_slug("b"), "the ring handed B the turn");
+
+        // B finishes, closing lap one. The ring wraps to A and hands it turn
+        // three — and THAT is where the input used to re-open.
+        act.set_busy_slug("b", false);
+        post(&storage, "participant", Some("b"), "b spoke").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: SPOKE },
+        )
+        .await;
+        let _ = seats[0].expect(1).await;
+
+        assert!(
+            act.is_busy_slug("a"),
+            "lap two handed A a turn; without the ring marking it, every flag is \
+             clear here and the user can type into a working session"
+        );
+        assert_eq!(
+            act.current(),
+            crate::core::activity::SessionActivity::Busy,
+            "the input must stay locked for the whole cycle, not just the first lap"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **And the fix must not lock the user out permanently**, which is the
+    /// obvious way to over-correct.
+    ///
+    /// A halt hands `None` — no holder recorded, nobody marked. The pump has
+    /// already cleared whoever finished, so the session falls to `Idle` and the
+    /// input opens. That is the unlock condition, and it needs no code of its
+    /// own; this pins that it actually holds.
+    #[tokio::test]
+    async fn a_halt_leaves_nobody_busy() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        let a = seats[0].id;
+        let act = tracker(&["a"]).await;
+        deps.activity = Some(Arc::clone(&act));
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        assert!(act.is_busy_slug("a"));
+
+        // The solo ring votes done: consensus halts the cycle, so no turn is
+        // handed out and no participant is marked.
+        act.set_busy_slug("a", false);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: DONE },
+        )
+        .await;
+        seats[0].quiet().await;
+
+        assert!(
+            !act.is_busy_slug("a"),
+            "a halt hands nobody a turn, so nothing may be marked working"
+        );
+        assert_eq!(
+            act.current(),
+            crate::core::activity::SessionActivity::Idle,
+            "the cycle yielded — this is when the user gets their input back"
         );
         drop(tx);
         assert!(exited(task).await);
@@ -7298,6 +7585,7 @@ mod tests {
             epochs: HashMap::new(),
             data_dir: None,
             bridge: None,
+            activity: None,
         };
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));

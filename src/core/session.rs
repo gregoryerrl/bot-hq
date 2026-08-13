@@ -964,6 +964,10 @@ async fn spawn_session_handle(
             // absent) earlier in this same function, well before here.
             data_dir: Some(paths.data_dir.clone()),
             bridge: Some(Arc::clone(&bridge)),
+            // The ring is the only thing that knows a turn started, so it is the
+            // only thing that can hold the chat-input lock for the whole cycle
+            // — see `SequencerDeps::activity`.
+            activity: Some(Arc::clone(&activity)),
         };
         let (tx, kick) = spawn_ring(deps, &bridge, &session.id).await;
         tracing::info!(
@@ -3960,6 +3964,7 @@ mod tests {
             epochs: std::collections::HashMap::new(),
             data_dir: None,
             bridge: Some(Arc::clone(&bridge)),
+            activity: None,
         };
         let _tx = spawn_ring(deps, &bridge, "s1").await;
 
