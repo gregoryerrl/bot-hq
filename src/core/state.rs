@@ -911,7 +911,12 @@ impl AppState {
         let slugs = crate::core::mentions::parse_mention_slugs(text);
         let mut ids = Vec::with_capacity(slugs.len());
         for slug in slugs {
-            match self.storage.participant_by_slug(session_id, &slug).await {
+            // Slug OR the user's label (rc3 D20, migration 0053). Without this
+            // the label would break the property `speaker_of`'s doc rests on:
+            // a participant reading `[skeptic]` must be reading the string the
+            // user would type to summon it. The slug still resolves, so a label
+            // that is not mention-shaped costs the alias, never the participant.
+            match self.storage.participant_by_mention(session_id, &slug).await {
                 Ok(Some(p)) if p.enabled => ids.push(p.id),
                 Ok(Some(_)) => tracing::debug!(
                     session_id,

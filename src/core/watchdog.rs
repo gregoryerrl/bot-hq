@@ -565,7 +565,11 @@ mod tests {
             wire,
             format!(
                 "[{}] {}",
-                crate::storage::speaker_of(&rows[1].origin, rows[1].author.as_deref()),
+                crate::storage::speaker_of(
+                    &rows[1].origin,
+                    rows[1].author.as_deref(),
+                    rows[1].speaker_label.as_deref(),
+                ),
                 crate::storage::render_wire(rows[1].envelope.as_ref(), &rows[1].content)
             )
         );

@@ -3473,6 +3473,79 @@ mod tests {
         assert!(exited(task).await);
     }
 
+    /// rc3 **D20**'s other half (migration 0053): the name the user gave a
+    /// participant is the name its PEERS read.
+    ///
+    /// The point of the label was that `EYES-2` still says nothing about which
+    /// reviewer this is. Shipping it into the roster and leaving the wire on the
+    /// slug would fix that for the user and leave every participant reading the
+    /// numbers — which is the same complaint, one layer down.
+    ///
+    /// Driven through the ring rather than by calling `speaker_of`, because the
+    /// claim is that the label reaches the WIRE: it is resolved at read time by
+    /// a LEFT JOIN in `channel_page`, and a test on the function alone passes
+    /// with that join deleted.
+    #[tokio::test]
+    async fn a_labelled_participant_says_its_name_on_the_wire() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let b = seats[1].id;
+        sqlx::query("UPDATE session_participants SET label = ? WHERE id = ?")
+            .bind("Skeptic")
+            .bind(b)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        // One row from the labelled peer, one from the user, one from the host —
+        // so the test also says what a label must NOT rename.
+        post(&storage, "participant", Some("b"), "b's opinion").await;
+        post(&storage, "user", None, "the task").await;
+        post(&storage, "system", None, "a host notice").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect_raw(1).await,
+            vec![[
+                // The user's name for it, not `b`.
+                "[Skeptic] b's opinion",
+                // Neither of these is a participant, so neither can be renamed:
+                // an agent that reads a host notice as the user has been handed
+                // a fabricated instruction (D23).
+                "[user] the task",
+                "[system] a host notice",
+            ]
+            .join(crate::storage::WIRE_JOIN)]
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// A blank label is not a name — on the wire, exactly as in the roster.
+    #[tokio::test]
+    async fn a_blank_label_leaves_the_slug_on_the_wire() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let b = seats[1].id;
+        sqlx::query("UPDATE session_participants SET label = ? WHERE id = ?")
+            .bind("   ")
+            .bind(b)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        post(&storage, "participant", Some("b"), "b's opinion").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect_raw(1).await,
+            vec!["[b] b's opinion"],
+            "whitespace must not put an empty [] on the wire"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
     #[tokio::test]
     async fn a_summonable_participant_is_skipped_not_given_a_no_op_turn() {
         // A wake nobody asked for is pure waste, so the ring filters `on_mention`

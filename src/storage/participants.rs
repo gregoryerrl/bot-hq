@@ -803,6 +803,47 @@ impl Storage {
         Ok(row.as_ref().map(participant_from_row))
     }
 
+    /// A participant by the token a user typed after `@` — its slug, or the
+    /// name the user gave it (rc3 **D20**, migration 0053).
+    ///
+    /// **The slug is tried first and wins outright**, because it is the key: it
+    /// is assigned at invite time, it is unique per session by constraint, and
+    /// nothing the user types later can change it. A label is a preference, and
+    /// a preference that could shadow a key would let renaming one participant
+    /// silently redirect summons meant for another.
+    ///
+    /// Labels are matched case-folded and trimmed, the same normalisation
+    /// [`crate::core::mentions::parse_mention_slugs`] already applies to the
+    /// token — a user who typed `@Skeptic` meant the participant called
+    /// `Skeptic`. `lower()` is ASCII-only in SQLite, which is exactly the range
+    /// the mention parser accepts, so the two cannot disagree about what a
+    /// match is.
+    ///
+    /// Two participants sharing a label is not prevented (the column is
+    /// deliberately unvalidated) and is resolved by turn order — the earliest
+    /// seat. Arbitrary, but stable and predictable, which is what D1 asks of
+    /// anything that decides who acts next.
+    pub async fn participant_by_mention(
+        &self,
+        session_id: &str,
+        token: &str,
+    ) -> Result<Option<Participant>> {
+        if let Some(p) = self.participant_by_slug(session_id, token).await? {
+            return Ok(Some(p));
+        }
+        let row = sqlx::query(&format!(
+            "SELECT {PARTICIPANT_COLUMNS} FROM session_participants \
+             WHERE session_id = ? AND lower(trim(label)) = ? \
+             ORDER BY turn_position, id LIMIT 1"
+        ))
+        .bind(session_id)
+        .bind(token.trim().to_ascii_lowercase())
+        .fetch_optional(&self.pool)
+        .await
+        .context("loading participant by label")?;
+        Ok(row.as_ref().map(participant_from_row))
+    }
+
     /// One participant's name, by the display rule
     /// ([`participant_display_name`]): the ROLE it plays and the MODEL it runs
     /// on, never a person's name (rc3 D10).
@@ -1572,18 +1613,35 @@ impl Envelope {
 /// `[eyes-2]` is reading the string the user would type to summon it. rc3 D20's
 /// user-set label supersedes this when it lands — the label the peers read and
 /// the label the user reads should be one string.
-pub fn speaker_of(origin: &str, author: Option<&str>) -> String {
+pub fn speaker_of(origin: &str, author: Option<&str>, label: Option<&str>) -> String {
     match origin {
         // The host's own injections and the user's typing are both "not a
         // peer", but they are not the same authority and must not read as one:
         // a system notice is bot-hq talking, and an agent that mistakes it for
         // the user has been handed a fabricated instruction.
+        //
+        // **Neither takes a label**, and that is not an omission: a label names
+        // a PARTICIPANT, and there is no participant here to name. A host notice
+        // that could be renamed is the D23 failure with a new coat of paint.
         "system" => "system".to_string(),
         "user" => "user".to_string(),
+        // rc3 D20 (migration 0053): the user's name for this participant wins
+        // over its slug, so the name its peers read and the name the user reads
+        // are one string — which was the whole point of the label.
+        //
+        // Blank is not a name, exactly as in [`participant_display_name`]: a
+        // whitespace label falls through to the slug rather than putting an
+        // empty `[]` on the wire.
+        //
         // A participant row whose author is missing predates the dual-write or
         // was written by a path that did not set it. Naming it `participant` is
         // less wrong than naming it nothing.
-        _ => author.unwrap_or("participant").to_string(),
+        _ => label
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .or(author)
+            .unwrap_or("participant")
+            .to_string(),
     }
 }
 
@@ -1665,6 +1723,16 @@ pub struct ChannelMessage {
     /// `"user"` for everything the host or the user authored. Read because the
     /// WIRE has to say it: see [`speaker_of`].
     pub author: Option<String>,
+    /// The writing participant's user-set label (rc3 D20, migration 0053), or
+    /// `None` when it has none — or when the row has no participant at all.
+    ///
+    /// **Resolved at READ time, from a join, not stored on the row.** Renaming a
+    /// participant therefore re-labels what it already said, which is the right
+    /// way round and matches `color`: the transcript shows who that participant
+    /// IS, not a snapshot of what it was called that minute. Storing it would
+    /// additionally freeze a name into every row, which is the mistake
+    /// `render_wire` already avoids for the phase tag.
+    pub speaker_label: Option<String>,
     /// See the type doc: zero-sized, private, and the only reason "this value
     /// came out of `messages`" is enforced rather than merely true today.
     _from_table: (),
@@ -1702,8 +1770,9 @@ pub struct ChannelPage {
 /// where the model is known.
 pub const UNREAD_BATCH_LIMIT: i64 = 200;
 
-const CHANNEL_COLUMNS: &str =
-    "id, session_id, participant_id, origin, kind, content, envelope, created_at, author";
+/// Qualified with `m.` because the channel read JOINs — see [`Storage::channel_page`].
+const CHANNEL_COLUMNS: &str = "m.id, m.session_id, m.participant_id, m.origin, m.kind, \
+     m.content, m.envelope, m.created_at, m.author, p.label AS speaker_label";
 
 fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
     use sqlx::Row;
@@ -1712,6 +1781,7 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
         id: r.get("id"),
         session_id: r.get("session_id"),
         participant_id: r.get("participant_id"),
+        speaker_label: r.get("speaker_label"),
         origin: r.get("origin"),
         kind: r.get("kind"),
         content: r.get("content"),
@@ -1943,7 +2013,11 @@ impl PersistedMessage {
             session_id: Arc::from(row.session_id.as_str()),
             body: row.content.clone(),
             envelope: row.envelope.clone(),
-            speaker: speaker_of(&row.origin, row.author.as_deref()),
+            speaker: speaker_of(
+            &row.origin,
+            row.author.as_deref(),
+            row.speaker_label.as_deref(),
+        ),
         }
     }
 
@@ -2075,7 +2149,12 @@ impl Storage {
             envelope,
             // Resolved from the same two values the INSERT just wrote, so the
             // receipt says exactly what a re-read of the row would.
-            speaker: speaker_of(origin, Some(legacy_author)),
+            // No label here, and it costs nothing: every caller that DELIVERS a
+            // write-time receipt posts as `system` or `user`, neither of which
+            // takes a label. Participant rows are written by the output pump
+            // (`duo.rs`), which only notifies — its peers read the row back
+            // through the ring, where the join supplies the label.
+            speaker: speaker_of(origin, Some(legacy_author), None),
         })
     }
 
@@ -2136,11 +2215,16 @@ impl Storage {
         let keep = limit.max(0);
         let probe = keep.saturating_add(1);
         let mut raw = sqlx::query(&format!(
-            "SELECT {CHANNEL_COLUMNS} FROM messages \
-             WHERE session_id = ?1 AND id > ?2 \
-               AND (?3 IS NULL OR participant_id IS NULL OR participant_id <> ?3) \
-               AND (?3 IS NULL OR kind NOT IN ('tool_use', 'tool_result')) \
-             ORDER BY id ASC LIMIT ?4"
+            // LEFT, not INNER: `origin = 'user'` and `origin = 'system'` rows
+            // carry no participant by design (0044), and an inner join would
+            // drop every user message and every host injection from every
+            // backlog — the same NULL trap the exclusion clause below documents.
+            "SELECT {CHANNEL_COLUMNS} FROM messages m \
+             LEFT JOIN session_participants p ON p.id = m.participant_id \
+             WHERE m.session_id = ?1 AND m.id > ?2 \
+               AND (?3 IS NULL OR m.participant_id IS NULL OR m.participant_id <> ?3) \
+               AND (?3 IS NULL OR m.kind NOT IN ('tool_use', 'tool_result')) \
+             ORDER BY m.id ASC LIMIT ?4"
         ))
         .bind(session_id)
         .bind(after_id)
@@ -3487,6 +3571,72 @@ mod tests {
         assert_eq!(
             participant_display_name(Some("EYES"), None, "eyes-2", Some("  Skeptic  ")),
             "Skeptic"
+        );
+    }
+
+    /// rc3 **D20** (migration 0053): `@` resolves the user's label as well as
+    /// the slug.
+    ///
+    /// Without this the label would break the property `speaker_of`'s own doc
+    /// rests on — *"a participant reading `[eyes-2]` is reading the string the
+    /// user would type to summon it"*. Putting a label on the wire and leaving
+    /// mentions slug-only would show peers a name that summons nobody.
+    #[tokio::test]
+    async fn a_mention_resolves_a_label_as_well_as_a_slug() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        // `false` = the whole roster: the first-role-only variant has no `eyes`.
+        s.ensure_session_roster("s1", false).await.unwrap();
+        let eyes = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap();
+        sqlx::query("UPDATE session_participants SET label = ? WHERE id = ?")
+            .bind("  Skeptic  ")
+            .bind(eyes.id)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        // The slug still resolves — a label is an alias, never a replacement.
+        assert_eq!(
+            s.participant_by_mention("s1", "eyes").await.unwrap().map(|p| p.id),
+            Some(eyes.id)
+        );
+        // And so does the label, case-folded and trimmed the same way the
+        // mention parser normalises the token it hands over.
+        for token in ["skeptic", "Skeptic", "SKEPTIC"] {
+            assert_eq!(
+                s.participant_by_mention("s1", token).await.unwrap().map(|p| p.id),
+                Some(eyes.id),
+                "@{token} names the participant the user called Skeptic"
+            );
+        }
+        // A token that is neither is nobody — ordinary prose (D1), never an
+        // error.
+        assert!(s.participant_by_mention("s1", "nobody").await.unwrap().is_none());
+    }
+
+    /// A slug OUTRANKS a label, and the collision is the reason.
+    #[tokio::test]
+    async fn a_label_cannot_shadow_another_participants_slug() {
+        // The user names one participant after another's slug. The slug is the
+        // key — assigned at invite, unique by constraint, unchangeable — so it
+        // has to win: otherwise renaming one participant silently redirects
+        // every summons meant for the other.
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", false).await.unwrap();
+        let hands = s.participant_by_slug("s1", "hands").await.unwrap().unwrap();
+        let eyes = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap();
+        sqlx::query("UPDATE session_participants SET label = ? WHERE id = ?")
+            .bind("hands")
+            .bind(eyes.id)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.participant_by_mention("s1", "hands").await.unwrap().map(|p| p.id),
+            Some(hands.id),
+            "@hands is the participant whose SLUG is hands, whatever anyone was renamed to"
         );
     }
 
@@ -4877,7 +5027,11 @@ mod tests {
             pm.wire(),
             format!(
                 "[{}] {}",
-                speaker_of(&rows[0].origin, rows[0].author.as_deref()),
+                speaker_of(
+                    &rows[0].origin,
+                    rows[0].author.as_deref(),
+                    rows[0].speaker_label.as_deref(),
+                ),
                 render_wire(rows[0].envelope.as_ref(), &rows[0].content)
             )
         );

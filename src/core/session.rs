@@ -2163,7 +2163,11 @@ mod tests {
             wire,
             format!(
                 "[{}] {}",
-                crate::storage::speaker_of(&row.origin, row.author.as_deref()),
+                crate::storage::speaker_of(
+                    &row.origin,
+                    row.author.as_deref(),
+                    row.speaker_label.as_deref(),
+                ),
                 crate::storage::render_wire(row.envelope.as_ref(), &row.content)
             ),
             "recorded == delivered, re-derived from the stored row — speaker included, \
