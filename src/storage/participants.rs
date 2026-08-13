@@ -1033,6 +1033,31 @@ impl Storage {
     /// the ring steps by place IN the rotation, so it needs to know WHICH row
     /// held the turn rather than only where that row sat. `None` resets the
     /// cycle to the front, which is what a user message does.
+    /// Record who holds the turn, so the UI can say "waiting for its turn"
+    /// rather than leaving a participant that has not been reached yet
+    /// indistinguishable from a dead one.
+    ///
+    /// `sessions.current_turn_participant_id` has existed since 0044 and
+    /// **nothing wrote it** — the ring knew whose turn it was and the column
+    /// that exists to say so stayed NULL. Reported from a live N=3 session where
+    /// only the first participant acted for two minutes and read as two broken
+    /// agents.
+    ///
+    /// Best-effort: a failed write costs a UI hint, never a turn, so it warns
+    /// and moves on rather than propagating.
+    pub async fn set_current_turn(&self, session_id: &str, participant_id: Option<i64>) {
+        if let Err(e) = sqlx::query(
+            "UPDATE sessions SET current_turn_participant_id = ? WHERE id = ?",
+        )
+        .bind(participant_id)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(session_id, ?e, "recording the turn holder failed");
+        }
+    }
+
     pub async fn next_active_participant(
         &self,
         session_id: &str,
@@ -1895,6 +1920,7 @@ impl Storage {
             "SELECT {CHANNEL_COLUMNS} FROM messages \
              WHERE session_id = ?1 AND id > ?2 \
                AND (?3 IS NULL OR participant_id IS NULL OR participant_id <> ?3) \
+               AND (?3 IS NULL OR kind NOT IN ('tool_use', 'tool_result')) \
              ORDER BY id ASC LIMIT ?4"
         ))
         .bind(session_id)
@@ -1931,6 +1957,23 @@ impl Storage {
     /// read used to get the entire session history in one `Vec` and then onto
     /// one wire; [`ChannelPage::more`] is how the caller learns to come back
     /// for the rest after committing this batch.
+    /// What a participant has not yet read — **prose and host notices only**.
+    ///
+    /// `tool_use` / `tool_result` rows are excluded when reading FOR a
+    /// participant (`exclude_participant` is `Some`), and included when reading
+    /// for the UI (`None`), which is what renders the full transcript.
+    ///
+    /// The router forwarded a turn's buffered PROSE and nothing else. The ring
+    /// drains every row past a cursor, and tool plumbing is rows — so without
+    /// this filter each participant was handed every peer's raw tool JSON.
+    /// Observed in `s-0d063183`: a participant was delivered
+    /// `{"input":{"project":"cognotify"},"name":"…cl_index_search"}` and spent a
+    /// turn correctly objecting that it was an envelope, not a message.
+    ///
+    /// It is not only noise. `tool_result` bodies are file reads, git output and
+    /// CL dumps, so every participant was paying to read every peer's plumbing
+    /// on every turn — the most plausible cause of the `Prompt is too long` that
+    /// killed a participant on a 1M-token model.
     pub async fn unread_for_participant(&self, participant_id: i64) -> Result<ChannelPage> {
         let Some(p) = self.participant_by_id(participant_id).await? else {
             return Ok(ChannelPage::default());
@@ -2958,6 +3001,62 @@ mod tests {
             "a plain bad id was reported as a lost-row race, which sends the \
              reader hunting a concurrency bug that did not happen: {msg:?}"
         );
+    }
+
+    /// **A participant reads its peers' PROSE, not their plumbing.**
+    ///
+    /// The router forwarded a turn's buffered prose; the ring drains rows, and
+    /// tool calls are rows. Without the kind filter every participant was handed
+    /// every peer's raw `tool_use` / `tool_result` JSON — noise it cannot act on,
+    /// and `tool_result` bodies are file reads and CL dumps, so it was also the
+    /// bulk of what filled their context windows.
+    ///
+    /// The UI read (`exclude_participant = None`) must still see everything, or
+    /// the transcript stops showing what the agents actually did.
+    #[tokio::test]
+    async fn a_participant_is_delivered_prose_but_never_a_peers_tool_plumbing() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", false).await.unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+        let (me, peer) = (roster[0].id, roster[1].id);
+
+        for (kind, body) in [
+            (MessageKind::Text, "real prose"),
+            (MessageKind::ToolUse, r#"{"name":"cl_index_search"}"#),
+            (MessageKind::ToolResult, r#"{"content":"a huge file dump"}"#),
+        ] {
+            s.post_to_channel("s1", "participant", Some(&roster[1].slug), kind.as_str(), body, None)
+                .await
+                .unwrap();
+        }
+        s.post_to_channel("s1", "system", None, MessageKind::SystemNotice.as_str(), "host note", None)
+            .await
+            .unwrap();
+
+        let mine: Vec<String> = s
+            .unread_for_participant(me)
+            .await
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|r| r.content)
+            .collect();
+        assert!(mine.iter().any(|c| c == "real prose"), "prose must arrive");
+        assert!(mine.iter().any(|c| c == "host note"), "host notices must arrive");
+        assert!(
+            !mine.iter().any(|c| c.contains("cl_index_search")),
+            "a peer's tool CALL must not be delivered: {mine:?}"
+        );
+        assert!(
+            !mine.iter().any(|c| c.contains("a huge file dump")),
+            "a peer's tool RESULT must not be delivered — this is what filled context windows: {mine:?}"
+        );
+
+        // The UI read is unfiltered, or the transcript loses what agents did.
+        let all = s.channel_after("s1", 0, 100).await.unwrap();
+        assert_eq!(all.rows.len(), 4, "the UI still sees every row");
+        let _ = peer;
     }
 
     #[tokio::test]

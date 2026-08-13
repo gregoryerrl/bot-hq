@@ -1970,6 +1970,12 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Hando
             "sequencer: no active participant to hand the turn to"
         );
     }
+    // Say who holds it. The ring has always known; the column that exists to
+    // report it was never written, so the UI could not tell a participant
+    // waiting its turn from one that had died.
+    deps.storage
+        .set_current_turn(&deps.session_id, next.as_ref().map(|p| p.id))
+        .await;
     Handover::To(next)
 }
 

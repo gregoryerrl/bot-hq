@@ -493,3 +493,55 @@ rows use `observer`, and the column has no CHECK constraint (only
 storage refuses any other value; the skip property is still pinned by a named
 test under its new subject; and no code path spawns a participant that cannot
 take a turn.
+
+### D19 — the ring is the only delivery path
+
+Decided and shipped 2026-08-13, after three live sessions diagnosed it.
+
+**The defect.** `broadcast_user_message` fanned the user's text into EVERY
+participant's stdin, and three other paths did the same: the session-start
+CL-opener nudge, the paused-wake replay, and the tray-answer receipt. A
+participant woken that way begins a turn the ring never handed it, so the pump
+snapshots its epoch before one has been published and carries `0` forever. Every
+completion it sends is then discarded and the cycle cannot step past slot 0.
+
+Measured in `s-cc30fc19`: slot 0 carried epoch 3, slots 1 and 2 carried 0, and
+the ring advanced exactly one place per user message. This also explains the
+2026-08-12 stall attributed at the time to the idle watchdog — the ring was not
+idle, it could not step.
+
+**The rule: the ROW is the delivery.** A caller posts the row and tells the ring
+(`notify_ring_user_message`); the ring hands the turn to the front of the
+rotation and each participant reads the row off its own cursor when its turn
+comes. Ordering matters — notify AFTER the row is persisted, or the woken
+participant drains an empty backlog and the message lands a turn late.
+
+This is the argument the router deletion already made, with `broadcast` in the
+router's place: **two paths delivering into one stdin, only one of which the ring
+can reason about.**
+
+### D19a — a participant reads prose, never a peer's tool plumbing
+
+`channel_page` had no `kind` filter, so the drain handed each participant every
+peer's raw `tool_use` / `tool_result` JSON. The router had forwarded a turn's
+buffered PROSE; the ring drains rows, and tool calls are rows.
+
+Observed in `s-0d063183`: a participant was delivered
+`{"input":{"project":"cognotify"},"name":"…cl_index_search"}` and spent a turn
+correctly objecting that it was an envelope, not a message.
+
+Not merely noise. `tool_result` bodies are file reads, git output and CL dumps,
+so every participant was paying to read every peer's plumbing on every turn —
+the most plausible cause of the `Prompt is too long` that killed a participant on
+a 1M-token model.
+
+Fixed: reads FOR a participant exclude `tool_use` / `tool_result`; the UI read
+stays unfiltered so the transcript still shows what agents did.
+
+### D19b — the ring records who holds the turn
+
+`sessions.current_turn_participant_id` shipped in 0044 and **nothing ever wrote
+it**. So a participant that had simply not been reached yet was
+indistinguishable from a dead one — reported from a live N=3 session where only
+the first participant acted for two minutes. `hand_over` now records the holder.
+Best-effort: a failed write costs a UI hint, never a turn.
