@@ -18,6 +18,63 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-13 — participants orient in parallel before the ring starts (rc3 D21)
+
+Orientation — reading the CL, the conventions — depends on nothing and contends
+for nothing, so serialising it through the ring cost N × the orientation time
+before any work began. Boot runs it in parallel, **and only it**: D21's
+refinement is the whole design, *"boot is ORIENTATION, NOT WORK"*, so the primer
+asks for reading and forbids acting. Acting in parallel is the free-for-all D19
+removed, and what produced three agents editing blind in `s-be58fdf0`.
+
+**The hard part is that boot is not a turn**, and D21 said so in advance —
+*"where this will break if rushed"*. The pump learns a turn started from its own
+first event, but during boot no turn has been handed out: the epoch cell still
+reads its initial `0` and `last_completed_epoch` is `None`, so D24's straggler
+guard cannot see it (`Some(0) != None`) and the pump binds epoch 0. The
+completion that follows is discarded forever — the `s-206e8921` wedge through a
+different door. `DuoConfig` now carries an explicit `booting` flag: no epoch is
+bound, no `TurnComplete` is sent, and readiness goes to the host on its own
+channel.
+
+That guard matters most on the **timeout** path, where a participant is still
+mid-boot when the ring starts. `turn_epoch` is only re-read while it is `None`,
+so a pump holding 0 would carry it into every real turn afterwards. Worth
+recording how that got pinned: the first test written for it **passed with the
+guard deleted** — the completion arm is guarded separately, so the bind guard was
+invisible from outside — and its own doc comment claimed otherwise. The second
+test reaches it through the timeout path, and the false claim was corrected.
+Exactly the failure the queue's mutation rule exists to catch.
+
+Boot output is a sixth `MessageKind`, `boot`, riding D19a's existing kind filter:
+persisted, shown to the user, never in a peer's backlog — *"three near-identical
+'CL loaded' rows are exactly the noise the channel does not need, and a peer
+reading them learns nothing"*. No migration; `messages.kind` carries no CHECK
+constraint, unlike `messages.author`.
+
+The ring's kick moved out of `spawn_ring` into a `RingKick` the caller fires
+after orientation — a value that must be consumed, because the failure it guards
+against is silent: an unfired kick is a session that never starts, and nothing
+else mints a `UserMessage` at spawn. Gating it after the pump loop also fixes an
+ordering hazard that was previously incidental — the ring was spawned *before*
+any pump existed to hear a turn.
+
+A slow participant is waited out rather than waited on, and the timeout says so
+in a visible row: a boot that truncated silently would be indistinguishable from
+one that completed — the failure item 4A had just finished paying for on the
+close epilogue.
+
+**Not settled here:** whether the task text belongs in the primer. D21 asks for
+that to be measured on a real session (*"three agents have opinions ready and the
+first turn arrives into a room where everyone already decided"*), and it is one
+function.
+
+Mutation-verified four ways: dropping the kick, firing it early, removing the
+epoch-bind guard, and sending `TurnComplete` during boot each redden exactly
+their own test. 1097 lib + 60 integration green.
+
+---
+
 ## 2026-08-13 — a participant has a name, and its peers read it (rc3 D20)
 
 D20's remaining half. The ordinal shipped earlier and made two reviewers of one
