@@ -245,8 +245,14 @@ the round cap ends it.
    "active"`, so an `on_mention` participant never blocks a halt).
 2. **A parked question** — `ask_user_choice` or `mark_awaiting_user` both set the
    awaiting flag through `set_session_awaiting`, which sends
-   `SequencerCommand::QuestionParked`. The cycle halts unilaterally: no vote is
-   cast and no further turns are handed out. Without this the ring keeps dealing
+   `SequencerCommand::QuestionParked` carrying the ASKER's participant id. No
+   vote is cast, and **the ring finishes its lap before the cycle halts** (rc3
+   D22): the asker's turn ends, every participant waiting on nothing still gets
+   one, and the halt fires when the rotation comes back to somebody blocked.
+   Bounded at N-1 extra turns. Halting at the park instead — which is what this
+   did — made a participant that asks the user something every turn into a
+   participant its peers could never speak after: `s-e8a20797` ran seven minutes
+   with four deliveries to slot 0 and zero to slots 1 and 2. Without this the ring keeps dealing
    turns to participants that have no legal move (fixed 2026-08-13).
 3. **Spin detection** — token-set Jaccard at `SPIN_SIMILARITY_THRESHOLD` (0.85)
    over ONE participant's output across rounds, for `SPIN_BREAK_STREAK` (2)
