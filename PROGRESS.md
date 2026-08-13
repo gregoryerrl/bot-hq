@@ -18,6 +18,57 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-13 — the wire says who spoke, and a straggler can no longer wedge a session (rc3 D22–D24)
+
+Three fixes, all found by running real sessions and reading what they left behind
+rather than by reading code.
+
+**A parked question finishes the lap before it halts** (D22). A participant that
+ends each turn by asking the user something made its peers structurally
+unreachable: the park halted the ring where it stood, and the user's answer
+restarted the cycle at the FRONT — which is the same participant. `s-e8a20797`
+ran seven minutes with four deliveries to slot 0 and zero to slots 1 and 2, both
+reviewers alive and initialised. Before rc3 the router forwarded the executor's
+output to its peer regardless of any halt; the ring turned that forward into a
+turn, and a halt stops turns. Now the park ends the ASKER's turn and the rotation
+carries on, halting when it comes back to somebody blocked — bounded at N-1 extra
+turns, which is the adversarial pass the roster was built for. Confirmed live in
+`s-534b8761`: both reviewers loaded the CL and reported before the user answered,
+and the halt landed 35 seconds later when the rotation returned to the asker.
+
+**Every delivered row now says who wrote it** (D23). The wire carried no author
+at all — `render_wire` rendered the envelope and the body, and nothing said whose
+body it was. Three sessions' confusion traces to that one gap, most sharply
+`s-81057bde`, where a reviewer reported "no task from the user and no HANDS
+output" while the delivery table recorded eight rows handed to it. Both were
+true: it had read them and could not tell what they were. Wires now lead with
+`[speaker]` — the peer's slug, `user`, or `system`, the last two kept distinct
+because an agent that reads a host notice as the user has been handed a
+fabricated instruction.
+
+**A straggler can no longer bind the next turn's epoch** (D24). `s-206e8921`
+stopped dead for nineteen minutes with a live reviewer holding a turn it could
+never hand back. The pump bound its turn on the first event after a completion,
+which is not the same thing as the first event of the next turn: a participant
+emitting anything in the gap read the cell as it stood — still the epoch it just
+completed with — and every completion after that carried a number the ring had
+retired. The trigger is the user typing while a participant is mid-turn, so it is
+routine rather than rare; both reviewers in that session died this way, two
+minutes apart, and one spoke exactly once in twenty-nine minutes. The message
+that triggered it was a note asking what happens if the user types while the
+agents are working.
+
+All three were mutation-verified — the D24 test needed fixing first, because
+`send` only queues and the original raced past the bug, passing with the guard
+deleted.
+
+Left deliberately unbundled: `deliver_backlog` still writes one stdin message per
+row, so a backlog is N writes and rows 2..N land inside the turn row 1 opened.
+With a speaker on every row that is far less confusing than it was, which is why
+it should be measured before it is changed.
+
+---
+
 ## 2026-08-13 — a participant you summon by name (rc3 D17 + D18)
 
 Two participation modes now, and both of them do something.

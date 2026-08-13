@@ -207,7 +207,17 @@ the errored branch, because the ring steps on the completion, not on the text.
 **Delivery is by cursor, not by forward.** A participant reads everything past
 its own `participant_cursors` watermark when it takes the turn, and every
 delivery is recorded in `participant_deliveries` with a nullable
-`withheld_reason`. There is no hold queue and no forward that can be lost:
+`withheld_reason`. **Each wire leads with `[speaker]`** — the peer's slug (the
+same handle `@mention` parses), `user`, or `system` (rc3 D23). Before that the
+wire carried no author at all, and a participant handed four rows had to infer
+which was the task and which was a peer's aside.
+
+**A turn's epoch is bound by the RING, not by the participant's own output.** The
+sequencer publishes the epoch before delivering, and the pump snapshots it on the
+turn's first event — but never on a STRAGGLER, an event arriving after a
+completion and before the next handover (rc3 D24). Binding one to the epoch it
+just completed with means every later completion carries a retired number, is
+discarded, and the ring stops on a participant it is waiting on. There is no hold queue and no forward that can be lost:
 policies gate delivery, never persistence.
 
 **How a turn ends** (`TurnEnding`):

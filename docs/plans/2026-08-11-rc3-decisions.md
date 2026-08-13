@@ -705,3 +705,90 @@ calls per parked question while the user is away.
 halt on reaching a blocked participant, or leave the block set uncleared by a
 user message — each reddens the tests written for it, and the suite is green with
 all three restored.
+
+### D23 — a delivered row says who wrote it
+
+Shipped 2026-08-13 (`411ee95`), from three sessions' worth of confusion that all
+trace to one gap: **the wire carried no author at all.**
+
+`render_wire` rendered the envelope (phase, findings banner, system prefix) and
+the body. Nothing said who the body was from. A participant handed four rows
+received four anonymous strings and had to infer which was the user's task, which
+was a peer's aside, and which was the host talking.
+
+**The evidence, in order of how badly it read:**
+
+| session | what it looked like | what it was |
+|---|---|---|
+| `s-81057bde` | a reviewer reporting "no task from the user and no HANDS output" | it had been delivered eight rows and could not tell what they were |
+| `s-534b8761` | HANDS describing three messages "injected alongside a tool result instead of arriving as its own turn" | its own turn's opening backlog, delivered as three unlabelled stdin writes |
+| `s-be58fdf0` | the user: *"for the 2 reviewers, i don't know which is which"* | the same problem one layer up (D20) |
+
+**The rule.** Every wire leads with `[speaker]` — the participant slug for a peer,
+`user`, or `system`. The slug rather than the display name (`ROLE · Model`)
+because it is ON the row, so labelling costs no lookup and cannot go stale
+mid-session, and because it is the handle `@mention` parses: what a peer reads is
+the string the user would type to summon it. D20's user-set label supersedes it
+when it lands — the label peers read and the label the user reads should be one
+string.
+
+**`user` and `system` are deliberately distinct.** A system notice is bot-hq
+talking. An agent that reads one as the user has been handed a fabricated
+instruction, which is the failure the general rules are built around.
+
+**On the forty-five tests that did not change.** The sequencer's tests assert
+ROUTING and name rows by content only to identify them. Threading the speaker
+through all of them would state it forty-five times and test it nowhere — worse,
+an expectation written from observed output accepts a WRONG name as readily as a
+right one. The shared helper strips the prefix; the label is pinned where it is
+the subject.
+
+**Still open, and deliberately not bundled:** `deliver_backlog` writes one stdin
+message per row, so a turn's backlog is N writes and rows 2..N land inside the
+turn row 1 opened. With the speaker on every row this is much less confusing than
+it was, which is exactly why it should be measured before being changed.
+
+### D24 — a straggler must not bind the next turn's epoch
+
+Shipped 2026-08-13 (`d392f05`), after `s-206e8921` stopped dead for nineteen
+minutes with a live reviewer holding a turn it could never hand back.
+
+**The defect.** `pump_agent` binds a turn to the epoch cell on the first event
+after the previous completion. *"The first event after a completion"* is not the
+same thing as *"the first event of the next turn"*, and the gap between them is
+the bug: a participant that emits anything before the ring has handed it another
+turn reads the cell as it stands — still the epoch it just completed with. The
+real turn arrives, the guard sees `turn_epoch` already set, and every completion
+from then on carries a number the ring retired. All discarded. The ring cannot
+step past a participant it is waiting on, and nothing in the loop recovers it.
+
+**The trigger is not rare — it is the user typing while a participant is
+mid-turn.** The ring resets to the front, the preempt interrupt ends that
+participant's turn, its completion arrives behind the reset and is correctly
+discarded, and whatever it emits next binds the retired epoch. Both reviewers in
+that session died this way, two minutes apart; one spoke exactly once in
+twenty-nine minutes. The user's message that triggered it was, verbatim, a note
+asking what happens if they type while the agents are working.
+
+Measured: completed 03:56:01 carrying epoch 9 → handed epoch 11 at 03:56:28 →
+completed 04:01:51 **still carrying 9**.
+
+**The fix.** A cell that still reads what this pump last completed with means no
+new turn has been handed out, so the event is a straggler and opens nothing. The
+epoch strictly increases at every handover, which makes "unchanged" an exact test
+rather than a heuristic.
+
+**The test needed fixing before it could fail.** `send` only queues, so storing
+the new epoch before the pump had processed the straggler meant the race never
+happened — the first version passed with the guard deleted. It now waits for the
+row the straggler persists, which is the only barrier that proves the pump ran the
+binding code. Bypass the guard and it reports `left: 9, right: 11`.
+
+**Recovery, for the record.** What unwedged that session was not a ring reset: the
+user pressed Stop, the reviewer did not honour the interrupt (`cancel: interrupt
+not honored in time — SIGKILL fallback`), and the next broadcast found the session
+stale and rebuilt it — new sequencer, epochs from 1, all three participants
+respawned. Worth knowing because the log's `sequencer: started` followed 20µs
+later by `control channel closed; exiting` reads as a task dying instantly, and is
+actually two different sequencers: the new one starting and the old wedged one
+finally noticing its senders were dropped.
