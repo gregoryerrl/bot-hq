@@ -49,7 +49,7 @@ export function ChatPane({ sessionId }: { sessionId: string }) {
 
   // rc3 D10: a message's stored `author` is a participant slug and is never
   // shown. The roster turns it into `ROLE · Model` for the byline.
-  const { labels } = useParticipantLabels(sessionId);
+  const { labels, hues } = useParticipantLabels(sessionId);
 
   const messages = useChatStore(
     (s) => s.messages[sessionId] ?? EMPTY_MESSAGES,
@@ -181,6 +181,7 @@ export function ChatPane({ sessionId }: { sessionId: string }) {
                 <ChatMessage
                   message={m}
                   authorLabel={authorLabel(m.author, labels)}
+                  authorHues={hues}
                   groupedWithPrev={
                     prev !== null &&
                     m.kind !== "phase_change" &&

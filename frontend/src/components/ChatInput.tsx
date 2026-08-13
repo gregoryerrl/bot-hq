@@ -101,6 +101,9 @@ interface ChatInputProps {
    *  Without it the status line has no roster to consult and says so, rather
    *  than printing the internal key it happens to hold. */
   busyLabel?: (key: string) => string;
+  /** Roster slot -> hue (rc3 D20), so two participants of one role are told
+   *  apart by colour as well as by their ordinal. */
+  authorHues?: Record<string, string>;
   /** Pause the in-flight turn (the Stop button — interrupts the agents and
    *  lands the session in `paused`). Without it a locked session shows the
    *  status line but no Stop. */
@@ -129,6 +132,7 @@ export function ChatInput({
   activity,
   busy,
   busyLabel,
+  authorHues,
   onCancel,
   onResume,
   onClose,
@@ -300,7 +304,12 @@ export function ChatInput({
       )}
       {/* Unlocked but still working — the locked branch has its own TurnStatus. */}
       {!locked && (
-        <StillWorkingNotice activity={activity} busy={busy} label={busyLabel} />
+        <StillWorkingNotice
+          activity={activity}
+          busy={busy}
+          label={busyLabel}
+          hues={authorHues}
+        />
       )}
       <form
         onSubmit={handleSubmit}
@@ -308,7 +317,12 @@ export function ChatInput({
       >
         {locked ? (
           <>
-            <TurnStatus activity={activity} busy={busy} label={busyLabel} />
+            <TurnStatus
+              activity={activity}
+              busy={busy}
+              label={busyLabel}
+              hues={authorHues}
+            />
             {onCancel && (
               <Button
                 type="button"
@@ -359,7 +373,7 @@ export function ChatInput({
                         <span
                           className={cn(
                             "font-semibold",
-                            authorColorClass(m.label),
+                            authorColorClass(m.label, authorHues),
                           )}
                         >
                           {m.label}
@@ -472,9 +486,11 @@ function anyBusy(busy?: AgentBusy): boolean {
 function WorkerLine({
   busy,
   label,
+  hues,
 }: {
   busy?: AgentBusy;
   label?: (slug: string) => string;
+  hues?: Record<string, string>;
 }) {
   const workers = Object.entries(busy ?? {})
     .filter(([, isBusy]) => isBusy)
@@ -490,7 +506,7 @@ function WorkerLine({
         return (
           <span key={key} className="flex items-center gap-1.5">
             {i > 0 && <span className="text-on-surface-variant/40">·</span>}
-            <span className={cn("font-semibold", authorColorClass(shown))}>
+            <span className={cn("font-semibold", authorColorClass(shown, hues))}>
               {shown}
             </span>
             <span>is working</span>
@@ -519,10 +535,12 @@ function StillWorkingNotice({
   activity,
   busy,
   label,
+  hues,
 }: {
   activity?: SessionActivity;
   busy?: AgentBusy;
   label?: (slug: string) => string;
+  hues?: Record<string, string>;
 }) {
   if (!anyBusy(busy)) return null;
   const paused = activity === "paused";
@@ -531,7 +549,7 @@ function StillWorkingNotice({
       <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
         {activity === "awaiting_user" && <span>Waiting on your answer ·</span>}
         {paused && <span>Stopping ·</span>}
-        <WorkerLine busy={busy} label={label} />
+        <WorkerLine busy={busy} label={label} hues={hues} />
         <span>
           {paused
             ? "— finishing the current tool."
@@ -550,10 +568,12 @@ function TurnStatus({
   activity,
   busy,
   label,
+  hues,
 }: {
   activity?: SessionActivity;
   busy?: AgentBusy;
   label?: (slug: string) => string;
+  hues?: Record<string, string>;
 }) {
   // A cancel-in-flight reads as "Stopping…" regardless of who was busy.
   if (activity === "cancelling") {
@@ -567,7 +587,7 @@ function TurnStatus({
     <div className="flex flex-1 items-center gap-2 px-1 text-xs text-on-surface-variant">
       <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
         {anyBusy(busy) ? (
-          <WorkerLine busy={busy} label={label} />
+          <WorkerLine busy={busy} label={label} hues={hues} />
         ) : (
           // Locked but no per-agent flag yet (e.g. a stale snapshot): stay generic.
           <span>A participant is working</span>

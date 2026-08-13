@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { authorColorClass } from "./authorColor";
+import {
+  authorColorClass,
+  colorByName,
+  PARTICIPANT_COLORS,
+} from "./authorColor";
 import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 
 describe("authorColorClass", () => {
@@ -50,9 +54,16 @@ describe("authorColorClass", () => {
     // `author-brian` / `author-rain` are palette TOKEN names in
     // tailwind.config.ts, not agent identities — nothing renders them. A typo
     // here is invisible at runtime (Tailwind just emits no rule).
+    //
+    //
+    // Read from `PARTICIPANT_COLORS` rather than transcribed, so adding a hue
+    // to the palette does not also need a line here — the drift this test used
+    // to have. What it still catches is the case it exists for: a token that is
+    // in the module and NOT in the Tailwind config emits no CSS rule and is
+    // invisible at runtime, which the assertion below reaches through the
+    // `text-author-*` shape.
     const DEFINED = [
-      "text-author-brian",
-      "text-author-rain",
+      ...PARTICIPANT_COLORS.map((c) => c.token),
       "text-author-user",
       "text-on-surface-variant",
     ];
@@ -66,5 +77,48 @@ describe("authorColorClass", () => {
       "",
     ];
     for (const l of labels) expect(DEFINED).toContain(authorColorClass(l));
+  });
+});
+
+// ===========================================================================
+// rc3 D20 — the palette is data, so the picker and the rotation agree
+// ===========================================================================
+
+describe("PARTICIPANT_COLORS", () => {
+  it("is big enough to both rotate and choose from", () => {
+    // Rotation only needs the roster cap (4) to guarantee distinctness. A PICKER
+    // needs more, or a user who dislikes a hue has no alternative that is still
+    // distinct from everyone else's.
+    expect(PARTICIPANT_COLORS.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it("carries no agent names", () => {
+    // These entries were `brian` and `rain` — two agent names living on in the
+    // design system after rc3 D10 retired them everywhere else.
+    for (const c of PARTICIPANT_COLORS) {
+      expect(c.token).not.toMatch(/brian|rain|hands|eyes/i);
+      expect(c.name).not.toMatch(/brian|rain|hands|eyes/i);
+    }
+  });
+
+  it("has no duplicate names or tokens", () => {
+    // A picker with two entries called the same thing, or two that paint the
+    // same, is a picker that cannot express what it offers.
+    expect(new Set(PARTICIPANT_COLORS.map((c) => c.name)).size).toBe(
+      PARTICIPANT_COLORS.length,
+    );
+    expect(new Set(PARTICIPANT_COLORS.map((c) => c.token)).size).toBe(
+      PARTICIPANT_COLORS.length,
+    );
+  });
+
+  it("resolves a stored name back to its entry, however it was cased", () => {
+    // The name round-trips through storage, so the lookup has to survive a user
+    // (or a migration) writing it differently.
+    expect(colorByName("Cyan")?.token).toBe("text-author-cyan");
+    expect(colorByName("  cyan ")?.token).toBe("text-author-cyan");
+    expect(colorByName("CYAN")?.token).toBe("text-author-cyan");
+    expect(colorByName("puce")).toBeUndefined();
+    expect(colorByName(null)).toBeUndefined();
   });
 });

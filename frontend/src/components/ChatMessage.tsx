@@ -13,6 +13,8 @@ interface ChatMessageProps {
   /** What to PRINT for `message.author`. rc3 D10: the stored author is a
    *  participant slug and is never shown; the header renders this instead. */
   authorLabel?: string;
+  /** Roster slot -> hue (rc3 D20). */
+  authorHues?: Record<string, string>;
   /** Lifted tool-pill expand state, keyed by message id. Virtualized parents
    * own it (rows unmount when scrolled away, which would reset local state);
    * when omitted, ToolMessage falls back to its own local state. */
@@ -35,9 +37,12 @@ interface ChatMessageProps {
 function MessageHeader({
   label,
   createdAt,
+  hues,
 }: {
   label?: string;
   createdAt: string;
+  /** Roster slot -> hue (rc3 D20). Absent falls back to the label hash. */
+  hues?: Record<string, string>;
 }) {
   const shown = label || UNKNOWN_PARTICIPANT;
   return (
@@ -45,7 +50,7 @@ function MessageHeader({
       <span
         className={cn(
           "text-[0.65rem] font-semibold uppercase tracking-wide",
-          authorColorClass(shown),
+          authorColorClass(shown, hues),
         )}
       >
         {shown}
@@ -69,6 +74,7 @@ export const ChatMessage = memo(function ChatMessage({
   message,
   groupedWithPrev,
   authorLabel,
+  authorHues,
   expanded,
   onToggleExpand,
   resolvedToolIds,
@@ -98,6 +104,7 @@ export const ChatMessage = memo(function ChatMessage({
         message={message}
         groupedWithPrev={groupedWithPrev}
         authorLabel={authorLabel}
+        authorHues={authorHues}
         expanded={expanded}
         onToggleExpand={onToggleExpand}
         resolvedToolIds={resolvedToolIds}
@@ -108,7 +115,7 @@ export const ChatMessage = memo(function ChatMessage({
   return (
     <article className={cn("mb-2", groupedWithPrev ? "mt-0" : "mt-3")}>
       {!groupedWithPrev && (
-        <MessageHeader label={authorLabel} createdAt={message.created_at} />
+        <MessageHeader label={authorLabel} createdAt={message.created_at} hues={authorHues} />
       )}
       <Markdown>{message.content}</Markdown>
     </article>
@@ -125,6 +132,7 @@ function ToolMessage({
   message,
   groupedWithPrev,
   authorLabel,
+  authorHues,
   expanded: controlledExpanded,
   onToggleExpand,
   resolvedToolIds,
@@ -132,6 +140,7 @@ function ToolMessage({
   message: AgentMessage;
   groupedWithPrev?: boolean;
   authorLabel?: string;
+  authorHues?: Record<string, string>;
   expanded?: boolean;
   onToggleExpand?: (id: number) => void;
   resolvedToolIds?: ReadonlySet<string>;
@@ -168,7 +177,7 @@ function ToolMessage({
   return (
     <article className={cn("mb-1", groupedWithPrev ? "mt-0" : "mt-2")}>
       {!groupedWithPrev && (
-        <MessageHeader label={authorLabel} createdAt={message.created_at} />
+        <MessageHeader label={authorLabel} createdAt={message.created_at} hues={authorHues} />
       )}
       <button
         type="button"

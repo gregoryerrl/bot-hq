@@ -107,7 +107,7 @@ export function SessionView() {
   // Who is in this session, in turn order — the header roster (rc3 D10) — plus
   // the key → `ROLE · Model` index every author-keyed surface below resolves
   // through (the turn-status line, and the roster row itself).
-  const { participants, labels } = useParticipantLabels(sessionId);
+  const { participants, labels, hues } = useParticipantLabels(sessionId);
 
   // Respawn agents on mount. Idempotent — `ensure_session_started` is a no-op
   // if the session's agents are already running. Reads each agent's stored
@@ -642,6 +642,7 @@ export function SessionView() {
               // frozen `brian_busy`/`rain_busy` pair); `labels` indexes both
               // key spaces, so one lookup names the participant either way.
               busyLabel={(key) => authorLabel(key, labels)}
+              authorHues={hues}
               // rc3 D17: typing `@` offers THIS session's participants and
               // nothing else, which is what makes mentioning a non-participant
               // impossible to express rather than an error to report. Disabled

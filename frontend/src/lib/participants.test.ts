@@ -4,6 +4,7 @@ import {
   capabilityGapWarning,
   participantLabelIndex,
   participantLabel,
+  participantHueIndex,
   participantRuntime,
   slugOrdinal,
   slotKey,
@@ -358,5 +359,54 @@ describe("participantLabel ordinals", () => {
         model_display_name: null,
       }),
     ).toBe("eyes-2");
+  });
+});
+
+// ===========================================================================
+// rc3 D20 — colour ROTATES, so a session cannot render two the same
+// ===========================================================================
+
+describe("participantHueIndex", () => {
+  const roster = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      p({
+        id: i + 1,
+        slug: i === 0 ? "hands" : i === 1 ? "eyes" : `eyes-${i}`,
+        role_display_name: i === 0 ? "HANDS" : "EYES",
+        turn_position: i,
+      }),
+    );
+
+  it("gives every participant of a full roster its own hue", () => {
+    // The reported bug: "HANDS and EYES-2 have the same color." The palette held
+    // two hues against a roster of three, so a collision was CERTAIN — pigeonhole,
+    // not luck. Four is the dialog's cap, so four hues is the whole fix for
+    // certainty; rotation is what removes the chance.
+    for (const n of [2, 3, 4]) {
+      const hues = Object.values(participantHueIndex(roster(n)));
+      expect(hues).toHaveLength(n);
+      expect(new Set(hues).size).toBe(n);
+    }
+  });
+
+  it("assigns by roster position, not by hashing the label", () => {
+    // Rotation is a property of the ASSIGNMENT. A hash is stable and only
+    // probably distinct, which is what shipped and what collided.
+    const hues = participantHueIndex(roster(3));
+    const labels = Object.keys(hues);
+    expect(hues[labels[0]]).not.toBe(hues[labels[1]]);
+    expect(hues[labels[1]]).not.toBe(hues[labels[2]]);
+    expect(hues[labels[0]]).not.toBe(hues[labels[2]]);
+  });
+
+  it("is what authorColorClass prefers when it has one", () => {
+    const hues = participantHueIndex(roster(3));
+    const [first, , third] = Object.keys(hues);
+    // With the map, the roster's answer wins.
+    expect(authorColorClass(first, hues)).toBe(hues[first]);
+    expect(authorColorClass(third, hues)).toBe(hues[third]);
+    // Without it the hash still answers — a surface showing one author at a
+    // time (a dashboard tile) has no roster and must still get a colour.
+    expect(authorColorClass(first)).toMatch(/^text-author-/);
   });
 });

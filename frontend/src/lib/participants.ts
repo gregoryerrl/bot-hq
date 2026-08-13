@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useTauriQuery } from "../hooks/useInvoke";
+import { participantHue } from "../components/authorColor";
 
 /**
  * How a participant is NAMED in the UI, and nothing else.
@@ -310,7 +311,39 @@ export function authorLabel(
 export function useParticipantLabels(sessionId: string) {
   const { participants } = useSessionParticipants(sessionId);
   const labels = useMemo(() => participantLabelIndex(participants), [participants]);
-  return { participants, labels };
+  const hues = useMemo(() => participantHueIndex(participants), [participants]);
+  return { participants, labels, hues };
+}
+
+/**
+ * label → hue class, assigned by the participant's PLACE in the roster
+ * (rc3 **D20**).
+ *
+ * **Rotation, not a hash**, and the difference is the whole point. Hashing a
+ * label picks a hue that is stable and *probably* distinct; rotating over turn
+ * slots makes distinctness a property of the assignment, so two participants in
+ * one session cannot share a hue while the roster fits the palette.
+ *
+ * The shipped version hashed, on the reasoning that D20's ordinal already made
+ * every label a distinct string. It did — and the palette held exactly TWO hues
+ * against a roster of three, so a collision was not unlucky but certain. The
+ * user reported it from a live session within the hour: *"HANDS and EYES-2 have
+ * the same color."* Widening the palette to the roster cap fixes the certainty;
+ * only rotation fixes the chance.
+ *
+ * Keyed by LABEL because that is what the render sites hold — the chat byline,
+ * the turn-status line and the mention picker all resolve a participant to its
+ * display string first, so the hue has to answer to the same key or one
+ * participant gets two colours.
+ */
+export function participantHueIndex(
+  participants: readonly ParticipantView[],
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  participants.forEach((p, i) => {
+    out[participantLabel(p)] = participantHue(i);
+  });
+  return out;
 }
 
 // ---------------------------------------------------------------------------

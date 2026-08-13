@@ -77,8 +77,27 @@ export default {
         elevated: "#1d1d1d",
         overlay: "#262626",
         author: {
-          brian: "#f97316",
-          rain: "#a855f7",
+          // **The participant palette** (rc3 D20). Eight hues the ring rotates
+          // through by turn slot, and the set a user picks from per participant.
+          //
+          // Named by COLOUR, never by agent. These were `brian` and `rain` —
+          // palette entries carrying two agent names into the design system,
+          // which rc3 D10 retired everywhere else. Eight rather than four
+          // because a picker wants more choices than the roster cap, and
+          // because a palette the same size as the cap leaves a user who
+          // dislikes one hue with no alternative that is still distinct.
+          //
+          // Chosen for separation on the dark surface (#0b1326) — adjacent
+          // entries are far apart in hue, so the default rotation looks
+          // deliberate at any roster size.
+          orange: "#f97316",
+          violet: "#a855f7",
+          cyan: "#22d3ee",
+          rose: "#f43f5e",
+          lime: "#a3e635",
+          amber: "#fbbf24",
+          sky: "#38bdf8",
+          pink: "#f472b6",
           user: "#3b82f6",
         },
         accent: {
