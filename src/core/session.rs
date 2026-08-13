@@ -1050,7 +1050,24 @@ async fn spawn_session_handle(
     // ~60k tokens per participant, and the session never got past orienting.
     // Measured in `s-8ac0d2d0`: three boots in four minutes, and the user
     // force-closed asking "what, its still on boot phase?"
+    let mut booted = false;
     if let Some(kick) = ring_kick.filter(|_| is_first_spawn) {
+        booted = true;
+        // **The input is locked while anyone is still orienting** (rc3 D29).
+        //
+        // Marked busy here and cleared by each pump as it finishes its boot
+        // response — the same flag and the same clear a turn uses, so the
+        // turn-status line names who is still orienting for free, and the box
+        // reopens when the last one is done.
+        //
+        // It is not cosmetic. A message typed mid-boot posts a row and releases
+        // the ring, but every pump is still `booting`, so its completion goes to
+        // the readiness channel rather than to the ring — a turn handed out that
+        // nothing can ever complete. Locking makes that unreachable rather than
+        // rare.
+        for p in &live {
+            activity.set_busy_slug(&p.slug, true);
+        }
         let boot_inputs: Vec<(i64, crate::agents::ParticipantInput)> = live
             .iter()
             .zip(&handles)
@@ -1134,7 +1151,16 @@ async fn spawn_session_handle(
     // and only when nudges are enabled. Delivered before the user's first task —
     // the agent opens the CL during the user's think-time, so the task lands
     // with conventions already loaded.
-    if is_first_spawn && storage.adherence_nudges_enabled().await {
+    // **Skipped when boot ran** (rc3 D29). The primer already says this, says it
+    // better, and hands it over directly — so on a booted session this is a
+    // duplicate instruction the participants have already carried out.
+    //
+    // It is also the row that seeded the volley. Boot ends with no task, the ring
+    // hands turn one to the front, and this is the whole of its backlog: an
+    // instruction it had already followed. It reports "CL loaded", that report is
+    // a row, the next participant reads it and has nothing to add, and every pass
+    // from there feeds the next.
+    if !booted && is_first_spawn && storage.adherence_nudges_enabled().await {
         if let Some(nudge) = cl_opener_nudge(project.as_deref()) {
             // One row, both agents. `Investigate` is the same constant this
             // site always wrapped the nudge in — it runs only on a first spawn,
