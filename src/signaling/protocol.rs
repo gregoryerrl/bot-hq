@@ -448,7 +448,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "close_session",
-            description: "Close the session this agent is running in. Kills every participant's subprocess and marks the session row closed (or archived). Use this when the user asks you to close the session and the conversation has reached a natural stopping point. Fire-and-forget — your subprocess will be terminated shortly after this call returns.",
+            description: gated_by("close_session", "Close the session this agent is running in. Kills every participant's subprocess and marks the session row closed (or archived). Use this when the user asks you to close the session and the conversation has reached a natural stopping point. Fire-and-forget — your subprocess will be terminated shortly after this call returns."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

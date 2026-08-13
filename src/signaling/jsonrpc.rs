@@ -157,25 +157,36 @@ pub async fn dispatch(
 /// would decide differently under the capability model than under the name gate
 /// it replaces:
 ///
-/// * **`close_session`** is UNGATED today — any agent may call it, EYES
-///   included. `capability::required_for` maps it to `Capability::CloseSession`,
-///   which the `eyes` role is not seeded with, so routing it through
-///   capabilities would newly REFUSE it for EYES. That is a real fix for a real
-///   gap (CL issues #5: a reviewer closed a session while unwritten CL learnings
-///   were still pending) and it is already blessed in the capability model's own
-///   test, `capability::tests::close_session_is_the_one_intended_boundary_change`
-///   — but blessing a boundary change in the model is not the same as shipping
-///   it in the runtime, and this change is not the place to do that. Held here
-///   so the reframe lands with byte-identical decisions and the boundary change
-///   can be taken on its own merits.
+/// **It is EMPTY as of rc3 D16**, and that is the end state this list was
+/// written for rather than a gap in it.
 ///
-/// Removing an entry is a one-line change and is the whole mechanism: whoever
-/// decides EYES should lose `close_session` deletes it here and moves the tool
-/// off `parity::UNGATED`.
-/// `parity::the_parity_hold_is_exactly_the_known_divergence` fails if this list
-/// grows silently, and the enforcement table in `agents::capability_prompt`'s
-/// module doc records that a held tool is not enforced.
-const PARITY_HOLD: &[&str] = &["close_session"];
+/// `close_session` was its one entry. The reframe shipped with the pre-rc3
+/// answer held — any agent could close, EYES included — because routing it
+/// through capabilities would newly REFUSE it for EYES, and a behaviour change
+/// is not a reframe. The user has since taken that change on its own merits:
+/// *"close session tick on role capabilities. if no agents are ticked, then user
+/// must be the one to manually click the close button if they want to close."*
+///
+/// So `close_session` now gates on `Capability::CloseSession` like every other
+/// tool, read from the participant's invite-time snapshot of its role's ticks.
+/// Two consequences were decided rather than discovered:
+///
+///   * **a roster where nobody holds it is LEGAL**, not an error — it means the
+///     session ends when the user says so. The UI Close button
+///     (`tauri_cmd::sessions::close_session`) calls `CoreAppState::close_session`
+///     directly and has never touched this gate, which is what makes that
+///     configuration usable rather than a session nobody can end;
+///   * **the seeded `eyes` role does not hold it**, so a HANDS + EYES session
+///     behaves as pre-rc3 did, and a session of EYES alone can no longer close
+///     itself. That is the intended change and the reason it was held for a
+///     decision (CL issues #5: a reviewer closed a session with unwritten CL
+///     learnings still pending).
+///
+/// Adding an entry here reopens a gap, so
+/// `parity::the_parity_hold_is_exactly_the_known_divergence` asserts this list
+/// is empty. The enforcement table in `agents::capability_prompt`'s module doc
+/// records that a held tool is not enforced.
+const PARITY_HOLD: &[&str] = &[];
 
 /// Is `tool`'s allow/deny decision routed through the caller's capability set?
 ///

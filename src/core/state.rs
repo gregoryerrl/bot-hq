@@ -1648,6 +1648,46 @@ mod tests {
         );
     }
 
+    /// rc3 **D16**: the UI's Close button is not capability-gated, and must
+    /// never become so.
+    ///
+    /// `close_session` gates on `Capability::CloseSession` for AGENTS as of D16,
+    /// which makes "a roster where nobody holds it" a legal configuration — it
+    /// means the session ends when the user says so. That configuration is only
+    /// usable because the button takes a different path:
+    /// `tauri_cmd::sessions::close_session` → `CoreAppState::close_session`,
+    /// which consults no capability set at all. Route it through the agent gate
+    /// and a session whose roster ticks nothing becomes a session nobody can
+    /// end, including its owner.
+    ///
+    /// Asserted over both files rather than one function body, because the
+    /// hazard is a check appearing ANYWHERE on the path, not in one place.
+    #[test]
+    fn the_users_close_button_is_not_capability_gated() {
+        for (name, src) in [
+            ("core::state", include_str!("state.rs")),
+            ("tauri_cmd::sessions", include_str!("../tauri_cmd/sessions.rs")),
+        ] {
+            let prod = src
+                .split("mod tests {")
+                .next()
+                .expect("a split always yields a first part");
+            for marker in [
+                "allows_tool",
+                "required_for",
+                "ResolvedCapabilities",
+                "capability_gated",
+            ] {
+                assert!(
+                    !prod.contains(marker),
+                    "{name} consults `{marker}` — the user's close path must not read \
+                     an agent capability, or a roster that ticks nobody becomes a \
+                     session its owner cannot end"
+                );
+            }
+        }
+    }
+
     /// rc3 **D17**: only a USER message is parsed for mentions.
     ///
     /// Enforced by construction rather than by asking agents not to: the parse

@@ -61,13 +61,13 @@ const UNGATED: &[&str] = &[
     "pass_turn",
     "advance_phase",
     "gate_status",
-    // Ungated BEFORE the capability gate landed, and held that way by
-    // `jsonrpc::PARITY_HOLD`. The capability model maps it to
-    // `Capability::CloseSession`, which EYES is not seeded with, so routing it
-    // through capabilities would newly refuse it for EYES — a behaviour change,
-    // not a reframe. It stays on this list until that change is taken on its
-    // own merits. See `the_parity_hold_is_exactly_the_known_divergence`.
-    "close_session",
+    // `close_session` LEFT this list in rc3 D16, and it is the one place this
+    // oracle deliberately stops transcribing pre-rc3 behaviour. It was ungated
+    // before the capability gate landed and held that way through the reframe;
+    // the user then decided the tick should mean something, so it gates on
+    // `Capability::CloseSession` now. The divergence is named rather than
+    // hidden — see `the_parity_hold_is_exactly_the_known_divergence`, which
+    // asserts the new answer and says why it differs from the old one.
 ];
 
 /// **The frozen oracle: the tool gate exactly as it read before rc3 wired
@@ -417,12 +417,23 @@ async fn the_reviewer_down_gate_blocks_only_a_duo_with_a_dead_reviewer() {
 // capability set.
 // ---------------------------------------------------------------------------
 
+/// The ONE tool whose answer the user deliberately changed (rc3 D16).
+///
+/// Everything else must still reproduce the pre-rc3 name gate exactly; this is
+/// named here rather than skipped silently so the exception cannot grow into a
+/// place to park regressions — `the_parity_hold_is_exactly_the_known_divergence`
+/// asserts the new answer directly.
+const SANCTIONED_DIVERGENCE: &[&str] = &["close_session"];
+
 #[tokio::test]
 async fn the_capability_gate_reproduces_the_name_gate_for_every_tool() {
     let bridge = seeded_bridge().await;
     let mut checked = 0usize;
     for descriptor in super::protocol::tool_descriptors() {
         let tool = descriptor.name;
+        if SANCTIONED_DIVERGENCE.contains(&tool) {
+            continue;
+        }
         for agent in ["hands", "eyes"] {
             let now = gate_admits(&bridge, tool, agent).await;
             let before = legacy_name_gate_admits(tool, legacy_name_of(agent));
@@ -473,30 +484,31 @@ async fn the_seeded_roster_resolves_to_the_presets() {
 
 #[tokio::test]
 async fn the_parity_hold_is_exactly_the_known_divergence() {
-    // `close_session` is the ONE tool where the capability model and the name
-    // gate disagree, and `jsonrpc::PARITY_HOLD` keeps the name gate's answer so
-    // the reframe ships without a behaviour change. Two things are pinned:
+    // **The hold is empty, and `close_session` is the reason it existed** (rc3
+    // D16). It was the one tool where the capability model and the pre-rc3 name
+    // gate disagreed: the model refuses EYES, the name gate admitted it. The
+    // reframe held the old answer so it shipped byte-identical; the user has
+    // since taken the change deliberately — the tick on the role is what decides.
     //
-    //  1. the divergence is real — the model would refuse EYES,
-    //  2. the runtime does NOT act on it — EYES can still close.
-    //
-    // If someone later decides EYES should lose `close_session`, this test is
-    // where that conversation starts: delete the hold, move `close_session` off
-    // `UNGATED`, and this test's first half becomes the new behaviour.
+    // This test's first half used to assert the model's answer was NOT acted on.
+    // It now asserts that it is, which is the whole edit.
     use crate::agents::CapabilitySet;
 
     assert!(
         !CapabilitySet::preset_eyes().allows_tool("close_session"),
-        "the capability model must still refuse close_session to EYES — \
-         without that there is nothing to hold"
+        "the capability model refuses close_session to EYES — the gate below \
+         is what makes that real"
     );
     let bridge = seeded_bridge().await;
     assert!(
-        gate_admits(&bridge, "close_session", "eyes").await,
-        "close_session must stay admitted for EYES until the boundary change is \
-         taken deliberately"
+        !gate_admits(&bridge, "close_session", "eyes").await,
+        "EYES does not hold CloseSession, so the runtime must refuse it — this is \
+         the one place the gate deliberately diverges from pre-rc3 behaviour"
     );
-    assert!(gate_admits(&bridge, "close_session", "hands").await);
+    assert!(
+        gate_admits(&bridge, "close_session", "hands").await,
+        "HANDS holds it and closes exactly as before"
+    );
 
     // And the hold must not quietly grow into a place to park regressions.
     let held: Vec<&str> = super::protocol::tool_descriptors()
