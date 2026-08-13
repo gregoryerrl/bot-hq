@@ -135,11 +135,25 @@ classification.
 
 ## In flight
 
-**Nothing.** The **rc3** arc closed 2026-08-13 — decisions D1–D16 in
-[`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md),
-all implemented. Known open items are D16 (`close_session` gating on the role
-capability, spec'd and unstarted) and the proposals in the project CL's
-`improvements-2026-08-12-visibility-and-verification.md` that were not taken.
+**Nothing blocking.** The **rc3** arc closed 2026-08-13 — decisions D1–D21 in
+[`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md).
+D17 (summon by `@mention`), D18 (two participation modes), D19/D19a/D19b (the
+ring is the only delivery path) all shipped that day.
+
+Spec'd and unstarted, in the order they were decided:
+
+- **D16** — `close_session` gates on the role capability; an empty-capability
+  roster is legal and the UI Close button must never route through the gate.
+- **D20** — a participant's label is the user's (`EYES` / `EYES-2` / `EYES-3`
+  when empty), and colour rotates so two participants of one role never render
+  identically.
+- **D21** — a parallel BOOT phase: every participant orients at once, nobody
+  acts until the ring starts. Rides D19a's `kind` filter.
+
+Also open: the proposals in the project CL's
+`improvements-2026-08-12-visibility-and-verification.md` that were not taken,
+and one dead column — `sessions.round_number` has no writer, exactly as
+`current_turn_participant_id` had none before D19b.
 
 The arc before it was the **native agent loop** (2026-07-26/27): an agent
 could run on bot-hq's own Rust loop instead of a claude-code subprocess,

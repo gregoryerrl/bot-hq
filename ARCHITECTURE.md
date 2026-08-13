@@ -200,8 +200,7 @@ policy block in layer 6).
 
 **One participant holds the turn at a time.** `src/core/sequencer.rs` runs a
 fixed rotation over the session's ACTIVE participants in `turn_position` order;
-observers and `on_demand` participants are skipped rather than handed a no-op
-turn. Each participant's pump (`src/core/duo.rs::pump_agent`) reports
+`on_mention` participants are skipped rather than handed a no-op turn. Each participant's pump (`src/core/duo.rs::pump_agent`) reports
 `SequencerCommand::TurnComplete` when its turn ends — on BOTH the substantive and
 the errored branch, because the ring steps on the completion, not on the text.
 
@@ -219,10 +218,31 @@ policies gate delivery, never persistence.
   its own, so a participant that is blocked rather than finished cannot complete
   a tally by accident.
 
+**Two participation modes, and both of them do something** (rc3 D18):
+`active` is in the rotation, `on_mention` is not. An `on_mention` participant is
+spawned and waits; the USER hands it a turn by naming it. `observer` was a third
+and is gone — it was spawned, handed no turn, delivered nothing and could not
+vote, so it read nothing, said nothing and billed for existing.
+
+**A mention is a wake target, not addressing** (rc3 D17). Typing `@advisor` in
+the composer opens a picker of this session's participants; the chosen slug is
+parsed out of the user's row (`core::mentions`), resolved to a participant id,
+and carried on `SequencerCommand::UserMessage`. That participant takes the NEXT
+turn and only that one; the rotation then resumes from where it was, because the
+ring steps from an ANCHOR that a summoned turn does not move. Several mentions
+queue in the order written.
+
+**Only the user may mention.** The parse has one call site, on the path that
+writes the user's own row, and the function is private to `core::state` — so a
+participant that types `@advisor` writes text and nothing can act on it. Peer
+mentions would compose into a summon loop nothing catches: every turn
+substantive, so the tally never completes, spin detection never fires, and only
+the round cap ends it.
+
 **How a cycle stops**, in order of how often it should fire:
 1. **Consensus** — every active participant holds a done vote
    (`all_active_voted_done`, which filters on `enabled && participation_mode ==
-   "active"`, so observers and on-call participants never block a halt).
+   "active"`, so an `on_mention` participant never blocks a halt).
 2. **A parked question** — `ask_user_choice` or `mark_awaiting_user` both set the
    awaiting flag through `set_session_awaiting`, which sends
    `SequencerCommand::QuestionParked`. The cycle halts unilaterally: no vote is

@@ -371,7 +371,7 @@ diverges from pre-rc3 behaviour, with this decision as the reason.
 
 ### D17 — `on_mention`: a participant you summon, for exactly one turn
 
-Decided 2026-08-13. This closes **A3** in
+Decided 2026-08-13. **SHIPPED 2026-08-13** (`5c17818`). This closes **A3** in
 [`2026-08-11-design-drift-audit.md`](2026-08-11-design-drift-audit.md), the last
 of the three decisions that audit found existing "in neither the code nor any
 batch" — the other two shipped as the round cap and PASS.
@@ -442,9 +442,36 @@ participant the next turn and no more; the rotation resumes where it left off; a
 mention typed by an agent does nothing; and the whole path is pinned by a test
 that would fail if a participant's mention were honoured.
 
+**Settled while building it** (2026-08-13), so they are not re-derived:
+
+1. **An `on_mention` participant IS spawned.** It was excluded from
+   `resolve_spawn_roster` while nothing could wake one. A summons cannot reach a
+   process that does not exist, and spawning lazily on the first mention would be
+   a SECOND way into the rotation — the shape D19 spent a day deleting. Cost: one
+   idle subprocess, no tokens until it is fed. It does not trip the
+   reviewer-down commit gate: the stall verdict requires `busy`, and a
+   participant that has never held a turn is not.
+2. **The ring steps from an ANCHOR, not from the holder.** The anchor is the last
+   participant to hold a RING turn, and a summoned turn does not move it. That
+   one rule is the whole of "the rotation resumes where it was". Stepping from
+   the holder passes every other test in the file — mutation-verified.
+3. **A user message clears the done tally whether or not it names anyone.** The
+   clear used to ride the restart-to-the-front, which a mention deliberately does
+   not do. Left bound to the restart, a summons after a converged halt leaves the
+   old votes standing, the summoned participant passes, and the session halts
+   again with the actives never having read the message that restarted it.
+4. **An unresolvable mention never reaches the ring.** `resolve_mentions` drops a
+   slug that names nobody, so the message arrives as a plain reset — which is
+   what "an unknown slug is ordinary prose" means operationally. The sequencer's
+   own drop path covers only the race where a participant leaves between the
+   mention and the turn.
+5. **The picker matches on word prefixes, not substrings.** The label carries the
+   model (`EYES · Claude Opus 5`), so `@e` under substring matching offered every
+   participant running Claud**e** and Enter inserted the wrong one.
+
 ### D18 — delete `observer`; two participation modes, both of which do something
 
-Decided 2026-08-13, alongside [D17]. The user, on being shown what an observer
+Decided 2026-08-13, alongside [D17]. **SHIPPED 2026-08-13** (`4c431b4`). The user, on being shown what an observer
 actually does: *"delete it, so we have two role types that are actually useful?
 Active and On Mention"* — yes.
 

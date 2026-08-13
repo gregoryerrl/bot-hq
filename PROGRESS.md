@@ -18,6 +18,66 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-13 — a participant you summon by name (rc3 D17 + D18)
+
+Two participation modes now, and both of them do something.
+
+**`observer` is gone** (D18). It was spawned, handed no turn, delivered nothing
+and could not vote — a subprocess that read nothing, said nothing and billed for
+existing. Zero rows used it, so the change was code and prose. The mechanical
+rename surfaced two tests whose halves had quietly disagreed for weeks: one
+asserted an observer IS spawned while an `on_demand` row is not, the other that
+an `on_mention` roster is both refused and legal. Collapsing the modes made the
+contradiction fail to compile past itself.
+
+**`@advisor` hands the advisor the next turn** (D17), and only that turn. The
+rotation then carries on from where it was — a mention is an INSERTION, not a
+reset, so summoning somebody does not silently send the ring back to participant
+1. Several mentions queue in the order written. Typing `@` in the composer opens
+a picker of this session's participants, which makes mentioning a
+non-participant impossible to EXPRESS rather than an error to report.
+
+The mechanism is one field on `UserMessage` and one rule in the ring: it steps
+from an ANCHOR that only a ring turn moves. For an ordinary turn the anchor and
+the holder are the same participant, so the common path is unchanged; after a
+summons they differ, and that difference IS "resumes where it was". Both new
+invariants were mutation-verified — swap the anchor for the holder, or drop the
+tally clear, and exactly the test written for each goes red.
+
+**Only the user may summon**, structurally rather than by asking: the parse has
+one call site, on the path that writes the user's own row, behind a function
+private to `core::state`. A participant that types `@advisor` writes text and
+nothing can act on it. Peer mentions would compose into a summon loop nothing
+catches — every turn substantive, so the tally never completes, spin detection
+never fires, and only the 500-lap cap ends it, at one real model call per lap on
+the most expensive role in the session.
+
+An `on_mention` participant is now spawned, which is a deliberate reversal: a
+summons cannot reach a process that does not exist, and spawning lazily on the
+first mention would be a second way into the rotation — the shape D19 spent a
+day deleting.
+
+**Live verification of D19a/D19b, from `s-81057bde`** (the user's N=3 run,
+HANDS + two EYES). All three slots delivered (8/8/9). **Zero** of the session's
+65 `tool_use`/`tool_result` rows reached a participant, where before every peer
+read every peer's plumbing. `current_turn_participant_id` is written. Two
+completions were discarded and both are the documented case — a parked question
+took the holder and moved the epoch — with no `epoch = 0` carrier anywhere,
+which was the whole of the D19 defect.
+
+That session also diagnosed, from inside, why its reviewers looked mute: HANDS
+parked a question on its FIRST turn, which halts the cycle unilaterally, so the
+ring never reached slots 1 and 2 until the user replied — and a user reply
+restarts at the front, i.e. at HANDS again. Working as designed and miserable to
+watch. **D17 is the affordance that answers it**: `@eyes` hands EYES the turn
+directly.
+
+Noted, not fixed: `sessions.round_number` has no writer, exactly as
+`current_turn_participant_id` had none before D19b. The ring counts laps in its
+own frame; the column is dead until something carries that out.
+
+---
+
 ## 2026-08-13 — CL claims that name code which is gone are detectable (rc3 P4)
 
 Last dogfood-queue item, and the structural one. bot-hq's advantage over plain
