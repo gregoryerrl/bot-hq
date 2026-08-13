@@ -54,12 +54,41 @@ export const LIST_PARTICIPANTS_CMD = "list_session_participants";
 export function participantLabel(
   p: Pick<ParticipantView, "slug" | "role_display_name" | "model_display_name">,
 ): string {
-  const role = p.role_display_name?.trim() || null;
+  const ordinal = slugOrdinal(p.slug);
+  const bare = p.role_display_name?.trim() || null;
+  const role = bare && ordinal ? `${bare}-${ordinal}` : bare;
   const model = p.model_display_name?.trim() || null;
   if (role && model) return `${role} · ${model}`;
   if (role) return role;
   if (model) return model;
   return p.slug;
+}
+
+/**
+ * The `-N` a duplicate slug carries: `eyes-2` → `2`, `eyes` → `null`
+ * (rc3 **D20**).
+ *
+ * **Two participants of one role rendered identically**, character for
+ * character — `EYES · DeepSeek V4 Pro` twice, in the same colour, because the
+ * label had no ordinal and `authorColor` hashes the label. Reported from a live
+ * N=3 run: *"for the 2 reviewers, i don't know which is which."*
+ *
+ * Taken from the SLUG rather than counted over the roster so the visible name
+ * and the internal key agree by construction — the backend assigns `eyes`,
+ * `eyes-2`, `eyes-3` at invite time. A second numbering would disagree with the
+ * first the moment a participant is disabled.
+ *
+ * Must stay in step with `participant_display_name` in
+ * `src/storage/participants.rs`; the two render the same participant on
+ * different surfaces.
+ */
+export function slugOrdinal(slug: string): number | null {
+  const at = slug.lastIndexOf("-");
+  if (at <= 0) return null;
+  const tail = slug.slice(at + 1);
+  if (!/^\d+$/.test(tail)) return null;
+  const n = Number(tail);
+  return n >= 2 ? n : null;
 }
 
 /**

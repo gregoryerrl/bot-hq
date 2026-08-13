@@ -5,11 +5,13 @@ import {
   participantLabelIndex,
   participantLabel,
   participantRuntime,
+  slugOrdinal,
   slotKey,
   spawnSlotOf,
   UNKNOWN_PARTICIPANT,
   type ParticipantView,
 } from "./participants";
+import { authorColorClass } from "../components/authorColor";
 
 function p(over: Partial<ParticipantView> = {}): ParticipantView {
   return {
@@ -191,7 +193,10 @@ describe("the two runtime key spaces", () => {
     const labels = participantLabelIndex(ROSTER);
     expect(labels["eyes"]).toBe("EYES · Claude Opus 5");
     expect(labels[slotKey(0)]).toBe("EYES · Claude Opus 5");
-    expect(labels[slotKey(1)]).toBe("EYES · DeepSeek R2");
+    // `EYES-2`, not `EYES` — this fixture is exactly the case rc3 D20 fixes:
+    // two participants of one role, which used to render the same string in the
+    // same colour on every surface.
+    expect(labels[slotKey(1)]).toBe("EYES-2 · DeepSeek R2");
     expect(authorLabel(slotKey(0), labels)).toBe("EYES · Claude Opus 5");
   });
 });
@@ -297,5 +302,61 @@ describe("capabilityGapWarning — rc3 D11", () => {
 
   it("says nothing about an empty roster", () => {
     expect(capabilityGapWarning([])).toBeNull();
+  });
+});
+
+// ===========================================================================
+// rc3 D20 — two participants of one role must not render identically
+// ===========================================================================
+
+describe("participantLabel ordinals", () => {
+  const eyes = {
+    slug: "eyes",
+    role_display_name: "EYES",
+    model_display_name: "DeepSeek V4 Pro",
+  };
+
+  it("numbers the second participant of a role", () => {
+    // The reported case: two reviewers, one role, one model, one colour.
+    expect(participantLabel(eyes)).toBe("EYES · DeepSeek V4 Pro");
+    expect(participantLabel({ ...eyes, slug: "eyes-2" })).toBe(
+      "EYES-2 · DeepSeek V4 Pro",
+    );
+    expect(participantLabel({ ...eyes, slug: "eyes-3" })).toBe(
+      "EYES-3 · DeepSeek V4 Pro",
+    );
+  });
+
+  it("leaves the first of a role alone", () => {
+    // The common case — one reviewer — must read exactly as it did.
+    expect(participantLabel({ ...eyes, slug: "eyes" })).toBe(
+      "EYES · DeepSeek V4 Pro",
+    );
+    expect(slugOrdinal("eyes")).toBeNull();
+    expect(slugOrdinal("code-reviewer")).toBeNull();
+    expect(slugOrdinal("eyes-1")).toBeNull();
+  });
+
+  it("gives the two of them different colours, which is the point", () => {
+    // `authorColor` hashes the LABEL, so identical labels were identical hues.
+    // The ordinal is what separates them; no second mechanism is needed.
+    const a = authorColorClass(participantLabel(eyes));
+    const b = authorColorClass(participantLabel({ ...eyes, slug: "eyes-2" }));
+    expect(a).not.toBe(b);
+  });
+
+  it("numbers the role, never the model", () => {
+    // Two models are not "the second EYES" — with no role there is nothing to
+    // number, and the label falls through as before.
+    expect(
+      participantLabel({ ...eyes, slug: "eyes-2", role_display_name: null }),
+    ).toBe("DeepSeek V4 Pro");
+    expect(
+      participantLabel({
+        slug: "eyes-2",
+        role_display_name: null,
+        model_display_name: null,
+      }),
+    ).toBe("eyes-2");
   });
 });

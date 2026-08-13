@@ -237,13 +237,13 @@ describe("SessionView health dots + context meters (rc3 D10)", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByLabelText("EYES · DeepSeek R2 stopped — gave up after errors"),
+      screen.getByLabelText("EYES-2 · DeepSeek R2 stopped — gave up after errors"),
     ).toBeInTheDocument();
     expect(
       screen.getByLabelText("EYES · Claude Opus 5 context 62 percent used"),
     ).toBeInTheDocument();
     expect(
-      screen.getByLabelText("EYES · DeepSeek R2 context 31 percent used"),
+      screen.getByLabelText("EYES-2 · DeepSeek R2 context 31 percent used"),
     ).toBeInTheDocument();
   });
 
@@ -257,7 +257,7 @@ describe("SessionView health dots + context meters (rc3 D10)", () => {
       screen.getByLabelText("EYES · Claude Opus 5 stopped — gave up after errors"),
     ).toBeInTheDocument();
     expect(
-      screen.getByLabelText("EYES · DeepSeek R2 running"),
+      screen.getByLabelText("EYES-2 · DeepSeek R2 running"),
     ).toBeInTheDocument();
   });
 
@@ -277,7 +277,7 @@ describe("SessionView health dots + context meters (rc3 D10)", () => {
     await screen.findByRole("button", { name: "Workspace" });
 
     expect(
-      screen.getByLabelText("EYES · DeepSeek R2 stopped — gave up after errors"),
+      screen.getByLabelText("EYES-2 · DeepSeek R2 stopped — gave up after errors"),
     ).toBeInTheDocument();
     expect(
       screen.getByLabelText("EYES · Claude Opus 5 running"),
@@ -296,7 +296,7 @@ describe("SessionView header roster (rc3 D10)", () => {
 
     const header = screen.getByRole("banner");
     expect(header).toHaveTextContent("EYES · Claude Opus 5");
-    expect(header).toHaveTextContent("EYES · DeepSeek R2");
+    expect(header).toHaveTextContent("EYES-2 · DeepSeek R2");
     // Slugs are internal keys — the header must not print them.
     expect(header.textContent).not.toMatch(/eyes-2/);
     // …and no participant is named after an agent (rc3 D10).
@@ -366,11 +366,11 @@ describe("SessionView composed system prompt (rc3 P1)", () => {
     };
     renderSessionView();
     fireEvent.click(
-      await screen.findByRole("button", { name: "EYES · DeepSeek R2" }),
+      await screen.findByRole("button", { name: "EYES-2 · DeepSeek R2" }),
     );
 
     const dialog = await screen.findByRole("dialog", {
-      name: "EYES · DeepSeek R2 — composed system prompt",
+      name: "EYES-2 · DeepSeek R2 — composed system prompt",
     });
     expect(promptCall.lastArgs).toEqual({ sessionId: "s1", slug: "eyes-2" });
     expect(dialog).toHaveTextContent("SENTINEL_PROMPT_BODY_Q4");
@@ -431,12 +431,12 @@ describe("SessionView context readings (rc3 P7)", () => {
     // No context store state is seeded, so no participant has a live meter.
     fireEvent.click(
       await screen.findByRole("button", {
-        name: "EYES · DeepSeek R2 context history",
+        name: "EYES-2 · DeepSeek R2 context history",
       }),
     );
 
     const dialog = await screen.findByRole("dialog", {
-      name: "EYES · DeepSeek R2 — context readings",
+      name: "EYES-2 · DeepSeek R2 — context readings",
     });
     expect(readingsCall.lastArgs).toEqual({ sessionId: "s1", slug: "eyes-2" });
     expect(dialog).toHaveTextContent("no_window");

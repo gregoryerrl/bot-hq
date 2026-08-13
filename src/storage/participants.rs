@@ -373,12 +373,47 @@ pub fn participant_display_name(
     fn clean(s: Option<&str>) -> Option<&str> {
         s.map(str::trim).filter(|s| !s.is_empty())
     }
-    match (clean(role_display_name), clean(model_display_name)) {
+    let role = clean(role_display_name).map(|role| match slug_ordinal(slug) {
+        Some(n) => format!("{role}-{n}"),
+        None => role.to_string(),
+    });
+    match (role, clean(model_display_name)) {
         (Some(role), Some(model)) => format!("{role} · {model}"),
-        (Some(role), None) => role.to_string(),
+        (Some(role), None) => role,
         (None, Some(model)) => model.to_string(),
         (None, None) => slug.to_string(),
     }
+}
+
+/// The `-N` a duplicate slug carries, if any: `eyes-2` → `Some(2)`, `eyes` →
+/// `None` (rc3 **D20**).
+///
+/// **Two participants of one role rendered identically, character for
+/// character**, which is what the user reported after a live N=3 run: *"for the
+/// 2 reviewers, i don't know which is which."* `EYES · DeepSeek V4 Pro` twice,
+/// in the roster, in the chat bylines, and in the same colour — because the
+/// display rule had no ordinal and the colour is hashed from the label.
+///
+/// The ordinal is taken from the SLUG rather than counted over the roster, and
+/// that is the point rather than a shortcut: `first_free_slug` already assigns
+/// `eyes`, `eyes-2`, `eyes-3` at invite time, so the visible name and the
+/// internal key agree by construction and cannot drift. A count over the roster
+/// would be a second numbering, and two numberings of one thing disagree the
+/// first time a participant is disabled.
+///
+/// The first of a role takes no suffix, which is why a session with ONE reviewer
+/// still reads `EYES` and nothing changes for the common case.
+///
+/// Conservative about what counts: only a trailing `-` followed by digits, and
+/// only when something precedes it. A role legitimately named `Agent-7` slugs to
+/// `agent-7` and would read as `AGENT-7` — the same string either way, so the
+/// worst case is a suffix that was already there.
+fn slug_ordinal(slug: &str) -> Option<u32> {
+    let (base, tail) = slug.rsplit_once('-')?;
+    if base.is_empty() {
+        return None;
+    }
+    tail.parse().ok().filter(|n| *n >= 2)
 }
 
 fn first_free_slug(base: &str, taken: &HashSet<String>) -> String {
@@ -3272,6 +3307,56 @@ mod tests {
         let a = ring_member(1, "a", 0);
         assert!(next_in_ring(&[], None).is_none());
         assert!(next_in_ring(&[], Some(&a)).is_none());
+    }
+
+    /// rc3 **D20**: two participants of one role do not render identically.
+    #[test]
+    fn a_second_participant_of_one_role_carries_its_ordinal() {
+        // The reported case, exactly: two reviewers, one role, one model.
+        assert_eq!(
+            participant_display_name(Some("EYES"), Some("DeepSeek V4 Pro"), "eyes"),
+            "EYES · DeepSeek V4 Pro"
+        );
+        assert_eq!(
+            participant_display_name(Some("EYES"), Some("DeepSeek V4 Pro"), "eyes-2"),
+            "EYES-2 · DeepSeek V4 Pro",
+            "the second reviewer must not read the same as the first"
+        );
+        // The first of a role takes no suffix, so a one-reviewer session is
+        // unchanged — which is the common case and must stay quiet.
+        assert_eq!(participant_display_name(Some("HANDS"), None, "hands"), "HANDS");
+        assert_eq!(participant_display_name(Some("HANDS"), None, "hands-3"), "HANDS-3");
+    }
+
+    #[test]
+    fn an_ordinal_is_only_a_trailing_number_that_a_duplicate_would_have() {
+        assert_eq!(slug_ordinal("eyes-2"), Some(2));
+        assert_eq!(slug_ordinal("eyes-10"), Some(10));
+        // `-1` is not a suffix `first_free_slug` ever assigns: the first of a
+        // role is the bare slug, and suffixes start at 2.
+        assert_eq!(slug_ordinal("eyes-1"), None);
+        assert_eq!(slug_ordinal("eyes"), None);
+        assert_eq!(slug_ordinal("code-reviewer"), None);
+        assert_eq!(slug_ordinal("-2"), None, "a suffix needs something to suffix");
+        assert_eq!(slug_ordinal(""), None);
+        // A role NAMED with a trailing number keeps it, which is the same string
+        // either way — the worst case is a suffix that was already there.
+        assert_eq!(slug_ordinal("agent-7"), Some(7));
+    }
+
+    /// The display rule and its TypeScript twin render the same participant on
+    /// different surfaces, so the ordinal has to be in both. This is the Rust
+    /// half; `participants.test.ts` holds the other.
+    #[test]
+    fn the_ordinal_survives_the_model_being_gone() {
+        assert_eq!(participant_display_name(Some("EYES"), None, "eyes-2"), "EYES-2");
+        // No ROLE, though, means there is nothing to number — the model alone is
+        // not a role and two of them are not "the second EYES".
+        assert_eq!(
+            participant_display_name(None, Some("DeepSeek V4 Pro"), "eyes-2"),
+            "DeepSeek V4 Pro"
+        );
+        assert_eq!(participant_display_name(None, None, "eyes-2"), "eyes-2");
     }
 
     #[tokio::test]

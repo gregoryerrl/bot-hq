@@ -70,7 +70,7 @@ describe("SessionPolicyPanel roster (rc3 D10)", () => {
     renderPanel();
 
     expect(await screen.findByText("EYES · Claude Opus 5")).toBeInTheDocument();
-    expect(screen.getByText("EYES · DeepSeek R2")).toBeInTheDocument();
+    expect(screen.getByText("EYES-2 · DeepSeek R2")).toBeInTheDocument();
   });
 
   it("keeps the slugs — and any agent name — off the panel", async () => {
@@ -79,7 +79,7 @@ describe("SessionPolicyPanel roster (rc3 D10)", () => {
     await screen.findByText("EYES · Claude Opus 5");
 
     const panel = screen.getByRole("dialog", { name: /session settings/i });
-    // `eyes-2` is the slug; `EYES · DeepSeek R2` is what the same row prints,
+    // `eyes-2` is the slug; `EYES-2 · DeepSeek R2` is what the same row prints,
     // so this fails the moment the block renders the internal key instead.
     expect(panel.textContent).not.toMatch(/eyes-2/);
     expect(panel.textContent).not.toMatch(/\bbrian\b/i);
@@ -92,7 +92,7 @@ describe("SessionPolicyPanel roster (rc3 D10)", () => {
     // the rest of the line.
     mockBackend();
     renderPanel();
-    const label = await screen.findByText("EYES · DeepSeek R2");
+    const label = await screen.findByText("EYES-2 · DeepSeek R2");
 
     const row = label.closest("li")!;
     expect(row.textContent).toMatch(/on_mention|on mention/i);

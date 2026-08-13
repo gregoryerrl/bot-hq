@@ -152,10 +152,15 @@ describe("ChatPane", () => {
     expect(screen.queryByText("eyes")).toBeNull();
   });
 
-  it("keeps two participants of the SAME role apart by their models", async () => {
+  it("keeps two participants of the SAME role apart", async () => {
     // The live complaint: "I accidentally set the two agents to EYES + EYES,
     // there's no way for me to know that until they explicitly said in the
-    // session". Same role, different model — the byline has to distinguish them.
+    // session". Same role — the byline has to distinguish them.
+    //
+    // Two things do it now. The model differs here, which was the original fix;
+    // rc3 D20 added the ORDINAL, which is what covers the harder case the user
+    // hit later — same role AND same model, where the model told them nothing:
+    // "for the 2 reviewers, i don't know which is which".
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === "get_session_messages")
         return Promise.resolve([
@@ -173,7 +178,32 @@ describe("ChatPane", () => {
     renderPane();
     await screen.findByText("first reviewer speaks");
     expect(await screen.findByText("EYES · Claude Opus 5")).toBeInTheDocument();
-    expect(screen.getByText("EYES · DeepSeek R2")).toBeInTheDocument();
+    expect(screen.getByText("EYES-2 · DeepSeek R2")).toBeInTheDocument();
+  });
+
+  it("keeps them apart even on the SAME model, which the byline could not before", async () => {
+    // rc3 D20, and the case that has no other signal: one role, one model, two
+    // participants. Before the ordinal both bylines read `EYES · DeepSeek V4
+    // Pro` — identical strings, and `authorColor` hashes the string, so
+    // identical colours too.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "get_session_messages")
+        return Promise.resolve([
+          msg(1, "first reviewer speaks", "text", "eyes"),
+          msg(2, "second reviewer speaks", "text", "eyes-2"),
+        ]);
+      if (cmd === "list_session_participants")
+        return Promise.resolve([
+          { ...PARTICIPANTS[1], id: 1, slug: "eyes", model_display_name: "DeepSeek V4 Pro" },
+          { ...PARTICIPANTS[1], id: 2, slug: "eyes-2", model_display_name: "DeepSeek V4 Pro" },
+        ]);
+      return Promise.resolve([]);
+    });
+
+    renderPane();
+    await screen.findByText("first reviewer speaks");
+    expect(await screen.findByText("EYES · DeepSeek V4 Pro")).toBeInTheDocument();
+    expect(screen.getByText("EYES-2 · DeepSeek V4 Pro")).toBeInTheDocument();
   });
 
   it("attributes a row the roster cannot back WITHOUT printing its slug", async () => {

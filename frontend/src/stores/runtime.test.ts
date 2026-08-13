@@ -50,7 +50,7 @@ describe("busyBySlot — the frozen pair, unpacked once", () => {
     const labels = participantLabelIndex(ROSTER);
     const working = Object.keys(busy).filter((k) => busy[k]);
     expect(working.map((k) => authorLabel(k, labels))).toEqual([
-      "EYES · DeepSeek R2",
+      "EYES-2 · DeepSeek R2",
     ]);
     // …and it is reachable as runtime state for that same participant row.
     expect(participantRuntime(busy, ROSTER, ROSTER[1])).toBe(true);
