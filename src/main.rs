@@ -498,7 +498,13 @@ fn main() -> Result<()> {
                     match ev {
                         SignalingEvent::SessionCloseRequest { session_id, archive, .. } => {
                             if let Err(e) =
-                                core_for_worker.close_session(&session_id, archive).await
+                                core_for_worker
+                                    .close_session(
+                                        &session_id,
+                                        archive,
+                                        bot_hq::core::close_learnings::ClosePath::Agent,
+                                    )
+                                    .await
                             {
                                 tracing::warn!(?e, %session_id, "close_session via MCP event failed");
                             }

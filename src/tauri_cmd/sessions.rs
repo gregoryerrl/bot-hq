@@ -1083,7 +1083,12 @@ pub async fn close_session(
     session_id: String,
     archive: bool,
 ) -> Result<(), AppError> {
-    core.close_session(&session_id, archive).await?;
+    core.close_session(
+        &session_id,
+        archive,
+        crate::core::close_learnings::ClosePath::User,
+    )
+    .await?;
     Ok(())
 }
 

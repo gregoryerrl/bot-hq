@@ -68,6 +68,7 @@ pub fn decide(
     any_writer: bool,
     cl_written: bool,
     close_nudged: bool,
+    path: ClosePath,
 ) -> Epilogue {
     if !matches!(
         activity,
@@ -78,10 +79,35 @@ pub fn decide(
     if !any_writer {
         return Epilogue::SkipNoWriter;
     }
-    if cl_written || close_nudged {
+    // `cl_written` gates BOTH paths — it is evidence of a write, whoever is
+    // closing. `close_nudged` gates only the agent's own path, and the
+    // difference is the point: it records that A3b soft-gated the AGENT's
+    // `close_session` call, which says nothing about a close the USER started.
+    // Reading it on the user's path suppressed exactly the case D15 exists to
+    // cover ("the USER's Close button ... kills every subprocess without anyone
+    // being asked"), because an agent that called the tool once and never
+    // retried had already set the flag.
+    let already = cl_written || (close_nudged && matches!(path, ClosePath::Agent));
+    if already {
         return Epilogue::SkipAlreadyHandled;
     }
     Epilogue::Run
+}
+
+/// Who started this close.
+///
+/// Not cosmetic: A3b's write-the-delta nudge runs on the agent's `close_session`
+/// tool and nowhere else, so its flag is only meaningful about that path. The
+/// enum is what stops [`decide`] having to guess — it had no way to tell, and
+/// read one path's bookkeeping as the other's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClosePath {
+    /// The agent's own `close_session` MCP tool, via the control-event worker.
+    /// A3b already had its turn here.
+    Agent,
+    /// The user's Close button, or a plugin closing on the user's behalf —
+    /// neither passes through A3b. **This is the path D15 was written for.**
+    User,
 }
 
 /// What the close path does, as data.
@@ -187,13 +213,13 @@ mod tests {
     #[test]
     fn an_idle_session_with_a_writer_that_has_not_written_gets_the_turn() {
         assert_eq!(
-            decide(SessionActivity::Idle, true, false, false),
+            decide(SessionActivity::Idle, true, false, false, ClosePath::User),
             Epilogue::Run
         );
         // The dominant real case: the agent asked "Close session?" and the user
         // closed from the UI, so the session is parked on the user, not idle.
         assert_eq!(
-            decide(SessionActivity::AwaitingUser, true, false, false),
+            decide(SessionActivity::AwaitingUser, true, false, false, ClosePath::User),
             Epilogue::Run
         );
     }
@@ -203,7 +229,7 @@ mod tests {
         // D15: "a capability answer, not a special case" — a review-only
         // session has nobody who COULD write, so there is nothing to report.
         assert_eq!(
-            decide(SessionActivity::Idle, false, false, false),
+            decide(SessionActivity::Idle, false, false, false, ClosePath::User),
             Epilogue::SkipNoWriter
         );
     }
@@ -211,16 +237,54 @@ mod tests {
     #[test]
     fn a_session_that_already_wrote_or_was_already_asked_is_not_asked_again() {
         assert_eq!(
-            decide(SessionActivity::Idle, true, true, false),
+            decide(SessionActivity::Idle, true, true, false, ClosePath::User),
             Epilogue::SkipAlreadyHandled
         );
         // `close_nudged` is the agent's own close having been soft-gated for a
-        // delta (jsonrpc A3b). It declined; re-asking is how a correct decline
-        // becomes filler.
+        // delta (jsonrpc A3b). On THAT path it declined; re-asking is how a
+        // correct decline becomes filler.
         assert_eq!(
-            decide(SessionActivity::Idle, true, false, true),
+            decide(SessionActivity::Idle, true, false, true, ClosePath::Agent),
             Epilogue::SkipAlreadyHandled
         );
+    }
+
+    #[test]
+    fn the_agents_nudge_does_not_suppress_the_users_close() {
+        // The leak this pins, found 2026-08-13 with zero epilogues recorded in
+        // any session ever. A3b runs on the agent's `close_session` tool ONLY,
+        // so its flag says nothing about a close the USER started — and D15's
+        // stated scope is precisely "the USER's Close button reaches
+        // AppState::close_session directly and kills every subprocess without
+        // anyone being asked". An agent that called the tool once, was nudged
+        // and never retried left the flag set; the user's Close then read it as
+        // already-handled.
+        assert_eq!(
+            decide(SessionActivity::Idle, true, false, true, ClosePath::User),
+            Epilogue::Run,
+            "the user's close is what D15 is FOR; the agent's nudge is not its business"
+        );
+        // And the flag still binds the path it belongs to, so this is a
+        // narrowing rather than a removal.
+        assert_eq!(
+            decide(SessionActivity::Idle, true, false, true, ClosePath::Agent),
+            Epilogue::SkipAlreadyHandled
+        );
+    }
+
+    #[test]
+    fn a_real_write_settles_both_paths() {
+        // `cl_written` is evidence, not bookkeeping: the delta is on disk
+        // whoever closed. Nothing to narrow here, and pinning it is what stops
+        // the path split above being over-applied to the flag that should
+        // survive it.
+        for path in [ClosePath::Agent, ClosePath::User] {
+            assert_eq!(
+                decide(SessionActivity::Idle, true, true, false, path),
+                Epilogue::SkipAlreadyHandled,
+                "{path:?}: a session that wrote is not asked again"
+            );
+        }
     }
 
     #[test]
@@ -232,7 +296,7 @@ mod tests {
             SessionActivity::Paused,
         ] {
             assert_eq!(
-                decide(activity, true, false, false),
+                decide(activity, true, false, false, ClosePath::User),
                 Epilogue::SkipBusy,
                 "{activity:?} must not be interrupted for a learnings turn"
             );
@@ -244,7 +308,7 @@ mod tests {
         // Precedence, pinned: a mid-turn close is reported as the stop it is,
         // not as a capability or bookkeeping answer.
         assert_eq!(
-            decide(SessionActivity::Busy, false, true, true),
+            decide(SessionActivity::Busy, false, true, true, ClosePath::Agent),
             Epilogue::SkipBusy
         );
     }

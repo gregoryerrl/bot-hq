@@ -471,7 +471,7 @@ pub(crate) async fn dispatch(
                 AppError::Internal("core state unavailable for plugin_session_close".into())
             })?;
             // Archive (recoverable), never hard-delete.
-            core.close_session(&session_id, true)
+            core.close_session(&session_id, true, crate::core::close_learnings::ClosePath::User)
                 .await
                 .map_err(|e| AppError::Internal(format!("plugin_session_close: {e}")))?;
             to_json(&true)

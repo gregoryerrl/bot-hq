@@ -513,9 +513,16 @@ async fn call_external_tool(
         "close_session" => {
             let session_id = arg_required_str(&args, "session_id")?;
             let archive = args.get("archive").and_then(Value::as_bool).unwrap_or(true);
-            core.close_session(&session_id, archive)
-                .await
-                .map_err(|e| internal_err("close_session", e))?;
+            // The EXTERNAL driver server, not the agents' own tools — A3b's
+            // write-the-delta nudge lives in the internal `jsonrpc.rs` and never
+            // runs here, so a driver close is on the user's side of the split.
+            core.close_session(
+                &session_id,
+                archive,
+                crate::core::close_learnings::ClosePath::User,
+            )
+            .await
+            .map_err(|e| internal_err("close_session", e))?;
             Ok(ok_response())
         }
         "get_pending_choices" => {

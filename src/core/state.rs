@@ -603,8 +603,13 @@ impl AppState {
     /// blocks on it; teardown must come AFTER, or the agent's `cl_write_file`
     /// reaches a bridge that has already forgotten the session
     /// (`unregister_session` drops both the project map and the close gate).
-    pub async fn close_session(self: &Arc<Self>, id: &str, archive: bool) -> Result<()> {
-        let decision = self.close_epilogue_decision(id).await;
+    pub async fn close_session(
+        self: &Arc<Self>,
+        id: &str,
+        archive: bool,
+        path: close_learnings::ClosePath,
+    ) -> Result<()> {
+        let decision = self.close_epilogue_decision(id, path).await;
         // Claim only when the decision wants a turn. `insert` returns false
         // when the id is already there, so the claim is atomic in one short
         // hold and the decision runs outside it — no `epilogue_in_flight` →
@@ -651,7 +656,11 @@ impl AppState {
     /// a turn, and an unreadable roster is treated as "no writer" — the silent
     /// skip, which is the safe direction: D15 would rather nothing happen than
     /// have a session prompted into writing the library on a guess.
-    async fn close_epilogue_decision(&self, id: &str) -> close_learnings::Epilogue {
+    async fn close_epilogue_decision(
+        &self,
+        id: &str,
+        path: close_learnings::ClosePath,
+    ) -> close_learnings::Epilogue {
         let activity = {
             let sessions = self.sessions.lock().await;
             match sessions.get(id) {
@@ -681,7 +690,29 @@ impl AppState {
             }
         };
         let (cl_written, close_nudged) = self.bridge.close_gate_flags(id).await;
-        close_learnings::decide(activity, any_writer, cl_written, close_nudged)
+        let decision = close_learnings::decide(activity, any_writer, cl_written, close_nudged, path);
+        // **Three of the four arms were silent, and only one of them by
+        // requirement.** D15 asks for `SkipNoWriter` to make no noise TO THE
+        // USER — a row — and says nothing about the log. The cost of the other
+        // two being silent was paid on 2026-08-13: no session had ever run an
+        // epilogue, and nothing recorded which arm had refused it, so the
+        // written-down diagnosis blamed a slow ring instead. Same argument D26
+        // made for agent health the same morning.
+        //
+        // INFO, and the inputs alongside the verdict: a close happens once per
+        // session, and a verdict without what produced it only moves the guess
+        // one level down.
+        tracing::info!(
+            session_id = %id,
+            ?decision,
+            ?path,
+            ?activity,
+            any_writer,
+            cl_written,
+            close_nudged,
+            "close epilogue decision"
+        );
+        decision
     }
 
     /// The detached half of D15: ask, wait, and record what happened.
