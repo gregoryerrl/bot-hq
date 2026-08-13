@@ -906,14 +906,11 @@ impl AppState {
         // Clear the awaiting halt BEFORE forwarding the user's reply so the
         // pumps see chunks again.
         self.clear_awaiting(handle, session_id).await;
-        // And RELEASE THE RING. `clear_awaiting` only lowers a flag; the
-        // sequencer halted on `QuestionParked` and a user message is the only
-        // thing that un-halts it. Without this line a parked question stops the
-        // cycle for the rest of the session — participants keep their
-        // subprocesses, receive no deliveries, and run blind on whatever was in
-        // their stdin. That shipped for two hours on 2026-08-13; see
-        // `SignalingBridge::notify_ring_user_message`.
-        self.bridge.notify_ring_user_message(session_id).await;
+        // The ring's RELEASE is not here — it rides the notify below, AFTER the
+        // row is posted. `clear_awaiting` only lowers a flag; the sequencer
+        // halted on `QuestionParked` and a user message is the only thing that
+        // un-halts it, so releasing it here would hand out a turn over an empty
+        // backlog and land the message a turn late.
         // A user message supersedes any in-flight cancel escalation: set this so
         // `interrupt_then_escalate` skips its SIGKILL (the message + its own
         // preempt-interrupt below already abort the stuck turn — a kill would
@@ -972,22 +969,17 @@ impl AppState {
         for agent in handle.agents() {
             agent.handle.interrupt("user-preempt");
         }
-        let recipients: Vec<(&str, &crate::agents::ParticipantInput)> = handle
-            .agents()
-            .map(|a| (a.slug.as_str(), a.handle.input()))
-            .collect();
-        let id = broadcast_user_message(
-            &self.storage,
-            session_id,
-            text,
-            phase,
-            reconcile,
-            &recipients,
-        )
-        .await?;
-        // The user's message was dispatched to both agents → they're now busy
-        // (the duo's turn-start). The awaiting flag was cleared just above, so
-        // this recompute moves the session AwaitingUser/Idle → Busy.
+        // No recipient list: the row IS the delivery (rc3 D19). The ring hands
+        // the turn to the front of the rotation and that participant drains the
+        // row off its cursor; everyone else reads it when their turn comes.
+        let id = broadcast_user_message(&self.storage, session_id, text, phase, reconcile).await?;
+        // The ring is told AFTER the row exists, so the participant it wakes has
+        // something to drain. Reversing these two hands out a turn over an empty
+        // backlog and the message lands a turn late.
+        self.bridge.notify_ring_user_message(session_id).await;
+        // The user's message reaches the front of the rotation → busy. The
+        // awaiting flag was cleared just above, so this recompute moves the
+        // session AwaitingUser/Idle → Busy.
         // A user prompt also re-arms the idle-unflagged watchdog's
         // once-per-window nudge (and its >0 count marks the session as
         // having a task at all).

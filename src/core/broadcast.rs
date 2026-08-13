@@ -19,10 +19,6 @@ pub async fn broadcast_user_message(
     // post-cancel reconciliation directive. NOT persisted: storage keeps the
     // raw user text, so chat history stays clean (like the findings banner).
     system_prefix: Option<&str>,
-    // Every live participant, as `(slug, stdin)`. B4b: was a `brian_input` +
-    // `Option<rain_input>` pair. The slug rides along so the per-agent delivery
-    // warning below can still name WHICH agent missed the message.
-    recipients: &[(&str, &ParticipantInput)],
 ) -> Result<i64> {
     // REORDERED (B5 Task 2): the banner count is read BEFORE the insert, because
     // it is part of what the agent will read and the row has to record that. It
@@ -56,17 +52,24 @@ pub async fn broadcast_user_message(
             Some(envelope),
         )
         .await?;
-    // Fan out to every agent. The message is persisted (above) regardless, but
-    // a failed delivery means that agent's input pump has exited (stdin gone)
-    // and the agent won't SEE this message. Previously swallowed with `let _`,
-    // which is precisely how the #4 user→HANDS desync stayed invisible: a
-    // failed send to Brian while Rain's succeeded looked like nothing wrong.
-    // Log per agent so the asymmetry is diagnosable.
-    for (slug, input) in recipients {
-        if !input.deliver(&persisted).await {
-            warn!(agent = %slug, "user broadcast not delivered (input pump closed)");
-        }
-    }
+    // **The row IS the delivery. This no longer writes anyone's stdin** (rc3
+    // D19, 2026-08-13).
+    //
+    // It used to fan the text into EVERY participant's stdin directly, which
+    // made the ring decorative: every participant woke on every user message
+    // regardless of whose turn it was, and a participant woken outside its turn
+    // snapshots its epoch before the ring has published one. It then carried
+    // `epoch = 0` forever, so every completion it sent was discarded and the
+    // cycle could not step past the first slot. Measured live in `s-cc30fc19`:
+    // slot 0 carried epoch 3, slots 1 and 2 carried 0, and the ring advanced
+    // exactly one place per user message.
+    //
+    // This is the same argument the router deletion made — two paths delivering
+    // into one stdin, only one of which the ring can reason about. The caller
+    // now tells the ring instead (`SignalingBridge::notify_ring_user_message`),
+    // which resets the cycle and hands the turn to the front; every participant
+    // reads the row off its own cursor when its turn comes, which is what "a
+    // turn is a PULL" has always meant.
     Ok(persisted.message_id())
 }
 
@@ -76,184 +79,100 @@ mod tests {
     use super::*;
     use crate::storage::render_wire;
 
-    /// `recv()` with a deadline.
+    /// **These tests moved with the mechanism (rc3 D19).** They used to assert
+    /// the WIRE each participant received, because `broadcast_user_message` wrote
+    /// every stdin directly. It no longer does: the row is the delivery, and the
+    /// ring hands it out off each participant's cursor. So what is checked here
+    /// is what is PERSISTED and how it RENDERS — the same content the ring will
+    /// deliver, one layer down.
     ///
-    /// A bare `rx.recv().await` turns a regression into a HANG rather than a
-    /// failure: the test waits forever for a wire the broken code never sends,
-    /// and prints nothing. This batch produced two — one wedged a run for seven
-    /// minutes, and one hung `cargo test` outright when a session-id mismatch
-    /// made a scope check refuse every wire. Both would have been a clean
-    /// failure in seconds through this.
-    async fn next_wire<T>(rx: &mut tokio::sync::mpsc::Receiver<T>) -> T {
-        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("expected a wire within 2s; none arrived")
-            .expect("the sender was dropped before a wire arrived")
+    /// The old direct-write is what made the ring decorative; see the comment on
+    /// the function for the epoch failure it caused.
+    async fn session(id: &str) -> Storage {
+        let s = Storage::memory().await.unwrap();
+        s.create_session(id, "test", None).await.unwrap();
+        s
     }
 
-    use crate::agents::OutgoingUserMessage;
-    use tokio::sync::mpsc;
-
-    /// One participant's stdin, plus the receiver a test reads the wire from.
-    ///
-    /// `session_id` is a parameter and not a constant because
-    /// [`ParticipantInput::deliver`] compares it against the receipt's: an input
-    /// built for a session the test does not broadcast into refuses every wire
-    /// and the receiver goes quiet. Hardcoding `"s1"` here did exactly that to
-    /// `broadcast_solo_delivers_to_brian_only`, whose session is `solo` — and
-    /// because the assertion was a bare `recv().await` with a live sender still
-    /// in scope, it hung instead of failing.
-    fn stub_input(session_id: &str) -> (ParticipantInput, mpsc::Receiver<OutgoingUserMessage>) {
-        let (tx, rx) = mpsc::channel(8);
-        (ParticipantInput::new(session_id, tx), rx)
+    /// The one row a broadcast writes, as `(raw stored content, rendered wire)`
+    /// — the two things that must differ, and the pair every test here is about.
+    async fn only_row(s: &Storage, id: &str) -> (String, String) {
+        let page = s.channel_after(id, 0, 100).await.unwrap();
+        assert_eq!(page.rows.len(), 1, "a broadcast writes exactly one row");
+        let row = page.rows.into_iter().next().unwrap();
+        let wire = render_wire(row.envelope.as_ref(), &row.content);
+        (row.content, wire)
     }
 
     #[tokio::test]
-    async fn broadcast_persists_raw_and_envelopes_wire() {
-        let s = Storage::memory().await.unwrap();
-        s.create_session("s1", "test", None).await.unwrap();
-        let (btx, mut brx) = stub_input("s1");
-        let (rtx, mut rrx) = stub_input("s1");
-        broadcast_user_message(
-            &s,
-            "s1",
-            "hello",
-            IpavPhase::Apply,
-            None,
-            &[("brian", &btx), ("rain", &rtx)],
-        )
+    async fn broadcast_persists_raw_and_envelopes_the_render() {
+        let s = session("s1").await;
+        broadcast_user_message(&s, "s1", "hello", IpavPhase::Apply, None)
             .await
             .unwrap();
-        let bm = next_wire(&mut brx).await;
-        let rm = next_wire(&mut rrx).await;
-        assert_eq!(bm.message.content, "[PHASE: Apply]\nhello");
-        assert_eq!(rm.message.content, "[PHASE: Apply]\nhello");
-        let msgs = s.messages_for_session("s1", None).await.unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(
-            msgs[0].content, "hello",
-            "the BODY is still the raw user text"
-        );
-        assert_eq!(msgs[0].author, "user");
-        // …and the decoration is now recorded beside it, so re-rendering the
-        // stored row reproduces both agents' stdin byte for byte. Before B5
-        // Task 2 the row said only "hello" and the `[PHASE: Apply]` the agents
-        // read existed nowhere the user could see it.
-        let row = &s.channel_after("s1", 0, 100).await.unwrap().rows[0];
-        assert_eq!(
-            render_wire(row.envelope.as_ref(), &row.content),
-            bm.message.content
-        );
+        let (content, wire) = only_row(&s, "s1").await;
+        // Storage keeps the RAW user text; the phase lives in the envelope and
+        // appears only when the row is rendered for a participant.
+        assert_eq!(content, "hello");
+        assert_eq!(wire, "[PHASE: Apply]\nhello");
     }
 
     #[tokio::test]
-    async fn broadcast_does_not_leak_to_other_session() {
-        // Regression: when the dashboard had tile-reordering bugs, the user
-        // worried that broadcasting to session A might land in B. This locks
-        // in the contract — broadcast is keyed strictly by session_id.
-        let s = Storage::memory().await.unwrap();
-        s.create_session("sess-a", "a", None).await.unwrap();
-        s.create_session("sess-b", "b", None).await.unwrap();
-        let (btx, _brx) = stub_input("sess-a");
-        let (rtx, _rrx) = stub_input("sess-a");
-        broadcast_user_message(
-            &s,
-            "sess-a",
-            "msg-into-a",
-            IpavPhase::Investigate,
-            None,
-            &[("brian", &btx), ("rain", &rtx)],
-        )
-        .await
-        .unwrap();
-
-        let a_msgs = s.messages_for_session("sess-a", None).await.unwrap();
-        let b_msgs = s.messages_for_session("sess-b", None).await.unwrap();
-        assert_eq!(a_msgs.len(), 1);
-        assert_eq!(a_msgs[0].content, "msg-into-a");
+    async fn a_broadcast_writes_only_into_its_own_session() {
+        let s = session("s1").await;
+        s.create_session("s2", "other", None).await.unwrap();
+        broadcast_user_message(&s, "s1", "for s1", IpavPhase::Investigate, None)
+            .await
+            .unwrap();
+        assert_eq!(only_row(&s, "s1").await.0, "for s1");
         assert!(
-            b_msgs.is_empty(),
-            "broadcast leaked into other session: {:?}",
-            b_msgs
+            s.channel_after("s2", 0, 100).await.unwrap().rows.is_empty(),
+            "a broadcast must not appear in another session's channel"
         );
-    }
-
-    #[tokio::test]
-    async fn broadcast_solo_delivers_to_brian_only() {
-        // Rain disabled: rain_input is None. Brian still receives the message
-        // and it's persisted exactly once — no panic on the absent peer.
-        let s = Storage::memory().await.unwrap();
-        s.create_session("solo", "test", None).await.unwrap();
-        let (btx, mut brx) = stub_input("solo");
-        broadcast_user_message(&s, "solo", "hi", IpavPhase::Apply, None, &[("brian", &btx)])
-            .await
-            .unwrap();
-        let bm = next_wire(&mut brx).await;
-        assert_eq!(bm.message.content, "[PHASE: Apply]\nhi");
-        assert_eq!(s.messages_for_session("solo", None).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn broadcast_user_message_carries_findings_banner() {
-        let s = Storage::memory().await.unwrap();
-        s.create_session("s1", "test", None).await.unwrap();
+        let s = session("s1").await;
         s.insert_finding(
             "s1",
-            "f1",
-            "rain",
+            "f-1",
+            "eyes",
             crate::storage::FindingSeverity::Blocking,
-            "bug",
+            "a real problem",
             None,
         )
         .await
         .unwrap();
-        let (btx, mut brx) = stub_input("s1");
-        broadcast_user_message(&s, "s1", "go", IpavPhase::Verify, None, &[("brian", &btx)])
+        broadcast_user_message(&s, "s1", "carry on", IpavPhase::Apply, None)
             .await
             .unwrap();
-        let bm = next_wire(&mut brx).await;
+        let (content, wire) = only_row(&s, "s1").await;
         assert!(
-            bm.message
-                .content
-                .contains("⚠ 1 unresolved EYES blocking finding"),
-            "user-turn wire should carry the banner: {}",
-            bm.message.content
+            wire.contains("blocking"),
+            "an open blocking finding must ride the render the participant reads: {wire}"
         );
-        assert!(bm.message.content.ends_with("\ngo"));
-        // Storage still keeps the RAW text (no envelope), unchanged by the banner.
-        let msgs = s.messages_for_session("s1", None).await.unwrap();
-        assert_eq!(msgs[0].content, "go");
+        // Storage still holds the user's own words, unprefixed.
+        assert_eq!(content, "carry on");
     }
 
     #[tokio::test]
-    async fn system_prefix_rides_the_wire_not_storage() {
-        // The post-cancel reconciliation directive is wire-only: the agent sees
-        // it prepended to the body, but storage keeps the raw user text so the
-        // chat history stays clean.
-        let s = Storage::memory().await.unwrap();
-        s.create_session("s1", "test", None).await.unwrap();
-        let (btx, mut brx) = stub_input("s1");
+    async fn system_prefix_rides_the_render_not_storage() {
+        let s = session("s1").await;
         broadcast_user_message(
             &s,
             "s1",
-            "do the thing",
-            IpavPhase::Apply,
-            Some("[System: previous turn interrupted — verify workspace.]"),
-            &[("brian", &btx)],
+            "go on",
+            IpavPhase::Verify,
+            Some("[System: reconcile first]"),
         )
         .await
         .unwrap();
-        let bm = next_wire(&mut brx).await;
-        assert!(
-            bm.message
-                .content
-                .contains("[System: previous turn interrupted"),
-            "wire carries the system prefix: {}",
-            bm.message.content
+        let (content, wire) = only_row(&s, "s1").await;
+        assert_eq!(
+            content, "go on",
+            "the prefix is wire-only — chat history keeps the raw user text"
         );
-        assert!(bm.message.content.ends_with("\ndo the thing"));
-        // Storage keeps the RAW text — no prefix.
-        let msgs = s.messages_for_session("s1", None).await.unwrap();
-        assert_eq!(msgs[0].content, "do the thing");
+        assert!(wire.contains("reconcile first"));
     }
 }
