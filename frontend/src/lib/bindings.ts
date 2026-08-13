@@ -1560,7 +1560,12 @@ effort: string | null; ultracode: boolean | null;
  * The palette entry the user picked for this row, by NAME ("Cyan"), or
  * `None` to take the rotation (rc3 **D20**).
  */
-color: string | null }
+color: string | null; 
+/**
+ * The name the user typed for this row, or `None`/blank to take the
+ * ordinal (rc3 **D20**, migration 0053).
+ */
+label: string | null }
 /**
  * One participant's composed system prompt — the ~48 KB of standing
  * instruction bot-hq assembled for it at spawn (rc3 **P1**).
@@ -1627,6 +1632,12 @@ participation_mode: string; enabled: boolean;
  * rotation the UI assigns by roster position (rc3 **D20**).
  */
 color: string | null; 
+/**
+ * The user's name for this participant, or `null` to take the ordinal
+ * (rc3 **D20**, migration 0053). `participant_display_name` is what joins
+ * this with the role and the model; the frontend must not re-derive it.
+ */
+label: string | null; 
 /**
  * This participant's effort override (rc3 D12), or `null` to inherit.
  * 
