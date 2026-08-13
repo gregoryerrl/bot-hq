@@ -2370,90 +2370,90 @@ async fn deliver_backlog(
         // takes precedence — see "one turn, one write" in the module doc.
         loop {
             tokio::select! {
-                    // Commands first. Both futures here are cancel-safe —
-                    // `recv` by documentation, and a dropped `Sender::send`
-                    // enqueues nothing — so the losing branch costs at most a
-                    // re-attempt of the same page, never a half-written one.
-                    // Biased so a command already waiting always wins: the
-                    // whole point is that a full stdin cannot hide it.
-                    biased;
-                    cmd = rx.recv() => match cmd {
-                        Some(cmd @ SequencerCommand::UserMessage { .. }) => {
-                            deferred.push_back(cmd);
-                            stop = Some(Stop::Superseded);
-                            break;
-                        }
-                        // Deferred like the user message, and for the same
-                        // reason: the ACT is the loop's, not this function's.
-                        // Ending the drain here is what makes the yield
-                        // immediate; see the module doc for what stopping costs
-                        // against what finishing would.
-                        //
-                        // **Only when it is THIS participant that parked** (rc3
-                        // D22). A park used to stop the cycle wherever it stood,
-                        // so cutting any drain short was right. It now ends only
-                        // the ASKER's turn — so a park naming somebody else
-                        // leaves this turn live, and stopping its drain would
-                        // hand it a partial backlog for no reason. The command is
-                        // still deferred either way; the loop decides.
-                        Some(cmd @ SequencerCommand::QuestionParked { .. }) => {
-                            let mine = matches!(
-                                cmd,
-                                SequencerCommand::QuestionParked { participant_id }
-                                    if participant_id == Some(to.id)
-                            );
-                            deferred.push_back(cmd);
-                            if mine {
-                                stop = Some(Stop::Parked);
-                                break;
-                            }
-                        }
-                        // Ends the drain like the two above, and for the same
-                        // reason the park does: the participant being fed is the
-                        // one the user just stopped, so every further row goes
-                        // into a buffer in front of a process that is not
-                        // reading, and `deliver` PARKS when it fills — until the
-                        // user unpauses. A pause that waits out the user before
-                        // taking effect is not a pause.
-                        //
-                        // **`push_front`, unlike every other deferral here, and
-                        // that asymmetry is the decision.** Arrival order is the
-                        // rule everywhere else in this loop, and it costs a
-                        // parked question at most one extra wake (the module doc
-                        // prices it). It costs a pause the whole semantic: a
-                        // `TurnComplete` set aside a moment ago would be
-                        // dispatched first, step the ring, and start a fresh turn
-                        // in a session the user has stopped — and unlike the
-                        // park's extra wake there is no user answer coming to end
-                        // it, only a Resume the user has not sent yet. So the
-                        // pause takes effect where it was READ rather than where
-                        // it would have been dispatched, and everything the drain
-                        // had merely set aside waits behind it.
-                        Some(cmd @ SequencerCommand::Pause) => {
-                            deferred.push_front(cmd);
-                            stop = Some(Stop::Paused);
-                            break;
-                        }
-                        // Set aside and re-attempt this page. Deferring rather
-                        // than acting is what keeps the drain-before-handover
-                        // rule true.
-                        Some(cmd) => deferred.push_back(cmd),
-                        None => {
-                            stop = Some(Stop::SessionEnd);
-                            break;
-                        }
-                    },
-                    landed_ok = input.deliver_batch(&receipts) => {
-                        if !landed_ok {
-                            stop = Some(Stop::Unreachable);
-                            break;
-                        }
-                        // `None` = delivered. Nothing on the turn path
-                        // withholds; see the module doc.
-                        landed.extend(receipts.iter().map(|m| (m.message_id(), None)));
+                // Commands first. Both futures here are cancel-safe —
+                // `recv` by documentation, and a dropped `Sender::send`
+                // enqueues nothing — so the losing branch costs at most a
+                // re-attempt of the same page, never a half-written one.
+                // Biased so a command already waiting always wins: the
+                // whole point is that a full stdin cannot hide it.
+                biased;
+                cmd = rx.recv() => match cmd {
+                    Some(cmd @ SequencerCommand::UserMessage { .. }) => {
+                        deferred.push_back(cmd);
+                        stop = Some(Stop::Superseded);
                         break;
                     }
+                    // Deferred like the user message, and for the same
+                    // reason: the ACT is the loop's, not this function's.
+                    // Ending the drain here is what makes the yield
+                    // immediate; see the module doc for what stopping costs
+                    // against what finishing would.
+                    //
+                    // **Only when it is THIS participant that parked** (rc3
+                    // D22). A park used to stop the cycle wherever it stood,
+                    // so cutting any drain short was right. It now ends only
+                    // the ASKER's turn — so a park naming somebody else
+                    // leaves this turn live, and stopping its drain would
+                    // hand it a partial backlog for no reason. The command is
+                    // still deferred either way; the loop decides.
+                    Some(cmd @ SequencerCommand::QuestionParked { .. }) => {
+                        let mine = matches!(
+                            cmd,
+                            SequencerCommand::QuestionParked { participant_id }
+                                if participant_id == Some(to.id)
+                        );
+                        deferred.push_back(cmd);
+                        if mine {
+                            stop = Some(Stop::Parked);
+                            break;
+                        }
+                    }
+                    // Ends the drain like the two above, and for the same
+                    // reason the park does: the participant being fed is the
+                    // one the user just stopped, so every further row goes
+                    // into a buffer in front of a process that is not
+                    // reading, and `deliver` PARKS when it fills — until the
+                    // user unpauses. A pause that waits out the user before
+                    // taking effect is not a pause.
+                    //
+                    // **`push_front`, unlike every other deferral here, and
+                    // that asymmetry is the decision.** Arrival order is the
+                    // rule everywhere else in this loop, and it costs a
+                    // parked question at most one extra wake (the module doc
+                    // prices it). It costs a pause the whole semantic: a
+                    // `TurnComplete` set aside a moment ago would be
+                    // dispatched first, step the ring, and start a fresh turn
+                    // in a session the user has stopped — and unlike the
+                    // park's extra wake there is no user answer coming to end
+                    // it, only a Resume the user has not sent yet. So the
+                    // pause takes effect where it was READ rather than where
+                    // it would have been dispatched, and everything the drain
+                    // had merely set aside waits behind it.
+                    Some(cmd @ SequencerCommand::Pause) => {
+                        deferred.push_front(cmd);
+                        stop = Some(Stop::Paused);
+                        break;
+                    }
+                    // Set aside and re-attempt this page. Deferring rather
+                    // than acting is what keeps the drain-before-handover
+                    // rule true.
+                    Some(cmd) => deferred.push_back(cmd),
+                    None => {
+                        stop = Some(Stop::SessionEnd);
+                        break;
+                    }
+                },
+                landed_ok = input.deliver_batch(&receipts) => {
+                    if !landed_ok {
+                        stop = Some(Stop::Unreachable);
+                        break;
+                    }
+                    // `None` = delivered. Nothing on the turn path
+                    // withholds; see the module doc.
+                    landed.extend(receipts.iter().map(|m| (m.message_id(), None)));
+                    break;
                 }
+            }
         }
         // The page either landed whole or not at all, and this commits whichever
         // it was. It moves the cursor to the highest id passed here and never
