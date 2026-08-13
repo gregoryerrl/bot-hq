@@ -578,7 +578,28 @@ Best-effort: a failed write costs a UI hint, never a turn.
 
 ### D20 — a participant's label is the user's, and colour rotates
 
-Deferred to a session, 2026-08-13. Reported from a live N=3 run: *"for the 2
+Deferred to a session, 2026-08-13. **FIRST HALF SHIPPED 2026-08-13** (`f3f4809`):
+the ordinal. The user-set label and its editor are still open.
+
+**What shipped, and why it was enough to close the complaint.** The ordinal is
+read off the SLUG — `first_free_slug` already assigns `eyes`, `eyes-2`, `eyes-3`
+at invite time — so the visible name and the internal key agree by construction.
+A count over the roster would be a SECOND numbering, and two numberings of one
+thing disagree the first time a participant is disabled. The first of a role
+takes no suffix, so a one-reviewer session is unchanged.
+
+**Colour needed no separate mechanism.** `authorColor` hashes the LABEL, so the
+collision was downstream of the identical strings; distinct labels give distinct
+hues and the "rotation" this decision asked for falls out. A per-slot rotation
+would still be stronger — a hash can collide — and is worth doing only if two
+participants are ever seen sharing a hue in practice.
+
+**Four frontend fixtures already modelled the exact case** (role `EYES`, slug
+`eyes-2`) and asserted the collision as correct. Their expectations were the bug.
+
+**Still open:** the user-set label that overrides the ordinal, and its editor in
+the New Session dialog. That half needs a column and UI; the ordinal is what the
+reported complaint was about. Reported from a live N=3 run: *"for the 2
 reviewers, i don't know which is which."* Two participants of one role on one
 model render identically — `EYES · DeepSeek V4 Pro`, character for character —
 because the display rule has no ordinal and colour is keyed to the role.

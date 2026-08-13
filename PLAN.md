@@ -147,9 +147,9 @@ turn's epoch).
 
 Spec'd and unstarted:
 
-- **D20** — a participant's label is the user's (`EYES` / `EYES-2` / `EYES-3`
-  when empty), and colour rotates so two participants of one role never render
-  identically.
+- **D20, second half** — the user-set label that overrides the ordinal, and its
+  editor in the New Session dialog. The ordinal itself shipped (`f3f4809`), which
+  is what the reported complaint was about.
 - **D21** — a parallel BOOT phase: every participant orients at once, nobody
   acts until the ring starts. Rides D19a's `kind` filter, and needs an explicit
   turn-start signal or it reintroduces the epoch-0 discard.
