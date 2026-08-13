@@ -134,6 +134,33 @@ pub struct DuoConfig {
     /// increases at every handover, so "unchanged" is an exact test rather than a
     /// heuristic.
     pub turn_epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// True while this participant is ORIENTING rather than holding a turn
+    /// (rc3 **D21**). Set before the primer goes out, cleared before the ring
+    /// hands out turn one.
+    ///
+    /// **The explicit signal D21 asks for, replacing an inference that is simply
+    /// wrong during boot.** The pump learns a turn started from its own first
+    /// event ([`Self::turn_epoch`]) — but during boot no turn has been handed
+    /// out, so the cell still reads its initial `0`, `last_completed_epoch` is
+    /// `None`, and the pump happily opens a turn on epoch 0. The completion that
+    /// follows carries 0, which the ring discards forever: precisely the class
+    /// D24 fixed, reached through a different door. D21 names this the hard part
+    /// and *"where this will break if rushed"*.
+    ///
+    /// An `AtomicBool` rather than a message because the pump reads it once per
+    /// EVENT and must not take a channel in that path, and because one store
+    /// flips every participant at once — boot ends for the session, not per
+    /// agent.
+    pub booting: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Where this pump reports that it finished orienting (rc3 **D21**),
+    /// carrying its participant id.
+    ///
+    /// The boot counterpart of [`Self::sequencer_tx`], and deliberately NOT the
+    /// same channel: a `TurnComplete` during boot would carry epoch 0 and be
+    /// discarded, so the ring would never learn anyone was ready. D21 §4 needs
+    /// exactly this signal — *"when every participant has finished orienting …
+    /// the ring starts"*.
+    pub boot_done: Option<tokio::sync::mpsc::Sender<i64>>,
 }
 
 impl DuoConfig {
@@ -155,7 +182,18 @@ impl DuoConfig {
             liveness: None,
             sequencer_tx: None,
             turn_epoch: None,
+            booting: None,
+            boot_done: None,
         }
+    }
+
+    /// Whether this participant is orienting rather than holding a turn (rc3
+    /// D21). `false` whenever no flag was wired, so every existing caller keeps
+    /// today's behaviour exactly.
+    fn is_booting(&self) -> bool {
+        self.booting
+            .as_ref()
+            .is_some_and(|b| b.load(std::sync::atomic::Ordering::Acquire))
     }
 
     fn notify_persisted(&self, message_id: i64) {
@@ -357,7 +395,13 @@ pub async fn pump_agent(
         // match, so every event kind opens a turn — the agent may lead with a
         // tool call rather than prose, and a turn opened only by text would
         // snapshot late and miss exactly the reset this guards against.
-        if turn_epoch.is_none() {
+        // **Boot opens no turn** (rc3 D21). No turn has been handed out, so the
+        // cell still reads its initial 0 and the straggler guard below cannot
+        // see that: `last_completed_epoch` is `None`, `Some(0) != None`, and the
+        // pump would bind epoch 0 and then complete with it — discarded forever
+        // by the ring, which is the exact class D24 fixed. The flag is the
+        // explicit signal D21 asks for in place of that inference.
+        if turn_epoch.is_none() && !cfg.is_booting() {
             if let Some(cell) = &cfg.turn_epoch {
                 let live = cell.load(std::sync::atomic::Ordering::Acquire);
                 // **Unchanged since this pump's last completion = no new turn.**
@@ -401,7 +445,21 @@ pub async fn pump_agent(
                     // The session id is an `Arc<str>` clone — a refcount bump,
                     // not the per-chunk allocation `&*cfg.session_id` would
                     // have cost once the parameter stopped being `&str`.
-                    .post_to_channel(cfg.session_id.clone(), "participant", Some(&cfg.slug), MessageKind::Text.as_str(), &text, None)
+                    // rc3 D21: what a participant says while ORIENTING is a
+                    // `boot` row — persisted and shown to the user, filtered out
+                    // of every peer's backlog by `channel_page`.
+                    .post_to_channel(
+                        cfg.session_id.clone(),
+                        "participant",
+                        Some(&cfg.slug),
+                        if cfg.is_booting() {
+                            MessageKind::Boot.as_str()
+                        } else {
+                            MessageKind::Text.as_str()
+                        },
+                        &text,
+                        None,
+                    )
                     .await
                 {
                     Ok(m) => cfg.notify_persisted(m.message_id()),
@@ -745,7 +803,23 @@ pub async fn pump_agent(
                 // whether or not there was prose — the sequencer steps on the
                 // completion, not on the text, so a silent turn that never
                 // reported would freeze the cycle on this participant.
-                if let (Some(sequencer_tx), Some(participant_id)) =
+                // **Boot reports readiness, not a completion** (rc3 D21). The
+                // epoch would be 0 — never issued — so a `TurnComplete` here is
+                // dropped by the ring and nothing learns this participant is
+                // ready. `boot_done` is the signal D21 §4 starts the ring on.
+                if cfg.is_booting() {
+                    if let (Some(done), Some(participant_id)) =
+                        (&cfg.boot_done, cfg.participant_id)
+                    {
+                        if done.send(participant_id).await.is_err() {
+                            warn!(
+                                agent = %cfg.slug,
+                                "boot completion DROPPED: the boot channel closed — the \
+                                 session starts on its timeout instead"
+                            );
+                        }
+                    }
+                } else if let (Some(sequencer_tx), Some(participant_id)) =
                     (&cfg.sequencer_tx, cfg.participant_id)
                 {
                     let epoch = turn_epoch.unwrap_or(0);
@@ -922,6 +996,8 @@ mod tests {
             liveness: None,
             sequencer_tx: None,
             turn_epoch: None,
+            booting: None,
+            boot_done: None,
         }
     }
 
@@ -1055,6 +1131,161 @@ mod tests {
         );
         assert_eq!(history[0].used_tokens, Some(620_000));
         assert_eq!(history[0].reported_window, Some(1_000_000));
+    }
+
+    /// rc3 **D21** — a participant that is ORIENTING opens no turn, completes
+    /// no turn, and does not speak to its peers.
+    ///
+    /// D21 names this the hard part and *"where this will break if rushed"*, and
+    /// the failure is specific: during boot no turn has been handed out, so the
+    /// epoch cell still reads its initial `0` and `last_completed_epoch` is
+    /// `None`. D24's straggler guard cannot see that — `Some(0) != None` — so
+    /// the pump binds epoch 0 and completes with it, and the ring discards it
+    /// forever. The session would then wait for a readiness signal that was
+    /// silently thrown away.
+    ///
+    /// Three assertions, one per thing boot must change. Note what this does
+    /// NOT pin: the `!cfg.is_booting()` guard on the epoch BIND is invisible
+    /// here, because the completion arm is guarded separately, so no
+    /// `TurnComplete` is emitted either way. That guard is pinned by
+    /// `a_participant_still_booting_when_the_ring_starts_binds_the_real_epoch`
+    /// below — verified by deleting it and watching only that test redden.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_booting_participant_reports_readiness_instead_of_completing_a_turn() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        // The cell as it actually is before the ring starts: nothing handed out.
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(0)));
+        cfg.booting = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+        let (boot_tx, mut boot_rx) = mpsc::channel::<i64>(4);
+        cfg.boot_done = Some(boot_tx);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Text("CL loaded for bot-hq".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+
+        // 1. Readiness reaches the host, carrying who is ready.
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), boot_rx.recv())
+                .await
+                .expect("the pump never reported that boot finished"),
+            Some(1),
+        );
+        // 2. And NOT as a turn completion. An epoch-0 completion is the
+        //    discarded-forever case; the ring must not see one at all.
+        assert!(
+            next_turn_end(&mut ring_rx).is_none(),
+            "boot must not report a turn completion — epoch 0 was never issued"
+        );
+        // 3. What it said while orienting is a `boot` row, so `channel_page`
+        //    keeps it out of every peer's backlog while the user still sees it.
+        let kinds: Vec<String> = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.content == "CL loaded for bot-hq")
+            .map(|m| m.kind)
+            .collect();
+        assert_eq!(kinds, vec![MessageKind::Boot.as_str().to_string()]);
+
+        drop(ev_tx);
+        let _ = task.await;
+    }
+
+    /// The other half: with boot OVER, the pump behaves exactly as it always
+    /// did. Without this the guard above could be a deletion rather than a
+    /// guard, and every turn in the session would report readiness to nobody.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_participant_that_has_finished_booting_completes_turns_normally() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(7)));
+        // Wired, but CLEARED — the state the session is in from turn one on.
+        cfg.booting = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let (boot_tx, mut boot_rx) = mpsc::channel::<i64>(4);
+        cfg.boot_done = Some(boot_tx);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Text("working".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(
+            next_epoch(&mut ring_rx).await,
+            7,
+            "a cleared boot flag must leave the epoch binding untouched"
+        );
+        assert!(
+            boot_rx.try_recv().is_err(),
+            "readiness is a boot-only signal; a normal turn must not send one"
+        );
+        assert_eq!(turn_bodies(&storage).await, vec!["working"], "and its prose is `text`");
+
+        drop(ev_tx);
+        let _ = task.await;
+    }
+
+    /// The BOOT TIMEOUT path, which is where D21's hard part actually bites.
+    ///
+    /// D21 §4: the ring starts *"when every participant has finished orienting —
+    /// or a timeout fires, because one slow agent must not hold the session"*.
+    /// So a participant CAN still be mid-boot when the ring hands out turn one,
+    /// and that is the case the epoch-bind guard exists for.
+    ///
+    /// Without it the pump binds `turn_epoch = Some(0)` on its first boot event.
+    /// `turn_epoch` is only re-read when it is `None`, so when the real turn
+    /// arrives the pump is still holding 0 — and every completion from then on
+    /// carries an epoch the ring never issued and discards. That is the
+    /// `s-206e8921` wedge exactly, reached through boot instead of through a
+    /// straggler.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_participant_still_booting_when_the_ring_starts_binds_the_real_epoch() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let booting = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        cfg.turn_epoch = Some(Arc::clone(&cell));
+        cfg.booting = Some(Arc::clone(&booting));
+        let (boot_tx, _boot_rx) = mpsc::channel::<i64>(4);
+        cfg.boot_done = Some(boot_tx);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        // A slow agent: it has SAID something while orienting but has not
+        // finished. No `turn_end`.
+        ev_tx.send(AgentEvent::Text("still reading the CL".into())).await.unwrap();
+
+        // **Wait for that event to be PROCESSED before the ring moves**, or the
+        // test proves nothing: `send` only queues, so flipping the cell first
+        // would have the pump read the new epoch when it finally got here and
+        // the race this exists to catch would never happen. The same trap the
+        // D24 test below documents; the persisted row is the synchronisation
+        // point.
+        for _ in 0..200 {
+            let rows = storage.messages_for_session("s1", None).await.unwrap();
+            if rows.iter().any(|m| m.content == "still reading the CL") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // The timeout fires: boot ends and the ring hands out turn one.
+        booting.store(false, std::sync::atomic::Ordering::Release);
+        cell.store(1, std::sync::atomic::Ordering::Release);
+
+        ev_tx.send(AgentEvent::Text("now working".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+
+        assert_eq!(
+            next_epoch(&mut ring_rx).await,
+            1,
+            "a participant caught mid-boot by the timeout must complete on the epoch \
+             it was actually handed — carrying 0 here is the s-206e8921 wedge"
+        );
+
+        drop(ev_tx);
+        let _ = task.await;
     }
 
     /// rc3 **D24** — the wedge that killed `s-206e8921`.

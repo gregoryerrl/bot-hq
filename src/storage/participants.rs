@@ -2223,7 +2223,7 @@ impl Storage {
              LEFT JOIN session_participants p ON p.id = m.participant_id \
              WHERE m.session_id = ?1 AND m.id > ?2 \
                AND (?3 IS NULL OR m.participant_id IS NULL OR m.participant_id <> ?3) \
-               AND (?3 IS NULL OR m.kind NOT IN ('tool_use', 'tool_result')) \
+               AND (?3 IS NULL OR m.kind NOT IN ('tool_use', 'tool_result', 'boot')) \
              ORDER BY m.id ASC LIMIT ?4"
         ))
         .bind(session_id)
@@ -2262,9 +2262,16 @@ impl Storage {
     /// for the rest after committing this batch.
     /// What a participant has not yet read — **prose and host notices only**.
     ///
-    /// `tool_use` / `tool_result` rows are excluded when reading FOR a
+    /// `tool_use` / `tool_result` / `boot` rows are excluded when reading FOR a
     /// participant (`exclude_participant` is `Some`), and included when reading
     /// for the UI (`None`), which is what renders the full transcript.
+    ///
+    /// `boot` is rc3 **D21**: orientation happens in parallel before the ring
+    /// starts, and D21 is explicit that its output is *"persisted and shown to
+    /// the USER, but not delivered to peers — three near-identical 'CL loaded'
+    /// rows are exactly the noise the channel does not need"*. It rides this
+    /// filter rather than getting a mechanism of its own, which is why D19a had
+    /// to land first.
     ///
     /// The router forwarded a turn's buffered PROSE and nothing else. The ring
     /// drains every row past a cursor, and tool plumbing is rows — so without
@@ -3328,6 +3335,9 @@ mod tests {
             (MessageKind::Text, "real prose"),
             (MessageKind::ToolUse, r#"{"name":"cl_index_search"}"#),
             (MessageKind::ToolResult, r#"{"content":"a huge file dump"}"#),
+            // rc3 D21: what a peer said while ORIENTING. The user sees it; a
+            // peer learns nothing from "CL loaded" three times over.
+            (MessageKind::Boot, "CL loaded for bot-hq"),
         ] {
             s.post_to_channel("s1", "participant", Some(&roster[1].slug), kind.as_str(), body, None)
                 .await
@@ -3355,10 +3365,14 @@ mod tests {
             !mine.iter().any(|c| c.contains("a huge file dump")),
             "a peer's tool RESULT must not be delivered — this is what filled context windows: {mine:?}"
         );
+        assert!(
+            !mine.iter().any(|c| c.contains("CL loaded")),
+            "a peer's BOOT output must not be delivered (rc3 D21): {mine:?}"
+        );
 
         // The UI read is unfiltered, or the transcript loses what agents did.
         let all = s.channel_after("s1", 0, 100).await.unwrap();
-        assert_eq!(all.rows.len(), 4, "the UI still sees every row");
+        assert_eq!(all.rows.len(), 5, "the UI still sees every row, boot included");
         let _ = peer;
     }
 

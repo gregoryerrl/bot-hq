@@ -965,14 +965,26 @@ async fn spawn_session_handle(
             data_dir: Some(paths.data_dir.clone()),
             bridge: Some(Arc::clone(&bridge)),
         };
-        let tx = spawn_ring(deps, &bridge, &session.id).await;
+        let (tx, kick) = spawn_ring(deps, &bridge, &session.id).await;
         tracing::info!(
             session = %session.id,
             participants = ring,
             "turn sequencer spawned"
         );
-        Some(tx)
+        Some((tx, kick))
     };
+    // Split back out: the tx is cloned into every pump below, and the kick is
+    // held until orientation finishes (rc3 D21).
+    let (sequencer_tx, ring_kick) = match sequencer_tx {
+        Some((tx, kick)) => (Some(tx), Some(kick)),
+        None => (None, None),
+    };
+    // rc3 **D21**: every participant orients in PARALLEL before the ring starts.
+    // Flipped false by `boot_then_start` immediately before the kick, so turn
+    // one binds its epoch normally. One cell for the whole session — boot ends
+    // for the session, not per agent.
+    let booting = Arc::new(std::sync::atomic::AtomicBool::new(ring_kick.is_some()));
+    let (boot_done_tx, boot_done_rx) = tokio::sync::mpsc::channel::<i64>(8);
     // One pump per spawned agent. The two hand-written pump blocks this replaced
     // differed in exactly three things — the author, the participant id, and
     // whether `self_input_tx` was set — and every one of them is now read off
@@ -995,6 +1007,9 @@ async fn spawn_session_handle(
                 .grants(crate::agents::Capability::EditFiles)
                 .then(|| handles[slot].input().clone()),
             edits_files: caps.grants(crate::agents::Capability::EditFiles),
+            // rc3 D21 — orientation is not a turn. See `DuoConfig::booting`.
+            booting: Some(Arc::clone(&booting)),
+            boot_done: Some(boot_done_tx.clone()),
             // Router-only two-party discriminant, and only meaningful when the
             // arm above actually spawned a router: slot 0 is the `Brian` side of
             // its bilateral forward, slot 1 the `Rain` side. Nothing else reads
@@ -1009,6 +1024,39 @@ async fn spawn_session_handle(
         let ipav_clone = Arc::clone(&ipav);
         tokio::spawn(async move {
             pump_agent(cfg, events, storage_clone, ipav_clone).await;
+        });
+    }
+
+    // rc3 **D21**: orient every participant in parallel, THEN start the ring.
+    // Detached — a boot that took its whole timeout must not hold up the caller
+    // (the UI is already showing the session by here).
+    //
+    // Placed after the pump loop deliberately: the ring is spawned earlier, at
+    // the `sequencer_tx` arm, and its kick used to fire from inside `spawn_ring`
+    // — i.e. potentially before any pump existed to hear the turn. Gating the
+    // kick here makes that ordering explicit rather than incidental.
+    if let Some(kick) = ring_kick {
+        let boot_inputs: Vec<(i64, crate::agents::ParticipantInput)> = live
+            .iter()
+            .zip(&handles)
+            .map(|(p, h)| (p.id, h.input().clone()))
+            .collect();
+        let boot_storage = storage.clone();
+        let boot_bridge = Arc::clone(&bridge);
+        let boot_session = session.id.clone();
+        let boot_flag = Arc::clone(&booting);
+        tokio::spawn(async move {
+            boot_then_start(
+                &boot_session,
+                &boot_storage,
+                &boot_bridge,
+                boot_inputs,
+                boot_done_rx,
+                boot_flag,
+                kick,
+                BOOT_TIMEOUT,
+            )
+            .await;
         });
     }
 
@@ -1871,26 +1919,193 @@ async fn spawn_ring(
     deps: crate::core::sequencer::SequencerDeps,
     bridge: &Arc<SignalingBridge>,
     session_id: &str,
-) -> tokio::sync::mpsc::Sender<crate::core::sequencer::SequencerCommand> {
+) -> (
+    tokio::sync::mpsc::Sender<crate::core::sequencer::SequencerCommand>,
+    RingKick,
+) {
     let (tx, rx) = tokio::sync::mpsc::channel(256);
     tokio::spawn(crate::core::sequencer::run_sequencer(deps, rx));
     bridge
         .register_session_sequencer(session_id.to_string(), tx.clone())
         .await;
-    // Hand out the first turn. Nothing else mints a `UserMessage` yet, so
-    // without this the ring sits with no holder and never starts.
-    //
-    // No mentions: nobody has typed anything yet, so this is a plain "start at
-    // the front of the rotation".
-    let kick = tx.clone();
-    tokio::spawn(async move {
-        let _ = kick
+    (tx.clone(), RingKick(tx))
+}
+
+/// How long orientation may take before the ring starts anyway (rc3 **D21** §4:
+/// *"or a timeout fires, because one slow agent must not hold the session"*).
+///
+/// Sized for what boot IS — read the CL index and a conventions file, say a line
+/// — not for a task. Overshooting costs a session that starts late; undershooting
+/// starts the ring while a participant is still reading, which is legal (the
+/// pump binds the real epoch, pinned by
+/// `a_participant_still_booting_when_the_ring_starts_binds_the_real_epoch`) but
+/// wastes the orientation. So it errs long, like `CLOSE_EPILOGUE_TIMEOUT`.
+const BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The primer every participant reads before the ring starts (rc3 **D21**).
+///
+/// **Orientation, not work.** D21's refinement is the whole design: *"Every
+/// participant may read in parallel. No participant may act in parallel — that
+/// is the free-for-all D19 just removed, and it is what produced three agents
+/// editing blind in `s-be58fdf0`."* So this asks for reading and explicitly
+/// forbids acting.
+///
+/// **What is NOT here is deliberate: the task text.** D21 leaves that open —
+/// *"does the task text belong in boot, or only the CL? Putting it in boot means
+/// every participant has read the task before anyone acts, which is the point.
+/// But it also means three agents have opinions ready and the first turn arrives
+/// into a room where everyone already decided. Try it both ways on a real
+/// session before settling it."* It is a one-function change when that
+/// measurement exists.
+fn boot_primer() -> &'static str {
+    "[System: BOOT — orientation only, and this is not a turn.\n\n\
+     Load your bearings now, in parallel with every other participant: open the \
+     project's Context Library index (cl_index_search), read its conventions, and \
+     note where things live. Nothing you write here is delivered to your peers, so \
+     do not report to them and do not summarise what you read.\n\n\
+     Do NOT act. No edits, no commits, no tool calls that change anything, no \
+     questions to the user. The work has not started and nobody is waiting on you.\n\n\
+     End your turn as soon as you have your bearings — the session begins when \
+     everyone has finished reading.]"
+}
+
+/// Hand every participant its primer at once, wait for them, then start the ring
+/// (rc3 **D21**).
+///
+/// One boot row, delivered to all, rather than one per participant: D21 §2's own
+/// objection is that *"three near-identical rows are exactly the noise the
+/// channel does not need"*, and today's primer is identical for everyone. The
+/// delivery loop below is already per-participant, so a per-participant primer
+/// is a content change here and not a mechanism change.
+///
+/// **The ring starts either way.** A participant that never reports is waited
+/// out, not waited on — and the timeout says so in a visible row, because a boot
+/// that silently truncated would be indistinguishable from one that completed.
+/// (The same argument that gave the close epilogue its decision log.)
+///
+/// `timeout` is [`BOOT_TIMEOUT`] on the one production path; it is a parameter
+/// so the timeout's own behaviour can be exercised without a two-minute test —
+/// the same reason `deliver_backlog` takes `max_batches`.
+#[allow(clippy::too_many_arguments)]
+async fn boot_then_start(
+    session_id: &str,
+    storage: &Storage,
+    bridge: &Arc<SignalingBridge>,
+    inputs: Vec<(i64, crate::agents::ParticipantInput)>,
+    mut boot_done: tokio::sync::mpsc::Receiver<i64>,
+    booting: Arc<std::sync::atomic::AtomicBool>,
+    kick: RingKick,
+    timeout: std::time::Duration,
+) {
+    let expected = inputs.len();
+    // Posted as a `boot` row so `channel_page` keeps it out of every backlog:
+    // the participants are handed it directly, here, and must not also read it
+    // back as unread history on turn one.
+    let receipt = match storage
+        .post_to_channel(
+            Arc::from(session_id),
+            "system",
+            None,
+            crate::storage::MessageKind::Boot.as_str(),
+            boot_primer(),
+            None,
+        )
+        .await
+    {
+        Ok(row) => {
+            bridge.notify_message_persisted(Arc::from(session_id), row.message_id());
+            row
+        }
+        Err(e) => {
+            // The primer is what boot IS. With no row there is nothing to
+            // deliver, so start the ring rather than stranding the session.
+            tracing::warn!(session_id, ?e, "boot primer not persisted; starting the ring unbooted");
+            booting.store(false, std::sync::atomic::Ordering::Release);
+            kick.fire().await;
+            return;
+        }
+    };
+
+    // In parallel — nothing here is contested, which is the entire point of D21.
+    let reached = futures::future::join_all(
+        inputs
+            .iter()
+            .map(|(id, input)| async { (*id, input.deliver(&receipt).await) }),
+    )
+    .await;
+    let deaf: Vec<i64> = reached.iter().filter(|(_, ok)| !ok).map(|(id, _)| *id).collect();
+    if !deaf.is_empty() {
+        tracing::warn!(session_id, ?deaf, "boot primer did not reach every participant");
+    }
+
+    // Wait for everyone, or time out. A participant whose stdin was already gone
+    // will never report, so it is counted as done rather than waited for.
+    let want = expected - deaf.len();
+    let mut ready = 0usize;
+    let deadline = tokio::time::Instant::now() + timeout;
+    while ready < want {
+        match tokio::time::timeout_at(deadline, boot_done.recv()).await {
+            Ok(Some(id)) => {
+                ready += 1;
+                tracing::info!(session_id, participant_id = id, ready, want, "boot: oriented");
+            }
+            // Every sender dropped: the pumps are gone, so nothing more is coming.
+            Ok(None) => break,
+            Err(_) => {
+                let notice = format!(
+                    "[System: BOOT — starting after {}s with {ready} of {want} participants \
+                     oriented. The rest join the rotation as they finish.]",
+                    timeout.as_secs()
+                );
+                if let Ok(row) = storage
+                    .post_to_channel(
+                        Arc::from(session_id),
+                        "system",
+                        None,
+                        crate::storage::MessageKind::SystemNotice.as_str(),
+                        notice,
+                        None,
+                    )
+                    .await
+                {
+                    bridge.notify_message_persisted(Arc::from(session_id), row.message_id());
+                }
+                tracing::warn!(session_id, ready, want, "boot timed out; starting the ring");
+                break;
+            }
+        }
+    }
+
+    // **Cleared BEFORE the kick**, or turn one is handed out while the pumps
+    // still think they are orienting — they would open no epoch and report
+    // readiness to a receiver nobody is reading.
+    booting.store(false, std::sync::atomic::Ordering::Release);
+    tracing::info!(session_id, ready, want, "boot complete; the ring starts");
+    kick.fire().await;
+}
+
+/// The "hand out turn one" command, held rather than sent (rc3 **D21**).
+///
+/// Nothing else mints a `UserMessage` at spawn, so without firing this the ring
+/// sits with no holder and never starts. It used to be a detached `tokio::spawn`
+/// inside [`spawn_ring`] — that detachment is the seam D21's BOOT phase needed,
+/// so it is now a value the caller fires after orientation instead.
+///
+/// **Returned rather than optional**, so a path that forgets to boot cannot
+/// silently never start: the type has to be consumed or explicitly dropped.
+pub(crate) struct RingKick(tokio::sync::mpsc::Sender<crate::core::sequencer::SequencerCommand>);
+
+impl RingKick {
+    /// Hand turn one to the front of the rotation. No mentions: nobody has typed
+    /// anything yet.
+    async fn fire(self) {
+        let _ = self
+            .0
             .send(crate::core::sequencer::SequencerCommand::UserMessage {
                 mentions: Vec::new(),
             })
             .await;
-    });
-    tx
+    }
 }
 
 /// One participant's finished spawn config — **the whole D8 model chain in one
@@ -3587,6 +3802,132 @@ mod tests {
         assert!(
             composed.contains("**Read-only file tools**"),
             "the composed EYES prompt lost the tool inventory"
+        );
+    }
+
+    /// rc3 **D21**: the ring does not start until orientation is over — and it
+    /// DOES start once it is.
+    ///
+    /// **Both halves, because either alone is a broken session.** Firing early
+    /// hands turn one to a participant still reading its primer, which is the
+    /// serialisation D21 exists to remove. Never firing is worse: the ring sits
+    /// with no holder and the session never begins, and nothing else mints a
+    /// `UserMessage` at spawn. Moving the kick out of `spawn_ring` is exactly
+    /// the kind of edit that can lose it silently — the CL's "test the WIRE"
+    /// rule, and the reason `RingKick` is a value that has to be consumed.
+    #[tokio::test]
+    async fn the_ring_waits_for_orientation_and_then_starts() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        let bridge = Arc::new(SignalingBridge::new());
+        bridge.set_storage(s.clone()).await;
+
+        let (a_tx, mut a_rx) = tokio::sync::mpsc::channel(8);
+        let (b_tx, mut b_rx) = tokio::sync::mpsc::channel(8);
+        let inputs = vec![
+            (1i64, crate::agents::ParticipantInput::new("s1", a_tx)),
+            (2i64, crate::agents::ParticipantInput::new("s1", b_tx)),
+        ];
+        let (done_tx, done_rx) = tokio::sync::mpsc::channel::<i64>(8);
+        let booting = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (ring_tx, mut ring_rx) = tokio::sync::mpsc::channel(8);
+
+        let flag = Arc::clone(&booting);
+        let st = s.clone();
+        let br = Arc::clone(&bridge);
+        let task = tokio::spawn(async move {
+            boot_then_start(
+                "s1", &st, &br, inputs, done_rx, flag, RingKick(ring_tx),
+                std::time::Duration::from_secs(30),
+            )
+            .await;
+        });
+
+        // Both participants are primed, in parallel, before anyone acts.
+        for rx in [&mut a_rx, &mut b_rx] {
+            let m = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("the primer never reached this participant")
+                .unwrap();
+            assert!(
+                m.message.content.contains("BOOT — orientation only"),
+                "got {:?}",
+                m.message.content
+            );
+        }
+        // And the ring has NOT started: one is still reading.
+        done_tx.send(1).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), ring_rx.recv())
+                .await
+                .is_err(),
+            "the ring started while a participant was still orienting"
+        );
+
+        done_tx.send(2).await.unwrap();
+        let started = tokio::time::timeout(std::time::Duration::from_secs(2), ring_rx.recv())
+            .await
+            .expect("the ring never started after everyone had oriented");
+        assert!(matches!(
+            started,
+            Some(crate::core::sequencer::SequencerCommand::UserMessage { .. })
+        ));
+        assert!(
+            !booting.load(std::sync::atomic::Ordering::Acquire),
+            "the boot flag must be cleared BEFORE the kick, or turn one opens no epoch"
+        );
+        let _ = task.await;
+    }
+
+    /// D21 §4: *"a timeout fires, because one slow agent must not hold the
+    /// session"* — and it says so out loud.
+    ///
+    /// A boot that silently truncated would be indistinguishable from one that
+    /// completed, which is the failure item 4A had just finished paying for on
+    /// the close epilogue.
+    #[tokio::test]
+    async fn one_silent_participant_does_not_hold_the_session() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        let bridge = Arc::new(SignalingBridge::new());
+        bridge.set_storage(s.clone()).await;
+
+        let (a_tx, _a_rx) = tokio::sync::mpsc::channel(8);
+        let inputs = vec![(1i64, crate::agents::ParticipantInput::new("s1", a_tx))];
+        // Held open and never written: this participant never reports.
+        let (_done_tx, done_rx) = tokio::sync::mpsc::channel::<i64>(8);
+        let booting = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (ring_tx, mut ring_rx) = tokio::sync::mpsc::channel(8);
+
+        let flag = Arc::clone(&booting);
+        let st = s.clone();
+        let br = Arc::clone(&bridge);
+        tokio::spawn(async move {
+            boot_then_start(
+                "s1", &st, &br, inputs, done_rx, flag, RingKick(ring_tx),
+                std::time::Duration::from_millis(150),
+            )
+            .await;
+        });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), ring_rx.recv())
+                .await
+                .expect("the timeout did not start the ring")
+                .is_some(),
+            "one silent participant must not hold the session"
+        );
+        let notices: Vec<String> = s
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == crate::storage::MessageKind::SystemNotice.as_str())
+            .map(|m| m.content)
+            .collect();
+        assert!(
+            notices.iter().any(|n| n.contains("0 of 1 participants")),
+            "a truncated boot must SAY it was truncated: {notices:?}"
         );
     }
 

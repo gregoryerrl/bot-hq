@@ -48,6 +48,20 @@ pub enum MessageKind {
     /// constraint on `messages.author` has no host author, and the chat should
     /// attribute host actions to neither agent.
     SystemNotice,
+    /// Orientation, from the BOOT phase before the ring starts (rc3 **D21**):
+    /// the primer the host hands every participant, and whatever each says while
+    /// reading it.
+    ///
+    /// **Persisted and shown to the USER, but never delivered to a peer.** D21:
+    /// *"Three near-identical 'CL loaded for cognotify' rows are exactly the
+    /// noise the channel does not need, and a peer reading them learns
+    /// nothing."* The exclusion is one entry in `channel_page`'s existing
+    /// `kind NOT IN (…)` filter (rc3 D19a), which applies only to a peer's
+    /// backlog read — the UI reads the whole channel and sees these.
+    ///
+    /// Needs no migration: `messages.kind` carries no CHECK constraint, unlike
+    /// `messages.author`.
+    Boot,
 }
 
 impl MessageKind {
@@ -58,6 +72,7 @@ impl MessageKind {
             MessageKind::ToolResult => "tool_result",
             MessageKind::PhaseChange => "phase_change",
             MessageKind::SystemNotice => "system_notice",
+            MessageKind::Boot => "boot",
         }
     }
 
@@ -68,6 +83,7 @@ impl MessageKind {
             "tool_result" => MessageKind::ToolResult,
             "phase_change" => MessageKind::PhaseChange,
             "system_notice" => MessageKind::SystemNotice,
+            "boot" => MessageKind::Boot,
             _ => return None,
         })
     }
