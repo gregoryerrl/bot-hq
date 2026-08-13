@@ -18,6 +18,61 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-13 — the input stays locked for the whole cycle, not one lap
+
+**Reported by the user, from outside the system:** *"I can type while agents are
+working, it might legitimately interrupt your turns, therefore corrupting the
+quality of work you provide."*
+
+`SessionActivity::derive` locks the chat input while any participant is busy.
+Busy was set in exactly two places — `AppState::broadcast` (every agent, when the
+user types) and `SessionHandle::send_to_all` — while each PUMP cleared its own
+flag at its own turn end. A user message locked the input; each participant
+unlocked its share as its turn finished; after **one lap** every flag was clear
+and the input re-opened while the ring was still cycling (D22's lap, the
+consensus tally, the round cap's 500). `SequencerDeps` carried no activity
+handle at all, so the one component that knows a turn started could not say so.
+
+The guarantee that used to cover this was the router's ordering — peer-busy set
+before sender-idle, so `derive` never saw both idle mid-handoff — and it went
+with `core/router.rs` in rc3. The replacement is stronger: the router closed the
+gap between two agents; the ring holds the lock for the whole cycle.
+
+**It closes a wedge, not just a cosmetic lock** — the reviewer's finding, and it
+raised the severity. A message typed while a turn is in flight lands on the
+holder's stdin mid-turn; the pump binds its epoch at turn-OPEN, so the
+completion carries the pre-reset epoch and is discarded — and the discard arm
+does not step the ring. The pump has cleared its state, the cursor is past the
+message, and the loop waits in `rx.recv()` with no timeout, so nothing can
+produce the epoch the ring now waits on. The only exit is another user message,
+which is the same action that caused it. Holding the lock makes that landing
+unreachable by construction.
+
+Recording the holder and marking it busy are one event, so `hand_turn_to` does
+both and each call site is one line. **That extraction exposed a second
+defect:** rc3 D19b's `set_current_turn` was completely unpinned — deleting it
+left all 1100 tests green, the same unpinned-wire class the CL says has shipped
+five times here. Both halves are now independently mutation-verified.
+
+A halt hands `None`, marks nobody, and the session falls to `Idle` — that is the
+unlock condition and it needed no code of its own (`a_halt_leaves_nobody_busy`
+pins that the fix does not over-correct into locking the user out).
+
+**Deliberately left:** the pump still clears its own flag, so a sub-second
+all-idle window remains between a completion and the next handover. Moving the
+clear into the ring would buy a wedge where a completion that never arrives
+locks the input forever. That window can be typed into, harmlessly — no turn is
+in flight, so the message takes the designed fresh-turn path.
+
+**Related, and NOT done here:** a consensus halt yields without flagging
+anything, so a correctly-finished session is indistinguishable from a stalled
+one. That is why shortening the idle nudge cannot land first — it would fire on
+every completed task. Third instance of one pattern (D7's capped-halt row, item
+4A's silent skip arms, this): bot-hq keeps producing ending states that look
+identical from outside.
+
+---
+
 ## 2026-08-13 — participants orient in parallel before the ring starts (rc3 D21)
 
 Orientation — reading the CL, the conventions — depends on nothing and contends
