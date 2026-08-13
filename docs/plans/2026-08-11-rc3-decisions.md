@@ -816,3 +816,75 @@ respawned. Worth knowing because the log's `sequencer: started` followed 20µs
 later by `control channel closed; exiting` reads as a task dying instantly, and is
 actually two different sequencers: the new one starting and the old wedged one
 finally noticing its senders were dropped.
+
+### D25 — a turn carries at most one pass
+
+Shipped 2026-08-13 (`049e58c`), from a runaway caught live in `s-a4e9a1b4` — a
+real work session, not a test.
+
+**What happened.** `pass_turn` was called **141 times in the eight minutes after
+the last handover**, one every two seconds, one real model call each. The user
+noticed it on screen; nothing in bot-hq did.
+
+The chain, and every link is a bug already known:
+
+1. The executor parked a question. D22 worked — the ring handed the turn on
+   rather than halting.
+2. The reviewer finished its turn and its completion was **discarded** on a
+   retired epoch (D24). From the ring's view it still held the turn, and no turn
+   was handed out again.
+3. The reviewer had nothing to review while a human was blocking, so it passed —
+   and the tool answered *"pass noted"*. Nothing it could see said the pass had
+   already been recorded, so it passed again. And again.
+
+**The round cap could not have caught it, and that is the finding.** The cap
+counts LAPS of the ring, and the ring was not moving at all — one turn that never
+ended. The single backstop bot-hq has for runaway loops is structurally blind to
+a participant looping *inside* a turn, because it measures the ring rather than
+the spend. rc3 P8 anticipated a pass volley ACROSS turns, bounded by the cap at
+500 laps; this is the same shape one level down, bounded by nothing.
+
+**The rule.** A pass is the turn ending, so a turn carries at most one. The second
+is refused with a message that names the attempt number and says to end the turn.
+
+- **Counted bridge-side**, not in the pump: the refusal has to reach the AGENT,
+  and the tool result is the only thing it reads synchronously.
+- **Cleared by the ring** when it starts a turn for that participant —
+  deliberately not by anything the participant does, because a turn that never
+  ends is precisely the state this bounds.
+
+**Two guards, not one.** D24 stops the loop from starting; D25 stops it running
+away when something else wedges a turn. They are independent on purpose: D24 was
+also once thought sufficient.
+
+### The delivery-order problem, measured
+
+Not a decision yet — evidence, recorded so the decision has something to stand on.
+
+`s-a4e9a1b4` at 05:26:44 delivered NINE rows to the reviewer as **nine separate
+stdin writes**:
+
+```
+1  [system]  Session idled with no question or halt parked — nudged the executor
+2  [system]  [System: this session went idle…]
+3-8 hands    six rows narrating a test run
+9  [user]    prepare to close — commit what needs committing…
+```
+
+claude-code opens the turn on row 1 — bot-hq's own idle nudge — and rows 2..9
+arrive DURING that turn as interruptions. So the user's actual instruction was
+last in the queue, behind six rows of a peer's narration, and the reviewer spent
+the turn reviewing the peer instead. The user: *"why does it feel like its not
+addressing my current message?"*
+
+Two fixes point at this and only one of them has shipped:
+
+- **D23** (shipped) labels each row, so row 9 is identifiable as the user's at
+  all. On the build that session ran, all nine were anonymous.
+- **Coalescing** the backlog into ONE write is what fixes the ORDERING: in a
+  single prompt the last line is the most recent instruction, which is the normal
+  conversational shape. As nine writes, position 1 frames the turn and position 9
+  is an interruption. The label does not fix this on its own.
+
+An earlier note in this file said coalescing should be measured before being
+built. This is the measurement.
