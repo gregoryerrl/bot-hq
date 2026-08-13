@@ -96,5 +96,16 @@ fi
 
 [[ -x "$BIN" ]] || die "$BIN is missing after a successful build — that should not happen"
 
-say "starting bot-hq"
-exec "$BIN"
+LOG="$DATA_DIR/.local/bot-hq.log"
+mkdir -p "$(dirname "$LOG")"
+say "starting bot-hq  (log: $LOG)"
+# Tee rather than redirect: the console still shows everything, and a session
+# that misbehaves leaves a file to read afterwards. Without this the only
+# evidence a stalled ring leaves is delivery rows, which is inference rather
+# than diagnosis — that cost real time on 2026-08-13.
+# `exec` is dropped deliberately so the pipe survives; the trap forwards a
+# Ctrl-C to the child rather than orphaning it.
+"$BIN" 2>&1 | tee "$LOG" &
+CHILD=$!
+trap 'kill $CHILD 2>/dev/null' INT TERM
+wait $CHILD

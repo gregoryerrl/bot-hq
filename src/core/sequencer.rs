@@ -1211,6 +1211,23 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // cheap half of the guard to keep.
                 let live = completed == epoch
                     && holder.as_ref().is_some_and(|h| h.id == participant_id);
+                // A DISCARDED completion was silent, which made a stalled ring
+                // indistinguishable from an idle one from the outside: the cycle
+                // simply stops and nothing anywhere says why. Discarding is
+                // usually correct (a superseded turn, a restarted cycle), so this
+                // is `debug` rather than a warning — but it must be SAYABLE, or
+                // the only way to diagnose a ring that stopped is to infer it
+                // from delivery rows after the fact.
+                if !live {
+                    debug!(
+                        session = %deps.session_id,
+                        participant_id,
+                        carried_epoch = completed,
+                        live_epoch = epoch,
+                        holder = ?holder.as_ref().map(|h| h.id),
+                        "sequencer: completion discarded — the ring did NOT step"
+                    );
+                }
                 if live {
                     // The vote is recorded and consensus asked BEFORE the ring
                     // is stepped: arriving means waking nobody, so a step taken
