@@ -339,6 +339,11 @@ pub async fn pump_agent(
     // event is being processed is a straggler from the turn that ended and must
     // not open a new one. See `DuoConfig::turn_epoch`.
     let mut last_completed_epoch: Option<u64> = None;
+    // When this pump last had a turn CLOSED, so the next turn's first event can
+    // report how long the model took to produce anything (rc3 D26). Reset at
+    // completion rather than at delivery because the pump is not told about the
+    // handover — its first event IS how it learns.
+    let mut turn_opened_at = std::time::Instant::now();
 
     loop {
         let Some(event) = event_rx.recv().await else { break };
@@ -367,6 +372,23 @@ pub async fn pump_agent(
                     );
                 } else {
                     turn_epoch = Some(live);
+                    // **How long the model took to say anything** (rc3 D26).
+                    // The gap between the ring handing a turn out and its first
+                    // event is the one stretch bot-hq records nothing for, and
+                    // it is exactly the stretch a user stares at wondering
+                    // whether the session is thinking or wedged. A live one ran
+                    // 565 seconds on 2026-08-13 and the only way to find out
+                    // afterwards was to diff two tables.
+                    //
+                    // INFO because it is once per turn and it is the number
+                    // `scripts/turn-latency.py` calls `start` — measurable from
+                    // the log now, not only by reconstruction.
+                    tracing::info!(
+                        agent = %cfg.slug,
+                        epoch = live,
+                        waited_ms = turn_opened_at.elapsed().as_millis() as u64,
+                        "turn opened: first event after the ring handed it over"
+                    );
                 }
             }
         }
@@ -748,6 +770,10 @@ pub async fn pump_agent(
                 // out and the event is a straggler (rc3 D24).
                 last_completed_epoch = turn_epoch;
                 turn_epoch = None;
+                // The clock for the NEXT turn's "how long until it spoke"
+                // starts here — the ring hands the next turn out within
+                // microseconds of this completion.
+                turn_opened_at = std::time::Instant::now();
                 // peer_ack is per-turn — reset after BOTH branches so an errored
                 // turn (which skips the router) can't leak the flag into the next.
                 peer_ack_pending = false;

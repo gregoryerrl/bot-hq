@@ -1182,6 +1182,24 @@ impl SignalingBridge {
                 .unwrap_or_else(|p| p.into_inner())
                 .remove(&session_id);
         }
+        // **A verdict that only ever reached the UI could not be read back**
+        // (rc3 D26). The health map is in memory and the event is transient, so
+        // once a window closed nothing recorded what bot-hq had CONCLUDED about
+        // a participant — and a post-hoc dissection could not tell "the watchdog
+        // called it stalled" from "the watchdog never ran". On 2026-08-13 that
+        // ambiguity produced a wrong diagnosis of a live session: silence in the
+        // log was read as the watchdog not firing, when the log was never going
+        // to show it either way.
+        //
+        // INFO rather than debug: a transition is rare (a participant goes
+        // stalled or recovers), it is exactly what someone reading a stalled
+        // session wants, and `./start` tees the log to a file for that purpose.
+        tracing::info!(
+            session_id = %session_id,
+            agent,
+            health,
+            "agent health"
+        );
         let _ = self.event_tx.send(SignalingEvent::AgentHealth {
             session_id,
             agent: agent.to_string(),
