@@ -119,7 +119,11 @@ const NON_PARTICIPANT_AUTHORS: Record<string, string> = {
  * is nothing. It stays visibly attributed — the byline, the tag and the status
  * line all still render — without asserting an identity the roster cannot back.
  */
-export const UNKNOWN_PARTICIPANT = "Unknown participant";
+// Re-exported from a leaf module so `components/authorColor` can have it
+// without importing THIS file, which would close an import cycle — see
+// `participantNames.ts` for the blank window that produced.
+export { UNKNOWN_PARTICIPANT } from "./participantNames";
+import { UNKNOWN_PARTICIPANT } from "./participantNames";
 
 /**
  * The key a SLOT-SHAPED runtime field lands under.

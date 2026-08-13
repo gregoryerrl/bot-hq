@@ -67,6 +67,14 @@ if [[ "$SKIP_FRONTEND" -eq 1 ]]; then
   [[ -d frontend/dist ]] || die "--fast needs an existing frontend/dist; run without it once"
   say "skipping the frontend build (--fast)"
 else
+  # Circular imports FIRST, because the build does not fail on one and the app
+  # does. A cycle shipped a blank window on 2026-08-13 with tsc clean, vite
+  # exit 0, and 333 green tests — Vitest resolves a module graph per test file,
+  # so the ordering that breaks a single bundled chunk never appears there.
+  say "checking for import cycles"
+  ( cd frontend && node scripts/check-import-cycles.mjs src ) \
+    || die "circular import (details above) — the app would load to a blank window"
+
   say "building the frontend"
   ( cd frontend && npm run build ) >/dev/null 2>&1 \
     || { ( cd frontend && npm run build ); die "frontend build failed (output above)"; }

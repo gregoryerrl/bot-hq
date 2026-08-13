@@ -13,7 +13,10 @@
  * altogether.
  */
 
-import { UNKNOWN_PARTICIPANT } from "../lib/participants";
+// From the LEAF module, not from `lib/participants` — that import closed a
+// cycle and the bundle threw before it rendered anything. See
+// `lib/participantNames.ts`.
+import { UNKNOWN_PARTICIPANT } from "../lib/participantNames";
 
 const NEUTRAL = "text-on-surface-variant";
 
