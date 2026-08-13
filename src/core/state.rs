@@ -882,13 +882,74 @@ impl AppState {
     /// Clear the awaiting-user halt for a live session: flip the handle's
     /// atomic AND the bridge's mirror (kept in sync — both point at the same
     /// `Arc<AtomicBool>`, but the bridge copy is what survives if the
-    /// `SessionHandle` is dropped). Does NOT touch pending-halt rows; callers
-    /// that also answer those call `clear_pending_halts` separately.
+    /// `SessionHandle` is dropped).
+    ///
+    /// Does NOT touch pending-halt ROWS. That is [`Self::user_responded`]'s
+    /// job, and it is the only thing that does it — this doc used to say
+    /// "callers that also answer those call `clear_pending_halts` separately",
+    /// which is the arrangement that let one caller forget for 52 occurrences
+    /// (rc3 D28).
     async fn clear_awaiting(&self, handle: &SessionHandle, session_id: &str) {
         handle
             .awaiting
             .store(false, std::sync::atomic::Ordering::Release);
         self.bridge.clear_session_awaiting(session_id).await;
+    }
+
+    /// **The user responded.** Release the ring and clear the halt they answered
+    /// — one call, because they are one event (rc3 **D28**).
+    ///
+    /// # Why this is a function and not two lines at each call site
+    ///
+    /// It was two lines at each call site, and they drifted. Three paths mean
+    /// "the user responded" — a typed message, an answered tray card, a phase
+    /// advance — and each did a different subset:
+    ///
+    /// | | releases the ring | clears the halt row |
+    /// |---|---|---|
+    /// | typed message | yes | yes |
+    /// | **answered tray card** | yes | **no** |
+    /// | phase advance | no | yes |
+    ///
+    /// So answering a question released the cycle and left its halt row pending
+    /// for ever. The bell stayed lit, the user answered again, and the agent —
+    /// legitimately, having a new question — parked another. **Measured across
+    /// the session archive: 52 occasions where a second tray row opened while
+    /// the first was still unanswered**, the worst a single row that sat
+    /// unanswered while six more stacked behind it over 53 minutes.
+    ///
+    /// The user reported it as "answering a question didn't clear a halt, so
+    /// they parked another halt after some time, now there are 2 halts in
+    /// tray". Every half was individually correct.
+    ///
+    /// This is the third bug of exactly this shape: a halt shipped with no
+    /// release (D19), a health verdict that reached the UI but no record (D26),
+    /// and now a release without a clear. The pattern is one event wired through
+    /// two halves at N call sites, where nothing makes the halves travel
+    /// together. A function is what makes them travel together.
+    ///
+    /// `mentions` rides along because the ring release already carries it (D17);
+    /// a tray answer passes none.
+    async fn user_responded(&self, session_id: &str, mentions: Vec<i64>, release_ring: bool) {
+        // The halt row FIRST. If the ring release panicked or the process died
+        // between the two, a cleared row and a halted ring is a session the next
+        // message fixes; a released ring and a pending row is the bug above, and
+        // it is invisible.
+        match self.storage.clear_pending_halts(session_id).await {
+            Ok(cleared) if cleared > 0 => {
+                self.bridge.notify_halts_cleared(session_id.to_string());
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(?e, session_id, "clear_pending_halts failed"),
+        }
+        // `advance_phase` is the one caller that does NOT release: a phase
+        // self-advance answers the halt without being a message anyone reads,
+        // so waking the ring on it would hand out a turn over an empty backlog.
+        if release_ring {
+            self.bridge
+                .notify_ring_user_message(session_id, mentions)
+                .await;
+        }
     }
 
     /// The participants a user message summons, in the order they were named
@@ -1012,19 +1073,6 @@ impl AppState {
         handle
             .user_silent_forwards
             .store(0, std::sync::atomic::Ordering::Release);
-        // Flip every pending `mark_awaiting_user` row to 'answered' — the
-        // user's reply IS the answer to a halt. `choice` rows stay pending
-        // until the user actually picks an option. Emit HaltsCleared only when
-        // rows actually flipped, so the UI refetches the tray + clears the
-        // "needs input" bell (a DB-only clear leaves list_pending_tray stale).
-        // The guard matters: broadcast() runs on every user message.
-        match self.storage.clear_pending_halts(session_id).await {
-            Ok(cleared) if cleared > 0 => {
-                self.bridge.notify_halts_cleared(session_id.to_string());
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(?e, session_id, "clear_pending_halts failed"),
-        }
         let phase = handle.ipav.lock().await.current_phase;
         // Consume any queued post-cancel reconciliation directive for this
         // session (set by cancel_session_turn) — prepended wire-only so the
@@ -1058,12 +1106,11 @@ impl AppState {
         // follow. A participant that types `@advisor` writes text, and there is
         // no code anywhere that could act on it.
         let mentions = self.resolve_mentions(session_id, text).await;
-        // The ring is told AFTER the row exists, so the participant it wakes has
-        // something to drain. Reversing these two hands out a turn over an empty
-        // backlog and the message lands a turn late.
-        self.bridge
-            .notify_ring_user_message(session_id, mentions)
-            .await;
+        // Told AFTER the row exists, so the participant it wakes has something
+        // to drain. Reversing these two hands out a turn over an empty backlog
+        // and the message lands a turn late. Both halves of "the user responded"
+        // ride this one call (rc3 D28).
+        self.user_responded(session_id, mentions, true).await;
         // The user's message reaches the front of the rotation → busy. The
         // awaiting flag was cleared just above, so this recompute moves the
         // session AwaitingUser/Idle → Busy.
@@ -1114,15 +1161,10 @@ impl AppState {
         let prev_phase = handle.ipav.lock().await.current_phase;
 
         self.clear_awaiting(handle, session_id).await;
-        match self.storage.clear_pending_halts(session_id).await {
-            Ok(cleared) if cleared > 0 => {
-                self.bridge.notify_halts_cleared(session_id.to_string());
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(?e, session_id, "clear_pending_halts (advance_phase) failed");
-            }
-        }
+        // Clears the halt without releasing the ring: a phase self-advance
+        // answers the question but is not a message anyone reads, so waking the
+        // ring on it would hand out a turn over an empty backlog (rc3 D28).
+        self.user_responded(session_id, Vec::new(), false).await;
 
         handle.ipav.lock().await.advance(target);
 
@@ -1387,9 +1429,12 @@ impl AppState {
                         // No mentions: an answer is a pick from a list of
                         // options, not prose the user composed, so there is no
                         // `@` in it to honour (rc3 D17).
-                        self.bridge
-                            .notify_ring_user_message(session_id, Vec::new())
-                            .await;
+                        //
+                        // **This path used to release the ring and nothing else**
+                        // (rc3 D28), so the halt it answered stayed pending and
+                        // the bell never cleared. It goes through the one entry
+                        // point now, like every other way of responding.
+                        self.user_responded(session_id, Vec::new(), true).await;
                     }
                 }
                 // Answering a tray card ends the halt just as a typed message
@@ -1674,13 +1719,63 @@ mod tests {
         let interrupt = arm.find("interrupt(\"tray-answer-preempt\")");
         // The delivery step is the ring notify since rc3 D19 — `send_to_all`
         // fanned the receipt into every stdin, which woke participants outside
-        // their turn. The ORDERING property is unchanged and is what this pins:
-        // the preempt must fire before the answer is handed on, whichever call
-        // hands it on.
-        let send = arm.find("notify_ring_user_message");
+        // their turn — and since rc3 D28 it is `user_responded`, which releases
+        // the ring and clears the halt as one event. The ORDERING property is
+        // unchanged and is what this pins: the preempt must fire before the
+        // answer is handed on, whichever call hands it on.
+        let send = arm.find("user_responded(");
         assert!(
             interrupt.is_some() && send.is_some() && interrupt < send,
             "the tray-answer interrupt must fire BEFORE the answer is delivered"
+        );
+    }
+
+    /// rc3 **D28**: every way of responding clears the halt AND releases the
+    /// ring — and there is exactly one function that can do either.
+    ///
+    /// The bug this pins is not hypothetical arithmetic. Answering a tray card
+    /// released the ring and left the halt row pending, so the bell never
+    /// cleared; the user answered again, the agent parked another question, and
+    /// the tray grew. **52 occasions in the session archive where a second tray
+    /// row opened while the first was still unanswered** — the worst, one row
+    /// unanswered while six stacked behind it across 53 minutes.
+    ///
+    /// Asserted over the SOURCE because the alternative needs a live session
+    /// with a real subprocess for each of three paths. What it checks is the
+    /// property that actually failed: not "does this path clear the halt" — each
+    /// path looked fine on its own — but "is there more than one place that
+    /// can". A fourth path added tomorrow inherits both halves or fails here.
+    #[test]
+    fn responding_to_the_user_is_one_function_with_no_second_way_to_do_half_of_it() {
+        let src = include_str!("state.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+
+        // The dotted CALL form, not the bare name: these docs name both
+        // functions in prose, and a test that counted prose would measure its
+        // own explanation. (It did, on the first run.)
+        assert_eq!(
+            prod.matches(".clear_pending_halts(").count(),
+            1,
+            "the halt row is cleared in exactly one place — a second call site is \
+             a path that can forget the other half"
+        );
+        // The ring release: the bridge method, called once, from the same place.
+        assert_eq!(
+            prod.matches(".notify_ring_user_message(").count(),
+            1,
+            "the ring is released in exactly one place, for the same reason"
+        );
+
+        // And every way of responding goes through it. Three today; the count is
+        // deliberately not asserted, because a fourth is fine — routing around
+        // it is not.
+        let callers = prod.matches("user_responded(").count();
+        assert!(
+            callers >= 4,
+            "expected the definition plus every response path to call it, found {callers}"
         );
     }
 
@@ -1764,8 +1859,8 @@ mod tests {
             .nth(1)
             .expect("the user's broadcast path must exist");
         let body = &body[..body
-            .find("notify_ring_user_message")
-            .expect("the broadcast tells the ring")];
+            .find("user_responded(")
+            .expect("the broadcast tells the ring, via the one response path (D28)")];
         assert!(
             body.contains("resolve_mentions("),
             "the parse belongs to the user's own message path"
