@@ -18,6 +18,55 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-13 — two columns and a decision that nobody could read back
+
+**The close-out learnings epilogue had never run — not once, in any session.**
+Zero outcome rows and zero broadcasts of `CLOSE_LEARNINGS_PROMPT` across all 17
+sessions in the live database, 13 of them closed after D15 shipped. The written
+diagnosis blamed a slow or wedged ring and called the evidence "one-for-two";
+the ring is not involved and there was no "one" — what looked like a success was
+the agent writing the CL through A3b's nudge, a different mechanism entirely.
+
+Two causes. `close_nudged` is set by A3b's write-the-delta soft gate, which runs
+on the **agent's** `close_session` tool and nowhere else, but
+`close_epilogue_decision` had no way to tell which path it was on. An agent that
+called the tool once, got nudged and never retried left the flag set — and the
+**user's** Close button then read it as already-handled, suppressing precisely
+the case D15 exists for (its own doc: the user's Close *"kills every subprocess
+without anyone being asked"*). A `ClosePath` now says who started the close.
+`close_nudged` gates only `Agent`; `cl_written` gates both, because a write on
+disk is evidence whoever closed. Threading an enum instead of a bool paid for
+itself immediately — the compiler found a fifth call site in the external driver
+server that the plan had missed.
+
+And **three of `decide`'s four arms were silent, only one of them by
+requirement**. D15 asks `SkipNoWriter` to post no ROW, which says nothing about
+the log; `SkipBusy` and `SkipAlreadyHandled` were silent by omission. So no
+session recorded which arm refused it, which is why the diagnosis had to guess.
+The decision and its three inputs are now one INFO line — the same remedy D26
+applied to agent health that morning, for the same reason.
+
+Not claimed: that this makes an epilogue appear. It removes one proven
+suppressor and makes the rest legible; the next real close is the measurement.
+
+**`sessions.round_number` now has a writer.** The column has existed since
+migration 0044 and nothing ever wrote it — `MAX(round_number)` was 0 across every
+session ever recorded, the same shape `current_turn_participant_id` had before
+D19b. It is written from `run_sequencer`'s own `laps` at both sites that move it
+(the wrap in `advance_turn`, and the reset a user message performs), so the
+column cannot drift from the number the round cap is measuring; it counts the
+stretch, not the session's lifetime, because that is what the counter counts.
+Kept rather than dropped: 0044 is applied and immutable, so removing it costs a
+migration, and a lap count is the one number saying how far an unattended run got.
+
+Both fixes mutation-verified — deleting either `set_round_number` call site
+reddens `a_lap_of_the_ring_is_recorded_on_the_session`, and restoring the old
+`cl_written || close_nudged` predicate reddens
+`the_agents_nudge_does_not_suppress_the_users_close` and nothing else.
+1086 lib + 60 integration green.
+
+---
+
 ## 2026-08-13 — a turn's backlog is one stdin write
 
 **The user's message stops arriving as an interruption.** `deliver_backlog`
