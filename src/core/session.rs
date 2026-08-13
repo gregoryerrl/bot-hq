@@ -1085,9 +1085,11 @@ async fn spawn_session_handle(
                         Arc::from(session.id.as_str()),
                         opener.message_id(),
                     );
-                    for h in &handles {
-                        h.input().deliver(&opener).await;
-                    }
+                    // No fan-out (rc3 D19). The row is persisted above and the
+                    // ring delivers it off each participant's cursor. Writing
+                    // every stdin here is what woke all participants at session
+                    // START, before a turn existed — so each snapshotted epoch 0
+                    // and every completion it ever sent was discarded.
                 }
                 // The nudge is a convenience — the prompt-side opener still
                 // pages the CL. Losing it must not fail a session open.

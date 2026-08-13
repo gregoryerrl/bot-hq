@@ -1007,9 +1007,10 @@ impl AppState {
             .await
             .remove(session_id)
             .unwrap_or_default();
-        for wake in &held_wakes {
-            handle.send_to_all(wake).await;
-        }
+        // The rows exist; the ring replays them off each cursor (rc3 D19).
+        // Fanning them into every stdin here woke participants outside their
+        // turn, which is what stranded their epochs.
+        let _ = &held_wakes;
         Ok(())
     }
 
@@ -1290,7 +1291,12 @@ impl AppState {
                         for agent in handle.agents() {
                             agent.handle.interrupt("tray-answer-preempt");
                         }
-                        handle.send_to_all(receipt).await;
+                        // Answering a tray card ends the halt exactly as a typed
+                        // message does, so it goes through the ring for the same
+                        // reason (rc3 D19): the receipt row is already persisted,
+                        // and this releases the cycle and hands the turn to the
+                        // front rather than waking everyone at once.
+                        self.bridge.notify_ring_user_message(session_id).await;
                     }
                 }
                 // Answering a tray card ends the halt just as a typed message
@@ -1573,10 +1579,15 @@ mod tests {
         // `interrupt` and a `send_to_all` that live nowhere near each other.
         let arm = &arm[..arm.find("if step.flush").expect("the flush step follows it")];
         let interrupt = arm.find("interrupt(\"tray-answer-preempt\")");
-        let send = arm.find("send_to_all");
+        // The delivery step is the ring notify since rc3 D19 — `send_to_all`
+        // fanned the receipt into every stdin, which woke participants outside
+        // their turn. The ORDERING property is unchanged and is what this pins:
+        // the preempt must fire before the answer is handed on, whichever call
+        // hands it on.
+        let send = arm.find("notify_ring_user_message");
         assert!(
             interrupt.is_some() && send.is_some() && interrupt < send,
-            "the tray-answer interrupt must fire BEFORE send_to_all"
+            "the tray-answer interrupt must fire BEFORE the answer is delivered"
         );
     }
 
