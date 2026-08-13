@@ -545,3 +545,73 @@ it**. So a participant that had simply not been reached yet was
 indistinguishable from a dead one — reported from a live N=3 session where only
 the first participant acted for two minutes. `hand_over` now records the holder.
 Best-effort: a failed write costs a UI hint, never a turn.
+
+### D20 — a participant's label is the user's, and colour rotates
+
+Deferred to a session, 2026-08-13. Reported from a live N=3 run: *"for the 2
+reviewers, i don't know which is which."* Two participants of one role on one
+model render identically — `EYES · DeepSeek V4 Pro`, character for character —
+because the display rule has no ordinal and colour is keyed to the role.
+
+The user's spec, settled:
+
+- **A participant carries an optional user-set LABEL**, editable where the
+  participant is chosen (New Session dialog) and shown wherever it is named.
+- **Empty falls back to an ordinal**: `EYES`, `EYES-2`, `EYES-3` — matching the
+  slug scheme (`eyes`, `eyes-2`) so the visible name and the internal key agree.
+  The first of a role takes no suffix.
+- **Colour ROTATES** so two participants of one role never collide. The user may
+  override per participant; rotation is the default, not a fallback.
+
+Notes for whoever builds it: `authorColor.ts` currently maps the two legacy
+slugs only, so every role-derived slug already falls through to neutral —
+rotation replaces that, it does not have to preserve it. Colour is keyed to turn
+slot rather than to role (see ARCHITECTURE's design-system section), which is
+already the right hook for a rotation.
+
+### D21 — a BOOT phase, so participants orient in parallel
+
+Proposed 2026-08-13 by the user after watching a three-participant session where
+only the first acted for two minutes: *"how can we make it so all agents can boot
+at the same time? … an 'Opening' or 'Boot' phase where they load CL and process
+initial instructions."*
+
+**The problem is real and the ring causes it.** Orientation — reading the CL,
+the conventions, the task — is per-participant work that depends on nothing and
+contends for nothing. Serialising it through the ring costs N × the orientation
+time before any work starts, and a participant that has not been reached yet is
+invisible from the outside (D19b helps, but latency is latency).
+
+**Agreed, with one refinement that decides whether it works: BOOT IS
+ORIENTATION, NOT WORK.**
+
+Every participant may read in parallel. No participant may *act* in parallel —
+that is the free-for-all D19 just removed, and it is what produced three agents
+editing blind in `s-be58fdf0`. Concretely:
+
+1. Spawn every participant, then feed each its own primer (CL index, conventions,
+   the task text) directly — in parallel, since nothing is contested.
+2. **Boot output is persisted and shown to the USER, but not delivered to
+   peers.** Three near-identical "CL loaded for cognotify" rows are exactly the
+   noise the channel does not need, and a peer reading them learns nothing. This
+   is why D19a lands first: the kind filter is the mechanism a boot-kind row
+   rides on.
+3. **No participant sends a completion during boot.** There is no holder, so
+   there is no epoch — a completion here is precisely the discarded-forever case
+   D19 fixed. The pump has to know boot from a turn.
+4. When every participant has finished orienting — or a timeout fires, because
+   one slow agent must not hold the session — the ring starts and hands turn one
+   to the front of the rotation.
+
+**The hard part is (3), and it is where this will break if rushed.** The pump
+currently learns a turn started from its first event, which is exactly the
+assumption that made the broadcast fan-out fatal. Boot needs an explicit signal
+that a participant is orienting rather than holding a turn, and the ring must not
+be startable until that phase is over.
+
+**Open question for the implementer, worth answering with a measurement:** does
+the task text belong in boot, or only the CL? Putting it in boot means every
+participant has read the task before anyone acts, which is the point. But it also
+means three agents have *opinions* ready and the first turn arrives into a room
+where everyone already decided. Try it both ways on a real session before
+settling it.
