@@ -1,5 +1,14 @@
 # Next queue — what a bot-hq session should pick up
 
+> **SUPERSEDED 2026-08-13 evening by
+> [`2026-08-13-dogfood-bot-hq.md`](2026-08-13-dogfood-bot-hq.md).**
+>
+> Two of the items below were already done when this was written and nobody had
+> checked: the reviewer-reproduces prose change (the user had already rewritten
+> it) and D16/D20, which shipped hours later. The replacement is written against
+> verified state — the database and the source — rather than against plan docs.
+> Kept for the reasoning in items 2 and 4, which carried forward unchanged.
+
 Mention this file to a session and it can start. Written 2026-08-13, after a day
 that shipped rc3 D16–D24 and found three defects by running real sessions rather
 than by reading code.
