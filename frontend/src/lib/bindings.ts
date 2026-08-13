@@ -1555,7 +1555,12 @@ export type ParticipantPick = { roleId: number; modelId: string | null;
  * `None` = inherit. Per participant since rc3 D12; the dialog used to
  * carry one effort select per AGENT, in two fixed blocks.
  */
-effort: string | null; ultracode: boolean | null }
+effort: string | null; ultracode: boolean | null; 
+/**
+ * The palette entry the user picked for this row, by NAME ("Cyan"), or
+ * `None` to take the rotation (rc3 **D20**).
+ */
+color: string | null }
 /**
  * One participant's composed system prompt — the ~48 KB of standing
  * instruction bot-hq assembled for it at spawn (rc3 **P1**).
@@ -1617,6 +1622,11 @@ model_display_name: string | null; turn_position: number;
  * `active` | `on_mention` (which create refuses today — see rc3 D17).
  */
 participation_mode: string; enabled: boolean; 
+/**
+ * The user's colour pick, by palette NAME ("Cyan"), or `null` to take the
+ * rotation the UI assigns by roster position (rc3 **D20**).
+ */
+color: string | null; 
 /**
  * This participant's effort override (rc3 D12), or `null` to inherit.
  * 
