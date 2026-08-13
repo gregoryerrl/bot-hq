@@ -1,15 +1,16 @@
-//! Duo broadcast helpers: persist + send to both agents.
+//! The user's message, persisted as the one row every participant reads.
+//!
+//! Named `broadcast` from when it wrote every agent's stdin; since rc3 D19 it
+//! writes none of them. The row IS the broadcast — the ring hands it to each
+//! participant off its own cursor, one turn at a time.
 //!
 //! Lives separately so it can be mocked in tests.
 
-use crate::agents::ParticipantInput;
 use crate::core::ipav::IpavPhase;
 use crate::storage::{Envelope, MessageKind, Storage};
 use anyhow::Result;
-use tracing::warn;
 
-
-/// Persist a user-originated message and fan it out to both agents.
+/// Persist a user-originated message. The ring delivers it; see the module doc.
 pub async fn broadcast_user_message(
     storage: &Storage,
     session_id: &str,

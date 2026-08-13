@@ -592,7 +592,7 @@ mod tests {
         assert!(!rendered.contains("Also in this session"));
     }
 
-    /// An observer — `read_channel` and nothing else — is a legal role, and its
+    /// A role granted `read_channel` and nothing else is legal, and its
     /// prompt has to be coherent rather than a wall with one line missing.
     #[test]
     fn an_empty_grant_set_still_renders_a_coherent_section() {

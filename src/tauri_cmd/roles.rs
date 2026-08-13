@@ -33,7 +33,7 @@ pub struct RoleView {
     pub display_name: String,
     pub description_prompt: Option<String>,
     pub capabilities: Vec<String>,
-    /// `active` | `observer` | `on_demand`.
+    /// `active` | `on_mention` — see `storage::PARTICIPATION_MODES`.
     pub participation_mode: String,
     /// D8's model control. `None` = the role names no default and the invite
     /// has to choose one.
@@ -65,7 +65,7 @@ impl TryFrom<Role> for RoleView {
     /// array**, rather than rendering it as an empty checklist.
     ///
     /// The empty rendering is the trap: a role with no capabilities is a LEGAL
-    /// configuration — that is what an observer is — so a malformed column
+    /// configuration — a role that only watches — so a malformed column
     /// shown as "grants nothing" is indistinguishable from a role the user
     /// deliberately narrowed. Worse, saving that form back would write the
     /// misreading in as fact.
@@ -390,7 +390,7 @@ mod tests {
             display_name: "Code Reviewer".into(),
             description_prompt: Some("be terse".into()),
             capabilities: r#"["read_channel","file_finding"]"#.into(),
-            participation_mode: "observer".into(),
+            participation_mode: "on_mention".into(),
             default_model_id: Some("m1".into()),
             builtin: true,
             archived: true,
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(view.display_name, "Code Reviewer");
         assert_eq!(view.description_prompt.as_deref(), Some("be terse"));
         assert_eq!(view.capabilities, ["read_channel", "file_finding"]);
-        assert_eq!(view.participation_mode, "observer");
+        assert_eq!(view.participation_mode, "on_mention");
         assert_eq!(view.default_model_id.as_deref(), Some("m1"));
         assert!(view.builtin);
         assert!(view.archived);
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn a_malformed_capabilities_column_is_an_error_not_an_empty_checklist() {
-        // "No capabilities" is a legal role (an observer), so a malformed
+        // "No capabilities" is a legal role, so a malformed
         // column rendered as an empty list would be indistinguishable from a
         // deliberate one — and saving that form back would write the
         // misreading in as fact.
@@ -434,7 +434,7 @@ mod tests {
         let mut i = input("Reviewer");
         i.capabilities = vec!["read_channel".into(), "file_finding".into()];
         i.description_prompt = Some("be terse".into());
-        i.participation_mode = "observer".into();
+        i.participation_mode = "on_mention".into();
         i.default_model_id = Some("m1".into());
         let draft: RoleDraft = i.into();
         assert_eq!(draft.capabilities, r#"["read_channel","file_finding"]"#);
@@ -444,7 +444,7 @@ mod tests {
         // just typed and save the blank.
         assert_eq!(draft.display_name, "Reviewer");
         assert_eq!(draft.description_prompt.as_deref(), Some("be terse"));
-        assert_eq!(draft.participation_mode, "observer");
+        assert_eq!(draft.participation_mode, "on_mention");
         assert_eq!(draft.default_model_id.as_deref(), Some("m1"));
         // An empty grant list is a legal role, and must serialise to the
         // column's own default rather than to `null`.
@@ -581,7 +581,7 @@ mod tests {
         assert!(matches!(err, AppError::Validation(_)), "got {err}");
         // The ring filters on the exact string "active", so this role's
         // participants would be enabled, listed, and never handed a turn.
-        assert!(err.to_string().contains("on_demand"), "list them: {err}");
+        assert!(err.to_string().contains("on_mention"), "list them: {err}");
     }
 
     #[tokio::test]
@@ -601,12 +601,12 @@ mod tests {
 
         let mut edit = input("Code Reviewer");
         edit.default_model_id = Some("m1".into());
-        edit.participation_mode = "observer".into();
+        edit.participation_mode = "on_mention".into();
         let updated = storage.update_role(created.id, &edit.into()).await.unwrap();
         let view = RoleView::try_from(updated).unwrap();
         assert_eq!(view.slug, "code-reviewer", "an edit is not a rename");
         assert_eq!(view.default_model_id.as_deref(), Some("m1"));
-        assert_eq!(view.participation_mode, "observer");
+        assert_eq!(view.participation_mode, "on_mention");
 
         storage.set_role_archived(created.id, true).await.unwrap();
         let live: Vec<String> = storage

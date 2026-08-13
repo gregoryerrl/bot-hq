@@ -2652,7 +2652,7 @@ mod tests {
         /// onto `expect(n)`, and appending one duplicate wire to the end of
         /// every drain left all four green:
         /// `a_completed_turn_wakes_exactly_one_participant`,
-        /// `an_observer_is_skipped_not_given_a_no_op_turn`,
+        /// `a_summonable_participant_is_skipped_not_given_a_no_op_turn`,
         /// `a_participant_with_no_stdin_holds_the_turn_rather_than_losing_its_rows`
         /// and `a_backlog_past_the_batch_limit_is_drained_before_the_turn_is_handed_over`.
         /// With the [`QUIET`] window below, that same duplicate fails all four.
@@ -2948,12 +2948,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_observer_is_skipped_not_given_a_no_op_turn() {
-        // A wake that cannot produce output is pure waste, so the ring filters
-        // observers out rather than handing them a turn they end immediately.
+    async fn a_summonable_participant_is_skipped_not_given_a_no_op_turn() {
+        // A wake nobody asked for is pure waste, so the ring filters `on_mention`
+        // out rather than handing it a turn it ends immediately. The only thing
+        // that reaches one is the user naming it (rc3 D17), and this is the
+        // property that keeps a later change from putting it back in the
+        // rotation "so the summons has somewhere to land".
         let (deps, storage, mut seats) = ring(&[
             ("a", "active"),
-            ("watcher", "observer"),
+            ("watcher", "on_mention"),
             ("b", "active"),
         ])
         .await;
@@ -2981,7 +2984,7 @@ mod tests {
         assert_eq!(
             seats[2].expect(1).await,
             vec!["go"],
-            "the turn steps OVER the observer to the next active participant"
+            "the turn steps OVER the summonable one to the next active participant"
         );
         drop(tx);
         assert!(exited(task).await);
@@ -2989,7 +2992,7 @@ mod tests {
         assert_eq!(
             seats[1].drain(),
             nothing(),
-            "the observer sits between A and B in the rotation and must not be woken"
+            "the summonable one sits between A and B in ring order and must not be woken"
         );
     }
 
@@ -3938,18 +3941,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observers_do_not_vote() {
-        // Only the rotation votes. Observers and on-demand participants are
-        // skipped in it, so they never get a turn, so they can never declare
-        // done — count them and one active plus three watchers would need four
+    async fn the_summonable_do_not_vote() {
+        // Only the rotation votes. An `on_mention` participant is skipped in it,
+        // so it never gets a ring turn, so it can never declare done — count them and one active plus three watchers would need four
         // yields to halt, which is a session that never halts at all.
         //
         // One active and two non-voters here: consensus has to arrive on A's
         // single done.
         let (deps, storage, mut seats) = ring(&[
             ("a", "active"),
-            ("watcher", "observer"),
-            ("helper", "on_demand"),
+            ("watcher", "on_mention"),
+            ("helper", "on_mention"),
         ])
         .await;
         let a = seats[0].id;

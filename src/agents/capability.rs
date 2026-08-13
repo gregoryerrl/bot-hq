@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
     // ---- channel ----
-    /// Read the session channel. An observer has this and nothing else.
+    /// Read the session channel. A read-only role has this and nothing else.
     ReadChannel,
     /// Post to the session channel.
     PostChannel,
@@ -135,7 +135,7 @@ impl Capability {
     pub fn description(self) -> &'static str {
         use Capability::*;
         match self {
-            ReadChannel => "See the session's messages. An observer has this and nothing else.",
+            ReadChannel => "See the session's messages. A read-only role has this and nothing else.",
             PostChannel => "Speak in the session channel.",
             AskUser => "Put a multiple-choice question to the user (`ask_user_choice`).",
             ParkApproval => "Park a request for the user to approve (`request_approval`).",
@@ -255,7 +255,8 @@ impl CapabilitySet {
     ///
     /// `None` means the column is not a JSON array of strings at all. It is a
     /// separate answer from `Some(empty)` because the two must degrade
-    /// differently: an empty array is a real configuration (an observer), while
+    /// differently: an empty array is a real configuration (a role that watches
+    /// and nothing more), while
     /// a malformed column is a read failure, and rendering a prompt that denies
     /// everything on a read failure would tell an agent it cannot do things it
     /// demonstrably can.
@@ -322,7 +323,10 @@ impl CapabilitySet {
             );
         }
         if !self.contains(Capability::PostChannel) && self.contains(Capability::ReadChannel) {
-            out.push("observer: reads the session but can never respond".to_string());
+            // Not "observer" — rc3 D18 deleted the participation mode of that
+            // name, and a warning that reuses a retired mode's word reads as
+            // "you set this role to observer" when the user set no such thing.
+            out.push("read-only: this role sees the session but can never respond".to_string());
         }
         let executes = self.contains(Capability::EditFiles) || self.contains(Capability::RunBash);
         if executes && !self.contains(Capability::AskUser) {
@@ -383,8 +387,7 @@ impl CapabilitySet {
 /// # Why this is not `Option<CapabilitySet>`
 ///
 /// `None` and `Some(empty)` would both spell "holds nothing", and they must not.
-/// An empty set is a real configuration — an observer, deliberately granted
-/// nothing. An unreadable roster is a *read failure*, and the two want different
+/// An empty set is a real configuration — a role deliberately granted nothing. An unreadable roster is a *read failure*, and the two want different
 /// error text and different reasoning at the site.
 ///
 /// # Degradation: gated decisions fail CLOSED, and say why
@@ -696,10 +699,10 @@ mod tests {
 
         // A resolved-but-EMPTY set is a different thing: a real configuration
         // with no grants, and it must not claim to be a read failure.
-        let observer = ResolvedCapabilities::Known(CapabilitySet::default());
-        assert_eq!(observer.unreadable_reason(), None);
-        assert!(!observer.allows_tool("ask_user_choice"));
-        assert!(observer.allows_tool("pass_turn"));
+        let granted_nothing = ResolvedCapabilities::Known(CapabilitySet::default());
+        assert_eq!(granted_nothing.unreadable_reason(), None);
+        assert!(!granted_nothing.allows_tool("ask_user_choice"));
+        assert!(granted_nothing.allows_tool("pass_turn"));
     }
 
     #[test]

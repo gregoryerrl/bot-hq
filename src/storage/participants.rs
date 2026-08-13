@@ -32,7 +32,7 @@ pub struct Role {
     /// [`Storage::create_role`] only guarantees the SHAPE (a JSON array of
     /// strings), never that a slug names a capability that exists.
     pub capabilities: String,
-    /// `active` | `observer` | `on_demand` — see [`PARTICIPATION_MODES`].
+    /// `active` | `on_mention` — see [`PARTICIPATION_MODES`].
     pub participation_mode: String,
     /// The role's default model, overridable per participant at invite
     /// (`session_participants.model_id`). Both columns ship in 0044; rc3
@@ -80,7 +80,12 @@ pub struct RoleDraft {
     pub default_model_id: Option<String>,
 }
 
-/// The participation modes 0044's column comment defines, as data.
+/// The participation modes, as data. **Two, and both of them do something**
+/// (rc3 D18).
+///
+/// `active` is in the rotation. `on_mention` is not: it is spawned, skipped by
+/// the ring, and handed a turn only when the USER names it — one turn, then out
+/// again (rc3 D17).
 ///
 /// A guard rather than documentation because the value is compared as a STRING
 /// with no CHECK constraint behind it: `next_active_participant` filters the
@@ -89,7 +94,21 @@ pub struct RoleDraft {
 /// counted by `all_active_voted_done` — no, not even counted, since that filters
 /// on the same string — and simply never given a turn. The failure is a session
 /// that looks fully staffed and never advances, with nothing to grep for.
-pub const PARTICIPATION_MODES: [&str; 3] = ["active", "observer", "on_demand"];
+///
+/// **`observer` was the third and is gone** (rc3 D18). It was spawned, handed no
+/// turn, delivered nothing and could not vote — a subprocess that read nothing,
+/// said nothing and billed for existing. Its one defensible use, a role that
+/// watches and speaks rarely, is what `on_mention` is.
+pub const PARTICIPATION_MODES: [&str; 2] = ["active", "on_mention"];
+
+/// The mode a participant must be in to sit in the turn rotation.
+///
+/// Named because three places filter on it — the ring read, the vote tally and
+/// 0045's partial index — and a fourth would be written as a bare `"active"`.
+pub const MODE_ACTIVE: &str = "active";
+
+/// The mode that waits to be summoned. See [`PARTICIPATION_MODES`].
+pub const MODE_ON_MENTION: &str = "on_mention";
 
 /// The slug a role whose display name contains no ASCII alphanumerics falls
 /// back to. See [`slugify`] for why that case exists at all.
@@ -201,8 +220,10 @@ fn participant_from_row(r: &sqlx::sqlite::SqliteRow) -> Participant {
 /// way to test what the ring does with a roster the schema once permitted.
 ///
 /// `ring` is the active participants in `(turn_position, id)` order and nothing
-/// else; observers and disabled rows are filtered out by the caller, because a
-/// wake that cannot produce output is pure waste.
+/// else; `on_mention` and disabled rows are filtered out by the caller, because
+/// a wake nobody asked for is pure waste. An `on_mention` participant is reached
+/// by being SUMMONED — the sequencer hands it a turn directly (rc3 D17) — never
+/// by this step.
 ///
 /// **The step is by POSITION IN THE RING, not by `turn_position` value.** The
 /// old rule — the first member whose `turn_position` is strictly greater —
@@ -217,7 +238,8 @@ fn participant_from_row(r: &sqlx::sqlite::SqliteRow) -> Participant {
 /// CHECK permits — was outside the index and inside the ring, and a copy of the
 /// live database accepted exactly that duplicate. The predicate is `<> 0` now,
 /// which is the same test the decode performs. Widening the ring to include
-/// `on_demand` later is the same trap, one line away.
+/// `on_mention` — which is what "let the summoned one stay in the rotation"
+/// would mean — is the same trap, one line away.
 ///
 /// Stepping by ring index is what makes that a correctness question about the
 /// SCHEMA rather than about scheduling: whatever set the caller's filter
@@ -236,7 +258,8 @@ fn next_in_ring<'a>(
     match ring.iter().position(|p| p.id == current.id) {
         Some(i) => Some(ring[(i + 1) % ring.len()]),
         // `current` is not in the rotation: it was disabled or demoted to
-        // observer while it held the turn, so there is no place to step one
+        // `on_mention` while it held the turn — or it IS an `on_mention`
+        // participant that was summoned — so there is no place to step one
         // along FROM. Fall back to the first member sorting after where it sat,
         // in the ring's own `(turn_position, id)` order, and wrap when there is
         // none. Skipping straight to `ring[0]` instead would replay the first
@@ -379,7 +402,7 @@ fn first_free_slug(base: &str, taken: &HashSet<String>) -> String {
 /// The shape check still earns its place. `CapabilitySet::from_slugs` is a
 /// `filter_map` over `Capability::parse`, so a column holding `"[]"`, `"null"`,
 /// or a stray `{}` all decode to the same thing: a role with no capabilities,
-/// which is a legal configuration (an observer) and reads as intentional. A
+/// which is a legal configuration and reads as intentional. A
 /// write that stored the wrong TYPE would be indistinguishable from a user who
 /// meant to grant nothing.
 ///
@@ -770,7 +793,7 @@ impl Storage {
     /// **rc3 D10: the roster is derived from the user's ROLES, not from two
     /// literal `WHERE slug = 'hands' / 'eyes'` subqueries.** The default is every
     /// live role that takes turns (`archived = 0`, `participation_mode <>
-    /// 'on_demand'`), in `roles.id` order — the order the user created them —
+    /// 'on_mention'`), in `roles.id` order — the order the user created them —
     /// with the slug and the display name derived from each role by
     /// [`participant_slug`] and `roles.display_name`. On the seeded pair that is
     /// exactly today's roster in today's turn order (HANDS at slot 0, EYES at
@@ -823,7 +846,7 @@ impl Storage {
         // first.
         let rows = sqlx::query(&format!(
             "SELECT {ROLE_COLUMNS} FROM roles \
-             WHERE archived = 0 AND participation_mode <> 'on_demand' ORDER BY id"
+             WHERE archived = 0 AND participation_mode <> 'on_mention' ORDER BY id"
         ))
         .fetch_all(&self.pool)
         .await
@@ -1068,7 +1091,7 @@ impl Storage {
         // filter preserves ring order — which is what [`next_in_ring`] assumes.
         let ring: Vec<&Participant> = roster
             .iter()
-            .filter(|p| p.enabled && p.participation_mode == "active")
+            .filter(|p| p.enabled && p.participation_mode == MODE_ACTIVE)
             .collect();
         Ok(next_in_ring(&ring, current).cloned())
     }
@@ -1173,15 +1196,15 @@ impl Storage {
     /// and take a turn only if it says no. Reading `is_none()` as "done" instead
     /// would never halt a session that has participants in it.
     ///
-    /// The states that reach the empty-rotation case: an all-observer or
-    /// all-`on_demand` roster, a roster whose every active participant has been
+    /// The states that reach the empty-rotation case: an all-`on_mention`
+    /// roster, a roster whose every active participant has been
     /// disabled (what disabling the last agent produces), and a session with no
     /// roster yet, since `ensure_session_roster` only runs pre-spawn.
     pub async fn all_active_voted_done(&self, session_id: &str) -> Result<bool> {
         let roster = self.participants_for_session(session_id).await?;
         Ok(roster
             .iter()
-            .filter(|p| p.enabled && p.participation_mode == "active")
+            .filter(|p| p.enabled && p.participation_mode == MODE_ACTIVE)
             .all(|p| p.done_vote))
     }
 
@@ -2706,9 +2729,9 @@ mod tests {
             r#"["b","a","b"]"#
         );
         // The rejections. Each of these decodes to "no capabilities" through
-        // `CapabilitySet::from_slugs`, which is a LEGAL configuration (an
-        // observer) — so accepting them would make a malformed write
-        // indistinguishable from a deliberate one.
+        // `CapabilitySet::from_slugs`, which is a LEGAL configuration — so
+        // accepting them would make a malformed write indistinguishable from a
+        // deliberate one.
         for bad in ["null", "{}", r#""read_channel""#, "[1,2]", r#"["ok",3]"#, "nonsense"] {
             assert!(
                 canonical_capabilities(bad).is_err(),
@@ -2728,7 +2751,7 @@ mod tests {
         d.description_prompt = Some("be terse".into());
         d.default_model_id = Some("m1".into());
         d.capabilities = r#"[ "read_channel" , "file_finding" ]"#.into();
-        d.participation_mode = "observer".into();
+        d.participation_mode = "on_mention".into();
         let created = s.create_role(&d).await.unwrap();
 
         assert_eq!(created.slug, "code-reviewer");
@@ -2737,7 +2760,7 @@ mod tests {
         // D8: the Roles tab owns the default model, so this column has to
         // round-trip or the tab's model select is a control that does nothing.
         assert_eq!(created.default_model_id.as_deref(), Some("m1"));
-        assert_eq!(created.participation_mode, "observer");
+        assert_eq!(created.participation_mode, "on_mention");
         assert_eq!(created.capabilities, r#"["read_channel","file_finding"]"#);
         // A user-created role is not a bot-hq seed, whatever it is called.
         assert!(!created.builtin);
@@ -2887,7 +2910,7 @@ mod tests {
 
         let mut d = draft("Executor");
         d.capabilities = r#"[ "read_channel" ]"#.into();
-        d.participation_mode = "observer".into();
+        d.participation_mode = "on_mention".into();
         let updated = s.update_role(hands.id, &d).await.unwrap();
 
         // The edit lands, normalised the same way a create is — an update that
@@ -2895,10 +2918,10 @@ mod tests {
         // spelling of the same set.
         assert_eq!(updated.capabilities, r#"["read_channel"]"#);
         // And the mode is the caller's, not a default. Pinned here because
-        // demoting a role to `observer` is how the ring stops scheduling it:
+        // demoting a role to `on_mention` is how the ring stops scheduling it:
         // an update that ignored this would leave the role looking demoted in
         // the tab while its participants kept taking turns.
-        assert_eq!(updated.participation_mode, "observer");
+        assert_eq!(updated.participation_mode, "on_mention");
 
         // `update_role` does not touch `builtin` at all — the flag records
         // provenance and a save is not a provenance change. Since 0048 leaves
@@ -3168,7 +3191,7 @@ mod tests {
     #[test]
     fn a_participant_that_left_the_rotation_mid_turn_still_advances() {
         // The sequencer hands the turn to X and X is disabled (or demoted to
-        // observer) before it completes. `current` is then not IN the ring, so
+        // `on_mention`) before it completes. `current` is then not IN the ring, so
         // there is no "one place along" to step — the ring has to fall back to
         // the first member that sorts after it, and wrap when there is none.
         let a = ring_member(1, "a", 0);
@@ -3196,19 +3219,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_ring_skips_observers_and_wraps() {
+    async fn the_ring_skips_the_summonable_and_wraps() {
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
         s.insert_participant("s1", "a", "A", None, None, "[]", "active", 0).await.unwrap();
-        s.insert_participant("s1", "obs", "Obs", None, None, "[]", "observer", 1).await.unwrap();
+        s.insert_participant("s1", "adv", "Adv", None, None, "[]", "on_mention", 1).await.unwrap();
         s.insert_participant("s1", "c", "C", None, None, "[]", "active", 2).await.unwrap();
 
         // A user message resets to the first active participant.
         let first = s.next_active_participant("s1", None).await.unwrap().unwrap();
         assert_eq!(first.slug, "a");
-        // The observer is SKIPPED, not given a no-op turn.
+        // The `on_mention` participant is SKIPPED, not given a no-op turn. The
+        // only thing that reaches it is a summons (rc3 D17), and a summons does
+        // not come through here.
         let second = s.next_active_participant("s1", Some(&first)).await.unwrap().unwrap();
-        assert_eq!(second.slug, "c", "observer must not take a turn");
+        assert_eq!(second.slug, "c", "an on_mention participant must not take a ring turn");
         // The ring wraps.
         let third = s.next_active_participant("s1", Some(&second)).await.unwrap().unwrap();
         assert_eq!(third.slug, "a");
@@ -3234,10 +3259,10 @@ mod tests {
             "expected a uniqueness failure, got: {err:#}"
         );
 
-        // What it does NOT prevent, and must not: an observer at the same
-        // position, because an observer never takes a turn and its position is
-        // retained purely against a later promotion.
-        s.insert_participant("s1", "obs", "Obs", None, None, "[]", "observer", 0)
+        // What it does NOT prevent, and must not: an `on_mention` participant at
+        // the same position, because it never takes a RING turn and its position
+        // is retained purely against a later promotion.
+        s.insert_participant("s1", "adv", "Adv", None, None, "[]", "on_mention", 0)
             .await
             .unwrap();
         // …nor slot 0 of a different session. The slot is per session.
@@ -3340,12 +3365,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn consensus_needs_every_active_participant_and_ignores_observers() {
+    async fn consensus_needs_every_active_participant_and_ignores_the_summonable() {
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
         let a = s.insert_participant("s1", "a", "A", None, None, "[]", "active", 0).await.unwrap();
         let c = s.insert_participant("s1", "c", "C", None, None, "[]", "active", 1).await.unwrap();
-        s.insert_participant("s1", "obs", "O", None, None, "[]", "observer", 2).await.unwrap();
+        s.insert_participant("s1", "adv", "O", None, None, "[]", "on_mention", 2).await.unwrap();
 
         assert!(!s.all_active_voted_done("s1").await.unwrap());
         s.set_done_vote(a, true).await.unwrap();
@@ -3353,8 +3378,9 @@ mod tests {
         s.set_done_vote(c, true).await.unwrap();
         assert!(
             s.all_active_voted_done("s1").await.unwrap(),
-            "observers must not be required to vote — 1 active + 3 observers \
-             would otherwise need 4 yields to halt"
+            "an on_mention participant must not be required to vote — 1 active \
+             + 3 summonable would otherwise need 4 yields to halt, and three of \
+             them are never handed a turn to yield from"
         );
         // Any substantive output resets every vote.
         s.clear_done_votes("s1").await.unwrap();
@@ -4412,21 +4438,21 @@ mod tests {
         s.seed_session_roster("s1", &drafts).await.unwrap();
         // The second seed the SCHEMA cannot stop, which is what makes the guard
         // load-bearing rather than decorative: a fresh slug clears
-        // `UNIQUE (session_id, slug)`, and an observer is outside 0045's
-        // turn-slot index (`WHERE enabled <> 0 AND participation_mode =
+        // `UNIQUE (session_id, slug)`, and an `on_mention` role is outside
+        // 0045's turn-slot index (`WHERE enabled <> 0 AND participation_mode =
         // 'active'`), so both constraints let this through and the roster
         // quietly grows a third member.
-        let observer = s
+        let summonable = s
             .create_role(&RoleDraft {
                 display_name: "Watcher".into(),
                 capabilities: "[]".into(),
-                participation_mode: "observer".into(),
+                participation_mode: "on_mention".into(),
                 ..Default::default()
             })
             .await
             .unwrap();
         let third = ParticipantDraft {
-            role_id: observer.id,
+            role_id: summonable.id,
             ..Default::default()
         };
         assert!(
@@ -4580,7 +4606,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_with_no_active_participants_is_already_done() {
-        // An all-observer session must not wedge the sequencer on an unwrap —
+        // A session of nothing but summonable participants must not wedge the
+        // sequencer on an unwrap —
         // and must not wedge it on a SPIN either, which is what the two answers
         // used to add up to. `next_active_participant` said `None` (no turn to
         // hand out) and `all_active_voted_done` said `false` (not done), so a
@@ -4591,15 +4618,15 @@ mod tests {
         // are none — and usefully, because nobody left can produce output, so
         // waiting is waiting on nothing. The sequencer halts and waits for a
         // wake (a user message, a participant being enabled) rather than
-        // cycling. Reached by an all-observer or all-`on_demand` roster, by
-        // every active participant being disabled, and by a session with no
-        // roster yet — all four covered below or by the roster tests.
+        // cycling. Reached by an all-`on_mention` roster, by every active
+        // participant being disabled, and by a session with no roster yet — all
+        // three covered below or by the roster tests.
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
-        s.insert_participant("s1", "o", "O", None, None, "[]", "observer", 0).await.unwrap();
-        // `on_demand` too — skipped in the rotation, woken only when addressed,
-        // so a roster of nothing but these is also an empty rotation.
-        s.insert_participant("s1", "d", "D", None, None, "[]", "on_demand", 1).await.unwrap();
+        // `on_mention` is skipped in the rotation and woken only when the user
+        // summons it, so a roster of nothing but these is an empty rotation.
+        s.insert_participant("s1", "o", "O", None, None, "[]", "on_mention", 0).await.unwrap();
+        s.insert_participant("s1", "d", "D", None, None, "[]", "on_mention", 1).await.unwrap();
         assert!(s.next_active_participant("s1", None).await.unwrap().is_none());
         assert!(
             s.all_active_voted_done("s1").await.unwrap(),
@@ -4614,8 +4641,8 @@ mod tests {
         assert!(s.all_active_voted_done("s2").await.unwrap());
 
         // Disabling the last active participant is the same state, and it is the
-        // one a user can reach from the UI rather than by building an
-        // all-observer roster.
+        // one a user can reach from the UI rather than by building a roster of
+        // nothing but summonable participants.
         let a = s
             .insert_participant("s1", "a", "A", None, None, "[]", "active", 1)
             .await

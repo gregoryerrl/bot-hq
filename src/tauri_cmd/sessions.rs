@@ -193,12 +193,12 @@ pub(crate) async fn resolve_participant_picks(
                 role.display_name
             )));
         }
-        if role.participation_mode == "on_demand" {
-            // rc3 D1: an `on_demand` participant wakes on a user `@mention`,
-            // and that is not built. Inviting one produces a participant the
+        if role.participation_mode == "on_mention" {
+            // rc3 D1/D17: an `on_mention` participant wakes when the user names
+            // it, and that is not built. Inviting one produces a participant the
             // ring skips and nothing ever wakes.
             return Err(AppError::Validation(format!(
-                "role {} is on-demand, and waking one is not built yet",
+                "role {} is summoned by mention, and the summons is not built yet",
                 role.display_name
             )));
         }
@@ -223,9 +223,15 @@ pub(crate) async fn resolve_participant_picks(
         });
     }
     if !any_active {
-        // Every participant an observer is a session that can never take a
-        // turn: the ring is empty, so `all_active_voted_done` is vacuously
+        // A roster with nobody in the rotation is a session that can never take
+        // a turn: the ring is empty, so `all_active_voted_done` is vacuously
         // true and the session is "finished" before it starts.
+        //
+        // **Unreachable while the `on_mention` refusal above stands** — with two
+        // modes and one of them refused, every roster that gets here is
+        // all-active — and kept because rc3 D17 lifts that refusal, at which
+        // point an all-`on_mention` roster reaches this and must be caught. It
+        // is the guard for a state one decision away, not dead code.
         return Err(AppError::Validation(
             "at least one participant has to be in the turn rotation".into(),
         ));
@@ -256,7 +262,7 @@ pub struct ParticipantView {
     /// `null` when the participant has no model, or the model row is gone.
     pub model_display_name: Option<String>,
     pub turn_position: i64,
-    /// `active` | `observer` (| `on_demand`, which create refuses today).
+    /// `active` | `on_mention` (which create refuses today — see rc3 D17).
     pub participation_mode: String,
     pub enabled: bool,
     /// This participant's effort override (rc3 D12), or `null` to inherit.
@@ -314,7 +320,7 @@ pub struct ParticipantSystemPrompt {
 /// An enum rather than an `Option<&Path>` because the two empty cases are not
 /// the same news: a closed session's prompt file is gone by design (it lives in
 /// the session's `TempDir`), while a participant with no live agent was never
-/// spawned at all — a disabled or `on_demand` row, which is a roster fact the
+/// spawned at all — a disabled or `on_mention` row, which is a roster fact the
 /// user may not expect.
 pub(crate) enum PromptSource<'a> {
     /// No live handle for this session — closed, or not started since the app
@@ -1493,32 +1499,25 @@ mod tests {
             "a role id that names nothing"
         );
 
-        // rc3 D1: an on-demand participant wakes on a user @mention, and that
-        // is not built. Inviting one is inviting a participant nothing wakes.
-        // Paired with an ACTIVE participant on purpose — a lone on-demand
-        // roster is also caught by the empty-rotation check below, so it would
-        // not tell us whether this rule exists at all.
-        let on_demand = role_with_mode(&storage, "Specialist", "on_demand").await;
+        // rc3 D1/D17: an `on_mention` participant wakes when the USER names it,
+        // and the summons is not built. Inviting one is inviting a participant
+        // nothing wakes.
+        //
+        // Paired with an ACTIVE participant on purpose, and the error MESSAGE is
+        // asserted rather than `is_err()` alone: a lone `on_mention` roster also
+        // has an empty rotation, so a bare `is_err()` here would pass whichever
+        // of the two rules fired — including if this one were deleted.
+        let summonable = role_with_mode(&storage, "Specialist", "on_mention").await;
+        let refused = resolve_participant_picks(
+            &storage,
+            &[pick(hands.id, None), pick(summonable, None)],
+            &opts,
+        )
+        .await
+        .expect_err("summoning is not built yet, so inviting one must be refused");
         assert!(
-            resolve_participant_picks(&storage, &[pick(hands.id, None), pick(on_demand, None)], &opts)
-                .await
-                .is_err(),
-            "on-demand is not offered anywhere yet"
-        );
-
-        // An all-observer roster leaves the rotation empty, which
-        // `all_active_voted_done` reports as vacuously DONE — a session that is
-        // finished before it starts.
-        let observer = role_with_mode(&storage, "Watcher", "observer").await;
-        assert!(
-            resolve_participant_picks(&storage, &[pick(observer, None)], &opts).await.is_err(),
-            "nobody in the turn rotation"
-        );
-        assert!(
-            resolve_participant_picks(&storage, &[pick(hands.id, None), pick(observer, None)], &opts)
-                .await
-                .is_ok(),
-            "an observer alongside an active participant is a legal roster"
+            refused.to_string().contains("summoned by mention"),
+            "refused for the wrong reason: {refused}"
         );
 
         // The picker lists live roles only, so an archived pick means the

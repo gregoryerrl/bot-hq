@@ -279,11 +279,12 @@ impl SessionHandle {
 /// holds, minus two exclusions where the process would have nothing to do:
 ///   * `enabled = 0` — the row a solo session keeps for the participant it did
 ///     not invite, exactly as 0044 wrote it,
-///   * `participation_mode = 'on_demand'` — nothing wakes one yet (rc3 D1), so a
-///     subprocess would idle for the life of the session.
+///   * `participation_mode = 'on_mention'` — nothing wakes one yet (rc3 D1), so a
+///     subprocess would idle for the life of the session. **rc3 D17 flips this**:
+///     once the user can summon one by name, not spawning it is what breaks the
+///     summons.
 ///
-/// Observers ARE spawned: they read the channel and may post, they simply never
-/// receive a scheduled turn. `participants_for_session` already orders by
+/// `participants_for_session` already orders by
 /// `(turn_position, id)`, so the filter preserves turn order and the returned
 /// order IS the spawn order.
 ///
@@ -318,7 +319,7 @@ fn resolve_spawn_roster<'a>(
 ) -> Vec<&'a crate::storage::Participant> {
     let live: Vec<&crate::storage::Participant> = roster
         .iter()
-        .filter(|p| p.enabled && p.participation_mode != "on_demand")
+        .filter(|p| p.enabled && p.participation_mode != "on_mention")
         .collect();
     bridge.register_session_reviewers(
         session_id.to_string(),
@@ -2216,18 +2217,24 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_or_on_demand_participant_is_not_spawned() {
-        // The solo case: the row a session keeps for the participant it did not
-        // invite, exactly as 0044 wrote it. And rc3 D1's `on_demand`, which
-        // nothing wakes yet — a subprocess for one would idle for the life of
-        // the session.
+    fn a_disabled_or_summonable_participant_is_not_spawned() {
+        // Two rows with nothing to do, for two different reasons.
+        //
+        // `enabled = 0` is the row a session keeps for the participant it did
+        // not invite, exactly as 0044 wrote it. `on_mention` is the mode that
+        // sits out the rotation — and while nothing can summon one, a
+        // subprocess for it would idle for the life of the session.
+        //
+        // **The second half is what rc3 D17 changes**, and this test is where
+        // it will be measured: once a mention can hand an `on_mention`
+        // participant a turn, not spawning it is what makes the summons fail.
         let mut roster = vec![
             stub_participant(4, "hands", 0),
             stub_participant(7, "eyes", 1),
             stub_participant(9, "specialist", 2),
         ];
         roster[1].enabled = false;
-        roster[2].participation_mode = "on_demand".into();
+        roster[2].participation_mode = "on_mention".into();
         let bridge = SignalingBridge::new();
         assert_eq!(
             resolve_spawn_roster(&bridge, "s1", &roster)
@@ -2235,17 +2242,7 @@ mod tests {
                 .map(|p| p.slug.as_str())
                 .collect::<Vec<_>>(),
             ["hands"],
-            "a solo session spawns one agent and the on-demand row stays asleep"
-        );
-        // An observer IS spawned: it reads the channel and may post, it simply
-        // never receives a scheduled turn.
-        roster[2].participation_mode = "observer".into();
-        assert_eq!(
-            resolve_spawn_roster(&bridge, "s1", &roster)
-                .iter()
-                .map(|p| p.slug.as_str())
-                .collect::<Vec<_>>(),
-            ["hands", "specialist"]
+            "a solo session spawns one agent and the summonable row stays asleep"
         );
     }
 
