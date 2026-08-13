@@ -2874,6 +2874,56 @@ mod tests {
         );
     }
 
+    /// **The ring must reach its THIRD place.** Written after a live N=3 session
+    /// (`s-a0416b2a`, 2026-08-13) in which the third participant produced output
+    /// but received ZERO deliveries and never moved its cursor: the ring went
+    /// A → B and stopped there for the rest of the session.
+    ///
+    /// The gap that let it through is in the test above, not in the ring —
+    /// `a_completed_turn_wakes_exactly_one_participant` drives exactly ONE
+    /// completion and then asserts the third seat is silent, which is correct at
+    /// that instant and says nothing about whether the rotation can ever arrive.
+    /// Two seats were tested; the step between the second and the third was
+    /// tested by nothing.
+    #[tokio::test]
+    async fn the_rotation_reaches_every_place_not_just_the_first_two() {
+        let (deps, storage, mut seats) =
+            ring(&[("a", "active"), ("b", "active"), ("c", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, SequencerCommand::UserMessage).await; // epoch 1 → A
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        post(&storage, "participant", Some("a"), "from a").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(seats[1].expect(2).await, vec!["go", "from a"], "epoch 2 → B");
+
+        // The step nothing covered.
+        post(&storage, "participant", Some("b"), "from b").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(
+            seats[2].expect(3).await,
+            vec!["go", "from a", "from b"],
+            "epoch 3 → C: a three-place ring must reach its third place, carrying \
+             every unread row. A ring that stops at two is two agents and a spectator."
+        );
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
     #[tokio::test]
     async fn an_observer_is_skipped_not_given_a_no_op_turn() {
         // A wake that cannot produce output is pure waste, so the ring filters
