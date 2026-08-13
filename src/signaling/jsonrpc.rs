@@ -502,12 +502,35 @@ async fn call_tool(
         "pass_turn" => {
             // Realized in the duo pump, exactly like `peer_ack` above: the pump
             // observes THIS ToolUse and `sequencer::turn_ending` turns it into a
-            // `TurnEnding::Passed` at the flush (duo.rs::pump_agent). Nothing to
-            // do bridge-side, and deliberately so — whether the pass STANDS
-            // depends on text the agent may not have written yet, so a handler
-            // that acted here would be deciding on evidence it does not have.
+            // `TurnEnding::Passed` at the flush (duo.rs::pump_agent). Whether the
+            // pass STANDS depends on text the agent may not have written yet, so
+            // this handler does not decide that.
             //
             // Ungated: every participant that can hold a turn can decline one.
+            //
+            // **What it DOES decide is repetition** (rc3 D25). One turn carries
+            // at most one pass; the first already recorded the whole of what a
+            // pass says, so a second is incoherent rather than merely redundant.
+            // Answering it with the same cheerful acknowledgment is what let a
+            // participant call this 141 times in eight minutes in `s-a4e9a1b4`,
+            // at one real model call each.
+            let n = bridge.record_pass(&caller.session_id, &caller.agent);
+            if n > 1 {
+                tracing::warn!(
+                    session_id = %caller.session_id,
+                    agent = %caller.agent,
+                    passes = n,
+                    "pass_turn called again in a turn that already passed; refusing"
+                );
+                return Ok(ToolCallResult::error(format!(
+                    "your pass is ALREADY recorded for this turn — this is call {n}. \
+                     Calling it again cannot change anything, and repeating it burns a \
+                     model call per attempt. STOP CALLING TOOLS AND END YOUR TURN: \
+                     write nothing further and let the turn close. The ring hands you \
+                     the next one when it comes round. If you believe you are stuck in \
+                     a loop, you are — end the turn."
+                )));
+            }
             Ok(ToolCallResult::text(
                 "pass noted — your turn is recorded as a pass and moves on. It counts \
                  toward nothing: a session settles when its participants say they are \
@@ -2174,6 +2197,98 @@ mod tests {
                 "pass_turn must be allowed for {agent}"
             );
         }
+    }
+
+    /// rc3 **D25**: the SECOND pass in one turn is refused.
+    ///
+    /// A pass is the turn ending, so a turn carries at most one. The second is
+    /// incoherent rather than merely redundant — the first already recorded the
+    /// whole of what a pass says — and answering it with the same cheerful
+    /// acknowledgment is what let a participant call it 141 times in eight
+    /// minutes in `s-a4e9a1b4`, one real model call each.
+    ///
+    /// **The round cap cannot substitute for this.** The cap counts LAPS of the
+    /// ring, so a participant looping inside ONE turn — which is what a turn that
+    /// never ends produces — spends model calls while the counter that is meant
+    /// to bound it stays at zero. The only thing that stopped the live one was
+    /// the user watching the screen.
+    #[tokio::test]
+    async fn a_second_pass_in_one_turn_is_refused() {
+        let bridge = SignalingBridge::new();
+        let c = caller();
+        let pass = || {
+            dispatch(
+                req("tools/call", json!({"name": "pass_turn", "arguments": {}}), 1),
+                &c,
+                &bridge,
+            )
+        };
+        let first = serde_json::to_value(pass().await.unwrap().unwrap()).unwrap();
+        assert_eq!(first["result"]["isError"], json!(false), "the first pass stands");
+
+        let second = serde_json::to_value(pass().await.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            second["result"]["isError"],
+            json!(true),
+            "a turn carries at most one pass"
+        );
+        let text = second["result"]["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("ALREADY recorded"),
+            "the refusal has to say WHY, or the agent reads it as a transient \
+             failure and retries: {text}"
+        );
+
+        // A third is refused too, and the count keeps rising — the message names
+        // which attempt this is, so a looping agent reads an escalating number
+        // rather than the same sentence forever.
+        let third = serde_json::to_value(pass().await.unwrap().unwrap()).unwrap();
+        let text3 = third["result"]["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(text3.contains("call 3"), "the attempt count is visible: {text3}");
+    }
+
+    /// The counter is per PARTICIPANT and per TURN, not per session.
+    #[tokio::test]
+    async fn one_participants_pass_does_not_spend_anothers() {
+        let bridge = SignalingBridge::new();
+        for c in [caller(), rain_caller()] {
+            let v = serde_json::to_value(
+                dispatch(
+                    req("tools/call", json!({"name": "pass_turn", "arguments": {}}), 1),
+                    &c,
+                    &bridge,
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                v["result"]["isError"],
+                json!(false),
+                "{} passes for the first time in its own turn",
+                c.agent
+            );
+        }
+        // And a new turn restores it — which is what the ring calls at handover.
+        let c = caller();
+        bridge.clear_passes(&c.session_id, &c.agent);
+        let v = serde_json::to_value(
+            dispatch(
+                req("tools/call", json!({"name": "pass_turn", "arguments": {}}), 1),
+                &c,
+                &bridge,
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            v["result"]["isError"],
+            json!(false),
+            "a fresh turn carries a fresh pass"
+        );
     }
 
     #[tokio::test]

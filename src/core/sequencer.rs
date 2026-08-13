@@ -1917,6 +1917,12 @@ async fn start_turn(
     let Some(to) = holder.as_ref() else {
         return;
     };
+    // A new turn, so a new pass is legitimate again (rc3 D25). Cleared HERE
+    // rather than when the participant passes, because the count has to survive
+    // a turn that never ends — which is precisely the state it exists to bound.
+    if let Some(bridge) = deps.bridge.as_ref() {
+        bridge.clear_passes(&deps.session_id, &to.slug);
+    }
     // Publish BEFORE the rows go out. The pump snapshots on its turn's first
     // event, and that event cannot happen until the agent has read something —
     // so writing first is what makes the snapshot see this turn's epoch rather

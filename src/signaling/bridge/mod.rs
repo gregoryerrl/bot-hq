@@ -311,6 +311,19 @@ pub struct SignalingBridge {
     /// Latest emitted WORKING badge state per session (dedupe registry +
     /// `get_session_runtime` seed), exactly mirroring `session_attention`.
     session_working: std::sync::Mutex<HashMap<String, String>>,
+    /// `session_id:slug` → how many times that participant has called
+    /// `pass_turn` in the turn it currently holds (rc3 **D25**).
+    ///
+    /// **A turn carries at most one pass, and the second is incoherent by
+    /// construction**: the first already recorded the whole of what a pass says.
+    /// Counted here rather than in the pump because the refusal has to reach the
+    /// AGENT, and the tool result is the only thing it reads synchronously.
+    ///
+    /// Cleared when the ring starts a turn for that participant, so the count is
+    /// per-turn rather than per-session. It deliberately does NOT clear on
+    /// anything the participant itself does — a wedged turn that never ends is
+    /// exactly when this has to keep refusing.
+    turn_passes: std::sync::Mutex<HashMap<String, u32>>,
     /// session_id → Weak ref to the session's ActivityTracker. Lets
     /// `set_session_awaiting` reflect an awaiting-flag flip into the derived
     /// activity immediately (emit AwaitingUser) instead of waiting for the next
@@ -442,6 +455,7 @@ impl SignalingBridge {
             session_attention: std::sync::Mutex::new(HashMap::new()),
             session_working_flag: Mutex::new(HashMap::new()),
             session_working: std::sync::Mutex::new(HashMap::new()),
+            turn_passes: std::sync::Mutex::new(HashMap::new()),
             session_open_blocking: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -548,6 +562,36 @@ impl SignalingBridge {
                 );
             }
         }
+    }
+
+    /// Record a `pass_turn` and say how many this participant has now made in
+    /// the turn it holds (rc3 **D25**). `1` is the first and is legitimate.
+    ///
+    /// **The bound exists because the round cap cannot see this.** The cap counts
+    /// LAPS of the ring, so a participant looping inside ONE turn — which is what
+    /// a stale-epoch turn that never ends produces — spends real model calls
+    /// while the counter it is supposed to trip stays at zero. Measured in
+    /// `s-a4e9a1b4` on 2026-08-13: 141 `pass_turn` calls in the eight minutes
+    /// after the last handover, one every two seconds, and the only thing that
+    /// stopped it was the user watching.
+    pub fn record_pass(&self, session_id: &str, agent: &str) -> u32 {
+        let mut map = self
+            .turn_passes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let n = map.entry(format!("{session_id}:{agent}")).or_insert(0);
+        *n += 1;
+        *n
+    }
+
+    /// Forget a participant's pass count — called by the ring when it hands that
+    /// participant a turn, which is the only event that makes a new pass
+    /// legitimate.
+    pub fn clear_passes(&self, session_id: &str, agent: &str) {
+        self.turn_passes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&format!("{session_id}:{agent}"));
     }
 
     /// Whether a turn ring is reachable for this session — the observable half
