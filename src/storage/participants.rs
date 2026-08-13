@@ -1124,6 +1124,52 @@ impl Storage {
         }
     }
 
+    /// Record how many laps of the ring this uninterrupted stretch has
+    /// completed.
+    ///
+    /// `sessions.round_number` has existed since 0044 with **no writer at all** —
+    /// `MAX(round_number)` was 0 across every session ever recorded. Exactly the
+    /// shape [`set_current_turn`](Self::set_current_turn) found and closed for
+    /// `current_turn_participant_id`, and closed the same way rather than by
+    /// dropping the column: 0044 is applied and immutable, so removing it costs
+    /// a new migration, and a lap count is the one number that says how far an
+    /// unattended run actually got.
+    ///
+    /// **The stretch, not the session's lifetime.** It counts what
+    /// `run_sequencer`'s `laps` counts, because it is written from it and from
+    /// nowhere else — including the reset a user message performs. A column that
+    /// tracked laps-ever and a cap that tracked laps-this-stretch would be two
+    /// numbers with one name.
+    ///
+    /// Best-effort, like the turn holder: a failed write costs a UI hint and a
+    /// post-hoc reading, never a turn.
+    pub async fn set_round_number(&self, session_id: &str, round: u32) {
+        if let Err(e) = sqlx::query("UPDATE sessions SET round_number = ? WHERE id = ?")
+            .bind(round)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+        {
+            tracing::warn!(session_id, round, ?e, "recording the round number failed");
+        }
+    }
+
+    /// Read back what [`set_round_number`](Self::set_round_number) wrote.
+    ///
+    /// Deliberately its own query rather than a field on [`Session`]: adding one
+    /// there means `SESSION_COLUMNS`, every `query_as::<_, Session>` site and the
+    /// generated TS bindings, which is a wider change than a lap count needs.
+    /// A missing session reads as 0 — the column's own default, and the same
+    /// answer as a session that has not completed a lap.
+    pub async fn round_number(&self, session_id: &str) -> Result<u32> {
+        let row: Option<(i64,)> = sqlx::query_as("SELECT round_number FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await
+            .context("reading the round number")?;
+        Ok(row.map(|(n,)| n.max(0) as u32).unwrap_or(0))
+    }
+
     pub async fn next_active_participant(
         &self,
         session_id: &str,

@@ -1777,6 +1777,10 @@ async fn advance_turn(
         // total, and why a cap that could not be released would be worse than
         // no cap at all.
         *laps = 0;
+        // The column follows the counter, here and at the increment below, and
+        // nowhere else — so `sessions.round_number` cannot drift from the number
+        // the round cap is actually measuring.
+        deps.storage.set_round_number(&deps.session_id, *laps).await;
         if let Err(e) = deps.storage.clear_done_votes(&deps.session_id).await {
             warn!(
                 session = %deps.session_id,
@@ -1894,6 +1898,7 @@ async fn advance_turn(
             };
             if wrapped {
                 *laps += 1;
+                deps.storage.set_round_number(&deps.session_id, *laps).await;
                 let cap = round_cap_laps(deps);
                 // `0` is off, and it is tested BEFORE the comparison rather than
                 // folded into it: `*laps >= 0` is true on the very first lap, so
@@ -6485,6 +6490,65 @@ mod tests {
         // deleted.
         seats[0].quiet().await;
         seats[1].quiet().await;
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// `sessions.round_number` is written, and written from the ring's own lap
+    /// counter.
+    ///
+    /// The column has existed since migration 0044 with **no writer at all** —
+    /// `MAX(round_number)` was 0 across every session ever recorded when this
+    /// was found (2026-08-13), the same shape `current_turn_participant_id` had
+    /// before D19b. A column nobody writes is worse than no column: it reads as
+    /// an answer.
+    ///
+    /// Driven through the real loop rather than by calling the setter, because
+    /// the claim is that the COUNTER reaches the column. Calling
+    /// `set_round_number` in a test and asserting it round-trips would pass with
+    /// both call sites in `advance_turn` deleted — the CL's "test the WIRE, not
+    /// the halves" rule, which this codebase has paid for five times.
+    #[tokio::test]
+    async fn a_lap_of_the_ring_is_recorded_on_the_session() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        assert_eq!(
+            storage.round_number("s1").await.unwrap(),
+            0,
+            "a user message starts a stretch at zero laps"
+        );
+
+        // A -> B is mid-lap; B -> A wraps and closes lap 1.
+        let _ = lap_step(&storage, &tx, &mut seats[1], a, 1, "t1").await;
+        assert_eq!(
+            storage.round_number("s1").await.unwrap(),
+            0,
+            "moving forward through the ring is not a lap"
+        );
+        let _ = lap_step(&storage, &tx, &mut seats[0], b, 2, "t2").await;
+        assert_eq!(
+            storage.round_number("s1").await.unwrap(),
+            1,
+            "the ring wrapped, so the column says one lap"
+        );
+
+        // A user message begins a new stretch, and the column follows the
+        // counter back down rather than holding a lifetime total.
+        post(&storage, "user", None, "new instruction").await;
+        send(&tx, user_message()).await;
+        let _ = seats[0].woken().await;
+        assert_eq!(
+            storage.round_number("s1").await.unwrap(),
+            0,
+            "the count belongs to the stretch, exactly as the round cap's does"
+        );
 
         drop(tx);
         assert!(exited(task).await);
