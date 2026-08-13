@@ -18,6 +18,61 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-13 — a participant has a name, and its peers read it (rc3 D20)
+
+D20's remaining half. The ordinal shipped earlier and made two reviewers of one
+role distinguishable — `EYES` and `EYES-2` — but it still says nothing about
+which is which, which is the complaint it was answering. A name does.
+
+**Migration 0053 copies 0052's shape**, including the roster-parity tripwire that
+one had to satisfy: `session_participants` grew a column, so the pinned column
+list in `n_of_two_is_byte_identical_to_the_default_roster` had to grow with it or
+the dialog's creation path and the driver's could quietly diverge. Verified by
+removing `"label"` from the list and watching that test fail by name.
+
+The label replaces the role-and-ordinal half of the displayed name **and nothing
+else** — the model suffix survives, because what a participant runs is a
+different fact from what the user called it, and D8's per-participant model
+picker exists to make that visible. Blank and whitespace fall back to the
+ordinal rather than rendering an empty byline; the dialog sends `null` rather
+than `""`, so an untouched field and a cleared one mean the same thing. Left
+unvalidated, as `color` is: the fallback is total, so an unusable label costs the
+override and never the participant.
+
+**And the label is what peers read.** Shipping it into the roster while the wire
+kept the slug would have fixed the confusion for the user and left every
+participant reading the numbers — the same complaint, one layer down. The
+`[speaker]` D23 puts on the wire is now the label when there is one, resolved at
+READ time by a LEFT JOIN in `channel_page`. Read-time is the right way round and
+matches `color`: renaming a participant re-labels what it already said, because
+the transcript shows who that participant IS rather than a snapshot of what it
+was called that minute. The join is LEFT, not INNER, for the reason the exclusion
+clause beside it already documents — `user` and `system` rows carry no
+participant, and an inner join would drop every user message and every host
+injection from every backlog.
+
+Neither `user` nor `system` takes a label, and that is not an omission: a label
+names a participant, and an agent that reads a host notice as the user has been
+handed a fabricated instruction (D23).
+
+The write path needed no change at all, which is provable rather than assumed:
+every caller that DELIVERS a write-time receipt posts as `system` or `user`
+(`watchdog.rs:357`, `state.rs:779`/`:1176`, `broadcast.rs:47`). Participant rows
+are written by the output pump (`duo.rs:404`), which only notifies — its peers
+read the row back through the ring.
+
+**`@mention` resolves a label too**, or the label would have broken the property
+`speaker_of`'s own doc rests on: *"a participant reading `[eyes-2]` is reading
+the string the user would type to summon it."* The slug is tried first and wins
+outright — it is the key, unique by constraint and unchangeable — so renaming one
+participant cannot silently redirect summons meant for another. A label that is
+not mention-shaped simply is not typeable as a mention, and the slug still is.
+
+Mutation-verified: dropping the label from the receipt reddens
+`a_labelled_participant_says_its_name_on_the_wire` and nothing else.
+
+---
+
 ## 2026-08-13 — two columns and a decision that nobody could read back
 
 **The close-out learnings epilogue had never run — not once, in any session.**
