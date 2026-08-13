@@ -11,6 +11,7 @@ import { useContextStore } from "../stores/context";
 import { useDragResize } from "../hooks/useDragResize";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
+import { HaltBanner, type TrayRow } from "../components/HaltBanner";
 import { ChatPane } from "../components/ChatPane";
 import { DocumentPane } from "../components/DocumentPane";
 import { type Phase } from "../components/PhasePill";
@@ -108,6 +109,12 @@ export function SessionView() {
   // the key → `ROLE · Model` index every author-keyed surface below resolves
   // through (the turn-status line, and the roster row itself).
   const { participants, labels, hues } = useParticipantLabels(sessionId);
+
+  // rc3 D30: why the session stopped, rendered above the input box. Same query
+  // key the tray tab uses, so answering anywhere invalidates both.
+  const { data: trayRows = [] } = useTauriQuery<TrayRow[]>("list_session_tray", {
+    sessionId,
+  });
 
   // Respawn agents on mount. Idempotent — `ensure_session_started` is a no-op
   // if the session's agents are already running. Reads each agent's stored
@@ -629,6 +636,11 @@ export function SessionView() {
           <ChatPane sessionId={sessionId} />
 
           <div className="border-t border-outline-variant">
+            {/* rc3 D30: the halt sits ABOVE the box that answers it. */}
+            <HaltBanner
+              rows={trayRows}
+              label={(agent) => authorLabel(agent, labels)}
+            />
             {/* key remounts the input per session so the draft seed (a lazy
                 initializer) re-runs — without it, switching sessions would
                 carry session A's text into session B. */}
