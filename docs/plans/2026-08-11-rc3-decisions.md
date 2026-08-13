@@ -932,3 +932,64 @@ unchanged in every build, and is what the delivery-order work would address.
 **Still true, and now the largest open item:** the user's message arrives buried
 3 times in 4, including row 8 of 8. D23's label makes it identifiable; only
 coalescing makes it last.
+
+### D27–D30 — the session that force-closed, and everything it exposed
+
+Shipped 2026-08-14 after `s-8ac0d2d0` was force-closed four minutes in. One
+report — *"they volley on boot, that's why I had to stop"* — turned out to sit on
+top of four separate defects.
+
+**What actually happened, in order:** boot completed with no task given, so the
+ring dealt turn one into a session with nothing to do. A participant handed a
+turn with nothing to do can only pass — **and its pass is a row**, so the next
+participant's turn delivers it, and that one passes too. Every pass generates the
+input for the next, so the ring never runs out of something to hand over and
+never converges. 23 provider calls in 77 seconds, ~240 KB each, producing
+`(passed — nothing to add this round)`. The only floor was the 500-lap round cap:
+over five hours.
+
+The user pressed Stop, which SIGKILLed the agents, which made the session stale,
+so the next message respawned it — and a respawn re-ran boot. Three boots in four
+minutes. *"what, its still on boot phase?"*
+
+| | |
+|---|---|
+| **D27** | a lap of nothing but passes yields to the user |
+| **D28** | responding is ONE event: release the ring and clear the halt row |
+| **D29** | boot ends by yielding, not by kicking; no boot on a respawn; input locked while orienting; the duplicate CL opener dropped |
+| **D30** | the halt renders above the input box, as a recap |
+
+**D28 is the one with the longest tail.** Three paths mean "the user responded" —
+typed message, answered tray card, phase advance — and each did a different
+subset. Answering a tray card released the ring and never cleared the halt row.
+**52 occasions in the archive** where a second tray row opened while the first was
+unanswered; the worst, one row sitting under six more for 53 minutes. The user
+had reported it (*"answering a question didn't clear a halt, so they parked
+another"*); I checked and said it had never happened, because I queried what was
+pending NOW and every resolved pile-up was invisible to that. The report was
+right and the method was wrong.
+
+It is the third bug of this exact shape: a halt shipped with no release (D19), a
+health verdict that reached the UI but no record (D26), a release with no clear.
+**One event, two halves, N call sites, nothing making them travel together.** The
+test does not check that each path clears the halt — each path looked fine alone.
+It checks that exactly one place *can*.
+
+**What the tests said when the condition was wrong.** D27's first cut yielded on
+"nobody produced substantive output", which broke six tests: it also caught laps
+containing `Done` votes and would have pre-empted the arrival the consensus tally
+exists to reach. Narrowed to nothing-but-passes, two remained, and both changed
+SUBJECT rather than expectation — an all-pass ring does still never halt *by
+consensus*, and an identical pass is still not a spin, though that one now needs
+N=2 because at N=1 every turn is a whole lap.
+
+**And one assertion of mine was wrong in a way worth keeping:** a dropped kick
+CLOSES its channel, so `recv` returns `None` immediately rather than timing out.
+`is_err()` passes for a merely-slow sender and fails for the behaviour being
+pinned.
+
+**Still open.** The general mid-turn input lock (`c13fcdb`) remains a band-aid:
+it closes the box whenever a turn is in flight, which is why Stop was the only
+way to speak. Buffering — hold the message, deliver it at the next turn boundary
+— gives the box back and removes the reason to press Stop at all. D29 removes the
+boot loop that made it painful; it does not make the lock right.

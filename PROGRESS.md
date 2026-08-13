@@ -288,6 +288,45 @@ passing while covering nothing. It now posts three pages.
 
 ---
 
+## 2026-08-14 — a session with no task deals no turns (rc3 D27–D30)
+
+`s-8ac0d2d0` was force-closed four minutes in. The report was "they volley on
+boot"; underneath it were four defects.
+
+**The volley.** Boot finished before a task existed, and the ring dealt turn one
+anyway. A participant with nothing to do can only pass, **and a pass is a row** —
+so it becomes the next participant's input, and that one passes too. The ring
+never runs out of something to hand over and never converges: 23 provider calls
+in 77 seconds, ~240 KB each, to produce "(passed — nothing to add this round)".
+The only floor was the 500-lap round cap, five hours away. Boot now ends by
+yielding: the ring is spawned and idle, and the user's first message starts it
+with something real in the backlog.
+
+**The boot loop.** Stopping the volley SIGKILLed the agents, which made the
+session stale, so the next message respawned it — and a respawn re-ran boot.
+Three boots in four minutes, ~60k tokens per participant each time, and no way to
+speak without triggering another. Boot now runs only on a first spawn; a reopen
+resumes with its bearings already loaded, which the agents said themselves.
+
+**Halts that never cleared.** Three code paths mean "the user responded" and each
+did a different subset — answering a tray card released the ring and left the
+halt row pending for ever. 52 occasions in the archive; the worst, one row under
+six more for 53 minutes. The user reported it; I checked and said it had never
+happened, having queried what was pending *now* rather than what had ever
+overlapped. Both halves ride one function now, and the test pins that exactly one
+place can do either.
+
+**And the halt moved to where you answer it** — above the input box, as a recap
+of what the session needs, one line per blocked participant. That is the user's
+design, and it is aimed at the question that has cost the most time all week:
+"why is it stopped?"
+
+Also: the input locks while participants orient, and the session-start CL opener
+no longer fires when boot ran — it repeated the primer, and it was the row that
+seeded the first pass.
+
+---
+
 ## 2026-08-13 — the wire says who spoke, and a straggler can no longer wedge a session (rc3 D22–D24)
 
 Three fixes, all found by running real sessions and reading what they left behind
