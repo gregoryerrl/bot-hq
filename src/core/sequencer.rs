@@ -1923,6 +1923,24 @@ async fn advance_turn(
                     "sequencer: the rotation reached a participant waiting on the user; \
                      the cycle yields"
                 );
+                // **Take the handover back, flag included** (rc3 D31).
+                //
+                // `hand_over` has already run `hand_turn_to`, which records the
+                // holder AND marks it busy — one event, deliberately. So by the
+                // time this check fires, the participant we are about to refuse
+                // a turn is marked as working. Nothing would ever clear it: the
+                // pump clears its own flag at ITS turn end, and this participant
+                // never receives a turn to end.
+                //
+                // Left standing it reads as a session that is halted and working
+                // at the same time — reported from `s-382d3d18`, where the banner
+                // said "waiting on your answer" directly above "HANDS is working
+                // — the turn hasn't ended yet", and the stall watchdog then
+                // called HANDS `stalled` 90 seconds later because `busy` is a
+                // precondition of that verdict.
+                if let (Some(activity), Some(p)) = (&deps.activity, next.as_ref()) {
+                    activity.set_busy_slug(&p.slug, false);
+                }
                 halt(holder, epoch);
                 return;
             }
@@ -3417,6 +3435,32 @@ mod tests {
         (deps, storage, seats)
     }
 
+    /// [`ring`], wired to a real [`ActivityTracker`] so the busy flag — the one
+    /// the input lock and the stall watchdog both read — is observable.
+    ///
+    /// The default `ring` passes `activity: None`, which is why a whole class of
+    /// defect was invisible to this file: the ring can mark a participant busy
+    /// and every test still passes, because no test had a tracker to look at.
+    async fn ring_with_activity(
+        roster: &[(&str, &str)],
+    ) -> (
+        SequencerDeps,
+        Storage,
+        Vec<Seat>,
+        Arc<crate::core::ActivityTracker>,
+    ) {
+        let (mut deps, storage, seats) = ring(roster).await;
+        let bridge = crate::signaling::SignalingBridge::new();
+        let activity = crate::core::ActivityTracker::new(
+            "s1".to_string(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bridge,
+            roster.iter().map(|(slug, _)| slug.to_string()).collect(),
+        );
+        deps.activity = Some(Arc::clone(&activity));
+        (deps, storage, seats, activity)
+    }
+
     /// A stdin that arrives AFTER the task was spawned, as
     /// [`SequencerCommand::ParticipantJoined`] carries one: the input to send
     /// and the seat that reads it.
@@ -4654,6 +4698,56 @@ mod tests {
     /// always has something unread and is always woken. An all-pass ring is
     /// therefore not self-limiting through an empty backlog either — it is a
     /// real spend, which is precisely why the cap is owed.
+    /// rc3 **D31**: a refused handover takes its busy flag back with it.
+    ///
+    /// `hand_over` runs `hand_turn_to`, which records the holder AND marks it
+    /// busy — deliberately one event. The D22 blocked-check fires AFTER that, so
+    /// the participant being refused a turn has already been marked as working,
+    /// and nothing would ever clear it: the pump clears its own flag at ITS turn
+    /// end, and this participant never receives a turn to end.
+    ///
+    /// Reported from `s-382d3d18` as a session that claimed both states at once
+    /// — the halt banner reading "waiting on your answer" directly above "HANDS
+    /// is working — the turn hasn't ended yet". Ninety seconds later the stall
+    /// watchdog called HANDS `stalled`, because `busy` is a precondition of that
+    /// verdict, so a cosmetic-looking lie became a health verdict.
+    #[tokio::test]
+    async fn a_handover_refused_to_a_blocked_participant_leaves_nobody_marked_working() {
+        let (deps, storage, mut seats, activity) =
+            ring_with_activity(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        assert!(activity.is_busy_slug("a"), "the holder is marked working");
+
+        // A parks a question: D22 ends ITS turn and the ring carries on to B.
+        send(&tx, parked_by(a)).await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"], "the lap continues");
+        assert!(activity.is_busy_slug("b"), "B holds the turn now");
+
+        // B finishes, so the rotation comes back to A — which is blocked. The
+        // cycle yields, and A must not be left marked as working.
+        post(&storage, "system", None, "host note").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: SPOKE },
+        )
+        .await;
+        seats[0].quiet().await;
+
+        assert!(
+            !activity.is_busy_slug("a"),
+            "the ring refused A a turn, so it must not be left marked as working — \
+             this is the session that read as halted and working at once"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
     /// rc3 **D27** — a full lap of passes yields to the user.
     ///
     /// The bug this closes cost real money in `s-8ac0d2d0`: boot finished before
