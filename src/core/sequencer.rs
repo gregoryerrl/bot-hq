@@ -2321,11 +2321,25 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Hando
 /// sites (the summons, the ring step) are now one line each, so a future edit
 /// cannot move one half without the other.
 ///
-/// `None` is a HALT — consensus, a parked question, the round cap — and it marks
-/// nobody, deliberately. The pump has already cleared the participant that just
-/// finished, so recording no holder leaves every flag clear, the session derives
-/// `Idle`, and the input unlocks. **That is the unlock condition, and it needs no
-/// code of its own.**
+/// `None` marks nobody, deliberately — but **be exact about when it is
+/// reached**, because an earlier draft of this comment was not. It said `None`
+/// is "a HALT — consensus, a parked question, the round cap", and that is
+/// FALSE: [`halt`] only clears the local holder and bumps the epoch, it never
+/// calls this. The one reachable `None` is [`hand_over`]'s nobody-active arm.
+///
+/// The consequence is a live gap this function does not close: after a real
+/// halt `sessions.current_turn_participant_id` still names the last holder, so
+/// a yielded session reads as working in the UI. Same shape as D7's capped-halt
+/// row and item 4A's silent skip arms — an ending state indistinguishable from
+/// a different one. Closing it means threading `deps` into `halt` and calling
+/// this with `None` there; noted rather than done, because it is the same
+/// "a yield must say it yielded" change the idle-nudge work needs.
+///
+/// The INPUT LOCK is unaffected either way, and that is worth separating: the
+/// pump clears each participant's busy flag at its own turn end, so after a halt
+/// every flag is clear, the session derives `Idle`, and the input unlocks. That
+/// is the unlock condition and it needs no code of its own —
+/// `a_halt_leaves_nobody_busy` pins it.
 ///
 /// **This closes a wedge, not just a cosmetic lock.** A message typed while a
 /// turn is in flight lands on the holder's stdin mid-turn; the pump binds its
@@ -3678,19 +3692,14 @@ mod tests {
             "the ring stepped, so the column steps with it"
         );
 
-        // A halt hands nobody the turn, and the column has to say so — a stale
-        // id here reads as "B is working" forever.
-        send(
-            &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: DONE },
-        )
-        .await;
-        send(
-            &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 2, ending: DONE },
-        )
-        .await;
-        seats[0].quiet().await;
+        // **What this test does NOT pin, stated rather than implied.** An earlier
+        // draft ended by driving a consensus halt and claiming the column was
+        // cleared. It is not: `halt` never calls `hand_turn_to`, so after a real
+        // halt the column still names the last holder — and the draft asserted
+        // nothing about it anyway, so it read as coverage while testing nothing.
+        // The gap is real and recorded in `hand_turn_to`'s doc; what is pinned
+        // here is that the column FOLLOWS the ring, which is the half D19b
+        // shipped with no test at all.
         drop(tx);
         assert!(exited(task).await);
     }
