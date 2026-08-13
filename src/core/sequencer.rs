@@ -1223,6 +1223,22 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     // it describes THIS stretch, and a queue that outlived one would hand out a
     // turn nobody asked for.
     let mut summons = Summons::default();
+    // Has any participant done anything but PASS since the current lap began
+    // (rc3 **D27**)? A lap of nothing but passes is a lap in which nobody had
+    // anything to say, and dealing another asks the same question again at the
+    // price of a full-context model call per participant.
+    //
+    // A `Done` counts as something: it is a participant declaring it is
+    // finished, which the consensus tally acts on. Only a pass is the absence of
+    // an answer.
+    //
+    // Measured in `s-8ac0d2d0`: after boot completed with no task yet given, the
+    // ring dealt passes for 77 seconds — 23 provider calls carrying ~240 KB
+    // each — to produce the string "(passed — nothing to add this round)". The
+    // only floor was the 500-lap round cap, which at ~13s a turn is over five
+    // hours. The user stopped it by hand, which is the one thing a backstop is
+    // supposed to make unnecessary.
+    let mut spoke_this_lap = false;
     // Participants that have parked a question and cannot proceed until the user
     // answers (rc3 D22). The ring skips no-one on account of this — it HALTS when
     // it reaches one, which is what bounds the extra work at one lap. Cleared by
@@ -1345,6 +1361,18 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     );
                 }
                 if live {
+                    // A substantive turn is what makes a lap worth dealing
+                    // (rc3 D27). Recorded before the consensus check so a turn
+                    // that BOTH speaks and halts still counts as speech.
+                    // Only a lap of NOTHING BUT passes yields (rc3 D27). A
+                    // `Done` is a participant saying it is finished — that is
+                    // information, and the consensus tally is what acts on it.
+                    // Treating "no substantive output" as the trigger would also
+                    // catch a converging session and pre-empt the arrival the
+                    // tally exists to reach.
+                    if !matches!(ending, TurnEnding::Passed) {
+                        spoke_this_lap = true;
+                    }
                     // The vote is recorded and consensus asked BEFORE the ring
                     // is stepped: arriving means waking nobody, so a step taken
                     // first would have to be taken back. Both are inside the
@@ -1419,6 +1447,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                                 &mut laps,
                                 &mut summons,
                                 &blocked,
+                                &mut spoke_this_lap,
                                 false,
                             )
                             .await;
@@ -1490,6 +1519,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     &mut laps,
                     &mut summons,
                     &blocked,
+                    &mut spoke_this_lap,
                     true,
                 )
                 .await;
@@ -1549,6 +1579,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                                 &mut laps,
                                 &mut summons,
                                 &blocked,
+                                &mut spoke_this_lap,
                                 false,
                             )
                             .await;
@@ -1697,6 +1728,7 @@ async fn advance_turn(
     laps: &mut u32,
     summons: &mut Summons,
     blocked: &std::collections::HashSet<i64>,
+    spoke_this_lap: &mut bool,
     user_spoke: bool,
 ) {
     // **A user message restarts the cycle at the front — UNLESS they named
@@ -1927,6 +1959,36 @@ async fn advance_turn(
             if wrapped {
                 *laps += 1;
                 deps.storage.set_round_number(&deps.session_id, *laps).await;
+                // **A lap in which nobody spoke is a lap that answered nothing**
+                // (rc3 D27). Every active participant declined its turn, so the
+                // session has nothing to do and the only party who can change
+                // that is the user. Yield to them rather than asking the same
+                // question again — each repetition is one full-context model
+                // call per participant, and the round cap is five hours away.
+                //
+                // Checked BEFORE the cap because it is the more specific reason
+                // and the one worth reporting: "everyone passed" tells the user
+                // what to do next, where "500 laps" tells them something ran
+                // away.
+                //
+                // NOT a consensus arrival, and the difference is the whole
+                // design: consensus is every participant saying it is FINISHED,
+                // which ends the work. This says nobody has anything to add
+                // right now, which ends the LAP. A pass still casts no vote and
+                // still clears nothing.
+                if !*spoke_this_lap {
+                    halt(holder, epoch);
+                    announce_all_passed(deps).await;
+                    debug!(
+                        session = %deps.session_id,
+                        laps = *laps,
+                        "sequencer: a full lap of passes; the cycle yields to the user"
+                    );
+                    return;
+                }
+                // A new lap begins: whether anyone speaks in THIS one is a
+                // fresh question.
+                *spoke_this_lap = false;
                 let cap = round_cap_laps(deps);
                 // `0` is off, and it is tested BEFORE the comparison rather than
                 // folded into it: `*laps >= 0` is true on the very first lap, so
@@ -2034,6 +2096,41 @@ async fn start_turn(
 /// A failed WRITE is logged, and loudly: the cycle is already halted by then,
 /// so what is lost is the only on-screen account of why — the notification gap
 /// the module doc names, which is exactly what D7 exists to close.
+/// Post the all-passed notice and tell the UI it landed (rc3 **D27**).
+///
+/// Mirrors [`announce_round_cap`], and for the same reason: a cycle that yields
+/// with nothing on screen is a session the user reads as hung. The difference is
+/// what it SAYS — a round cap reports something that ran away, this reports that
+/// the participants are waiting on them, which is an instruction rather than an
+/// alarm.
+async fn announce_all_passed(deps: &SequencerDeps) {
+    match deps
+        .storage
+        .post_to_channel(
+            Arc::clone(&deps.session_id),
+            "system",
+            None,
+            MessageKind::SystemNotice.as_str(),
+            "Every participant passed this round — nobody has anything to add \
+             without you. The cycle has yielded; send a message to start it again.",
+            None,
+        )
+        .await
+    {
+        Ok(row) => {
+            if let Some(bridge) = deps.bridge.as_ref() {
+                bridge.notify_message_persisted(Arc::clone(&deps.session_id), row.message_id());
+            }
+        }
+        Err(e) => warn!(
+            session = %deps.session_id,
+            error = %e,
+            "sequencer: the cycle yielded on an all-pass lap but its notice was not \
+             posted; the session has stopped with nothing on screen to say so"
+        ),
+    }
+}
+
 async fn announce_round_cap(deps: &SequencerDeps, laps: u32) {
     match deps
         .storage
@@ -4557,6 +4654,112 @@ mod tests {
     /// always has something unread and is always woken. An all-pass ring is
     /// therefore not self-limiting through an empty backlog either — it is a
     /// real spend, which is precisely why the cap is owed.
+    /// rc3 **D27** — a full lap of passes yields to the user.
+    ///
+    /// The bug this closes cost real money in `s-8ac0d2d0`: boot finished before
+    /// the user had given a task, so every participant passed, and the ring kept
+    /// dealing turns. 23 provider calls in 77 seconds, each carrying ~240 KB, to
+    /// produce "(passed — nothing to add this round)". The only floor was the
+    /// 500-lap round cap — over five hours at that rate — so the user stopped it
+    /// by hand, which is the one thing a backstop exists to make unnecessary.
+    ///
+    /// **Not consensus, and the sibling test below is why the distinction has to
+    /// hold.** Consensus is every participant saying it is FINISHED, which ends
+    /// the work and needs `done` votes. This says nobody has anything to add
+    /// right now, which ends the LAP. A pass still casts no vote.
+    #[tokio::test]
+    async fn a_full_lap_of_passes_yields_to_the_user() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // A passes. One pass is not a lap — the ring must still reach B.
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: PASSED })
+            .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"], "a single pass steps the ring");
+
+        // An unread row for whoever would be woken next, so the silence below is
+        // the yield rather than a step that found nothing to hand over.
+        post(&storage, "user", None, "still here").await;
+        assert!(
+            !storage.unread_for_participant(a).await.unwrap().rows.is_empty(),
+            "the silence has to be the yield, not an empty backlog"
+        );
+
+        // B passes too: the lap wraps with nobody having spoken.
+        send(&tx, SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: PASSED })
+            .await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+
+        // And it SAYS so — a cycle that stops with nothing on screen reads as a
+        // hang, which is what the user reported before this existed.
+        let said = notices(&storage).await;
+        assert!(
+            said.iter().any(|n| n.contains("Every participant passed")),
+            "the yield has to be visible: {said:?}"
+        );
+
+        // Halted, not dead: the user's message restarts it.
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect(2).await,
+            vec![
+                "still here",
+                "Every participant passed this round — nobody has anything to add \
+                 without you. The cycle has yielded; send a message to start it again.",
+            ],
+            "the restart hands over the backlog INCLUDING the notice — it is a row like \
+             any other, and a participant reading why the cycle stopped is the point"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// One substantive turn is enough to earn the lap — the yield is for a lap
+    /// where NOBODY spoke, not for one that contained a pass.
+    #[tokio::test]
+    async fn a_lap_with_one_substantive_turn_keeps_cycling() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // A speaks, B passes: the lap wraps having produced something.
+        post(&storage, "participant", Some("a"), "from a").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE })
+            .await;
+        assert_eq!(seats[1].expect(2).await, vec!["go", "from a"]);
+        // Something for A to READ on its next turn — its own row is excluded from
+        // its own backlog, so without this the silence below would be an empty
+        // handover rather than a yield.
+        post(&storage, "system", None, "host note").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: PASSED })
+            .await;
+
+        // The ring carries on to A rather than yielding.
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["host note"],
+            "a lap that produced work earns another one"
+        );
+        assert!(
+            !notices(&storage).await.iter().any(|n| n.contains("Every participant passed")),
+            "nothing to announce: somebody spoke"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
     #[tokio::test]
     async fn a_ring_where_everyone_passes_never_halts_by_consensus() {
         let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
@@ -4568,9 +4771,16 @@ mod tests {
         send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
+        // **The subject is the TALLY, and it is unchanged** — a pass casts no
+        // vote, so no number of them ever adds up to an arrival. What changed
+        // under rc3 D27 is what happens at the end of a lap of nothing but
+        // passes: the cycle yields to the user instead of dealing another. So
+        // the ring turns for the rest of THIS lap, and the assertion that
+        // matters — no consensus, ever — holds throughout.
         let mut epoch = 1u64;
-        for round in 0..3 {
+        {
             for (holder, slug, seat) in [(a, "a", 1usize), (b, "b", 0usize)] {
+                let round = 0;
                 let row = format!("{slug} passes, round {round}");
                 post(&storage, "participant", Some(slug), &row).await;
                 send(
@@ -4592,10 +4802,13 @@ mod tests {
                     expected.push("go".to_string());
                 }
                 expected.push(row);
-                // The wire is the proof: the ring handed the turn on rather
-                // than halting. A silence here would be the failure.
-                let got = seats[seat].expect(expected.len()).await;
-                assert_eq!(got, expected, "round {round}: the ring must keep turning");
+                // A's pass steps the ring to B — a single pass is not a lap.
+                // B's pass CLOSES the lap, and the yield's own notice is what
+                // lands instead of a further turn.
+                if seat == 1 {
+                    let got = seats[seat].expect(expected.len()).await;
+                    assert_eq!(got, expected, "a single pass steps the ring");
+                }
                 assert!(
                     !storage.all_active_voted_done("s1").await.unwrap(),
                     "round {round}: passes never accumulate into an arrival"
@@ -4624,8 +4837,13 @@ mod tests {
     async fn a_participant_that_passes_every_round_never_trips_spin_detection() {
         const SAME: &str = "(passed — nothing to add this round)";
 
-        let (deps, storage, mut seats) = ring(&[("a", "active")]).await;
-        let a = seats[0].id;
+        // **Two participants, and B speaks every lap** (rc3 D27). A solo ring
+        // wraps on EVERY turn, so at N=1 the first pass now closes an all-pass
+        // lap and the cycle yields — ending this test before it can repeat
+        // anything. The SUBJECT is untouched: A passes byte-identically, round
+        // after round, and must never be judged as repeating itself.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
         post(&storage, "user", None, "go").await;
 
         let (tx, rx) = mpsc::channel(8);
@@ -4633,18 +4851,35 @@ mod tests {
         send(&tx, user_message()).await;
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
 
-        for (epoch, tick) in [(1u64, "tick one"), (2, "tick two"), (3, "tick three")] {
+        let mut epoch = 1u64;
+        for (round, tick) in [(0, "tick one"), (1, "tick two"), (2, "tick three")] {
             post(&storage, "participant", Some("a"), SAME).await;
-            post(&storage, "system", None, tick).await;
             send(
                 &tx,
                 SequencerCommand::TurnComplete { participant_id: a, epoch, ending: PASSED },
             )
             .await;
+            epoch += 1;
+            let got = seats[1].expect(if round == 0 { 2 } else { 1 }).await;
+            assert_eq!(
+                got.last().map(String::as_str),
+                Some(SAME),
+                "an identical pass is not a spin (round {round})"
+            );
+
+            // B says something real, so the lap is not all-pass and the ring
+            // comes back round to A for another identical pass.
+            post(&storage, "participant", Some("b"), tick).await;
+            send(
+                &tx,
+                SequencerCommand::TurnComplete { participant_id: b, epoch, ending: SPOKE },
+            )
+            .await;
+            epoch += 1;
             assert_eq!(
                 seats[0].expect(1).await,
                 vec![tick],
-                "an identical pass is not a spin (epoch {epoch})"
+                "the ring returns to A (round {round})"
             );
         }
 

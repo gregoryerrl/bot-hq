@@ -1039,7 +1039,18 @@ async fn spawn_session_handle(
     // the `sequencer_tx` arm, and its kick used to fire from inside `spawn_ring`
     // — i.e. potentially before any pump existed to hear the turn. Gating the
     // kick here makes that ordering explicit rather than incidental.
-    if let Some(kick) = ring_kick {
+    // **Boot only on a FIRST spawn** (rc3 D29). A reopen passes `--resume` with
+    // each participant's stored claude session id, so the process comes back
+    // holding the bearings it loaded the first time — the agents say so
+    // themselves when it re-runs: "bearings already loaded, index unchanged."
+    //
+    // Re-booting a resumed session is not merely wasteful, it is the trap the
+    // user hit: Stop kills the agents, the session goes stale, and the NEXT
+    // message respawns it — so every attempt to speak cost another full boot,
+    // ~60k tokens per participant, and the session never got past orienting.
+    // Measured in `s-8ac0d2d0`: three boots in four minutes, and the user
+    // force-closed asking "what, its still on boot phase?"
+    if let Some(kick) = ring_kick.filter(|_| is_first_spawn) {
         let boot_inputs: Vec<(i64, crate::agents::ParticipantInput)> = live
             .iter()
             .zip(&handles)
@@ -1062,6 +1073,11 @@ async fn spawn_session_handle(
             )
             .await;
         });
+    } else {
+        // No boot on this spawn, so nothing will clear the flag — and a latched
+        // `booting` sends every completion down the readiness channel instead of
+        // to the ring, which is a session that can never take a turn.
+        booting.store(false, std::sync::atomic::Ordering::Release);
     }
 
     // Batch 7: spawn the per-session stall watchdog (solo + duo). It holds Weak
@@ -2080,12 +2096,67 @@ async fn boot_then_start(
         }
     }
 
-    // **Cleared BEFORE the kick**, or turn one is handed out while the pumps
-    // still think they are orienting — they would open no epoch and report
+    // **Cleared BEFORE anything else**, or a later turn is handed out while the
+    // pumps still think they are orienting — they would open no epoch and report
     // readiness to a receiver nobody is reading.
     booting.store(false, std::sync::atomic::Ordering::Release);
-    tracing::info!(session_id, ready, want, "boot complete; the ring starts");
-    kick.fire().await;
+
+    // **Boot ends by YIELDING, not by starting the ring** (rc3 D29).
+    //
+    // Firing the kick here deals turn one into a session that has no task —
+    // and a participant handed a turn with nothing to do can only pass. Its
+    // pass is a row, so the next participant's turn delivers it, and that one
+    // passes too. **Every pass generates the input for the next pass**, so the
+    // ring never runs out of something to hand over and never converges. The
+    // only floor was the 500-lap round cap: over five hours.
+    //
+    // Measured in `s-8ac0d2d0`, the session that made this a bug rather than a
+    // theory: 23 provider calls in 77 seconds, each carrying ~240 KB, producing
+    // nothing but "(passed — nothing to add this round)". The user stopped it by
+    // hand — and stopping killed the agents, which made the session stale, which
+    // re-ran boot on the next message.
+    //
+    // So the ring waits. It is spawned and idle, holding no turn; the user's
+    // first message starts it with something real in the backlog. The `kick` is
+    // dropped unfired, which is what "the session is ready and waiting" IS.
+    drop(kick);
+    let notice = if ready == want {
+        format!(
+            "[System: READY — {ready} participant(s) oriented and waiting. \
+             Send your task to begin; nobody takes a turn until you do.]"
+        )
+    } else {
+        format!(
+            "[System: READY — {ready} of {want} participant(s) oriented before the \
+             {}s boot timeout; the rest join as they finish. Send your task to \
+             begin; nobody takes a turn until you do.]",
+            timeout.as_secs()
+        )
+    };
+    match storage
+        .post_to_channel(
+            Arc::from(session_id),
+            "system",
+            None,
+            crate::storage::MessageKind::SystemNotice.as_str(),
+            notice,
+            None,
+        )
+        .await
+    {
+        Ok(row) => bridge.notify_message_persisted(Arc::from(session_id), row.message_id()),
+        // The session is usable either way — it is waiting, which is its resting
+        // state. What is lost is the sentence telling the user so, and a session
+        // that looks stopped for no reason is the report this whole arc began
+        // with.
+        Err(e) => tracing::warn!(
+            session_id,
+            ?e,
+            "boot finished but its ready notice was not posted; the session is \
+             waiting with nothing on screen to say so"
+        ),
+    }
+    tracing::info!(session_id, ready, want, "boot complete; the session waits for the user");
 }
 
 /// The "hand out turn one" command, held rather than sent (rc3 **D21**).
@@ -3869,18 +3940,42 @@ mod tests {
         );
 
         done_tx.send(2).await.unwrap();
-        let started = tokio::time::timeout(std::time::Duration::from_secs(2), ring_rx.recv())
-            .await
-            .expect("the ring never started after everyone had oriented");
-        assert!(matches!(
-            started,
-            Some(crate::core::sequencer::SequencerCommand::UserMessage { .. })
-        ));
+        let _ = task.await;
+
+        // **Everyone is oriented and the ring STILL does not start** (rc3 D29).
+        // A session with no task can only produce passes, and a pass is a row —
+        // so it feeds the next participant's pass and the ring never converges.
+        // The kick is dropped unfired; the user's first message starts it.
+        // `Ok(None)` — the channel CLOSED without a command, which is what a
+        // dropped kick is. Not a timeout: asserting `is_err()` here passes for a
+        // sender that is merely slow, and fails for the very behaviour being
+        // pinned. (It did, on the first run.)
+        assert!(
+            matches!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), ring_rx.recv()).await,
+                Ok(None)
+            ),
+            "the ring started with no task — this is the volley that cost 23 provider \
+             calls in 77 seconds in s-8ac0d2d0"
+        );
         assert!(
             !booting.load(std::sync::atomic::Ordering::Acquire),
-            "the boot flag must be cleared BEFORE the kick, or turn one opens no epoch"
+            "the boot flag must be cleared, or every later completion is routed to the \
+             readiness channel instead of the ring"
         );
-        let _ = task.await;
+        // And it SAYS it is waiting. A session that stops with nothing on screen
+        // is the report this whole arc began with.
+        let notices: Vec<String> = s
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        assert!(
+            notices.iter().any(|n| n.contains("READY") && n.contains("waiting")),
+            "boot has to announce that it is done and waiting: {notices:?}"
+        );
     }
 
     /// D21 §4: *"a timeout fires, because one slow agent must not hold the
@@ -3914,12 +4009,17 @@ mod tests {
             .await;
         });
 
+        // The timeout still fires — that is this test's subject and it is
+        // unchanged. What it does at the end changed (rc3 D29): it yields to the
+        // user rather than starting the ring, so the proof is the notice rather
+        // than the kick.
         assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(2), ring_rx.recv())
-                .await
-                .expect("the timeout did not start the ring")
-                .is_some(),
-            "one silent participant must not hold the session"
+            matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), ring_rx.recv()).await,
+                Ok(None)
+            ),
+            "boot must not start the ring, timeout or not — the kick is dropped, so the \
+             channel closes with nothing on it"
         );
         let notices: Vec<String> = s
             .messages_for_session("s1", None)
