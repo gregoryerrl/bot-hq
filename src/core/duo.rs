@@ -111,6 +111,28 @@ pub struct DuoConfig {
     /// the one invariant that loop exists to keep. Snapshotting on the first
     /// event of the turn makes the stale completion carry the OLD epoch, which is
     /// exactly what the guard is there to reject.
+    ///
+    /// # A STRAGGLER must not open a turn (rc3 D24)
+    ///
+    /// "The first event after a completion" is not the same thing as "the first
+    /// event of the next turn", and treating them as one wedged a live session.
+    /// A participant that emits anything in the gap between completing and being
+    /// handed its next turn snapshots the cell as it stands — which is still the
+    /// epoch it just completed with. The real turn then arrives, the guard sees
+    /// `turn_epoch` already set, and every completion from that point carries a
+    /// number the ring retired. They are all discarded, the ring cannot step past
+    /// a participant it is waiting on, and nothing in the loop recovers.
+    ///
+    /// Measured in `s-206e8921`: the reviewer completed at 03:56:01 carrying
+    /// epoch 9, was handed epoch 11 at 03:56:28, and completed again at 04:01:51
+    /// **still carrying 9**. A 27-second window was all it took, and the session
+    /// stopped dead for the twenty minutes until the user noticed.
+    ///
+    /// The fix is `pump_agent`'s `last_completed_epoch`: a cell that still reads
+    /// what this pump last completed with means no new turn has been handed out,
+    /// so the event is a straggler and opens nothing. The epoch strictly
+    /// increases at every handover, so "unchanged" is an exact test rather than a
+    /// heuristic.
     pub turn_epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
@@ -312,6 +334,11 @@ pub async fn pump_agent(
     // for why reading it at completion time instead would defeat the guard it
     // exists to pass.
     let mut turn_epoch: Option<u64> = None;
+    // The epoch this pump last COMPLETED with (rc3 D24). A cell still reading
+    // this value means the ring has not handed out a turn since, so whatever
+    // event is being processed is a straggler from the turn that ended and must
+    // not open a new one. See `DuoConfig::turn_epoch`.
+    let mut last_completed_epoch: Option<u64> = None;
 
     loop {
         let Some(event) = event_rx.recv().await else { break };
@@ -327,7 +354,20 @@ pub async fn pump_agent(
         // snapshot late and miss exactly the reset this guards against.
         if turn_epoch.is_none() {
             if let Some(cell) = &cfg.turn_epoch {
-                turn_epoch = Some(cell.load(std::sync::atomic::Ordering::Acquire));
+                let live = cell.load(std::sync::atomic::Ordering::Acquire);
+                // **Unchanged since this pump's last completion = no new turn.**
+                // Binding here would tie the NEXT turn to a retired epoch, and
+                // every completion after it would be discarded — see the field
+                // doc for the session that died this way.
+                if last_completed_epoch == Some(live) {
+                    debug!(
+                        agent = %cfg.slug,
+                        epoch = live,
+                        "straggler event after a completed turn; not opening a turn on it"
+                    );
+                } else {
+                    turn_epoch = Some(live);
+                }
             }
         }
 
@@ -703,7 +743,10 @@ pub async fn pump_agent(
                         );
                     }
                 }
-                // Opened by the next event, from whatever epoch is live then.
+                // Opened by the next event, from whatever epoch is live then —
+                // unless the cell has not moved, which means no turn was handed
+                // out and the event is a straggler (rc3 D24).
+                last_completed_epoch = turn_epoch;
                 turn_epoch = None;
                 // peer_ack is per-turn — reset after BOTH branches so an errored
                 // turn (which skips the router) can't leak the flag into the next.
@@ -877,6 +920,27 @@ mod tests {
         (cfg, rx)
     }
 
+    /// A plain end-of-turn event.
+    fn turn_end() -> AgentEvent {
+        AgentEvent::TurnComplete {
+            stop_reason: None,
+            subtype: None,
+            is_error: false,
+            api_error_status: None,
+            context: ContextReport::none(ContextVerdict::NoWindow),
+        }
+    }
+
+    /// The epoch the next `TurnComplete` on the ring channel carries.
+    async fn next_epoch(
+        rx: &mut mpsc::Receiver<crate::core::sequencer::SequencerCommand>,
+    ) -> u64 {
+        match next_wire(rx).await {
+            crate::core::sequencer::SequencerCommand::TurnComplete { epoch, .. } => epoch,
+            other => panic!("expected a TurnComplete, got {other:?}"),
+        }
+    }
+
     /// Pull one `TurnComplete` off the ring channel → its [`TurnEnding`].
     ///
     /// Replaces the old `next_forward`, which read the body off a
@@ -965,6 +1029,73 @@ mod tests {
         );
         assert_eq!(history[0].used_tokens, Some(620_000));
         assert_eq!(history[0].reported_window, Some(1_000_000));
+    }
+
+    /// rc3 **D24** — the wedge that killed `s-206e8921`.
+    ///
+    /// A pump binds its turn to the epoch cell on the first event after a
+    /// completion. If that event is a STRAGGLER — output from the turn that just
+    /// ended, arriving before the ring has handed out another — the cell still
+    /// reads the epoch just completed, and the next real turn inherits it. Every
+    /// completion from then on carries a retired number, is discarded by the
+    /// sequencer's guard, and the ring can never step past a participant it is
+    /// waiting on. Nothing recovers it; the session stops for good.
+    ///
+    /// Observed live: completed at 03:56:01 carrying epoch 9, handed epoch 11 at
+    /// 03:56:28, completed again at 04:01:51 **still carrying 9**.
+    ///
+    /// Delete the `last_completed_epoch` guard and the last assertion here reads
+    /// 9 — which is the wedge, reproduced.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_straggler_after_a_completed_turn_does_not_bind_the_next_one() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(9));
+        cfg.turn_epoch = Some(Arc::clone(&cell));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        // Turn one, on epoch 9.
+        ev_tx.send(AgentEvent::Text("working".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(
+            next_epoch(&mut ring_rx).await,
+            9,
+            "the turn in flight completes on the epoch it was handed"
+        );
+
+        // **The straggler.** One more event, before the ring hands anything out —
+        // the cell has not moved. This must NOT open a turn on epoch 9.
+        //
+        // **And it has to be PROCESSED before the cell moves**, or the test
+        // proves nothing: `send` only queues, so storing 11 first would have the
+        // pump read 11 when it eventually gets here and the race would never
+        // happen. An earlier draft did exactly that and passed with the guard
+        // deleted. Waiting for the row the straggler persists is the barrier —
+        // the pump cannot have written it without having run the binding code
+        // above it.
+        ev_tx.send(AgentEvent::Text("a late word".into())).await.unwrap();
+        for _ in 0..200 {
+            let rows = storage.messages_for_session("s1", None).await.unwrap();
+            if rows.iter().any(|m| m.content.contains("a late word")) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // Only now does the ring hand out the next turn: the cell moves to 11.
+        cell.store(11, std::sync::atomic::Ordering::Release);
+        ev_tx.send(AgentEvent::Text("turn two".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+
+        drop(ev_tx);
+        task.await.unwrap();
+        assert_eq!(
+            next_epoch(&mut ring_rx).await,
+            11,
+            "the second turn completes on the epoch the RING handed it, not on the \
+             one a straggler bound it to"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
