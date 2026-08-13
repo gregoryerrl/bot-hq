@@ -326,6 +326,9 @@ distinguishable without the Context Library carrying anything.
 ### D16 — `close_session` becomes a real capability, and the user is the fallback
 
 Decided 2026-08-13, closing the `PARITY_HOLD` question rc3 left open.
+**SHIPPED 2026-08-13** (`6cc2b9a`) — `PARITY_HOLD` is empty, the UI Close path is
+pinned as ungated across both its files, and the parity oracle names
+`close_session` as its one sanctioned divergence rather than skipping it.
 
 The user: *"close session tick on **role** capabilities. if no agents are
 ticked, then user must be the one to manually click the close button if they

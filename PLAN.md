@@ -140,20 +140,39 @@ classification.
 D17 (summon by `@mention`), D18 (two participation modes), D19/D19a/D19b (the
 ring is the only delivery path) all shipped that day.
 
-Spec'd and unstarted, in the order they were decided:
+Also shipped that day: **D16** (`close_session` gates on the role's tick),
+**D22** (a parked question finishes the lap before it halts), **D23** (a
+delivered row says who wrote it) and **D24** (a straggler cannot bind the next
+turn's epoch).
 
-- **D16** — `close_session` gates on the role capability; an empty-capability
-  roster is legal and the UI Close button must never route through the gate.
+Spec'd and unstarted:
+
 - **D20** — a participant's label is the user's (`EYES` / `EYES-2` / `EYES-3`
   when empty), and colour rotates so two participants of one role never render
   identically.
 - **D21** — a parallel BOOT phase: every participant orients at once, nobody
-  acts until the ring starts. Rides D19a's `kind` filter.
+  acts until the ring starts. Rides D19a's `kind` filter, and needs an explicit
+  turn-start signal or it reintroduces the epoch-0 discard.
+
+Found by live sessions, not yet decided:
+
+- **The backlog is N stdin writes, not one.** `deliver_backlog` delivers a row at
+  a time, so rows 2..N land inside the turn row 1 opened and read as
+  interruptions. D23's speaker label removes most of the confusion; whether
+  coalescing is still worth the change to partial-delivery semantics should be
+  measured on a real session first.
+- **The tail of the ring starves.** Every user message resets to the front, so at
+  N=3 with an active driver slot 2 gets roughly half the turns of slot 0 —
+  2-vs-6 in `s-534b8761`, 2-vs-6 in `s-206e8921`.
+- **`sessions.round_number` has no writer**, exactly as
+  `current_turn_participant_id` had none before D19b.
 
 Also open: the proposals in the project CL's
-`improvements-2026-08-12-visibility-and-verification.md` that were not taken,
-and one dead column — `sessions.round_number` has no writer, exactly as
-`current_turn_participant_id` had none before D19b.
+`improvements-2026-08-12-visibility-and-verification.md` that were not taken —
+P3 (the reviewer should REPRODUCE, not read), P5 (post-merge re-verification of
+cross-branch claims) and P6 (the CL remote goes stale; a push path needs a
+pre-push secret check). P8 is substantially closed by D22 plus the awaiting-flag
+wiring: the pass volley it describes is now bounded at N-1.
 
 The arc before it was the **native agent loop** (2026-07-26/27): an agent
 could run on bot-hq's own Rust loop instead of a claude-code subprocess,
