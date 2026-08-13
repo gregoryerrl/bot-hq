@@ -136,6 +136,9 @@ pub struct ParticipantPick {
     /// The palette entry the user picked for this row, by NAME ("Cyan"), or
     /// `None` to take the rotation (rc3 **D20**).
     pub color: Option<String>,
+    /// The name the user typed for this row, or `None`/blank to take the
+    /// ordinal (rc3 **D20**, migration 0053).
+    pub label: Option<String>,
 }
 
 /// How many participants a session can be created with.
@@ -219,6 +222,7 @@ pub(crate) async fn resolve_participant_picks(
             effort: pick.effort.clone().or(legacy.0),
             ultracode: pick.ultracode.or(legacy.1),
             color: pick.color.clone(),
+            label: pick.label.clone(),
         });
     }
     if !any_active {
@@ -266,6 +270,10 @@ pub struct ParticipantView {
     /// The user's colour pick, by palette NAME ("Cyan"), or `null` to take the
     /// rotation the UI assigns by roster position (rc3 **D20**).
     pub color: Option<String>,
+    /// The user's name for this participant, or `null` to take the ordinal
+    /// (rc3 **D20**, migration 0053). `participant_display_name` is what joins
+    /// this with the role and the model; the frontend must not re-derive it.
+    pub label: Option<String>,
     /// This participant's effort override (rc3 D12), or `null` to inherit.
     ///
     /// The New Session dialog writes both this and `ultracode` per row and
@@ -502,6 +510,7 @@ pub(crate) async fn participant_views(
             participation_mode: p.participation_mode,
             enabled: p.enabled,
             color: p.color,
+            label: p.label,
             effort: p.effort,
             ultracode: p.ultracode,
         });
@@ -1205,6 +1214,7 @@ mod tests {
                 views[0].role_display_name.as_deref(),
                 views[0].model_display_name.as_deref(),
                 &views[0].slug,
+                views[0].label.as_deref(),
             ),
             "HANDS · Claude Opus 5"
         );
@@ -1213,6 +1223,7 @@ mod tests {
                 views[1].role_display_name.as_deref(),
                 views[1].model_display_name.as_deref(),
                 &views[1].slug,
+                views[1].label.as_deref(),
             ),
             "EYES",
             "no model means the role alone, never a placeholder"
@@ -1228,7 +1239,7 @@ mod tests {
         let views = participant_views(&storage, "s1").await.unwrap();
         assert_eq!(views[1].role_display_name, None);
         assert_eq!(
-            crate::storage::participant_display_name(None, None, &views[1].slug),
+            crate::storage::participant_display_name(None, None, &views[1].slug, None),
             "eyes",
             "with both halves gone the slug is the last resort"
         );
@@ -1381,6 +1392,7 @@ mod tests {
             effort: None,
             ultracode: None,
             color: None,
+            label: None,
         }
     }
 

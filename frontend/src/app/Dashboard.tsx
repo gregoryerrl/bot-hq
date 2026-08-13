@@ -59,6 +59,10 @@ type ParticipantRow = {
   /** rc3 **D20**: the palette entry by NAME, or `null` to take the rotation —
    *  which already guarantees no two participants share a hue. */
   color: string | null;
+  /** rc3 **D20** (migration 0053): the name the user gave this participant.
+   *  `""` means "take the ordinal", which is what the placeholder shows. Sent
+   *  as `null` so the column stores an absence rather than an empty string. */
+  label: string;
 };
 
 let nextParticipantKey = 1;
@@ -69,6 +73,7 @@ const emptyParticipant = (): ParticipantRow => ({
   effort: null,
   ultracode: null,
   color: null,
+  label: "",
 });
 
 // Quickview liveness throttle: collapse bursts of agent:messages:batch into at
@@ -251,6 +256,7 @@ export function Dashboard() {
           effort: string | null;
           ultracode: boolean | null;
           color: string | null;
+          label: string | null;
         }[];
       };
     }
@@ -336,6 +342,26 @@ export function Dashboard() {
     roles.find((r) => r.id === row.roleId) ?? null;
 
   /**
+   * What this row would be called with no label — the placeholder for the Name
+   * field.
+   *
+   * Mirrors the backend's ordinal rule (`participant_display_name` +
+   * `slug_ordinal`) over the rows ABOVE this one: the first of a role is bare,
+   * the second is `-2`. It is a hint, not the stored value — the name that
+   * ships is whatever `participant_display_name` derives from the slug the
+   * backend assigns, so a placeholder that guessed wrong costs a hint and never
+   * a name.
+   */
+  const ordinalNameFor = (index: number): string => {
+    const role = roleAt(participants[index]);
+    if (!role) return "Name";
+    const nth = participants
+      .slice(0, index)
+      .filter((r) => r.roleId === role.id).length;
+    return nth === 0 ? role.display_name : `${role.display_name}-${nth + 1}`;
+  };
+
+  /**
    * rc3 **D11** — what the picked roster, taken together, cannot do.
    *
    * Computed from ticked capability boxes only: rows with no role yet are
@@ -389,6 +415,10 @@ export function Dashboard() {
             effort: p.effort,
             ultracode: p.ultracode,
             color: p.color,
+            // Blank is an absence, not a name — the backend trims and falls
+            // back to the ordinal either way, but storing `""` would make an
+            // untouched input indistinguishable from a cleared one.
+            label: p.label.trim() || null,
           })),
         },
       });
@@ -702,6 +732,26 @@ export function Dashboard() {
                           <span className="font-code-sm text-code-sm text-on-surface">
                             Ultracode
                           </span>
+                        </label>
+                        {/* rc3 D20's other half (migration 0053): the NAME
+                            this participant goes by. Empty takes the ordinal,
+                            which is what the placeholder shows — so the field
+                            reads as an override of something that already
+                            works, not as a blank that has to be filled. */}
+                        <label className="block">
+                          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                            Name
+                          </span>
+                          <input
+                            type="text"
+                            value={row.label}
+                            placeholder={ordinalNameFor(index)}
+                            aria-label={`Participant ${index + 1} name`}
+                            onChange={(e) =>
+                              patchParticipant(index, { label: e.target.value })
+                            }
+                            className="w-full rounded border border-outline-variant bg-surface px-2 py-1 font-code-sm text-code-sm text-on-surface placeholder:text-on-surface-variant"
+                          />
                         </label>
                         {/* rc3 D20: the colour this participant's byline takes.
                             "Rotate" is the DEFAULT rather than an absence — the

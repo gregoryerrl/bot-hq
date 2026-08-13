@@ -183,8 +183,8 @@ describe("New session dialog — participants", () => {
         expect.objectContaining({
           options: expect.objectContaining({
             participants: [
-              { roleId: 1, modelId: null, effort: null, ultracode: null, color: null },
-              { roleId: 2, modelId: "m-opus", effort: null, ultracode: null, color: null },
+              { roleId: 1, modelId: null, effort: null, ultracode: null, color: null, label: null },
+              { roleId: 2, modelId: "m-opus", effort: null, ultracode: null, color: null, label: null },
             ],
           }),
         }),
@@ -318,8 +318,8 @@ describe("New session dialog — per-participant effort (D12)", () => {
       expect(mockInvoke).toHaveBeenCalledWith("create_session", expect.anything()),
     );
     expect(sentOptions().participants).toEqual([
-      { roleId: 1, modelId: null, effort: "max", ultracode: null, color: null },
-      { roleId: 2, modelId: null, effort: "low", ultracode: null, color: null },
+      { roleId: 1, modelId: null, effort: "max", ultracode: null, color: null, label: null },
+      { roleId: 2, modelId: null, effort: "low", ultracode: null, color: null, label: null },
     ]);
     // The per-slot columns spawn still reads are a projection of those same
     // rows, so they cannot disagree with the roster they came from.
@@ -343,7 +343,7 @@ describe("New session dialog — per-participant effort (D12)", () => {
       expect(mockInvoke).toHaveBeenCalledWith("create_session", expect.anything()),
     );
     expect(sentOptions().participants).toEqual([
-      { roleId: 1, modelId: null, effort: null, ultracode: true, color: null },
+      { roleId: 1, modelId: null, effort: null, ultracode: true, color: null, label: null },
     ]);
     expect(sentOptions().brianUltracode).toBe(true);
   });
@@ -646,6 +646,68 @@ describe("New session dialog — participant colour (D20)", () => {
           options: expect.objectContaining({
             participants: [
               expect.objectContaining({ roleId: 1, color: "Cyan" }),
+            ],
+          }),
+        }),
+      ),
+    );
+  });
+
+  it("sends the user's name for a participant, and blank means the ordinal", async () => {
+    // rc3 D20's other half (migration 0053). The field is an OVERRIDE of
+    // something that already works, so the untouched case has to reach the
+    // backend as an absence — `""` stored would make "never typed" and
+    // "cleared" the same row, and the ordinal is what both should mean.
+    mockBackend([role()]);
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+
+    const nameInput = screen.getByLabelText(/participant 1 name/i);
+    // Blank by default, with the ordinal as the placeholder: the user sees what
+    // it would be called before deciding to override it.
+    expect(nameInput).toHaveValue("");
+    expect(nameInput).toHaveAttribute("placeholder", "HANDS");
+
+    // Whitespace is not a name — it must reach the backend as null, exactly as
+    // an untouched field does.
+    fireEvent.change(nameInput, { target: { value: "   " } });
+    fireEvent.change(screen.getByPlaceholderText(/refactor auth flow/i), {
+      target: { value: "blank name" },
+    });
+    fireEvent.click(createButton());
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "create_session",
+        expect.objectContaining({
+          options: expect.objectContaining({
+            participants: [expect.objectContaining({ roleId: 1, label: null })],
+          }),
+        }),
+      ),
+    );
+
+  });
+
+  it("trims the name it sends, so padding is not part of it", async () => {
+    mockBackend([role()]);
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+    fireEvent.change(screen.getByLabelText(/participant 1 name/i), {
+      target: { value: "  Skeptic  " },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/refactor auth flow/i), {
+      target: { value: "named" },
+    });
+    fireEvent.click(createButton());
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "create_session",
+        expect.objectContaining({
+          options: expect.objectContaining({
+            participants: [
+              expect.objectContaining({ roleId: 1, label: "Skeptic" }),
             ],
           }),
         }),

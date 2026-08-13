@@ -2186,6 +2186,7 @@ mod tests {
             done_vote: false,
             enabled: true,
             color: None,
+            label: None,
             effort: None,
             ultracode: None,
             claude_session_id: None,

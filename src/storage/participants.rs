@@ -140,6 +140,11 @@ pub struct Participant {
     /// The user's colour pick for this participant, by palette NAME, or `None`
     /// to take the rotation (rc3 D20).
     pub color: Option<String>,
+    /// The user's NAME for this participant, or `None`/blank to take the
+    /// ordinal (rc3 D20, migration 0053). See
+    /// [`participant_display_name`] for what it overrides and what it leaves
+    /// alone.
+    pub label: Option<String>,
 }
 
 /// One participant a session is created with: **a role and a model**.
@@ -167,6 +172,9 @@ pub struct ParticipantDraft {
     /// The palette entry the user picked for this participant, by NAME
     /// ("Cyan"), or `None` to take the rotation (rc3 **D20**, migration 0052).
     pub color: Option<String>,
+    /// The name the user gave this participant, or `None` to take the ordinal
+    /// (rc3 **D20**, migration 0053).
+    pub label: Option<String>,
 }
 
 const ROLE_COLUMNS: &str = "id, slug, display_name, description_prompt, capabilities, \
@@ -174,7 +182,7 @@ const ROLE_COLUMNS: &str = "id, slug, display_name, description_prompt, capabili
 
 const PARTICIPANT_COLUMNS: &str = "id, session_id, slug, display_name, role_id, model_id, \
      runtime, capabilities, participation_mode, turn_position, done_vote, enabled, \
-     effort, ultracode, claude_session_id, color";
+     effort, ultracode, claude_session_id, color, label";
 
 fn role_from_row(r: &sqlx::sqlite::SqliteRow) -> Role {
     use sqlx::Row;
@@ -217,6 +225,7 @@ fn participant_from_row(r: &sqlx::sqlite::SqliteRow) -> Participant {
         ultracode: r.get::<Option<i64>, _>("ultracode").map(|v| v != 0),
         claude_session_id: r.get("claude_session_id"),
         color: r.get("color"),
+        label: r.get("label"),
     }
 }
 
@@ -376,13 +385,25 @@ pub fn participant_display_name(
     role_display_name: Option<&str>,
     model_display_name: Option<&str>,
     slug: &str,
+    label: Option<&str>,
 ) -> String {
     fn clean(s: Option<&str>) -> Option<&str> {
         s.map(str::trim).filter(|s| !s.is_empty())
     }
-    let role = clean(role_display_name).map(|role| match slug_ordinal(slug) {
-        Some(n) => format!("{role}-{n}"),
-        None => role.to_string(),
+    // **The label replaces the role-and-ordinal half, and only that half** (rc3
+    // D20, migration 0053). The model suffix survives it, because what a
+    // participant RUNS is a different fact from what the user named it — a
+    // `Skeptic` whose model the user cannot see is the thing D8's per-participant
+    // picker exists to make visible.
+    //
+    // Blank is not a name: an empty or whitespace label falls back to the
+    // ordinal rather than rendering an empty byline, which is the same `clean`
+    // every other field on this path goes through.
+    let role = clean(label).map(str::to_string).or_else(|| {
+        clean(role_display_name).map(|role| match slug_ordinal(slug) {
+            Some(n) => format!("{role}-{n}"),
+            None => role.to_string(),
+        })
     });
     match (role, clean(model_display_name)) {
         (Some(role), Some(model)) => format!("{role} · {model}"),
@@ -818,7 +839,7 @@ impl Storage {
             },
             None => None,
         };
-        participant_display_name(role.as_deref(), model.as_deref(), &p.slug)
+        participant_display_name(role.as_deref(), model.as_deref(), &p.slug, p.label.as_deref())
     }
 
     /// Seed the DEFAULT roster for a session that has none, returning how many
@@ -1038,8 +1059,9 @@ impl Storage {
             let id = sqlx::query(
                 "INSERT INTO session_participants \
                  (session_id, slug, display_name, role_id, model_id, effort, ultracode, \
-                  capabilities, participation_mode, turn_position, enabled, joined_at, color) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  capabilities, participation_mode, turn_position, enabled, joined_at, color, \
+                  label) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(session_id)
             .bind(&slug)
@@ -1060,6 +1082,7 @@ impl Storage {
             .bind(i64::from(enabled.map(|e| e[slot]).unwrap_or(true)))
             .bind(&created_at)
             .bind(draft.color.as_deref())
+            .bind(draft.label.as_deref())
             .execute(&mut *tx)
             .await
             .with_context(|| format!("seeding participant {slug} into {session_id}"))?
@@ -3324,6 +3347,7 @@ mod tests {
             done_vote: false,
             enabled: true,
             color: None,
+            label: None,
             effort: None,
             ultracode: None,
             claude_session_id: None,
@@ -3397,18 +3421,73 @@ mod tests {
     fn a_second_participant_of_one_role_carries_its_ordinal() {
         // The reported case, exactly: two reviewers, one role, one model.
         assert_eq!(
-            participant_display_name(Some("EYES"), Some("DeepSeek V4 Pro"), "eyes"),
+            participant_display_name(Some("EYES"), Some("DeepSeek V4 Pro"), "eyes", None),
             "EYES · DeepSeek V4 Pro"
         );
         assert_eq!(
-            participant_display_name(Some("EYES"), Some("DeepSeek V4 Pro"), "eyes-2"),
+            participant_display_name(Some("EYES"), Some("DeepSeek V4 Pro"), "eyes-2", None),
             "EYES-2 · DeepSeek V4 Pro",
             "the second reviewer must not read the same as the first"
         );
         // The first of a role takes no suffix, so a one-reviewer session is
         // unchanged — which is the common case and must stay quiet.
-        assert_eq!(participant_display_name(Some("HANDS"), None, "hands"), "HANDS");
-        assert_eq!(participant_display_name(Some("HANDS"), None, "hands-3"), "HANDS-3");
+        assert_eq!(participant_display_name(Some("HANDS"), None, "hands", None), "HANDS");
+        assert_eq!(participant_display_name(Some("HANDS"), None, "hands-3", None), "HANDS-3");
+    }
+
+    /// rc3 **D20**'s other half (migration 0053): the user names a participant,
+    /// and that name wins over the ordinal.
+    #[test]
+    fn a_user_set_label_replaces_the_role_and_its_ordinal() {
+        // The reported case again, but named rather than numbered: `EYES-2` was
+        // an improvement on two identical bylines, and it still says nothing
+        // about which reviewer this is. A label does.
+        assert_eq!(
+            participant_display_name(
+                Some("EYES"),
+                Some("DeepSeek V4 Pro"),
+                "eyes-2",
+                Some("Skeptic")
+            ),
+            "Skeptic · DeepSeek V4 Pro",
+            "the label replaces the role AND its ordinal, and nothing else"
+        );
+        // **The model suffix survives.** What a participant runs is a different
+        // fact from what the user called it, and D8's per-participant model
+        // picker exists precisely so that fact is visible.
+        assert_eq!(
+            participant_display_name(None, Some("Claude Opus 5"), "hands", Some("Driver")),
+            "Driver · Claude Opus 5"
+        );
+        assert_eq!(
+            participant_display_name(Some("HANDS"), None, "hands", Some("Driver")),
+            "Driver"
+        );
+    }
+
+    #[test]
+    fn a_blank_label_is_not_a_name() {
+        // Empty and whitespace both fall back to today's rendering rather than
+        // leaving an empty byline — the same `clean` every other field on this
+        // path goes through. A UI that writes `""` for an untouched input must
+        // not thereby erase the participant's name.
+        for blank in ["", "   ", "\t", "\n "] {
+            assert_eq!(
+                participant_display_name(
+                    Some("EYES"),
+                    Some("DeepSeek V4 Pro"),
+                    "eyes-2",
+                    Some(blank)
+                ),
+                "EYES-2 · DeepSeek V4 Pro",
+                "{blank:?} is not a name"
+            );
+        }
+        // And the label is trimmed rather than rendered with its padding.
+        assert_eq!(
+            participant_display_name(Some("EYES"), None, "eyes-2", Some("  Skeptic  ")),
+            "Skeptic"
+        );
     }
 
     #[test]
@@ -3432,14 +3511,14 @@ mod tests {
     /// half; `participants.test.ts` holds the other.
     #[test]
     fn the_ordinal_survives_the_model_being_gone() {
-        assert_eq!(participant_display_name(Some("EYES"), None, "eyes-2"), "EYES-2");
+        assert_eq!(participant_display_name(Some("EYES"), None, "eyes-2", None), "EYES-2");
         // No ROLE, though, means there is nothing to number — the model alone is
         // not a role and two of them are not "the second EYES".
         assert_eq!(
-            participant_display_name(None, Some("DeepSeek V4 Pro"), "eyes-2"),
+            participant_display_name(None, Some("DeepSeek V4 Pro"), "eyes-2", None),
             "DeepSeek V4 Pro"
         );
-        assert_eq!(participant_display_name(None, None, "eyes-2"), "eyes-2");
+        assert_eq!(participant_display_name(None, None, "eyes-2", None), "eyes-2");
     }
 
     #[tokio::test]
@@ -4341,6 +4420,10 @@ mod tests {
                 // roster that quietly differed here would give the dialog's
                 // sessions a different rotation from the driver's.
                 "color",
+                // rc3 D20's other half (migration 0053), and part of parity for
+                // exactly the same reason: a default roster that wrote anything
+                // but NULL here would name participants the user never named.
+                "label",
             ],
             "session_participants grew a column; roster parity has to cover it"
         );
@@ -4390,6 +4473,7 @@ mod tests {
                 effort: Some("max".into()),
                 ultracode: Some(true),
                 color: None,
+                label: None,
             },
             ParticipantDraft {
                 role_id: eyes.id,
@@ -4397,6 +4481,7 @@ mod tests {
                 effort: Some("low".into()),
                 ultracode: Some(false),
                 color: None,
+                label: None,
             },
         ]
     }
