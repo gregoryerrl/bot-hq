@@ -133,6 +133,9 @@ pub struct ParticipantPick {
     /// carry one effort select per AGENT, in two fixed blocks.
     pub effort: Option<String>,
     pub ultracode: Option<bool>,
+    /// The palette entry the user picked for this row, by NAME ("Cyan"), or
+    /// `None` to take the rotation (rc3 **D20**).
+    pub color: Option<String>,
 }
 
 /// How many participants a session can be created with.
@@ -215,6 +218,7 @@ pub(crate) async fn resolve_participant_picks(
             model_id: pick.model_id.clone().or_else(|| role.default_model_id.clone()),
             effort: pick.effort.clone().or(legacy.0),
             ultracode: pick.ultracode.or(legacy.1),
+            color: pick.color.clone(),
         });
     }
     if !any_active {
@@ -259,6 +263,9 @@ pub struct ParticipantView {
     /// `active` | `on_mention` (which create refuses today — see rc3 D17).
     pub participation_mode: String,
     pub enabled: bool,
+    /// The user's colour pick, by palette NAME ("Cyan"), or `null` to take the
+    /// rotation the UI assigns by roster position (rc3 **D20**).
+    pub color: Option<String>,
     /// This participant's effort override (rc3 D12), or `null` to inherit.
     ///
     /// The New Session dialog writes both this and `ultracode` per row and
@@ -494,6 +501,7 @@ pub(crate) async fn participant_views(
             turn_position: p.turn_position,
             participation_mode: p.participation_mode,
             enabled: p.enabled,
+            color: p.color,
             effort: p.effort,
             ultracode: p.ultracode,
         });
@@ -1367,6 +1375,7 @@ mod tests {
             model_id: model_id.map(str::to_string),
             effort: None,
             ultracode: None,
+            color: None,
         }
     }
 

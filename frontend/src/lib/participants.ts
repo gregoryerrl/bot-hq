@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useTauriQuery } from "../hooks/useInvoke";
-import { participantHue } from "../components/authorColor";
+import { colorByName, participantHue } from "../components/authorColor";
 
 /**
  * How a participant is NAMED in the UI, and nothing else.
@@ -36,6 +36,9 @@ export type ParticipantView = {
   turn_position: number;
   /** `"active"` | `"on_mention"` (rc3 D17/D18). */
   participation_mode: string;
+  /** The user's colour pick by palette NAME, or null to take the rotation
+   *  (rc3 D20). */
+  color?: string | null;
   enabled: boolean;
 };
 
@@ -341,7 +344,11 @@ export function participantHueIndex(
 ): Record<string, string> {
   const out: Record<string, string> = {};
   participants.forEach((p, i) => {
-    out[participantLabel(p)] = participantHue(i);
+    // The user's pick wins; the rotation is the default, not a fallback for
+    // failure. A name the palette no longer carries degrades to the rotation
+    // rather than to no colour — an unknown entry costs the override, never the
+    // participant.
+    out[participantLabel(p)] = colorByName(p.color)?.token ?? participantHue(i);
   });
   return out;
 }

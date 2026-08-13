@@ -52,11 +52,18 @@ const RESERVED = new Map<string, string>([
  * One entry of the participant palette (rc3 **D20**).
  *
  * `name` is what a user picks from a list; `token` is the Tailwind class the
- * byline renders. Exported as DATA so the picker and the rotation read the same
- * eight entries — a picker built from its own hardcoded list is how a user
- * chooses a colour nothing renders.
+ * byline renders; `swatch` is the same hue as a BACKGROUND, for the picker.
+ * Exported as DATA so the picker and the rotation read the same eight entries —
+ * a picker built from its own hardcoded list is how a user chooses a colour
+ * nothing renders.
+ *
+ * **`swatch` is spelled out rather than derived** from `token` at the call site.
+ * Tailwind's scanner reads class strings out of the SOURCE, so a class built as
+ * `token.replace("text-", "bg-")` is never emitted and the swatch renders with
+ * no colour at all — invisible in review, obvious to the user, and the exact
+ * "a typo emits no rule" failure the palette test exists for.
  */
-export type ParticipantColor = { name: string; token: string };
+export type ParticipantColor = { name: string; token: string; swatch: string };
 
 /**
  * The palette, in rotation order.
@@ -71,14 +78,14 @@ export type ParticipantColor = { name: string; token: string };
  * else's.
  */
 export const PARTICIPANT_COLORS: readonly ParticipantColor[] = [
-  { name: "Orange", token: "text-author-orange" },
-  { name: "Violet", token: "text-author-violet" },
-  { name: "Cyan", token: "text-author-cyan" },
-  { name: "Rose", token: "text-author-rose" },
-  { name: "Lime", token: "text-author-lime" },
-  { name: "Amber", token: "text-author-amber" },
-  { name: "Sky", token: "text-author-sky" },
-  { name: "Pink", token: "text-author-pink" },
+  { name: "Orange", token: "text-author-orange", swatch: "bg-author-orange" },
+  { name: "Violet", token: "text-author-violet", swatch: "bg-author-violet" },
+  { name: "Cyan", token: "text-author-cyan", swatch: "bg-author-cyan" },
+  { name: "Rose", token: "text-author-rose", swatch: "bg-author-rose" },
+  { name: "Lime", token: "text-author-lime", swatch: "bg-author-lime" },
+  { name: "Amber", token: "text-author-amber", swatch: "bg-author-amber" },
+  { name: "Sky", token: "text-author-sky", swatch: "bg-author-sky" },
+  { name: "Pink", token: "text-author-pink", swatch: "bg-author-pink" },
 ] as const;
 
 const PARTICIPANT_HUES = PARTICIPANT_COLORS.map((c) => c.token);

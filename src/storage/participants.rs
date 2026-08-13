@@ -137,6 +137,9 @@ pub struct Participant {
     /// This participant's prior claude-code conversation id, so a respawn
     /// resumes instead of starting blank. Was `sessions.{brian,rain}_claude_session_id`.
     pub claude_session_id: Option<String>,
+    /// The user's colour pick for this participant, by palette NAME, or `None`
+    /// to take the rotation (rc3 D20).
+    pub color: Option<String>,
 }
 
 /// One participant a session is created with: **a role and a model**.
@@ -161,6 +164,9 @@ pub struct ParticipantDraft {
     /// these generalise mean it.
     pub effort: Option<String>,
     pub ultracode: Option<bool>,
+    /// The palette entry the user picked for this participant, by NAME
+    /// ("Cyan"), or `None` to take the rotation (rc3 **D20**, migration 0052).
+    pub color: Option<String>,
 }
 
 const ROLE_COLUMNS: &str = "id, slug, display_name, description_prompt, capabilities, \
@@ -168,7 +174,7 @@ const ROLE_COLUMNS: &str = "id, slug, display_name, description_prompt, capabili
 
 const PARTICIPANT_COLUMNS: &str = "id, session_id, slug, display_name, role_id, model_id, \
      runtime, capabilities, participation_mode, turn_position, done_vote, enabled, \
-     effort, ultracode, claude_session_id";
+     effort, ultracode, claude_session_id, color";
 
 fn role_from_row(r: &sqlx::sqlite::SqliteRow) -> Role {
     use sqlx::Row;
@@ -210,6 +216,7 @@ fn participant_from_row(r: &sqlx::sqlite::SqliteRow) -> Participant {
         // is a nullable INTEGER with no CHECK, so anything storable is truthy.
         ultracode: r.get::<Option<i64>, _>("ultracode").map(|v| v != 0),
         claude_session_id: r.get("claude_session_id"),
+        color: r.get("color"),
     }
 }
 
@@ -1031,8 +1038,8 @@ impl Storage {
             let id = sqlx::query(
                 "INSERT INTO session_participants \
                  (session_id, slug, display_name, role_id, model_id, effort, ultracode, \
-                  capabilities, participation_mode, turn_position, enabled, joined_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  capabilities, participation_mode, turn_position, enabled, joined_at, color) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(session_id)
             .bind(&slug)
@@ -1052,6 +1059,7 @@ impl Storage {
             .bind(slot as i64)
             .bind(i64::from(enabled.map(|e| e[slot]).unwrap_or(true)))
             .bind(&created_at)
+            .bind(draft.color.as_deref())
             .execute(&mut *tx)
             .await
             .with_context(|| format!("seeding participant {slug} into {session_id}"))?
@@ -3241,6 +3249,7 @@ mod tests {
             turn_position,
             done_vote: false,
             enabled: true,
+            color: None,
             effort: None,
             ultracode: None,
             claude_session_id: None,
@@ -4253,6 +4262,11 @@ mod tests {
                 "id", "session_id", "slug", "display_name", "role_id", "model_id", "runtime",
                 "capabilities", "participation_mode", "prompt", "turn_position", "done_vote",
                 "effort", "ultracode", "claude_session_id", "enabled", "joined_at", "left_at",
+                // rc3 D20 (migration 0052). IS part of roster parity: both paths
+                // must write NULL when nobody picked a colour, and a default
+                // roster that quietly differed here would give the dialog's
+                // sessions a different rotation from the driver's.
+                "color",
             ],
             "session_participants grew a column; roster parity has to cover it"
         );
@@ -4301,12 +4315,14 @@ mod tests {
                 model_id: Some("opus".into()),
                 effort: Some("max".into()),
                 ultracode: Some(true),
+                color: None,
             },
             ParticipantDraft {
                 role_id: eyes.id,
                 model_id: Some("sonnet".into()),
                 effort: Some("low".into()),
                 ultracode: Some(false),
+                color: None,
             },
         ]
     }

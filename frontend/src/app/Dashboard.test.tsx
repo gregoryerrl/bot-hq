@@ -1,3 +1,4 @@
+import { PARTICIPANT_COLORS } from "../components/authorColor";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -182,8 +183,8 @@ describe("New session dialog — participants", () => {
         expect.objectContaining({
           options: expect.objectContaining({
             participants: [
-              { roleId: 1, modelId: null, effort: null, ultracode: null },
-              { roleId: 2, modelId: "m-opus", effort: null, ultracode: null },
+              { roleId: 1, modelId: null, effort: null, ultracode: null, color: null },
+              { roleId: 2, modelId: "m-opus", effort: null, ultracode: null, color: null },
             ],
           }),
         }),
@@ -317,8 +318,8 @@ describe("New session dialog — per-participant effort (D12)", () => {
       expect(mockInvoke).toHaveBeenCalledWith("create_session", expect.anything()),
     );
     expect(sentOptions().participants).toEqual([
-      { roleId: 1, modelId: null, effort: "max", ultracode: null },
-      { roleId: 2, modelId: null, effort: "low", ultracode: null },
+      { roleId: 1, modelId: null, effort: "max", ultracode: null, color: null },
+      { roleId: 2, modelId: null, effort: "low", ultracode: null, color: null },
     ]);
     // The per-slot columns spawn still reads are a projection of those same
     // rows, so they cannot disagree with the roster they came from.
@@ -342,7 +343,7 @@ describe("New session dialog — per-participant effort (D12)", () => {
       expect(mockInvoke).toHaveBeenCalledWith("create_session", expect.anything()),
     );
     expect(sentOptions().participants).toEqual([
-      { roleId: 1, modelId: null, effort: null, ultracode: true },
+      { roleId: 1, modelId: null, effort: null, ultracode: true, color: null },
     ]);
     expect(sentOptions().brianUltracode).toBe(true);
   });
@@ -605,5 +606,65 @@ describe("Dashboard tiles — the Quickview byline (rc3 D10)", () => {
 
     expect(await screen.findByText("Unknown participant")).toBeInTheDocument();
     expect(screen.queryByText(/^brian$/i)).toBeNull();
+  });
+});
+
+// ===========================================================================
+// rc3 D20 — a participant's colour is the user's to pick
+// ===========================================================================
+
+describe("New session dialog — participant colour (D20)", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  it("defaults to the rotation, and carries a pick into that row's payload", async () => {
+    // "Rotate" is the DEFAULT, not an absence: the rotation already guarantees
+    // no two participants of one session share a hue, so a pick is a preference
+    // rather than a fix. It has to reach the backend as a NAME — the palette can
+    // be re-themed and a session keeps meaning what its user meant.
+    mockBackend([role()]);
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+
+    // Rotate is pressed to begin with.
+    expect(
+      screen.getByRole("button", { name: /participant 1 colour: rotate/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /participant 1 colour: cyan/i }),
+    );
+    fireEvent.change(screen.getByPlaceholderText(/refactor auth flow/i), {
+      target: { value: "coloured" },
+    });
+    fireEvent.click(createButton());
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "create_session",
+        expect.objectContaining({
+          options: expect.objectContaining({
+            participants: [
+              expect.objectContaining({ roleId: 1, color: "Cyan" }),
+            ],
+          }),
+        }),
+      ),
+    );
+  });
+
+  it("offers every palette entry, so the picker and the rotation cannot disagree", async () => {
+    // Built from PARTICIPANT_COLORS rather than its own list — a picker with a
+    // hardcoded set is how a user chooses a colour nothing renders.
+    mockBackend([role()]);
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    for (const c of PARTICIPANT_COLORS) {
+      expect(
+        screen.getByRole("button", {
+          name: new RegExp(`participant 1 colour: ${c.name}`, "i"),
+        }),
+      ).toBeInTheDocument();
+    }
   });
 });

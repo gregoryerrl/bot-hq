@@ -1,0 +1,18 @@
+-- rc3 D20 — a participant's colour is the USER's choice.
+--
+-- NULL means "rotate": the UI assigns a hue by the participant's place in the
+-- roster, which is what makes two participants of one role distinguishable
+-- without anyone configuring anything. A value overrides that for this
+-- participant only.
+--
+-- Stored as the palette entry's NAME ("Cyan"), not a hex or a Tailwind token.
+-- A name survives a palette re-theme — the hex behind "Cyan" can change and
+-- every session keeps meaning what its user meant. A token would additionally
+-- bake a CSS framework's naming into the database, which is the wrong layer to
+-- learn about Tailwind.
+--
+-- Unvalidated on purpose. A name the palette no longer carries falls back to
+-- the rotation at render time (`colorByName` returns undefined), which is the
+-- degradation the user would want: an unknown colour costs the override, never
+-- the participant.
+ALTER TABLE session_participants ADD COLUMN color TEXT;

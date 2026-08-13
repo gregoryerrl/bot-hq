@@ -14,6 +14,7 @@ import type {
   SessionTrayView,
 } from "../lib/bindings";
 import { cn } from "../lib/cn";
+import { PARTICIPANT_COLORS } from "../components/authorColor";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { pickFolder } from "./contextLibraryShared";
@@ -55,6 +56,9 @@ type ParticipantRow = {
   effort: string | null;
   /** rc3 **D12**: ultracode is per participant. `null` = inherit. */
   ultracode: boolean | null;
+  /** rc3 **D20**: the palette entry by NAME, or `null` to take the rotation —
+   *  which already guarantees no two participants share a hue. */
+  color: string | null;
 };
 
 let nextParticipantKey = 1;
@@ -64,6 +68,7 @@ const emptyParticipant = (): ParticipantRow => ({
   modelId: "",
   effort: null,
   ultracode: null,
+  color: null,
 });
 
 // Quickview liveness throttle: collapse bursts of agent:messages:batch into at
@@ -245,6 +250,7 @@ export function Dashboard() {
           // rc3 D12 — per-participant, per the shared contract.
           effort: string | null;
           ultracode: boolean | null;
+          color: string | null;
         }[];
       };
     }
@@ -382,6 +388,7 @@ export function Dashboard() {
             modelId: p.modelId || null,
             effort: p.effort,
             ultracode: p.ultracode,
+            color: p.color,
           })),
         },
       });
@@ -695,6 +702,52 @@ export function Dashboard() {
                           <span className="font-code-sm text-code-sm text-on-surface">
                             Ultracode
                           </span>
+                        </label>
+                        {/* rc3 D20: the colour this participant's byline takes.
+                            "Rotate" is the DEFAULT rather than an absence — the
+                            rotation already guarantees no two participants of
+                            one session share a hue, so a pick is a preference,
+                            not a fix. Swatches rather than a select: the thing
+                            being chosen is a colour, and its name is the label
+                            of last resort. */}
+                        <label className="block">
+                          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                            Colour
+                          </span>
+                          <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                            <button
+                              type="button"
+                              aria-label={`Participant ${index + 1} colour: rotate`}
+                              aria-pressed={row.color === null}
+                              title="Rotate — a distinct hue by turn order"
+                              onClick={() => patchParticipant(index, { color: null })}
+                              className={cn(
+                                "size-5 rounded-full border text-[0.6rem] leading-none text-on-surface-variant",
+                                row.color === null
+                                  ? "border-primary ring-1 ring-primary"
+                                  : "border-outline-variant",
+                              )}
+                            >
+                              ↻
+                            </button>
+                            {PARTICIPANT_COLORS.map((c) => (
+                              <button
+                                key={c.name}
+                                type="button"
+                                aria-label={`Participant ${index + 1} colour: ${c.name}`}
+                                aria-pressed={row.color === c.name}
+                                title={c.name}
+                                onClick={() => patchParticipant(index, { color: c.name })}
+                                className={cn(
+                                  "size-5 rounded-full border",
+                                  c.swatch,
+                                  row.color === c.name
+                                    ? "border-primary ring-1 ring-primary"
+                                    : "border-outline-variant",
+                                )}
+                              />
+                            ))}
+                          </div>
                         </label>
                       </div>
                     </div>
