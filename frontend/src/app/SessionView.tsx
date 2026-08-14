@@ -11,7 +11,7 @@ import { useContextStore } from "../stores/context";
 import { useDragResize } from "../hooks/useDragResize";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
-import { HaltBanner, isApproval, type TrayRow } from "../components/HaltBanner";
+import { HaltBanner, isApproval, type SessionHalt, type TrayRow } from "../components/HaltBanner";
 import { useTrayStaging, stagedFor } from "../stores/trayStaging";
 import { ApprovalGate } from "../components/ApprovalGate";
 import { ChatPane } from "../components/ChatPane";
@@ -117,6 +117,12 @@ export function SessionView() {
   const { data: trayRows = [] } = useTauriQuery<TrayRow[]>("list_session_tray", {
     sessionId,
   });
+  // rc3 D35: the halt is SESSION state — its own slot, its own query, nothing
+  // to do with the tray. Invalidated by the same awaiting/halt-cleared events.
+  const { data: sessionHalt = null } = useTauriQuery<SessionHalt | null>(
+    "get_session_halt",
+    { sessionId },
+  );
   // rc3 D33: approvals are not parkable — they take the input slot. The gate
   // shows rows[0], and `tray_entries_for_session` is already `ORDER BY id ASC`,
   // so the row that has been blocking longest is the one asked first.
@@ -660,6 +666,7 @@ export function SessionView() {
           <div className="border-t border-outline-variant">
             {/* rc3 D30: the halt sits ABOVE the box that answers it. */}
             <HaltBanner
+              halt={sessionHalt}
               rows={trayRows}
               label={(agent) => authorLabel(agent, labels)}
             />

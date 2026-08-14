@@ -50,7 +50,12 @@ export function Providers({ children }: { children: ReactNode }) {
 // a single choice-resolve during a live duo meant 10-20+ Tauri round-trips
 // (incl. `compute_apply_diff` spawning a `git` subprocess). Scope each event to
 // only what it can actually change.
-const TRAY_KEYS = ["list_pending_tray", "list_session_tray"] as const;
+const TRAY_KEYS = [
+  "list_pending_tray",
+  "list_session_tray",
+  // rc3 D35: the halt slot rides the same awaiting/halt-cleared events.
+  "get_session_halt",
+] as const;
 // A phase advance changes only the chip, not doc data (docs refresh via DOC_KEYS
 // on a `doc_changed` event) — so `session_doc_search` belongs only in DOC_KEYS.
 const PHASE_KEYS = ["get_session_phase"] as const;

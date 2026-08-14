@@ -1240,3 +1240,22 @@ rotation because the advisor ROLE's `participation_mode` was `active` — the
 role predates the mode picker and was never flipped. The ring's on-mention
 filtering is pinned by tests and held. Fixed in the data: the role (and that
 session's row) now carry `on_mention`.
+
+#### D35 addendum — the halt divorced from the tray at the STORAGE layer
+
+The first cut of D35 kept the halt as a durable `session_tray` row and hid it
+from the tray surfaces. The user's reminder closed that gap: *"halt should be
+complete different, and not even remotely close to parkable items in tray. It
+is now a session channel feature."*
+
+Migration 0054 gives the session itself ONE halt slot — `halt_declared_by`,
+`halt_reason`, `halt_declared_at` on `sessions` — so *"there can never be 2
+halts"* stopped being a display invariant and became schema: a later
+declaration replaces the earlier, and the freshest recap is always the one on
+screen. `mark_awaiting_user` / `request_phase_advance` write the slot;
+`user_responded` clears it (the D28 single entry point, its source-count test
+re-pointed); the repeat-halt warning reads it; `get_session_halt` serves it to
+the banner, which no longer looks at tray rows for anything but the questions
+pointer. `clear_pending_halts` and `pending_halt_for_agent` are deleted;
+nothing writes `kind='halt'` rows any more, and the migration closes out any
+legacy pending ones. The banner's N-lines rendering collapsed to the one slot.

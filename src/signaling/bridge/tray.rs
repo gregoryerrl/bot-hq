@@ -956,18 +956,22 @@ impl SignalingBridge {
     /// the duo's peer-forward halts until the user acts.
     async fn emit_halt_row(&self, session_id: String, agent: String, text: String) {
         self.set_session_awaiting(&session_id, &agent, true).await;
-        let choice_id = Uuid::new_v4().to_string();
-        self.persist_question(
-            &session_id,
-            &choice_id,
-            &agent,
-            crate::storage::QuestionKind::Halt,
-            &text,
-            None,
-            None,
-            None,
-        )
-        .await;
+        // **A halt is SESSION state, not a tray row (rc3 D35).** The user:
+        // "halt should be complete different, and not even remotely close to
+        // parkable items in tray. It is now a session channel feature." One
+        // slot on the session row — a later declaration replaces the earlier,
+        // so "there can never be 2 halts" is schema now, not a display rule.
+        {
+            let storage_guard = self.storage.lock().await;
+            if let Some(storage) = storage_guard.as_ref() {
+                if let Err(e) = storage
+                    .declare_session_halt(&session_id, &agent, &text)
+                    .await
+                {
+                    tracing::warn!(?e, session_id, "declare_session_halt failed");
+                }
+            }
+        }
         let _ = self.event_tx.send(SignalingEvent::AwaitingUser {
             session_id,
             agent,
@@ -1001,12 +1005,16 @@ impl SignalingBridge {
     /// Storage lookup behind the repeat-halt check. Best-effort: a bridge built
     /// without storage (tests) or a failed query simply reports "no prior".
     async fn pending_halt_prompt(&self, session_id: &str, agent: &str) -> Option<String> {
+        // The session's ONE halt slot (rc3 D35): a prior halt from this same
+        // agent that the user has not acted on yet.
         let storage = self.storage.lock().await.clone()?;
         storage
-            .pending_halt_for_agent(session_id, agent)
+            .session_halt(session_id)
             .await
             .ok()
             .flatten()
+            .filter(|(by, _, _)| by == agent)
+            .map(|(_, reason, _)| reason)
     }
 
     /// Agent-initiated IPAV phase advance request. Persists a chat message
@@ -1419,8 +1427,8 @@ mod tests {
         // The real path a user reply takes (core::state::broadcast), not a
         // stand-in — this is the mechanism the guard's "still pending means
         // unanswered" assumption depends on.
-        let cleared = storage.clear_pending_halts("s1").await.unwrap();
-        assert_eq!(cleared, 1, "the halt row should have been pending");
+        let cleared = storage.clear_session_halt("s1").await.unwrap();
+        assert!(cleared, "the session's halt slot should have been set");
 
         let after = bridge
             .mark_awaiting_user("s1".into(), "brian".into(), "second".into())

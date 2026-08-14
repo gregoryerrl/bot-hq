@@ -68,25 +68,10 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
-    /// Mark every pending `kind='halt'` row for this session as answered.
-    /// Called when the user broadcasts a message to the session — the message
-    /// IS the answer to a `mark_awaiting_user` halt, so the tray should clear.
-    /// `choice` and other kinds are NOT touched (they wait on a real pick).
-    pub async fn clear_pending_halts(&self, session_id: &str) -> Result<u64> {
-        let res = sqlx::query(
-            "UPDATE session_tray \
-             SET status = 'answered', \
-                 answered_at = ?, \
-                 picked_option = '(user replied)' \
-             WHERE session_id = ? AND status = 'pending' AND kind = 'halt'",
-        )
-        .bind(now_utc())
-        .bind(session_id)
-        .execute(&self.pool)
-        .await
-        .with_context(|| format!("clearing halts for session {session_id}"))?;
-        Ok(res.rows_affected())
-    }
+    // `clear_pending_halts` lived here until rc3 D35 moved the halt off the
+    // tray entirely — it is a session-state slot now (`clear_session_halt`,
+    // storage/sessions.rs). Nothing writes kind='halt' rows any more; the ones
+    // in the archive are history.
 
     /// Mark a tray entry as withdrawn (agent abandons it; never to be answered).
     pub async fn withdraw_tray_entry(&self, choice_id: &str) -> Result<u64> {
@@ -201,28 +186,6 @@ impl Storage {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
-    }
-
-    /// The prompt of the most recent still-PENDING `halt` this agent parked in
-    /// this session, if any. User input clears halts, so a pending one means
-    /// the user has not replied since it was raised — and a second halt on top
-    /// of it is a repeat yield on a state the user has not acted on. Backs the
-    /// repeat-halt warning; see `SignalingBridge::mark_awaiting_user`.
-    pub async fn pending_halt_for_agent(
-        &self,
-        session_id: &str,
-        agent: &str,
-    ) -> Result<Option<String>> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT prompt FROM session_tray \
-             WHERE session_id = ? AND agent = ? AND status = 'pending' AND kind = 'halt' \
-             ORDER BY id DESC LIMIT 1",
-        )
-        .bind(session_id)
-        .bind(agent)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|(prompt,)| prompt))
     }
 
     /// Whether ANY tray row is pending for this session — question, halt, or

@@ -105,12 +105,25 @@ const RECAP_CLAMP_CHARS = 200;
  * while halted; a tray choice is an optional pick attached to it.
  */
 
+/** The session's declared halt — SESSION state, never a tray row (rc3 D35).
+ *  One slot by construction: the schema holds exactly one, so "there can never
+ *  be 2 halts" stopped being a display rule and became a fact. */
+export type SessionHalt = {
+  declared_by: string;
+  reason: string;
+  declared_at: string;
+};
+
 export function HaltBanner({
+  halt,
   rows,
   label,
   onOpenTray,
 }: {
-  /** Every tray row for this session; this component does the filtering. */
+  /** The session's halt slot, from `get_session_halt`. Null = not halted. */
+  halt?: SessionHalt | null;
+  /** Every tray row for this session — read ONLY for the questions pointer.
+   *  Halts are not rows (rc3 D35); approvals belong to the gate. */
   rows: readonly TrayRow[];
   /** slug → what to print for it (rc3 D10/D20), so the banner names a
    *  participant exactly as the chat byline does. */
@@ -118,14 +131,10 @@ export function HaltBanner({
   /** Jump to the tray, when a pick is waiting there too. */
   onOpenTray?: () => void;
 }) {
-  const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
+  const [expanded, setExpanded] = useState(false);
   const pending = rows.filter((r) => r.status === "pending");
-  const halts = pending.filter((r) => r.kind === "halt");
-  const approvals = pending.filter((r) => r.kind !== "halt" && isApproval(r));
-  const choices = pending.filter((r) => r.kind !== "halt" && !isApproval(r));
-  // Not waiting on anything: render nothing rather than an empty bar. A banner
-  // that is always present stops being read.
-  if (pending.length === 0) return null;
+  const approvals = pending.filter(isApproval);
+  const choices = pending.filter(isTrayItem);
 
   // **HALT is a claim about the SESSION, not about the tray** (rc3 D32).
   //
@@ -140,11 +149,14 @@ export function HaltBanner({
   // carries on. Only `halt` / `mark_awaiting_user` is a participant saying it has
   // stopped. So a halt row is a halt; everything else is something waiting for
   // you while the session runs.
-  const halted = halts.length > 0;
+  // Normalized, not trusted: a malformed slot (or a test mock's generic []
+  // fallback) must read as "not halted" rather than crash the banner.
+  const activeHalt = halt && typeof halt.reason === "string" ? halt : null;
+  const halted = !!activeHalt;
   // rc3 D35: an approval owns the INPUT SLOT (the gate replaces the box and
   // the session halts on it) — a banner narrating it on top would be the
-  // second surface for one fact. With nothing but approvals pending, the gate
-  // says everything.
+  // second surface for one fact. With no halt and no questions, render
+  // nothing: a banner that is always present stops being read.
   if (!halted && choices.length === 0) return null;
 
   return (
@@ -165,45 +177,39 @@ export function HaltBanner({
             : "a question is waiting — the session is still working"}
         </span>
       </div>
-      {/* One line per blocked participant. Multiple is reachable since rc3 D22:
-          a park no longer stops the ring where it stands, so the rotation
-          finishes its lap and a second participant can park before it yields. */}
-      <ul className="mt-1 space-y-1">
-        {halts.map((h) => {
-          const who = label?.(h.agent) ?? h.agent;
-          const long = h.prompt.length > RECAP_CLAMP_CHARS;
-          const open = expanded.has(h.id);
-          return (
-            <li key={h.id} className="text-sm text-on-surface">
-              <span className={cn("font-semibold", authorColorClass(who))}>
-                {who}
-              </span>
-              <span className="text-on-surface-variant"> — </span>
-              {/* Clamped, not truncated: the full text is in the DOM and one
-                  click away. A recap the user cannot finish reading is the same
-                  failure the banner was built to fix. */}
-              <span className={cn("whitespace-pre-wrap", !open && "line-clamp-3")}>
-                {h.prompt}
-              </span>
-              {long && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    setExpanded((prev) => {
-                      const next = new Set(prev);
-                      if (!next.delete(h.id)) next.add(h.id);
-                      return next;
-                    })
-                  }
-                  className="mt-0.5 text-xs text-primary underline underline-offset-2"
-                >
-                  {open ? "show less" : "show the full recap"}
-                </button>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+      {/* ONE halt line, because the session holds exactly one halt slot (rc3
+          D35) — a later declaration replaces the earlier, so the freshest recap
+          is always the one on screen. */}
+      {activeHalt && (
+        <div className="mt-1 text-sm text-on-surface">
+          <span
+            className={cn(
+              "font-semibold",
+              authorColorClass(
+                label?.(activeHalt.declared_by) ?? activeHalt.declared_by,
+              ),
+            )}
+          >
+            {label?.(activeHalt.declared_by) ?? activeHalt.declared_by}
+          </span>
+          <span className="text-on-surface-variant"> — </span>
+          {/* Clamped, not truncated: the full text is in the DOM and one click
+              away. A recap the user cannot finish reading is the same failure
+              the banner was built to fix. */}
+          <span className={cn("whitespace-pre-wrap", !expanded && "line-clamp-3")}>
+            {activeHalt.reason}
+          </span>
+          {activeHalt.reason.length > RECAP_CLAMP_CHARS && (
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              className="mt-0.5 text-xs text-primary underline underline-offset-2"
+            >
+              {expanded ? "show less" : "show the full recap"}
+            </button>
+          )}
+        </div>
+      )}
       {choices.length > 0 && (
         <button
           type="button"

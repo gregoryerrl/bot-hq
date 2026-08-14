@@ -44,10 +44,13 @@ delivery, whatever the session is doing. The D34 box-open/box-locked split
 shipped in the morning and was overruled by lunch; its test changed subject
 the same day it was written.
 
-**Halts are not tray items.** The badge said "one item on tray" over an empty
-tray because every count included the halt row. `isTrayItem` (question ⇔
-tray) now guards the tray list, the pill badge, the dashboard tile, and the
-header bell; the durable row survives restarts but claims no surface.
+**Halts are not tray items — at the storage layer, not just the surfaces.**
+The badge said "one item on tray" over an empty tray because every count
+included the halt row. First fix hid halts from the surfaces; the user's
+reminder — *"halt is a session channel feature"* — finished it: migration 0054
+gives the session ONE halt slot (`halt_declared_by/reason/declared_at`), a
+later declaration replaces the earlier, `get_session_halt` feeds the banner,
+and nothing writes `kind='halt'` tray rows any more.
 
 **The advisor taking turns was config, not code:** the advisor ROLE predates
 the mode picker and still carried `active`. The ring's on-mention filtering

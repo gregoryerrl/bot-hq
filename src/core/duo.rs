@@ -2322,11 +2322,18 @@ mod tests {
             next_turn_end(&mut ring_rx).is_some(),
             "a limit-stalled turn must still report its end to the ring"
         );
+        // rc3 D35: a halt is SESSION state, not a tray row — the provider-limit
+        // yield fills the session's one halt slot, and the tray stays empty.
+        let halt = storage.session_halt("s1").await.unwrap();
+        assert!(
+            halt.as_ref()
+                .is_some_and(|(_, reason, _)| reason.contains("Provider limit")),
+            "the session's halt slot carries the provider-limit reason: {halt:?}"
+        );
         let tray = storage.tray_entries_for_session("s1").await.unwrap();
         assert!(
-            tray.iter()
-                .any(|q| q.status == "pending" && q.prompt.contains("Provider limit")),
-            "tray carries the provider-limit halt: {tray:?}"
+            !tray.iter().any(|q| q.kind == "halt"),
+            "nothing writes halt ROWS any more: {tray:?}"
         );
     }
 

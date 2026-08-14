@@ -49,6 +49,60 @@ impl Storage {
         Ok(row)
     }
 
+    /// **Declare the session's halt (rc3 D35).** One slot on the session
+    /// itself, by construction — the user's "there can never be 2 halts",
+    /// finally as schema rather than as a display rule. A later declaration
+    /// replaces the earlier: the freshest recap is the one the user reads.
+    /// Not remotely a tray row: the tray is for questions.
+    pub async fn declare_session_halt(
+        &self,
+        session_id: &str,
+        agent: &str,
+        reason: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ? WHERE id = ?",
+        )
+        .bind(agent)
+        .bind(reason)
+        .bind(now_utc())
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("declaring halt for session {session_id}"))?;
+        Ok(())
+    }
+
+    /// Clear the session's halt slot. Returns whether one was set — the
+    /// caller's cue to tell the UI the state changed.
+    pub async fn clear_session_halt(&self, session_id: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE sessions SET halt_declared_by = NULL, halt_reason = NULL,              halt_declared_at = NULL WHERE id = ? AND halt_reason IS NOT NULL",
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("clearing halt for session {session_id}"))?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// The session's declared halt, if any: `(declared_by, reason, declared_at)`.
+    pub async fn session_halt(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(String, String, String)>> {
+        let row: Option<(Option<String>, Option<String>, Option<String>)> =
+            sqlx::query_as(
+                "SELECT halt_declared_by, halt_reason, halt_declared_at                  FROM sessions WHERE id = ?",
+            )
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|(by, reason, at)| {
+            Some((by?, reason?, at.unwrap_or_default()))
+        }))
+    }
+
     /// Rename a session. The live `SessionHandle.title` snapshot is NOT
     /// touched (it only feeds spawn-time logs); the UI re-reads the row.
     pub async fn rename_session(&self, id: &str, title: &str) -> Result<()> {

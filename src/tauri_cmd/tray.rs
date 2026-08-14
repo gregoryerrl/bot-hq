@@ -39,6 +39,34 @@ pub async fn resolve_choice(
     })
 }
 
+/// The session's declared halt (rc3 D35) — a SESSION state, never a tray row.
+/// `None` = not halted. One slot by construction; the freshest declaration is
+/// the one the user reads.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct SessionHaltView {
+    pub declared_by: String,
+    pub reason: String,
+    pub declared_at: String,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_session_halt(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    session_id: String,
+) -> Result<Option<SessionHaltView>, AppError> {
+    let Some(storage) = bridge.storage_handle().await else {
+        return Ok(None);
+    };
+    Ok(storage.session_halt(&session_id).await?.map(
+        |(declared_by, reason, declared_at)| SessionHaltView {
+            declared_by,
+            reason,
+            declared_at,
+        },
+    ))
+}
+
 /// One staged tray pick, as the composer's Send hands it over (rc3 D34).
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct StagedPick {

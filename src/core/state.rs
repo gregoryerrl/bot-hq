@@ -891,7 +891,7 @@ impl AppState {
     ///
     /// Does NOT touch pending-halt ROWS. That is [`Self::user_responded`]'s
     /// job, and it is the only thing that does it — this doc used to say
-    /// "callers that also answer those call `clear_pending_halts` separately",
+    /// "callers that also answer those call the halt-clear separately",
     /// which is the arrangement that let one caller forget for 52 occurrences
     /// (rc3 D28).
     async fn clear_awaiting(&self, handle: &SessionHandle, session_id: &str) {
@@ -940,12 +940,12 @@ impl AppState {
         // between the two, a cleared row and a halted ring is a session the next
         // message fixes; a released ring and a pending row is the bug above, and
         // it is invisible.
-        match self.storage.clear_pending_halts(session_id).await {
-            Ok(cleared) if cleared > 0 => {
+        match self.storage.clear_session_halt(session_id).await {
+            Ok(true) => {
                 self.bridge.notify_halts_cleared(session_id.to_string());
             }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(?e, session_id, "clear_pending_halts failed"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(?e, session_id, "clear_session_halt failed"),
         }
         // `advance_phase` is the one caller that does NOT release: a phase
         // self-advance answers the halt without being a message anyone reads,
@@ -1810,10 +1810,11 @@ mod tests {
         // functions in prose, and a test that counted prose would measure its
         // own explanation. (It did, on the first run.)
         assert_eq!(
-            prod.matches(".clear_pending_halts(").count(),
+            prod.matches(".clear_session_halt(").count(),
             1,
-            "the halt row is cleared in exactly one place — a second call site is \
-             a path that can forget the other half"
+            "the session's halt slot is cleared in exactly one place — a second \
+             call site is a path that can forget the other half (rc3 D35: the \
+             slot lives on the SESSION, not in the tray)"
         );
         // The ring release: the bridge method, called once, from the same place.
         assert_eq!(
