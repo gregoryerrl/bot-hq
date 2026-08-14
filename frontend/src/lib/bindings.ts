@@ -879,6 +879,44 @@ async getSessionHalt(sessionId: string) : Promise<Result<SessionHaltView | null,
 }
 },
 /**
+ * **Stage a response for boundary delivery** (the Stage toggle,
+ * 2026-08-15): the message + currently staged tray picks are held by the
+ * backend and delivered as one ordinary user response at the ring's next
+ * turn boundary — never mid-turn, never superseding the holder. Pause
+ * stays the only interrupt. Re-staging replaces the previous stage.
+ */
+async stageUserResponse(sessionId: string, text: string, picks: StagedPick[]) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("stage_user_response", { sessionId, text, picks }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Un-toggle Stage: the message returns to the (editable) box; nothing
+ * delivers.
+ */
+async unstageUserResponse(sessionId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("unstage_user_response", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The currently staged response, if any — `null` when nothing is staged.
+ */
+async getStagedResponse(sessionId: string) : Promise<Result<StagedResponseView | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_staged_response", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Discard a tray row from the UI without answering it — the user's bin for
  * stale questions they no longer want to answer.
  * 
@@ -2088,6 +2126,10 @@ export type SkillVisibility =
  * One staged tray pick, as the composer's Send hands it over (rc3 D34).
  */
 export type StagedPick = { choice_id: string; picked: string }
+/**
+ * The staged response, as the frontend rehydrates it after a reload.
+ */
+export type StagedResponseView = { text: string; picks: StagedPick[] }
 export type TerminalOpenView = { 
 /**
  * Base64 of the retained scrollback — replayed into xterm on mount so a
