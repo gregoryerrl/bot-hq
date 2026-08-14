@@ -1,5 +1,29 @@
 # Dogfood queue — bot-hq working on bot-hq
 
+> **CLOSED 2026-08-14. Items 1–4 are DONE — verified in the source and the
+> database, not in a doc.** Do not work from the list below; it is kept for the
+> evidence and the reasoning, not as a queue.
+>
+> - **1. Coalesce the backlog** — done. `deliver_backlog` builds receipts for the
+>   whole page and writes once ("Each page is ONE write", `core/sequencer.rs`).
+> - **2. D21 parallel boot** — done (`584f06f`), and D29 later made boot YIELD
+>   rather than kick the ring, which fixed the pass-volley it caused.
+> - **3. D20 user-set label** — done (`4e531c8`), migration 0053.
+> - **4. `round_number`** — done; written from the ring's lap counter (D27).
+>   The close-epilogue inconsistency was not separately reproduced.
+> - **5. The ring's tail starves** — still a DECISION, not a fix. Unchanged.
+>
+> **The one real leftover is `src/core/duo.rs`**: still named for a lineup that
+> no longer exists (rc3 D10), and its module doc still says it "fans text chunks
+> out to the peer" — which stopped being true when delivery became a PULL through
+> the ring. Cosmetic, but the doc actively misleads.
+>
+> This doc was itself written because *"two items in the previous queue were
+> already done and nobody had checked."* It then went stale the same way inside a
+> day. **The lesson is not "write a better queue" — it is that a queue doc ages
+> faster than the tree, so check the source before taking an item from either.**
+
+
 Point a session at this file. Written 2026-08-13 evening, **against verified
 state rather than against the older plan docs**, because two items in the
 previous queue were already done and nobody had noticed.
