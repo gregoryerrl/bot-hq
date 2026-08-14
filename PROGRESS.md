@@ -18,6 +18,35 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-15 — s-761704e8 dissected: the alignment build's first clean run
+
+76 minutes, Fable5+Opus5, closed by consensus. **Zero ring/halt/lock defects**
+— the first live validation of the alignment build: the one declared halt
+opened the box in 17 ms with a clean busy map, four staged answers rode one
+Send, all 27 dealt turns logged themselves, no error turns, no ghost turns,
+no stuck flags, and the session ended on a done-vote consensus yield. Both
+Pauses were the user steering (the #521 prod-risk hold; taking the floor for
+Tom's reply) — the second honored in 54 ms, no SIGKILL. 17/17 tray questions
+answered. CL delta landed and committed (`3238043`): a 41-line learnings
+block (the `max_usage_pct` integer-floor rule), eod tweaks, and a tasks.md
+refactor (1,515 → 116 lines against a byte-exact archive; the shrink guard
+fired and was confirmed through properly).
+
+**One bot-hq defect found: the close-out staleness sweep cried wolf 510
+times.** The tasks.md shrink made the sweep flag "real", "pass", "second",
+"empty", "php" — common English words — as "retired terms other files still
+use". HANDS dismissed it in 18 seconds, which was the right call and is also
+the problem: a gate that always cries wolf trains agents to slam through the
+confirm, and the day it flags a real retired term (the sandbox→staging
+class) nobody will read it. The sweep needs a term-shaped filter
+(distinctive tokens — code-shaped, hyphenated, proper-noun — or a curated
+list), not vocabulary diffing. Unfixed tonight; sized small.
+
+Minor observations, no action: a reviewer that dies post-consensus surfaces
+"reviewer down" in a close-out findings check with nothing to commit
+(cosmetic; the override gate covers the case where it matters), and one
+pass still carried a one-line narration (prose steers, not forces).
+
 ## 2026-08-15 (early) — vision alignment: the user decides, and the yield that dealt
 
 The user's directive after reading the s-f6a441ff dissection against
