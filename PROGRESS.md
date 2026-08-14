@@ -18,6 +18,63 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-14 — Pause is the only real interrupt
+
+**The user set the rule, and it is one sentence:** *"users are never allowed to
+type while agents are working, no halt = no type (except for pause button which
+is the real interrupt)."*
+
+That closes the item the previous entry left open, in the opposite direction
+from the one it recommended. Yesterday's note called the mid-turn input lock a
+band-aid and proposed **buffering** — hold the user's message, deliver it at the
+next turn boundary. Buffering was never a decision, only a recommendation, and
+the rule is strictly simpler: the lock is not a band-aid, it is the design. No
+queue, no delivery point, no "it will land later" affordance, and no answer
+needed for what happens if the session halts before the boundary. The cost is
+chosen rather than discovered — arriving at a working session takes one extra
+click.
+
+**Locked ⟺ somebody is working, read from the busy MAP.** The session enum
+cannot answer the question: `SessionActivity::derive` ranks `awaiting` above
+`busy`, so parking a question reported `awaiting_user` while two participants
+ran. The user screenshotted the result — an open textarea and a banner claiming
+a halt, over a status line that correctly named a participant mid-turn.
+`paused` is the one exception, because taking the box back is what the button is
+for. `isLocked` had no unit test until it became load-bearing; it has one now.
+
+**Approvals take the input slot (`ApprovalGate`).** Something is synchronously
+blocked on the answer — a pre-push hook, a gated command that has not run. The
+tray treated it as one more card with a Send button of its own, which is how the
+user came to answer a row and watch nothing move. The gate replaces the box, is
+answered on the spot, and keeps **Pause** reachable. The tray reports approvals
+as a count and says where they go; it does not offer a second way to answer
+them, because two paths into one row is the defect rather than the fix. Discard
+went with it: for a gate the explicit no is Reject, which tells the hook.
+
+**A discriminator that was wrong by a third.** `isApproval` first asked
+`command_text !== null`, set for action-gate rows alone — so **10 of 31
+approvals ever recorded**, every one a push gate, read as ordinary questions
+while a hook blocked on each. Both gate kinds ask exactly `Approve`/`Reject`,
+and no ordinary question in any session has. Same lesson as the two-hue palette:
+a discriminator that holds on the cases in front of you reads exactly like one
+that holds.
+
+**Also shipped:** a refused handover takes its busy flag back (fourth instance of
+*one event, two halves, nothing making them travel together* — invisible because
+every sequencer test but one passes `activity: None`); `HALT` became a claim
+about the session rather than about the tray; and Stop is renamed **Pause**,
+which is what it does — it parks, and Resume picks the ring up where it left off.
+
+**The ring is untouched.** Approvals still do not freeze it: the asker is
+blocked, peers keep working, and D22's review lap survives. The gate is a claim
+about where the answer goes, not a new way to stop the ring.
+
+1105 Rust + 367 frontend green. Both new rules mutation-verified. Decisions:
+[`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md)
+D31–D33.
+
+---
+
 ## 2026-08-13 — the input stays locked for the whole cycle, not one lap
 
 **Reported by the user, from outside the system:** *"I can type while agents are
