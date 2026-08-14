@@ -1081,3 +1081,12 @@ longer answers an approval, and Stop is now called Pause because that is what it
 does (it parks; Resume picks the ring up where it left off). Both new rules were
 mutation-verified — drop `anyBusy` from `isLocked`, or restore the
 `command_text` discriminator, and the tests that exist for them go red.
+
+**Verified live** in `s-c8e411a5` (2026-08-14, user-run): the lock held for the
+whole cycle, a parked question read `◆ FOR YOU` rather than `HALT`, and the gate
+took the input slot and **cleared cleanly on Approve** — the approval row went
+`pending → answered` in 36s with nothing left behind. Two ordinary questions were
+answered from the tray in the same session (37s, 63s), so the split between "an
+approval takes the box" and "a question stays parkable" held in practice. Zero
+halt overlaps. The push-gate path was the one with no prior UI exercise; it is
+the one that ran.
