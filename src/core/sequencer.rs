@@ -1464,11 +1464,11 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                             //
                             // `warn` rather than a `system_notice` row: the
                             // notice lane already carries five host injections
-                            // and is sized for one line (task 16), and the
-                            // inventory asks this task to DETECT. That leaves a
-                            // halted cycle with no on-screen reason — the
-                            // notification gap the module doc already names,
-                            // reached down one more path.
+                            // and is sized for one line (task 16). The
+                            // on-screen reason rides the HALT SLOT instead —
+                            // declared just below via the bridge, closing the
+                            // "halted cycle with no on-screen reason" gap this
+                            // comment used to end on.
                             let streak = spin.get(&participant_id).map_or(0, |s| s.streak);
                             halt(&mut holder, &mut epoch);
                             warn!(
@@ -1477,6 +1477,37 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                                 streak,
                                 "sequencer: participant repeating itself across rounds; cycle halted"
                             );
+                            // The halted cycle gets an ON-SCREEN reason (the
+                            // gap the comment above used to end on). Same
+                            // route as the provider-limit and error-streak
+                            // halts: the session's halt slot + the banner,
+                            // via `mark_awaiting_user` — which also latches
+                            // the ring and interrupts the spinning
+                            // participant's generation if one is in flight.
+                            // s-f6a441ff sat "just quiet" for exactly this.
+                            if let Some(bridge) = deps.bridge.as_ref() {
+                                let slug = deps
+                                    .storage
+                                    .participant_by_id(participant_id)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|p| p.slug)
+                                    .unwrap_or_else(|| format!("participant {participant_id}"));
+                                let _ = bridge
+                                    .mark_awaiting_user(
+                                        deps.session_id.to_string(),
+                                        slug.clone(),
+                                        format!(
+                                            "⚠ {slug} is repeating itself across rounds \
+                                             (streak {streak}) — the cycle halted so you \
+                                             can steer. Its last messages were near-\
+                                             identical; send a message to redirect, or \
+                                             close the session if the task is done."
+                                        ),
+                                    )
+                                    .await;
+                            }
                         } else {
                             advance_turn(
                                 &deps,
@@ -2112,6 +2143,17 @@ async fn start_turn(
     rx: &mut mpsc::Receiver<SequencerCommand>,
     deferred: &mut VecDeque<SequencerCommand>,
 ) {
+    // The DEAL — the holder column + the busy mark — happens HERE, strictly
+    // after every check that can refuse the turn (the halt latch, open gates,
+    // the all-pass yield, the round cap). It lived in `hand_over`, which
+    // marked the participant BEFORE those checks ran: a wrap that yielded
+    // orphaned a busy flag for a turn no pump would ever run or clear, and
+    // the input stayed locked under the yield notice (s-f6a441ff — the user
+    // force-paused out of it, twice). A `None` holder still writes the
+    // column — clearing it, nobody is active — and marks nobody. This also
+    // means a SUMMONED turn is now recorded and marked like any other, which
+    // the eager placement never did.
+    hand_turn_to(deps, holder.as_ref()).await;
     let Some(to) = holder.as_ref() else {
         return;
     };
@@ -2470,7 +2512,13 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Hando
             "sequencer: no active participant to hand the turn to"
         );
     }
-    hand_turn_to(deps, next.as_ref()).await;
+    // COMPUTE only — the deal (`hand_turn_to`: the holder column + the busy
+    // mark) moved to `start_turn` (s-f6a441ff). Dealing here meant the mark
+    // landed BEFORE the caller's wrap checks: an all-pass yield or a round cap
+    // then refused the turn it had already marked, and the flag — set for a
+    // turn no pump would ever run, so no pump would ever clear — locked the
+    // input under a "send a message to resume" notice until the user
+    // force-paused. `an_all_pass_yield_leaves_the_input_open` reproduces it.
     Handover::To(next)
 }
 
@@ -2537,6 +2585,17 @@ async fn hand_turn_to(deps: &SequencerDeps, next: Option<&Participant>) {
         .await;
     if let (Some(activity), Some(p)) = (&deps.activity, next) {
         activity.set_busy_slug(&p.slug, true);
+    }
+    // A deal used to be SILENT in the log — the s-f6a441ff dissection spent an
+    // hour proving a busy flag near a yield could not have come from here,
+    // because nothing recorded whether it had. Every deal says so now.
+    if let Some(p) = next {
+        debug!(
+            session = %deps.session_id,
+            participant_id = p.id,
+            slug = %p.slug,
+            "sequencer: turn dealt"
+        );
     }
 }
 
@@ -7114,6 +7173,132 @@ mod tests {
 
         drop(tx);
         assert!(exited(task).await, "the loop outlives a spin halt");
+    }
+
+    /// **An all-pass yield leaves nobody busy and the input open.** The
+    /// s-f6a441ff complaint, verbatim: "all agents passed, but input is still
+    /// locked (I had to press Pause/Stop)". Whatever else held that lock (a
+    /// self-woken background continuation is the prime suspect — carried_epoch
+    /// 0, no turn-opened line), the RING's own contract is pinned here: a lap
+    /// of passes yields with every ring-set flag clear, the tracker derives
+    /// Idle, and the box opens.
+    #[tokio::test]
+    async fn an_all_pass_yield_leaves_the_input_open() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        let act = tracker(&["a", "b"]).await;
+        deps.activity = Some(Arc::clone(&act));
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // A passes: the pass posts its row (as pass_turn does) and the pump
+        // clears A's flag at turn end — both simulated faithfully.
+        post(&storage, "participant", Some("a"), "(passed — nothing to add this round)").await;
+        act.set_busy_slug("a", false);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+                ending: crate::core::sequencer::TurnEnding::Passed,
+            },
+        )
+        .await;
+        let _ = seats[1].expect(2).await;
+        assert!(act.is_busy_slug("b"), "the ring dealt B its turn");
+
+        // B passes too — a full lap of passes: the cycle yields.
+        post(&storage, "participant", Some("b"), "(passed — nothing to add this round)").await;
+        act.set_busy_slug("b", false);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: b,
+                epoch: 2,
+                ending: crate::core::sequencer::TurnEnding::Passed,
+            },
+        )
+        .await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+
+        assert!(
+            !act.is_busy_slug("a") && !act.is_busy_slug("b"),
+            "a yielded ring marks nobody working (a={}, b={})",
+            act.is_busy_slug("a"),
+            act.is_busy_slug("b")
+        );
+        assert_eq!(
+            act.current(),
+            crate::core::activity::SessionActivity::Idle,
+            "the yield is when the user gets the floor — the input must open"
+        );
+        // And the yield said so on screen (D27's notice row).
+        let notices: Vec<String> = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.content.contains("Every participant passed"))
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(notices.len(), 1, "one all-passed notice: {notices:?}");
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **The spin halt says so on screen.** s-f6a441ff: the detector halted an
+    /// error volley and the session just went quiet — the user could not tell
+    /// settled from stalled, which is the exact gap rc3 D33's halt banner
+    /// exists to close. With a bridge wired, the halt fills the session's one
+    /// halt slot with the repeating participant and the reason, same route as
+    /// the provider-limit and error-streak halts. (The detector itself is
+    /// pinned above with no bridge — the ROW-side behaviour must not depend on
+    /// this field, which is why both tests exist.)
+    #[tokio::test]
+    async fn a_spin_halt_fills_the_session_halt_slot() {
+        const SAME: &str = "still waiting on the parser fix before i can continue";
+
+        let (mut deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        let a = seats[0].id;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        for (epoch, tick) in [(1u64, "tick one"), (2, "tick two"), (3, "tick three")] {
+            post(&storage, "participant", Some("a"), SAME).await;
+            post(&storage, "system", None, tick).await;
+            send(
+                &tx,
+                SequencerCommand::TurnComplete { participant_id: a, epoch, ending: SPOKE },
+            )
+            .await;
+            if epoch < 3 {
+                let _ = seats[0].expect(1).await;
+            }
+        }
+        seats[0].quiet().await;
+
+        let halt = storage.session_halt("s1").await.unwrap();
+        assert!(
+            halt.as_ref().is_some_and(|(by, reason, _)| by == "a"
+                && reason.contains("repeating itself")),
+            "the spin halt names the participant and the reason in the halt slot: {halt:?}"
+        );
+
+        drop(tx);
+        assert!(exited(task).await);
     }
 
     /// Router inventory **#3** — the false-positive guard, and the one the plan
