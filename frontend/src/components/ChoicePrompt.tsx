@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Button } from "./ui/Button";
+import { cn } from "../lib/cn";
 
-/** Shape ChoicePrompt renders — a pending choice/approval row. Hand-defined
- *  (not a generated binding) because it's built frontend-side from a durable
+/** Shape ChoicePrompt renders — a pending question row. Hand-defined (not a
+ *  generated binding) because it's built frontend-side from a durable
  *  SessionTrayView, not returned by any Tauri command. */
 export interface ChoicePromptChoice {
   choice_id: string;
@@ -14,39 +15,38 @@ export interface ChoicePromptChoice {
 
 interface ChoicePromptProps {
   choice: ChoicePromptChoice;
-  /** The option string currently mid-resolve for this choice, or undefined. */
-  pendingOption: string | undefined;
-  onResolve: (choiceId: string, picked: string) => void;
+  /** The pick currently staged for this question, if any. Highlights the
+   *  matching option; a staged custom answer seeds nothing here (the staged
+   *  chip below the card shows it verbatim). */
+  stagedOption?: string | undefined;
+  /** Stage a preset option. */
+  onPick: (choiceId: string, picked: string) => void;
+  /** The Other box changed. Fires per keystroke with the current text; empty
+   *  text means the custom answer is withdrawn. */
+  onOther: (choiceId: string, text: string) => void;
 }
 
 /**
- * One in-chat question: the preset options PLUS a mandatory "Other" free-text
- * field (#8). The field is ALWAYS present so the user can answer outside the
- * preset options — `resolve_choice` accepts arbitrary text as the picked value
- * (there is no options-membership check server-side), and the agent receives
- * whatever the user typed verbatim.
+ * One tray question: the preset options PLUS a mandatory "Other" free-text
+ * field (#8), so the user can answer outside the presets — the picked value is
+ * arbitrary text server-side and the agent receives it verbatim.
+ *
+ * **Nothing here sends (rc3 D35).** The user, after the second regression:
+ * *"I thought I was clear on this that answers will be sent in one batch.
+ * REMOVE THE SEND BUTTON ON QUESTIONS. I type on the 'other:' box on question,
+ * then click send from the input box, all answers including my message will
+ * get sent."* An option click stages; typing in Other stages; the composer's
+ * Send delivers everything as one response. This component had a per-card Send
+ * twice — first for resolve-on-click, then for the Other box — and both were
+ * a second answer path racing the batch.
  */
 export function ChoicePrompt({
   choice,
-  pendingOption,
-  onResolve,
+  stagedOption,
+  onPick,
+  onOther,
 }: ChoicePromptProps) {
   const [other, setOther] = useState("");
-  const isPending = pendingOption !== undefined;
-  const otherIsPending = isPending && !choice.options.includes(pendingOption!);
-  // A gated-command card (Approve/Reject) — free text doubles as
-  // reject-with-reason, and the agent is told to read the reasoning.
-  const isGate =
-    choice.options.length === 2 &&
-    choice.options.includes("Approve") &&
-    choice.options.includes("Reject");
-
-  const submitOther = () => {
-    const text = other.trim();
-    if (!text || isPending) return;
-    onResolve(choice.choice_id, text);
-    setOther("");
-  };
 
   return (
     <div className="rounded border border-secondary/40 bg-secondary/5 p-3">
@@ -61,42 +61,28 @@ export function ChoicePrompt({
               key={opt}
               size="sm"
               variant="secondary"
-              disabled={isPending}
-              onClick={() => onResolve(choice.choice_id, opt)}
+              className={cn(
+                stagedOption === opt && "ring-1 ring-primary text-primary",
+              )}
+              onClick={() => onPick(choice.choice_id, opt)}
             >
-              {pendingOption === opt ? `${opt} …` : opt}
+              {opt}
             </Button>
           ))}
         </div>
       )}
 
-      <div className="mt-2 flex items-center gap-1.5">
+      <div className="mt-2">
         <input
           type="text"
           value={other}
-          disabled={isPending}
-          onChange={(e) => setOther(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              submitOther();
-            }
+          onChange={(e) => {
+            setOther(e.target.value);
+            onOther(choice.choice_id, e.target.value);
           }}
-          placeholder={
-            isGate
-              ? "Reject with a reason — type why (the agent reads it)…"
-              : "Other — type a custom answer…"
-          }
-          className="min-w-0 flex-1 rounded border border-outline/40 bg-surface px-2 py-1 font-mono text-xs text-on-surface placeholder:text-on-surface-variant/70 focus:border-secondary focus:outline-none disabled:opacity-50"
+          placeholder="Other — type a custom answer; it sends with your message…"
+          className="w-full rounded border border-outline/40 bg-surface px-2 py-1 font-mono text-xs text-on-surface placeholder:text-on-surface-variant/70 focus:border-secondary focus:outline-none"
         />
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={isPending || other.trim() === ""}
-          onClick={submitOther}
-        >
-          {otherIsPending ? "Sending…" : "Send"}
-        </Button>
       </div>
     </div>
   );

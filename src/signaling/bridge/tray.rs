@@ -43,15 +43,14 @@ impl SignalingBridge {
         if let Some(flag) = self.session_awaiting.lock().await.get(session_id) {
             flag.store(true, Ordering::Release);
         }
-        // HALT THE RING, not just the cursors — but only for a park that YIELDS
-        // the session to the user.
+        // HALT THE RING, not just the cursors (rc3 D35: a halt is a halt — the
+        // ring stops where it stands, no lap).
         //
-        // `halt_ring` is false for `request_approval` / the action gate, which
-        // set the same flag while a git hook blocks on a yes/no. That is
-        // transient: the tool call is still in flight, the holder still holds the
-        // turn, and the ring is already waiting on its completion. Halting there
-        // stops a cycle that was not stuck and — until the release below existed
-        // — stopped it forever.
+        // `halt_ring` is false for `request_approval` / the action gate: those
+        // park through the GATE latch instead (`notify_ring_gate`), which also
+        // parks the ring but is lifted by ANSWERING the gate rather than by a
+        // user message. Same outcome the user decreed — "Approval gate halts
+        // the session" — different release.
         //
         // `try_send`, not `send`: this runs inside a tool call that must not
         // block on the ring's queue, and a full channel already has a halt or a
@@ -62,9 +61,8 @@ impl SignalingBridge {
             None
         };
         if let Some(tx) = seq {
-            // rc3 D22: WHO parked it. The ring ends that participant's turn and
-            // keeps dealing turns to everyone else, halting when the rotation
-            // comes back to somebody who cannot proceed.
+            // WHO declared it — the holder declaring ends its turn; a
+            // non-holder leaves the live turn alone (rc3 D35).
             let participant_id = {
                 let storage_guard = self.storage.lock().await;
                 let storage = storage_guard.clone();
@@ -88,7 +86,7 @@ impl SignalingBridge {
                 );
             }
             if tx
-                .try_send(crate::core::sequencer::SequencerCommand::QuestionParked {
+                .try_send(crate::core::sequencer::SequencerCommand::HaltDeclared {
                     participant_id,
                 })
                 .is_err()
@@ -366,11 +364,20 @@ impl SignalingBridge {
         )
         .await;
 
-        // Halt BEFORE emitting the event — the agent's next chunk shouldn't
-        // reach its peers while we wait for the user. `!blocking` is the
-        // distinction: a parked CHOICE yields the session, a blocking approval
-        // is a hook waiting on a bool and must not stop the cycle.
-        self.set_session_awaiting(&session_id, &agent, !blocking).await;
+        // rc3 **D35** — the user's rule, replacing two earlier regimes:
+        //
+        // - An ordinary QUESTION parks a row and touches NOTHING else. No
+        //   awaiting flag, no ring command. The session keeps working; the
+        //   answer travels with the user's next Send (D34). (It used to halt
+        //   the ring after a lap — which put peers to work under a session the
+        //   user was told had yielded.)
+        // - A blocking APPROVAL halts the session: the gate latch parks the
+        //   ring until the user answers. The asker is mid-turn inside the gated
+        //   tool call; the latch stops the NEXT deal, cutting nothing.
+        if blocking {
+            self.set_session_awaiting(&session_id, &agent, false).await;
+            self.notify_ring_gate(&session_id, true).await;
+        }
 
         // Best-effort broadcast. If no subscribers, the request still parks
         // until resolve_choice is called (mostly a concern for tests).
@@ -452,11 +459,37 @@ impl SignalingBridge {
         // Drop the oneshot — the agent's blocking caller (if any) gets the
         // standard "canceled" error.
         drop(parked);
+        // rc3 D35: a withdrawn approval (agent abandons its gate, or an
+        // external caller discards one) must lift the ring's gate latch too, or
+        // the session stays halted on a gate nobody can answer any more. Read
+        // BEFORE the withdraw flips the row away from `pending` — the latch
+        // discriminator matches pending rows only.
+        let gate_session = {
+            let storage_guard = self.storage.lock().await;
+            match storage_guard.as_ref() {
+                Some(storage) => storage
+                    .get_tray_entry(choice_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|row| {
+                        row.status == "pending"
+                            && row.options_json.as_deref()
+                                == Some("[\"Approve\",\"Reject\"]")
+                    })
+                    .map(|row| row.session_id),
+                None => None,
+            }
+        };
         let storage_guard = self.storage.lock().await;
         if let Some(storage) = storage_guard.as_ref() {
             if let Err(e) = storage.withdraw_tray_entry(choice_id).await {
                 tracing::warn!(?e, choice_id, "withdraw_question storage update failed");
             }
+        }
+        drop(storage_guard);
+        if let Some(session_id) = gate_session {
+            self.notify_ring_gate(&session_id, false).await;
         }
         was_parked
     }
@@ -545,6 +578,31 @@ impl SignalingBridge {
                 None => false,
             }
         };
+        // rc3 D35: a resolved approval lifts the ring's gate latch. Keyed on
+        // the durable row's options — the same Approve/Reject discriminator
+        // that seeds the latch — and gated on `flipped` so a duplicate resolve
+        // cannot decrement twice.
+        if flipped {
+            let gate_session = {
+                let storage_guard = self.storage.lock().await;
+                match storage_guard.as_ref() {
+                    Some(storage) => storage
+                        .get_tray_entry(choice_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .filter(|row| {
+                            row.options_json.as_deref()
+                                == Some("[\"Approve\",\"Reject\"]")
+                        })
+                        .map(|row| row.session_id),
+                    None => None,
+                }
+            };
+            if let Some(session_id) = gate_session {
+                self.notify_ring_gate(&session_id, false).await;
+            }
+        }
         let parked = self.pending.lock().await.remove(choice_id);
         match parked {
             Some(p) => {
@@ -1018,15 +1076,23 @@ mod tests {
     /// ending that clears the whole tally. So the agents kept resetting the very
     /// consensus that would have stopped them, by saying they had nothing to say.
     ///
-    /// `SequencerCommand::QuestionParked` was written, documented in six places
+    /// `SequencerCommand::HaltDeclared` was written, documented in six places
     /// and covered by two sequencer tests — with no production sender. This is
     /// that sender.
     #[tokio::test]
-    async fn parking_a_question_halts_the_ring_through_both_doors() {
+    async fn a_halt_reaches_the_ring_and_a_question_does_not() {
+        // **Changed subject at rc3 D35 — it used to assert both doors halt.**
+        // The user's rule split them: *"A halt is a halt. Still working means
+        // still working."* `mark_awaiting_user` is a participant declaring the
+        // session waits — the ring stops. `ask_user_choice` parks a row and
+        // touches NOTHING; the session keeps working and the answer travels
+        // with the user's next Send (D34). The old behaviour put peers to work
+        // under a ⏸ HALT banner (questions halted after a lap) — both halves
+        // of that are gone.
         use crate::core::sequencer::SequencerCommand;
         use std::sync::atomic::AtomicBool;
 
-        for door in ["ask_user_choice", "mark_awaiting_user"] {
+        for (door, expects_halt) in [("ask_user_choice", false), ("mark_awaiting_user", true)] {
             let bridge = SignalingBridge::new();
             let storage = crate::storage::Storage::memory().await.unwrap();
             bridge.set_storage(storage.clone()).await;
@@ -1056,16 +1122,23 @@ mod tests {
                 }
             }
 
-            assert!(
-                matches!(rx.try_recv(), Ok(SequencerCommand::QuestionParked { .. })),
-                "{door} parked a question and the ring was never told to halt"
-            );
+            if expects_halt {
+                assert!(
+                    matches!(rx.try_recv(), Ok(SequencerCommand::HaltDeclared { .. })),
+                    "{door} declared a halt and the ring was never told"
+                );
+            } else {
+                assert!(
+                    rx.try_recv().is_err(),
+                    "{door} is a parked QUESTION — it must not touch the ring at all"
+                );
+            }
         }
     }
 
     /// **The RELEASE, which is the half that was missing.**
     ///
-    /// A halt with no release is worse than no halt: `QuestionParked` sets
+    /// A halt with no release is worse than no halt: `HaltDeclared` sets
     /// `holder = None`, and the sequencer's only un-halt is a `UserMessage`. When
     /// this shipped without a release path, the first `mark_awaiting_user` of a
     /// session stopped the cycle permanently — the participants kept their
@@ -1094,7 +1167,7 @@ mod tests {
             .mark_awaiting_user("s1".into(), "hands".into(), "blocked".into())
             .await;
         assert!(
-            matches!(rx.try_recv(), Ok(SequencerCommand::QuestionParked { .. })),
+            matches!(rx.try_recv(), Ok(SequencerCommand::HaltDeclared { .. })),
             "parking must halt the ring"
         );
 
@@ -1110,7 +1183,7 @@ mod tests {
     /// already waiting on the completion, and halting there stopped a cycle that
     /// was not stuck. Every gated `git commit` goes through this path.
     #[tokio::test]
-    async fn a_blocking_approval_does_not_halt_the_ring() {
+    async fn a_blocking_approval_opens_a_gate_that_parks_the_ring() {
         use std::sync::atomic::AtomicBool;
         let bridge = SignalingBridge::new();
         let storage = crate::storage::Storage::memory().await.unwrap();
@@ -1139,9 +1212,17 @@ mod tests {
                 .await;
         });
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        // **Changed subject at rc3 D35 — this used to assert NOTHING reached
+        // the ring.** The user overruled the "asker is blocked; peers keep
+        // working" split: *"Approval gate halts the session, stop
+        // overcomplicating things like halting just for the agent that
+        // asked."* A gate now parks the ring until the user answers.
         assert!(
-            rx.try_recv().is_err(),
-            "a blocking approval must not halt the ring — it is a hook waiting on a bool"
+            matches!(
+                rx.try_recv(),
+                Ok(crate::core::sequencer::SequencerCommand::GateOpened)
+            ),
+            "a blocking approval must open a gate — the session halts on it"
         );
     }
 
@@ -1192,9 +1273,11 @@ mod tests {
             .unwrap();
         assert!(ack.contains("\"status\":\"parked\""), "ack: {ack}");
         assert!(ack.contains("choice_id"), "ack: {ack}");
+        // rc3 D35: a parked QUESTION sets nothing — no awaiting flag, no ring
+        // command. The session keeps working; only the row exists.
         assert!(
-            flag.load(Ordering::Acquire),
-            "ask_user_choice must halt the duo while parked"
+            !flag.load(Ordering::Acquire),
+            "a parked question must not flag the session as awaiting"
         );
 
         let choice_id = loop {

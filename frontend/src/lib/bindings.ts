@@ -856,6 +856,21 @@ async resolveChoice(choiceId: string, picked: string, confirmStale: boolean) : P
 }
 },
 /**
+ * **The composer's Send when tray picks are staged (rc3 D34):** the typed
+ * message plus every staged answer, delivered as ONE user response. Answers
+ * record first, the message posts last (framing the turn), and exactly one
+ * ring release fires. `text` may be empty when at least one pick is staged —
+ * answering without commentary is a complete response.
+ */
+async sendUserResponse(sessionId: string, text: string, picks: StagedPick[]) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("send_user_response", { sessionId, text, picks }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Discard a tray row from the UI without answering it — the user's bin for
  * stale questions they no longer want to answer.
  * 
@@ -2055,6 +2070,10 @@ export type SkillVisibility =
  * Fully disabled (no auto-invoke, not in the `/` menu).
  */
 "off"
+/**
+ * One staged tray pick, as the composer's Send hands it over (rc3 D34).
+ */
+export type StagedPick = { choice_id: string; picked: string }
 export type TerminalOpenView = { 
 /**
  * Base64 of the retained scrollback — replayed into xterm on mount so a

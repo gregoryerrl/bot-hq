@@ -1181,3 +1181,62 @@ tests red).
 D33 the box only opens when nobody is working, so it fires against idle
 agents — vestigial rather than wrong, and the Pause/steer flows route through
 it.
+
+### D35 — a halt is a halt: one surface and one ring effect per kind
+
+Shipped 2026-08-14, from the user's live test of `s-c41a4927`, which returned
+four defects and one standing instruction: *"Again stop overcomplicating
+things. A halt is a halt. Still working means still working."* Mid-build the
+user widened the license — *"just redesign the halt mechanism if thats
+better"* — and the redesign is the whole entry:
+
+| kind | ring effect | surface | release |
+|---|---|---|---|
+| **halt** (`mark_awaiting_user`, `request_phase_advance`) | stops **now** — no lap | the banner | any user response |
+| **gate** (approval, `Approve`/`Reject`) | stops until answered | the gate, in the input slot | answering the gate |
+| **question** (`ask_user_choice`) | **nothing** | the tray | answers batch into Send (D34) |
+
+The ring's whole mechanism is now two latches and one release: a
+`halted_pending_user` bool (set by `HaltDeclared`, cleared by `UserMessage`),
+an `open_gates` counter (GateOpened/GateResolved, **seeded from the durable
+rows on spawn** so a respawn cannot deal under a pre-existing gate), and the
+`UserMessage` release. Dealing is refused at the TOP of `advance_turn`, before
+any handover is minted — so no busy flag is ever set for a refused turn, and
+D31's take-back became unreachable instead of carefully handled.
+
+**What died, and why each existed:**
+
+- **D22's courtesy lap + blocked set.** Built so a first-turn question could
+  not make peers unreachable (`s-e8a20797`, 4/0/0). The user watched that lap
+  put peers to work under a ⏸ HALT banner and overruled it. The original
+  defect cannot return: a question no longer reaches the ring at all — D22's
+  cause was removed rather than its effect softened. A session where everyone
+  runs dry now yields through D27's all-pass lap.
+- **"The asker is blocked; peers keep working" for approvals.** My split,
+  defended twice, overruled once seen live: *"Approval gate halts the session,
+  stop overcomplicating things like halting just for the agent that asked."*
+  The gate parks dealing; the asker's in-flight turn is not cut (Pause is the
+  only interrupt); `GateResolved` deliberately deals nothing — the wake is the
+  asker's own completion or the user's release, so there is no second path
+  onto a turn.
+- **The question's awaiting flag and ring halt.** A parked question now sets
+  nothing: no flag, no command, no claim on any surface but its tray card.
+- **The per-question Send button** (`ChoicePrompt`'s Other-box Send — the
+  second one this component has carried). Clicks stage, typing in Other
+  stages, and the composer's Send is the only delivery: *"REMOVE THE SEND
+  BUTTON ON QUESTIONS. I type on the 'other:' box on question, then click
+  send from the input box, all answers including my message will get sent."*
+  The D34 box-open/box-locked split is gone too — staging is unconditional.
+- **Halts as tray items.** *"halt is not on tray anymore, its a declared
+  state."* The durable row remains (restart survival) but no tray surface
+  counts or lists it: `isTrayItem` (question ⇔ tray) now guards the tray
+  list, the pill badge, the dashboard tile, and the header bell. The reported
+  defect was a badge saying "one item on tray" over a tray with nothing in it.
+- **`QuestionParked` the name.** It is `HaltDeclared` now, because that is
+  what it is; only halt-declaring tools mint it.
+
+**The advisor defect was config, not code.** `s-c41a4927`'s advisor sat in the
+rotation because the advisor ROLE's `participation_mode` was `active` — the
+role predates the mode picker and was never flipped. The ring's on-mention
+filtering is pinned by tests and held. Fixed in the data: the role (and that
+session's row) now carry `on_mention`.

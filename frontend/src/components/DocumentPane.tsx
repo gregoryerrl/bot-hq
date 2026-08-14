@@ -5,8 +5,7 @@ import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { PhasePillRow, type Phase } from "./PhasePill";
-import { isApproval } from "./HaltBanner";
-import { useActivityStore, isLocked } from "../stores/activity";
+import { isTrayItem } from "./HaltBanner";
 import { useTrayStaging, stagedFor } from "../stores/trayStaging";
 import { ChoicePrompt, type ChoicePromptChoice } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
@@ -20,7 +19,6 @@ import { formatRelative } from "../lib/time";
 import { groupDiffByFile, type DiffLine } from "../lib/diffGroups";
 import { authorLabel, useParticipantLabels } from "../lib/participants";
 import type {
-  ResolveResult,
   SessionDocumentView,
   SessionTrayView,
 } from "../lib/bindings";
@@ -100,8 +98,12 @@ export const DocumentPane = memo(function DocumentPane({
     "list_session_tray",
     { sessionId },
   );
+  // rc3 D35: the tray holds QUESTIONS. A halt is a declared state (the
+  // banner); an approval is the gate. Counting either here is how a badge said
+  // "one item on tray" over a tray with nothing in it.
   const pendingTrayCount = useMemo(
-    () => trayEntries.filter((e) => e.status === "pending").length,
+    () =>
+      trayEntries.filter((e) => e.status === "pending" && isTrayItem(e)).length,
     [trayEntries],
   );
 
@@ -459,20 +461,7 @@ function TrayList({ sessionId }: { sessionId: string }) {
     "list_session_tray",
     { sessionId },
   );
-  // Track which (choiceId, option) is mid-resolve so the clicked option shows
-  // "…" and the row disables until resolve_choice settles + the tray refetches
-  // (the answered item then drops out of the pending filter).
-  const [resolving, setResolving] = useState<Map<string, string>>(new Map());
   const [resolveError, setResolveError] = useState<string | null>(null);
-  // When approving a STALE gated command (its requesting agent has moved on),
-  // the backend returns needs_stale_confirm instead of running it — we hold the
-  // pick here and surface a confirmation before re-resolving with confirmStale.
-  const [staleConfirm, setStaleConfirm] = useState<{
-    choiceId: string;
-    picked: string;
-    command: string;
-    askedAt: string | null;
-  } | null>(null);
   // Discard = bin a card WITHOUT answering it (nothing is sent to the agent).
   // Confirmed first: a mis-click on a real approval gate is destructive — a
   // discarded push gate denies the push.
@@ -502,78 +491,28 @@ function TrayList({ sessionId }: { sessionId: string }) {
       });
   };
 
-  const onResolve = (choiceId: string, picked: string, confirmStale = false) => {
-    setResolving((m) => new Map(m).set(choiceId, picked));
-    setResolveError(null);
-    invoke<ResolveResult>("resolve_choice", { choiceId, picked, confirmStale })
-      .then((res) => {
-        // Stale gate: don't run the (possibly now-invalid) command on a blind
-        // approve — park the pick and ask the user to confirm first.
-        if (res.kind === "needs_stale_confirm") {
-          setStaleConfirm({
-            choiceId,
-            picked,
-            command: res.command,
-            askedAt: res.asked_at,
-          });
-        }
-      })
-      // Surface the failure — answering is the core HITL action, and a silent
-      // console.error left the item stuck pending with no signal to the user.
-      .catch((e) => setResolveError(errorMessage(e)))
-      .finally(() => {
-        setResolving((m) => {
-          const next = new Map(m);
-          next.delete(choiceId);
-          return next;
-        });
-        void queryClient.invalidateQueries({
-          queryKey: ["list_session_tray", { sessionId }],
-        });
-      });
-  };
+  // The per-card resolve path is GONE (rc3 D35). Questions stage and travel
+  // with the composer's Send; approvals are answered in the gate, which owns
+  // the stale-confirm flow too. Discard is the one direct action left here.
 
-  // **rc3 D33: approvals are not parkable, so they are not answerable HERE.**
-  //
-  // They take the input slot instead (`ApprovalGate`). Leaving a second Approve
-  // button in the tray would rebuild the exact defect the gate exists to fix —
-  // two answer paths into one row, which is what produced "I answered it and a
-  // second one appeared". The count line below still reports them, so a user
-  // looking at the tray is told where the answer lives rather than finding the
-  // row missing.
-  const allPending = entries.filter((e) => e.status === "pending");
-  const gated = allPending.filter(isApproval);
-  const pending = allPending.filter((e) => !isApproval(e));
-  // rc3 D34: while the box is OPEN (nobody working — the composer's own
-  // isLocked rule, so the two surfaces agree by construction), a click STAGES
-  // the pick and Send delivers it with the message as one response. While
-  // LOCKED, picks resolve immediately as before — the answer rides the next
-  // turn boundary; the backend no longer interrupts anyone for it.
-  const activity = useActivityStore((s) => s.bySession[sessionId]);
-  const busyMap = useActivityStore((s) => s.busyBySession[sessionId]);
-  const boxOpen = !isLocked(activity, busyMap);
+  // **rc3 D35: the tray holds QUESTIONS and nothing else.** A halt is a
+  // declared state — the banner above the input box; an approval is the gate,
+  // which replaces the input box and halts the session. Rendering either here
+  // gave one fact two surfaces, and the user's report was a badge counting a
+  // halt as "one item on tray" over a tray with nothing in it.
+  const pending = entries.filter((e) => e.status === "pending" && isTrayItem(e));
+  // rc3 D34/D35: a click STAGES the pick — always. There is no send on a
+  // question; the composer's Send delivers every staged answer with the typed
+  // message as ONE response. The user: "I thought I was clear on this that
+  // answers will be sent in one batch. REMOVE THE SEND BUTTON ON QUESTIONS."
   const staged = useTrayStaging((s) => stagedFor(s.staged, sessionId));
   const stage = useTrayStaging((s) => s.stage);
   const unstage = useTrayStaging((s) => s.unstage);
-  const gateNotice = gated.length > 0 && (
-    <p className="mb-3 text-sm text-on-surface-variant">
-      <span className="font-label-caps text-label-caps text-primary">
-        ⛔ {gated.length} APPROVAL{gated.length > 1 ? "S" : ""}
-      </span>{" "}
-      — answered below the chat, where the input box is. Something is blocked
-      until you do.
-    </p>
-  );
   if (pending.length === 0) {
     return (
-      <>
-        {gateNotice}
-        {gated.length === 0 && (
-          <p className="text-sm text-on-surface-variant">
-            No pending input — you're all caught up.
-          </p>
-        )}
-      </>
+      <p className="text-sm text-on-surface-variant">
+        No pending input — you're all caught up.
+      </p>
     );
   }
   return (
@@ -585,43 +524,6 @@ function TrayList({ sessionId }: { sessionId: string }) {
           onDismiss={() => setResolveError(null)}
           className="mb-3"
         />
-      )}
-      {staleConfirm && (
-        <div
-          role="alertdialog"
-          className="mb-3 rounded border border-error/50 bg-error-container/30 px-3 py-2 text-xs text-on-error-container"
-        >
-          <p className="font-semibold">
-            ⚠ This approval prompt has been waiting a while
-          </p>
-          <p className="mt-1">
-            Requested {relAgo(staleConfirm.askedAt)}. The repo state may have
-            changed since — running it now could be invalid or destructive.
-          </p>
-          <pre className="mt-1 whitespace-pre-wrap break-words rounded bg-surface-container-high px-2 py-1 font-mono text-on-surface-variant">
-            {staleConfirm.command}
-          </pre>
-          <div className="mt-2 flex gap-2">
-            <button
-              type="button"
-              className="rounded bg-error px-2 py-1 font-semibold text-on-error hover:opacity-90"
-              onClick={() => {
-                const sc = staleConfirm;
-                setStaleConfirm(null);
-                onResolve(sc.choiceId, sc.picked, true);
-              }}
-            >
-              Run anyway
-            </button>
-            <button
-              type="button"
-              className="rounded border border-outline/40 px-2 py-1 hover:bg-surface-container-high"
-              onClick={() => setStaleConfirm(null)}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
       )}
       <ConfirmDialog
         open={discardTarget !== null}
@@ -657,7 +559,6 @@ function TrayList({ sessionId }: { sessionId: string }) {
           setViewInline(null);
         }}
       />
-      {gateNotice}
       <ul className="space-y-3">
         {pending.map((e) => (
         <li key={e.id}>
@@ -665,13 +566,8 @@ function TrayList({ sessionId }: { sessionId: string }) {
             entry={e}
             sessionId={sessionId}
             askedByLabel={authorLabel(e.agent, labels)}
-            pendingOption={resolving.get(e.choice_id)}
             stagedOption={staged[e.choice_id]}
-            onResolve={
-              boxOpen
-                ? (choiceId, picked) => stage(sessionId, choiceId, picked)
-                : onResolve
-            }
+            onStage={(choiceId, picked) => stage(sessionId, choiceId, picked)}
             onUnstage={() => unstage(sessionId, e.choice_id)}
             onDiscard={() => setDiscardTarget(e)}
             onViewFile={(path) => setViewFile({ sessionId, path })}
@@ -691,9 +587,8 @@ function TrayChoice({
   entry,
   sessionId,
   askedByLabel,
-  pendingOption,
   stagedOption,
-  onResolve,
+  onStage,
   onUnstage,
   onDiscard,
   onViewFile,
@@ -704,11 +599,12 @@ function TrayChoice({
   /** Who asked, as `ROLE · Model` — resolved by the list, which holds the
    *  roster. Never `entry.agent` itself (rc3 D10). */
   askedByLabel: string;
-  pendingOption: string | undefined;
   /** rc3 D34: the pick staged for the next Send, if any. Staged ≠ answered —
    *  the row is still pending and the agent has seen nothing yet. */
   stagedOption?: string | undefined;
-  onResolve: (choiceId: string, picked: string) => void;
+  /** Stage a pick (option click or Other text). There is no per-card send
+   *  (rc3 D35) — the composer's Send delivers everything as one response. */
+  onStage: (choiceId: string, picked: string) => void;
   onUnstage?: () => void;
   onDiscard: () => void;
   onViewFile: (path: string) => void;
@@ -780,8 +676,14 @@ function TrayChoice({
       )}
       <ChoicePrompt
         choice={choice}
-        pendingOption={pendingOption}
-        onResolve={onResolve}
+        stagedOption={stagedOption}
+        onPick={onStage}
+        onOther={(choiceId, text) => {
+          // Typing in Other IS the staging — no button (rc3 D35). Emptying the
+          // box withdraws the custom answer.
+          if (text.trim()) onStage(choiceId, text.trim());
+          else onUnstage?.();
+        }}
       />
       {stagedOption !== undefined && (
         <div className="mt-1 flex items-center gap-2 text-[0.7rem] text-on-surface-variant">

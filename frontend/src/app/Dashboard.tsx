@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { SessionTile } from "../components/SessionTile";
+import { isTrayItem } from "../components/HaltBanner";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import type {
@@ -263,8 +264,11 @@ export function Dashboard() {
   >("create_session");
 
   const pendingBySession = useMemo(() => {
+    // rc3 D35: tiles count tray QUESTIONS only — a halt is the session's
+    // declared state, an approval is the gate.
     const acc: Record<string, number> = {};
     for (const p of pending) {
+      if (!isTrayItem(p)) continue;
       acc[p.session_id] = (acc[p.session_id] ?? 0) + 1;
     }
     return acc;

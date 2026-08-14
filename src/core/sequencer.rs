@@ -153,7 +153,7 @@
 //! — it resets the cycle to the front and hands out another turn, which is a
 //! redirect, not a stop. What else stops it is
 //! [`Pause`](SequencerCommand::Pause), a
-//! [`QuestionParked`](SequencerCommand::QuestionParked), the command channel
+//! [`HaltDeclared`](SequencerCommand::HaltDeclared), the command channel
 //! closing (the session going away), or a participant that stops completing
 //! turns at all — a dead process leaves the turn in flight for ever, which ends
 //! the spend by wedging rather than by deciding. Spin detection is deliberately
@@ -235,7 +235,7 @@
 //!
 //! ### The second halt reason: a parked question
 //!
-//! [`QuestionParked`](SequencerCommand::QuestionParked) halts the same way and
+//! [`HaltDeclared`](SequencerCommand::HaltDeclared) halts the same way and
 //! on different grounds. Consensus is an ARRIVAL — every active participant
 //! agreed there is nothing left to do — so it is a tally and needs all of them.
 //! A parked question is a YIELD by one, and **the ring finishes its lap before
@@ -283,7 +283,7 @@
 //!
 //! What none of this establishes is that one row means one release. It does not,
 //! and that gap is real — see
-//! [`QuestionParked`](SequencerCommand::QuestionParked) for the case where two
+//! [`HaltDeclared`](SequencerCommand::HaltDeclared) for the case where two
 //! parks share a flag that only ever counts to one.
 //!
 //! ### A row can arrive with no command behind it
@@ -407,7 +407,7 @@
 //!   supersedes the turn being fed. This is the user's way out of a wedged
 //!   participant, and it costs nothing correctness-wise: the rows that did not
 //!   land stay past the cursor and are offered again when the ring returns;
-//! - a [`SequencerCommand::QuestionParked`] **naming the participant being
+//! - a [`SequencerCommand::HaltDeclared`] **naming the participant being
 //!   fed**, whose turn is over, so there is no longer a turn to feed. One naming
 //!   anyone else does not stop the drain (rc3 D22) — that turn is still live;
 //! - a [`SequencerCommand::Pause`], which stops the cycle where it stands. Same
@@ -646,7 +646,7 @@
 //! [`ActivityTracker::holds_wakes`](crate::core::activity::ActivityTracker::holds_wakes)
 //! answers "cancelling or paused", and `core::router` reads it lock-free on
 //! every forward. It is not reused here, for the reason
-//! [`QuestionParked`](SequencerCommand::QuestionParked) already gives about the
+//! [`HaltDeclared`](SequencerCommand::HaltDeclared) already gives about the
 //! awaiting flag: **a flag is a LEVEL and this loop needs an EDGE.** The
 //! sequencer sits in `recv().await` between turns, so a latch flipped elsewhere
 //! is only ever observed wherever the loop happens to look, with no defined order
@@ -959,7 +959,7 @@ pub enum SequencerCommand {
     /// with — so it passes this guard rather than failing it.
     ///
     /// One case does discard a held completion, and it is not the pause doing
-    /// it: a [`QuestionParked`](Self::QuestionParked) held AHEAD of it halts the
+    /// it: a [`HaltDeclared`](Self::HaltDeclared) held AHEAD of it halts the
     /// cycle on replay, which takes the holder and moves the epoch, so the
     /// completion behind it is discarded exactly as it would have been live.
     /// That is the park's semantics surviving the pause intact rather than a
@@ -1085,27 +1085,49 @@ pub enum SequencerCommand {
     /// halt — see "the second halt reason" in the module doc for why there is no
     /// release command of its own and what that leaves unwired.
     ///
-    /// # `participant_id` — who cannot proceed, and why the ring finishes its lap
+    /// # A halt is a halt (rc3 D35)
     ///
-    /// **A parked question no longer stops the ring where it stands** (rc3 D22).
-    /// It ends the ASKER's turn; the rotation carries on, and halts when it comes
-    /// back around to somebody who is blocked. Bounded at N-1 extra turns — one
-    /// each for the participants that are not waiting on anything.
+    /// **The ring stops where it stands.** No lap, no per-participant blocked
+    /// set — a latch that parks dealing until the user's next message. The
+    /// user, after watching D22's courtesy lap put peers to work under a ⏸
+    /// HALT banner: *"HALT doesn't halt the agents... A halt is a halt. Still
+    /// working means still working."*
     ///
-    /// The old behaviour was individually correct and composed into a session
-    /// with one working agent. A participant that ends each turn by asking the
-    /// user something halts the cycle before the ring reaches slot 1, and the
-    /// user's ANSWER restarts the cycle at the front — so the same participant
-    /// takes every turn and its peers are never handed one. Measured in
-    /// `s-e8a20797`: 4 deliveries to slot 0, zero to slots 1 and 2, across a
-    /// seven-minute session with both peers alive and initialised. Before rc3 the
-    /// router forwarded the asker's output to its peer regardless of any halt;
-    /// the ring turned that forward into a turn, and a halt stops turns.
+    /// This variant spent a day as `QuestionParked` with D22's lap semantics
+    /// (end the asker's turn, finish the rotation, halt on reaching the
+    /// blocked). That existed because ordinary QUESTIONS used to send it, and
+    /// a first-turn question halting the ring made peers unreachable
+    /// (`s-e8a20797`: 4/0/0 deliveries). D35 removed the cause instead of
+    /// softening the effect: **a question no longer reaches the ring at all**
+    /// — only `mark_awaiting_user` / `request_phase_advance` mint this, and
+    /// they mean stop.
     ///
-    /// `None` means the asker could not be resolved to a participant, and falls
-    /// back to halting outright — the safe direction, since the alternative is
-    /// dealing turns nobody can use with no record of who is stuck.
-    QuestionParked { participant_id: Option<i64> },
+    /// # `participant_id` — whose turn ends
+    ///
+    /// The holder declaring the halt ends its turn; a halt declared by a
+    /// NON-holder (a tool call still live after its turn was superseded) sets
+    /// the latch and leaves the live turn alone — Pause is the only interrupt,
+    /// and the latch stops the next deal, which is the halt taking effect at
+    /// the boundary. `None` (unresolvable declarer) behaves like a non-holder
+    /// with nothing in flight: halt outright.
+    HaltDeclared { participant_id: Option<i64> },
+    /// An approval gate parked: a command is synchronously blocked on the
+    /// user's yes/no (rc3 **D35**). **The session halts.** While any gate is
+    /// open the ring deals no turns — the user's decree, overturning the D22-era
+    /// split ("the asker is blocked; peers keep working"): *"Approval gate
+    /// halts the session, stop overcomplicating things like halting just for
+    /// the agent that asked."*
+    ///
+    /// The turn in flight stays in flight: the asker is usually mid-turn,
+    /// blocked inside its own tool call, and cutting that would kill the very
+    /// command awaiting approval. The gate is a LATCH consulted where turns are
+    /// dealt, not an interrupt.
+    GateOpened,
+    /// An approval gate resolved (approved, rejected, or discarded). Decrements
+    /// the latch and **never deals a turn itself** — the wake rides the
+    /// existing release (`user_responded` → [`UserMessage`]) or the asker's own
+    /// completion, so there is no second path onto a turn.
+    GateResolved,
     /// Stop: hold the cycle where it stands, hand out no further turns.
     ///
     /// **The turn in flight stays in flight.** This is not [`halt`] and must not
@@ -1123,7 +1145,7 @@ pub enum SequencerCommand {
     /// three are in the module doc.
     ///
     /// **A latch, not a counter**, and the asymmetry with
-    /// [`QuestionParked`](Self::QuestionParked)'s refcount problem is worth
+    /// [`HaltDeclared`](Self::HaltDeclared)'s refcount problem is worth
     /// being plain about, because it is the same hazard with the sign flipped.
     /// Two pauses and one resume runs the cycle again while one of the two
     /// pausers still means it to be stopped. There is no second pauser today —
@@ -1243,7 +1265,25 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     // answers (rc3 D22). The ring skips no-one on account of this — it HALTS when
     // it reaches one, which is what bounds the extra work at one lap. Cleared by
     // a user message, which is the answer.
-    let mut blocked: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    // rc3 **D35**: "a halt is a halt." One latch, not a set — a declared halt
+    // stops the ring where it stands, whoever declared it. Cleared by the
+    // user's next message, like the blocked-set it replaces.
+    let mut halted_pending_user = false;
+    // Open approval gates. While nonzero the ring deals no turns. Seeded from
+    // the durable rows so a respawned ring cannot deal turns under a gate that
+    // parked before the restart.
+    let mut open_gates: usize = deps
+        .storage
+        .count_pending_gates(&deps.session_id)
+        .await
+        .unwrap_or(0);
+    if open_gates > 0 {
+        tracing::info!(
+            session = %deps.session_id,
+            open_gates,
+            "sequencer: started with approval gate(s) already pending; dealing no turns until they resolve"
+        );
+    }
     loop {
         let cmd = match deferred.pop_front() {
             Some(cmd) => cmd,
@@ -1446,7 +1486,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                                 &mut deferred,
                                 &mut laps,
                                 &mut summons,
-                                &blocked,
+                                halted_pending_user,
+                                open_gates,
                                 &mut spoke_this_lap,
                                 false,
                             )
@@ -1479,7 +1520,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // D22). Cleared BEFORE the ring is stepped, or the restart would
                 // land on a participant this set still calls blocked and halt on
                 // the spot — the release re-halting itself.
-                blocked.clear();
+                halted_pending_user = false;
                 // The user's own output is substantive, so it resets the tally —
                 // but the reset is NOT written here. It rides the restart itself,
                 // in `advance_turn`; see the comment there for why this arm is
@@ -1518,7 +1559,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     &mut deferred,
                     &mut laps,
                     &mut summons,
-                    &blocked,
+                    halted_pending_user,
+                    open_gates,
                     &mut spoke_this_lap,
                     true,
                 )
@@ -1543,60 +1585,82 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut deferred).await;
                 }
             }
-            SequencerCommand::QuestionParked { participant_id } => {
+            SequencerCommand::HaltDeclared { participant_id } => {
                 // Unguarded and uncounted, unlike a completion — see the variant
                 // doc. No vote is touched, so the tally standing when the
                 // question was parked is exactly the tally the release has to
                 // clear, and `advance_turn` is where that happens.
-                match participant_id {
-                    // **The asker is blocked; the ring is not** (rc3 D22). Record
-                    // who cannot proceed and carry on dealing turns. The halt
-                    // fires in `advance_turn`, when the rotation comes back
-                    // around to somebody in this set.
-                    Some(id) => {
-                        blocked.insert(id);
-                        // Only the HOLDER parking ends a turn. A park from a
-                        // participant that is not holding one — a tool call still
-                        // in flight after its turn was superseded — records the
-                        // block and leaves the live turn alone; stepping there
-                        // would put two participants on a turn at once, which is
-                        // the one invariant this loop exists to keep.
-                        let ends_a_turn = holder.as_ref().is_some_and(|h| h.id == id);
-                        debug!(
-                            session = %deps.session_id,
-                            participant_id = id,
-                            ends_a_turn,
-                            blocked = blocked.len(),
-                            "sequencer: a question was parked; the asker yields its turn"
-                        );
-                        if ends_a_turn {
-                            advance_turn(
-                                &deps,
-                                &mut rx,
-                                &mut holder,
-                                &mut epoch,
-                                &mut deferred,
-                                &mut laps,
-                                &mut summons,
-                                &blocked,
-                                &mut spoke_this_lap,
-                                false,
-                            )
-                            .await;
-                        }
-                    }
-                    // Unresolvable asker: halt outright, as this command always
-                    // did. Halting twice is harmless by construction — the second
-                    // call finds no holder and moves an epoch nothing is carrying.
-                    None => {
-                        halt(&mut holder, &mut epoch);
-                        debug!(
-                            session = %deps.session_id,
-                            "sequencer: a question was parked by an unknown participant; \
-                             the cycle yields"
-                        );
-                    }
+                // **rc3 D35: a halt is a halt — the ring stops NOW.** The
+                // D22-era behaviour recorded the asker as blocked and finished
+                // the lap so peers could review first; the user watched those
+                // peers work under a ⏸ HALT banner and overruled it: *"HALT
+                // doesn't halt the agents... A halt is a halt. Still working
+                // means still working."* (D22's original defect — a first-turn
+                // park making peers unreachable — cannot come back this way:
+                // an ordinary QUESTION no longer sends this command at all.)
+                halted_pending_user = true;
+                // Only the HOLDER parking ends the turn in flight. A halt
+                // declared by a non-holder — a tool call still live after its
+                // turn was superseded — must not cut the holder's turn (Pause
+                // is the only interrupt); the latch stops the NEXT deal, which
+                // is the halt taking effect at the boundary.
+                let ends_a_turn = holder
+                    .as_ref()
+                    .is_some_and(|h| Some(h.id) == participant_id);
+                debug!(
+                    session = %deps.session_id,
+                    ?participant_id,
+                    ends_a_turn,
+                    "sequencer: a halt was declared; the ring stops where it stands"
+                );
+                if ends_a_turn {
+                    advance_turn(
+                        &deps,
+                        &mut rx,
+                        &mut holder,
+                        &mut epoch,
+                        &mut deferred,
+                        &mut laps,
+                        &mut summons,
+                        halted_pending_user,
+                        open_gates,
+                        &mut spoke_this_lap,
+                        false,
+                    )
+                    .await;
+                } else if holder.is_none() {
+                    // Nothing in flight: halt outright so the epoch moves and a
+                    // straggler cannot bind the retired turn.
+                    halt(&mut holder, &mut epoch);
                 }
+            }
+            SequencerCommand::GateOpened => {
+                open_gates += 1;
+                debug!(
+                    session = %deps.session_id,
+                    open_gates,
+                    "sequencer: an approval gate opened; the session halts until it resolves"
+                );
+                // The asker is usually mid-turn, blocked inside the gated tool
+                // call — its turn stays live. With nothing in flight, move the
+                // epoch now so a straggler cannot bind the retired turn while
+                // the gate holds the ring.
+                if holder.is_none() {
+                    halt(&mut holder, &mut epoch);
+                }
+            }
+            SequencerCommand::GateResolved => {
+                open_gates = open_gates.saturating_sub(1);
+                debug!(
+                    session = %deps.session_id,
+                    open_gates,
+                    "sequencer: an approval gate resolved"
+                );
+                // Deliberately deals nothing. The wake is the asker's own
+                // completion (it was mid-turn, blocked on the tool result) or
+                // the release the resolve path already fires
+                // (`user_responded` → `UserMessage`). Dealing here would be a
+                // second path onto a turn.
             }
             SequencerCommand::Pause => {
                 // **Not [`halt`], and the difference is the whole command.**
@@ -1727,10 +1791,28 @@ async fn advance_turn(
     deferred: &mut VecDeque<SequencerCommand>,
     laps: &mut u32,
     summons: &mut Summons,
-    blocked: &std::collections::HashSet<i64>,
+    halted_pending_user: bool,
+    open_gates: usize,
     spoke_this_lap: &mut bool,
     user_spoke: bool,
 ) {
+    // **rc3 D35: nothing is dealt while the session is halted or gated.**
+    // Checked before ANY handover is minted, so no busy flag is ever set for a
+    // turn that will be refused — the whole D31 take-back becomes unreachable
+    // instead of carefully handled. `halted_pending_user` is cleared by the
+    // user's message BEFORE this runs (the release path), so a release deals
+    // normally; an open gate holds even through a user message — the answer to
+    // the gate is what lifts it, and the message waits in the channel.
+    if halted_pending_user || open_gates > 0 {
+        debug!(
+            session = %deps.session_id,
+            halted_pending_user,
+            open_gates,
+            "sequencer: dealing is parked (halt declared or approval pending); the cycle yields"
+        );
+        halt(holder, epoch);
+        return;
+    }
     // **A user message restarts the cycle at the front — UNLESS they named
     // someone** (rc3 D17 #4). A mention is an insertion: it changes who takes
     // the next turn and leaves the rotation where it is, because summoning an
@@ -1906,44 +1988,11 @@ async fn advance_turn(
         // for how the ring read is broken without breaking the clear.
         Handover::Held => {}
         Handover::To(next) => {
-            // **The lap is over: the rotation has come back to somebody who
-            // cannot proceed** (rc3 D22). Halt here rather than at the park, so
-            // every participant that is NOT waiting on the user has had its turn
-            // first — the reviewer sees the work while the user decides.
-            //
-            // Checked before the round cap so the halt reports the real reason. A
-            // participant is only in this set between parking a question and the
-            // user's next message, so this cannot fire on a session nobody has
-            // asked anything.
-            if let Some(n) = next.as_ref().filter(|n| blocked.contains(&n.id)) {
-                debug!(
-                    session = %deps.session_id,
-                    participant_id = n.id,
-                    slug = %n.slug,
-                    "sequencer: the rotation reached a participant waiting on the user; \
-                     the cycle yields"
-                );
-                // **Take the handover back, flag included** (rc3 D31).
-                //
-                // `hand_over` has already run `hand_turn_to`, which records the
-                // holder AND marks it busy — one event, deliberately. So by the
-                // time this check fires, the participant we are about to refuse
-                // a turn is marked as working. Nothing would ever clear it: the
-                // pump clears its own flag at ITS turn end, and this participant
-                // never receives a turn to end.
-                //
-                // Left standing it reads as a session that is halted and working
-                // at the same time — reported from `s-382d3d18`, where the banner
-                // said "waiting on your answer" directly above "HANDS is working
-                // — the turn hasn't ended yet", and the stall watchdog then
-                // called HANDS `stalled` 90 seconds later because `busy` is a
-                // precondition of that verdict.
-                if let (Some(activity), Some(p)) = (&deps.activity, next.as_ref()) {
-                    activity.set_busy_slug(&p.slug, false);
-                }
-                halt(holder, epoch);
-                return;
-            }
+            // The D22-era "rotation reached a blocked participant" check lived
+            // here, with the D31 busy-flag take-back it forced. Both are gone
+            // (rc3 D35): a halt now parks dealing at the TOP of this function,
+            // before any handover is minted — so no flag is ever set for a turn
+            // that will be refused, and there is nothing to take back.
             // **The ring wrapped iff the participant taking the turn does not
             // sort strictly AFTER the one handing it on.** `next_in_ring` steps
             // by position through a ring ordered by `(turn_position, id)`, so
@@ -2272,7 +2321,7 @@ async fn halted_on_consensus(
 /// marker, no vote touched.
 ///
 /// One function for both reasons the cycle can yield ([`halted_on_consensus`]
-/// and [`SequencerCommand::QuestionParked`]) so they cannot drift apart. They
+/// and [`SequencerCommand::HaltDeclared`]) so they cannot drift apart. They
 /// differ in what leads here, not in what a halted cycle IS.
 ///
 /// Both lines are load-bearing, but for DIFFERENT reasons — remove either and a
@@ -2492,9 +2541,9 @@ enum Stop {
     /// A user message arrived: the ring is about to reset, so the turn being
     /// fed is superseded. Already pushed onto the deferred queue.
     Superseded,
-    /// A question was parked: the cycle is about to halt, so there is no turn
+    /// A halt was declared: the cycle is about to halt, so there is no turn
     /// left to feed. Already pushed onto the deferred queue.
-    Parked,
+    Halted,
     /// The cycle was paused: the participant being fed is the one the user just
     /// stopped, so there is no-one left to feed either. Pushed onto the FRONT of
     /// the deferred queue rather than the back — see the drain's own arm.
@@ -2599,15 +2648,15 @@ async fn deliver_backlog(
                     // leaves this turn live, and stopping its drain would
                     // hand it a partial backlog for no reason. The command is
                     // still deferred either way; the loop decides.
-                    Some(cmd @ SequencerCommand::QuestionParked { .. }) => {
+                    Some(cmd @ SequencerCommand::HaltDeclared { .. }) => {
                         let mine = matches!(
                             cmd,
-                            SequencerCommand::QuestionParked { participant_id }
+                            SequencerCommand::HaltDeclared { participant_id }
                                 if participant_id == Some(to.id)
                         );
                         deferred.push_back(cmd);
                         if mine {
-                            stop = Some(Stop::Parked);
+                            stop = Some(Stop::Halted);
                             break;
                         }
                     }
@@ -2689,7 +2738,7 @@ async fn deliver_backlog(
                 );
                 return;
             }
-            Some(Stop::Parked) => {
+            Some(Stop::Halted) => {
                 debug!(
                     session = %deps.session_id,
                     participant_id = to.id,
@@ -3493,9 +3542,27 @@ mod tests {
         }
     }
 
-    /// `participant_id` parked a question and cannot proceed (rc3 D22).
-    fn parked_by(participant_id: i64) -> SequencerCommand {
-        SequencerCommand::QuestionParked {
+    /// Park an Approve/Reject gate row for `session` — the durable shape both
+    /// gate kinds write, and the one `count_pending_gates` seeds the latch from.
+    async fn park_gate(storage: &Storage, choice_id: &str) -> i64 {
+        storage
+            .insert_tray_entry(
+                "s1",
+                choice_id,
+                "hands",
+                crate::storage::QuestionKind::Choice,
+                "Run gated command?",
+                Some(&["Approve".to_string(), "Reject".to_string()]),
+                None,
+                Some("git push"),
+            )
+            .await
+            .expect("gate row parks")
+    }
+
+    /// `participant_id` declared a halt (rc3 D35: the ring stops NOW).
+    fn halt_by(participant_id: i64) -> SequencerCommand {
+        SequencerCommand::HaltDeclared {
             participant_id: Some(participant_id),
         }
     }
@@ -3503,7 +3570,7 @@ mod tests {
     /// A park whose asker could not be resolved — the fallback that halts the
     /// whole cycle where it stands, as every park used to.
     fn parked_by_nobody() -> SequencerCommand {
-        SequencerCommand::QuestionParked {
+        SequencerCommand::HaltDeclared {
             participant_id: None,
         }
     }
@@ -4712,10 +4779,17 @@ mod tests {
     /// watchdog called HANDS `stalled`, because `busy` is a precondition of that
     /// verdict, so a cosmetic-looking lie became a health verdict.
     #[tokio::test]
-    async fn a_handover_refused_to_a_blocked_participant_leaves_nobody_marked_working() {
+    async fn a_declared_halt_parks_the_ring_before_any_handover_is_minted() {
+        // **Changed subject at rc3 D35 — this was D31's take-back test.** Under
+        // D22 a park kept dealing, so the ring could mint a handover (marking
+        // the next participant busy) and then refuse it, and D31 existed to
+        // take that flag back. The halt now parks dealing at the TOP of
+        // `advance_turn`, before any handover exists — so the take-back is not
+        // "handled", it is unreachable, and this pins the stronger property:
+        // after a halt, no busy flag is ever set for a turn nobody received.
         let (deps, storage, mut seats, activity) =
             ring_with_activity(&[("a", "active"), ("b", "active")]).await;
-        let (a, b) = (seats[0].id, seats[1].id);
+        let (a, _b) = (seats[0].id, seats[1].id);
         post(&storage, "user", None, "go").await;
 
         let (tx, rx) = mpsc::channel(8);
@@ -4724,26 +4798,17 @@ mod tests {
         assert_eq!(seats[0].expect(1).await, vec!["go"]);
         assert!(activity.is_busy_slug("a"), "the holder is marked working");
 
-        // A parks a question: D22 ends ITS turn and the ring carries on to B.
-        send(&tx, parked_by(a)).await;
-        assert_eq!(seats[1].expect(1).await, vec!["go"], "the lap continues");
-        assert!(activity.is_busy_slug("b"), "B holds the turn now");
-
-        // B finishes, so the rotation comes back to A — which is blocked. The
-        // cycle yields, and A must not be left marked as working.
+        // A declares a halt. The ring stops where it stands: B is never handed
+        // a turn, so B is never marked working — there is nothing to take back.
         post(&storage, "system", None, "host note").await;
-        send(
-            &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: SPOKE },
-        )
-        .await;
-        seats[0].quiet().await;
-
+        send(&tx, halt_by(a)).await;
+        seats[1].quiet().await;
         assert!(
-            !activity.is_busy_slug("a"),
-            "the ring refused A a turn, so it must not be left marked as working — \
-             this is the session that read as halted and working at once"
+            !activity.is_busy_slug("b"),
+            "no handover was minted under the halt, so nobody NEW reads as working — \
+             this is the session that used to say halted and working at once"
         );
+
         drop(tx);
         assert!(exited(task).await);
     }
@@ -5466,12 +5531,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_parked_question_finishes_the_lap_then_halts() {
-        // The second halt reason, and the one that is NOT a tally. Consensus
-        // needs every active participant to agree; a parked question needs one
-        // participant to block on a human. So the ring has to stop here with B's
-        // `done` standing and A's never cast — a cycle that only ever halted on
-        // `all_active_voted_done` would keep handing out turns.
+    async fn a_declared_halt_stops_the_ring_where_it_stands() {
+        // **Changed subject at rc3 D35 — it used to be "finishes the lap, then
+        // halts" (D22).** The user watched that lap put peers to work under a
+        // ⏸ HALT banner and overruled it: *"HALT doesn't halt the agents...
+        // A halt is a halt. Still working means still working."* D22's original
+        // defect (a first-turn park making peers unreachable) cannot return
+        // through this door: an ordinary QUESTION no longer reaches the ring at
+        // all — only a declared halt does, and a halt means stop.
         let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
         let (a, b) = (seats[0].id, seats[1].id);
         post(&storage, "user", None, "go").await;
@@ -5487,8 +5554,8 @@ mod tests {
         .await;
         assert_eq!(seats[1].expect(1).await, vec!["go"], "epoch 2, B holds");
 
-        // A row for A to be woken by, and then B's done vote — which must
-        // SURVIVE the halt below, because it is what the release has to clear.
+        // B votes done and hands back; A holds epoch 3. B's vote must SURVIVE
+        // the halt below, because it is what the release has to clear.
         post(&storage, "user", None, "note for a").await;
         send(
             &tx,
@@ -5501,58 +5568,32 @@ mod tests {
             "one done vote of two is not consensus — epoch 3, A holds"
         );
 
-        // Unread by BOTH when the question is parked, so any silence below is
-        // the halt rather than a ring step that found nothing to hand over.
+        // Unread by B when the halt lands, so B's silence below is the halt
+        // rather than a ring step that found nothing to hand over.
         post(&storage, "user", None, "note for b").await;
-        for id in [a, b] {
-            assert!(
-                !storage.unread_for_participant(id).await.unwrap().rows.is_empty(),
-                "the silence has to be the halt, not an empty backlog"
-            );
-        }
-
-        // A parks a question. Unilateral in the sense that matters: A has cast
-        // no vote at all, and the cycle will stop one vote short.
-        //
-        // **But the ring finishes its lap first** (rc3 D22). A yields ITS turn;
-        // B, which is waiting on nothing, still gets one. The old behaviour
-        // stopped the cycle where it stood, and composed into a session where a
-        // participant that ends each turn by asking the user something makes its
-        // peers structurally unreachable — measured in `s-e8a20797`, four
-        // deliveries to slot 0 and zero to slots 1 and 2.
-        send(&tx, parked_by(a)).await;
-        assert_eq!(
-            seats[1].expect(2).await,
-            vec!["note for a", "note for b"],
-            "the asker yields; the participant waiting on nothing still takes its turn"
+        assert!(
+            !storage.unread_for_participant(b).await.unwrap().rows.is_empty(),
+            "the silence has to be the halt, not an empty backlog"
         );
+
+        // A declares a halt. The ring stops HERE: B gets nothing, whatever is
+        // sitting unread for it. (Under D22 this dealt B one more turn first.)
+        send(&tx, halt_by(a)).await;
+        seats[1].quiet().await;
+        seats[0].quiet().await;
         assert!(
             !storage.all_active_voted_done("s1").await.unwrap(),
-            "the cycle is stopping with the rotation still one vote short — which is \
-             the whole difference between this halt and the consensus one"
+            "the cycle stopped one vote short — a halt, not consensus"
         );
 
-        // B's turn ends, and the rotation comes back to A — who is still waiting
-        // on the user. THAT is where the cycle yields.
-        send(
-            &tx,
-            SequencerCommand::TurnComplete { participant_id: b, epoch: 4, ending: DONE },
-        )
-        .await;
-        seats[0].quiet().await;
-
-        // The halt is proven by what happens to A's completion, not by the
-        // silence: an ignored command produces silence too, because nothing was
-        // due to happen. A SUBSTANTIVE completion for the turn that was in flight
-        // is the discriminator — taken as live it would clear the tally and step
-        // the ring.
+        // The halt moved the epoch, so A's stale completion for the turn the
+        // halt ended is discarded — taken as live it would clear the tally and
+        // step the ring.
         send(
             &tx,
             SequencerCommand::TurnComplete { participant_id: a, epoch: 3, ending: SPOKE },
         )
         .await;
-        // With the control channel still OPEN — dropping `tx` here would abort
-        // the very delivery a broken halt would have made.
         seats[1].quiet().await;
         seats[0].quiet().await;
         let roster = storage.participants_for_session("s1").await.unwrap();
@@ -5561,32 +5602,37 @@ mod tests {
             "and the discarded completion cleared no vote"
         );
 
-        // Halted, not dead: the user's message restarts the cycle at the front.
+        // Halted, not dead: the user's message restarts the cycle at the front,
+        // and the backlog the halt held is what the first turn reads.
         send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["note for b"],
-            "epoch 5, A holds again"
+            "the release deals from the front, backlog intact"
         );
 
-        // The release CLEARED the tally, and this is the shape that proves it
-        // rather than restating it. B's done was standing when the question was
-        // parked. If it survived the restart, A's first `done: true` completes a
-        // tally of two and the cycle halts again with B never having taken a
-        // turn — the false arrival `advance_turn`'s clear exists to stop.
+        // The release CLEARED the tally: B's done was standing when the halt
+        // landed. If it survived the restart, A's first `done: true` would
+        // complete a tally of two and halt the cycle again with B never having
+        // taken a turn after the release.
         post(&storage, "user", None, "note for b again").await;
         send(
             &tx,
-            SequencerCommand::TurnComplete { participant_id: a, epoch: 6, ending: DONE },
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 5,
+                ending: DONE,
+            },
         )
         .await;
         assert_eq!(
-            seats[1].expect(1).await,
-            vec!["note for b again"],
-            "one live vote of two: B's pre-park done did not survive the release. Had it \
-             survived, A's done here would complete a tally of two and the cycle would \
-             halt with B never woken."
+            seats[1].expect(3).await,
+            vec!["note for a", "note for b", "note for b again"],
+            "one fresh done vote is not consensus — the stale vote was cleared. And \
+             B's backlog is everything since ITS last turn: the halt held the rows, \
+             it did not spend them on a lap the user never saw"
         );
+
         drop(tx);
         assert!(exited(task).await);
     }
@@ -5618,7 +5664,7 @@ mod tests {
             vec!["go"],
             "delivery is live in this run"
         );
-        send(&tx, parked_by(a)).await;
+        send(&tx, halt_by(a)).await;
 
         // Written while the session is awaiting. Nobody may be handed it.
         post(&storage, "user", None, "while awaiting").await;
@@ -5677,7 +5723,7 @@ mod tests {
         //
         // The backlog spans TWO batches on purpose. `break 'rows` alone ends the
         // page, so on a single-page fixture the drain returns anyway at
-        // `!page.more` and the `Stop::Parked` arm's own `return` is dead weight
+        // `!page.more` and the `Stop::Halted` arm's own `return` is dead weight
         // no assertion could see. Past the batch limit the outer loop would come
         // back for a second page — with the park already consumed off the
         // channel, so nothing would stop it a second time.
@@ -5702,13 +5748,13 @@ mod tests {
         // has nothing to do with the park — and would leave this test green with
         // the park branch deleted.
         let (cmd_tx, mut rx) = mpsc::channel(8);
-        send(&cmd_tx, parked_by(a)).await;
+        send(&cmd_tx, halt_by(a)).await;
         let mut deferred = VecDeque::new();
         deliver_backlog(&deps, &holder, &mut rx, MAX_TURN_BATCHES, &mut deferred).await;
 
         seats[0].quiet().await;
         assert!(
-            matches!(deferred.front(), Some(SequencerCommand::QuestionParked { .. })),
+            matches!(deferred.front(), Some(SequencerCommand::HaltDeclared { .. })),
             "the drain sets the park aside for the loop rather than swallowing it — \
              the halt itself is the main loop's arm, not this function's"
         );
@@ -5747,7 +5793,7 @@ mod tests {
             .unwrap();
 
         let (cmd_tx, mut rx) = mpsc::channel(8);
-        send(&cmd_tx, parked_by(b)).await;
+        send(&cmd_tx, halt_by(b)).await;
         let mut deferred = VecDeque::new();
         deliver_backlog(&deps, &holder, &mut rx, MAX_TURN_BATCHES, &mut deferred).await;
 
@@ -5757,7 +5803,7 @@ mod tests {
             "the whole backlog goes out: this participant is not the one that parked"
         );
         assert!(
-            matches!(deferred.front(), Some(SequencerCommand::QuestionParked { .. })),
+            matches!(deferred.front(), Some(SequencerCommand::HaltDeclared { .. })),
             "and the park is still handed to the loop, which is what records the block"
         );
         assert_eq!(
@@ -6565,7 +6611,7 @@ mod tests {
             vec!["go"],
             "delivery is live in this run"
         );
-        send(&tx, parked_by(a)).await;
+        send(&tx, halt_by(a)).await;
 
         // Unread, so any silence below is the halt holding rather than a ring
         // step that found nothing to hand over.
@@ -6753,7 +6799,7 @@ mod tests {
         // Stopped, then two commands caught by the pause: the park FIRST, the
         // completion behind it.
         send(&tx, SequencerCommand::Pause).await;
-        send(&tx, parked_by(b)).await;
+        send(&tx, halt_by(b)).await;
         send(
             &tx,
             SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
@@ -8029,4 +8075,103 @@ mod tests {
             "partial overlap should not trip the breaker: {partial}"
         );
     }
+    /// rc3 **D35** — an open approval gate parks the ring: "Approval gate halts
+    /// the session, stop overcomplicating things like halting just for the
+    /// agent that asked."
+    #[tokio::test]
+    async fn an_open_gate_parks_the_ring_until_the_user_answers() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await; // epoch 1, A holds
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // A's gated tool call parks an approval. A still holds its turn — the
+        // gate cuts nothing — but when that turn ends, the ring deals no next
+        // turn: the session is halted on the gate.
+        send(&tx, SequencerCommand::GateOpened).await;
+        post(&storage, "user", None, "for b").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        seats[1].quiet().await;
+
+        // Resolving the gate deals NOTHING by itself — the wake is the user's
+        // release, so there is no second path onto a turn. BOTH seats must be
+        // quiet: the first cut of this checked only B, and a premature deal
+        // goes to the FRONT (A), whose buffered row the later expect would
+        // happily consume — the mutation passed until A was pinned quiet too.
+        send(&tx, SequencerCommand::GateResolved).await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+
+        // The release drains normally once the gate is lifted.
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["for b"],
+            "the release deals from the front once no gate is open"
+        );
+        let _ = b;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// rc3 **D35** — a user message does NOT run the session under a pending
+    /// gate: the answer to the gate is what lifts it. The message waits.
+    #[tokio::test]
+    async fn a_user_message_does_not_deal_under_an_open_gate() {
+        let (deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::GateOpened).await;
+        send(&tx, user_message()).await;
+        seats[0].quiet().await;
+
+        send(&tx, SequencerCommand::GateResolved).await;
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "lifted gate + release = the turn deals"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// rc3 **D35** — the latch survives a restart: a ring spawned over a
+    /// pending Approve/Reject row starts parked. Without the seed, a respawn
+    /// would deal turns under a gate that parked before the process died.
+    #[tokio::test]
+    async fn the_gate_latch_seeds_from_the_durable_rows() {
+        let (deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        park_gate(&storage, "c-gate-1").await;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        seats[0].quiet().await;
+
+        // Answering the gate (the row flips) + the resolve notify + the release
+        // is the full production sequence, in its production order.
+        storage.answer_tray_entry("c-gate-1", "Approve").await.unwrap();
+        send(&tx, SequencerCommand::GateResolved).await;
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "the seeded latch lifts exactly like a live one"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
 }

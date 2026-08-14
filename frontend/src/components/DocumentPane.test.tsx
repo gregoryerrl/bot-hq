@@ -177,18 +177,40 @@ describe("tray discard", () => {
         options: ["Approve", "Reject"],
       }),
     ]);
-    // Present as a COUNT, so the tray is not silently missing a pending row…
-    expect(await screen.findByText(/1 APPROVAL/)).toBeInTheDocument();
+    // rc3 D35 dropped the pointer notice too: the gate replaces the input box
+    // AND halts the session, so it is unmissable without the tray narrating
+    // it. An approval simply is not tray business.
     expect(
-      screen.getByText(/answered below the chat, where the input box is/i),
+      await screen.findByText(/No pending input — you're all caught up/i),
     ).toBeInTheDocument();
-    // …but with no way to answer or dismiss it from here.
+    expect(screen.queryByText(/APPROVAL/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
     expect(
       screen.queryByRole("button", {
         name: /discard this card without answering/i,
       }),
     ).toBeNull();
+  });
+
+  it("does not render a HALT as a tray item — it is a declared state", async () => {
+    // The reported defect, verbatim: "An agent-declared halt displays 'One
+    // item on tray'. There is nothing on tray... halt is not on tray anymore,
+    // its a declared state." The halt lives in the banner above the input box;
+    // the durable row is an implementation detail the tray must not count.
+    await openTray([
+      trayRow({
+        kind: "halt",
+        options: [],
+        prompt: "Waiting on the tinker output.",
+      }),
+    ]);
+    expect(
+      await screen.findByText(/No pending input — you're all caught up/i),
+    ).toBeInTheDocument();
+    // Neither a card…
+    expect(screen.queryByText(/Waiting on the tinker output/)).toBeNull();
+    // …nor a badge: the Tray pill shows no count for it.
+    expect(screen.queryByText("1")).toBeNull();
   });
 
   it("still lists an ordinary question, which IS parkable", async () => {
@@ -259,22 +281,42 @@ describe("tray staging (rc3 D34)", () => {
     );
   });
 
-  it("resolves immediately while participants are working", async () => {
-    // A parked question stays answerable mid-work — the answer rides the next
-    // turn boundary (the backend no longer interrupts anyone for it, D34).
-    // Staging here would hold the answer hostage until the session stopped.
+  it("stages even while participants are working — one batch, no exceptions", async () => {
+    // **Changed subject at rc3 D35, hours after it was written.** The first
+    // version resolved immediately mid-work, on the theory that a parked
+    // question should stay answerable any time. The user hit exactly that
+    // branch and overruled it: "Clicking on choices on parked questions
+    // immediately sends the answer, I thought I was clear on this that answers
+    // will be sent in one batch." A click stages, whatever the session is
+    // doing; the composer's Send is the only delivery.
     const { useActivityStore } = await import("../stores/activity");
     useActivityStore.getState().setActivity("s1", "busy", { hands: true });
 
     await openTray([trayRow()]);
     fireEvent.click(await screen.findByRole("button", { name: "Yes" }));
 
-    await waitFor(() =>
-      expect(mockInvoke).toHaveBeenCalledWith(
-        "resolve_choice",
-        expect.objectContaining({ choiceId: "c-1", picked: "Yes" }),
-      ),
+    expect(await screen.findByText(/staged: Yes/)).toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "resolve_choice",
+      expect.anything(),
     );
+  });
+
+  it("stages the Other box as it is typed — there is no send on a question", async () => {
+    // "I type on the 'other:' box on question, then click send from the input
+    // box, all answers including my message will get sent." Typing stages;
+    // emptying withdraws; no button exists to press.
+    await openTray([trayRow()]);
+    const other = await screen.findByPlaceholderText(/Other — type a custom/);
+    fireEvent.change(other, { target: { value: "ship it tomorrow" } });
+    expect(await screen.findByText(/staged: ship it tomorrow/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Send$/ })).toBeNull();
+
+    fireEvent.change(other, { target: { value: "" } });
     expect(screen.queryByText(/staged:/)).toBeNull();
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "resolve_choice",
+      expect.anything(),
+    );
   });
 });

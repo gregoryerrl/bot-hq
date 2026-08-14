@@ -524,7 +524,7 @@ impl SignalingBridge {
     /// because a pass retracts its own done vote and any prose at all counts as
     /// substantive output, which clears the whole tally.
     ///
-    /// `SequencerCommand::QuestionParked` was written, documented and tested for
+    /// `SequencerCommand::HaltDeclared` was written, documented and tested for
     /// exactly this, and had no production sender until now.
     pub async fn register_session_sequencer(
         &self,
@@ -538,7 +538,7 @@ impl SignalingBridge {
     /// only one the sequencer has — and without it a parked question stops the
     /// cycle permanently.
     ///
-    /// Shipped broken on 2026-08-13 for about two hours: `QuestionParked` was
+    /// Shipped broken on 2026-08-13 for about two hours: `HaltDeclared` was
     /// wired with no release path, so the first `mark_awaiting_user` of a session
     /// halted the ring and nothing could restart it. The participants then ran
     /// on their initial prompt with no turn-taking and no delivery at all — 105
@@ -549,6 +549,31 @@ impl SignalingBridge {
     /// **`mentions` is who the user named** (rc3 D17), already resolved to
     /// participant ids by the caller — the only caller that can, since it is the
     /// one holding the text and the session. Empty is the ordinary case.
+    /// Tell the ring an approval gate opened (`opened = true`) or resolved
+    /// (`false`) — rc3 **D35**: while any gate is open the ring deals no turns.
+    /// `try_send` like every ring notify: this runs inside tool calls and
+    /// resolve paths that must not block on the ring's queue. A miss on
+    /// `opened` is healed at the next respawn (the latch is seeded from the
+    /// durable rows); a miss on `resolved` is healed the same way, and the
+    /// user's release still drains the session's rows.
+    pub async fn notify_ring_gate(&self, session_id: &str, opened: bool) {
+        let seq = self.session_sequencer.lock().await.get(session_id).cloned();
+        if let Some(tx) = seq {
+            let cmd = if opened {
+                crate::core::sequencer::SequencerCommand::GateOpened
+            } else {
+                crate::core::sequencer::SequencerCommand::GateResolved
+            };
+            if tx.try_send(cmd).is_err() {
+                tracing::warn!(
+                    session_id,
+                    opened,
+                    "a gate notification did not reach the ring; the latch reseeds on respawn"
+                );
+            }
+        }
+    }
+
     pub async fn notify_ring_user_message(&self, session_id: &str, mentions: Vec<i64>) {
         let seq = self.session_sequencer.lock().await.get(session_id).cloned();
         if let Some(tx) = seq {

@@ -116,6 +116,25 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
+    /// How many approval gates are open for this session — pending rows whose
+    /// options are exactly `Approve`/`Reject`, which is what both gate kinds
+    /// (action gate, push gate) ask and no ordinary question ever has (the same
+    /// discriminator the UI's `isApproval` uses; verified exact across every
+    /// row ever recorded — 31 matches, all gates). Seeds the ring's gate latch
+    /// on spawn (rc3 D35), so a respawned session cannot deal turns under a
+    /// gate that parked before the restart.
+    pub async fn count_pending_gates(&self, session_id: &str) -> Result<usize> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM session_tray \
+             WHERE session_id = ? AND status = 'pending' \
+               AND options_json = '[\"Approve\",\"Reject\"]'",
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n as usize)
+    }
+
     /// Read all tray entries for a session, ordered oldest-first. Use for the
     /// in-chat tray (filter to status=pending in the UI) and the dashboard
     /// counter (count where status=pending).

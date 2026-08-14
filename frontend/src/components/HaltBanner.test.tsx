@@ -1,6 +1,6 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
-import { HaltBanner, type TrayRow } from "./HaltBanner";
+import { HaltBanner, isApproval, isTrayItem, type TrayRow } from "./HaltBanner";
 
 const row = (o: Partial<TrayRow> = {}): TrayRow => ({
   id: 1,
@@ -85,13 +85,13 @@ describe("HaltBanner", () => {
     expect(banner).toHaveTextContent("the session is still working");
   });
 
-  it("says a gated approval is BLOCKING, which a question is not", () => {
-    // A gated command is a git hook synchronously waiting on a yes/no — the
-    // most time-sensitive row in the tray, and the one in the reported
-    // screenshot. Calling it a halt understates it in one direction (the
-    // session has not stopped) and overstates it in the other (something IS
-    // blocked on the user).
-    render(
+  it("renders NOTHING for approvals alone — the gate owns that fact", () => {
+    // **Changed subject at rc3 D35.** This banner used to narrate a pending
+    // approval ("a command is blocked on your approval — the session is still
+    // working"), and both halves aged out in one day: the gate now replaces
+    // the input box (so a banner above it is a second surface for one fact),
+    // and an approval now HALTS the session, so "still working" became false.
+    const { container } = render(
       <HaltBanner
         rows={[
           row({
@@ -103,39 +103,36 @@ describe("HaltBanner", () => {
         ]}
       />,
     );
-    const banner = screen.getByRole("status");
-    expect(banner).not.toHaveTextContent("HALT");
-    expect(banner).toHaveTextContent("blocked on your approval");
-    expect(
-      screen.getByRole("button", { name: /1 approval waiting/i }),
-    ).toBeInTheDocument();
+    expect(container).toBeEmptyDOMElement();
   });
 
-  it("counts a PUSH gate as an approval, which has no command_text", () => {
-    // The defect in the first discriminator, and it hid a third of all
-    // approvals. `command_text` is set by `ask_user_choice_inner` for
-    // ToolBlocklist (action-gate) rows ALONE; a parked `request_approval` — the
-    // push gate — carries none. Measured across the archive: 10 of 31 approvals
-    // were push gates, every one classified as an ordinary question while a
-    // pre-push hook blocked on it.
-    //
-    // Both gate kinds ask exactly Approve/Reject, which is what this now keys
-    // on. Mutation check: restore `command_text !== null` and this goes red.
-    render(
-      <HaltBanner
-        rows={[
-          row({
-            kind: "choice",
-            options: ["Approve", "Reject"],
-            command_text: null,
-            prompt: "Allow `git push` to `staging` in this session's repo?",
-          }),
-        ]}
-      />,
-    );
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "blocked on your approval",
-    );
+  it("classifies a PUSH gate (no command_text) as an approval, and never a question as one", () => {
+    // The discriminator is load-bearing beyond this component (rc3 D35): it
+    // seeds the ring's gate latch and routes rows between the gate and the
+    // tray. `command_text` is set for action-gate rows ALONE — keying on it
+    // hid 10 of 31 approvals (every push gate). Both gate kinds ask exactly
+    // Approve/Reject; no ordinary question ever has.
+    expect(
+      isApproval({ options: ["Approve", "Reject"] }),
+    ).toBe(true);
+    expect(
+      isApproval({ options: ["Write the EOD first", "Close #499 first"] }),
+    ).toBe(false);
+    expect(isApproval({ options: [] })).toBe(false);
+  });
+
+  it("sorts rows into exactly one surface each (rc3 D35)", () => {
+    // The user: "halt is not on tray anymore, its a declared state." A halt is
+    // the banner, an approval is the gate, a question is the tray — and every
+    // tray count goes through isTrayItem, so no badge can say "one item on
+    // tray" over a tray with nothing in it (the reported defect).
+    expect(isTrayItem({ kind: "halt", options: [] })).toBe(false);
+    expect(
+      isTrayItem({ kind: "choice", options: ["Approve", "Reject"] }),
+    ).toBe(false);
+    expect(
+      isTrayItem({ kind: "choice", options: ["main", "staging"] }),
+    ).toBe(true);
   });
 
   it("does not mistake an ordinary question for an approval", () => {

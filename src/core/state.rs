@@ -1053,7 +1053,7 @@ impl AppState {
         self.clear_awaiting(handle, session_id).await;
         // The ring's RELEASE is not here — it rides the notify below, AFTER the
         // row is posted. `clear_awaiting` only lowers a flag; the sequencer
-        // halted on `QuestionParked` and a user message is the only thing that
+        // halted on `HaltDeclared` and a user message is the only thing that
         // un-halts it, so releasing it here would hand out a turn over an empty
         // backlog and land the message a turn late.
         // A user message supersedes any in-flight cancel escalation: set this so

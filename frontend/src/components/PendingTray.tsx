@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import { BellIcon } from "./icons";
+import { isTrayItem } from "./HaltBanner";
 
 // `list_pending_tray` returns durable pending session_tray rows for open
 // sessions. Typed locally rather than via the generated `SessionTrayView`
@@ -10,6 +11,8 @@ import { BellIcon } from "./icons";
 // needs the session id to group by. Raw invoke works without a bindings entry.
 interface PendingTrayRow {
   session_id: string;
+  kind: string;
+  options: string[];
 }
 
 /**
@@ -35,8 +38,12 @@ export function PendingTray() {
   // [N]" instead of one row per item. The bell badge counts SESSIONS awaiting,
   // not raw items. Stays notify-only — answering happens on that session's Tray
   // tab; the CTA here is just "go to session".
+  // rc3 D35: the bell counts QUESTIONS. A halt announces itself in the
+  // session (the banner); an approval is the gate. Counting them here said
+  // "needs your input [1]" over a tray with nothing in it.
   const bySession = new Map<string, number>();
   for (const q of pending) {
+    if (!isTrayItem(q)) continue;
     bySession.set(q.session_id, (bySession.get(q.session_id) ?? 0) + 1);
   }
   const sessions = [...bySession.entries()];

@@ -43,6 +43,22 @@ export function isApproval(r: { options: readonly string[] }): boolean {
 }
 
 /**
+ * Is this row a TRAY item — an ordinary question? (rc3 D35)
+ *
+ * The user: *"halt is not on tray anymore, its a declared state."* A halt is
+ * the banner; an approval is the gate; only a question lives in the tray. Every
+ * tray surface — the list, the pill badge, the dashboard tile, the header
+ * bell — counts through this, so none of them can claim "one item on tray"
+ * over a tray with nothing in it.
+ */
+export function isTrayItem(r: {
+  kind: string;
+  options: readonly string[];
+}): boolean {
+  return r.kind !== "halt" && !isApproval(r);
+}
+
+/**
  * Above this, a halt reason gets a "show the full recap" toggle.
  *
  * **Set from what participants actually write, not from taste.** Across the 28
@@ -125,6 +141,11 @@ export function HaltBanner({
   // stopped. So a halt row is a halt; everything else is something waiting for
   // you while the session runs.
   const halted = halts.length > 0;
+  // rc3 D35: an approval owns the INPUT SLOT (the gate replaces the box and
+  // the session halts on it) — a banner narrating it on top would be the
+  // second surface for one fact. With nothing but approvals pending, the gate
+  // says everything.
+  if (!halted && choices.length === 0) return null;
 
   return (
     <div
@@ -137,11 +158,11 @@ export function HaltBanner({
           {halted ? "⏸ HALT" : "◆ FOR YOU"}
         </span>
         <span className="text-xs text-on-surface-variant">
+          {/* rc3 D35 made "waiting on you" literal: a declared halt stops the
+              ring where it stands — nobody keeps working under this header. */}
           {halted
             ? "the session is waiting on you"
-            : approvals.length > 0
-              ? "a command is blocked on your approval — the session is still working"
-              : "a question is waiting — the session is still working"}
+            : "a question is waiting — the session is still working"}
         </span>
       </div>
       {/* One line per blocked participant. Multiple is reachable since rc3 D22:
@@ -183,15 +204,13 @@ export function HaltBanner({
           );
         })}
       </ul>
-      {(choices.length > 0 || approvals.length > 0) && (
+      {choices.length > 0 && (
         <button
           type="button"
           onClick={onOpenTray}
           className="mt-1 text-xs text-primary underline underline-offset-2"
         >
-          {approvals.length > 0
-            ? `${approvals.length} approval${approvals.length > 1 ? "s" : ""} waiting in the tray →`
-            : `${choices.length} question${choices.length > 1 ? "s" : ""} waiting in the tray →`}
+          {`${choices.length} question${choices.length > 1 ? "s" : ""} waiting in the tray →`}
         </button>
       )}
       <p className="mt-1 text-[0.7rem] text-on-surface-variant">

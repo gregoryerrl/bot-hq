@@ -18,6 +18,51 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-14 (later) — a halt is a halt
+
+**The user ran `s-c41a4927` and returned four defects and one rule:** *"Again
+stop overcomplicating things. A halt is a halt. Still working means still
+working."* Mid-fix they widened the license — *"just redesign the halt
+mechanism if thats better"* — so this is the redesign (rc3 **D35**), not four
+patches.
+
+**One surface and one ring effect per kind.** A **halt** stops the ring where
+it stands — no D22 courtesy lap — and lives in the banner. An **approval**
+halts the session until answered — the "asker blocked, peers keep working"
+split I defended twice is gone — and lives in the gate. A **question** touches
+nothing: no ring command, no awaiting flag, a tray card whose answer stages
+into the next Send. The ring's whole mechanism is two latches (a halt bool, a
+gate counter seeded from the durable rows so respawns can't deal under a
+pending gate) and one release (the user's message). Dealing is refused before
+any handover is minted, which made D31's busy-flag take-back unreachable
+instead of carefully handled. `QuestionParked` is renamed `HaltDeclared`,
+because that is what it is.
+
+**The per-question Send button is gone** — the second one that component had
+carried. Clicks stage, typing in Other stages, the composer's Send is the only
+delivery, whatever the session is doing. The D34 box-open/box-locked split
+shipped in the morning and was overruled by lunch; its test changed subject
+the same day it was written.
+
+**Halts are not tray items.** The badge said "one item on tray" over an empty
+tray because every count included the halt row. `isTrayItem` (question ⇔
+tray) now guards the tray list, the pill badge, the dashboard tile, and the
+header bell; the durable row survives restarts but claims no surface.
+
+**The advisor taking turns was config, not code:** the advisor ROLE predates
+the mode picker and still carried `active`. The ring's on-mention filtering
+held; the role and the session row now say `on_mention`.
+
+D22's original defect cannot return through the redesign — a question no
+longer reaches the ring at all, and a session where everyone runs dry yields
+through D27's all-pass lap. Both new latches mutation-verified, including one
+mutation the first cut of a test failed to catch: a premature deal at
+`GateResolved` goes to the FRONT, whose buffered row the later expect happily
+consumed — both seats are pinned quiet now. 1108 lib + 381 frontend green.
+Decisions: [`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md) D35.
+
+---
+
 ## 2026-08-14 — Pause is the only real interrupt
 
 **The user set the rule, and it is one sentence:** *"users are never allowed to
