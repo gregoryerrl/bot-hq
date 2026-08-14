@@ -12,6 +12,7 @@ import { useDragResize } from "../hooks/useDragResize";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
 import { HaltBanner, isApproval, type TrayRow } from "../components/HaltBanner";
+import { useTrayStaging, stagedFor } from "../stores/trayStaging";
 import { ApprovalGate } from "../components/ApprovalGate";
 import { ChatPane } from "../components/ChatPane";
 import { DocumentPane } from "../components/DocumentPane";
@@ -122,6 +123,19 @@ export function SessionView() {
   const pendingApprovals = useMemo(
     () => trayRows.filter((r) => r.status === "pending" && isApproval(r)),
     [trayRows],
+  );
+  // rc3 D34: tray picks staged to travel with the next Send. Pruned against
+  // the pending rows at Send time — a row answered or superseded elsewhere
+  // must not be re-answered by a stale stage.
+  const stagedMap = useTrayStaging((s) => stagedFor(s.staged, sessionId));
+  const clearStaged = useTrayStaging((s) => s.clear);
+  const stagedCount = useMemo(
+    () =>
+      trayRows.filter(
+        (r) =>
+          r.status === "pending" && !isApproval(r) && stagedMap[r.choice_id],
+      ).length,
+    [trayRows, stagedMap],
   );
 
   // Respawn agents on mount. Idempotent — `ensure_session_started` is a no-op
@@ -694,8 +708,30 @@ export function SessionView() {
               mentionables={participants
                 .filter((p) => p.enabled)
                 .map((p) => ({ slug: p.slug, label: participantLabel(p) }))}
+              stagedAnswers={stagedCount}
               onSend={async (text) => {
-                await invoke("broadcast_message", { sessionId, text });
+                // rc3 D34: staged answers travel WITH the message as one user
+                // response — answers recorded first, message last, one release.
+                const picks = trayRows
+                  .filter(
+                    (r) =>
+                      r.status === "pending" &&
+                      !isApproval(r) &&
+                      stagedMap[r.choice_id],
+                  )
+                  .map((r) => ({
+                    choice_id: r.choice_id,
+                    picked: stagedMap[r.choice_id]!,
+                  }));
+                if (picks.length > 0) {
+                  await invoke("send_user_response", { sessionId, text, picks });
+                  clearStaged(sessionId);
+                  await queryClient.invalidateQueries({
+                    queryKey: ["list_session_tray", { sessionId }],
+                  });
+                } else {
+                  await invoke("broadcast_message", { sessionId, text });
+                }
               }}
               onCancel={async () => {
                 await invoke("cancel_session_turn", { sessionId });

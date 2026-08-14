@@ -1127,3 +1127,57 @@ fourth occurrence this week of *one event, two halves, nothing making them trave
 together* — and the first that was introduced rather than inherited. Worth
 recording as such: a fix that concentrates authority in one signal also removes
 whatever was quietly compensating for that signal being wrong.
+
+### D34 — answers travel with Send; a tray click interrupts nobody
+
+Shipped 2026-08-14, from the recovered half of the halt/tray conversation. The
+user's Send idea — *"remove the send button on tray items. On Halt, sending a
+message will also send all of the answers on all tray items"* — was agreed
+**for choices and not for approvals**, and then the gate pivot two messages
+later left the choices half unbuilt and its status ambiguous. Recovered from
+the transcript, put to the user, decided: build it.
+
+**The recovery also surfaced something worse than the missing feature.** The
+out-of-band tray-answer path fired `tray-answer-preempt` at every agent and
+reset the ring — the issues.md #27 cure (s-b69a5c01: an agent finishing a
+deliverable while its superseding answer sat unread). The sequencer's own doc
+states what a mid-turn reset does: *"the previous holder's turn is not
+cancelled; nothing can stop it — the epoch moves, so its completion is
+discarded when it arrives."* So answering a parked question while agents
+worked **threw away the holder's entire in-flight turn**. A tray click was a
+hidden interrupt, and the decree is that Pause is the only real one.
+
+**The rule, stated from the user's side:** when the session is waiting on you,
+answers travel with Send; when it's working, answers slip in at the next
+boundary without interrupting anyone.
+
+- **Box open** (nobody working — the same `isLocked` map the composer reads,
+  so the surfaces agree by construction): a tray click STAGES the pick — a
+  draft, re-pickable, withdrawable. Send delivers the typed message plus every
+  staged answer as one user response (`send_user_response`): answers recorded
+  first, message posted LAST so the freshest instruction frames the turn (the
+  37-of-44 buried-message evidence), and **exactly one release fires**. Send
+  is enabled with an empty box when picks are staged — answering without
+  commentary is a complete response.
+- **Box locked** (participants working): a click resolves immediately — a
+  parked question stays answerable any time — but the backend no longer
+  interrupts or releases for it. The row is persisted; delivery is a pull; the
+  next handover drains it. #27's exposure is now bounded at the remainder of
+  the current turn instead of cured by aborting it.
+- **Idle ring** is the one case a lone tray answer still wakes
+  (`user_responded`, the D28 entry point) — nothing else would ever drain the
+  row. `tray_wake` gates it on the busy map: release ⟺ recorded ∧ ¬paused ∧
+  ¬running.
+
+**What was deleted:** the `deliver` flag, its interrupt loop, and the dead
+router-era `flush` stub. A source test pins the deletion — the
+`tray-answer-preempt` string reappearing in `state.rs` is the decree being
+unwound. The decision table gained `ring_running` and both new gates are
+mutation-verified (drop `!ring_running` → the table test reds; re-add the
+interrupt → the pin test reds; bypass the UI staging branch → the staging
+tests red).
+
+**Scope note:** `broadcast`'s own `user-preempt` interrupt is untouched. Under
+D33 the box only opens when nobody is working, so it fires against idle
+agents — vestigial rather than wrong, and the Pause/steer flows route through
+it.

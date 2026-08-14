@@ -6,6 +6,8 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { PhasePillRow, type Phase } from "./PhasePill";
 import { isApproval } from "./HaltBanner";
+import { useActivityStore, isLocked } from "../stores/activity";
+import { useTrayStaging, stagedFor } from "../stores/trayStaging";
 import { ChoicePrompt, type ChoicePromptChoice } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
 import { ErrorBanner } from "./ErrorBanner";
@@ -542,6 +544,17 @@ function TrayList({ sessionId }: { sessionId: string }) {
   const allPending = entries.filter((e) => e.status === "pending");
   const gated = allPending.filter(isApproval);
   const pending = allPending.filter((e) => !isApproval(e));
+  // rc3 D34: while the box is OPEN (nobody working — the composer's own
+  // isLocked rule, so the two surfaces agree by construction), a click STAGES
+  // the pick and Send delivers it with the message as one response. While
+  // LOCKED, picks resolve immediately as before — the answer rides the next
+  // turn boundary; the backend no longer interrupts anyone for it.
+  const activity = useActivityStore((s) => s.bySession[sessionId]);
+  const busyMap = useActivityStore((s) => s.busyBySession[sessionId]);
+  const boxOpen = !isLocked(activity, busyMap);
+  const staged = useTrayStaging((s) => stagedFor(s.staged, sessionId));
+  const stage = useTrayStaging((s) => s.stage);
+  const unstage = useTrayStaging((s) => s.unstage);
   const gateNotice = gated.length > 0 && (
     <p className="mb-3 text-sm text-on-surface-variant">
       <span className="font-label-caps text-label-caps text-primary">
@@ -653,7 +666,13 @@ function TrayList({ sessionId }: { sessionId: string }) {
             sessionId={sessionId}
             askedByLabel={authorLabel(e.agent, labels)}
             pendingOption={resolving.get(e.choice_id)}
-            onResolve={onResolve}
+            stagedOption={staged[e.choice_id]}
+            onResolve={
+              boxOpen
+                ? (choiceId, picked) => stage(sessionId, choiceId, picked)
+                : onResolve
+            }
+            onUnstage={() => unstage(sessionId, e.choice_id)}
             onDiscard={() => setDiscardTarget(e)}
             onViewFile={(path) => setViewFile({ sessionId, path })}
             onExpand={(title, text) => setViewInline({ title, text })}
@@ -673,7 +692,9 @@ function TrayChoice({
   sessionId,
   askedByLabel,
   pendingOption,
+  stagedOption,
   onResolve,
+  onUnstage,
   onDiscard,
   onViewFile,
   onExpand,
@@ -684,7 +705,11 @@ function TrayChoice({
    *  roster. Never `entry.agent` itself (rc3 D10). */
   askedByLabel: string;
   pendingOption: string | undefined;
+  /** rc3 D34: the pick staged for the next Send, if any. Staged ≠ answered —
+   *  the row is still pending and the agent has seen nothing yet. */
+  stagedOption?: string | undefined;
   onResolve: (choiceId: string, picked: string) => void;
+  onUnstage?: () => void;
   onDiscard: () => void;
   onViewFile: (path: string) => void;
   onExpand: (title: string, text: string) => void;
@@ -758,6 +783,23 @@ function TrayChoice({
         pendingOption={pendingOption}
         onResolve={onResolve}
       />
+      {stagedOption !== undefined && (
+        <div className="mt-1 flex items-center gap-2 text-[0.7rem] text-on-surface-variant">
+          <span className="rounded bg-primary/15 px-1.5 py-0.5 text-primary">
+            ✓ staged: {stagedOption}
+          </span>
+          <span>sends with your message</span>
+          {onUnstage && (
+            <button
+              type="button"
+              onClick={onUnstage}
+              className="underline underline-offset-2 hover:text-on-surface"
+            >
+              undo
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -116,6 +116,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         claude_config::claude_config_set_plugin_enabled,
         // Tray (choices / approvals / halts)
         tray::resolve_choice,
+        tray::send_user_response,
         tray::discard_choice,
         tray::list_session_tray,
         tray::list_pending_tray,

@@ -220,6 +220,16 @@ impl ActivityTracker {
         self.recompute_locked(&mut g);
     }
 
+    /// Is any participant mid-turn right now? The ring hands a turn out by
+    /// setting exactly one of these flags, so this is the closest thing the
+    /// app layer has to "the ring is running" — and it is the same signal the
+    /// chat input locks on (rc3 D33), so the UI and the tray-answer path agree
+    /// on what "working" means by construction.
+    pub fn any_busy(&self) -> bool {
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.any_busy()
+    }
+
     /// Mark a cancel in-flight (`true`) or settled (`false`). Emits on change.
     pub fn set_cancelling(&self, cancelling: bool) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());

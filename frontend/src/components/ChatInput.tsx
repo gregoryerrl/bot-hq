@@ -96,6 +96,10 @@ interface ChatInputProps {
   /** Per-participant busy flags, for the turn-status line. The collapsed
    *  `activity` says "someone is busy"; this says which participants. */
   busy?: AgentBusy;
+  /** rc3 D34: how many tray picks are staged to travel with this Send. When
+   *  > 0, Send is enabled with an empty box — answering without commentary is
+   *  a complete response — and a chip says what rides along. */
+  stagedAnswers?: number;
   /** Busy-map key -> what to PRINT for it (rc3 D10: `ROLE · Model`, never an
    *  agent name). `SessionView` resolves it through the session's roster.
    *  Without it the status line has no roster to consult and says so, rather
@@ -131,6 +135,7 @@ export function ChatInput({
   mentionables,
   activity,
   busy,
+  stagedAnswers = 0,
   busyLabel,
   authorHues,
   onCancel,
@@ -246,7 +251,9 @@ export function ChatInput({
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     const text = value.trim();
-    if (!text || disabled || sending) return;
+    // Staged answers make an empty Send meaningful (rc3 D34): the picks ARE
+    // the response, and the backend requires text or at least one pick.
+    if ((!text && stagedAnswers === 0) || disabled || sending) return;
     setSending(true);
     setError(null);
     try {
@@ -458,10 +465,18 @@ export function ChatInput({
                 {hint}
               </kbd>
             </div>
+            {stagedAnswers > 0 && (
+              <span
+                className="self-center whitespace-nowrap rounded bg-primary/15 px-1.5 py-0.5 text-[0.7rem] text-primary"
+                title="Staged tray answers — they travel with this Send as one response"
+              >
+                +{stagedAnswers} answer{stagedAnswers > 1 ? "s" : ""}
+              </span>
+            )}
             <Button
               type="submit"
               variant="primary"
-              disabled={!value.trim() || disabled || sending}
+              disabled={(!value.trim() && stagedAnswers === 0) || disabled || sending}
               // Fixed min-width so the label cycle (Send → Sending… → Send)
               // doesn't dance the layout on every submit.
               className="min-w-[5.5rem]"

@@ -213,3 +213,68 @@ describe("tray discard", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("tray staging (rc3 D34)", () => {
+  beforeEach(async () => {
+    mockInvoke.mockReset();
+    // Both stores are module singletons; start each case from a known state.
+    const { useActivityStore } = await import("../stores/activity");
+    const { useTrayStaging } = await import("../stores/trayStaging");
+    useActivityStore.getState().clearSession("s1");
+    useTrayStaging.setState({ staged: {} });
+  });
+
+  it("STAGES a pick while the box is open, instead of resolving it", async () => {
+    // The user's design, verbatim: "remove the send button on tray items. On
+    // Halt, sending a message will also send all of the answers on all tray
+    // items." No activity event seeded = nobody working = the box is open —
+    // the same isLocked rule the composer reads, so the two surfaces agree.
+    await openTray([trayRow()]);
+    fireEvent.click(await screen.findByRole("button", { name: "Yes" }));
+
+    expect(await screen.findByText(/staged: Yes/)).toBeInTheDocument();
+    expect(screen.getByText(/sends with your message/)).toBeInTheDocument();
+    // The defect this replaces: the first click fired resolve_choice, which
+    // released the ring and locked the box before the other questions could
+    // be answered or a message added.
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "resolve_choice",
+      expect.anything(),
+    );
+  });
+
+  it("lets the user change or withdraw a staged pick", async () => {
+    await openTray([trayRow()]);
+    fireEvent.click(await screen.findByRole("button", { name: "Yes" }));
+    // Re-picking overwrites — staged is a draft, not an answer.
+    fireEvent.click(screen.getByRole("button", { name: "No" }));
+    expect(await screen.findByText(/staged: No/)).toBeInTheDocument();
+    expect(screen.queryByText(/staged: Yes/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "undo" }));
+    expect(screen.queryByText(/staged:/)).toBeNull();
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "resolve_choice",
+      expect.anything(),
+    );
+  });
+
+  it("resolves immediately while participants are working", async () => {
+    // A parked question stays answerable mid-work — the answer rides the next
+    // turn boundary (the backend no longer interrupts anyone for it, D34).
+    // Staging here would hold the answer hostage until the session stopped.
+    const { useActivityStore } = await import("../stores/activity");
+    useActivityStore.getState().setActivity("s1", "busy", { hands: true });
+
+    await openTray([trayRow()]);
+    fireEvent.click(await screen.findByRole("button", { name: "Yes" }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "resolve_choice",
+        expect.objectContaining({ choiceId: "c-1", picked: "Yes" }),
+      ),
+    );
+    expect(screen.queryByText(/staged:/)).toBeNull();
+  });
+});

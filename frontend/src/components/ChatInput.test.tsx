@@ -473,3 +473,23 @@ describe("ChatInput mention picker", () => {
     expect(screen.queryByRole("listbox")).toBeNull();
   });
 });
+
+describe("ChatInput staged answers (rc3 D34)", () => {
+  it("enables Send on an empty box when picks are staged", async () => {
+    // Answering without commentary is a complete response — the user's tinker
+    // flow in reverse: sometimes the picks ARE the whole reply.
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} stagedAnswers={2} />);
+    expect(screen.getByText("+2 answers")).toBeInTheDocument();
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toBeEnabled();
+    fireEvent.click(send);
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith(""));
+  });
+
+  it("keeps Send disabled on an empty box with nothing staged", () => {
+    render(<ChatInput onSend={() => {}} stagedAnswers={0} />);
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.queryByText(/answers?$/)).toBeNull();
+  });
+});

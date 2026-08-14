@@ -39,6 +39,35 @@ pub async fn resolve_choice(
     })
 }
 
+/// One staged tray pick, as the composer's Send hands it over (rc3 D34).
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct StagedPick {
+    pub choice_id: String,
+    pub picked: String,
+}
+
+/// **The composer's Send when tray picks are staged (rc3 D34):** the typed
+/// message plus every staged answer, delivered as ONE user response. Answers
+/// record first, the message posts last (framing the turn), and exactly one
+/// ring release fires. `text` may be empty when at least one pick is staged —
+/// answering without commentary is a complete response.
+#[tauri::command]
+#[specta::specta]
+pub async fn send_user_response(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+    text: String,
+    picks: Vec<StagedPick>,
+) -> Result<(), AppError> {
+    core.send_user_response(
+        &session_id,
+        &text,
+        picks.into_iter().map(|p| (p.choice_id, p.picked)).collect(),
+    )
+    .await?;
+    Ok(())
+}
+
 /// One durable `session_tray` row, projected for the session-view Tray tab.
 /// Unlike the live in-memory pending view (`list_pending_choices`), this
 /// surfaces every tray item for the session — pending AND resolved history —

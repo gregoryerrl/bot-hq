@@ -86,18 +86,27 @@ enum DeliverStep {
 }
 
 /// Everything an out-of-band tray answer does to a live session, decided in one
-/// place from the only two facts that bear on it: whether the session holds
-/// wakes (the pause latch) and whether the bridge managed to record the answer.
-/// Pure (see [`AppState::tray_wake`]) so all four combinations are unit-tested
-/// without a live session.
+/// place from the three facts that bear on it: whether the session holds wakes
+/// (the pause latch), whether the bridge managed to record the answer, and
+/// whether any participant is mid-turn. Pure (see [`AppState::tray_wake`]) so
+/// every combination is unit-tested without a live session.
 ///
-/// FOUR independent flags rather than an enum of named cases, because the bug
-/// this replaced was exactly a case that bundled them. Gating the whole block on
-/// a recorded row skipped the halt clear and the router flush along with the
-/// send, leaving the session parked on a question the user had already answered
-/// with the peer's messages queued behind that halt. As an enum the two are one
-/// variant and nothing can tell them apart; as fields, `(live, unrecorded)` is a
-/// value you can compare against, which is what the test does.
+/// Independent flags rather than an enum of named cases, because the bug this
+/// replaced was exactly a case that bundled them. Gating the whole block on a
+/// recorded row skipped the halt clear along with the send, leaving the session
+/// parked on a question the user had already answered.
+///
+/// **The `deliver` flag this struct used to carry is gone, and that is rc3
+/// D34.** It interrupted every agent (`tray-answer-preempt`, issues.md #27) and
+/// reset the ring — so answering a parked question threw away the holder's
+/// in-flight turn: the epoch moved and its completion was discarded on arrival.
+/// #27's evidence was real (s-b69a5c01: an agent finishing a deliverable while
+/// its superseding answer sat unread), but the cure predates the decree that
+/// **Pause is the only real interrupt**. The answer row is already persisted by
+/// the time this table is consulted, and delivery is a PULL — the next handover
+/// drains it — so a running ring needs nothing from us: the answer frames the
+/// next turn instead of aborting the current one. Only an IDLE ring needs a
+/// wake, or the answer sits unread forever.
 #[derive(Debug, PartialEq, Eq)]
 struct TrayWake {
     /// Lift the awaiting-user halt. Always — the user answered, and that stays
@@ -107,15 +116,11 @@ struct TrayWake {
     /// delivering: the pause latch. A tray answer must not release a pause the
     /// user deliberately set. Needs a receipt, since a receipt is the thing held.
     stash: bool,
-    /// Interrupt the in-flight turn and write the answer to every agent. Needs a
-    /// receipt, and the interrupt is PAIRED with it: firing it with nothing
-    /// behind it would abort a live turn and give the agent nothing to read in
-    /// its place, which is worse than leaving the turn alone.
-    deliver: bool,
-    /// Release what the router held behind the halt. Follows `clear_halt`, NOT
-    /// the receipt — otherwise the peer's queued messages sit behind a halt that
-    /// is already gone. Never in the stash case: there the hold is the point.
-    flush: bool,
+    /// Wake an idle ring so the answer is read (`user_responded`, the D28 single
+    /// entry point). Needs a receipt — waking with nothing behind it hands out a
+    /// turn over an empty backlog — and needs the ring NOT running: waking a
+    /// running ring is the interrupt D34 removed.
+    release: bool,
 }
 
 /// Max respawn attempts in `broadcast`'s auto-heal loop before delivering
@@ -1148,6 +1153,92 @@ impl AppState {
         Ok(())
     }
 
+    /// **One Send, one event: the typed message plus every staged tray answer
+    /// (rc3 D34).**
+    ///
+    /// The user's design, verbatim: *"remove the send button on tray items. On
+    /// Halt, sending a message will also send all of the answers on all tray
+    /// items."* Agreed for choices and not for approvals — an approval is
+    /// synchronously blocked and answers on the spot in the gate; a choice is
+    /// parkable, so its answer can travel with the message.
+    ///
+    /// What this replaces: each tray pick resolved on click, and the first one
+    /// fired `user_responded` — so answering the first of three questions while
+    /// halted released the ring and locked the box (D33) before the other two
+    /// could be answered or a message added. Under this, picks stage in the UI
+    /// and arrive here together; the answers are recorded FIRST and the typed
+    /// message posts LAST, so it is the freshest row in the batch the released
+    /// ring drains — the buried-user-message work (37 of 44 arrived buried)
+    /// established that the last line frames the turn.
+    ///
+    /// Exactly one release fires, whichever branch runs: `broadcast` when there
+    /// is text (it releases via its notify), else one `user_responded`. A pick
+    /// that fails to resolve stays pending in the tray — visible, answerable
+    /// again — rather than failing the whole Send.
+    pub async fn send_user_response(
+        &self,
+        session_id: &str,
+        text: &str,
+        picks: Vec<(String, String)>,
+    ) -> Result<()> {
+        let mut answered = 0usize;
+        for (choice_id, picked) in picks {
+            // Straight to the bridge: record the answer, skip the wake. The
+            // per-pick wake machinery (`resolve_choice`) is exactly what made
+            // the first answer release the ring ahead of the rest.
+            match self
+                .bridge
+                .resolve_choice_confirmable(&choice_id, picked, false)
+                .await
+            {
+                Ok(crate::signaling::ResolveOutcome::StaleGateNeedsConfirm { .. }) => {
+                    // Staged picks are never approvals — the gate owns those and
+                    // answers them on the spot — so hitting the stale gate means
+                    // the row changed shape under us. Leave it pending rather
+                    // than approve anything by side effect.
+                    tracing::warn!(
+                        session_id,
+                        choice_id = %choice_id,
+                        "staged pick hit the stale gate; left pending"
+                    );
+                }
+                Ok(_) => answered += 1,
+                Err(e) => tracing::warn!(
+                    ?e,
+                    session_id,
+                    choice_id = %choice_id,
+                    "staged pick failed to resolve; left pending"
+                ),
+            }
+        }
+        if !text.trim().is_empty() {
+            // The message is the release, and it posts after the answers — the
+            // last row of the batch, framing the turn.
+            return self.broadcast(session_id, text).await;
+        }
+        if answered == 0 {
+            return Err(anyhow::anyhow!(
+                "nothing to send: empty message and no answers resolved"
+            ));
+        }
+        // Answers alone. Mirror the slice of `broadcast` a release needs:
+        // engagement bump (the idle watchdog re-arms on user input), the pause
+        // latch down (a Send while paused is the steer), and the stash entry
+        // dropped (the rows are persisted; the ring replays them off cursors).
+        {
+            let sessions = self.sessions.lock().await;
+            if let Some(handle) = sessions.get(session_id) {
+                handle
+                    .user_broadcasts
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                handle.activity.set_paused(false);
+            }
+        }
+        self.pending_paused_wakes.lock().await.remove(session_id);
+        self.user_responded(session_id, Vec::new(), true).await;
+        Ok(())
+    }
+
     /// Set IPAV phase + emit a synthetic user "phase advanced to X" message so
     /// both agents see the transition naturally. Also clears any awaiting-user
     /// halt — an agent that fired `request_phase_advance` has effectively been
@@ -1321,18 +1412,21 @@ impl AppState {
     }
 
     /// Decide what an out-of-band tray answer does to a live session. Pure for
-    /// testing; `holds_wakes` is the pause latch (`activity.holds_wakes()`) and
-    /// `recorded` is whether the bridge got a receipt back for the answer.
+    /// testing; `holds_wakes` is the pause latch (`activity.holds_wakes()`),
+    /// `recorded` is whether the bridge got a receipt back for the answer, and
+    /// `ring_running` is whether any participant is mid-turn
+    /// (`activity.any_busy()` — the same signal the chat-input lock reads, so
+    /// the UI and this table agree on what "working" means).
     ///
-    /// Read the four lines as "what does each consequence actually depend on":
-    /// the halt clear on neither input, the flush on the pause latch alone, and
-    /// only the two that move a receipt around depend on there being one.
-    fn tray_wake(holds_wakes: bool, recorded: bool) -> TrayWake {
+    /// Read the three lines as "what does each consequence actually depend on":
+    /// the halt clear on nothing, the stash on the pause latch, and the release
+    /// on all three — a receipt to read, no pause to respect, and no running
+    /// ring to interrupt (rc3 D34).
+    fn tray_wake(holds_wakes: bool, recorded: bool, ring_running: bool) -> TrayWake {
         TrayWake {
             clear_halt: true,
             stash: holds_wakes && recorded,
-            deliver: !holds_wakes && recorded,
-            flush: !holds_wakes,
+            release: !holds_wakes && recorded && !ring_running,
         }
     }
 
@@ -1386,7 +1480,11 @@ impl AppState {
         {
             let sessions = self.sessions.lock().await;
             if let Some(handle) = sessions.get(session_id) {
-                let step = Self::tray_wake(handle.activity.holds_wakes(), receipt.is_some());
+                let step = Self::tray_wake(
+                    handle.activity.holds_wakes(),
+                    receipt.is_some(),
+                    handle.activity.any_busy(),
+                );
                 if step.clear_halt {
                     self.clear_awaiting(handle, session_id).await;
                 }
@@ -1403,45 +1501,27 @@ impl AppState {
                             .or_default()
                             .push(receipt.clone());
                     }
-                    // Human preemption, same spine as `broadcast` (issues.md
-                    // #27): an answered tray card is the user speaking, so it
-                    // must take effect at the next tool boundary instead of
-                    // waiting out the agent's whole current turn — two same-day
-                    // races in s-b69a5c01 had an agent building on premises the
-                    // parked answer had already overturned. The interrupt goes
-                    // BEFORE the send, mirroring `broadcast`: the pump's biased
-                    // control channel writes it ahead of stdin, so each agent
-                    // aborts and then reads the answer. Verified idle-harmless
-                    // there (control_response{success}, process survives, next
-                    // message still processed) — so no gate on the flaky `busy`
-                    // signal, and no SIGKILL escalation (the answer IS the next
-                    // work).
-                    if step.deliver {
-                        for agent in handle.agents() {
-                            agent.handle.interrupt("tray-answer-preempt");
-                        }
-                        // Answering a tray card ends the halt exactly as a typed
-                        // message does, so it goes through the ring for the same
-                        // reason (rc3 D19): the receipt row is already persisted,
-                        // and this releases the cycle and hands the turn to the
-                        // front rather than waking everyone at once.
-                        //
-                        // No mentions: an answer is a pick from a list of
-                        // options, not prose the user composed, so there is no
-                        // `@` in it to honour (rc3 D17).
-                        //
-                        // **This path used to release the ring and nothing else**
-                        // (rc3 D28), so the halt it answered stayed pending and
-                        // the bell never cleared. It goes through the one entry
-                        // point now, like every other way of responding.
+                    // **No interrupt, and no release while the ring runs (rc3
+                    // D34).** This block used to fire `tray-answer-preempt` at
+                    // every agent and reset the ring — the issues.md #27 cure
+                    // for an agent building on premises a parked answer had
+                    // overturned (s-b69a5c01). But the reset threw away the
+                    // holder's whole in-flight turn (the epoch moves; its
+                    // completion is discarded on arrival), which makes a tray
+                    // click a hidden interrupt — and the decree is that **Pause
+                    // is the only real interrupt**. The answer row is already
+                    // persisted; delivery is a pull; the next handover drains
+                    // it, so the exposure #27 worried about is now bounded at
+                    // the remainder of the current turn.
+                    //
+                    // An IDLE ring is the one case that still needs waking —
+                    // nothing will ever drain the row otherwise. Through
+                    // `user_responded`, the D28 single entry point; no mentions,
+                    // because a pick from a list carries no `@` to honour (D17).
+                    if step.release {
                         self.user_responded(session_id, Vec::new(), true).await;
                     }
                 }
-                // Answering a tray card ends the halt just as a typed message
-                // does, so release what the router held behind it — after the
-                // answer, so the peer's held chatter lands behind it.
-                if step.flush {
-                            }
             }
             // else: session closed in the gap between resolve and wake — the OOB
             // message persists in storage, so a future reopen still sees it.
@@ -1640,93 +1720,66 @@ mod tests {
     // --- issues.md #27: an OOB tray answer preempts the running turn ---
 
     #[test]
-    fn tray_wake_covers_all_four_pause_and_record_combinations() {
-        // Live + recorded: the answer is the user speaking, so it aborts the
-        // in-flight turn instead of waiting it out (the s-b69a5c01 races — an
-        // agent finishing a deliverable while its superseding answer sat unread
-        // on stdin), and the router releases what the halt held.
+    fn tray_wake_covers_the_pause_record_and_running_combinations() {
+        // **This table changed subject at rc3 D34, and the old subject was the
+        // interrupt.** The `deliver` flag used to fire `tray-answer-preempt` at
+        // every agent and reset the ring — so answering a parked question threw
+        // away the holder's in-flight turn. Under "Pause is the only real
+        // interrupt" a running ring gets NOTHING from a tray answer: the row is
+        // persisted, and the next handover drains it.
+
+        // Running + recorded: the answer rides the next boundary. No interrupt,
+        // no release — the exact case that used to abort the holder's turn.
         assert_eq!(
-            AppState::tray_wake(false, true),
-            TrayWake {
-                clear_halt: true,
-                stash: false,
-                deliver: true,
-                flush: true
-            }
+            AppState::tray_wake(false, true, true),
+            TrayWake { clear_halt: true, stash: false, release: false }
         );
-        // Paused + recorded: nothing is delivered (the receipt is stashed for
-        // the next broadcast), so there is nothing to preempt — and interrupting
-        // or flushing here would half-release a pause the user deliberately set.
+        // Idle + recorded: the one case that needs waking — nothing else will
+        // ever drain the row. Through `user_responded`, the D28 entry point.
         assert_eq!(
-            AppState::tray_wake(true, true),
-            TrayWake {
-                clear_halt: true,
-                stash: true,
-                deliver: false,
-                flush: false
-            }
+            AppState::tray_wake(false, true, false),
+            TrayWake { clear_halt: true, stash: false, release: true }
         );
-        // Live + UNRECORDED — the regression. The insert failing gates the send
-        // and nothing else: the halt still lifts and the router still flushes,
-        // because both follow from the user having answered rather than from the
-        // row. Getting this wrong parked the session on a question already
-        // answered, with the peer's messages queued behind the dead halt and the
-        // user's own pick visible in the tray the whole time.
+        // Paused + recorded: the receipt is stashed for the next broadcast.
+        // A tray answer must not release a pause the user deliberately set —
+        // whatever the busy flags say mid-drain.
         assert_eq!(
-            AppState::tray_wake(false, false),
-            TrayWake {
-                clear_halt: true,
-                stash: false,
-                deliver: false,
-                flush: true
-            }
+            AppState::tray_wake(true, true, false),
+            TrayWake { clear_halt: true, stash: true, release: false }
         );
-        // Paused + unrecorded: nothing to hold and nothing to send, so the halt
-        // clear is the whole of what this case owes. The pause latch is left
-        // exactly as the user set it.
         assert_eq!(
-            AppState::tray_wake(true, false),
-            TrayWake {
-                clear_halt: true,
-                stash: false,
-                deliver: false,
-                flush: false
-            }
+            AppState::tray_wake(true, true, true),
+            TrayWake { clear_halt: true, stash: true, release: false }
+        );
+        // Unrecorded — the regression the flags exist for. The insert failing
+        // gates the wake and nothing else: the halt still lifts, because that
+        // follows from the user having answered rather than from the row. But
+        // releasing over a receipt that never landed would hand out a turn on
+        // an empty backlog.
+        assert_eq!(
+            AppState::tray_wake(false, false, false),
+            TrayWake { clear_halt: true, stash: false, release: false }
+        );
+        assert_eq!(
+            AppState::tray_wake(true, false, true),
+            TrayWake { clear_halt: true, stash: false, release: false }
         );
     }
 
     #[test]
-    fn tray_preempt_fires_before_the_answer_is_sent() {
-        // Ordering contract, mirroring `broadcast`: the pump's biased control
-        // channel writes the interrupt ahead of stdin, so the agent aborts and
-        // THEN reads the answer. Sending first would let the whole turn run out
-        // before the abort landed — the bug this fixes.
-        //
-        // Source order, because this is the ordering of two side effects inside
-        // one branch and the branch needs a live subprocess to exercise —
-        // `tray_wake` decides WHETHER to deliver, which is a value, but not the
-        // order of the two calls that carry it out. Scoped to the `deliver`
-        // block so the haystack is the code being described.
+    fn a_tray_answer_interrupts_nobody() {
+        // rc3 **D34**: the `tray-answer-preempt` interrupt is deleted, and this
+        // pins the deletion. It was the issues.md #27 cure — abort every agent
+        // so the answer takes effect at the next tool boundary — and it made a
+        // tray click a hidden interrupt that reset the ring and discarded the
+        // holder's completion. Pause is the only real interrupt; if this string
+        // reappears in this file, that decree is being unwound.
         let src = include_str!("state.rs");
-        let arm = src
-            .split("if step.deliver {")
-            .nth(1)
-            .expect("the preempt block must exist");
-        // Bounded at the step that follows it, so the haystack is the block and
-        // not the rest of the file — an unbounded tail would happily match an
-        // `interrupt` and a `send_to_all` that live nowhere near each other.
-        let arm = &arm[..arm.find("if step.flush").expect("the flush step follows it")];
-        let interrupt = arm.find("interrupt(\"tray-answer-preempt\")");
-        // The delivery step is the ring notify since rc3 D19 — `send_to_all`
-        // fanned the receipt into every stdin, which woke participants outside
-        // their turn — and since rc3 D28 it is `user_responded`, which releases
-        // the ring and clears the halt as one event. The ORDERING property is
-        // unchanged and is what this pins: the preempt must fire before the
-        // answer is handed on, whichever call hands it on.
-        let send = arm.find("user_responded(");
+        // Assembled at runtime so this test's own source can never match it.
+        let needle = format!("interrupt(\"{}\")", "tray-answer-preempt");
         assert!(
-            interrupt.is_some() && send.is_some() && interrupt < send,
-            "the tray-answer interrupt must fire BEFORE the answer is delivered"
+            !src.contains(&needle),
+            "the tray-answer preempt must not come back"
         );
     }
 
