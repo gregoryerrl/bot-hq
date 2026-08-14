@@ -1090,3 +1090,40 @@ answered from the tray in the same session (37s, 63s), so the split between "an
 approval takes the box" and "a question stays parkable" held in practice. Zero
 halt overlaps. The push-gate path was the one with no prior UI exercise; it is
 the one that ran.
+
+#### D33 addendum — two things recovered from the transcript
+
+A context compaction lost the halt/tray brainstorm, and the recovered log held
+two agreements that had never been built. Both were found by reading the
+session's own JSONL rather than the plan docs — which had themselves gone stale
+inside a day.
+
+**The recap needed a bound, not a prompt.** The strongest argument for the whole
+banner was the user's: *"halt can serve as a recap for what happened in the
+session and what the agent is waiting for."* I had recorded it as the risky part
+— *"the recap is written by an agent about its own state… its value depends on a
+prompt change with no gate behind it."* That was wrong in a useful direction:
+participants were **already** writing recaps unprompted. Across the 28 halts on
+record the reason averages 277 characters and the longest is 1,166. What was
+missing was somewhere bounded to put one — rendered whole, a recap is ~15 lines
+of banner displacing the input box it exists to sit beside. Clamped to three
+lines with an expander above 200 chars, clamped in CSS so the full text stays
+present and selectable.
+
+**A hung participant could strand the input locked — and D33 is what made it
+reachable.** The pump clears a busy flag on exactly two paths: turn end, and
+pump termination. A participant that is alive but never answers the boot primer
+takes neither. Boot set the flag; nothing else was ever going to clear it.
+
+This was flagged when D29 was still a design — *"a participant that hangs during
+boot means a UI you can never type into… that is the one property I would write
+the test for first"* — and then not written. It stayed invisible because
+`derive` ranked `awaiting` above `busy`, so the halt reopened the box regardless.
+**Making the busy map authoritative removed the accidental cover.** A session
+would print READY and refuse to be typed into.
+
+Released on all three exits, from the same place the flags are set. That is the
+fourth occurrence this week of *one event, two halves, nothing making them travel
+together* — and the first that was introduced rather than inherited. Worth
+recording as such: a fix that concentrates authority in one signal also removes
+whatever was quietly compensating for that signal being wrong.
