@@ -159,22 +159,46 @@ export function HaltBanner({
   // nothing: a banner that is always present stops being read.
   if (!halted && choices.length === 0) return null;
 
+  // Questions only: ONE line (user, reviewing s-761704e8: "shorten the
+  // message on top of the input box, a one line 'You have questions in the
+  // tray' will do"). And their clarification, verbatim: "Questions in the
+  // tray is not equal to Waiting for you. Tray is asynchronous. HALT =
+  // waiting for you." — so nothing here may say "waiting": the tray line is
+  // an FYI, not a demand, and only the HALT path below wears that language.
+  if (!halted) {
+    return (
+      <div
+        role="status"
+        aria-label="Questions in the tray"
+        className="border-b border-outline-variant bg-surface-container-low px-3 py-1.5"
+      >
+        <button
+          type="button"
+          onClick={onOpenTray}
+          className="text-xs text-primary underline underline-offset-2"
+        >
+          {`◆ ${choices.length} question${choices.length > 1 ? "s" : ""} in the tray — the session keeps working →`}
+        </button>
+      </div>
+    );
+  }
+
+  // From here down the session is HALTED — the one state that genuinely
+  // waits on the user, and the only surface allowed to say so.
   return (
     <div
       role="status"
-      aria-label={halted ? "Session halted" : "Waiting for you"}
+      aria-label="Session halted"
       className="border-b border-outline-variant bg-surface-container-low px-3 py-2"
     >
       <div className="flex items-baseline gap-2">
         <span className="font-label-caps text-label-caps text-primary">
-          {halted ? "⏸ HALT" : "◆ FOR YOU"}
+          ⏸ HALT
         </span>
         <span className="text-xs text-on-surface-variant">
           {/* rc3 D35 made "waiting on you" literal: a declared halt stops the
               ring where it stands — nobody keeps working under this header. */}
-          {halted
-            ? "the session is waiting on you"
-            : "a question is waiting — the session is still working"}
+          the session is waiting on you
         </span>
       </div>
       {/* ONE halt line, because the session holds exactly one halt slot (rc3
@@ -222,13 +246,11 @@ export function HaltBanner({
       <p className="mt-1 text-[0.7rem] text-on-surface-variant">
         {/* An approval has TAKEN the input box (rc3 D33), so "answer here"
             would point at a textarea that is not on screen. Both can be
-            pending at once: D22 lets the lap finish, so one participant can
-            park an approval while another halts. */}
+            pending at once: one participant can park an approval while
+            another halts. */}
         {approvals.length > 0
           ? "Answer the approval below first — something is blocked on it."
-          : halted
-            ? "Answering — here or in the tray — clears this and resumes the session."
-            : "Answer whenever you are ready; the participants carry on meanwhile."}
+          : "Answering — here or in the tray — clears this and resumes the session."}
       </p>
     </div>
   );

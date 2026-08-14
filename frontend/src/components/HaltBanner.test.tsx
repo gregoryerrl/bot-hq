@@ -65,15 +65,20 @@ describe("HaltBanner", () => {
     expect(screen.getByText(/the freshest recap/)).toBeInTheDocument();
   });
 
-  it("does NOT claim the session halted just because a question is pending", () => {
+  it("shows questions as a ONE-LINE tray pointer that never says waiting", () => {
     // `ask_user_choice` is non-blocking by design — the agent parks and
-    // carries on, and under D35 a question doesn't even touch the ring. Only
-    // the session's halt slot says halted.
+    // carries on, and under D35 a question doesn't even touch the ring. The
+    // user, twice over: "shorten the message on top of the input box, a one
+    // line 'You have questions in the tray' will do" and "Questions in the
+    // tray is not equal to Waiting for you. Tray is asynchronous. HALT =
+    // waiting for you." So: one clickable line, no HALT, no waiting
+    // language anywhere in it.
     render(<HaltBanner halt={null} rows={[row()]} />);
     const banner = screen.getByRole("status");
-    expect(banner).toHaveAccessibleName("Waiting for you");
+    expect(banner).toHaveAccessibleName("Questions in the tray");
     expect(banner).not.toHaveTextContent("HALT");
-    expect(banner).toHaveTextContent("the session is still working");
+    expect(banner).not.toHaveTextContent(/waiting/i);
+    expect(banner).toHaveTextContent("1 question in the tray — the session keeps working");
   });
 
   it("renders NOTHING for approvals alone — the gate owns that fact", () => {
