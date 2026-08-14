@@ -352,6 +352,11 @@ const SWEEP_STOPWORDS: &[&str] = &[
 pub(super) fn retired_terms(old: &str, new: &str) -> Vec<String> {
     const MIN_LEN: usize = 3;
     const MAX_TERMS: usize = 12;
+    // Above this many distinct candidates, the write is a BULK REWRITE and
+    // frequency-ranking selects ordinary prose ("real", "pass", "empty" — the
+    // s-761704e8 tasks.md refactor produced a 510-hit report of exactly such
+    // words). A targeted edit retires a handful of terms and stays under it.
+    const BULK_REWRITE_CANDIDATES: usize = 25;
     fn tokens(body: &str) -> impl Iterator<Item = String> + '_ {
         body.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
             .map(|t| t.trim_matches(['-', '_']).to_lowercase())
@@ -365,6 +370,16 @@ pub(super) fn retired_terms(old: &str, new: &str) -> Vec<String> {
         }
         *counts.entry(tok).or_default() += 1;
     }
+    // Bulk rewrites keep only DISTINCTIVE candidates: term-shaped tokens
+    // (hyphen/underscore/digit — code and file names) or tokens the old body
+    // marked structurally (backticked, bolded, or in a heading). A plain word
+    // like the live "duo" specimen still reports on a targeted edit, where the
+    // pool is small and the old ranking already worked; a plain word in a
+    // 1,500-line rewrite is vocabulary, not a concept.
+    if counts.len() > BULK_REWRITE_CANDIDATES {
+        let old_lower = old.to_lowercase();
+        counts.retain(|tok, _| term_shaped(tok) || structurally_marked(&old_lower, tok));
+    }
     let mut terms: Vec<(String, usize)> = counts.into_iter().collect();
     // Most-used first (a concept the old body leaned on), longest as tiebreak
     // (more distinctive to grep), then alphabetical so the output is stable.
@@ -375,6 +390,26 @@ pub(super) fn retired_terms(old: &str, new: &str) -> Vec<String> {
     });
     terms.truncate(MAX_TERMS);
     terms.into_iter().map(|(t, _)| t).collect()
+}
+
+/// Code- or artifact-shaped: a hyphen, an underscore, or a digit — the shapes
+/// prose words don't have and branch names, file stems, columns and issue
+/// numbers do.
+fn term_shaped(tok: &str) -> bool {
+    tok.chars().any(|c| c == '-' || c == '_' || c.is_ascii_digit())
+}
+
+/// Did the (lowercased) old body mark this token structurally — backticks,
+/// bold, or a heading line? Structure is how a CL file says "this word is a
+/// TERM here"; prose vocabulary never gets it.
+fn structurally_marked(old_lower: &str, tok: &str) -> bool {
+    if old_lower.contains(&format!("`{tok}`")) || old_lower.contains(&format!("**{tok}**")) {
+        return true;
+    }
+    old_lower.lines().filter(|l| l.trim_start().starts_with('#')).any(|l| {
+        l.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+            .any(|t| t.trim_matches(['-', '_']).eq_ignore_ascii_case(tok))
+    })
 }
 
 /// Cap on the close-out sweep's reported hits — the point is to surface the
@@ -1150,6 +1185,41 @@ mod tests {
         assert!(!terms.contains(&"was".to_string()), "got: {terms:?}");
         // An append can only add — a pure superset retires nothing.
         assert!(retired_terms("alpha beta", "alpha beta gamma").is_empty());
+    }
+
+    #[test]
+    fn a_bulk_rewrite_reports_terms_not_vocabulary() {
+        // s-761704e8: the tasks.md refactor (1,515 → 116 lines) made the
+        // sweep flag "real", "pass", "empty" — 510 hits of ordinary prose,
+        // dismissed in 18 seconds. Over the bulk threshold only DISTINCTIVE
+        // candidates survive: term-shaped tokens and words the old body
+        // marked structurally (backticks, bold, headings).
+        let mut old = String::from(
+            "## Sandbox rules\n\nUse `meta_reconcile_runs` and tmp-prod-logs for scratch.\n",
+        );
+        for i in 0..40 {
+            old.push_str(&format!(
+                "- item {i}: the real pass looks empty and wrong exactly here, running \
+                 tests with php quickly against normal prose sentences forever\n\
+                 - walk jump swim dance sing paint drive climb read write count speak\n"
+            ));
+        }
+        let terms = retired_terms(&old, "lean.");
+        assert!(
+            terms.iter().any(|t| t == "sandbox"),
+            "a heading-marked plain word is a TERM and survives: {terms:?}"
+        );
+        assert!(terms.iter().any(|t| t == "meta_reconcile_runs"), "got: {terms:?}");
+        assert!(terms.iter().any(|t| t == "tmp-prod-logs"), "got: {terms:?}");
+        for noise in ["real", "pass", "empty", "wrong", "running", "tests", "php", "walk"] {
+            assert!(
+                !terms.iter().any(|t| t == noise),
+                "prose vocabulary must not report in a bulk rewrite: {noise} in {terms:?}"
+            );
+        }
+        // Under the threshold nothing changes: the live "duo" specimen — a
+        // plain unmarked word retired by a targeted edit — still reports
+        // (pinned by `retired_terms_keeps_dropped_concepts_and_drops_noise`).
     }
 
     #[test]
