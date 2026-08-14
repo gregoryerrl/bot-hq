@@ -53,6 +53,7 @@ pub use row_types::{
     AgentConfig, AgentFeedback, Author, CancelEvent, ClFolder, ForwardEvent, ClIndexEntry, ClRead,
     Finding, FindingSeverity, FindingStatus, Message, MessageKind, Model, Plugin, Project,
     QuestionKind, RetrievalStats, Session, SessionDocument, SessionTrayEntry, SessionWithPreview,
+    UserActionRow,
 };
 pub(crate) use time::now_utc;
 

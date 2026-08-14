@@ -1454,6 +1454,26 @@ impl SignalingBridge {
         )
     }
 
+    /// Record actions the USER owes — `close_session(user_actions=[...])`'s
+    /// landing point (migration 0056, the "waiting on you" ledger). Best
+    /// effort: a failed write warns and never blocks a close, because the
+    /// prose copy of the same list is already in the wrap question and
+    /// tasks.md — this ledger is the SURFACE, not the record of last resort.
+    pub async fn record_user_actions(&self, session_id: &str, actions: &[String]) {
+        let storage = self.storage.lock().await.clone();
+        let Some(storage) = storage else {
+            return;
+        };
+        match storage.add_user_actions(session_id, actions).await {
+            Ok(added) => {
+                if added > 0 {
+                    tracing::info!(session_id, added, "user actions recorded for the dashboard");
+                }
+            }
+            Err(e) => tracing::warn!(?e, session_id, "recording user actions failed"),
+        }
+    }
+
     /// The active reviewer-down override reason for a session, if any.
     pub fn reviewer_override_reason(&self, session_id: &str) -> Option<String> {
         self.reviewer_override

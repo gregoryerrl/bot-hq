@@ -55,6 +55,7 @@ const EYES = role({ id: 2, slug: "eyes", display_name: "EYES" });
 function mockBackend(
   roles: RoleView[] = [role(), EYES],
   claude: { overrides?: ClaudeOverrides; knob?: string | null } = {},
+  userActions: unknown[] = [],
 ) {
   mockInvoke.mockImplementation(async (cmd: string) => {
     switch (cmd) {
@@ -62,6 +63,10 @@ function mockBackend(
         return [];
       case "list_pending_tray":
         return [];
+      case "list_user_actions":
+        return userActions;
+      case "complete_user_action":
+        return undefined;
       case "list_projects":
         return [];
       case "list_models":
@@ -138,6 +143,47 @@ function sentOptions() {
   const call = mockInvoke.mock.calls.find((c) => c[0] === "create_session");
   return (call?.[1] as { options: Record<string, unknown> }).options;
 }
+
+describe("Waiting on you — the user-actions ledger", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  it("lists user-owed actions and checks one off", async () => {
+    // s-761704e8: "Merge all 5 myself now" survived only in prose and the
+    // five PRs sat unmerged — the card is the surface that outlives the
+    // session close.
+    mockBackend([role(), EYES], {}, [
+      {
+        id: 1,
+        session_id: "s-1",
+        action: "Merge dependabot PRs #475 #497 #498 #505 #507",
+        created_at: "2026-08-14T16:39:00Z",
+        session_title: "aug 14 ad-manager work 2",
+        repo: "/Users/x/Projects/bcc-ad-manager",
+      },
+    ]);
+    renderDashboard();
+    await screen.findByTestId("waiting-on-you");
+    expect(screen.getByText(/Merge dependabot PRs/)).toBeInTheDocument();
+    // Labeled by the repo basename, so a cross-project list stays readable.
+    expect(screen.getByText("bcc-ad-manager")).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /Done: Merge dependabot/ }),
+    );
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("complete_user_action", {
+        id: 1,
+      }),
+    );
+  });
+
+  it("renders no card when nothing waits on the user", async () => {
+    mockBackend();
+    renderDashboard();
+    await screen.findByRole("button", { name: /new session/i });
+    expect(screen.queryByTestId("waiting-on-you")).toBeNull();
+  });
+});
 
 describe("New session dialog — participants", () => {
   beforeEach(() => mockInvoke.mockReset());

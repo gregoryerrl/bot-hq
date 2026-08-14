@@ -221,6 +221,32 @@ async renameSession(sessionId: string, title: string) : Promise<Result<null, App
 }
 },
 /**
+ * Every action still waiting on the user, oldest first. Written by agents at
+ * `close_session(user_actions=[...])`; s-761704e8 is why they exist — the
+ * user's own "Merge all 5 myself now" survived only in prose nobody
+ * re-surfaced.
+ */
+async listUserActions() : Promise<Result<UserActionView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_user_actions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Check an action off the "Waiting on you" card. Idempotent — a repeat click
+ * on an already-done item is a no-op, not an error.
+ */
+async completeUserAction(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("complete_user_action", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Read the current IPAV phase for a session. Returns one of "investigate" /
  * "plan" / "apply" / "verify", or `None` if the session isn't live (IPAV
  * state is in-memory only — restart loses it). Frontend SessionView header
@@ -2099,6 +2125,12 @@ snapshot_b64: string; cols: number; rows: number }
  * `SessionInfo` return-type convention) — the React side reads these names.
  */
 export type UpdateInfo = { current_version: string; latest_version: string; update_available: boolean; release_url: string; release_notes: string | null; published_at: string | null }
+/**
+ * One action the USER owes, for the dashboard's "Waiting on you" card
+ * (migration 0056). `repo` is the owning session's working repo path — the
+ * card labels items by its basename.
+ */
+export type UserActionView = { id: number; session_id: string; action: string; created_at: string; session_title: string; repo: string | null }
 /**
  * Outcome of a pre-flight model probe (B5).
  */

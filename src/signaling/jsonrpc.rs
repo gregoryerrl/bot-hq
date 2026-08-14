@@ -708,6 +708,24 @@ async fn call_tool(
                 .get("archive")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            // The "waiting on you" ledger (migration 0056): actions the USER
+            // owes, recorded BEFORE the sweep's once-only refusal below so a
+            // retried close needs no re-pass — and a re-pass is a no-op
+            // (UNIQUE per (session, action)). s-761704e8: "Merge all 5 myself
+            // now" survived only in prose nobody re-surfaced; this is the
+            // surface.
+            if let Some(actions) = args.get("user_actions").and_then(Value::as_array) {
+                let actions: Vec<String> = actions
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect();
+                if !actions.is_empty() {
+                    bridge
+                        .record_user_actions(&caller.session_id, &actions)
+                        .await;
+                }
+            }
             // #31 close-out staleness sweep, checked BEFORE (and independently
             // of) the delta nudge: an agent that DID write the CL gets no delta
             // nudge, and that is exactly the agent whose rewrite may have left
@@ -1442,6 +1460,39 @@ mod tests {
             }
             other => panic!("expected SessionCloseRequest, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn close_session_records_user_actions_even_when_the_close_is_refused() {
+        // The "waiting on you" ledger (0056). Two properties, both from
+        // s-761704e8: the actions land even when this close call is REFUSED
+        // (the delta nudge and the staleness sweep both fire after recording,
+        // and the live sweep refused the first close), and the retry that
+        // re-passes the same list duplicates nothing.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "t", None).await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+
+        let call = json!({"name": "close_session", "arguments": {
+            "user_actions": [
+                "Merge dependabot PRs #475 #497 #498 #505 #507",
+                "Decide #521 after the sweep read"
+            ]
+        }});
+        // First call: the delta nudge refuses the close — recorded anyway.
+        dispatch(req("tools/call", call.clone(), 1), &caller(), &bridge)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(storage.open_user_actions().await.unwrap().len(), 2);
+        // The retry re-passes the list verbatim: no duplicates.
+        dispatch(req("tools/call", call, 2), &caller(), &bridge)
+            .await
+            .unwrap()
+            .unwrap();
+        let open = storage.open_user_actions().await.unwrap();
+        assert_eq!(open.len(), 2, "a retried close must not double-record");
     }
 
     #[tokio::test]
