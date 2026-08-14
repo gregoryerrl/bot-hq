@@ -330,6 +330,9 @@ impl SignalingBridge {
         let command_text = approval.as_ref().and_then(|a| {
             matches!(a.kind, crate::policy::ViolationKind::ToolBlocklist).then(|| a.action.clone())
         });
+        // Captured before `approval` moves into the park below: the gate latch
+        // keys on this (rc3 D35).
+        let is_approval = approval.is_some();
         let (tx, rx) = oneshot::channel::<String>();
         let choice = PendingChoice {
             choice_id: choice_id.clone(),
@@ -368,13 +371,16 @@ impl SignalingBridge {
         //
         // - An ordinary QUESTION parks a row and touches NOTHING else. No
         //   awaiting flag, no ring command. The session keeps working; the
-        //   answer travels with the user's next Send (D34). (It used to halt
-        //   the ring after a lap — which put peers to work under a session the
-        //   user was told had yielded.)
-        // - A blocking APPROVAL halts the session: the gate latch parks the
-        //   ring until the user answers. The asker is mid-turn inside the gated
-        //   tool call; the latch stops the NEXT deal, cutting nothing.
-        if blocking {
+        //   answer travels with the user's next Send (D34).
+        // - An APPROVAL halts the session: the gate latch parks the ring until
+        //   the user answers. **Keyed on the approval CONTEXT, not on
+        //   `blocking`** — the action gate parks non-blocking (the agent gets
+        //   "parked, outcome out-of-band" and carries on), and keying the
+        //   latch on `blocking` let `s-86a81478` roll straight through a
+        //   parked gate: the ring never latched, the session never stopped,
+        //   and the user never got the floor. The asker's CURRENT turn is not
+        //   cut either way; the latch stops the next deal.
+        if is_approval {
             self.set_session_awaiting(&session_id, &agent, false).await;
             self.notify_ring_gate(&session_id, true).await;
         }
@@ -1191,7 +1197,7 @@ mod tests {
     /// already waiting on the completion, and halting there stopped a cycle that
     /// was not stuck. Every gated `git commit` goes through this path.
     #[tokio::test]
-    async fn a_blocking_approval_opens_a_gate_that_parks_the_ring() {
+    async fn any_approval_opens_a_gate_blocking_or_parked() {
         use std::sync::atomic::AtomicBool;
         let bridge = SignalingBridge::new();
         let storage = crate::storage::Storage::memory().await.unwrap();
@@ -1203,8 +1209,13 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         bridge.register_session_sequencer("s1".into(), tx).await;
 
-        // The real path with `blocking = true` — what `request_approval` and the
-        // action gate use. It holds open until resolved, so it is spawned.
+        // **The latch keys on the approval CONTEXT, not on `blocking`** — the
+        // defect found live in `s-86a81478`: the action gate parks
+        // NON-blocking (the agent gets "parked" and carries on), and a
+        // blocking-keyed latch let the session roll straight through a parked
+        // gate. Both modes must open one.
+        //
+        // Blocking (the pre-push hook shape) — holds open, so it is spawned.
         let bridge2 = bridge.clone();
         tokio::spawn(async move {
             let _ = bridge2
@@ -1212,25 +1223,63 @@ mod tests {
                     "s1".into(),
                     "hands".into(),
                     "run it?".into(),
-                    vec!["yes".into(), "no".into()],
-                    None,
+                    vec!["Approve".into(), "Reject".into()],
+                    Some(super::super::ApprovalContext {
+                        kind: crate::policy::ViolationKind::PushGate,
+                        action: "git push".into(),
+                        detail: None,
+                    }),
                     None,
                     true,
                 )
                 .await;
         });
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        // **Changed subject at rc3 D35 — this used to assert NOTHING reached
-        // the ring.** The user overruled the "asker is blocked; peers keep
-        // working" split: *"Approval gate halts the session, stop
-        // overcomplicating things like halting just for the agent that
-        // asked."* A gate now parks the ring until the user answers.
         assert!(
             matches!(
                 rx.try_recv(),
                 Ok(crate::core::sequencer::SequencerCommand::GateOpened)
             ),
             "a blocking approval must open a gate — the session halts on it"
+        );
+
+        // Parked (the action-gate shape): blocking = false, ack returns
+        // immediately, and the gate must STILL open.
+        let _ = bridge
+            .ask_user_choice_inner(
+                "s1".into(),
+                "hands".into(),
+                "Run gated command?".into(),
+                vec!["Approve".into(), "Reject".into()],
+                Some(super::super::ApprovalContext {
+                    kind: crate::policy::ViolationKind::ToolBlocklist,
+                    action: "rm -rf build".into(),
+                    detail: None,
+                }),
+                None,
+                false,
+            )
+            .await;
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(crate::core::sequencer::SequencerCommand::GateOpened)
+            ),
+            "a PARKED approval must open a gate too — this is the s-86a81478 hole"
+        );
+
+        // And an ordinary question (no approval context) must NOT.
+        let _ = bridge
+            .ask_user_choice(
+                "s1".into(),
+                "hands".into(),
+                "which?".into(),
+                vec!["a".into(), "b".into()],
+            )
+            .await;
+        assert!(
+            rx.try_recv().is_err(),
+            "a question is not a gate; the ring hears nothing"
         );
     }
 

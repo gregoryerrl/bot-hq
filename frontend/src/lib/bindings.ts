@@ -870,6 +870,14 @@ async sendUserResponse(sessionId: string, text: string, picks: StagedPick[]) : P
     else return { status: "error", error: e  as any };
 }
 },
+async getSessionHalt(sessionId: string) : Promise<Result<SessionHaltView | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_session_halt", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Discard a tray row from the UI without answering it — the user's bin for
  * stale questions they no longer want to answer.
@@ -1933,6 +1941,12 @@ participants: ParticipantPick[] | null }
  */
 export type SessionDirty = { has_repo: boolean; dirty_count: number }
 export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
+/**
+ * The session's declared halt (rc3 D35) — a SESSION state, never a tray row.
+ * `None` = not halted. One slot by construction; the freshest declaration is
+ * the one the user reads.
+ */
+export type SessionHaltView = { declared_by: string; reason: string; declared_at: string }
 export type SessionInfo = { id: string; title: string; working_repo_path: string | null; 
 /**
  * Set when the session runs in an isolated git worktree —

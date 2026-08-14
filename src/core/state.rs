@@ -935,17 +935,30 @@ impl AppState {
     ///
     /// `mentions` rides along because the ring release already carries it (D17);
     /// a tray answer passes none.
-    async fn user_responded(&self, session_id: &str, mentions: Vec<i64>, release_ring: bool) {
+    async fn user_responded(
+        &self,
+        session_id: &str,
+        mentions: Vec<i64>,
+        release_ring: bool,
+        clear_halt: bool,
+    ) {
         // The halt row FIRST. If the ring release panicked or the process died
         // between the two, a cleared row and a halted ring is a session the next
         // message fixes; a released ring and a pending row is the bug above, and
         // it is invisible.
-        match self.storage.clear_session_halt(session_id).await {
-            Ok(true) => {
-                self.bridge.notify_halts_cleared(session_id.to_string());
+        // `clear_halt = false` is the GATE-ANSWER case (rc3 D35, found live in
+        // `s-86a81478`): approving a parked command is answering THAT approval,
+        // not the session's halt — the first cut cleared the slot on any
+        // resolve, so the one HALT the user saw was wiped by them approving an
+        // unrelated gate, and the ring released straight back into work.
+        if clear_halt {
+            match self.storage.clear_session_halt(session_id).await {
+                Ok(true) => {
+                    self.bridge.notify_halts_cleared(session_id.to_string());
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(?e, session_id, "clear_session_halt failed"),
             }
-            Ok(false) => {}
-            Err(e) => tracing::warn!(?e, session_id, "clear_session_halt failed"),
         }
         // `advance_phase` is the one caller that does NOT release: a phase
         // self-advance answers the halt without being a message anyone reads,
@@ -1115,7 +1128,7 @@ impl AppState {
         // to drain. Reversing these two hands out a turn over an empty backlog
         // and the message lands a turn late. Both halves of "the user responded"
         // ride this one call (rc3 D28).
-        self.user_responded(session_id, mentions, true).await;
+        self.user_responded(session_id, mentions, true, true).await;
         // The user's message reaches the front of the rotation → busy. The
         // awaiting flag was cleared just above, so this recompute moves the
         // session AwaitingUser/Idle → Busy.
@@ -1235,7 +1248,7 @@ impl AppState {
             }
         }
         self.pending_paused_wakes.lock().await.remove(session_id);
-        self.user_responded(session_id, Vec::new(), true).await;
+        self.user_responded(session_id, Vec::new(), true, true).await;
         Ok(())
     }
 
@@ -1255,7 +1268,7 @@ impl AppState {
         // Clears the halt without releasing the ring: a phase self-advance
         // answers the question but is not a message anyone reads, so waking the
         // ring on it would hand out a turn over an empty backlog (rc3 D28).
-        self.user_responded(session_id, Vec::new(), false).await;
+        self.user_responded(session_id, Vec::new(), false, true).await;
 
         handle.ipav.lock().await.advance(target);
 
@@ -1447,11 +1460,18 @@ impl AppState {
         // live smoke found tray-only input left the watchdog disarmed (only
         // `broadcast` bumped the counter). StaleGateNeedsConfirm is excluded:
         // nothing was flipped or delivered.
+        // Was the resolved row a GATE? Answering a gate answers that approval
+        // alone (rc3 D35): it lifts the latch and may wake an idle ring, but it
+        // must not clear the session's halt slot — the defect in `s-86a81478`
+        // was exactly that coupling.
+        let mut resolved_a_gate = false;
         if matches!(
             outcome,
             ResolveOutcome::Delivered | ResolveOutcome::AgentReceiverDroppedFellBack { .. }
         ) {
             if let Ok(Some(entry)) = self.storage.get_tray_entry(choice_id).await {
+                resolved_a_gate =
+                    entry.options_json.as_deref() == Some("[\"Approve\",\"Reject\"]");
                 let sessions = self.sessions.lock().await;
                 if let Some(handle) = sessions.get(&entry.session_id) {
                     handle
@@ -1519,7 +1539,8 @@ impl AppState {
                     // `user_responded`, the D28 single entry point; no mentions,
                     // because a pick from a list carries no `@` to honour (D17).
                     if step.release {
-                        self.user_responded(session_id, Vec::new(), true).await;
+                        self.user_responded(session_id, Vec::new(), true, !resolved_a_gate)
+                            .await;
                     }
                 }
             }
@@ -1527,6 +1548,26 @@ impl AppState {
             // message persists in storage, so a future reopen still sees it.
         }
         Ok(outcome)
+    }
+
+    /// **A declared halt stops the DECLARER's own generation (rc3 D35,
+    /// `s-86a81478`).** `mark_awaiting_user` ends the agent's turn ring-side,
+    /// but the subprocess keeps generating after the tool ack — calling more
+    /// tools for minutes under a ⏸ HALT banner, which is exactly the "HALT
+    /// doesn't halt the agents" the user reported twice. Interrupting it here
+    /// is not the user cutting anyone off: the agent DECLARED it is waiting,
+    /// and this makes its own declaration true. Pause remains the only USER
+    /// interrupt; peers are untouched (the ring latch already stops the next
+    /// deal, and a non-declarer holding a live turn keeps it).
+    pub async fn halt_declared(&self, session_id: &str, agent_slug: &str) {
+        let sessions = self.sessions.lock().await;
+        if let Some(handle) = sessions.get(session_id) {
+            for agent in handle.agents() {
+                if agent.slug == agent_slug {
+                    agent.handle.interrupt("halt-self-declared");
+                }
+            }
+        }
     }
 
     pub fn subscribe_signaling(&self) -> broadcast::Receiver<SignalingEvent> {
@@ -1821,6 +1862,16 @@ mod tests {
             prod.matches(".notify_ring_user_message(").count(),
             1,
             "the ring is released in exactly one place, for the same reason"
+        );
+
+        // A gate answer is the one response that must NOT clear the halt slot
+        // (rc3 D35, s-86a81478: approving an unrelated command wiped the HALT
+        // the user was looking at). The OOB release site carries the
+        // distinction; losing the negation re-couples them.
+        assert!(
+            prod.contains("!resolved_a_gate"),
+            "the OOB release must pass clear_halt = !resolved_a_gate — a gate \
+             answer answers that gate, not the session's halt"
         );
 
         // And every way of responding goes through it. Three today; the count is

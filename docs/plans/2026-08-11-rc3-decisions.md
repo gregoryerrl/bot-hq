@@ -1259,3 +1259,35 @@ the banner, which no longer looks at tray rows for anything but the questions
 pointer. `clear_pending_halts` and `pending_halt_for_agent` are deleted;
 nothing writes `kind='halt'` rows any more, and the migration closes out any
 legacy pending ones. The banner's N-lines rendering collapsed to the one slot.
+
+#### D35 addendum 2 — `s-86a81478`: three holes between the decree and the build
+
+The user tested again and the contract still failed ("HALT still did not halt
+the agents… they never allowed me to type anything" — 25 minutes, no floor).
+The dissection found three of my defects compounding:
+
+1. **The action gate parks NON-blocking, and the latch was keyed on
+   `blocking`.** The 08:16 gate never latched the ring; the session rolled
+   through it. Fixed: `GateOpened` fires on the approval CONTEXT — any parked
+   Approve/Reject, blocking or not. Pinned both modes plus the question-is-not-
+   a-gate direction.
+2. **Answering a gate wiped the halt slot.** The D28 coupling treated any
+   resolve as a full user response, so approving an unrelated command at 08:18
+   cleared the one HALT the user was looking at and released the ring back
+   into work. Fixed: `user_responded` carries `clear_halt`; a gate answer
+   passes `!resolved_a_gate` — it answers that approval, lifts the latch,
+   wakes an idle ring, and touches nothing else. (Safe against a live halt by
+   construction: the halt latch is separate, so a gate-release deals nothing
+   while `halted_pending_user` stands.)
+3. **The declarer's generation outlived its declaration.**
+   `mark_awaiting_user` ends the turn ring-side; the subprocess kept
+   generating and calling tools under the ⏸ banner. Fixed: the backend event
+   router interrupts the DECLARER on `AwaitingUser` — the agent said it is
+   waiting, and the interrupt makes its own declaration true. Not a user
+   interrupt; Pause remains the only one of those. Peers untouched.
+
+Why the user had no floor for 25 minutes: with no halt surviving, no gate
+latching, and four participants told to "converse with each other", nothing
+ever created a boundary — the ring dealt continuously and the D33 lock never
+lifted. With the three fixes, that session stops at the first gate (08:16) or
+the first halt, busy drains, and the box (or the gate) is the user's.

@@ -509,6 +509,11 @@ fn main() -> Result<()> {
                                 tracing::warn!(?e, %session_id, "close_session via MCP event failed");
                             }
                         }
+                        SignalingEvent::AwaitingUser { session_id, agent, .. } => {
+                            // rc3 D35: the declarer said it is waiting — stop
+                            // its residual generation so the halt is a halt.
+                            core_for_worker.halt_declared(&session_id, &agent).await;
+                        }
                         SignalingEvent::AgentAdvancePhase { session_id, target, .. } => {
                             match bot_hq::core::ipav::IpavPhase::parse(&target) {
                                 Some(phase) => {
@@ -534,7 +539,8 @@ fn main() -> Result<()> {
                     match close_rx.recv().await {
                         Ok(
                             ev @ (SignalingEvent::SessionCloseRequest { .. }
-                            | SignalingEvent::AgentAdvancePhase { .. }),
+                            | SignalingEvent::AgentAdvancePhase { .. }
+                            | SignalingEvent::AwaitingUser { .. }),
                         ) => {
                             // Unbounded hand-off → never blocks the broadcast drain.
                             let _ = ctrl_tx.send(ev);
