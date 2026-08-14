@@ -367,6 +367,15 @@ pub async fn pump_agent(
     // incident, not one per nudged retry).
     let mut limit_line: Option<String> = None;
     let mut last_limit_notice: Option<std::time::Instant> = None;
+    // s-f6a441ff: consecutive errored turns for THIS pump. ONE errored turn
+    // ends `Spoke` and the ring steps past it — a failure is not a claim there
+    // is nothing left to do (see the ending derivation below). But a SECOND in
+    // a row means the participant cannot work at all, and letting the ring
+    // keep dealing turned a context-blown pair into an error volley: 11
+    // "Prompt is too long" turns in 5 minutes before the text-repeat net
+    // halted the cycle — silently. Two in a row → host-declared halt with the
+    // error as the visible reason, the provider-limit stall's route.
+    let mut consecutive_errored_turns: usize = 0;
     // B5: the epoch of the turn in flight, snapshotted from `cfg.turn_epoch` on
     // this turn's FIRST event and cleared when it completes. See the field's doc
     // for why reading it at completion time instead would defeat the guard it
@@ -751,8 +760,51 @@ pub async fn pump_agent(
                     // unbounded error-spam loop (Rain on the DeepSeek gateway,
                     // 2026-05-29). Drain silently.
                     debug!(agent = %cfg.slug, "errored turn; draining buffer without router-forward");
+                    consecutive_errored_turns += 1;
+                    if consecutive_errored_turns >= 2 {
+                        // Read before the buffer is cleared below: the error
+                        // line is the turn's tail, and it is what the banner
+                        // must say — a stop with no reason is the silence the
+                        // repeat-net's halt already taught us not to repeat.
+                        let last_line: String = buffer
+                            .lines()
+                            .rev()
+                            .find(|l| !l.trim().is_empty())
+                            .unwrap_or("unknown error")
+                            .chars()
+                            .take(200)
+                            .collect();
+                        warn!(
+                            agent = %cfg.slug,
+                            %last_line,
+                            "back-to-back errored turns; declaring the session's halt"
+                        );
+                        if let Some(bridge) = &cfg.bridge {
+                            let _ = bridge
+                                .mark_awaiting_user(
+                                    cfg.session_id.to_string(),
+                                    cfg.slug.to_string(),
+                                    format!(
+                                        "⚠ {}'s turns are failing back-to-back \
+                                         (last error: \"{last_line}\"). The session \
+                                         stopped so you can steer. If the error is \
+                                         about prompt/context size, this \
+                                         participant's context is likely \
+                                         unrecoverable — close the session and \
+                                         open a fresh one.",
+                                        &cfg.slug
+                                    ),
+                                )
+                                .await;
+                        }
+                        // Re-arm rather than latch: the halt already stops the
+                        // ring, so the next errors are a NEW incident — the
+                        // user's release attempt — and deserve a fresh banner.
+                        consecutive_errored_turns = 0;
+                    }
                     buffer.clear();
                 } else {
+                    consecutive_errored_turns = 0;
                     // The turn's prose is already posted as rows by the pump
                     // above; the ring delivers those to every peer off its
                     // cursor. Nothing extra to hand anywhere — the router that
@@ -1396,6 +1448,86 @@ mod tests {
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].content.contains("API Error"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn back_to_back_errored_turns_declare_a_visible_halt() {
+        // s-f6a441ff: a 2.9 MB paste blew both participants' context windows;
+        // every dealt turn ended "Prompt is too long", the ring stepped past
+        // each one (a single errored turn is survivable by design — the test
+        // above), and the volley ran 11 error turns across 5 minutes before
+        // the text-repeat net halted the cycle SILENTLY. Two errored turns in
+        // a row from one pump = this participant cannot work: the pump fills
+        // the session's halt slot so the stop has a banner, not a shrug.
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        let send_error_turn = |ev_tx: mpsc::Sender<AgentEvent>| async move {
+            ev_tx
+                .send(AgentEvent::Text("Prompt is too long".into()))
+                .await
+                .unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: Some("error_during_execution".into()),
+                    is_error: true,
+                    api_error_status: None,
+                    context: ContextReport::none(ContextVerdict::NoWindow),
+                })
+                .await
+                .unwrap();
+        };
+
+        // Turn one errors. The halt write (if any) lands BEFORE the completion
+        // is reported, so once the completion is visible the absence is proof.
+        send_error_turn(ev_tx.clone()).await;
+        let mut first = None;
+        for _ in 0..200 {
+            first = next_turn_end(&mut ring_rx);
+            if first.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(first.is_some(), "the first errored turn reports its end");
+        assert!(
+            storage.session_halt("s1").await.unwrap().is_none(),
+            "ONE errored turn is survivable and must not halt the session"
+        );
+
+        // Turn two errors — the streak trips and the halt slot fills.
+        send_error_turn(ev_tx.clone()).await;
+        let mut second = None;
+        for _ in 0..200 {
+            second = next_turn_end(&mut ring_rx);
+            if second.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(second.is_some(), "the second errored turn still reports its end");
+        let halt = storage.session_halt("s1").await.unwrap();
+        assert!(
+            halt.as_ref()
+                .is_some_and(|(_, reason, _)| reason.contains("Prompt is too long")
+                    && reason.contains("failing back-to-back")),
+            "the halt slot carries the error as the visible reason: {halt:?}"
+        );
+        // rc3 D35 holds here too: a halt is SESSION state, never a tray row.
+        let tray = storage.tray_entries_for_session("s1").await.unwrap();
+        assert!(
+            !tray.iter().any(|q| q.kind == "halt"),
+            "the error halt writes no tray rows: {tray:?}"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
