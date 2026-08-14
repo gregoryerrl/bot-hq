@@ -187,12 +187,9 @@ is the only real interrupt"*, then the clarification that killed buffering:
 
 ### The one thread left open by the pivot
 
-**Batched choices** — the agreed half of the Send idea (picks *stage*, and one
-Send delivers the typed message + all staged answers as a single user
-response) was **never built**; the pivot two messages later was about
-approvals, and it is genuinely ambiguous whether the "or" superseded the
-choices half too. Today each tray pick still resolves immediately, which
-under D33 means: answering one of several questions while halted releases the
-ring and locks the box before the rest can be answered or a message added.
-The batched design exists for exactly that case. **Needs the user's call, not
-an assumption.**
+**Batched choices** — recovered as ambiguous, put to the user, decided, and
+**built the same day as rc3 D34** (`7e1e04d`): picks stage while the box is
+open, Send delivers message + answers as one response, and the
+`tray-answer-preempt` interrupt — which reset the ring and threw away the
+holder's in-flight turn on every mid-work tray answer — is deleted and pinned
+deleted.
