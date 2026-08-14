@@ -1018,7 +1018,38 @@ impl AppState {
         ids
     }
 
+    /// The user-message paste gate: `Some(refusal)` when `len` exceeds the
+    /// wire clamp, `None` when the message may pass.
+    ///
+    /// The threshold IS [`crate::storage::WIRE_BODY_CLAMP_BYTES`] — one
+    /// constant, two layers. This gate refuses at the door with guidance the
+    /// user can act on; the wire clamp truncates whatever gets past every
+    /// door (agent dumps, rows already on record). Sharing the constant means
+    /// an ACCEPTED user message is never truncated on delivery.
+    fn oversized_message_refusal(len: usize) -> Option<String> {
+        const CAP: usize = crate::storage::WIRE_BODY_CLAMP_BYTES;
+        (len > CAP).then(|| {
+            format!(
+                "message is {len} bytes — the per-message cap is {CAP} (~50k \
+                 tokens). A paste this size wedges the participants' context \
+                 windows unrecoverably (s-f6a441ff: a 2.9 MB paste ended the \
+                 session). Save the bulk to a file in the working repo and send \
+                 the path instead — participants read files selectively."
+            )
+        })
+    }
+
     pub async fn broadcast(&self, session_id: &str, text: &str) -> Result<()> {
+        // The paste gate, FIRST — before any respawn work is spent on a
+        // message that will be refused. s-f6a441ff: a 2,977,078-byte paste of
+        // prod logs was accepted, delivered, and lodged in both participants'
+        // subprocess transcripts; every prompt after it exceeded even the 1M
+        // window and the session died volleying "Prompt is too long". The
+        // refusal carries the fix the user reached for themselves that day
+        // ("i've put it in temp.md") — a file, referenced by path.
+        if let Some(refusal) = Self::oversized_message_refusal(text.len()) {
+            anyhow::bail!(refusal);
+        }
         // Auto-heal: if the duo went stale (e.g. an agent's stdin pump died,
         // closing the public input channel — a now-deaf agent that would silently
         // drop this message), evict + respawn it before delivering so the user's
@@ -1199,6 +1230,13 @@ impl AppState {
         text: &str,
         picks: Vec<(String, String)>,
     ) -> Result<()> {
+        // Same paste gate as `broadcast`, checked BEFORE the picks resolve —
+        // a Send refused halfway would consume the staged answers and drop the
+        // message, leaving the user unsure what landed. Refuse whole instead:
+        // picks stay staged, the message stays in the box, the error says why.
+        if let Some(refusal) = Self::oversized_message_refusal(text.len()) {
+            anyhow::bail!(refusal);
+        }
         let mut answered = 0usize;
         for (choice_id, picked) in picks {
             // Straight to the bridge: record the answer, skip the wake. The
@@ -1854,6 +1892,40 @@ mod tests {
                  stopped ring has always cleared (s-ff729daa)"
             );
         }
+    }
+
+    /// **s-f6a441ff: the paste gate.** One 2.9 MB user paste wedged both
+    /// participants' contexts unrecoverably. Both user-text entry points —
+    /// `broadcast` and `send_user_response` — refuse an oversized message at
+    /// the top, whole, with the file-not-paste fix in the error.
+    #[test]
+    fn an_oversized_user_message_is_refused_with_the_fix_in_hand() {
+        let cap = crate::storage::WIRE_BODY_CLAMP_BYTES;
+        assert_eq!(
+            AppState::oversized_message_refusal(cap),
+            None,
+            "at the cap passes — the wire clamp's boundary matches, so an \
+             accepted message is never truncated"
+        );
+        let refusal = AppState::oversized_message_refusal(cap + 1)
+            .expect("one byte over the cap refuses");
+        assert!(
+            refusal.contains("file") && refusal.contains(&cap.to_string()),
+            "the refusal names the cap and the file-instead-of-paste fix: {refusal}"
+        );
+
+        // Both entry points consult the gate — the definition plus two calls.
+        // A user-text path that skips it reintroduces the 2.9 MB session.
+        let src = include_str!("state.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        assert_eq!(
+            prod.matches("oversized_message_refusal(").count(),
+            3,
+            "the paste gate guards broadcast AND send_user_response"
+        );
     }
 
     /// rc3 **D28**: every way of responding clears the halt AND releases the

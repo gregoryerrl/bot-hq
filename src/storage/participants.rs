@@ -1655,6 +1655,38 @@ pub fn speaker_of(origin: &str, author: Option<&str>, label: Option<&str>) -> St
 /// has to explain and a body could counterfeit.
 pub const WIRE_JOIN: &str = "\n\n";
 
+/// The most bytes one row's BODY may put on a participant's stdin — see
+/// [`PersistedMessage::wire`] for the incident this caps. ~50k tokens: far
+/// above any legitimate message, far below what can wedge a context window.
+/// `AppState`'s user-message cap matches it, so an accepted user message is
+/// never truncated — this clamp catches what that gate cannot: rows already
+/// on record, agent-authored dumps, and any future write path.
+pub const WIRE_BODY_CLAMP_BYTES: usize = 200_000;
+
+/// [`WIRE_BODY_CLAMP_BYTES`] applied: oversized bodies are cut at a char
+/// boundary and carry a marker saying what was cut and where the rest lives.
+/// The marker addresses the AGENT reading it — the actionable move (a file
+/// read, or asking the user for a path) belongs in the text that replaced the
+/// content, not in a doc nobody's subprocess ever sees.
+fn clamped_body(body: &str) -> std::borrow::Cow<'_, str> {
+    if body.len() <= WIRE_BODY_CLAMP_BYTES {
+        return std::borrow::Cow::Borrowed(body);
+    }
+    let mut cut = WIRE_BODY_CLAMP_BYTES;
+    while !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    std::borrow::Cow::Owned(format!(
+        "{}\n\n[bot-hq: truncated on delivery — this message is {} bytes and the \
+         per-message wire cap is {}. The full text is on the session record, not \
+         in your context. Content this large belongs in a FILE read selectively \
+         (grep/head), not in chat; if you need the remainder, ask for a path.]",
+        &body[..cut],
+        body.len(),
+        WIRE_BODY_CLAMP_BYTES
+    ))
+}
+
 pub fn render_wire(envelope: Option<&Envelope>, body: &str) -> String {
     let Some(envelope) = envelope else {
         return body.to_string();
@@ -1930,6 +1962,17 @@ impl PersistedMessage {
     /// so there is one answer to "what did the agent read": every caller of
     /// [`render_wire`] on the delivery path goes through here, and the
     /// arguments cannot drift from the row they came from.
+    ///
+    /// **One answer also means one clamp.** A single row's body above
+    /// [`WIRE_BODY_CLAMP_BYTES`] is truncated HERE, on the wire — the row in
+    /// `messages` stays whole. s-f6a441ff: one 2,977,078-byte user paste (prod
+    /// logs) rode a batch into both participants' subprocesses; once ingested,
+    /// every subsequent prompt exceeded even the 1M window and the session
+    /// died volleying "Prompt is too long" — unrecoverably, because the paste
+    /// was lodged in each subprocess's own transcript where no later delivery
+    /// decision can reach it. Clamping at the one place rows become stdin
+    /// bytes means no single row can do that again, wherever it came from —
+    /// a user paste, an agent's pasted dump, or a replayed backlog.
     pub fn wire(&self) -> String {
         // **The speaker leads.** Everything else in the wire decorates the
         // message; this says whose message it is, which is the one thing a
@@ -1937,7 +1980,7 @@ impl PersistedMessage {
         format!(
             "[{}] {}",
             self.speaker,
-            render_wire(self.envelope.as_ref(), &self.body)
+            render_wire(self.envelope.as_ref(), &clamped_body(&self.body))
         )
     }
 
@@ -5142,6 +5185,64 @@ mod tests {
         // The scope survives the round trip, or `send_to_all`'s check would wave
         // every replayed row through.
         assert_eq!(replayed.session_id(), "s1");
+    }
+
+    /// **s-f6a441ff: no single row may be able to blow a context window.** A
+    /// 2,977,078-byte user paste rode one batch into both participants; every
+    /// prompt after it exceeded the model window and the session died volleying
+    /// "Prompt is too long". The wire — the ONE place rows become stdin bytes —
+    /// clamps any oversized body and tells the reading agent what was cut.
+    #[tokio::test]
+    async fn an_oversized_body_is_clamped_on_the_wire_but_whole_on_the_record() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let giant = "x".repeat(WIRE_BODY_CLAMP_BYTES * 3);
+        let pm = s
+            .post_to_channel("s1", "user", None, MessageKind::Text.as_str(), &giant, None)
+            .await
+            .unwrap();
+
+        // The record keeps every byte — the clamp is a delivery decision.
+        assert_eq!(all_rows(&s, "s1").await[0].content.len(), giant.len());
+
+        let wire = pm.wire();
+        assert!(
+            wire.len() < WIRE_BODY_CLAMP_BYTES + 600,
+            "the wire is bounded near the cap, got {} bytes",
+            wire.len()
+        );
+        assert!(
+            wire.contains("truncated on delivery"),
+            "the reading agent is told the body was cut"
+        );
+        assert!(
+            wire.contains(&giant.len().to_string()),
+            "…and how large the original is"
+        );
+        // The batch form inherits the clamp — it is the same wire() per row.
+        assert!(
+            PersistedMessage::wire_batch(std::slice::from_ref(&pm)).len()
+                < WIRE_BODY_CLAMP_BYTES + 600
+        );
+    }
+
+    #[test]
+    fn the_wire_clamp_cuts_at_a_char_boundary() {
+        // A cap landing mid-codepoint must step back, not panic: after the
+        // single-byte prefix every 'é' straddles an even offset, so the even
+        // cap is guaranteed to land inside one.
+        let body = format!("x{}", "é".repeat(WIRE_BODY_CLAMP_BYTES)); // ≈2× the cap
+        let clamped = clamped_body(&body);
+        assert!(clamped.len() < body.len());
+        assert!(clamped.contains("truncated on delivery"));
+    }
+
+    #[test]
+    fn a_body_at_the_cap_is_untouched() {
+        // The user-message gate admits up to the SAME constant, so an accepted
+        // message must never arrive truncated — the boundary case is exact.
+        let body = "x".repeat(WIRE_BODY_CLAMP_BYTES);
+        assert!(matches!(clamped_body(&body), std::borrow::Cow::Borrowed(_)));
     }
 
     #[tokio::test]
