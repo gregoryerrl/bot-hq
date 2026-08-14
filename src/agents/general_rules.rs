@@ -138,7 +138,7 @@ So the next session doesn't re-discover what this one learned, the participant h
 - **Status words need same-turn evidence.** A CL write may not move a status (PENDING / OWED / BLOCKED -> RESOLVED / DONE / SHIPPED) by inference from adjacent events — a close-out rewrite once recorded a pending stakeholder question as \"RESOLVED (keep both)\" because a PR merged as-is, the OPPOSITE of the stakeholder's actual decision (2026-07-24). Cite the evidence (the message, the merge, the query output) beside any status you write; when you cannot, record it as still pending, dated.
 - **Care rules:** `decisions.md` is append-only — never rewrite history. Preserve the user's voice in files they authored. Keep it tight — CL must stay lighter than the codebase or it loses its purpose; the user prunes in the Context Library tab.
 
-**What waits on the USER goes into `close_session(user_actions=[...])`** — one short imperative line per item (a merge that's theirs to click, a send that's theirs, a decision they deferred). Those lines surface on the dashboard until the user checks them off. A list that lives only in your wrap-question prose or tasks.md dies with the answer: measured in `s-761704e8`, the user picked \"Merge all 5 myself now\", the session recorded it perfectly in prose, no surface ever showed it again, and the five PRs sat unmerged until a forensic dissection rebuilt the user's own checklist.
+**Nothing should ever WAIT on the user outside the system** (their correction, 2026-08-15, reverting a dashboard to-do list built on the opposite reading): bot-hq is not a task manager, and an action item living in prose is an action item lost. When work ends at something only the user can do, make it a GATE or a QUESTION — a mergeable PR means PARK THE MERGE GATE (`gh pr merge` through the gate) so the user clicks Approve, not a note that the merge is theirs; a deferred decision is an `ask_user_choice` next session picks up from the tray or a line in the project's tasks/handoff file that the next session re-raises. The measured miss (`s-761704e8`): five CI-green dependabot PRs were left as \"yours to merge\" prose — the user expected five merge gates, and the PRs sat unmerged for a day.
 
 ## Session-scoped documents
 
@@ -262,17 +262,23 @@ mod tests {
     }
 
     #[test]
-    fn the_universal_layer_routes_user_owed_actions_to_the_ledger() {
-        // s-761704e8: "Merge all 5 myself now" survived only in prose and the
-        // five PRs sat unmerged. The layer must teach close_session's
-        // user_actions arg as the surface for what waits on the user.
+    fn the_universal_layer_routes_user_owed_actions_through_gates() {
+        // The user, reverting the dashboard to-do list: "I only meant 'merge
+        // myself' cause i thought they're going to gate the merges." Anything
+        // that ends at the user must be a gate or a question IN the system —
+        // s-761704e8 left five CI-green PRs as "yours to merge" prose and
+        // they sat unmerged for a day.
         assert!(
-            GENERAL_RULES.contains("close_session(user_actions=[...])"),
-            "the layer must name the ledger argument"
+            GENERAL_RULES.contains("PARK THE MERGE GATE"),
+            "the layer must teach gating a mergeable PR instead of noting it"
         );
         assert!(
-            GENERAL_RULES.contains("dies with the answer"),
-            "and say why prose alone is not a surface"
+            GENERAL_RULES.contains("bot-hq is not a task manager"),
+            "and the principle the revert established"
+        );
+        assert!(
+            !GENERAL_RULES.contains("user_actions"),
+            "the reverted ledger argument must not be taught"
         );
     }
 

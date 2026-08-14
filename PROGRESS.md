@@ -18,7 +18,27 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
-## 2026-08-15 — the "waiting on you" ledger + the sweep learns what a term is
+## 2026-08-15 — the ledger reverted: bot-hq is not a task manager
+
+The user, seeing the "Waiting on you" card: *"No i don't want that, revert
+that, I only meant 'merge myself' cause i thought they're going to gate the
+merges."* The diagnosis under the feature was wrong: their "Merge all 5
+myself now" pick was never a personal to-do — it was an expectation that the
+agents would PARK FIVE MERGE GATES for them to click. The right fix is
+in-system routing, not a checklist surface.
+
+Reverted whole (`git revert` of the feature commit + the prose): migration
+0056 removed and the dev DB re-stamped (row 56 dropped, table dropped — the
+applied-migrations rule honored by re-stamp, sanctioned pre-release), the
+dashboard card, the tauri commands, the close_session argument, and the
+universal-layer paragraph. In its place the layer now teaches the principle
+the revert established: **nothing waits on the user outside the system** — a
+mergeable PR means park the merge gate; a deferred decision is a question or
+a line in the project's handoff file that the next session re-raises. The
+three outstanding s-761704e8 items moved to the ad-manager tasks.md
+next-actions (per the user's instruction), item 4 rewritten to "park the
+five dependabot merge gates." The staleness-sweep term filter from the same
+build is unaffected and stays.
 
 The deeper s-761704e8 dissection found the failure class the clean run still
 carried: **the user's own action items had no surface.** They picked "Merge
