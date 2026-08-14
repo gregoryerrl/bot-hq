@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 import { HaltBanner, type TrayRow } from "./HaltBanner";
 
@@ -185,6 +185,58 @@ describe("HaltBanner", () => {
     const banner = screen.getByRole("status");
     expect(banner).toHaveTextContent("Answer the approval below first");
     expect(banner).not.toHaveTextContent("Answering — here or in the tray");
+  });
+
+  it("clamps a long recap so it cannot push the input box away", () => {
+    // Sized against what participants actually write: 28 halts on record, mean
+    // 277 chars, longest 1,166. Rendered whole that is ~15 lines of banner
+    // above the box — the banner would displace the very thing it exists to sit
+    // next to. The user's design was "HALT + [short recap]"; the recaps are not
+    // short.
+    const recap =
+      "PR #514 is open, CI fully green (ci 3m40s, quality 3m35s, search-e2e 1m4s), " +
+      "mergeStateStatus CLEAN, auto-close to #509 confirmed registered via closing " +
+      "keyword. Branch re-verified against current origin/main. Nothing further I " +
+      "can do until you decide whether to merge or hold for the staging promotion.";
+    render(<HaltBanner rows={[row({ prompt: recap })]} />);
+    const text = screen.getByText(/PR #514 is open/);
+    // Clamped by CSS, not cut in the DOM — the whole recap is present and
+    // selectable, and one click removes the clamp.
+    expect(text).toHaveTextContent("staging promotion");
+    expect(text.className).toContain("line-clamp-3");
+    fireEvent.click(
+      screen.getByRole("button", { name: /show the full recap/i }),
+    );
+    expect(screen.getByText(/PR #514 is open/).className).not.toContain(
+      "line-clamp-3",
+    );
+  });
+
+  it("leaves a short reason alone", () => {
+    // Most halts are short and need no affordance. An expander on a one-liner
+    // is clutter on the surface that has to stay readable.
+    render(<HaltBanner rows={[row({ prompt: "Waiting on the tinker output." })]} />);
+    expect(screen.queryByRole("button", { name: /full recap/i })).toBeNull();
+    expect(
+      screen.getByText("Waiting on the tinker output.").className,
+    ).toContain("line-clamp-3");
+  });
+
+  it("expands one participant's recap without expanding the other's", () => {
+    const long = "x".repeat(400);
+    render(
+      <HaltBanner
+        rows={[
+          row({ id: 1, agent: "hands", prompt: `HANDS ${long}` }),
+          row({ id: 2, agent: "eyes", prompt: `EYES ${long}` }),
+        ]}
+      />,
+    );
+    const toggles = screen.getAllByRole("button", { name: /full recap/i });
+    expect(toggles).toHaveLength(2);
+    fireEvent.click(toggles[0]!);
+    expect(screen.getByText(/^HANDS x+/).className).not.toContain("line-clamp-3");
+    expect(screen.getByText(/^EYES x+/).className).toContain("line-clamp-3");
   });
 
   it("tells the user what clears it", () => {

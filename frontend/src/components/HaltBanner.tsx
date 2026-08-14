@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { cn } from "../lib/cn";
 import { authorColorClass } from "./authorColor";
 
@@ -42,6 +43,22 @@ export function isApproval(r: { options: readonly string[] }): boolean {
 }
 
 /**
+ * Above this, a halt reason gets a "show the full recap" toggle.
+ *
+ * **Set from what participants actually write, not from taste.** Across the 28
+ * halts on record the reason averages 277 characters and the longest is 1,166 —
+ * because the recap the user asked for is a recap: *"PR #514 is open, CI fully
+ * green (ci 3m40s, quality 3m35s), mergeStateStatus CLEAN…"*. Rendered whole,
+ * that is ~15 lines of banner sitting on top of the input box, and the banner
+ * would push away the very box it exists to be adjacent to.
+ *
+ * Note the prompts never had to be changed to get this. The brainstorm assumed
+ * the recap would need one — *"its value depends on a prompt change with no
+ * gate behind it"* — and participants were already writing them.
+ */
+const RECAP_CLAMP_CHARS = 200;
+
+/**
  * **Why the session has stopped, above the box where you answer it.**
  *
  * A halt is the session saying it needs the user. Until now it said so in the
@@ -71,6 +88,7 @@ export function isApproval(r: { options: readonly string[] }): boolean {
  * a sentence. The rule is: this banner is the session's STATE, always present
  * while halted; a tray choice is an optional pick attached to it.
  */
+
 export function HaltBanner({
   rows,
   label,
@@ -84,6 +102,7 @@ export function HaltBanner({
   /** Jump to the tray, when a pick is waiting there too. */
   onOpenTray?: () => void;
 }) {
+  const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
   const pending = rows.filter((r) => r.status === "pending");
   const halts = pending.filter((r) => r.kind === "halt");
   const approvals = pending.filter((r) => r.kind !== "halt" && isApproval(r));
@@ -131,13 +150,35 @@ export function HaltBanner({
       <ul className="mt-1 space-y-1">
         {halts.map((h) => {
           const who = label?.(h.agent) ?? h.agent;
+          const long = h.prompt.length > RECAP_CLAMP_CHARS;
+          const open = expanded.has(h.id);
           return (
             <li key={h.id} className="text-sm text-on-surface">
               <span className={cn("font-semibold", authorColorClass(who))}>
                 {who}
               </span>
               <span className="text-on-surface-variant"> — </span>
-              <span>{h.prompt}</span>
+              {/* Clamped, not truncated: the full text is in the DOM and one
+                  click away. A recap the user cannot finish reading is the same
+                  failure the banner was built to fix. */}
+              <span className={cn("whitespace-pre-wrap", !open && "line-clamp-3")}>
+                {h.prompt}
+              </span>
+              {long && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setExpanded((prev) => {
+                      const next = new Set(prev);
+                      if (!next.delete(h.id)) next.add(h.id);
+                      return next;
+                    })
+                  }
+                  className="mt-0.5 text-xs text-primary underline underline-offset-2"
+                >
+                  {open ? "show less" : "show the full recap"}
+                </button>
+              )}
             </li>
           );
         })}
