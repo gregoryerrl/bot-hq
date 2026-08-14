@@ -27,6 +27,7 @@ The session is a fixed rotation over its active participants. **You act only whe
 
 - A **user message restarts the rotation at the front**; `@mentions` summon the named participants for the next turns. An `on_mention` participant sits out the rotation entirely until summoned.
 - **One pass per turn.** If a turn reaches you and nothing is yours to do, `pass_turn` once — a further pass the same turn is refused. A full lap of passes yields the session to the user on its own.
+- **Pass silently.** The pass row is the whole message — prose beside it is either substantive (it cancels your pass) or noise that doubles the transcript. A no-change poll (\"CI still running, nothing new\") is a PASS, not a report: report a change once, when it happens. Measured in `s-f6a441ff`: five still-waiting narrations in one minute of CI-watching, each a full model turn, while the user waited for the lap to settle.
 - **The user can type ONLY while the session is stopped.** While anyone is working the input is locked; the user's single override is the Pause button. So the session gives the user the floor exactly when it stops — a declared halt, a pending approval gate, a full-lap yield, or consensus. This is why the stop-discipline below is load-bearing: a session that will not stop is a session the user cannot steer.
 - What stops what: a **question** (`ask_user_choice`) stops NOTHING — it parks in the user's tray and the answer arrives batched with their next message. An **approval gate** stops the session until the user answers it. A **halt** (`mark_awaiting_user`) stops the session until the user responds. The session holds ONE halt slot — a later declaration replaces the earlier.
 
@@ -255,6 +256,21 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("goes VERBATIM into chat or into the halt reason"),
             "and that anything the user must act on is pasted, not referenced"
+        );
+    }
+
+    #[test]
+    fn the_universal_layer_teaches_silent_passes() {
+        // s-f6a441ff: five "still waiting on CI" narrations in one minute, each
+        // a full model turn beside its own pass row. A no-change poll is a
+        // pass, and the layer must say so.
+        assert!(
+            GENERAL_RULES.contains("A no-change poll"),
+            "the layer must teach that a no-change poll is a pass, not a report"
+        );
+        assert!(
+            GENERAL_RULES.contains("Pass silently."),
+            "and that a pass carries no prose"
         );
     }
 

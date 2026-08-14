@@ -18,6 +18,61 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-15 (early) — vision alignment: the user decides, and the yield that dealt
+
+The user's directive after reading the s-f6a441ff dissection against
+vision.md: *"decisions should be mine, unless I lift all gates and explicitly
+tell them to drive autonomously."* Four changes, plus a fifth found live
+mid-pass when the user reported "all agents passed, but input is still
+locked."
+
+**1. The all-pass yield dealt the turn it refused — found, reproduced,
+fixed.** `hand_over` called `hand_turn_to` (holder column + busy mark) as a
+SIDE EFFECT of computing the next participant, BEFORE the caller's wrap
+checks. Every all-pass yield (and round cap) therefore marked the front
+participant busy, then refused the turn — a flag for a turn no pump would
+ever run, so no pump would ever clear. The input locked under "send a
+message to resume" until the user force-paused; at 12:45:39 a coincidental
+ghost turn's ending cleared it, at 12:50:49 nothing did. Reproduced
+deterministically in `an_all_pass_yield_leaves_the_input_open` (probe-driven
+dissection: the deal printed before the wrap check), fixed by making
+`hand_over` pure and moving the deal into `start_turn` — strictly after the
+halt latch, gates, yield, and cap can refuse it. Side benefit: SUMMONED
+turns are now recorded and marked, which the eager placement never did.
+Deals also log themselves now ("sequencer: turn dealt") — the forensics
+burned an hour on a silent deal.
+
+**2. The reviewer-down override is the user's decision.** rc3's
+`override_reviewer_block` let the executor self-override the dead-reviewer
+commit block with a logged reason — reasonable at 12:26Z, and still an agent
+asserting a path at a junction. It now parks an Approve/Reject gate: the
+override takes effect only on the user's Approve; Reject leaves the block;
+a reviewer that recovers first VOIDS the pending request (row withdrawn, so
+a late Approve can't lift a future block). Pinned in findings + parity
+tests ("a REQUEST alone lifts nothing").
+
+**3. The spin halt says so on screen.** The repetition-net's halt was the
+last silent stop — it now fills the session's halt slot via the same route
+as the provider-limit and error-streak halts, naming the repeating
+participant. `a_spin_halt_fills_the_session_halt_slot` pins it.
+
+**4. Pass silently** (universal layer): the pass row is the whole message;
+a no-change poll ("CI still running") is a pass, not a report — s-f6a441ff
+burned five still-waiting narrations in one minute of CI-watching.
+
+**5. PLAN entries the user must spec, not me:** park-on-external-signal
+(the CI-wait shape, reconciling the ghost self-wake mechanism claude-code's
+background tasks give every subprocess) and the release-scoped
+autonomous-gate profile (the vision's "dangerously open every gate", as one
+audited opt-in for released users).
+
+Ghost turns are now a named phenomenon in the record: a subprocess whose
+background task completes re-invokes its model OUTSIDE the ring —
+carried_epoch 0, no turn-opened line, completion discarded, rows posted.
+One did useful work at 12:46 (caught CI green); the park-on-signal design
+is where they get a sanctioned home. Suite 1123 green; the yield fix and
+the override-approve consumption both mutation-verified red.
+
 ## 2026-08-14 (late night) — the 2.9 MB paste and the error volley
 
 **`s-f6a441ff` (still open, unrecoverable).** The halt fix held — at 10:54:19

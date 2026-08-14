@@ -253,6 +253,33 @@ should pick unilaterally:
 - **Solo sessions for non-adversarial tasks** — already possible; a
   one-participant roster runs without review laps.
 
+### Park on external signal (raised 2026-08-14, needs the user's spec)
+
+`s-f6a441ff` spent a minute of pass-laps watching CI: the ring kept dealing
+turns to two agents whose only move was "check `gh pr checks`, nothing new,
+pass" — each pass a full model call — until the all-pass yield caught it.
+The missing shape: a session state that PARKS the ring on a named external
+signal (a CI run, a deploy) and wakes it when the signal fires, without
+burning turns in between. Open questions that are the user's to answer
+before anything is built: what may register a signal (an agent? only via a
+gate?), what the wake is (a subprocess background task completing already
+re-invokes its agent OUTSIDE the ring — see the ghost-turn note in
+PROGRESS 2026-08-14 — so the park must reconcile with that), and whether
+the user is notified while parked.
+
+### Release-autonomy gate profile (raised 2026-08-14, release-scoped)
+
+The vision's line: a fully autonomous run requires the user to authorize it
+in the first prompt AND dangerously open every gate. The owner will likely
+never use it; released users might. Today "every gate" is a set of separate
+toggles (`push_gate`, `action_gate`, per-action approvals, and now the
+reviewer-down override gate) with no single profile that opens — or
+audits — them together. Before release this wants: one explicit
+"autonomous" profile the user opts into per session, a visible banner while
+it is active, and the violations log recording that the profile (not the
+agent) authorized each pass-through. Not scheduled; parked until release
+planning.
+
 ### spawn_session `task` summary field (catalog extension, deferred 2026-07-07)
 
 Optional `task` string on the spawn_session args that the per-spawn
