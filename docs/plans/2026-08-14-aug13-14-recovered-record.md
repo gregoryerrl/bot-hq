@@ -93,3 +93,106 @@ what "the ring works" means in this project. Dissections read
 - **"Approvals halt the session"** — proposed by the user, split by agreement:
   the gate takes the input slot (UI), the ring is untouched (`halt_ring =
   !blocking` stands; freezing peers would undo D22's review lap).
+
+---
+
+## The halt / question-tray / input-box conversation, in full
+
+The design conversation that produced D27–D33, reconstructed from the
+transcript (it straddled the third compaction — the first half was nearly
+lost). This is the contract the surfaces implement; treat it as binding
+unless the user reopens it.
+
+### The proposal, in the user's words
+
+> *"instead of parkable in the tray, let's put it on top of the input box. in
+> this way there can never be 2 halts parked anymore. and halt can serve as a
+> recap for what happened in the session and what the agent is waiting for
+> from the user. And sending a message will clear the halt … HALT — [short
+> recap here], waiting output from these command `php tinker execute…`. I run
+> the commands on laravel cloud and paste the output on the input box. That
+> clears the halt at the same time I give them what they're waiting for."*
+
+And the amendment: *"and ofcourse, answering questions from the tray will also
+clear the halt (since those count as user's response)."*
+
+### What was agreed around it
+
+- **The recap is the strong argument, not dedup.** Every "why is it stopped?"
+  had cost six queries across two tables and a log; the agent knew the answer
+  at the moment it stopped and the knowledge went nowhere. (Dedup was the weak
+  argument — and my "two halts never co-pend" check was later proven wrong:
+  asked correctly, **52 overlaps**, worst one row under six more for 53
+  minutes.)
+- **Keep the durable row; the banner is a VIEW of it.** It must survive a
+  restart; `list_session_tray` stays the source.
+- **One banner, N lines** when several participants are blocked (reachable
+  since D22) — "never two halts" as a display invariant, not a false claim
+  about state.
+- **The tray keeps structured picks**, and the division of labour is a rule,
+  stated because without it agents use the two interchangeably: **the banner
+  is the session's state, always present while halted; a tray choice is an
+  optional pick attached to it.**
+- **Clearing is ONE event.** The audit found it half-wired: a typed message
+  released the ring *and* cleared the rows; a tray answer only released. Fix
+  was not "patch the third caller" but a single `user_responded()` every
+  entry point goes through (typed message, tray answer, phase advance) —
+  **D28**. The stated risk: it sits on the release path, where a half-made
+  change once broke every session for two hours.
+- **The recap's known weakness:** it is the agent's claim about its own state,
+  untestable by the suite. (Resolved in practice: agents already write real
+  recaps unprompted — the gap was bounding them, hence the 3-line clamp.)
+
+### The two screenshots, and what each overturned
+
+1. **"halted while hands is still working — is this by design?"** → not
+   design: a refused handover left its busy flag set (**D31**), and the
+   watchdog had already turned the lie into a `stalled` verdict.
+2. **"happened again, this time they are really working. I suspect parking a
+   question in tray toggles the halt (it should not), its asynchronous."** →
+   correct, and deeper than wording: no halt row existed at all; the banner
+   said HALT whenever *anything* was pending. **A halt is a claim about the
+   SESSION, not the tray** (**D32**). `ask_user_choice` is non-blocking by
+   design; only `halt`/`mark_awaiting_user` is a participant saying it
+   stopped.
+
+### The Send idea, the gate pivot, and the decree
+
+With the second screenshot came a proposal: *"remove the send button on tray
+items. On Halt, sending a message will also send all of the answers on all
+tray items."* Agreed **for choices and not for approvals** ("responding should
+be one event" — but a gated approval is synchronously blocked and cannot wait
+for a Send).
+
+Then the pivot: *"or how about this: approvals are not parkable anymore …
+instead of input box, it will show the approval gate."* Taken wholesale for
+the UI; pushed back on "they halt a session" — `halt_ring = !blocking` is
+deliberate (the asker is already stopped inside its tool call; freezing peers
+would undo D22's review lap). The ring stays untouched.
+
+And the destination, verbatim: *"yes, i want to build towards → Pause button
+is the only real interrupt"*, then the clarification that killed buffering:
+*"users are never allowed to type while agents are working, no halt = no type
+(except for pause button which is the real interrupt)"* → **D33**.
+
+### The settled contract, compact
+
+| thing | behaviour |
+|---|---|
+| halt (`halt`/`mark_awaiting_user`) | banner above the box: `⏸ HALT`, who + clamped recap; box is open (nobody working); any user response clears row + releases ring via `user_responded` |
+| parked question (`ask_user_choice`) | tray card; session keeps working; banner shows `◆ FOR YOU`, never HALT; answer whenever; answering also goes through `user_responded` |
+| approval (`Approve`/`Reject` options) | not parkable: gate replaces the input box, answered on the spot, Reject is the explicit no; tray shows a count pointing at the gate; ring untouched |
+| input box | locked ⟺ any participant busy (the map, not the enum); `paused` open; no halt = no type |
+| Pause | the only interrupt; parks the session; Resume continues where the ring left off |
+
+### The one thread left open by the pivot
+
+**Batched choices** — the agreed half of the Send idea (picks *stage*, and one
+Send delivers the typed message + all staged answers as a single user
+response) was **never built**; the pivot two messages later was about
+approvals, and it is genuinely ambiguous whether the "or" superseded the
+choices half too. Today each tray pick still resolves immediately, which
+under D33 means: answering one of several questions while halted releases the
+ring and locks the box before the rest can be answered or a message added.
+The batched design exists for exactly that case. **Needs the user's call, not
+an assumption.**
