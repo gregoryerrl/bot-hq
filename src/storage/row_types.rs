@@ -89,19 +89,6 @@ impl MessageKind {
     }
 }
 
-/// One action the USER owes, surfaced on the dashboard until checked off
-/// (migration 0056, the "waiting on you" ledger). Joined with the owning
-/// session at read time so the card can label items without a second query.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct UserActionRow {
-    pub id: i64,
-    pub session_id: String,
-    pub action: String,
-    pub created_at: String,
-    pub session_title: String,
-    pub working_repo_path: Option<String>,
-}
-
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,

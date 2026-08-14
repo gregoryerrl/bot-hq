@@ -1062,61 +1062,6 @@ pub async fn rename_session(
         .map_err(|e| AppError::DbError(e.to_string()))
 }
 
-/// One action the USER owes, for the dashboard's "Waiting on you" card
-/// (migration 0056). `repo` is the owning session's working repo path — the
-/// card labels items by its basename.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
-pub struct UserActionView {
-    pub id: i64,
-    pub session_id: String,
-    pub action: String,
-    pub created_at: String,
-    pub session_title: String,
-    pub repo: Option<String>,
-}
-
-/// Every action still waiting on the user, oldest first. Written by agents at
-/// `close_session(user_actions=[...])`; s-761704e8 is why they exist — the
-/// user's own "Merge all 5 myself now" survived only in prose nobody
-/// re-surfaced.
-#[tauri::command]
-#[specta::specta]
-pub async fn list_user_actions(
-    storage: tauri::State<'_, Arc<Storage>>,
-) -> Result<Vec<UserActionView>, AppError> {
-    let rows = storage
-        .open_user_actions()
-        .await
-        .map_err(|e| AppError::DbError(e.to_string()))?;
-    Ok(rows
-        .into_iter()
-        .map(|r| UserActionView {
-            id: r.id,
-            session_id: r.session_id,
-            action: r.action,
-            created_at: r.created_at,
-            session_title: r.session_title,
-            repo: r.working_repo_path,
-        })
-        .collect())
-}
-
-/// Check an action off the "Waiting on you" card. Idempotent — a repeat click
-/// on an already-done item is a no-op, not an error.
-#[tauri::command]
-#[specta::specta]
-pub async fn complete_user_action(
-    storage: tauri::State<'_, Arc<Storage>>,
-    id: i64,
-) -> Result<(), AppError> {
-    storage
-        .complete_user_action(id)
-        .await
-        .map(|_| ())
-        .map_err(|e| AppError::DbError(e.to_string()))
-}
-
-
 /// Read the current IPAV phase for a session. Returns one of "investigate" /
 /// "plan" / "apply" / "verify", or `None` if the session isn't live (IPAV
 /// state is in-memory only — restart loses it). Frontend SessionView header

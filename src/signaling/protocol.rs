@@ -448,7 +448,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "close_session",
-            description: gated_by("close_session", "Close the session this agent is running in. Kills every participant's subprocess and marks the session row closed (or archived). Use this when the user asks you to close the session and the conversation has reached a natural stopping point. Fire-and-forget — your subprocess will be terminated shortly after this call returns. If anything now WAITS ON THE USER (a merge that is theirs to click, a send that is theirs, a decision they deferred), pass it in `user_actions` — those surface on the dashboard until the user checks them off; a list that lives only in your wrap-question prose dies with the answer."),
+            description: gated_by("close_session", "Close the session this agent is running in. Kills every participant's subprocess and marks the session row closed (or archived). Use this when the user asks you to close the session and the conversation has reached a natural stopping point. Fire-and-forget — your subprocess will be terminated shortly after this call returns."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -456,11 +456,6 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                         "type": "boolean",
                         "default": false,
                         "description": "If true, mark the session archived (hidden from dashboard) rather than just closed."
-                    },
-                    "user_actions": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Actions that now wait on the USER, one short imperative line each (e.g. 'Merge dependabot PRs #475 #497 #498 #505 #507'). Shown on the dashboard until checked off. Omit when nothing waits on them."
                     }
                 },
                 "required": []

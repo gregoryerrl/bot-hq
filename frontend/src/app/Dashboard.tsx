@@ -15,20 +15,6 @@ import type {
   SessionTrayView,
 } from "../lib/bindings";
 import { cn } from "../lib/cn";
-
-/**
- * One action the USER owes — `list_user_actions` row. Declared locally
- * (matching the Rust `UserActionView` field-for-field) until the next app
- * launch regenerates bindings.ts with the new command.
- */
-interface UserActionView {
-  id: number;
-  session_id: string;
-  action: string;
-  created_at: string;
-  session_title: string;
-  repo: string | null;
-}
 import { PARTICIPANT_COLORS } from "../components/authorColor";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTauriEvent } from "../hooks/useTauriEvent";
@@ -176,20 +162,6 @@ export function Dashboard() {
   const { data: pending = [] } = useTauriQuery<SessionTrayView[]>(
     "list_pending_tray",
     {},
-  );
-
-  // The "waiting on you" ledger (migration 0056): actions the USER owes,
-  // written by agents at close_session(user_actions=[...]) and shown until
-  // checked off. s-761704e8 is why: "Merge all 5 myself now" survived only
-  // in prose nobody re-surfaced, and the five PRs sat unmerged.
-  // `?? []`, not a destructure default: a mock/backends returning null (not
-  // undefined) skips the default and `.length` on null crashed two unrelated
-  // tests — the jsdom harness lesson, relearned locally.
-  const { data: userActionsRaw, refetch: refetchUserActions } =
-    useTauriQuery<UserActionView[] | null>("list_user_actions", {});
-  const userActions = userActionsRaw ?? [];
-  const completeAction = useTauriMutation<void, { id: number }>(
-    "complete_user_action",
   );
 
   // Project dropdown source for the New Session dialog. Refreshed live via the
@@ -957,41 +929,6 @@ export function Dashboard() {
           >
             Retry
           </button>
-        </div>
-      )}
-      {userActions.length > 0 && (
-        <div
-          data-testid="waiting-on-you"
-          className="mb-6 rounded-lg border border-outline-variant bg-surface px-4 py-3"
-        >
-          <p className="text-sm font-medium text-on-surface">Waiting on you</p>
-          <ul className="mt-2 space-y-1.5">
-            {userActions.map((a) => (
-              <li
-                key={a.id}
-                className="flex items-start gap-2 text-sm text-on-surface-variant"
-              >
-                <input
-                  type="checkbox"
-                  aria-label={`Done: ${a.action}`}
-                  className="mt-0.5 accent-primary"
-                  disabled={completeAction.isPending}
-                  onChange={() =>
-                    completeAction.mutate(
-                      { id: a.id },
-                      { onSuccess: () => refetchUserActions() },
-                    )
-                  }
-                />
-                <span>
-                  {a.action}
-                  <span className="ml-2 text-xs opacity-70">
-                    {a.repo ? a.repo.split("/").pop() : a.session_title}
-                  </span>
-                </span>
-              </li>
-            ))}
-          </ul>
         </div>
       )}
       {isLoading ? (

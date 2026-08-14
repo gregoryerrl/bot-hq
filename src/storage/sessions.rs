@@ -103,60 +103,6 @@ impl Storage {
         }))
     }
 
-    /// Record actions the USER owes, from `close_session(user_actions=[...])`
-    /// (migration 0056 — the "waiting on you" ledger). Idempotent per
-    /// `(session_id, action)`: the staleness sweep refuses the first close
-    /// call and the retry passes the same list, so re-inserts are no-ops.
-    pub async fn add_user_actions(&self, session_id: &str, actions: &[String]) -> Result<usize> {
-        let mut added = 0usize;
-        for action in actions {
-            let action = action.trim();
-            if action.is_empty() {
-                continue;
-            }
-            let res = sqlx::query(
-                "INSERT INTO user_actions (session_id, action) VALUES (?, ?) \
-                 ON CONFLICT(session_id, action) DO NOTHING",
-            )
-            .bind(session_id)
-            .bind(action)
-            .execute(&self.pool)
-            .await
-            .with_context(|| format!("recording user action for {session_id}"))?;
-            added += res.rows_affected() as usize;
-        }
-        Ok(added)
-    }
-
-    /// Every action still waiting on the user, oldest first, with the owning
-    /// session's title and repo for the dashboard's labels.
-    pub async fn open_user_actions(&self) -> Result<Vec<UserActionRow>> {
-        let rows = sqlx::query_as::<_, UserActionRow>(
-            "SELECT ua.id, ua.session_id, ua.action, ua.created_at, \
-                    s.title AS session_title, s.working_repo_path \
-             FROM user_actions ua JOIN sessions s ON s.id = ua.session_id \
-             WHERE ua.done_at IS NULL ORDER BY ua.id ASC",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .context("listing open user actions")?;
-        Ok(rows)
-    }
-
-    /// Check an action off. Returns whether THIS call flipped it (a stale
-    /// double-click reports false rather than re-stamping the time).
-    pub async fn complete_user_action(&self, id: i64) -> Result<bool> {
-        let res = sqlx::query(
-            "UPDATE user_actions SET done_at = ? WHERE id = ? AND done_at IS NULL",
-        )
-        .bind(now_utc())
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .with_context(|| format!("completing user action {id}"))?;
-        Ok(res.rows_affected() == 1)
-    }
-
     /// Rename a session. The live `SessionHandle.title` snapshot is NOT
     /// touched (it only feeds spawn-time logs); the UI re-reads the row.
     pub async fn rename_session(&self, id: &str, title: &str) -> Result<()> {
@@ -419,39 +365,6 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use crate::storage::Storage;
-
-    /// The "waiting on you" ledger (0056): recorded at close, listed until
-    /// checked off, and idempotent per (session, action) — the staleness
-    /// sweep refuses the first close call, so the retry re-passes the list.
-    #[tokio::test]
-    async fn user_actions_record_surface_and_check_off() {
-        let s = Storage::memory().await.unwrap();
-        s.create_session("s-a", "aug 14 work 2", Some("/repos/ad-manager"))
-            .await
-            .unwrap();
-        let items = vec![
-            "Merge dependabot PRs #475 #497 #498 #505 #507".to_string(),
-            "  ".to_string(), // blank lines are dropped, not stored
-            "Decide #521 after the sweep read".to_string(),
-        ];
-        assert_eq!(s.add_user_actions("s-a", &items).await.unwrap(), 2);
-        // The sweep-refused close retries with the same list: no duplicates.
-        assert_eq!(s.add_user_actions("s-a", &items).await.unwrap(), 0);
-
-        let open = s.open_user_actions().await.unwrap();
-        assert_eq!(open.len(), 2);
-        assert_eq!(open[0].action, "Merge dependabot PRs #475 #497 #498 #505 #507");
-        assert_eq!(open[0].session_title, "aug 14 work 2");
-        assert_eq!(open[0].working_repo_path.as_deref(), Some("/repos/ad-manager"));
-
-        // Check one off: this call flips it, a repeat is a stale no-op, and
-        // the open list no longer carries it.
-        assert!(s.complete_user_action(open[0].id).await.unwrap());
-        assert!(!s.complete_user_action(open[0].id).await.unwrap());
-        let open = s.open_user_actions().await.unwrap();
-        assert_eq!(open.len(), 1);
-        assert_eq!(open[0].action, "Decide #521 after the sweep read");
-    }
 
     #[tokio::test]
     async fn active_and_closed_lists_partition_sessions() {
