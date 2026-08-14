@@ -138,6 +138,8 @@ So the next session doesn't re-discover what this one learned, the participant h
 - **Status words need same-turn evidence.** A CL write may not move a status (PENDING / OWED / BLOCKED -> RESOLVED / DONE / SHIPPED) by inference from adjacent events — a close-out rewrite once recorded a pending stakeholder question as \"RESOLVED (keep both)\" because a PR merged as-is, the OPPOSITE of the stakeholder's actual decision (2026-07-24). Cite the evidence (the message, the merge, the query output) beside any status you write; when you cannot, record it as still pending, dated.
 - **Care rules:** `decisions.md` is append-only — never rewrite history. Preserve the user's voice in files they authored. Keep it tight — CL must stay lighter than the codebase or it loses its purpose; the user prunes in the Context Library tab.
 
+**What waits on the USER goes into `close_session(user_actions=[...])`** — one short imperative line per item (a merge that's theirs to click, a send that's theirs, a decision they deferred). Those lines surface on the dashboard until the user checks them off. A list that lives only in your wrap-question prose or tasks.md dies with the answer: measured in `s-761704e8`, the user picked \"Merge all 5 myself now\", the session recorded it perfectly in prose, no surface ever showed it again, and the five PRs sat unmerged until a forensic dissection rebuilt the user's own checklist.
+
 ## Session-scoped documents
 
 Use `session_doc_write(slug, body, phase?)` for plans, investigation findings, and any scratch info that's useful within the session but shouldn't pollute the CL. Docs are isolated per session, archived with the session on close, and discoverable via `session_doc_search(query?, phase?)` + `session_doc_read(slug)`.
@@ -256,6 +258,21 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("goes VERBATIM into chat or into the halt reason"),
             "and that anything the user must act on is pasted, not referenced"
+        );
+    }
+
+    #[test]
+    fn the_universal_layer_routes_user_owed_actions_to_the_ledger() {
+        // s-761704e8: "Merge all 5 myself now" survived only in prose and the
+        // five PRs sat unmerged. The layer must teach close_session's
+        // user_actions arg as the surface for what waits on the user.
+        assert!(
+            GENERAL_RULES.contains("close_session(user_actions=[...])"),
+            "the layer must name the ledger argument"
+        );
+        assert!(
+            GENERAL_RULES.contains("dies with the answer"),
+            "and say why prose alone is not a surface"
         );
     }
 

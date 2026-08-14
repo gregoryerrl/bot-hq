@@ -18,6 +18,38 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-15 — the "waiting on you" ledger + the sweep learns what a term is
+
+The deeper s-761704e8 dissection found the failure class the clean run still
+carried: **the user's own action items had no surface.** They picked "Merge
+all 5 myself now" at 15:47 — recorded flawlessly in the wrap question and
+tasks.md, shown nowhere ever again — and the five dependabot PRs sat
+unmerged until a forensic pass rebuilt the user's own checklist. Same class:
+the $_SERVER guard fix pushed at 16:16 whose `gh pr create` slid across a
+Pause into prose, while the EOD had already told Tom "goes up for review
+next."
+
+**The ledger (migration 0056).** `close_session` gains `user_actions:
+[...]` — one line per thing that now waits on the USER. Recorded before the
+close gates fire (the staleness sweep refused the live first call), UNIQUE
+per (session, action) so the retry re-passing the list is a no-op, and
+surfaced as a **"Waiting on you" card on the dashboard** until checked off.
+The universal layer teaches the arg; the tool schema carries the contract.
+Pinned end-to-end: storage
+(`user_actions_record_surface_and_check_off`), the JSON-RPC wiring
+(`close_session_records_user_actions_even_when_the_close_is_refused`), the
+card (Dashboard tests, including the null-returning-mock crash the jsdom
+harness lesson predicted).
+
+**The sweep filter.** Over 25 distinct retired-term candidates a cl_write is
+a BULK REWRITE, and frequency-ranking selects prose ("real", "pass",
+"empty" — the live 510-hit report). Bulk rewrites now keep only distinctive
+candidates: term-shaped tokens (hyphen/underscore/digit) or words the old
+body marked structurally (backticks, bold, headings) — so "sandbox" in a
+heading still reports and "real" in prose never does, while the targeted-
+edit path (the live "duo" specimen) is untouched.
+`a_bulk_rewrite_reports_terms_not_vocabulary` pins it.
+
 ## 2026-08-15 — s-761704e8 dissected: the alignment build's first clean run
 
 76 minutes, Fable5+Opus5, closed by consensus. **Zero ring/halt/lock defects**
