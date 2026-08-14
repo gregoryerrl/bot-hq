@@ -1129,12 +1129,8 @@ impl AppState {
         // and the message lands a turn late. Both halves of "the user responded"
         // ride this one call (rc3 D28).
         self.user_responded(session_id, mentions, true, true).await;
-        // The user's message reaches the front of the rotation → busy. The
-        // awaiting flag was cleared just above, so this recompute moves the
-        // session AwaitingUser/Idle → Busy.
-        // A user prompt also re-arms the idle-unflagged watchdog's
-        // once-per-window nudge (and its >0 count marks the session as
-        // having a task at all).
+        // A user prompt re-arms the idle-unflagged watchdog's once-per-window
+        // nudge (and its >0 count marks the session as having a task at all).
         handle
             .user_broadcasts
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -1143,9 +1139,18 @@ impl AppState {
         // settle into the new task. (Expiry and this are the only clears —
         // never activity transitions.)
         self.bridge.clear_session_working(session_id).await;
-        for agent in handle.agents() {
-            handle.activity.set_busy_slug(&agent.slug, true);
-        }
+        // NOBODY is marked busy here. The ring hands the turn to the front of
+        // the rotation and `hand_turn_to` marks THAT participant — the one
+        // busy-true writer (rc3 D19b). This used to pre-mark every agent, which
+        // read fine while the ring rotated (each pre-mark was laundered into a
+        // real turn when its holder's deal came) and lied the moment the ring
+        // stopped early: in s-ff729daa the second participant was never dealt a
+        // turn before a halt, no turn end ever cleared its pre-mark, and the
+        // input stayed locked under the HALT banner until the user force-paused
+        // — three times in four minutes. The stale flag also read busy+silent to
+        // the stall watchdog, which called a rightfully quiet participant
+        // "stalled". A flag only the ring sets is a flag a stopped ring has
+        // always cleared; `broadcast_marks_nobody_busy` pins this loop deleted.
         self.bridge
             .notify_message_persisted(Arc::from(session_id), id);
         // Release everything the pause held, BEHIND the user's message (their
@@ -1822,6 +1827,33 @@ mod tests {
             !src.contains(&needle),
             "the tray-answer preempt must not come back"
         );
+    }
+
+    /// **s-ff729daa**: `broadcast` pre-marked every agent busy — duo-era
+    /// delivery, redundant since D19b's `hand_turn_to` marks the participant
+    /// the ring actually deals. A pre-mark on a participant the ring never
+    /// reached (a halt landed two turns early) had no turn end to clear it, so
+    /// `any_busy` stayed true, the input stayed locked under the HALT banner,
+    /// and the user force-paused three times in four minutes to get the floor.
+    /// The same stale flag read busy+silent to the stall watchdog, which called
+    /// the rightfully quiet participant "stalled". The ring is the only
+    /// busy-true writer; if this file marks anyone busy again, that lie is back.
+    #[test]
+    fn broadcast_marks_nobody_busy() {
+        let src = include_str!("state.rs");
+        // Production section only — this doc names the call forms in prose.
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        for form in ["set_busy_slug(", ".set_busy("] {
+            assert!(
+                !prod.contains(form),
+                "core::state calls `{form}` — the ring's hand_turn_to is the one \
+                 busy-true writer, and a flag only the ring sets is a flag a \
+                 stopped ring has always cleared (s-ff729daa)"
+            );
+        }
     }
 
     /// rc3 **D28**: every way of responding clears the halt AND releases the

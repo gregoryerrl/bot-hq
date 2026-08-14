@@ -2503,7 +2503,11 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Hando
 /// pump clears each participant's busy flag at its own turn end, so after a halt
 /// every flag is clear, the session derives `Idle`, and the input unlocks. That
 /// is the unlock condition and it needs no code of its own —
-/// `a_halt_leaves_nobody_busy` pins it.
+/// `a_halt_leaves_nobody_busy` pins it. (True only because this function is the
+/// ONE busy-true writer: `AppState::broadcast` used to pre-mark every agent, and
+/// a pre-mark on a participant a halt stopped the ring before reaching had no
+/// turn end to clear it — s-ff729daa, the input locked under the HALT banner.
+/// `broadcast_marks_nobody_busy` in core::state pins that loop deleted.)
 ///
 /// **This closes a wedge, not just a cosmetic lock.** A message typed while a
 /// turn is in flight lands on the holder's stdin mid-turn; the pump binds its
@@ -3946,13 +3950,18 @@ mod tests {
     /// *"I can type while agents are working, it might legitimately interrupt
     /// your turns, therefore corrupting the quality of work you provide."*
     ///
-    /// A user message marks every participant busy; each clears its OWN flag as
-    /// its turn ends. So after one full lap every flag is clear and the session
-    /// derives `Idle` — the input re-opens while the ring is still cycling
-    /// (D22's lap, the consensus tally, the round cap's 500). What makes that
-    /// expensive rather than cosmetic: a message typed mid-lap supersedes the
-    /// in-flight turn, and when the reset target is the participant already
-    /// holding it, its new backlog is written to a stdin whose turn is running.
+    /// When busy was set only at the broadcast layer — every participant
+    /// pre-marked on the user's message, each clearing its OWN flag as its turn
+    /// ended — one full lap cleared every flag and the session derived `Idle`:
+    /// the input re-opened while the ring was still cycling (D22's lap, the
+    /// consensus tally, the round cap's 500). The cure is the ring marking each
+    /// holder as it deals — and since s-ff729daa that is the ONLY busy-true
+    /// writer; the broadcast pre-mark is deleted, because a pre-mark on a
+    /// participant the ring stops before reaching has no turn end to clear it.
+    /// What made the lap gap expensive rather than cosmetic: a message typed
+    /// mid-lap supersedes the in-flight turn, and when the reset target is the
+    /// participant already holding it, its new backlog is written to a stdin
+    /// whose turn is running.
     ///
     /// The assertion is on the state AFTER a completed lap, with the ring still
     /// live — which is exactly the window the user was typing into.
