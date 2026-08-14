@@ -1077,6 +1077,18 @@ async fn spawn_session_handle(
         let boot_bridge = Arc::clone(&bridge);
         let boot_session = session.id.clone();
         let boot_flag = Arc::clone(&booting);
+        // The CLEAR travels with the set above. A pump clears its own flag at
+        // turn end and at termination — so a participant that finishes booting
+        // clears, and one that crashes clears. A participant that is alive and
+        // HUNG does neither: no turn ends, the pump never exits, and the flag
+        // set five lines up stays set forever.
+        //
+        // That strands the input locked with no way back, because rc3 D33 made
+        // the busy MAP authoritative for the lock. It was survivable before —
+        // `derive` ranked `awaiting` above `busy`, so the halt reopened the box
+        // regardless — which is exactly why it has to be handled now.
+        let boot_activity = Arc::clone(&activity);
+        let boot_slugs: Vec<String> = live.iter().map(|p| p.slug.clone()).collect();
         tokio::spawn(async move {
             boot_then_start(
                 &boot_session,
@@ -1087,6 +1099,8 @@ async fn spawn_session_handle(
                 boot_flag,
                 kick,
                 BOOT_TIMEOUT,
+                boot_activity,
+                boot_slugs,
             )
             .await;
         });
@@ -2042,6 +2056,12 @@ async fn boot_then_start(
     booting: Arc<std::sync::atomic::AtomicBool>,
     kick: RingKick,
     timeout: std::time::Duration,
+    // `activity` + `slugs`: cleared for every participant on the way out — see
+    // "the CLEAR travels with the set" at the call site. Boot set these flags,
+    // so boot owns undoing them; a participant that never finishes orienting
+    // has no other path that ever will.
+    activity: Arc<crate::core::activity::ActivityTracker>,
+    slugs: Vec<String>,
 ) {
     let expected = inputs.len();
     // Posted as a `boot` row so `channel_page` keeps it out of every backlog:
@@ -2067,6 +2087,11 @@ async fn boot_then_start(
             // deliver, so start the ring rather than stranding the session.
             tracing::warn!(session_id, ?e, "boot primer not persisted; starting the ring unbooted");
             booting.store(false, std::sync::atomic::Ordering::Release);
+            // This exit skips boot entirely, so no pump will ever end a boot
+            // response — nothing else clears what the call site set.
+            for slug in &slugs {
+                activity.set_busy_slug(slug, false);
+            }
             kick.fire().await;
             return;
         }
@@ -2126,6 +2151,21 @@ async fn boot_then_start(
     // pumps still think they are orienting — they would open no epoch and report
     // readiness to a receiver nobody is reading.
     booting.store(false, std::sync::atomic::Ordering::Release);
+
+    // **Every participant is released here, ready or not.**
+    //
+    // Reached by all three exits: everyone oriented, the channel closed, or the
+    // timeout fired. The ones that finished already cleared themselves and this
+    // is a no-op for them; the one that HUNG is the reason this exists, because
+    // nothing else will ever clear it — its pump ends no turn and never exits.
+    //
+    // Releasing a participant that is still producing boot output is correct
+    // rather than merely tolerable: boot is not a turn, the ring is idle, and
+    // the READY notice below already tells the user "the rest join as they
+    // finish". The alternative is a window that can never be typed into.
+    for slug in &slugs {
+        activity.set_busy_slug(slug, false);
+    }
 
     // **Boot ends by YIELDING, not by starting the ring** (rc3 D29).
     //
@@ -3934,12 +3974,24 @@ mod tests {
         let (ring_tx, mut ring_rx) = tokio::sync::mpsc::channel(8);
 
         let flag = Arc::clone(&booting);
+        // Boot marks every participant busy (rc3 D29) and must release them all
+        // on the way out, ready or not — see the loop in `boot_then_start`.
+        let act = crate::core::activity::ActivityTracker::new(
+            "s1",
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::clone(&bridge),
+            vec!["hands".to_string(), "eyes".to_string()],
+        );
+        act.set_busy_slug("hands", true);
+        act.set_busy_slug("eyes", true);
         let st = s.clone();
         let br = Arc::clone(&bridge);
         let task = tokio::spawn(async move {
             boot_then_start(
                 "s1", &st, &br, inputs, done_rx, flag, RingKick(ring_tx),
                 std::time::Duration::from_secs(30),
+                Arc::clone(&act),
+                vec!["hands".to_string(), "eyes".to_string()],
             )
             .await;
         });
@@ -4025,12 +4077,25 @@ mod tests {
         let (ring_tx, mut ring_rx) = tokio::sync::mpsc::channel(8);
 
         let flag = Arc::clone(&booting);
+        // Boot marks every participant busy (rc3 D29) and must release them all
+        // on the way out, ready or not — see the loop in `boot_then_start`.
+        let act = crate::core::activity::ActivityTracker::new(
+            "s1",
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::clone(&bridge),
+            vec!["hands".to_string(), "eyes".to_string()],
+        );
+        act.set_busy_slug("hands", true);
+        act.set_busy_slug("eyes", true);
         let st = s.clone();
         let br = Arc::clone(&bridge);
+        let boot_act = Arc::clone(&act);
         tokio::spawn(async move {
             boot_then_start(
                 "s1", &st, &br, inputs, done_rx, flag, RingKick(ring_tx),
                 std::time::Duration::from_millis(150),
+                boot_act,
+                vec!["hands".to_string(), "eyes".to_string()],
             )
             .await;
         });
@@ -4058,6 +4123,23 @@ mod tests {
         assert!(
             notices.iter().any(|n| n.contains("0 of 1 participants")),
             "a truncated boot must SAY it was truncated: {notices:?}"
+        );
+
+        // **The hung participant must be RELEASED, or the window is unusable.**
+        //
+        // This participant never answered the primer, so its pump ends no turn
+        // and never exits — the two paths that clear a busy flag. Boot set the
+        // flag; if boot does not clear it, nothing ever does, and rc3 D33 reads
+        // the busy map as authoritative for the input lock. The result is a
+        // session that says READY and cannot be typed into.
+        //
+        // It was survivable before D33 only because `derive` ranked `awaiting`
+        // above `busy`, so the halt reopened the box despite the stuck flag.
+        // Mutation check: delete the release loop in `boot_then_start` and this
+        // is the assertion that goes red.
+        assert!(
+            !act.is_busy_slug("hands") && !act.is_busy_slug("eyes"),
+            "boot must release every participant on the way out, ready or not —              a participant that never finishes orienting has no other path that will"
         );
     }
 
