@@ -497,6 +497,13 @@ impl SignalingBridge {
         if let Some(session_id) = gate_session {
             self.notify_ring_gate(&session_id, false).await;
         }
+        // A withdrawn reviewer-override request is consumed unanswered — the
+        // reviewer-recovery void routes here, and a stale request must never
+        // linger to be approved against a future down-incident.
+        self.pending_override_requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(choice_id);
         was_parked
     }
 
@@ -607,6 +614,37 @@ impl SignalingBridge {
             };
             if let Some(session_id) = gate_session {
                 self.notify_ring_gate(&session_id, false).await;
+            }
+            // A reviewer-down override REQUEST resolves here (vision alignment,
+            // 2026-08-14): Approve moves the reason into the active override —
+            // the commit gate reads it — and Reject drops the request so the
+            // block stands. Consumed either way, and only on the flip, so a
+            // duplicate resolve cannot re-apply it.
+            let pending_override = self
+                .pending_override_requests
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(choice_id);
+            if let Some((session_id, reason)) = pending_override {
+                if matches!(
+                    outcome_from_picked(&picked),
+                    crate::policy::ViolationOutcome::Approved
+                ) {
+                    tracing::warn!(
+                        session = %session_id,
+                        reason = %reason,
+                        "reviewer-down commit block override APPROVED by the user"
+                    );
+                    self.reviewer_override
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(session_id, reason);
+                } else {
+                    tracing::info!(
+                        session = %session_id,
+                        "reviewer-down override request REJECTED by the user; the block stands"
+                    );
+                }
             }
         }
         let parked = self.pending.lock().await.remove(choice_id);

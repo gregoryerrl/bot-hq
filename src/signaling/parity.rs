@@ -384,8 +384,28 @@ async fn the_reviewer_down_gate_blocks_only_a_duo_with_a_dead_reviewer() {
         "must distinguish reviewer-gone from unreviewed: {blocked}"
     );
 
-    // HANDS overrides → gate opens, and says so rather than silently passing.
-    bridge.override_reviewer_block("s1", "confirmed safe to ship unreviewed");
+    // HANDS requests an override; the USER's Approve is what opens the gate
+    // (vision alignment, 2026-08-14) — and the verdict says so rather than
+    // silently passing.
+    bridge
+        .override_reviewer_block("s1", "hands", "confirmed safe to ship unreviewed")
+        .await;
+    let still_blocked = bridge.check_open_findings("s1").await.unwrap();
+    assert!(
+        still_blocked.starts_with("blocked: reviewer down"),
+        "a REQUEST alone lifts nothing: {still_blocked}"
+    );
+    let pending = bridge
+        .list_questions_for_session("s1")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.status == "pending" && r.prompt.contains("override the review block"))
+        .expect("the request parked an Approve/Reject row");
+    bridge
+        .resolve_choice_confirmable(&pending.choice_id, "Approve".into(), false)
+        .await
+        .unwrap();
     let overridden = bridge.check_open_findings("s1").await.unwrap();
     assert!(
         overridden.starts_with("ok (reviewer-down overridden"),

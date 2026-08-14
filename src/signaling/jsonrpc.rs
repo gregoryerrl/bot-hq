@@ -841,7 +841,9 @@ async fn call_tool(
         }
         "override_reviewer_block" => {
             let reason = arg_required_str(&args, "reason")?;
-            let result = bridge.override_reviewer_block(&caller.session_id, &reason);
+            let result = bridge
+                .override_reviewer_block(&caller.session_id, &caller.agent, &reason)
+                .await;
             Ok(ToolCallResult::text(result))
         }
         "approve_finding" => {

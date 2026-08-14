@@ -386,8 +386,15 @@ pub struct SignalingBridge {
     /// the bridge is alive regardless of what the health events last said.
     agent_rpc_seen: std::sync::Mutex<HashMap<(String, String), std::time::Instant>>,
     /// Batch 7: per-session HANDS override of the reviewer-down commit block —
-    /// session_id → reason. Set by `override_reviewer_block`, honored by
-    /// `check_open_findings`, auto-cleared when the reviewer recovers to running.
+    /// choice_id → (session_id, reason): reviewer-override REQUESTS parked and
+    /// not yet decided. Written by `override_reviewer_block`, consumed by
+    /// `resolve_choice_confirmable` (Approve → the reason moves into
+    /// `reviewer_override`; Reject → dropped), voided by reviewer recovery.
+    pub(super) pending_override_requests: std::sync::Mutex<HashMap<String, (String, String)>>,
+    /// session_id → reason. Set by the USER approving an override request
+    /// (`resolve_choice_confirmable` consumes `pending_override_requests`),
+    /// honored by `check_open_findings`, auto-cleared when the reviewer
+    /// recovers to running.
     reviewer_override: std::sync::Mutex<HashMap<String, String>>,
     /// session_id → the slugs of the participants that can file findings.
     ///
@@ -450,6 +457,7 @@ impl SignalingBridge {
             agent_health: std::sync::Mutex::new(HashMap::new()),
             agent_rpc_seen: std::sync::Mutex::new(HashMap::new()),
             reviewer_override: std::sync::Mutex::new(HashMap::new()),
+            pending_override_requests: std::sync::Mutex::new(HashMap::new()),
             session_reviewers: std::sync::Mutex::new(HashMap::new()),
             router_health: std::sync::Mutex::new(HashMap::new()),
             session_attention: std::sync::Mutex::new(HashMap::new()),
@@ -1190,7 +1198,7 @@ impl SignalingBridge {
     /// Publish an agent's retry-supervisor liveness change (B2). Fire-and-forget;
     /// the UI subscriber maps it to a `session:agent_health` event. `health` is
     /// the `AgentHealth::as_str` string ("running" / "retrying" / "dead").
-    pub fn notify_agent_health(&self, session_id: String, agent: &str, health: &str) {
+    pub fn notify_agent_health(self: &Arc<Self>, session_id: String, agent: &str, health: &str) {
         // Batch 7: cache the latest health so the fail-closed commit gate can read
         // it (a Stalled/Dead duo reviewer blocks commit). Write BEFORE the move.
         self.agent_health
@@ -1206,6 +1214,40 @@ impl SignalingBridge {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .remove(&session_id);
+            // A recovered reviewer also VOIDS any override request still
+            // parked for the user — the down-incident it asked about is over,
+            // and an approval landing later must not lift a future block.
+            // Withdraw the tray row too (it un-parks the ring's gate latch);
+            // spawned because this method is sync and the withdraw is not.
+            let voided: Vec<String> = {
+                let mut pending = self
+                    .pending_override_requests
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                let ids: Vec<String> = pending
+                    .iter()
+                    .filter(|(_, (sid, _))| sid == &session_id)
+                    .map(|(cid, _)| cid.clone())
+                    .collect();
+                for cid in &ids {
+                    pending.remove(cid);
+                }
+                ids
+            };
+            if !voided.is_empty() {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let bridge = Arc::clone(self);
+                    handle.spawn(async move {
+                        for cid in voided {
+                            tracing::info!(
+                                choice_id = %cid,
+                                "reviewer recovered; withdrawing the parked override request"
+                            );
+                            let _ = bridge.withdraw_question(&cid).await;
+                        }
+                    });
+                }
+            }
         }
         // **A verdict that only ever reached the UI could not be read back**
         // (rc3 D26). The health map is in memory and the event is transient, so
@@ -1327,22 +1369,88 @@ impl SignalingBridge {
             .cloned()
     }
 
-    /// Batch 7: HANDS records an explicit override of the reviewer-down commit
-    /// block, with a reason (logged + surfaced in the gate response). The
-    /// fail-closed escape valve — mirrors a finding rebuttal; never wedged.
-    pub fn override_reviewer_block(&self, session_id: &str, reason: &str) -> String {
-        tracing::warn!(
+    /// The reviewer-down escape valve, as a REQUEST (vision alignment,
+    /// 2026-08-14): the agent no longer overrides the block itself — it parks
+    /// an Approve/Reject decision for the user and the session waits at the
+    /// gate. Measured in `s-f6a441ff` (12:26Z): HANDS self-overrode with a
+    /// four-line justification that was reasonable AND was still an agent
+    /// asserting a path at a junction — "agents recommend; the user decides"
+    /// is the vision's line, and a dead reviewer is a junction. The override
+    /// takes effect only when the user picks Approve
+    /// (`resolve_choice_confirmable` consumes the pending request); a
+    /// recovered reviewer voids the request before it is answered.
+    pub async fn override_reviewer_block(&self, session_id: &str, agent: &str, reason: &str) -> String {
+        // One pending request per session — a duplicate call returns the
+        // existing gate rather than stacking confusable prompts (the
+        // action-gate's own rule).
+        {
+            let pending = self
+                .pending_override_requests
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some((existing_choice, _)) = pending
+                .iter()
+                .find(|(_, (sid, _))| sid == session_id)
+                .map(|(c, v)| (c.clone(), v.clone()))
+            {
+                return format!(
+                    "override already requested (gate {existing_choice} pending) — the \
+                     user's Approve/Reject decides; the outcome arrives out-of-band."
+                );
+            }
+        }
+        let parked = match self
+            .ask_user_choice_inner(
+                session_id.to_string(),
+                agent.to_string(),
+                format!(
+                    "Reviewer is down — {agent} asks to override the review block.\n\n\
+                     Reason: {reason}\n\nApprove lifts the commit block for this \
+                     down-incident (auto-clears when the reviewer recovers); Reject \
+                     keeps commits blocked until the reviewer is back."
+                ),
+                vec!["Approve".to_string(), "Reject".to_string()],
+                Some(ApprovalContext {
+                    kind: crate::policy::ViolationKind::GenericApproval,
+                    action: format!("override reviewer-down block: {reason}"),
+                    detail: Some("reviewer-override".to_string()),
+                }),
+                None,
+                false,
+            )
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return format!("could not park the override request: {e}");
+            }
+        };
+        let choice_id = serde_json::from_str::<serde_json::Value>(&parked)
+            .ok()
+            .and_then(|v| {
+                v.get("choice_id")
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        tracing::info!(
             session = %session_id,
+            agent,
             reason = %reason,
-            "reviewer-down commit block OVERRIDDEN by HANDS"
+            choice_id = %choice_id,
+            "reviewer-down override REQUESTED; parked for the user's approval"
         );
-        self.reviewer_override
+        self.pending_override_requests
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(session_id.to_string(), reason.to_string());
+            .insert(
+                choice_id.clone(),
+                (session_id.to_string(), reason.to_string()),
+            );
         format!(
-            "reviewer-down block overridden — commit allowed. Logged reason: {reason}. \
-             (Auto-clears when the reviewer recovers.)"
+            "override REQUESTED — parked for the user's approval (gate {choice_id}); \
+             the session waits at the gate. If approved, the block lifts for this \
+             down-incident; if rejected, restore the reviewer or wait."
         )
     }
 

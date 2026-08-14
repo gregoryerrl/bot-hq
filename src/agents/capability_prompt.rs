@@ -145,9 +145,12 @@ pub fn phrasing(cap: Capability) -> Phrasing {
             peer: "clears blocking findings",
         },
         OverrideReviewerBlock => Phrasing {
-            grant: "override a reviewer's block with `override_reviewer_block`",
-            deny: "override a reviewer's block — `override_reviewer_block` is refused for you",
-            peer: "overrides a reviewer's block",
+            grant: "request a reviewer-block override with `override_reviewer_block` — it \
+                    parks an Approve/Reject decision for the user; the override takes \
+                    effect only on their Approve",
+            deny: "request a reviewer-block override — `override_reviewer_block` is refused \
+                   for you",
+            peer: "requests reviewer-block overrides (the user approves them)",
         },
         EditFiles => Phrasing {
             // No tool name, for the reason spelled out at `RunBash` below.

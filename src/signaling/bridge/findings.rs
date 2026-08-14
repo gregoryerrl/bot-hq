@@ -246,9 +246,9 @@ fn reviewer_block_decision(
         None => format!(
             "blocked: reviewer down — review cannot be confirmed (the reviewer is {} and \
              has made no tool call in the last {}s). This means the REVIEWER IS GONE, not \
-             that the change is unreviewed — restore the reviewer, or override with \
-             override_reviewer_block(reason) if you've confirmed the change is safe to \
-             ship unreviewed.",
+             that the change is unreviewed — restore the reviewer, or REQUEST an override \
+             with override_reviewer_block(reason): it parks an Approve/Reject decision \
+             for the user and the session waits at the gate. The user decides; you do not.",
             reviewer_health.unwrap_or("down"),
             REVIEWER_LIVENESS_WINDOW.as_secs()
         ),
@@ -329,13 +329,114 @@ mod tests {
             "an actively-calling reviewer is alive regardless of health events"
         );
         // And the recovery path, which is what the override auto-clear hangs
-        // off: a registered reviewer back to `running` drops the override.
-        bridge.override_reviewer_block("s-live", "confirmed safe");
-        assert!(bridge.reviewer_override_reason("s-live").is_some());
+        // off: a registered reviewer back to `running` drops the override. The
+        // override itself is now user-approved (vision alignment, 2026-08-14):
+        // the request parks an approval and takes effect only on Approve.
+        let request = bridge
+            .override_reviewer_block("s-live", "hands", "confirmed safe")
+            .await;
+        assert!(
+            request.contains("REQUESTED"),
+            "the tool parks a request, it does not override: {request}"
+        );
+        assert!(
+            bridge.reviewer_override_reason("s-live").is_none(),
+            "no override is active until the user approves"
+        );
+        let pending = bridge
+            .list_questions_for_session("s-live")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.status == "pending" && r.prompt.contains("override the review block"))
+            .expect("the request parked an Approve/Reject row");
+        bridge
+            .resolve_choice_confirmable(&pending.choice_id, "Approve".into(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            bridge.reviewer_override_reason("s-live").as_deref(),
+            Some("confirmed safe"),
+            "the user's Approve is what activates the override"
+        );
         bridge.notify_agent_health("s-live".to_string(), "eyes", "running");
         assert!(
             bridge.reviewer_override_reason("s-live").is_none(),
             "a recovered reviewer must clear the one-incident override"
+        );
+    }
+
+    /// The other half of the user-decides redesign: a REJECT leaves the block
+    /// standing, and a reviewer that recovers while the request is still parked
+    /// VOIDS it — an approval landing later must not lift a future block.
+    #[tokio::test]
+    async fn an_override_request_rejected_or_outlived_never_takes_effect() {
+        let bridge = bridge_with_session("s-live").await;
+        bridge.register_session_reviewers("s-live".into(), vec!["eyes".into()]);
+        bridge.notify_agent_health("s-live".to_string(), "eyes", "dead");
+
+        // Reject: the request is consumed and nothing is overridden.
+        bridge
+            .override_reviewer_block("s-live", "hands", "please let me ship")
+            .await;
+        let pending = bridge
+            .list_questions_for_session("s-live")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.status == "pending")
+            .expect("request parked");
+        bridge
+            .resolve_choice_confirmable(&pending.choice_id, "Reject".into(), false)
+            .await
+            .unwrap();
+        assert!(
+            bridge.reviewer_override_reason("s-live").is_none(),
+            "a rejected request overrides nothing"
+        );
+        assert!(
+            bridge
+                .check_open_findings("s-live")
+                .await
+                .unwrap()
+                .starts_with("blocked: reviewer down"),
+            "the block stands after a reject"
+        );
+
+        // A second request parks; the reviewer recovers BEFORE the user answers
+        // → the request is voided (map consumed, row withdrawn). Approving the
+        // now-withdrawn row later must not activate anything.
+        bridge
+            .override_reviewer_block("s-live", "hands", "second attempt")
+            .await;
+        let second = bridge
+            .list_questions_for_session("s-live")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.status == "pending")
+            .expect("second request parked");
+        bridge.notify_agent_health("s-live".to_string(), "eyes", "running");
+        // The void's withdraw is spawned; give it a beat.
+        for _ in 0..100 {
+            let still_pending = bridge
+                .list_questions_for_session("s-live")
+                .await
+                .unwrap()
+                .into_iter()
+                .any(|r| r.choice_id == second.choice_id && r.status == "pending");
+            if !still_pending {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let _ = bridge
+            .resolve_choice_confirmable(&second.choice_id, "Approve".into(), false)
+            .await;
+        assert!(
+            bridge.reviewer_override_reason("s-live").is_none(),
+            "a request outlived by the down-incident is void — approving it \
+             activates nothing"
         );
     }
 
