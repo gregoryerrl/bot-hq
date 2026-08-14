@@ -63,6 +63,29 @@ repeat-net's own halt is still silent (pre-existing "a yield must say it
 yielded" gap) — the error case that hit it today now stops earlier and
 visibly, so the remaining exposure is agent-prose loops.
 
+**Addendum, same evening — the session was healed, not written off.** The
+poison was only in the two claude-side transcripts, so the heal was three
+surgical steps: kill the zombie resume, NULL both participants'
+`claude_session_id` (→ `is_first_spawn` → fresh boot), zero both cursors
+(→ full chat replay, now survivable because the wire clamp truncates the
+2.9 MB row). The paste itself moved out of the CL to the ad-manager repo
+(gitignored) and its 2.9 MB of atoms left the global retrieval index on the
+watcher's rescan. The user then drove the healed session for 75 more minutes
+and every new mechanism validated live: the replay delivered the clamped
+paste (its head carried the verdict JSON HANDS needed; the bulk came from
+grepping the file); three isolated API errors were absorbed invisibly
+(streak resets on success); and at 13:07 the error-streak halt fired for
+real — two consecutive `Connection lost` turns → ⚠ banner with the error →
+"recover please" → recovered. Same failure class as 11:20's silent 11-turn
+volley, opposite surfacing. The session closed clean at 13:11: EYES caught a
+real blocking finding (a three-account aggregate had inflated a page count;
+the conclusion flipped and every outward draft was corrected), PR #517
+merged squash `5ea8fb0c` through the push/PR/merge gates, 11/11 tray
+questions answered, tasks.md + CL handoff written for the next session.
+Heal recipe if it recurs: kill subprocesses → NULL claude ids → zero
+cursors; a "restart participants fresh" button is the feature-shaped
+version.
+
 ## 2026-08-14 (night) — the pre-mark that outlived the ring
 
 **`s-ff729daa` (12 min, three force-pauses, three SIGKILLs).** The user opened
