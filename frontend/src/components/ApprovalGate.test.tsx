@@ -175,4 +175,35 @@ describe("ApprovalGate", () => {
     // Exactly one rendering of the command itself.
     expect(screen.getAllByText("gh pr create --base main")).toHaveLength(1);
   });
+
+  it("Details surfaces absolutely everything about the gate", () => {
+    // vision.md: "Full transparency. Every bit of information the agents see
+    // is visible to the user." The card clamps the command to a short scroll
+    // box and shows only the prompt's first line — a PR-create gate carries
+    // its whole PR body inside that command. Details opens the lot: every
+    // recorded field plus the untruncated request and command.
+    const body = "## Summary — closes the guard gap the suite proved.";
+    render(
+      <ApprovalGate
+        rows={[
+          approval({
+            prompt:
+              "Run gated command in this session's repo?\n\nContext the card never shows.",
+            command_text: `gh pr create --base main --title 'fix: close the gap' --body '${body}'`,
+          }),
+        ]}
+        onResolve={resolved()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+    const dialog = screen.getByRole("dialog", { name: "Approval details" });
+    expect(dialog).toHaveTextContent("hands");
+    expect(dialog).toHaveTextContent("2026-08-14T10:00:00Z");
+    expect(dialog).toHaveTextContent("c-1");
+    expect(dialog).toHaveTextContent("Approve / Reject");
+    expect(dialog).toHaveTextContent("Context the card never shows.");
+    expect(dialog).toHaveTextContent("closes the guard gap the suite proved");
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
 });

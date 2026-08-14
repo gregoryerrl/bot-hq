@@ -3,6 +3,8 @@ import { Button } from "./ui/Button";
 import { cn } from "../lib/cn";
 import { authorColorClass } from "./authorColor";
 import { formatRelative } from "../lib/time";
+import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 import type { TrayRow } from "./HaltBanner";
 
 /**
@@ -51,6 +53,7 @@ export function ApprovalGate({
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
   const [stale, setStale] = useState<{
     picked: string;
     command: string;
@@ -105,8 +108,16 @@ export function ApprovalGate({
         <span className="text-xs text-on-surface-variant">
           is blocked until you answer
         </span>
+        <button
+          type="button"
+          onClick={() => setShowDetails(true)}
+          className="ml-auto text-xs text-primary underline underline-offset-2"
+          title="Everything about this gate — the full request, the exact command, who asked and when"
+        >
+          Details
+        </button>
         {more > 0 && (
-          <span className="ml-auto text-xs text-on-surface-variant">
+          <span className="text-xs text-on-surface-variant">
             1 of {rows.length} · {more} more after this
           </span>
         )}
@@ -185,7 +196,102 @@ export function ApprovalGate({
           {error}
         </p>
       )}
+      {showDetails && (
+        <GateDetailsDialog row={row} onClose={() => setShowDetails(false)} />
+      )}
     </div>
+  );
+}
+
+/**
+ * Everything about the gate, in one place (vision.md: "Full transparency.
+ * Every bit of information the agents see is visible to the user").
+ *
+ * The gate card shows the prompt's FIRST line and a height-capped command;
+ * a `gh pr create --body '…'` approval carries its whole PR body inside
+ * that command, cramped into a 8-rem scroll box. The old gate surfaced such
+ * payloads as clickable files (view `pr-body.md`); this is that affordance
+ * rebuilt for the new gate: the full request text, the exact command with
+ * room to read it, and every recorded field — who asked, when, kind, id,
+ * options — so nothing about what's being approved is off screen.
+ */
+function GateDetailsDialog({
+  row,
+  onClose,
+}: {
+  row: TrayRow;
+  onClose: () => void;
+}) {
+  const trapRef = useFocusTrap<HTMLDivElement>(true);
+  useEscapeKey(onClose, true);
+  return (
+    <>
+      <div
+        className="fixed inset-0 z-40 bg-black/60"
+        onClick={onClose}
+        aria-hidden
+      />
+      <div
+        ref={trapRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Approval details"
+        className={cn(
+          "fixed left-1/2 top-1/2 z-50 flex max-h-[85vh] w-[min(760px,94vw)]",
+          "-translate-x-1/2 -translate-y-1/2 flex-col rounded-lg border",
+          "border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
+        )}
+      >
+        <h2 className="mb-3 font-headline-md text-headline-md text-on-surface">
+          Approval details
+        </h2>
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+            <dt className="text-on-surface-variant">Requested by</dt>
+            <dd className={cn("font-semibold", authorColorClass(row.agent))}>
+              {row.agent}
+            </dd>
+            <dt className="text-on-surface-variant">Asked</dt>
+            <dd className="text-on-surface">
+              {formatRelative(row.asked_at)}{" "}
+              <span className="text-on-surface-variant">({row.asked_at})</span>
+            </dd>
+            <dt className="text-on-surface-variant">Kind</dt>
+            <dd className="text-on-surface">
+              {row.command_text ? "gated command (Tool Gate)" : row.kind}
+            </dd>
+            <dt className="text-on-surface-variant">Options</dt>
+            <dd className="text-on-surface">{row.options.join(" / ")}</dd>
+            <dt className="text-on-surface-variant">Gate id</dt>
+            <dd className="font-mono text-on-surface-variant">{row.choice_id}</dd>
+          </dl>
+
+          <p className="mt-3 text-xs font-medium text-on-surface-variant">
+            Full request
+          </p>
+          <p className="mt-1 whitespace-pre-wrap rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 text-sm text-on-surface">
+            {row.prompt}
+          </p>
+
+          {row.command_text && (
+            <>
+              <p className="mt-3 text-xs font-medium text-on-surface-variant">
+                Exact command — runs verbatim on Approve
+              </p>
+              <pre className="mt-1 overflow-auto rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-mono text-xs text-on-surface">
+                {row.command_text}
+              </pre>
+            </>
+          )}
+        </div>
+        <div className="mt-4 flex justify-end">
+          <Button variant="secondary" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+      </div>
+    </>
   );
 }
 
