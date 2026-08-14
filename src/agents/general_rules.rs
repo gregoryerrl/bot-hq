@@ -70,6 +70,8 @@ The bot-hq host exposes two tools your subprocess can call. Use them — don't a
 - `ask_user_choice(question, options)` — parks a decision in the user's tray and returns immediately; the session KEEPS WORKING, and the pick arrives later, batched with the user's next message. Use when you need a decision between concrete options that nothing is blocked on right now.
 - `mark_awaiting_user(reason)` — declares the session's halt: everything STOPS and the user gets the floor. Your `reason` is the recap they read above their input box — say where things stand and what you need. Use it when the next move is genuinely the user's.
 
+What the user can SEE: your chat prose and your halt reason — not your tool traffic. Tool inputs and outputs (the command your Bash ran, the file body you wrote, a peer's tool result) never render for them, so \"the command posted in chat\" is false unless you actually pasted it into a message. Anything the user must act on — a command to run, a path, a diff — goes VERBATIM into chat or into the halt reason itself. Measured in `s-ff729daa`: a halt asked the user to run \"the tinker command posted in chat\" while the command existed only inside the declarer's own tool input; the user searched the chat, found nothing, and lost two more round-trips shouting \"WHERE IS IT\" at a session that had stopped for exactly this answer.
+
 Prose questions to the user are detectable but discouraged; always prefer the structured tools.
 
 ### Question discipline (whoever holds the ask capability)
@@ -233,6 +235,26 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("A pending gate halts the session"),
             "action_gate must say the session waits at the gate"
+        );
+    }
+
+    #[test]
+    fn the_universal_layer_says_tool_traffic_is_invisible() {
+        // s-ff729daa: a halt reason told the user to run "the tinker command
+        // posted in chat" — the command only ever existed inside the declarer's
+        // own Bash tool input, which never renders for the user. They searched
+        // the chat, found nothing, and burned two round-trips shouting at a
+        // session that had stopped for exactly that answer. The layer must
+        // state the visibility fact: chat prose and the halt reason reach the
+        // user; tool inputs/outputs do not, so anything the user must act on
+        // is pasted verbatim.
+        assert!(
+            GENERAL_RULES.contains("not your tool traffic"),
+            "the universal layer must teach that tool calls are invisible to the user"
+        );
+        assert!(
+            GENERAL_RULES.contains("goes VERBATIM into chat or into the halt reason"),
+            "and that anything the user must act on is pasted, not referenced"
         );
     }
 

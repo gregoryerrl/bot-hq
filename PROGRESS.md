@@ -18,6 +18,49 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-14 (night) — the pre-mark that outlived the ring
+
+**`s-ff729daa` (12 min, three force-pauses, three SIGKILLs).** The user opened
+an ad-manager session on the fresh build; HANDS declared a clean halt at
+09:54:04 — ring stopped where it stood, declarer interrupted, banner up — and
+the input box **stayed locked for 110 seconds** until the user hit Pause.
+Then the same thing twice more. "HALTS did not unlock the input box."
+
+**Root cause: `AppState::broadcast` still pre-marked every agent busy** — the
+duo-era delivery loop, redundant since D19b made `hand_turn_to` mark the
+participant the ring actually deals. The pre-mark read fine while the ring
+rotated (each flag was laundered into a real turn when its holder's deal came)
+and lied the moment the ring stopped early: EYES was never dealt a turn before
+the halt, so no turn end ever cleared its flag, `any_busy` stayed true, and
+D33's map-authoritative lock held the box shut under the HALT banner. The same
+stale flag read busy+silent to the stall watchdog, which called the rightfully
+quiet EYES "stalled" at 09:48:25 — a false verdict that also feeds
+`reviewer_block_decision`. Activity ledger, the proof:
+`awaiting_user 0|1` — halted, declarer freed, and a participant that had done
+nothing for six minutes still holding the lock.
+
+**Fix: the loop is deleted.** The ring's `hand_turn_to` is the ONE busy-true
+writer; the pump stays the clear. A flag only the ring sets is a flag a
+stopped ring has always cleared — which makes `a_halt_leaves_nobody_busy`'s
+claim finally true in production, not just in the sequencer tests.
+`broadcast_marks_nobody_busy` (core::state) pins the loop deleted;
+mutation-verified red both ways.
+
+**Second defect, prose-layer: the halt reason referenced invisible artifacts.**
+The halt said *"run the tinker command posted in chat"* — the command only
+ever existed inside HANDS's own Bash tool input, which never renders for the
+user. They searched the chat, found nothing, and burned two more round-trips
+("WHERE IS IT ITS NOT POSTED IN THE CHAT") at a session that had stopped for
+exactly that answer. The universal layer now states the visibility fact: chat
+prose and the halt reason reach the user; tool inputs/outputs do not — anything
+the user must act on goes VERBATIM into chat or the halt reason. Pinned by
+`the_universal_layer_says_tool_traffic_is_invisible`.
+
+Suite 1114 green. Also observed, noted not fixed: the declarer's own
+`mark_awaiting_user` tool result reads "The user doesn't want to proceed"
+in its transcript (the self-interrupt races the MCP response) — cosmetic but
+confusing across resumes; watch whether it misleads a resumed declarer.
+
 ## 2026-08-14 (evening) — the discipline that manufactured work
 
 **`s-86a81478`, full dissection (33 min, force-closed).** The session that
