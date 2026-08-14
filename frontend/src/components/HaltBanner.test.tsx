@@ -164,6 +164,29 @@ describe("HaltBanner", () => {
     expect(banner).toHaveTextContent("the session is waiting on you");
   });
 
+  it("points a halted session at the approval that took its input box", () => {
+    // Both pending at once is reachable: D22 lets the lap finish, so one
+    // participant can park an approval while another halts. The gate has the
+    // input slot (D33), so "answer here" would point at a textarea that is not
+    // on screen.
+    render(
+      <HaltBanner
+        rows={[
+          row({ id: 1, kind: "halt", prompt: "needs the tinker output" }),
+          row({
+            id: 2,
+            kind: "choice",
+            options: ["Approve", "Reject"],
+            command_text: "git push origin main",
+          }),
+        ]}
+      />,
+    );
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent("Answer the approval below first");
+    expect(banner).not.toHaveTextContent("Answering — here or in the tray");
+  });
+
   it("tells the user what clears it", () => {
     // "Sending a message clears the halt" is already the semantic (rc3 D28
     // makes every response path do both halves). Saying so is what turns a

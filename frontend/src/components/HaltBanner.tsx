@@ -154,9 +154,15 @@ export function HaltBanner({
         </button>
       )}
       <p className="mt-1 text-[0.7rem] text-on-surface-variant">
-        {halted
-          ? "Answering — here or in the tray — clears this and resumes the session."
-          : "Answer whenever you are ready; the participants carry on meanwhile."}
+        {/* An approval has TAKEN the input box (rc3 D33), so "answer here"
+            would point at a textarea that is not on screen. Both can be
+            pending at once: D22 lets the lap finish, so one participant can
+            park an approval while another halts. */}
+        {approvals.length > 0
+          ? "Answer the approval below first — something is blocked on it."
+          : halted
+            ? "Answering — here or in the tray — clears this and resumes the session."
+            : "Answer whenever you are ready; the participants carry on meanwhile."}
       </p>
     </div>
   );
