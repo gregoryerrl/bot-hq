@@ -237,6 +237,22 @@ roughly in value order:
 
 ## Backlog
 
+### Ring latency levers (raised 2026-08-14, all USER decisions)
+
+The serialized ring is why sessions feel slow — measured in `s-f6a441ff`:
+HANDS 10.3 min, EYES 5 min, HANDS 3 min, one holder at a time, 18.5 minutes
+before the user got the floor. The candidate levers, none of which bot-hq
+should pick unilaterally:
+
+- **Turn-picker** — the user routes the next turn to a named participant
+  instead of the ring running full laps (EYES takes a verify turn only when
+  summoned). The user has mentioned wanting this; it is unspec'd — theirs to
+  define before anything is built.
+- **Per-role model/effort presets for review passes** — already expressible
+  per participant at spawn; the lever is defaults/UX, not new machinery.
+- **Solo sessions for non-adversarial tasks** — already possible; a
+  one-participant roster runs without review laps.
+
 ### spawn_session `task` summary field (catalog extension, deferred 2026-07-07)
 
 Optional `task` string on the spawn_session args that the per-spawn

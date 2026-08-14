@@ -18,6 +18,51 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-14 (late night) — the 2.9 MB paste and the error volley
+
+**`s-f6a441ff` (still open, unrecoverable).** The halt fix held — at 10:54:19
+the declared halt cleared the busy map in 62 ms and the box opened. What
+killed the session came later: the user pasted the prod output HANDS asked for
+— **one 2,977,078-byte message** (~750k tokens) riding the same Send as a
+staged tray answer. It delivered, lodged in both participants' subprocess
+transcripts, and from then on every prompt exceeded even the 1M window. The
+ring dealt turns anyway: each ended `"Prompt is too long"`, each error ended
+`Spoke` (one errored turn is survivable by design), and the two agents
+volleyed **11 error turns across 5 minutes** until the text-repeat net halted
+the cycle — silently. The user diagnosed it themselves mid-wreck ("i've put it
+in temp.md logs are too long"), but the paste was already in both transcripts
+where no delivery decision can reach it.
+
+**Three fixes, three layers:**
+
+1. **The paste gate** (`core::state`): `broadcast` and `send_user_response`
+   refuse a message over 200,000 bytes at the top, whole — picks stay staged,
+   the draft stays in the box, and the error carries the fix the user invented
+   ("save it to a file, send the path"). ChatInput already renders rejected
+   sends inline. Pinned by `an_oversized_user_message_is_refused_with_the_fix_in_hand`.
+2. **The wire clamp** (`storage::participants::wire()`): no single ROW may put
+   more than 200,000 bytes on a participant's stdin, wherever it came from — a
+   user paste, an agent's dump, a replayed backlog. The record keeps every
+   byte; the wire carries a truncation marker addressed to the reading agent.
+   Same constant as the gate, so an accepted user message is never truncated.
+   Pinned by `an_oversized_body_is_clamped_on_the_wire_but_whole_on_the_record`
+   (+ char-boundary and at-the-cap edge tests).
+3. **The error-streak halt** (`core::duo`): two errored turns in a row from
+   one pump now fill the session's halt slot via the provider-limit route —
+   the session STOPS with a ⚠ banner carrying the actual error line, instead
+   of volleying until a repeat-net catches it in silence. One errored turn
+   still steps the ring (unchanged). Pinned by
+   `back_to_back_errored_turns_declare_a_visible_halt`.
+
+All three mutation-verified red. The slowness the user also reported is the
+ring's serialization itself — HANDS 10.3 min, EYES 5 min, HANDS 3 min, one
+holder at a time — plus the heavyweight verify-everything discipline; the
+levers (turn-picker, per-role model/effort, solo sessions) are the user's
+call, recorded in PLAN.md's backlog rather than changed here. Also noted: the
+repeat-net's own halt is still silent (pre-existing "a yield must say it
+yielded" gap) — the error case that hit it today now stops earlier and
+visibly, so the remaining exposure is agent-prose loops.
+
 ## 2026-08-14 (night) — the pre-mark that outlived the ring
 
 **`s-ff729daa` (12 min, three force-pauses, three SIGKILLs).** The user opened
