@@ -2625,6 +2625,55 @@ mod tests {
         )
     }
 
+    /// `0055_yield_discipline_stops_manufacturing_work.sql`'s single UPDATE.
+    fn yield_discipline_statement() -> String {
+        reseed_statement(
+            include_str!("../../migrations/0055_yield_discipline_stops_manufacturing_work.sql"),
+            "0055",
+            "-- 1. HANDS",
+        )
+    }
+
+    /// **The guard on migration 0055, both directions** — the same two-sided
+    /// proof 0049 and 0050 carry: overwrite the previous seed, never a user's
+    /// edit. The prose being moved is the yield discipline that taught HANDS
+    /// to manufacture work instead of stopping (`s-86a81478`).
+    #[tokio::test]
+    async fn the_0055_prose_reseed_overwrites_0050s_seed_but_not_a_user_edit() {
+        let s = storage_with_0044().await;
+
+        // Half 1 — a stock migrated database carries the D35 discipline.
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        let prose = hands.description_prompt.expect("hands prose seeded");
+        assert_eq!(
+            prose,
+            crate::agents::prompts::HANDS_ROLE,
+            "0055 did not overwrite 0050's seed for hands"
+        );
+        // The point of the migration, spelled out: stopping is the move, and
+        // a parked question stops nothing.
+        assert!(prose.contains("Do not invent work to avoid stopping"));
+        assert!(prose.contains("the session keeps working"));
+        assert!(!prose.contains("never yield twice"), "the old trap is gone");
+
+        // Half 2 — replayed against a row the user has edited, it leaves it be.
+        let edit = "You are HANDS. Ship small, verified changes.";
+        sqlx::query("UPDATE roles SET description_prompt = ? WHERE slug = 'hands'")
+            .bind(edit)
+            .execute(s.pool())
+            .await
+            .unwrap();
+        sqlx::query(&yield_discipline_statement())
+            .execute(s.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            s.role_by_slug("hands").await.unwrap().unwrap().description_prompt.as_deref(),
+            Some(edit),
+            "0055 clobbered a user-edited prompt"
+        );
+    }
+
     /// **The guard on migration 0049, both directions.**
     ///
     /// 0049 re-seeds both roles' prose because rc3 D10 took the agent names out

@@ -18,6 +18,45 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-14 (evening) — the discipline that manufactured work
+
+**`s-86a81478`, full dissection (33 min, force-closed).** The session that
+found four D35 holes in the morning found the fifth in the evening: with its
+halt wiped (the gate bug, fixed at `6721abe`) and its question still parked,
+HANDS hit the shipped yield discipline — *"never yield twice on a state the
+user hasn't acted on; if anything in your queue is still workable, work it"* —
+and said, in chat: *"Queue's empty and the next move is the user's — but I
+won't halt on a state they haven't acted on."* Then it **invented work**: a
+CL-delta draft written specifically to be reviewable, EYES reviewed it, EYES-2
+confirmed EYES, and the three volleyed for 25 minutes (hands 15 / eyes 9 /
+eyes-2 8 substantive messages post-08:20, only 7 passes all session — so D27's
+all-pass net could never fire). The user sat locked out the whole time,
+because D33 only opens the box when the session stops, and the discipline
+taught the session that stopping twice is rude.
+
+**The prose was the bug, and it was stale on two counts.** It opened with
+"every `ask_user_choice` halts the session until answered" — false since D35
+questions stopped touching the ring — and its anti-spam rule was written for
+the world where re-halts piled up in a tray. Rewritten (`general_rules.rs` +
+`HANDS_ROLE`): the D35 cost table (question stops nothing; approval and halt
+stop everything), and the new rule verbatim from the user's model — **"when
+your queue is empty and the next move is the user's, STOP. Declare the halt or
+pass — never manufacture work to avoid stopping"** — with `s-86a81478` cited
+in the prose as its evidence, like every other discipline carries.
+
+**Moved by migration 0055**, the sanctioned reseed path (0050's shape:
+byte-guard on the previous seed, a user's edit is never overwritten), with the
+two-sided guard test the others have. HANDS 10569 → 10741 bytes; EYES
+untouched.
+
+Also confirmed in the same dissection: **the advisor config fix held** —
+`on_mention` in this session's roster, 7 rows all boot orientation, zero ring
+turns.
+
+1109 lib + 378 frontend green.
+
+---
+
 ## 2026-08-14 (later) — a halt is a halt
 
 **The user ran `s-c41a4927` and returned four defects and one rule:** *"Again
