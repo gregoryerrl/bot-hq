@@ -159,7 +159,17 @@ describe("tray discard", () => {
     expect(screen.getByText("Ship it?")).toBeInTheDocument();
   });
 
-  it("warns that discarding an approval gate means not-approved", async () => {
+  it("does not offer a second way to answer an approval", async () => {
+    // **Changed subject at rc3 D33.** This used to check the warning shown when
+    // discarding an approval from the tray. Approvals are no longer answerable
+    // here at all — they take the input slot (`ApprovalGate`), and leaving an
+    // Approve button (or a Discard) in the tray as well would rebuild the exact
+    // defect the gate exists to fix: two paths into one row, which is what
+    // produced "I answered it and a second one appeared".
+    //
+    // Discard was also the wrong verb for a gate. Something is synchronously
+    // blocked on the answer, so the explicit no is **Reject**, which tells the
+    // hook. Discarding just walked away from a held-open command.
     await openTray([
       trayRow({
         command_text: "gh pr create --base staging",
@@ -167,11 +177,39 @@ describe("tray discard", () => {
         options: ["Approve", "Reject"],
       }),
     ]);
-    fireEvent.click(
-      await screen.findByRole("button", {
+    // Present as a COUNT, so the tray is not silently missing a pending row…
+    expect(await screen.findByText(/1 APPROVAL/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/answered below the chat, where the input box is/i),
+    ).toBeInTheDocument();
+    // …but with no way to answer or dismiss it from here.
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(
+      screen.queryByRole("button", {
         name: /discard this card without answering/i,
       }),
-    );
-    expect(await screen.findByText(/not approved/i)).toBeInTheDocument();
+    ).toBeNull();
+  });
+
+  it("still lists an ordinary question, which IS parkable", async () => {
+    // The division D33 draws: a question waits for you and the session carries
+    // on, so it keeps its card, its options and its Discard. Only approvals —
+    // where something is blocked right now — lose the tray.
+    await openTray([
+      trayRow({
+        command_text: null,
+        prompt: "Which branch should this target?",
+        options: ["main", "staging"],
+      }),
+    ]);
+    expect(
+      await screen.findByText("Which branch should this target?"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/APPROVAL/)).toBeNull();
+    expect(
+      screen.getByRole("button", {
+        name: /discard this card without answering/i,
+      }),
+    ).toBeInTheDocument();
   });
 });

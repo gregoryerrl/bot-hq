@@ -4,11 +4,14 @@ import { HaltBanner, type TrayRow } from "./HaltBanner";
 
 const row = (o: Partial<TrayRow> = {}): TrayRow => ({
   id: 1,
+  choice_id: "c-1",
   agent: "hands",
   kind: "halt",
   prompt: "Waiting on the output of `php artisan tinker --execute=…`",
+  options: [],
   status: "pending",
   asked_at: "2026-08-14T10:00:00Z",
+  command_text: null,
   ...o,
 });
 
@@ -66,20 +69,110 @@ describe("HaltBanner", () => {
     expect(screen.getByRole("button", { name: /1 question waiting/i })).toBeInTheDocument();
   });
 
-  it("shows for a pending choice even with no halt row", () => {
+  it("does NOT claim the session halted just because a question is pending", () => {
+    // The defect this replaces, reported with a screenshot: the banner read
+    // "HALT" over a session where both participants were visibly mid-turn, and
+    // the status line underneath correctly said so.
+    //
+    // `ask_user_choice` is non-blocking BY DESIGN — the agent parks and carries
+    // on. Only `halt` / `mark_awaiting_user` is a participant saying it stopped.
+    // The user: "parking a question in tray toggles the halt (it should not),
+    // its asynchronous."
     render(<HaltBanner rows={[row({ kind: "choice" })]} />);
     const banner = screen.getByRole("status");
-    expect(banner).toBeInTheDocument();
-    // The HEADER line specifically — the tray link below says something
-    // similar, and a loose match here found both.
-    expect(banner).toHaveTextContent("a question is waiting in the tray");
+    expect(banner).toHaveAccessibleName("Waiting for you");
+    expect(banner).not.toHaveTextContent("HALT");
+    expect(banner).toHaveTextContent("the session is still working");
+  });
+
+  it("says a gated approval is BLOCKING, which a question is not", () => {
+    // A gated command is a git hook synchronously waiting on a yes/no — the
+    // most time-sensitive row in the tray, and the one in the reported
+    // screenshot. Calling it a halt understates it in one direction (the
+    // session has not stopped) and overstates it in the other (something IS
+    // blocked on the user).
+    render(
+      <HaltBanner
+        rows={[
+          row({
+            kind: "choice",
+            options: ["Approve", "Reject"],
+            command_text: "git push origin main",
+            prompt: "Run gated command in this session's repo",
+          }),
+        ]}
+      />,
+    );
+    const banner = screen.getByRole("status");
+    expect(banner).not.toHaveTextContent("HALT");
+    expect(banner).toHaveTextContent("blocked on your approval");
+    expect(
+      screen.getByRole("button", { name: /1 approval waiting/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("counts a PUSH gate as an approval, which has no command_text", () => {
+    // The defect in the first discriminator, and it hid a third of all
+    // approvals. `command_text` is set by `ask_user_choice_inner` for
+    // ToolBlocklist (action-gate) rows ALONE; a parked `request_approval` — the
+    // push gate — carries none. Measured across the archive: 10 of 31 approvals
+    // were push gates, every one classified as an ordinary question while a
+    // pre-push hook blocked on it.
+    //
+    // Both gate kinds ask exactly Approve/Reject, which is what this now keys
+    // on. Mutation check: restore `command_text !== null` and this goes red.
+    render(
+      <HaltBanner
+        rows={[
+          row({
+            kind: "choice",
+            options: ["Approve", "Reject"],
+            command_text: null,
+            prompt: "Allow `git push` to `staging` in this session's repo?",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "blocked on your approval",
+    );
+  });
+
+  it("does not mistake an ordinary question for an approval", () => {
+    // The other direction: free-form options are a question, whatever they say.
+    render(
+      <HaltBanner
+        rows={[
+          row({
+            kind: "choice",
+            options: ["Write the EOD first", "Close #499 properly first"],
+            prompt: "Board's clear apart from the EOD. Next?",
+          }),
+        ]}
+      />,
+    );
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent("a question is waiting");
+    expect(banner).not.toHaveTextContent("approval");
+  });
+
+  it("still says HALT when a participant actually yielded", () => {
+    render(<HaltBanner rows={[row({ kind: "halt" })]} />);
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveAccessibleName("Session halted");
+    expect(banner).toHaveTextContent("HALT");
+    expect(banner).toHaveTextContent("the session is waiting on you");
   });
 
   it("tells the user what clears it", () => {
     // "Sending a message clears the halt" is already the semantic (rc3 D28
     // makes every response path do both halves). Saying so is what turns a
     // stopped session from a mystery into an instruction.
+    //
+    // RESUMES, not "restarts": the ring picks up where it left off — the
+    // rotation, the cursors and the tally all survive. "Restart" reads as
+    // starting over, which would make a user hesitate to answer.
     render(<HaltBanner rows={[row()]} />);
-    expect(screen.getByText(/clears this and restarts the session/i)).toBeInTheDocument();
+    expect(screen.getByText(/clears this and resumes the session/i)).toBeInTheDocument();
   });
 });

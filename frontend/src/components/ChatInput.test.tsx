@@ -73,7 +73,7 @@ const LABEL = (slug: string) =>
   ({ hands: "HANDS · Opus", eyes: "EYES · Sonnet" })[slug] ?? slug;
 
 describe("ChatInput turn-status + Stop", () => {
-  it("hides the textarea and shows the turn-status + Stop while busy", () => {
+  it("hides the textarea and shows the turn-status + Pause while busy", () => {
     render(
       <ChatInput
         activity="busy"
@@ -85,7 +85,7 @@ describe("ChatInput turn-status + Stop", () => {
     );
     // While a turn is in flight the input is replaced by the status line.
     expect(screen.queryByRole("textbox")).toBeNull();
-    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
     // rc3 D10: the busy participant is named ROLE · Model, never by a slug or
     // an agent name.
@@ -147,7 +147,7 @@ describe("ChatInput turn-status + Stop", () => {
     );
     expect(screen.getByRole("textbox")).toBeEnabled();
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
 
     rerender(
       <ChatInput activity="awaiting_user" onSend={() => {}} onCancel={() => {}} />,
@@ -156,11 +156,19 @@ describe("ChatInput turn-status + Stop", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
   });
 
-  it("says an agent is still working while awaiting_user leaves the input open", () => {
-    // The reported bug: `awaiting` outranks `busy` in the backend derive, so
-    // parking a question unlocks the textarea while the agent keeps running
-    // tools — and the per-agent status used to render only in the LOCKED
-    // branch, so the user saw an open input and assumed the work had stopped.
+  it("LOCKS while a participant works, even with a question parked", () => {
+    // **This test changed subject at rc3 D33, and the old subject was the bug.**
+    //
+    // It used to assert that `awaiting_user` + busy left the textarea OPEN, on
+    // the reasoning that answering a parked question is the whole point. The
+    // user's screenshot is what that reasoning produces in practice: an open
+    // box, a banner claiming a halt, and the status line underneath correctly
+    // naming a participant mid-turn.
+    //
+    // The rule is now the user's: *"users are never allowed to type while
+    // agents are working."* A parked question is answered in the tray — a
+    // click, not a sentence — so unlocking the box was never needed to answer
+    // it. And if the user genuinely wants to speak, Pause is right there.
     render(
       <ChatInput
         activity="awaiting_user"
@@ -170,11 +178,46 @@ describe("ChatInput turn-status + Stop", () => {
         onCancel={() => {}}
       />,
     );
-    // Input stays usable — answering the parked question is the whole point.
-    expect(screen.getByRole("textbox")).toBeEnabled();
-    expect(screen.getByText("Waiting on your answer ·")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.getByText("HANDS · Opus")).toBeInTheDocument();
-    expect(screen.getByText("— the turn hasn't ended yet.")).toBeInTheDocument();
+    // The one way back to the box.
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+  });
+
+  it("locks on the busy MAP even when the session enum has lost it", () => {
+    // The mechanism behind the test above, isolated: `SessionActivity::derive`
+    // ranks `awaiting` above `busy`, so the collapsed enum cannot answer "is
+    // anyone working". The per-participant map can, and the backend emits it on
+    // every activity event whatever the derived state.
+    //
+    // Mutation check for whoever edits `isLocked`: drop the `anyBusy(busy)` arm
+    // and this is the test that goes red.
+    render(
+      <ChatInput
+        activity="awaiting_user"
+        busy={{ eyes: true }}
+        busyLabel={LABEL}
+        onSend={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("unlocks the moment the last participant stops, with no halt required", () => {
+    // "No halt = no type" is a floor, not a ceiling: the box opens when nobody
+    // is working, whether the session halted, went idle, or simply finished a
+    // lap. Nothing has to grant permission.
+    render(
+      <ChatInput
+        activity="awaiting_user"
+        busy={{ hands: false, eyes: false }}
+        busyLabel={LABEL}
+        onSend={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    expect(screen.getByRole("textbox")).toBeEnabled();
   });
 
   it("shows no still-working notice when nobody is busy", () => {
@@ -213,7 +256,7 @@ describe("ChatInput turn-status + Stop", () => {
     expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
   });
 
-  it("calls onCancel and shows Cancelling… when Stop is pressed", async () => {
+  it("calls onCancel and shows Pausing… when Pause is pressed", async () => {
     const onCancel = vi.fn().mockResolvedValue(undefined);
     render(
       <ChatInput
@@ -224,14 +267,14 @@ describe("ChatInput turn-status + Stop", () => {
         onCancel={onCancel}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
     await waitFor(() => expect(onCancel).toHaveBeenCalledTimes(1));
     expect(
-      screen.getByRole("button", { name: "Cancelling…" }),
+      screen.getByRole("button", { name: "Pausing…" }),
     ).toBeInTheDocument();
   });
 
-  it("shows the status with no Stop when busy without onCancel", () => {
+  it("shows the status with no Pause when busy without onCancel", () => {
     render(
       <ChatInput
         activity="busy"
@@ -242,18 +285,18 @@ describe("ChatInput turn-status + Stop", () => {
     );
     // No textarea, no Stop (no onCancel), no Send — just the status line.
     expect(screen.queryByRole("textbox")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
     expect(screen.getByText("HANDS · Opus")).toBeInTheDocument();
   });
 
-  it("reads Stopping… with a disabled Stop while cancelling", () => {
+  it("reads Stopping… with a disabled Pause while cancelling", () => {
     render(
       <ChatInput activity="cancelling" onSend={() => {}} onCancel={() => {}} />,
     );
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.getByText(/Stopping/)).toBeInTheDocument();
-    const stop = screen.getByRole("button", { name: "Cancelling…" });
+    const stop = screen.getByRole("button", { name: "Pausing…" });
     expect(stop).toBeInTheDocument();
     expect(stop).toBeDisabled();
   });
@@ -278,7 +321,7 @@ describe("ChatInput paused bar", () => {
       screen.getByRole("button", { name: "Close session" }),
     ).toBeInTheDocument();
     // The Stop button belongs to the locked states, not paused.
-    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
   });
 
   it("calls onResume and latches Resuming… until activity leaves paused", async () => {

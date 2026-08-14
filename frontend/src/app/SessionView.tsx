@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
@@ -11,7 +11,8 @@ import { useContextStore } from "../stores/context";
 import { useDragResize } from "../hooks/useDragResize";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
-import { HaltBanner, type TrayRow } from "../components/HaltBanner";
+import { HaltBanner, isApproval, type TrayRow } from "../components/HaltBanner";
+import { ApprovalGate } from "../components/ApprovalGate";
 import { ChatPane } from "../components/ChatPane";
 import { DocumentPane } from "../components/DocumentPane";
 import { type Phase } from "../components/PhasePill";
@@ -26,7 +27,7 @@ import {
   type ParticipantView,
 } from "../lib/participants";
 import { FileViewerDialog } from "../components/FileViewerDialog";
-import type { AppError, SessionInfo } from "../lib/bindings";
+import type { AppError, ResolveResult, SessionInfo } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { GearIcon } from "../components/icons";
@@ -115,6 +116,13 @@ export function SessionView() {
   const { data: trayRows = [] } = useTauriQuery<TrayRow[]>("list_session_tray", {
     sessionId,
   });
+  // rc3 D33: approvals are not parkable — they take the input slot. The gate
+  // shows rows[0], and `tray_entries_for_session` is already `ORDER BY id ASC`,
+  // so the row that has been blocking longest is the one asked first.
+  const pendingApprovals = useMemo(
+    () => trayRows.filter((r) => r.status === "pending" && isApproval(r)),
+    [trayRows],
+  );
 
   // Respawn agents on mount. Idempotent — `ensure_session_started` is a no-op
   // if the session's agents are already running. Reads each agent's stored
@@ -641,9 +649,33 @@ export function SessionView() {
               rows={trayRows}
               label={(agent) => authorLabel(agent, labels)}
             />
-            {/* key remounts the input per session so the draft seed (a lazy
+            {/* rc3 D33: an approval TAKES the input slot. Something is
+                synchronously blocked on it — a pre-push hook, a gated command —
+                so it is not a card to get to later. Oldest first: a user
+                approving a push needs to read that push, not five at once. */}
+            {pendingApprovals.length > 0 ? (
+              <ApprovalGate
+                rows={pendingApprovals}
+                label={(agent) => authorLabel(agent, labels)}
+                onResolve={async (choiceId, picked, confirmStale = false) => {
+                  const res = await invoke<ResolveResult>("resolve_choice", {
+                    choiceId,
+                    picked,
+                    confirmStale,
+                  });
+                  await queryClient.invalidateQueries({
+                    queryKey: ["list_session_tray", { sessionId }],
+                  });
+                  return res;
+                }}
+                onCancel={async () => {
+                  await invoke("cancel_session_turn", { sessionId });
+                }}
+              />
+            ) : (
+            /* key remounts the input per session so the draft seed (a lazy
                 initializer) re-runs — without it, switching sessions would
-                carry session A's text into session B. */}
+                carry session A's text into session B. */
             <ChatInput
               key={sessionId}
               draftKey={`bothq:draft:${sessionId}`}
@@ -673,6 +705,7 @@ export function SessionView() {
               }}
               onClose={onCloseClick}
             />
+            )}
           </div>
         </section>
 

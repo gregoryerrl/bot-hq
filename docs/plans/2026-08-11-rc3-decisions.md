@@ -993,3 +993,91 @@ it closes the box whenever a turn is in flight, which is why Stop was the only
 way to speak. Buffering — hold the message, deliver it at the next turn boundary
 — gives the box back and removes the reason to press Stop at all. D29 removes the
 boot loop that made it painful; it does not make the lock right.
+
+### D31–D33 — Pause is the only real interrupt
+
+Shipped 2026-08-14. D31 was a loose end from D28's afternoon; D32 and D33 came
+out of two screenshots the user sent of a session claiming one thing while
+visibly doing another.
+
+**D31 — a refused handover takes its busy flag back.** The ring sets the next
+participant busy, then discovers it is blocked and halts. The flag stayed set,
+so the UI showed a participant working that the ring had already declined to
+hand a turn to. Fourth instance of the same shape: *one event, two halves,
+nothing making them travel together.* It was invisible because every sequencer
+test but one passes `activity: None` — a fixture (`ring_with_activity`) had to
+exist before the defect could be seen at all.
+
+**D32 — HALT is a claim about the session, not about the tray.** The banner said
+HALT whenever any row was pending, so parking a question printed "HALT" over a
+session whose own status line, one line below, correctly named two participants
+mid-turn. The user: *"parking a question in tray toggles the halt (it should
+not), its asynchronous."* They were right, and it was the semantics rather than
+the wording: `ask_user_choice` is non-blocking BY DESIGN. Only `halt` /
+`mark_awaiting_user` is a participant saying it stopped.
+
+#### D33 — the rule, and what it closes
+
+The user set the destination — *"i want to build towards → Pause button is the
+only real interrupt"* — and then corrected the shape I was building toward it:
+
+> *"users are never allowed to type while agents are working, no halt = no type
+> (except for pause button which is the real interrupt)"*
+
+**This closes the item D27–D30 left open, in the opposite direction from the one
+it recommended.** That entry called the mid-turn input lock (`c13fcdb`) a
+band-aid and proposed buffering — hold the user's message, deliver it at the
+next turn boundary. Buffering was never a decision, only my recommendation, and
+the user's rule is strictly simpler: the lock is not a band-aid, it is the
+design. No queue, no delivery point, no "it will land later" affordance, no
+answer needed for what happens when the session halts before the boundary. And
+no message can arrive mid-turn, which is the corruption the lock existed to
+prevent.
+
+The cost is chosen rather than discovered: **arriving at a working session costs
+one extra click.** You open a session to fire a prompt and leave; if participants
+are mid-turn you press Pause first.
+
+**Locked ⟺ somebody is working**, and that is read from the per-participant busy
+MAP, not the session enum. `SessionActivity::derive` ranks `awaiting` ABOVE
+`busy`, so a parked question reported `awaiting_user` while two participants ran
+— which is precisely the screenshot: an open textarea over a working session.
+The collapsed enum cannot answer "is anyone working"; the map can, and the
+backend emits it on every activity event whatever the derived state. `paused` is
+the one exception, because taking the box back is what the button is for.
+
+**Approvals are not parkable — they take the input slot.** Something is
+synchronously blocked on the answer: a pre-push hook holding a push open, a
+gated command that has not run. The tray treated it as one more card in a list,
+with a Send button of its own, which is how the user came to answer a row and
+watch nothing move. The gate replaces the input box, is answered on the spot,
+and keeps Pause reachable — a gate you cannot escape is how a harness loses a
+user's trust. The tray now reports approvals as a count and says where they are
+answered; it does not offer a second way to answer them, because two paths into
+one row is the defect, not the fix. Discard went with it: for a gate the
+explicit no is **Reject**, which tells the hook, where discarding just walked
+away from a held-open command.
+
+**A discriminator that was wrong by a third.** `isApproval` first asked
+`command_text !== null`, which `ask_user_choice_inner` sets for ToolBlocklist
+(action-gate) rows ALONE. A parked `request_approval` — the push gate — carries
+none, so **10 of 31 approvals in the archive** were classified as ordinary
+questions while a pre-push hook blocked on each one. Both gate kinds ask exactly
+`Approve`/`Reject`; no ordinary question in any session ever recorded uses those
+two options. The lesson is the one from the two-hue palette: a discriminator
+that holds on the cases in front of you reads exactly like one that holds.
+
+**What the ring does NOT do.** Approvals still do not freeze it.
+`set_session_awaiting` passes `halt_ring = !blocking` deliberately — the tool
+call is in flight, the holder still holds the turn, and the ring is already
+waiting on its completion. Freezing peers would undo D22's review lap. The asker
+is blocked; everyone else keeps working. The gate is a UI claim about where the
+answer goes, not a new way to stop the ring.
+
+**Tests.** `isLocked` had no unit test until it became load-bearing — every case
+had to be expressed as a render. It has one now. Three edits changed SUBJECT and
+say so in place: the input no longer opens for a parked question, the tray no
+longer answers an approval, and Stop is now called Pause because that is what it
+does (it parks; Resume picks the ring up where it left off). Both new rules were
+mutation-verified — drop `anyBusy` from `isLocked`, or restore the
+`command_text` discriminator, and the tests that exist for them go red.

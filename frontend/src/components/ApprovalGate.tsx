@@ -1,0 +1,205 @@
+import { useState } from "react";
+import { Button } from "./ui/Button";
+import { cn } from "../lib/cn";
+import { authorColorClass } from "./authorColor";
+import { formatRelative } from "../lib/time";
+import type { TrayRow } from "./HaltBanner";
+
+/**
+ * **An approval is not a question, and it must not be parkable (rc3 D33).**
+ *
+ * Something is synchronously blocked on the answer — a git hook holding a push
+ * open, a gated command that has not run. The tray treated it as one more card
+ * in a list, so it sat below three answered questions with a Send button of its
+ * own, and the user's report was the predictable one: they answered a row, the
+ * session did not move, and a second row appeared under the first.
+ *
+ * So the gate takes the input slot. Three properties, each deliberate:
+ *
+ * 1. **It replaces the box rather than sitting near it.** There is nothing else
+ *    to do in that slot while a command is blocked, and under D33 the box is
+ *    locked anyway whenever participants are working.
+ * 2. **It is answered on the spot** — Approve / Reject, one click, no Send.
+ * 3. **Pause stays reachable.** Pause is the only interrupt in the product, and
+ *    a gate is exactly when a user might want it. A modal you cannot escape is
+ *    how a harness loses a user's trust.
+ *
+ * Approvals queue rather than stack: one at a time, oldest first, with a count.
+ * A user approving `git push` needs to read that push, not five commands at
+ * once.
+ */
+export function ApprovalGate({
+  rows,
+  label,
+  onResolve,
+  onCancel,
+}: {
+  /** Pending approvals, oldest first. Never empty — the caller decides to
+   *  render this at all. */
+  rows: readonly TrayRow[];
+  /** slug → what to print for it (rc3 D10/D20). */
+  label?: (agent: string) => string;
+  /** Resolve one approval. `confirmStale` re-sends a pick the backend held
+   *  back because the request had aged. */
+  onResolve: (
+    choiceId: string,
+    picked: string,
+    confirmStale?: boolean,
+  ) => Promise<{ kind: string; command?: string; asked_at?: string | null }>;
+  /** Pause the session — the one interrupt, kept reachable from here. */
+  onCancel?: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [stale, setStale] = useState<{
+    picked: string;
+    command: string;
+    askedAt: string | null;
+  } | null>(null);
+
+  const row = rows[0];
+  if (!row) return null;
+  const who = label?.(row.agent) ?? row.agent;
+  const more = rows.length - 1;
+
+  const resolve = async (picked: string, confirmStale = false) => {
+    if (busy) return;
+    setBusy(picked);
+    setError(null);
+    try {
+      const res = await onResolve(row.choice_id, picked, confirmStale);
+      // The backend refuses a blind approve on an aged request: the repo may
+      // have moved under it, and running the command anyway is the one
+      // irreversible mistake this surface can make.
+      if (res.kind === "needs_stale_confirm") {
+        setStale({
+          picked,
+          command: res.command ?? row.command_text ?? "",
+          askedAt: res.asked_at ?? row.asked_at,
+        });
+      } else {
+        setStale(null);
+      }
+    } catch (e) {
+      // Answering IS the action here. A silent failure would leave the gate up
+      // with no signal, and the user pressing Approve again.
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div
+      role="group"
+      aria-label="Approval required"
+      className="border-t border-primary/40 bg-surface-container-low p-3"
+    >
+      <div className="flex items-baseline gap-2">
+        <span className="font-label-caps text-label-caps text-primary">
+          ⛔ APPROVAL
+        </span>
+        <span className={cn("text-sm font-semibold", authorColorClass(who))}>
+          {who}
+        </span>
+        <span className="text-xs text-on-surface-variant">
+          is blocked until you answer
+        </span>
+        {more > 0 && (
+          <span className="ml-auto text-xs text-on-surface-variant">
+            1 of {rows.length} · {more} more after this
+          </span>
+        )}
+      </div>
+
+      <p className="mt-1.5 text-sm text-on-surface">{gatePrompt(row)}</p>
+
+      {/* The command verbatim. Never truncated — approving something you were
+          shown half of is not approval. It scrolls; the page does not. */}
+      {row.command_text && (
+        <pre className="mt-1.5 max-h-32 overflow-auto rounded border border-outline-variant bg-surface-container px-2 py-1.5 font-mono text-xs text-on-surface">
+          {row.command_text}
+        </pre>
+      )}
+
+      {stale ? (
+        <div className="mt-2 rounded border border-error/50 bg-error-container/30 p-2">
+          <p className="text-xs text-on-surface">
+            Requested {stale.askedAt ? formatRelative(stale.askedAt) : "earlier"}
+            . The repo may have moved since — confirm you still want this to run.
+          </p>
+          <div className="mt-2 flex gap-2">
+            <Button
+              type="button"
+              variant="danger"
+              disabled={!!busy}
+              onClick={() => void resolve(stale.picked, true)}
+            >
+              Run it anyway
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={!!busy}
+              onClick={() => setStale(null)}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-2 flex items-center gap-2">
+          <Button
+            type="button"
+            variant="primary"
+            disabled={!!busy}
+            onClick={() => void resolve("Approve")}
+          >
+            {busy === "Approve" ? "Approving…" : "Approve"}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={!!busy}
+            onClick={() => void resolve("Reject")}
+          >
+            {busy === "Reject" ? "Rejecting…" : "Reject"}
+          </Button>
+          {onCancel && (
+            <Button
+              type="button"
+              variant="danger"
+              className="ml-auto"
+              disabled={!!busy}
+              onClick={() => void onCancel()}
+              title="Pause the agents — the one interrupt. The gate stays until you answer it."
+            >
+              Pause
+            </Button>
+          )}
+        </div>
+      )}
+
+      {error && (
+        <p role="alert" className="mt-1.5 text-xs text-error">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * What to print above the buttons.
+ *
+ * An action-gate row's prompt is the boilerplate "Run gated command in this
+ * session's repo?" followed by the command in a fenced block — and the command
+ * gets its own `<pre>` here, so repeating it would show it twice. A push gate
+ * has no command and its prompt IS the question ("Allow `git push` to `staging`
+ * …"), so that one is printed as written.
+ */
+function gatePrompt(row: TrayRow): string {
+  if (!row.command_text) return row.prompt;
+  const firstLine = row.prompt.split("\n", 1)[0]?.trim();
+  return firstLine || "Run gated command in this session's repo?";
+}

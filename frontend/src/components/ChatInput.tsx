@@ -6,7 +6,7 @@ import { errorMessage } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import { authorColorClass } from "./authorColor";
 import { UNKNOWN_PARTICIPANT } from "../lib/participants";
-import { isLocked, type AgentBusy, type SessionActivity } from "../stores/activity";
+import { anyBusy, isLocked, type AgentBusy, type SessionActivity } from "../stores/activity";
 
 /** One participant the `@` picker can insert (rc3 D17). */
 export type Mentionable = {
@@ -164,9 +164,10 @@ export function ChatInput({
   const pickerOpen = !!mention && matches.length > 0 && !pickerDismissed;
   const active = matches[Math.min(highlight, matches.length - 1)];
 
-  // A turn is in flight (busy/cancelling). While locked we hide the textarea and
-  // show the turn-status line + Stop, rather than leaving the input typeable.
-  const locked = isLocked(activity);
+  // Somebody is working. While locked we hide the textarea and show the
+  // turn-status line + Pause, rather than leaving the input typeable — rc3 D33:
+  // no typing while agents work, and Pause is the only way to take the box back.
+  const locked = isLocked(activity, busy);
   // Once the turn actually stops (activity leaves busy/cancelling) drop the
   // local "Cancelling…" spinner. v1 has no explicit backend cancelling state
   // (it goes busy → idle), so this is the post-press feedback.
@@ -332,11 +333,16 @@ export function ChatInput({
                 // latency (`cancelling`) or the backend's explicit `cancelling`.
                 disabled={cancelling || activity === "cancelling"}
                 className="min-w-[5.5rem]"
-                title="Pause the agents — the session parks until you steer, resume, or close"
+                // Named for what it IS (rc3 D33): the only interrupt in the
+                // product. Everything else — a parked question, an approval, a
+                // halt — is the session arriving somewhere, not being cut off.
+                // It was called "Stop", which reads as an abort; it parks, and
+                // Resume picks the ring up where it left off.
+                title="Pause the agents — the one interrupt. The session parks until you steer, resume, or close."
               >
                 {cancelling || activity === "cancelling"
-                  ? "Cancelling…"
-                  : "Stop"}
+                  ? "Pausing…"
+                  : "Pause"}
               </Button>
             )}
           </>
@@ -469,12 +475,6 @@ export function ChatInput({
   );
 }
 
-/** Is any agent mid-turn? Separate from the collapsed `activity`, which can
- *  read `awaiting_user` / `paused` while an agent is still running. */
-function anyBusy(busy?: AgentBusy): boolean {
-  return Object.values(busy ?? {}).some(Boolean);
-}
-
 // Which participants are mid-turn, as a labelled list — a broadcast can have
 // every one of them busy at once. Shared by the locked turn-status line and the
 // unlocked still-working notice so the two labels can never drift apart.
@@ -518,18 +518,16 @@ function WorkerLine({
 }
 
 /**
- * The input is UNLOCKED but an agent is still mid-turn — the state that reads as
- * "they stopped" and isn't.
+ * The input is UNLOCKED but a participant is still mid-turn.
  *
- * `SessionActivity::derive` (src/core/activity.rs) ranks `awaiting` ABOVE `busy`
- * on purpose: parking a question must re-open the textarea even though the turn
- * is still in flight, or the user couldn't answer it. But `TurnStatus` only ever
- * rendered inside the locked branch, so the per-agent flags — which the backend
- * emits on EVERY activity event, whatever the derived state — had nowhere to go.
- * The user saw an open input, assumed the work was done, and then watched more
- * output arrive seconds later.
+ * Under rc3 D33 that combination has exactly ONE cause left: **the user pressed
+ * Pause and the busy flags are still draining.** `isLocked` now consults the
+ * per-participant map, so a parked question no longer re-opens the box over a
+ * running turn — which is what this notice originally existed to apologise for.
  *
- * The textarea stays enabled here. This line only says the work hasn't stopped.
+ * Keeping the line for the Pause case is the point: the user chose the
+ * interrupt, gets the box immediately, and this says the current tool call is
+ * still unwinding, so the first reply may land a beat late.
  */
 function StillWorkingNotice({
   activity,

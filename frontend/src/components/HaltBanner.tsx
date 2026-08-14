@@ -4,12 +4,42 @@ import { authorColorClass } from "./authorColor";
 /** One pending tray row, as `list_session_tray` returns it. */
 export type TrayRow = {
   id: number;
+  choice_id: string;
   agent: string;
   kind: string;
   prompt: string;
+  options: string[];
   status: string;
   asked_at: string;
+  /** The gated command awaiting approval; null for an ordinary question. This
+   *  is the discriminator between "somebody is blocked on this RIGHT NOW" and
+   *  "a question is waiting whenever you get to it". */
+  command_text: string | null;
 };
+
+/**
+ * Is this row an approval — something synchronously blocked on a yes/no?
+ *
+ * **Keyed on the OPTIONS, not on `command_text`.** The first version of this
+ * asked `command_text !== null`, which is set by `ask_user_choice_inner` for
+ * ToolBlocklist (action-gate) rows *alone*. A parked `request_approval` — the
+ * push gate, `Allow \`git push\` to \`staging\`?` — carries no command and was
+ * therefore classified as an ordinary question. Counted across the archive:
+ * **10 of 31 approvals**, every one of them a push gate, shown to the user as
+ * something they could answer whenever they got to it while a pre-push hook
+ * blocked on it.
+ *
+ * Both gate kinds ask exactly `Approve`/`Reject`; an `ask_user_choice` question
+ * carries free-form options. Across every tray row ever recorded that
+ * separation is exact — 31 matches, all gates, no false positives.
+ */
+export function isApproval(r: { options: readonly string[] }): boolean {
+  return (
+    r.options.length === 2 &&
+    r.options[0] === "Approve" &&
+    r.options[1] === "Reject"
+  );
+}
 
 /**
  * **Why the session has stopped, above the box where you answer it.**
@@ -54,28 +84,45 @@ export function HaltBanner({
   /** Jump to the tray, when a pick is waiting there too. */
   onOpenTray?: () => void;
 }) {
-  const halts = rows.filter((r) => r.kind === "halt" && r.status === "pending");
-  const choices = rows.filter(
-    (r) => r.kind !== "halt" && r.status === "pending",
-  );
-  // Not halted: render nothing at all rather than an empty bar. A banner that is
-  // always present stops being read.
-  if (halts.length === 0 && choices.length === 0) return null;
+  const pending = rows.filter((r) => r.status === "pending");
+  const halts = pending.filter((r) => r.kind === "halt");
+  const approvals = pending.filter((r) => r.kind !== "halt" && isApproval(r));
+  const choices = pending.filter((r) => r.kind !== "halt" && !isApproval(r));
+  // Not waiting on anything: render nothing rather than an empty bar. A banner
+  // that is always present stops being read.
+  if (pending.length === 0) return null;
+
+  // **HALT is a claim about the SESSION, not about the tray** (rc3 D32).
+  //
+  // The first version of this banner said HALT whenever any row was pending —
+  // so parking a question printed "HALT" over a session that was still working,
+  // and the status line underneath correctly said two participants were mid-turn.
+  // The user: "parking a question in tray toggles the halt (it should not), its
+  // asynchronous."
+  //
+  // They are right, and it is the semantics rather than the wording:
+  // `ask_user_choice` is non-blocking BY DESIGN — the agent parks a question and
+  // carries on. Only `halt` / `mark_awaiting_user` is a participant saying it has
+  // stopped. So a halt row is a halt; everything else is something waiting for
+  // you while the session runs.
+  const halted = halts.length > 0;
 
   return (
     <div
       role="status"
-      aria-label="Session halted"
+      aria-label={halted ? "Session halted" : "Waiting for you"}
       className="border-b border-outline-variant bg-surface-container-low px-3 py-2"
     >
       <div className="flex items-baseline gap-2">
         <span className="font-label-caps text-label-caps text-primary">
-          ⏸ HALT
+          {halted ? "⏸ HALT" : "◆ FOR YOU"}
         </span>
         <span className="text-xs text-on-surface-variant">
-          {halts.length > 0
+          {halted
             ? "the session is waiting on you"
-            : "a question is waiting in the tray"}
+            : approvals.length > 0
+              ? "a command is blocked on your approval — the session is still working"
+              : "a question is waiting — the session is still working"}
         </span>
       </div>
       {/* One line per blocked participant. Multiple is reachable since rc3 D22:
@@ -95,18 +142,21 @@ export function HaltBanner({
           );
         })}
       </ul>
-      {choices.length > 0 && (
+      {(choices.length > 0 || approvals.length > 0) && (
         <button
           type="button"
           onClick={onOpenTray}
           className="mt-1 text-xs text-primary underline underline-offset-2"
         >
-          {choices.length} question{choices.length > 1 ? "s" : ""} waiting in the
-          tray →
+          {approvals.length > 0
+            ? `${approvals.length} approval${approvals.length > 1 ? "s" : ""} waiting in the tray →`
+            : `${choices.length} question${choices.length > 1 ? "s" : ""} waiting in the tray →`}
         </button>
       )}
       <p className="mt-1 text-[0.7rem] text-on-surface-variant">
-        Answering — here or in the tray — clears this and restarts the session.
+        {halted
+          ? "Answering — here or in the tray — clears this and resumes the session."
+          : "Answer whenever you are ready; the participants carry on meanwhile."}
       </p>
     </div>
   );

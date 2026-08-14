@@ -58,10 +58,53 @@ export const useActivityStore = create<ActivityStore>((set) => ({
     }),
 }));
 
-/** Should the chat input lock? `busy`/`cancelling` lock it (the duo is
- *  working); `idle`, `awaiting_user`, and `paused` (the user's turn — steer,
- *  resume, or close) leave it open. Undefined = no event yet = assume idle
- *  (input open). */
-export function isLocked(activity: SessionActivity | undefined): boolean {
-  return activity === "busy" || activity === "cancelling";
+/** Is any participant mid-turn? The session-level activity collapses the map to
+ *  a single `busy` and ranks `awaiting` above it, so this is the only honest
+ *  answer to "is somebody working right now". */
+export function anyBusy(busy?: AgentBusy): boolean {
+  return Object.values(busy ?? {}).some(Boolean);
+}
+
+/**
+ * **Should the chat input lock? — the one rule the whole interrupt model rests
+ * on (rc3 D33).**
+ *
+ * > *"users are never allowed to type while agents are working, no halt = no
+ * > type (except for pause button which is the real interrupt)"*
+ *
+ * So: **locked ⟺ somebody is working.** Not "the session says busy" — the
+ * per-participant map, because `SessionActivity::derive` ranks `awaiting` ABOVE
+ * `busy` and a parked question therefore reported `awaiting_user` while two
+ * participants ran. That is the reported screenshot: an open textarea, a banner
+ * claiming a halt, and a status line underneath correctly naming the
+ * participant mid-turn. The box was typeable because the collapsed enum had
+ * lost the fact that anyone was busy.
+ *
+ * `paused` is the deliberate exception and the point of the whole design: the
+ * user pressed Pause, which is the ONE interrupt in the product. Agents are
+ * stopped by the time it lands, and the busy flags may still be draining — the
+ * user gets the box regardless, because taking it is what they pressed the
+ * button for.
+ *
+ * What this buys, and why it is worth a locked box: **no message can arrive
+ * mid-turn.** The alternative considered and rejected was buffering — hold the
+ * user's text and deliver it at the next turn boundary — which needs a queue, a
+ * delivery point, an "it will land later" affordance, and an answer for what
+ * happens when the session halts before the boundary. Locking needs none of
+ * that, and it makes the cost visible at the moment the user pays it rather
+ * than silently deferring their words.
+ *
+ * The cost, chosen rather than discovered: **arriving to a working session
+ * takes one extra click.** You open a session to fire a prompt and leave; if
+ * agents are mid-turn you press Pause first. Deliberate, not free.
+ */
+export function isLocked(
+  activity: SessionActivity | undefined,
+  busy?: AgentBusy,
+): boolean {
+  if (activity === "cancelling") return true;
+  // Pause landed: the interrupt the user chose. The box is theirs even if the
+  // busy flags have not finished draining.
+  if (activity === "paused") return false;
+  return activity === "busy" || anyBusy(busy);
 }

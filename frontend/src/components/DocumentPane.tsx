@@ -5,6 +5,7 @@ import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { PhasePillRow, type Phase } from "./PhasePill";
+import { isApproval } from "./HaltBanner";
 import { ChoicePrompt, type ChoicePromptChoice } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
 import { ErrorBanner } from "./ErrorBanner";
@@ -530,12 +531,36 @@ function TrayList({ sessionId }: { sessionId: string }) {
       });
   };
 
-  const pending = entries.filter((e) => e.status === "pending");
+  // **rc3 D33: approvals are not parkable, so they are not answerable HERE.**
+  //
+  // They take the input slot instead (`ApprovalGate`). Leaving a second Approve
+  // button in the tray would rebuild the exact defect the gate exists to fix —
+  // two answer paths into one row, which is what produced "I answered it and a
+  // second one appeared". The count line below still reports them, so a user
+  // looking at the tray is told where the answer lives rather than finding the
+  // row missing.
+  const allPending = entries.filter((e) => e.status === "pending");
+  const gated = allPending.filter(isApproval);
+  const pending = allPending.filter((e) => !isApproval(e));
+  const gateNotice = gated.length > 0 && (
+    <p className="mb-3 text-sm text-on-surface-variant">
+      <span className="font-label-caps text-label-caps text-primary">
+        ⛔ {gated.length} APPROVAL{gated.length > 1 ? "S" : ""}
+      </span>{" "}
+      — answered below the chat, where the input box is. Something is blocked
+      until you do.
+    </p>
+  );
   if (pending.length === 0) {
     return (
-      <p className="text-sm text-on-surface-variant">
-        No pending input — you're all caught up.
-      </p>
+      <>
+        {gateNotice}
+        {gated.length === 0 && (
+          <p className="text-sm text-on-surface-variant">
+            No pending input — you're all caught up.
+          </p>
+        )}
+      </>
     );
   }
   return (
@@ -619,6 +644,7 @@ function TrayList({ sessionId }: { sessionId: string }) {
           setViewInline(null);
         }}
       />
+      {gateNotice}
       <ul className="space-y-3">
         {pending.map((e) => (
         <li key={e.id}>

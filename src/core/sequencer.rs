@@ -2130,7 +2130,7 @@ async fn announce_all_passed(deps: &SequencerDeps) {
             None,
             MessageKind::SystemNotice.as_str(),
             "Every participant passed this round — nobody has anything to add \
-             without you. The cycle has yielded; send a message to start it again.",
+             without you. The cycle has yielded; send a message to resume.",
             None,
         )
         .await
@@ -4806,7 +4806,7 @@ mod tests {
             vec![
                 "still here",
                 "Every participant passed this round — nobody has anything to add \
-                 without you. The cycle has yielded; send a message to start it again.",
+                 without you. The cycle has yielded; send a message to resume.",
             ],
             "the restart hands over the backlog INCLUDING the notice — it is a row like \
              any other, and a participant reading why the cycle stopped is the point"
