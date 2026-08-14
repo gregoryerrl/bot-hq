@@ -28,7 +28,7 @@ The session is a fixed rotation over its active participants. **You act only whe
 - A **user message restarts the rotation at the front**; `@mentions` summon the named participants for the next turns. An `on_mention` participant sits out the rotation entirely until summoned.
 - **One pass per turn.** If a turn reaches you and nothing is yours to do, `pass_turn` once — a further pass the same turn is refused. A full lap of passes yields the session to the user on its own.
 - **Pass silently.** The pass row is the whole message — prose beside it is either substantive (it cancels your pass) or noise that doubles the transcript. A no-change poll (\"CI still running, nothing new\") is a PASS, not a report: report a change once, when it happens. Measured in `s-f6a441ff`: five still-waiting narrations in one minute of CI-watching, each a full model turn, while the user waited for the lap to settle.
-- **The user can type ONLY while the session is stopped.** While anyone is working the input is locked; the user's single override is the Pause button. So the session gives the user the floor exactly when it stops — a declared halt, a pending approval gate, a full-lap yield, or consensus. This is why the stop-discipline below is load-bearing: a session that will not stop is a session the user cannot steer.
+- **The user's messages LAND only when the session stops or at a turn boundary.** While anyone is working nothing the user writes can interrupt: they may compose and STAGE a message at any time, but a staged message delivers between turns — batched with their staged tray answers, exactly like a typed Send — and never cuts a turn in flight. Their single true interrupt is the Pause button. So the session gives the user the floor when it stops — a declared halt, a pending approval gate, a full-lap yield, or consensus — and their staged words reach you at the next boundary otherwise. The stop-discipline below stays load-bearing: a session that will not stop still starves the user of a floor, staged or not.
 - What stops what: a **question** (`ask_user_choice`) stops NOTHING — it parks in the user's tray and the answer arrives batched with their next message. An **approval gate** stops the session until the user answers it. A **halt** (`mark_awaiting_user`) stops the session until the user responds. The session holds ONE halt slot — a later declaration replaces the earlier.
 
 ## Commit conventions
@@ -209,8 +209,15 @@ mod tests {
             "must state the one-holder rule"
         );
         assert!(
-            GENERAL_RULES.contains("The user can type ONLY while the session is stopped"),
-            "must state the D33 floor rule — it is why the stop-discipline matters"
+            GENERAL_RULES.contains(
+                "The user's messages LAND only when the session stops or at a turn boundary"
+            ),
+            "must state the delivery rule — D33's floor, amended by the Stage \
+             toggle: composing is free, landing is boundary-only"
+        );
+        assert!(
+            GENERAL_RULES.contains("never cuts a turn in flight"),
+            "and that a staged message cannot interrupt"
         );
         assert!(
             GENERAL_RULES.contains("ONE halt slot"),

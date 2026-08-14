@@ -142,6 +142,19 @@ pub enum SignalingEvent {
         agent: String,
         target: String,
     },
+    /// The ring reached a turn boundary with a staged user response pending
+    /// (the Stage toggle, 2026-08-15). Routed by main.rs to
+    /// `AppState::deliver_staged`, which takes the stored content and sends
+    /// it through the ordinary `send_user_response` path — answers first,
+    /// message last, one release. Internal plumbing: the UI never sees this.
+    StagedDeliveryDue {
+        session_id: String,
+    },
+    /// A staged user response was delivered (posted + released). The UI
+    /// clears its Stage toggle, drops the draft, and un-stages tray picks.
+    StageDelivered {
+        session_id: String,
+    },
     /// A session document was written/updated (`session_doc_write`). The UI
     /// invalidates its doc queries so a freshly-written phase doc appears
     /// without a manual tab-switch.
@@ -577,6 +590,45 @@ impl SignalingBridge {
                     session_id,
                     opened,
                     "a gate notification did not reach the ring; the latch reseeds on respawn"
+                );
+            }
+        }
+    }
+
+    /// The ring reached a boundary with a stage pending: hand delivery to the
+    /// app layer (main.rs routes this to `AppState::deliver_staged`).
+    pub fn notify_staged_delivery_due(&self, session_id: &str) {
+        let _ = self.event_tx.send(SignalingEvent::StagedDeliveryDue {
+            session_id: session_id.to_string(),
+        });
+    }
+
+    /// A staged response was posted + released — the UI clears its toggle,
+    /// draft, and staged tray picks.
+    pub fn notify_stage_delivered(&self, session_id: &str) {
+        let _ = self.event_tx.send(SignalingEvent::StageDelivered {
+            session_id: session_id.to_string(),
+        });
+    }
+
+    /// Tell the ring a STAGED user response now exists (or was withdrawn) —
+    /// the Stage toggle (2026-08-15). The content stays in `AppState`; the
+    /// ring holds only the flag and emits `StagedDeliveryDue` at the next
+    /// turn boundary, where delivery cannot supersede a turn in flight.
+    pub async fn notify_ring_stage(&self, session_id: &str, staged: bool) {
+        let seq = self.session_sequencer.lock().await.get(session_id).cloned();
+        if let Some(tx) = seq {
+            let cmd = if staged {
+                crate::core::sequencer::SequencerCommand::MessageStaged
+            } else {
+                crate::core::sequencer::SequencerCommand::MessageUnstaged
+            };
+            if tx.try_send(cmd).is_err() {
+                tracing::warn!(
+                    session_id,
+                    staged,
+                    "a stage notification did not reach the ring; the staged \
+                     message waits for the next boundary the flag does reach"
                 );
             }
         }

@@ -342,6 +342,56 @@ export function SessionView() {
     },
     [sessionId, navigate, clearChat],
   );
+  // The Stage toggle (2026-08-15): the backend holds the staged response;
+  // this query is the toggle's source of truth (reload-safe). Delivery fires
+  // `session:stage_delivered` — bump the tick (clears the composer draft),
+  // drop the consumed tray picks, and refetch everything the delivery moved.
+  const { data: stagedResp = null, refetch: refetchStaged } = useTauriQuery<{
+    text: string;
+    picks: { choice_id: string; picked: string }[];
+  } | null>("get_staged_response", { sessionId });
+  const [deliveredTick, setDeliveredTick] = useState(0);
+  useTauriEvent<{ session_id: string }>(
+    "session:stage_delivered",
+    (payload) => {
+      if (payload.session_id !== sessionId) return;
+      setDeliveredTick((t) => t + 1);
+      clearStaged(sessionId);
+      void refetchStaged();
+      void queryClient.invalidateQueries({
+        queryKey: ["list_session_tray", { sessionId }],
+      });
+    },
+    [sessionId, clearStaged, refetchStaged, queryClient],
+  );
+  // Picks staged AFTER the message was staged must ride too: re-stage with
+  // the same text whenever the pick set changes while staged, so the backend
+  // snapshot always equals what the tray shows as staged.
+  const stagedPickCount = Object.keys(stagedMap).length;
+  useEffect(() => {
+    if (!stagedResp) return;
+    const current = trayRows
+      .filter(
+        (r) =>
+          r.status === "pending" && !isApproval(r) && stagedMap[r.choice_id],
+      )
+      .map((r) => ({ choice_id: r.choice_id, picked: stagedMap[r.choice_id]! }));
+    if (
+      current.length !== stagedResp.picks.length ||
+      current.some(
+        (p, i) =>
+          stagedResp.picks[i]?.choice_id !== p.choice_id ||
+          stagedResp.picks[i]?.picked !== p.picked,
+      )
+    ) {
+      void invoke("stage_user_response", {
+        sessionId,
+        text: stagedResp.text,
+        picks: current,
+      }).then(() => refetchStaged());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stagedPickCount]);
 
   if (!session) {
     return (
@@ -716,6 +766,35 @@ export function SessionView() {
                 .filter((p) => p.enabled)
                 .map((p) => ({ slug: p.slug, label: participantLabel(p) }))}
               stagedAnswers={stagedCount}
+              staged={!!stagedResp}
+              stagedText={stagedResp?.text ?? null}
+              deliveredTick={deliveredTick}
+              onStage={async (text) => {
+                // Snapshot the currently staged tray picks with the message —
+                // the same set a Send would carry (rc3 D34); the effect above
+                // re-stages if the set changes while staged.
+                const picks = trayRows
+                  .filter(
+                    (r) =>
+                      r.status === "pending" &&
+                      !isApproval(r) &&
+                      stagedMap[r.choice_id],
+                  )
+                  .map((r) => ({
+                    choice_id: r.choice_id,
+                    picked: stagedMap[r.choice_id]!,
+                  }));
+                await invoke("stage_user_response", {
+                  sessionId,
+                  text,
+                  picks,
+                });
+                await refetchStaged();
+              }}
+              onUnstage={async () => {
+                await invoke("unstage_user_response", { sessionId });
+                await refetchStaged();
+              }}
               onSend={async (text) => {
                 // rc3 D34: staged answers travel WITH the message as one user
                 // response — answers recorded first, message last, one release.

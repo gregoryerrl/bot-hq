@@ -139,6 +139,18 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             // refetches list_pending_tray (it isn't per-session data).
             emit_event("session:halt_cleared", Value::Null);
         }
+        SignalingEvent::StagedDeliveryDue { .. } => {
+            // Internal plumbing: main.rs routes this to AppState::deliver_staged.
+            // The UI hears about the OUTCOME via StageDelivered below.
+        }
+        SignalingEvent::StageDelivered { session_id } => {
+            // The staged response landed: the composer clears its Stage
+            // toggle + draft and the staged tray picks are consumed.
+            emit_event(
+                "session:stage_delivered",
+                serde_json::json!({ "session_id": session_id }),
+            );
+        }
         SignalingEvent::AgentHealth {
             session_id,
             agent,

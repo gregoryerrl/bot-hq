@@ -174,6 +174,13 @@ pub struct AppState {
     /// instead of carrying a copy, so a held wake cannot drift from what the
     /// chat shows.
     pending_paused_wakes: Mutex<std::collections::HashMap<String, Vec<PersistedMessage>>>,
+    /// The Stage toggle's content (2026-08-15): session_id → (text, staged
+    /// tray picks), written when the user toggles Stage while the ring runs,
+    /// taken by [`deliver_staged`](Self::deliver_staged) when the ring
+    /// reaches a boundary. The SEQUENCER holds only a flag; the content
+    /// lives here so a reloaded frontend can rehydrate its toggle and an
+    /// unstage is a plain remove.
+    staged_responses: Mutex<std::collections::HashMap<String, (String, Vec<(String, String)>)>>,
     /// Per-session PTY terminals (Terminal subtab). Lazily spawned on first
     /// `terminal_open`, killed on `close_session`. Shared as an `Arc` so the
     /// signaling bridge's MCP handlers can reach the same PTYs.
@@ -206,6 +213,7 @@ impl AppState {
             fs_watcher: std::sync::OnceLock::new(),
             pending_reconcile: Mutex::new(HashSet::new()),
             pending_paused_wakes: Mutex::new(std::collections::HashMap::new()),
+            staged_responses: Mutex::new(std::collections::HashMap::new()),
             terminals: Arc::new(crate::core::TerminalRegistry::new()),
             epilogue_in_flight: Mutex::new(HashSet::new()),
         }
@@ -1295,6 +1303,80 @@ impl AppState {
         Ok(())
     }
 
+    /// **Stage a user response** (the Stage toggle, 2026-08-15): hold the
+    /// typed message + the staged tray picks for delivery at the ring's next
+    /// turn boundary. Staging changes WHEN the user may compose, not when a
+    /// message may land — delivery arrives as an ordinary user message
+    /// between turns, and Pause stays the only interrupt. Re-staging
+    /// replaces the previous stage (one slot, like the halt).
+    pub async fn stage_user_response(
+        &self,
+        session_id: &str,
+        text: &str,
+        picks: Vec<(String, String)>,
+    ) -> Result<()> {
+        // The paste gate applies at STAGE time so the user hears the refusal
+        // immediately, not minutes later at a boundary they aren't watching.
+        if let Some(refusal) = Self::oversized_message_refusal(text.len()) {
+            anyhow::bail!(refusal);
+        }
+        if text.trim().is_empty() && picks.is_empty() {
+            anyhow::bail!("nothing to stage: empty message and no staged answers");
+        }
+        self.staged_responses
+            .lock()
+            .await
+            .insert(session_id.to_string(), (text.to_string(), picks));
+        self.bridge.notify_ring_stage(session_id, true).await;
+        Ok(())
+    }
+
+    /// The user un-toggled Stage to edit: drop the content and lower the
+    /// ring's flag. A boundary that already fired finds nothing to deliver
+    /// and the ring simply yields — an open box over an idle ring, which is
+    /// exactly what an editing user wants.
+    pub async fn unstage_user_response(&self, session_id: &str) {
+        self.staged_responses.lock().await.remove(session_id);
+        self.bridge.notify_ring_stage(session_id, false).await;
+    }
+
+    /// The staged content, if any — the frontend rehydrates its toggle from
+    /// this after a reload.
+    pub async fn staged_response(
+        &self,
+        session_id: &str,
+    ) -> Option<(String, Vec<(String, String)>)> {
+        self.staged_responses.lock().await.get(session_id).cloned()
+    }
+
+    /// The ring reached a boundary with a stage pending
+    /// (`SignalingEvent::StagedDeliveryDue`, routed here by main.rs): take
+    /// the content and deliver it through [`send_user_response`] — the ONE
+    /// send path, so a staged send and a typed send are the same event
+    /// (answers first, message last, one release; rc3 D34/D28). On failure
+    /// the content is restored and the ring re-flagged, so the user's
+    /// message survives to the next boundary instead of vanishing.
+    pub async fn deliver_staged(&self, session_id: &str) {
+        let Some((text, picks)) = self.staged_responses.lock().await.remove(session_id) else {
+            return;
+        };
+        match self.send_user_response(session_id, &text, picks.clone()).await {
+            Ok(()) => self.bridge.notify_stage_delivered(session_id),
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    session_id,
+                    "staged delivery failed; restoring the stage for the next boundary"
+                );
+                self.staged_responses
+                    .lock()
+                    .await
+                    .insert(session_id.to_string(), (text, picks));
+                self.bridge.notify_ring_stage(session_id, true).await;
+            }
+        }
+    }
+
     /// Set IPAV phase + emit a synthetic user "phase advanced to X" message so
     /// both agents see the transition naturally. Also clears any awaiting-user
     /// halt — an agent that fired `request_phase_advance` has effectively been
@@ -1923,8 +2005,9 @@ mod tests {
             .expect("a split always yields a first part");
         assert_eq!(
             prod.matches("oversized_message_refusal(").count(),
-            3,
-            "the paste gate guards broadcast AND send_user_response"
+            4,
+            "the paste gate guards broadcast, send_user_response AND \
+             stage_user_response — every user-text entry point"
         );
     }
 

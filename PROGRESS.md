@@ -18,7 +18,46 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
-## 2026-08-15 — the ledger reverted: bot-hq is not a task manager
+## 2026-08-15 — Stage: compose anytime, land at the boundary
+
+The user's design, built as specced: *"remove the lock on the input box.
+while agents are busy, instead of send button, it will be a toggle button…
+lock-load the written message… to be sent in the most convenient time (in
+between turns maybe?) along with the answers from tray."* Named **Stage**
+(their ask for a term; consistent with the tray's staged answers, which ride
+along).
+
+**The insight that keeps it inside the contract:** rc3 D33's rule was always
+about messages LANDING mid-turn — superseding the holder — never about
+composing. Stage moves the lock from the BOX to the SEND: the textarea stays
+writable while the ring runs, nothing can Send, and the submit slot becomes
+a toggle that queues the message for the next turn boundary. Pause remains
+the only interrupt.
+
+**Mechanics.** Content lives in `AppState` (reload-safe, one slot,
+re-stage replaces); the sequencer holds only a flag. At a boundary — a turn
+completing, a consensus yield, a declared halt (the staged message IS the
+release), or staging while already stopped — the ring PARKS instead of
+dealing and emits `StagedDeliveryDue`; main.rs routes it to
+`deliver_staged`, which sends through the ONE path (`send_user_response`:
+answers first, message last, one release), then `StageDelivered` clears the
+composer, the draft, and the consumed tray picks. A failed delivery
+restores the stage rather than losing the message. The paste gate applies
+at stage time. Picks staged after the message re-stage automatically so the
+snapshot always equals the tray.
+
+**Frontend:** the locked branch now shows the turn-status line above a
+writable box; Stage ⇄ Staged ✓ toggles lock/edit; Enter stages while the
+ring runs and sends otherwise; `get_staged_response` rehydrates the toggle
+across reloads. Universal layer updated — "the user's messages LAND only
+when the session stops or at a turn boundary… never cuts a turn in flight"
+— since agents reason from that sentence.
+
+Pinned: four sequencer tests (boundary-not-mid-turn with the full
+delivery loop, immediate delivery when stopped, unstage never delivers,
+staged-as-halt-release), ChatInput's rewritten lock pins (the lock is on
+SEND now, twice re-subjected and saying so), stage/unstage/clear-on-deliver
+flows, and the paste-gate count extended to the stage entry point.
 
 The user, seeing the "Waiting on you" card: *"No i don't want that, revert
 that, I only meant 'merge myself' cause i thought they're going to gate the

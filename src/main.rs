@@ -514,6 +514,11 @@ fn main() -> Result<()> {
                             // its residual generation so the halt is a halt.
                             core_for_worker.halt_declared(&session_id, &agent).await;
                         }
+                        SignalingEvent::StagedDeliveryDue { session_id } => {
+                            // The ring reached a boundary with a stage
+                            // pending: deliver it through the one send path.
+                            core_for_worker.deliver_staged(&session_id).await;
+                        }
                         SignalingEvent::AgentAdvancePhase { session_id, target, .. } => {
                             match bot_hq::core::ipav::IpavPhase::parse(&target) {
                                 Some(phase) => {
@@ -540,7 +545,8 @@ fn main() -> Result<()> {
                         Ok(
                             ev @ (SignalingEvent::SessionCloseRequest { .. }
                             | SignalingEvent::AgentAdvancePhase { .. }
-                            | SignalingEvent::AwaitingUser { .. }),
+                            | SignalingEvent::AwaitingUser { .. }
+                            | SignalingEvent::StagedDeliveryDue { .. }),
                         ) => {
                             // Unbounded hand-off → never blocks the broadcast drain.
                             let _ = ctrl_tx.send(ev);

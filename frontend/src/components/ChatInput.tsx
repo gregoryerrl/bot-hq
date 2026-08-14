@@ -126,6 +126,21 @@ interface ChatInputProps {
    * the seed is a lazy initializer, not an effect.
    */
   draftKey?: string;
+  /**
+   * The Stage toggle (2026-08-15). While the ring runs the box stays
+   * WRITABLE — composing was never the hazard; landing mid-turn was — and
+   * the Send slot becomes **Stage**: toggled on, the message locks and the
+   * backend delivers it at the next turn boundary together with the staged
+   * tray answers, exactly like a typed Send. Untoggling makes it editable
+   * again. Pause remains the only interrupt.
+   */
+  staged?: boolean;
+  /** The staged text, for rehydrating the box after a reload. */
+  stagedText?: string | null;
+  /** Increments each time a staged response DELIVERS — clears the draft. */
+  deliveredTick?: number;
+  onStage?: (text: string) => Promise<void> | void;
+  onUnstage?: () => Promise<void> | void;
 }
 
 export function ChatInput({
@@ -142,6 +157,11 @@ export function ChatInput({
   onResume,
   onClose,
   draftKey,
+  staged = false,
+  stagedText = null,
+  deliveredTick = 0,
+  onStage,
+  onUnstage,
 }: ChatInputProps) {
   const [value, setValue] = useState(() =>
     draftKey ? (localStorage.getItem(draftKey) ?? "") : "",
@@ -169,9 +189,11 @@ export function ChatInput({
   const pickerOpen = !!mention && matches.length > 0 && !pickerDismissed;
   const active = matches[Math.min(highlight, matches.length - 1)];
 
-  // Somebody is working. While locked we hide the textarea and show the
-  // turn-status line + Pause, rather than leaving the input typeable — rc3 D33:
-  // no typing while agents work, and Pause is the only way to take the box back.
+  // Somebody is working. The box stays WRITABLE (the Stage toggle,
+  // 2026-08-15) — rc3 D33's rule was always about messages LANDING mid-turn,
+  // not about composing — but nothing SENDS while locked: the submit slot
+  // becomes Stage, delivery waits for a turn boundary, and Pause stays the
+  // only interrupt.
   const locked = isLocked(activity, busy);
   // Once the turn actually stops (activity leaves busy/cancelling) drop the
   // local "Cancelling…" spinner. v1 has no explicit backend cancelling state
@@ -179,6 +201,52 @@ export function ChatInput({
   useEffect(() => {
     if (!locked) setCancelling(false);
   }, [locked]);
+  const [staging, setStaging] = useState(false);
+  // A staged delivery consumed the message: clear the draft. Ref-guarded so
+  // the mount value never wipes a draft.
+  const prevTickRef = useRef(deliveredTick);
+  useEffect(() => {
+    if (prevTickRef.current !== deliveredTick) {
+      prevTickRef.current = deliveredTick;
+      updateValue("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deliveredTick]);
+  // Rehydrate the box from the backend's staged content (a reload while
+  // staged). Only while staged — the box is readOnly then, so this can never
+  // fight the user's typing.
+  useEffect(() => {
+    if (staged && stagedText != null && stagedText !== value) {
+      setValue(stagedText);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [staged, stagedText]);
+
+  const handleStage = async () => {
+    if (!onStage || staging || staged) return;
+    const text = value.trim();
+    if (!text && stagedAnswers === 0) return;
+    setStaging(true);
+    setError(null);
+    try {
+      await onStage(text);
+      // The text stays in the (now read-only) box — it IS the staged message.
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setStaging(false);
+    }
+  };
+
+  const handleUnstage = async () => {
+    if (!onUnstage) return;
+    setError(null);
+    try {
+      await onUnstage();
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
 
   const handleCancel = async () => {
     if (!onCancel || cancelling) return;
@@ -250,6 +318,11 @@ export function ChatInput({
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    // While the ring runs, submit means STAGE — nothing ever sends mid-turn.
+    if (locked) {
+      await handleStage();
+      return;
+    }
     const text = value.trim();
     // Staged answers make an empty Send meaningful (rc3 D34): the picks ARE
     // the response, and the backend requires text or at least one pick.
@@ -319,41 +392,16 @@ export function ChatInput({
           hues={authorHues}
         />
       )}
-      <form
-        onSubmit={handleSubmit}
-        className={cn("flex gap-2 p-3", locked ? "items-center" : "items-end")}
-      >
-        {locked ? (
-          <>
-            <TurnStatus
-              activity={activity}
-              busy={busy}
-              label={busyLabel}
-              hues={authorHues}
-            />
-            {onCancel && (
-              <Button
-                type="button"
-                variant="danger"
-                onClick={handleCancel}
-                // Disabled while the cancel is in flight — either the local press
-                // latency (`cancelling`) or the backend's explicit `cancelling`.
-                disabled={cancelling || activity === "cancelling"}
-                className="min-w-[5.5rem]"
-                // Named for what it IS (rc3 D33): the only interrupt in the
-                // product. Everything else — a parked question, an approval, a
-                // halt — is the session arriving somewhere, not being cut off.
-                // It was called "Stop", which reads as an abort; it parks, and
-                // Resume picks the ring up where it left off.
-                title="Pause the agents — the one interrupt. The session parks until you steer, resume, or close."
-              >
-                {cancelling || activity === "cancelling"
-                  ? "Pausing…"
-                  : "Pause"}
-              </Button>
-            )}
-          </>
-        ) : (
+      <form onSubmit={handleSubmit} className="flex flex-col gap-1.5 p-3">
+        {locked && (
+          <TurnStatus
+            activity={activity}
+            busy={busy}
+            label={busyLabel}
+            hues={authorHues}
+          />
+        )}
+        <div className="flex items-end gap-2">
           <>
             <div className="relative flex-1">
               {pickerOpen && (
@@ -453,9 +501,13 @@ export function ChatInput({
                     handleSubmit(e as unknown as FormEvent);
                   }
                 }}
-                disabled={disabled || sending}
+                disabled={disabled || sending || activity === "cancelling"}
+                readOnly={staged}
                 // Right padding leaves room for the kbd hint overlay.
-                className="w-full resize-none pr-14"
+                className={cn(
+                  "w-full resize-none pr-14",
+                  staged && "opacity-80",
+                )}
               />
               <kbd
                 aria-hidden
@@ -468,23 +520,71 @@ export function ChatInput({
             {stagedAnswers > 0 && (
               <span
                 className="self-center whitespace-nowrap rounded bg-primary/15 px-1.5 py-0.5 text-[0.7rem] text-primary"
-                title="Staged tray answers — they travel with this Send as one response"
+                title="Staged tray answers — they travel with this response as one Send"
               >
                 +{stagedAnswers} answer{stagedAnswers > 1 ? "s" : ""}
               </span>
             )}
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={(!value.trim() && stagedAnswers === 0) || disabled || sending}
-              // Fixed min-width so the label cycle (Send → Sending… → Send)
-              // doesn't dance the layout on every submit.
-              className="min-w-[5.5rem]"
-            >
-              {sending ? "Sending…" : "Send"}
-            </Button>
+            {locked ? (
+              staged ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={handleUnstage}
+                  className="min-w-[5.5rem]"
+                  title="Staged — delivers at the next turn break, with your staged answers. Click to edit."
+                >
+                  Staged ✓
+                </Button>
+              ) : (
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={
+                    (!value.trim() && stagedAnswers === 0) ||
+                    !onStage ||
+                    staging ||
+                    activity === "cancelling"
+                  }
+                  className="min-w-[5.5rem]"
+                  title="Queue this message — it delivers at the next turn break, never mid-turn. Pause is the interrupt."
+                >
+                  {staging ? "Staging…" : "Stage"}
+                </Button>
+              )
+            ) : (
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={
+                  (!value.trim() && stagedAnswers === 0) || disabled || sending
+                }
+                // Fixed min-width so the label cycle (Send → Sending… → Send)
+                // doesn't dance the layout on every submit.
+                className="min-w-[5.5rem]"
+              >
+                {sending ? "Sending…" : "Send"}
+              </Button>
+            )}
+            {locked && onCancel && (
+              <Button
+                type="button"
+                variant="danger"
+                onClick={handleCancel}
+                // Disabled while the cancel is in flight — either the local
+                // press latency (`cancelling`) or the backend's explicit state.
+                disabled={cancelling || activity === "cancelling"}
+                className="min-w-[5.5rem]"
+                // Named for what it IS (rc3 D33): the only interrupt in the
+                // product. Everything else — a parked question, an approval, a
+                // halt — is the session arriving somewhere, not being cut off.
+                title="Pause the agents — the one interrupt. The session parks until you steer, resume, or close."
+              >
+                {cancelling || activity === "cancelling" ? "Pausing…" : "Pause"}
+              </Button>
+            )}
           </>
-        )}
+        </div>
       </form>
     </>
   );

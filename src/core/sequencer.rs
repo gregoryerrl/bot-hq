@@ -1014,6 +1014,20 @@ pub enum SequencerCommand {
     /// parse itself is `core::mentions`, which runs on exactly one path — the
     /// user's own message — so a participant cannot summon anyone.
     UserMessage { mentions: Vec<i64> },
+    /// The user STAGED a response while the ring runs (the Stage toggle,
+    /// 2026-08-15): the content sits in `AppState`; this is only the flag.
+    /// At the next turn boundary the ring parks instead of dealing and emits
+    /// [`SignalingEvent::StagedDeliveryDue`] — the delivery then arrives as
+    /// an ordinary [`UserMessage`](Self::UserMessage), which is what makes a
+    /// staged send land exactly like a typed one, never mid-turn. Pause is
+    /// still the only interrupt; staging changes WHEN the user may compose,
+    /// not when a message may land.
+    MessageStaged,
+    /// The user un-toggled Stage to edit: clear the flag. The content was
+    /// already removed from `AppState` by the caller, so a boundary that
+    /// races this command finds nothing to deliver and simply yields — an
+    /// idle ring under an open box, which is what an editing user wants.
+    MessageUnstaged,
     /// A participant's stdin, arriving after the task was spawned.
     ///
     /// The map in [`SequencerDeps`] is owned by [`run_sequencer`], so this is
@@ -1261,6 +1275,13 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     // hours. The user stopped it by hand, which is the one thing a backstop is
     // supposed to make unnecessary.
     let mut spoke_this_lap = false;
+    // The Stage toggle's flag (2026-08-15): a user response is staged in
+    // AppState and delivery is owed at the next turn boundary. The boundary
+    // PARKS instead of dealing and emits `StagedDeliveryDue`; the delivery
+    // then arrives as an ordinary `UserMessage` milliseconds later, so a
+    // staged send lands exactly like a typed one — never mid-turn, never
+    // superseding the holder.
+    let mut staged_pending = false;
     // Participants that have parked a question and cannot proceed until the user
     // answers (rc3 D22). The ring skips no-one on account of this — it HALTS when
     // it reaches one, which is what bounds the extra work at one lap. Cleared by
@@ -1420,9 +1441,20 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     // about a turn that no longer exists — counting it would
                     // let a discarded completion do the one thing discarding it
                     // was meant to prevent.
-                    if !halted_on_consensus(&deps, &mut holder, &mut epoch, participant_id, ending)
+                    if halted_on_consensus(&deps, &mut holder, &mut epoch, participant_id, ending)
                         .await
                     {
+                        // The cycle just yielded on consensus with a staged
+                        // response pending: deliver it now — it is the
+                        // user's queued next message, and a yielded ring is
+                        // exactly the boundary it was waiting for.
+                        if staged_pending {
+                            staged_pending = false;
+                            if let Some(bridge) = deps.bridge.as_ref() {
+                                bridge.notify_staged_delivery_due(&deps.session_id);
+                            }
+                        }
+                    } else {
                         // Spin is a property of SUBSTANTIVE output. A `done`
                         // vote is a participant saying it has nothing left to
                         // add — the cycle converging rather than failing to —
@@ -1507,6 +1539,25 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                                         ),
                                     )
                                     .await;
+                            }
+                        } else if staged_pending {
+                            // The boundary the Stage toggle was waiting for:
+                            // PARK instead of dealing (the same yield a halt
+                            // takes) and hand delivery to the app layer. The
+                            // delivery arrives as an ordinary UserMessage
+                            // milliseconds later and deals to the front — so
+                            // the staged send lands between turns, exactly
+                            // like a typed one, and no holder's work is ever
+                            // superseded by it.
+                            staged_pending = false;
+                            halt(&mut holder, &mut epoch);
+                            debug!(
+                                session = %deps.session_id,
+                                "sequencer: staged response pending at the boundary; \
+                                 parking and handing delivery to the app"
+                            );
+                            if let Some(bridge) = deps.bridge.as_ref() {
+                                bridge.notify_staged_delivery_due(&deps.session_id);
                             }
                         } else {
                             advance_turn(
@@ -1597,6 +1648,29 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 )
                 .await;
             }
+            SequencerCommand::MessageStaged => {
+                if holder.is_none() {
+                    // No turn in flight — the ring is parked, yielded, or
+                    // between deals. There is no boundary to wait for:
+                    // deliver now, exactly as the Send an open box offers.
+                    debug!(
+                        session = %deps.session_id,
+                        "sequencer: message staged with no turn in flight; delivering now"
+                    );
+                    if let Some(bridge) = deps.bridge.as_ref() {
+                        bridge.notify_staged_delivery_due(&deps.session_id);
+                    }
+                } else {
+                    staged_pending = true;
+                    debug!(
+                        session = %deps.session_id,
+                        "sequencer: message staged; delivers at the next turn boundary"
+                    );
+                }
+            }
+            SequencerCommand::MessageUnstaged => {
+                staged_pending = false;
+            }
             SequencerCommand::ParticipantJoined {
                 participant_id,
                 input,
@@ -1663,6 +1737,15 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     // Nothing in flight: halt outright so the epoch moves and a
                     // straggler cannot bind the retired turn.
                     halt(&mut holder, &mut epoch);
+                }
+                // A staged response delivers AS THE RELEASE: the halt asked
+                // for the user's next message and one is already queued. The
+                // delivery clears the halt exactly as a typed answer would.
+                if staged_pending {
+                    staged_pending = false;
+                    if let Some(bridge) = deps.bridge.as_ref() {
+                        bridge.notify_staged_delivery_due(&deps.session_id);
+                    }
                 }
             }
             SequencerCommand::GateOpened => {
@@ -7248,6 +7331,187 @@ mod tests {
             .collect();
         assert_eq!(notices.len(), 1, "one all-passed notice: {notices:?}");
 
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// Pull the next `StagedDeliveryDue` off a bridge subscription, skipping
+    /// unrelated traffic, or `None` after a short deadline.
+    async fn next_due(
+        rx: &mut tokio::sync::broadcast::Receiver<crate::signaling::SignalingEvent>,
+    ) -> Option<String> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(crate::signaling::SignalingEvent::StagedDeliveryDue { session_id })) => {
+                    return Some(session_id)
+                }
+                Ok(Ok(_)) => continue,
+                _ => return None,
+            }
+        }
+    }
+
+    /// **The Stage toggle's core promise: a staged response lands at a turn
+    /// boundary, never mid-turn.** The holder's turn runs to completion
+    /// untouched; the boundary then PARKS instead of dealing and hands
+    /// delivery to the app, whose ordinary user message deals to the front.
+    #[tokio::test]
+    async fn a_staged_response_delivers_at_the_boundary_not_mid_turn() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        let mut events = bridge.subscribe();
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // The user stages while A holds the turn: flag only — nothing fires,
+        // A's turn is untouched.
+        send(&tx, SequencerCommand::MessageStaged).await;
+        assert!(
+            next_due_quick(&mut events).await.is_none(),
+            "staging mid-turn must not deliver mid-turn"
+        );
+
+        // A completes: the boundary. The ring parks (B is dealt NOTHING) and
+        // hands delivery to the app layer.
+        post(&storage, "participant", Some("a"), "a spoke").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(
+            next_due(&mut events).await.as_deref(),
+            Some("s1"),
+            "the boundary hands delivery to the app"
+        );
+        seats[1].quiet().await;
+
+        // The delivery arrives as an ordinary user message and deals front.
+        // A's own "a spoke" row is not in its backlog, so the batch is
+        // exactly the staged text.
+        post(&storage, "user", None, "the staged text").await;
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["the staged text"],
+            "the staged send lands like a typed one"
+        );
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// A short-deadline variant for asserting ABSENCE without stalling tests.
+    async fn next_due_quick(
+        rx: &mut tokio::sync::broadcast::Receiver<crate::signaling::SignalingEvent>,
+    ) -> Option<String> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(150);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(crate::signaling::SignalingEvent::StagedDeliveryDue { session_id })) => {
+                    return Some(session_id)
+                }
+                Ok(Ok(_)) => continue,
+                _ => return None,
+            }
+        }
+    }
+
+    /// Staging with no turn in flight has no boundary to wait for — it
+    /// delivers immediately, exactly like the Send an open box offers.
+    #[tokio::test]
+    async fn staging_while_the_ring_is_stopped_delivers_immediately() {
+        let (mut deps, storage, _seats) = ring(&[("a", "active")]).await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        let mut events = bridge.subscribe();
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::MessageStaged).await;
+        assert_eq!(next_due(&mut events).await.as_deref(), Some("s1"));
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// Un-toggling Stage clears the flag: the boundary deals normally and
+    /// nothing ever delivers.
+    #[tokio::test]
+    async fn an_unstaged_message_never_delivers() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        let mut events = bridge.subscribe();
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        send(&tx, SequencerCommand::MessageStaged).await;
+        send(&tx, SequencerCommand::MessageUnstaged).await;
+
+        post(&storage, "participant", Some("a"), "a spoke").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        // The boundary deals B normally — no park, no delivery.
+        let got = seats[1].expect(2).await;
+        assert!(got.contains(&"a spoke".to_string()));
+        assert!(
+            next_due_quick(&mut events).await.is_none(),
+            "an unstaged message must never deliver"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// A halt declared with a stage pending: the staged response IS the
+    /// user's next message, so it delivers as the release.
+    #[tokio::test]
+    async fn a_staged_response_delivers_as_the_halt_release() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        let a = seats[0].id;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        let mut events = bridge.subscribe();
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        send(&tx, SequencerCommand::MessageStaged).await;
+        send(&tx, SequencerCommand::HaltDeclared { participant_id: Some(a) }).await;
+        assert_eq!(
+            next_due(&mut events).await.as_deref(),
+            Some("s1"),
+            "the staged response delivers as the halt's release"
+        );
         drop(tx);
         assert!(exited(task).await);
     }

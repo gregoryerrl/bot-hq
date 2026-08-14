@@ -68,7 +68,7 @@ pub async fn get_session_halt(
 }
 
 /// One staged tray pick, as the composer's Send hands it over (rc3 D34).
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct StagedPick {
     pub choice_id: String,
     pub picked: String,
@@ -94,6 +94,65 @@ pub async fn send_user_response(
     )
     .await?;
     Ok(())
+}
+
+/// The staged response, as the frontend rehydrates it after a reload.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct StagedResponseView {
+    pub text: String,
+    pub picks: Vec<StagedPick>,
+}
+
+/// **Stage a response for boundary delivery** (the Stage toggle,
+/// 2026-08-15): the message + currently staged tray picks are held by the
+/// backend and delivered as one ordinary user response at the ring's next
+/// turn boundary — never mid-turn, never superseding the holder. Pause
+/// stays the only interrupt. Re-staging replaces the previous stage.
+#[tauri::command]
+#[specta::specta]
+pub async fn stage_user_response(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+    text: String,
+    picks: Vec<StagedPick>,
+) -> Result<(), AppError> {
+    core.stage_user_response(
+        &session_id,
+        &text,
+        picks.into_iter().map(|p| (p.choice_id, p.picked)).collect(),
+    )
+    .await
+    .map_err(|e| AppError::Validation(e.to_string()))
+}
+
+/// Un-toggle Stage: the message returns to the (editable) box; nothing
+/// delivers.
+#[tauri::command]
+#[specta::specta]
+pub async fn unstage_user_response(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+) -> Result<(), AppError> {
+    core.unstage_user_response(&session_id).await;
+    Ok(())
+}
+
+/// The currently staged response, if any — `null` when nothing is staged.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_staged_response(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+) -> Result<Option<StagedResponseView>, AppError> {
+    Ok(core.staged_response(&session_id).await.map(|(text, picks)| {
+        StagedResponseView {
+            text,
+            picks: picks
+                .into_iter()
+                .map(|(choice_id, picked)| StagedPick { choice_id, picked })
+                .collect(),
+        }
+    }))
 }
 
 /// One durable `session_tray` row, projected for the session-view Tray tab.
