@@ -142,7 +142,7 @@ impl SessionTerminal {
         }
         cmd.env("TERM", "xterm-256color");
 
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(cmd)
             .context("PTY shell spawn failed")?;
@@ -214,6 +214,15 @@ impl SessionTerminal {
             std::thread::Builder::new()
                 .name(format!("pty-read-{}", &term.session_id[..8.min(term.session_id.len())]))
                 .spawn(move || {
+                    // The child rides into this thread so it can be REAPED
+                    // here. `portable_pty`'s unix child is a
+                    // `std::process::Child`, which does not wait on drop, and
+                    // `kill()` only signals — so every terminal that ever
+                    // exited left a zombie behind for the life of the app.
+                    // Read-EOF is exactly the moment the process is gone, so
+                    // the wait below returns immediately; it is a reap, not a
+                    // block.
+                    let mut child = child;
                     let mut buf = [0u8; 8192];
                     loop {
                         match reader.read(&mut buf) {
@@ -225,6 +234,11 @@ impl SessionTerminal {
                                 emit_notify.notify_one();
                             }
                         }
+                    }
+                    // Reap before announcing the exit: after this the process
+                    // is really gone rather than a zombie in the table.
+                    if let Err(e) = child.wait() {
+                        tracing::warn!(?e, "PTY child wait failed; it may be left a zombie");
                     }
                     let exit_note = b"\r\n[process exited]\r\n";
                     term.scrollback.lock().unwrap().append(exit_note);
@@ -284,6 +298,9 @@ impl SessionTerminal {
         Ok(())
     }
 
+    /// Signal the shell. The REAP is the reader thread's, at read-EOF — which
+    /// the kill causes, so the two are one sequence: signal here, the read ends,
+    /// the thread waits the child and announces the exit.
     pub fn kill(&self) {
         let _ = self.killer.lock().unwrap().kill();
     }
@@ -404,6 +421,41 @@ impl TerminalRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The PTY child is REAPED, not just killed** (B2-6).
+    ///
+    /// `portable_pty`'s unix child is a `std::process::Child`: it does not wait
+    /// on drop, and `kill()` only signals. The child was dropped at the end of
+    /// `spawn`, so every terminal that ever exited left a zombie in the process
+    /// table for the life of the app — one per terminal, invisible until you
+    /// look.
+    ///
+    /// Asserted over the source: the reap happens on a blocking reader THREAD
+    /// after read-EOF, and a test that wanted to observe it would have to spawn
+    /// a real shell and then inspect the process table, which is neither
+    /// portable nor deterministic. What is checkable is that the child reaches
+    /// the thread and is waited there — the two things that were missing.
+    #[test]
+    fn the_pty_child_is_waited_not_just_dropped() {
+        let src = include_str!("terminal.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        let thread = prod
+            .split("Reader thread: blocking PTY reads")
+            .nth(1)
+            .expect("the reader thread exists");
+        assert!(
+            thread.contains("let mut child = child;"),
+            "the child must ride into the reader thread — that is where read-EOF \
+             says the process is gone"
+        );
+        assert!(
+            thread.contains("child.wait()"),
+            "a killed child that is never waited is a zombie, one per terminal"
+        );
+    }
 
     #[test]
     fn scrollback_appends_and_reports_offsets() {

@@ -640,6 +640,16 @@ impl AppState {
             close_learnings::ClosePlan::TearDownNow => {
                 self.teardown_session(id, Some(archive)).await
             }
+            close_learnings::ClosePlan::JoinInFlight => {
+                // The other close owns the teardown; doing it here kills the
+                // learnings turn it just started (B2-5). The row is already
+                // closed by that path, so the user's Close has taken effect.
+                tracing::debug!(
+                    session_id = %id,
+                    "close: an epilogue is already in flight; leaving the teardown to it"
+                );
+                Ok(())
+            }
             close_learnings::ClosePlan::RunEpilogueFirst => {
                 // Closed and off the UI's hands from here; the turn is epilogue.
                 self.storage.close_session(id, archive).await?;

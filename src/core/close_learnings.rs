@@ -138,6 +138,21 @@ pub enum ClosePlan {
     /// Close the row and release the UI first, run the learnings turn, then
     /// tear down.
     RunEpilogueFirst,
+    /// Another close is already running the epilogue for this session: do
+    /// nothing and let it finish.
+    ///
+    /// **This arm used to be `TearDownNow`, and that killed the thing the other
+    /// close had just started.** The two entry points (the UI's Close button and
+    /// the agent's `close_session` tool) can both decide `Run`; the loser of the
+    /// claim then tore down — SIGKILLing the agents mid-broadcast, so the
+    /// epilogue turn produced no outcome row at all. Which is a race the second
+    /// path reaches routinely, not rarely: the epilogue's own agent calling
+    /// `close_session` on the turn it was just given IS the second close.
+    ///
+    /// Nothing leaks by waiting. The winner closed the session row before its
+    /// turn (that is what `RunEpilogueFirst` means), so the session is already
+    /// out of the UI, and the winner tears down when the turn ends.
+    JoinInFlight,
 }
 
 /// [`decide`]'s answer plus whether this call actually won the epilogue claim.
@@ -149,6 +164,9 @@ pub enum ClosePlan {
 pub fn plan(decision: Epilogue, claimed: bool) -> ClosePlan {
     match (decision, claimed) {
         (Epilogue::Run, true) => ClosePlan::RunEpilogueFirst,
+        // Wanted the epilogue and did not get the claim ⇒ somebody else is
+        // running it right now. The only way to reach this pair.
+        (Epilogue::Run, false) => ClosePlan::JoinInFlight,
         _ => ClosePlan::TearDownNow,
     }
 }
@@ -367,8 +385,15 @@ mod tests {
     #[test]
     fn only_a_run_that_won_its_claim_gets_the_epilogue_arm() {
         assert_eq!(plan(Epilogue::Run, true), ClosePlan::RunEpilogueFirst);
-        // A second close for a session already mid-epilogue: finish the job.
-        assert_eq!(plan(Epilogue::Run, false), ClosePlan::TearDownNow);
+        // **A second close for a session already mid-epilogue waits.** It used
+        // to tear down — "finish the job" — which SIGKILLed the agents in the
+        // middle of the turn the first close had just started, so the epilogue
+        // produced no outcome row at all. And the second close is not a rare
+        // double-click: the epilogue's own agent calling `close_session` on the
+        // turn it was given arrives here every time it happens. Nothing leaks by
+        // waiting — the winner closed the row before the turn and tears down
+        // after it.
+        assert_eq!(plan(Epilogue::Run, false), ClosePlan::JoinInFlight);
         for skip in [
             Epilogue::SkipNoWriter,
             Epilogue::SkipAlreadyHandled,

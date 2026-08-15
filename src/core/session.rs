@@ -1121,10 +1121,21 @@ async fn spawn_session_handle(
     // message (the d61d277 live smoke hit exactly this). Race-free — the read
     // completes before the watchdog task exists.
     let user_broadcasts = Arc::new(std::sync::atomic::AtomicU64::new(
-        storage
-            .count_user_messages(&session.id)
-            .await
-            .unwrap_or_default(),
+        match storage.count_user_messages(&session.id).await {
+            Ok(n) => n,
+            // Silence here re-introduces the bug this count exists to fix: a
+            // zero seed reads as "the user has never spoken", which disarms the
+            // idle watchdog until their next TYPED message.
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    session_id = %session.id,
+                    "seeding the user-message count failed; the idle watchdog starts \
+                     disarmed until the next user message"
+                );
+                0
+            }
+        },
     ));
     // The idle nudge is addressed to the participant that can act on it, so it
     // goes to the first agent holding `edit_files` and falls back to the first
@@ -2232,12 +2243,19 @@ impl RingKick {
     /// Hand turn one to the front of the rotation. No mentions: nobody has typed
     /// anything yet.
     async fn fire(self) {
-        let _ = self
+        if let Err(e) = self
             .0
             .send(crate::core::sequencer::SequencerCommand::UserMessage {
                 mentions: Vec::new(),
             })
-            .await;
+            .await
+        {
+            // A closed channel here means the ring task is already gone, and
+            // the cost is the whole first turn: nothing else mints this kick,
+            // so the session sits with a full backlog and no holder until the
+            // user types.
+            tracing::warn!(?e, "the ring kick was dropped; the session's first turn is not dealt");
+        }
     }
 }
 
