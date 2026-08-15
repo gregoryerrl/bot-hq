@@ -18,6 +18,40 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-15 — the wedge-net declares; the handoff to self-hosting
+
+The last build of the claude-code maintenance arc, closing the two wedges
+the s-d6352684 restart incident exposed:
+
+**1. The boot orphan sweep.** A restart over a mid-turn session kills the
+turn without a stop — bannerless open box until the watchdog's grace.
+At startup, every open session whose last recorded activity state was
+`busy`/`cancelling` (and whose halt slot is empty — an agent's recap is
+never overwritten) gets the restart halt: "that turn was lost, but the
+participants keep their memory." Pinned + guard mutation-verified.
+
+**2. The watchdog escalates from detecting to declaring.** The nudge-woken
+generation that ends on prose with no tool lands outside every ring
+backstop (its completion is discarded), and the nudge is once-per-window —
+s-d6352684 sat bannerless twice in one night. Now, when the wedge outlives
+the spent nudge, the watchdog fills the halt slot itself: every stop is a
+HALT, even the stop nobody declared. Self-limiting — the filled slot flips
+`halted` on the next poll.
+
+**The handoff.** Per the user, bot-hq now maintains itself through its own
+sessions; this claude-code lineage retires for bot-hq work. The standing
+orientation is in the project CL
+(`learnings-2026-08-15-selfhost-handoff.md`): the decreed state model, the
+self-hosting hazards (never relaunch bot-hq from inside a bot-hq session;
+`cargo build` transiently rewrites the Tool Gate hook's own binary), the
+healing recipes, the dissection instruments, and pointers here. Deferred as
+dogfood, per the user: everything else on the backlog.
+
+Also of record: the arc's last hour included a full-disk outage (cargo's
+incremental cache after ~15 rebuilds) severe enough to wedge the tooling
+itself — cleared by the user; `target/debug/incremental` is the first
+suspect when the machine chokes mid-maintenance.
+
 ## 2026-08-15 — every stop is a HALT; Working retired
 
 The user's collapse of the state model, arrived at while reading s-d6352684

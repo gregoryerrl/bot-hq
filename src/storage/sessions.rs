@@ -103,6 +103,40 @@ impl Storage {
         }))
     }
 
+    /// **The boot orphan sweep** (2026-08-15): a restart over a mid-turn
+    /// session kills the turn without a stop — the busy map dies with the
+    /// process, the box reopens bannerless, and the watchdog needs its whole
+    /// grace period to notice (lived in `s-d6352684` when a relaunch landed
+    /// 90 s into a turn). At startup, every open session whose LAST recorded
+    /// activity state was `busy` or `cancelling` gets a host halt saying so —
+    /// restarts land inside the every-stop-is-a-HALT model like everything
+    /// else. A session already wearing a halt keeps its own recap (an agent's
+    /// words beat the generic ones). Returns how many sessions were halted.
+    pub async fn halt_orphaned_busy_sessions(&self) -> Result<usize> {
+        let orphans: Vec<String> = sqlx::query_scalar(
+            "SELECT s.id FROM sessions s \
+             WHERE s.closed_at IS NULL AND s.archived = 0 \
+               AND s.halt_reason IS NULL \
+               AND (SELECT a.state FROM activity_events a \
+                    WHERE a.session_id = s.id \
+                    ORDER BY a.id DESC LIMIT 1) IN ('busy', 'cancelling')",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("scanning for restart-orphaned sessions")?;
+        for id in &orphans {
+            self.declare_session_halt(
+                id,
+                "system",
+                "The app restarted while a turn was in flight — that turn was \
+                 lost, but the participants keep their memory. Send a message \
+                 to resume where they left off.",
+            )
+            .await?;
+        }
+        Ok(orphans.len())
+    }
+
     /// Rename a session. The live `SessionHandle.title` snapshot is NOT
     /// touched (it only feeds spawn-time logs); the UI re-reads the row.
     pub async fn rename_session(&self, id: &str, title: &str) -> Result<()> {
@@ -365,6 +399,48 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use crate::storage::Storage;
+
+    /// The boot orphan sweep: a session whose last recorded state was busy
+    /// gets the restart halt; idle, already-halted, and closed sessions are
+    /// untouched — an agent's own recap is never overwritten by the generic.
+    #[tokio::test]
+    async fn boot_sweep_halts_only_restart_orphans() {
+        let s = Storage::memory().await.unwrap();
+        // Orphan: open, last state busy, no halt.
+        s.create_session("s-orphan", "t", None).await.unwrap();
+        s.insert_activity_event("s-orphan", "idle", false, false).await.unwrap();
+        s.insert_activity_event("s-orphan", "busy", true, false).await.unwrap();
+        // Clean: open but last state idle.
+        s.create_session("s-idle", "t", None).await.unwrap();
+        s.insert_activity_event("s-idle", "busy", true, false).await.unwrap();
+        s.insert_activity_event("s-idle", "idle", false, false).await.unwrap();
+        // Already declared: busy at kill, but an agent's halt is on the slot.
+        s.create_session("s-declared", "t", None).await.unwrap();
+        s.insert_activity_event("s-declared", "busy", true, false).await.unwrap();
+        s.declare_session_halt("s-declared", "hands", "my own recap").await.unwrap();
+        // Closed mid-busy: not open, not swept.
+        s.create_session("s-closed", "t", None).await.unwrap();
+        s.insert_activity_event("s-closed", "busy", true, false).await.unwrap();
+        s.close_session("s-closed", false).await.unwrap();
+
+        assert_eq!(s.halt_orphaned_busy_sessions().await.unwrap(), 1);
+        let halt = s.session_halt("s-orphan").await.unwrap();
+        assert!(
+            halt.is_some_and(|(by, reason, _)| by == "system"
+                && reason.contains("restarted while a turn was in flight")),
+            "the orphan wears the restart halt"
+        );
+        assert!(s.session_halt("s-idle").await.unwrap().is_none());
+        assert_eq!(
+            s.session_halt("s-declared").await.unwrap().unwrap().1,
+            "my own recap",
+            "an agent's recap is never overwritten"
+        );
+        assert!(s.session_halt("s-closed").await.unwrap().is_none());
+        // Idempotent: the swept orphan now wears a halt, so a second sweep
+        // finds nothing.
+        assert_eq!(s.halt_orphaned_busy_sessions().await.unwrap(), 0);
+    }
 
     #[tokio::test]
     async fn active_and_closed_lists_partition_sessions() {

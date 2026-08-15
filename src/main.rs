@@ -90,6 +90,18 @@ fn main() -> Result<()> {
     let (core, storage_arc, bridge_arc): (Arc<CoreAppState>, Arc<Storage>, Arc<SignalingBridge>) =
         runtime.block_on(async {
             let storage = Storage::open(&paths.db_path).await?;
+            // Boot orphan sweep (2026-08-15): a restart over a mid-turn session
+            // kills the turn without a stop — the box reopens bannerless and
+            // the watchdog needs its whole grace to notice. Sessions whose
+            // last recorded state was busy/cancelling get the restart halt so
+            // they land inside the every-stop-is-a-HALT model immediately.
+            match storage.halt_orphaned_busy_sessions().await {
+                Ok(n) if n > 0 => {
+                    tracing::info!(halted = n, "restart-orphaned sessions wear the halt banner")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(?e, "boot orphan sweep failed"),
+            }
             // Boot-time tray reconciliation: withdraw pending rows left on closed or
             // orphaned sessions (cruft from a close under a pre-fix binary). Keeps
             // the notification bell honest without waiting on a one-shot migration.

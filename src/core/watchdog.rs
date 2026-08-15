@@ -298,6 +298,29 @@ pub async fn run_stall_watchdog(
                         deliver_idle_nudge(&session_id, idle_watch, &activity, &bridge)
                             .await;
                     }
+                } else if decision.chip && nudged_at == Some(broadcasts) {
+                    // The wedge outlived this window's one nudge — measured in
+                    // s-d6352684 (2026-08-15): a nudge-woken generation ended
+                    // on prose with no tool, its completion was discarded
+                    // outside the ring, and the session sat bannerless with
+                    // the nudge spent. The net stops detecting and DECLARES:
+                    // every stop is a HALT, even the stop nobody declared.
+                    // Filling the slot flips `halted` on the next poll, so
+                    // this fires once per wedge and never spams.
+                    if activity.current() == SessionActivity::Idle
+                        && !activity.holds_wakes()
+                    {
+                        let _ = bridge
+                            .mark_awaiting_user(
+                                session_id.clone(),
+                                "system".to_string(),
+                                "This session went idle with nothing declared — \
+                                 no halt, no question, no gate — and the nudge \
+                                 went unanswered. Send a message to resume."
+                                    .to_string(),
+                            )
+                            .await;
+                    }
                 }
             } else {
                 idle_since = None;
