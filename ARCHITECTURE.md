@@ -6,7 +6,10 @@ lives at [`docs/rebuild-archive/ARCHITECTURE-rebuild-era.md`](docs/rebuild-archi
 
 For user-facing setup see [`README.md`](README.md). For planned work
 see [`PLAN.md`](PLAN.md). For recent change log see
-[`PROGRESS.md`](PROGRESS.md).
+[`PROGRESS.md`](PROGRESS.md). For WHERE things live — the codebase split
+into areas with files, entry points, seams and tests — see
+[`CODEBASE.md`](CODEBASE.md) (this file says what bot-hq does; that one
+says where).
 
 ---
 

@@ -30,8 +30,12 @@ maintenance + feature-extension on the existing system.
    backlog, deferred plugins).
 3. **[`PROGRESS.md`](PROGRESS.md)** — recent change log,
    newest-first.
+4. **[`CODEBASE.md`](CODEBASE.md)** — the area map: WHERE things live,
+   one area at a time (files, entry points, seams, tests, recipes) —
+   open it before touching code; `tests/codebase_map_test.rs` keeps it
+   honest.
 
-These three are the canonical docs. The original rebuild design +
+The first three are the canonical behaviour docs; the map says where. The original rebuild design +
 roadmap + Phase 0 research are preserved under
 [`docs/rebuild-archive/`](docs/rebuild-archive/) for historical
 reference — do not treat them as current.
