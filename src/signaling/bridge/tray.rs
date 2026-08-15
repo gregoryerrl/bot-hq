@@ -1551,6 +1551,66 @@ mod tests {
         );
     }
 
+    /// **A halt whose write FAILS still stops the session, and says it did not
+    /// persist** — the behavioural half, on a real storage error.
+    ///
+    /// EYES' correction to my own claim that this could not be induced: it can.
+    /// `Storage::pool()` is public and this file's tests already run raw SQL
+    /// through it, so dropping the column `declare_session_halt` writes makes
+    /// the UPDATE return a genuine `Err` while `messages` stays intact for the
+    /// notice. That closes what the source pin cannot see — an edit that keeps
+    /// the order and swallows the error.
+    #[tokio::test]
+    async fn a_halt_that_cannot_be_recorded_still_stops_and_says_so() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        let mut events = bridge.subscribe();
+
+        // The one column the halt write needs, gone. Everything else — the
+        // session row, `messages` and its foreign key — is untouched.
+        sqlx::query("ALTER TABLE sessions DROP COLUMN halt_reason")
+            .execute(storage.pool())
+            .await
+            .expect("the column drops");
+
+        bridge
+            .mark_awaiting_user("s1".into(), "hands".into(), "waiting on you".into())
+            .await;
+
+        // 1. The session still STOPS. An agent that asked to stop must stop,
+        //    whatever storage did.
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match events.recv().await {
+                    Ok(SignalingEvent::AwaitingUser { reason, .. }) => return reason,
+                    Ok(_) => continue,
+                    Err(e) => panic!("event channel closed: {e}"),
+                }
+            }
+        })
+        .await
+        .expect("the halt still raises its banner when the write fails");
+        assert_eq!(stopped, "waiting on you");
+
+        // 2. And the user is TOLD it will not survive a restart, rather than
+        //    being shown a banner indistinguishable from a durable one.
+        let notices: Vec<String> = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.content)
+            .filter(|c| c.contains("could not be recorded"))
+            .collect();
+        assert_eq!(
+            notices.len(),
+            1,
+            "a halt that failed to persist looks exactly like one that did: {notices:?}"
+        );
+    }
+
     /// **The halt is written before it is shown, and a failed write says so.**
     ///
     /// The old order flipped the awaiting flag and stopped the ring FIRST and

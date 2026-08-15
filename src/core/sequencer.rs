@@ -1300,6 +1300,12 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     // cleared by the one resolve that follows — the session then deals nothing
     // for the life of the process. Keyed by `choice_id`, the second open is a
     // no-op and the resolve clears it.
+    // Whether that seed FAILED, which the set itself cannot say — an empty set
+    // means "no gates are open" and an unreadable query means "I do not know",
+    // and conflating them is what let a transient error at ring start deal turns
+    // under a live gate. Cleared by the first successful re-read
+    // ([`reseed_gates_if_needed`], run before every deal while it is set).
+    let mut gate_seed_failed = false;
     let mut open_gates: std::collections::HashSet<String> = match deps
         .storage
         .pending_gate_ids(&deps.session_id)
@@ -1323,9 +1329,10 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
             warn!(
                 session = %deps.session_id,
                 error = %e,
-                "sequencer: the gate latch could not be seeded; starting with no gates \
-                 open — a gate parked before this ring started will NOT hold it"
+                "sequencer: the gate latch could not be seeded; retrying before the \
+                 first deal rather than assuming no gates are open"
             );
+            gate_seed_failed = true;
             std::collections::HashSet::new()
         }
     };
@@ -1606,6 +1613,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                                 bridge.notify_staged_delivery_due(&deps.session_id);
                             }
                         } else {
+                            reseed_gates_if_needed(&deps, &mut open_gates, &mut gate_seed_failed)
+                                .await;
                             advance_turn(
                                 &deps,
                                 &mut rx,
@@ -1679,6 +1688,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // a path that does not exist yet. If a second restart path ever
                 // lands, this belongs next to the tally clear, not here.
                 spin.clear();
+                reseed_gates_if_needed(&deps, &mut open_gates, &mut gate_seed_failed).await;
                 advance_turn(
                     &deps,
                     &mut rx,
@@ -1785,6 +1795,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     "sequencer: a halt was declared; the ring stops where it stands"
                 );
                 if ends_a_turn {
+                    reseed_gates_if_needed(&deps, &mut open_gates, &mut gate_seed_failed).await;
                     advance_turn(
                         &deps,
                         &mut rx,
@@ -2454,6 +2465,48 @@ async fn unwind_wedged_turn(
         let _ = bridge
             .mark_awaiting_user(deps.session_id.to_string(), "system".to_string(), reason)
             .await;
+    }
+}
+
+/// Re-read the gate latch when its seed failed, before a turn is dealt.
+///
+/// The seed's fail-open is deliberate (a set cannot express "unknown", and
+/// failing closed would hold a session that may have no gates at all, with
+/// nothing for the user to answer). What it left behind was a blind window: a
+/// `SQLITE_BUSY`-class blip at ring start, storage healthy a moment later, and
+/// the ring deals turns while a gate sits genuinely parked — narrow (a restart,
+/// a pending gate, a transient error) and silent, which is the combination this
+/// file keeps paying for.
+///
+/// So the not-knowing is carried in its own flag and answered before the first
+/// deal instead of being folded into the set. No cost on the healthy path: the
+/// flag is false and this returns without touching storage.
+async fn reseed_gates_if_needed(
+    deps: &SequencerDeps,
+    open_gates: &mut std::collections::HashSet<String>,
+    gate_seed_failed: &mut bool,
+) {
+    if !*gate_seed_failed {
+        return;
+    }
+    match deps.storage.pending_gate_ids(&deps.session_id).await {
+        Ok(ids) => {
+            // Union, not replace: a `GateOpened` that arrived while the seed was
+            // unknown is already in the set, and the durable rows are what the
+            // seed would have found. Neither is a superset of the other.
+            open_gates.extend(ids);
+            *gate_seed_failed = false;
+            debug!(
+                session = %deps.session_id,
+                open_gates = open_gates.len(),
+                "sequencer: the gate latch reseeded after its failed read"
+            );
+        }
+        Err(e) => warn!(
+            session = %deps.session_id,
+            error = %e,
+            "sequencer: the gate latch still cannot be read; dealing without it"
+        ),
     }
 }
 
@@ -4315,6 +4368,61 @@ mod tests {
             SignalingBridge::new(),
             slugs.iter().map(|s| s.to_string()).collect(),
         )
+    }
+
+    /// **A latch whose seed failed is re-read before the ring deals** — the
+    /// blind window EYES found in slice E's fail-open.
+    ///
+    /// The seed stays fail-open by design (a set cannot express "unknown", and
+    /// failing closed would hold a session that may have no gates at all). What
+    /// it left was narrow and silent: a transient storage error at ring start,
+    /// storage healthy a moment later, and the ring deals turns while a gate
+    /// sits genuinely parked.
+    ///
+    /// Written so it CANNOT pass by accident: the gate row is parked AFTER the
+    /// ring started, so no seed could ever have found it and no `GateOpened` is
+    /// sent for it. The only way the latch can hold is the re-read.
+    #[tokio::test]
+    async fn a_failed_gate_seed_is_re_read_before_the_next_deal() {
+        let (deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        post(&storage, "user", None, "go").await;
+
+        // The seed's read fails: the table it reads is not there when the ring
+        // starts. (A transient error, in the only shape a test can arrange.)
+        sqlx::query("ALTER TABLE session_tray RENAME TO session_tray_hidden")
+            .execute(storage.pool())
+            .await
+            .expect("the table renames");
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        // Give the task its failed seed before healing storage.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        sqlx::query("ALTER TABLE session_tray_hidden RENAME TO session_tray")
+            .execute(storage.pool())
+            .await
+            .expect("the table comes back");
+
+        // A gate parks with no notify — the shape a restart leaves behind, and
+        // one the seed could not have seen even if it had worked.
+        park_gate(&storage, "late-gate").await;
+        send(&tx, user_message()).await;
+        seats[0].quiet().await;
+
+        // Answering it releases the session, which is what proves the hold was
+        // the gate rather than a ring that never ran.
+        storage
+            .answer_tray_entry("late-gate", "Approve")
+            .await
+            .unwrap();
+        send(&tx, gate_resolved("late-gate")).await;
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "the reseeded latch lifts like any other"
+        );
+        drop(tx);
+        assert!(exited(task).await);
     }
 
     /// **The gate LIFT is a wire, and cutting it stops the session dead.**
