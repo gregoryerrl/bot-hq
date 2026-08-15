@@ -4365,6 +4365,66 @@ mod tests {
         )
     }
 
+    /// **Stop stops the RING, not just the banner** (B1-F8, wired 2026-08-16 on
+    /// the user's call).
+    ///
+    /// The pause vocabulary shipped with no producer: `cancel_session_turn`
+    /// flipped the activity latch and told the ring nothing, so the interrupt
+    /// ended the holder's turn, its completion arrived like any other, and the
+    /// ring dealt the NEXT participant — a fresh turn started BY the Stop, under
+    /// a ⏸ Paused banner.
+    ///
+    /// This drives the shape that failed: a turn in flight, a Stop, then the
+    /// completion the interrupt produces. Nobody may be dealt after it.
+    #[tokio::test]
+    async fn a_pause_stops_the_next_deal_not_just_the_banner() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let bridge = SignalingBridge::new();
+        deps.bridge = Some(Arc::clone(&bridge));
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        bridge
+            .register_session_sequencer("s1".to_string(), tx.clone())
+            .await;
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"], "A holds the turn");
+
+        // The user hits Stop. The ring hears it BEFORE the interrupt's
+        // completion, which is the ordering `cancel_session_turn` guarantees by
+        // sending this ahead of the signal.
+        bridge.notify_ring_pause("s1").await;
+        post(&storage, "user", None, "for b").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: seats[0].id,
+                epoch: 1,
+                ending: TurnEnding::SPOKE,
+            },
+        )
+        .await;
+
+        // Before the producer existed, B was dealt right here.
+        seats[1].quiet().await;
+        seats[0].quiet().await;
+
+        // And the user's next message is the release — the ring's own
+        // `UserMessage`-while-paused arm, which re-queues the message so their
+        // mentions survive. (There is deliberately no `Resume` producer: two
+        // release paths would be two mechanisms for one job.)
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["for b"],
+            "a user message releases the pause and the cycle resumes"
+        );
+        drop(tx);
+        bridge.unregister_session("s1").await;
+        assert!(exited(task).await);
+    }
+
     /// **A ring-declared halt fills the slot without asking the ring to halt
     /// again.**
     ///

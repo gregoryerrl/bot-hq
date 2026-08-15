@@ -575,6 +575,40 @@ impl SignalingBridge {
         }
     }
 
+    /// **Stop the ring where it stands** — rc3's Pause, minted at last.
+    ///
+    /// `SequencerCommand::Pause` and the whole held-queue machinery behind it
+    /// shipped with NO producer: `cancel_session_turn` flipped the activity
+    /// latch and nothing told the ring, so after an honoured interrupt the
+    /// holder's `result` still completed its turn, the ring dealt the NEXT
+    /// participant, and the user watched a fresh turn start under a ⏸ Paused
+    /// banner. (If that turn then failed to settle, the escalation SIGKILLed
+    /// everyone.)
+    ///
+    /// There is deliberately no `Resume` producer: a user message IS the
+    /// release, and the ring's own `UserMessage`-while-paused arm does it —
+    /// re-queuing the message so it keeps the mentions the user typed. A second
+    /// release path would be two mechanisms for one job, which in this codebase
+    /// is how the older one silently disables the newer.
+    ///
+    /// `try_send` like every ring notify: this runs inside the Stop path, which
+    /// must not block on the ring's queue. A miss leaves the session in the
+    /// behaviour it had before this existed.
+    pub async fn notify_ring_pause(&self, session_id: &str) {
+        let seq = self.session_sequencer.lock().await.get(session_id).cloned();
+        if let Some(tx) = seq {
+            if tx
+                .try_send(crate::core::sequencer::SequencerCommand::Pause)
+                .is_err()
+            {
+                tracing::warn!(
+                    session_id,
+                    "the pause did not reach the ring; it may deal one more turn"
+                );
+            }
+        }
+    }
+
     /// The ring reached a boundary with a stage pending: hand delivery to the
     /// app layer (main.rs routes this to `AppState::deliver_staged`).
     pub fn notify_staged_delivery_due(&self, session_id: &str) {

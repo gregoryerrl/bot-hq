@@ -369,6 +369,7 @@ impl AppState {
     /// user message respawns each agent via `--resume`, restoring prior context.
     /// No-op (`Done`) if the session isn't live.
     pub async fn cancel_session_turn(&self, session_id: &str) -> Result<CancelOutcome> {
+        let mut pause_ring = false;
         let deferred = {
             let mut sessions = self.sessions.lock().await;
             let Some(handle) = sessions.get_mut(session_id) else {
@@ -382,6 +383,17 @@ impl AppState {
             // enabled, duo held until the user steers, resumes, or closes.
             handle.activity.set_cancelling(true);
             handle.activity.set_paused(true);
+            // **And the RING, which until now was never told** (B1-F8, the
+            // user's call 2026-08-16). The latch above is the UI's; without this
+            // the interrupt ends the holder's turn, its `result` arrives as an
+            // ordinary completion, and the ring deals the NEXT participant under
+            // the Paused banner — a fresh turn started by a Stop.
+            //
+            // Sent BEFORE the interrupt goes out, which is what makes the
+            // ordering safe: the completion the interrupt causes cannot reach
+            // the ring ahead of a command queued before the agent was even
+            // signalled.
+            pause_ring = true;
             // A fresh cancel begins un-superseded; `broadcast` flips this true if a
             // user message arrives during the escalation window (then the SIGKILL
             // is skipped). Reset here so a prior supersede can't suppress THIS kill.
@@ -395,6 +407,11 @@ impl AppState {
                 .load(Ordering::Acquire)
                 .then(|| Arc::clone(&handle.in_atomic_tool))
         };
+        // Outside the `sessions` lock: `notify_ring_pause` takes the bridge's
+        // own, and holding two is how a lock-order hazard starts.
+        if pause_ring {
+            self.bridge.notify_ring_pause(session_id).await;
+        }
         match deferred {
             Some(flag) => {
                 tracing::info!(session_id, "cancel: deferring interrupt — mid atomic tool");
@@ -2087,6 +2104,35 @@ mod tests {
                  stopped ring has always cleared (s-ff729daa)"
             );
         }
+    }
+
+    /// **Stop tells the RING, not only the activity latch** (B1-F8).
+    ///
+    /// `cancel_session_turn` set `paused` on the tracker — a UI state — and the
+    /// ring was never told, so the interrupt's completion stepped the rotation
+    /// and a new turn began under the ⏸ banner. The behaviour is pinned in
+    /// `core::sequencer` (`a_pause_stops_the_next_deal_not_just_the_banner`);
+    /// this pins the PRODUCER, which is the half that was missing for the whole
+    /// life of the feature and cannot be observed from the ring's side.
+    #[test]
+    fn stopping_a_session_pauses_the_ring() {
+        let src = include_str!("state.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        let body = prod
+            .split("pub async fn cancel_session_turn")
+            .nth(1)
+            .expect("cancel_session_turn exists")
+            .split("\n    /// ")
+            .next()
+            .expect("a split always yields a first part");
+        assert!(
+            body.contains("notify_ring_pause("),
+            "Stop must reach the ring — a paused banner over a ring that keeps \
+             dealing is the state this fixed"
+        );
     }
 
     /// **A relaunch mid-stage puts the user's words back, and tells the ring.**
