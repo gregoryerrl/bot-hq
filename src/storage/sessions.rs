@@ -75,6 +75,36 @@ impl Storage {
 
     /// Clear the session's halt slot. Returns whether one was set — the
     /// caller's cue to tell the UI the state changed.
+    /// Persist (or clear) this session's staged message — the Stage slot
+    /// (rc3 B1-F11).
+    ///
+    /// One slot per session, replace-on-restage, exactly like the halt. Kept
+    /// OFF the `Session` row struct deliberately: that struct derives `FromRow`
+    /// and is built by three `query_as` sites, so every field added to it has to
+    /// appear in all three SELECTs or they fail at RUNTIME. This column has two
+    /// readers and one writer, so it pays for a widened row type nowhere.
+    pub async fn set_staged_message(&self, session_id: &str, text: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE sessions SET staged_message = ? WHERE id = ?")
+            .bind(text)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("staging a message for {session_id}"))?;
+        Ok(())
+    }
+
+    /// The staged message, if this session has one — read at spawn so a relaunch
+    /// mid-stage resumes with the user's words still in the slot.
+    pub async fn staged_message(&self, session_id: &str) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT staged_message FROM sessions WHERE id = ?")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await
+                .with_context(|| format!("reading the staged message for {session_id}"))?;
+        Ok(row.and_then(|(text,)| text))
+    }
+
     pub async fn clear_session_halt(&self, session_id: &str) -> Result<bool> {
         let res = sqlx::query(
             "UPDATE sessions SET halt_declared_by = NULL, halt_reason = NULL,              halt_declared_at = NULL WHERE id = ? AND halt_reason IS NOT NULL",
@@ -399,6 +429,41 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use crate::storage::Storage;
+
+    /// **The staged message survives the process** (B1-F11, migration 0058).
+    ///
+    /// One slot, replace-on-restage, cleared by delivery or unstage — the halt's
+    /// shape, for the same reason: the user gets one composed message pending at
+    /// a time, and a second replaces it rather than queueing behind it.
+    #[tokio::test]
+    async fn a_staged_message_round_trips_and_replaces() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        assert_eq!(
+            s.staged_message("s1").await.unwrap(),
+            None,
+            "a fresh session has nothing staged"
+        );
+
+        s.set_staged_message("s1", Some("first draft")).await.unwrap();
+        assert_eq!(
+            s.staged_message("s1").await.unwrap().as_deref(),
+            Some("first draft")
+        );
+
+        // Re-staging replaces; it does not queue.
+        s.set_staged_message("s1", Some("what they actually meant"))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.staged_message("s1").await.unwrap().as_deref(),
+            Some("what they actually meant")
+        );
+
+        // Delivery / unstage empties the slot.
+        s.set_staged_message("s1", None).await.unwrap();
+        assert_eq!(s.staged_message("s1").await.unwrap(), None);
+    }
 
     /// The boot orphan sweep: a session whose last recorded state was busy
     /// gets the restart halt; idle, already-halted, and closed sessions are

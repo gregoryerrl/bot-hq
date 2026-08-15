@@ -260,6 +260,7 @@ impl AppState {
         let id = handle.id.clone();
         self.watch_session_repo(&id, &handle);
         self.sessions.lock().await.insert(id.clone(), handle);
+        self.rehydrate_stage(&id).await;
         // Tell the frontend a session was created. This covers the external
         // driver path (UI create paths already self-invalidate list_sessions);
         // no-op until the AppHandle is set in setup.
@@ -322,6 +323,9 @@ impl AppState {
             .lock()
             .await
             .insert(session_id.to_string(), handle);
+        // The path a RELAUNCH takes: this is where a session that was mid-stage
+        // gets its message back.
+        self.rehydrate_stage(session_id).await;
         Ok(())
     }
 
@@ -1339,6 +1343,39 @@ impl AppState {
         Ok(())
     }
 
+    /// Put a session's staged message back in the slot after a relaunch, and
+    /// tell the fresh ring it is there.
+    ///
+    /// Both halves are needed and they are separate: the CONTENT lives in
+    /// `staged_responses` (what `deliver_staged` sends) and the FLAG lives in
+    /// the ring (what makes a boundary park and emit `StagedDeliveryDue`). A
+    /// restart rebuilds neither, so before this the durable row would have sat
+    /// there with nothing watching it.
+    ///
+    /// The picks are deliberately not restored: they are durable tray rows, and
+    /// `send_user_response` re-derives them at delivery — which is also what
+    /// keeps a pick staged after the message from being lost.
+    async fn rehydrate_stage(&self, session_id: &str) {
+        let text = match self.storage.staged_message(session_id).await {
+            Ok(Some(text)) => text,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(?e, session_id, "reading the staged message failed");
+                return;
+            }
+        };
+        tracing::debug!(
+            session_id,
+            bytes = text.len(),
+            "restoring a staged message across the restart"
+        );
+        self.staged_responses
+            .lock()
+            .await
+            .insert(session_id.to_string(), (text, Vec::new()));
+        self.bridge.notify_ring_stage(session_id, true).await;
+    }
+
     /// **Stage a user response** (the Stage toggle, 2026-08-15): hold the
     /// typed message + the staged tray picks for delivery at the ring's next
     /// turn boundary. Staging changes WHEN the user may compose, not when a
@@ -1363,6 +1400,19 @@ impl AppState {
             .lock()
             .await
             .insert(session_id.to_string(), (text.to_string(), picks));
+        // **And durably.** The slot used to be process memory only, so a
+        // relaunch mid-stage dropped what the user had typed — silently, while
+        // the composer rehydrated to "Staged ✓" from the same empty map. The
+        // picks are not persisted with it: they are already durable tray rows,
+        // and re-deriving them at delivery is what keeps the snapshot equal to
+        // the tray.
+        if let Err(e) = self.storage.set_staged_message(session_id, Some(text)).await {
+            tracing::warn!(
+                ?e,
+                session_id,
+                "the staged message was not persisted; it will be lost if the app restarts"
+            );
+        }
         self.bridge.notify_ring_stage(session_id, true).await;
         Ok(())
     }
@@ -1373,6 +1423,9 @@ impl AppState {
     /// exactly what an editing user wants.
     pub async fn unstage_user_response(&self, session_id: &str) {
         self.staged_responses.lock().await.remove(session_id);
+        if let Err(e) = self.storage.set_staged_message(session_id, None).await {
+            tracing::warn!(?e, session_id, "the staged message was not cleared");
+        }
         self.bridge.notify_ring_stage(session_id, false).await;
     }
 
@@ -1397,7 +1450,17 @@ impl AppState {
             return;
         };
         match self.send_user_response(session_id, &text, picks.clone()).await {
-            Ok(()) => self.bridge.notify_stage_delivered(session_id),
+            Ok(()) => {
+                // Delivered: the slot is empty again, in memory and on the row.
+                if let Err(e) = self.storage.set_staged_message(session_id, None).await {
+                    tracing::warn!(
+                        ?e,
+                        session_id,
+                        "the delivered stage was not cleared; a restart would re-stage it"
+                    );
+                }
+                self.bridge.notify_stage_delivered(session_id);
+            }
             Err(e) => {
                 tracing::warn!(
                     ?e,
@@ -2024,6 +2087,55 @@ mod tests {
                  stopped ring has always cleared (s-ff729daa)"
             );
         }
+    }
+
+    /// **A relaunch mid-stage puts the user's words back, and tells the ring.**
+    ///
+    /// Stage held its content in `AppState.staged_responses` — process memory —
+    /// so a relaunch dropped whatever the user had composed, while the composer
+    /// rehydrated its "Staged ✓" toggle from the same empty map and showed them
+    /// a stage that no longer existed. Migration 0058 gives the session row a
+    /// slot; this pins that BOTH halves come back, because they are separate
+    /// and either alone is useless: the CONTENT (what `deliver_staged` sends)
+    /// and the ring's FLAG (what makes a boundary park and emit
+    /// `StagedDeliveryDue`).
+    ///
+    /// Source-asserted: `rehydrate_stage` needs a live `CoreAppState` with
+    /// subprocesses to exercise, the same reason its neighbours here are grep
+    /// pins.
+    #[test]
+    fn a_restart_restores_both_halves_of_a_stage() {
+        let src = include_str!("state.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        let body = prod
+            .split("async fn rehydrate_stage")
+            .nth(1)
+            .expect("rehydrate_stage exists")
+            .split("\n    /// ")
+            .next()
+            .expect("a split always yields a first part");
+        assert!(
+            body.contains("staged_message("),
+            "the stage comes back from the durable slot, not from memory"
+        );
+        assert!(
+            body.contains("staged_responses"),
+            "the CONTENT half: what `deliver_staged` will send"
+        );
+        assert!(
+            body.contains("notify_ring_stage("),
+            "the FLAG half: without it the fresh ring parks for nothing and the \
+             message waits for a boundary that never fires"
+        );
+        // Both spawn paths rehydrate — creation and the respawn a relaunch takes.
+        assert_eq!(
+            prod.matches("self.rehydrate_stage(").count(),
+            2,
+            "every path that puts a live handle in the map must restore its stage"
+        );
     }
 
     /// **The D15 epilogue waits for the LAP it asked for, not for the first

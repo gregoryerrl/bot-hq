@@ -1,0 +1,16 @@
+-- rc3 B1-F11: the staged message survives a relaunch.
+--
+-- Stage (2026-08-15) lets the user compose while the ring runs and delivers at
+-- the next turn boundary. The content lived only in `AppState.staged_responses`
+-- — process memory — so relaunching bot-hq mid-stage dropped whatever they had
+-- typed, silently, while the composer still showed "Staged ✓" from its own
+-- rehydrate call. One slot per session, exactly like the halt.
+--
+-- Nullable with no default on purpose: every existing INSERT into `sessions`
+-- keeps working untouched (a NOT NULL column with no default would stop the app
+-- booting, which is how migration 0044's `origin` was caught).
+--
+-- The tray picks that ride along are NOT stored here: they are already durable
+-- rows in `session_tray`, and re-deriving them at delivery is what keeps the
+-- snapshot equal to the tray.
+ALTER TABLE sessions ADD COLUMN staged_message TEXT;
