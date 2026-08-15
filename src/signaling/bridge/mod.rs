@@ -225,14 +225,6 @@ pub enum SignalingEvent {
         session_id: String,
         alive: bool,
     },
-    /// HANDS declared (or ended) harness-background work via `declare_working`.
-    /// `reason=Some(..)` shows the neutral WORKING badge; `None` clears it
-    /// (TTL expiry, user broadcast, or session close — never activity
-    /// transitions: a declared state persists across turns).
-    SessionWorking {
-        session_id: String,
-        reason: Option<String>,
-    },
     /// Session-level attention flag from the idle-unflagged watchdog.
     /// `state=Some("idle_unflagged")` when the session sat Idle past grace with
     /// no tray flag parked after the first user prompt; `state=None` when the
@@ -313,17 +305,6 @@ pub struct SignalingBridge {
     session_sequencer: Mutex<
         HashMap<String, tokio::sync::mpsc::Sender<crate::core::sequencer::SequencerCommand>>,
     >,
-    /// Per-session `declare_working` flag, registered at spawn (mirrors
-    /// `session_awaiting`). `Some((until, reason))` while active. Tuple —
-    /// not a core type — so the signaling layer stays decoupled from core.
-    /// The bridge sets it (`declare_working`); `AppState::broadcast` clears
-    /// it; the watchdog expires it.
-    #[allow(clippy::type_complexity)]
-    session_working_flag:
-        Mutex<HashMap<String, Arc<std::sync::Mutex<Option<(std::time::Instant, String)>>>>>,
-    /// Latest emitted WORKING badge state per session (dedupe registry +
-    /// `get_session_runtime` seed), exactly mirroring `session_attention`.
-    session_working: std::sync::Mutex<HashMap<String, String>>,
     /// `session_id:slug` → how many times that participant has called
     /// `pass_turn` in the turn it currently holds (rc3 **D25**).
     ///
@@ -474,8 +455,6 @@ impl SignalingBridge {
             session_reviewers: std::sync::Mutex::new(HashMap::new()),
             router_health: std::sync::Mutex::new(HashMap::new()),
             session_attention: std::sync::Mutex::new(HashMap::new()),
-            session_working_flag: Mutex::new(HashMap::new()),
-            session_working: std::sync::Mutex::new(HashMap::new()),
             turn_passes: std::sync::Mutex::new(HashMap::new()),
             session_open_blocking: std::sync::Mutex::new(HashMap::new()),
         })
@@ -686,89 +665,6 @@ impl SignalingBridge {
         self.session_sequencer.lock().await.contains_key(session_id)
     }
 
-    /// Register the session's `declare_working` flag at spawn (mirrors
-    /// `register_session_awaiting`).
-    #[allow(clippy::type_complexity)]
-    pub async fn register_session_working(
-        &self,
-        session_id: String,
-        flag: Arc<std::sync::Mutex<Option<(std::time::Instant, String)>>>,
-    ) {
-        self.session_working_flag
-            .lock()
-            .await
-            .insert(session_id, flag);
-    }
-
-    /// HANDS declares harness-background work: set the flag until `ttl` from
-    /// now and emit the WORKING badge. Re-declaring extends/replaces. Returns
-    /// the clamped TTL actually applied, or None if the session isn't
-    /// registered (spawn incomplete / already closed).
-    pub async fn declare_working(
-        &self,
-        session_id: &str,
-        reason: &str,
-        ttl: std::time::Duration,
-    ) -> Option<std::time::Duration> {
-        let flag = self
-            .session_working_flag
-            .lock()
-            .await
-            .get(session_id)
-            .cloned()?;
-        *flag.lock().unwrap_or_else(|p| p.into_inner()) =
-            Some((std::time::Instant::now() + ttl, reason.to_string()));
-        self.notify_session_working(session_id.to_string(), Some(reason));
-        Some(ttl)
-    }
-
-    /// Clear the `declare_working` flag (user broadcast / session close) and
-    /// drop the badge. No-op when nothing was declared.
-    pub async fn clear_session_working(&self, session_id: &str) {
-        if let Some(flag) = self.session_working_flag.lock().await.get(session_id) {
-            let had = flag
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take()
-                .is_some();
-            if had {
-                self.notify_session_working(session_id.to_string(), None);
-            }
-        }
-    }
-
-    /// Emit a WORKING badge change, deduped like `notify_session_attention` —
-    /// the watchdog's expiry path and re-declares may re-call with the same
-    /// state; only actual transitions reach the wire.
-    pub fn notify_session_working(&self, session_id: String, reason: Option<&str>) {
-        {
-            let mut map = self
-                .session_working
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            let changed = match reason {
-                Some(r) => map.insert(session_id.clone(), r.to_string()).as_deref() != Some(r),
-                None => map.remove(&session_id).is_some(),
-            };
-            if !changed {
-                return;
-            }
-        }
-        let _ = self.event_tx.send(SignalingEvent::SessionWorking {
-            session_id,
-            reason: reason.map(str::to_string),
-        });
-    }
-
-    /// Latest cached WORKING badge state (`None` = clear / never declared).
-    pub fn current_session_working(&self, session_id: &str) -> Option<String> {
-        self.session_working
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(session_id)
-            .cloned()
-    }
-
     /// Hand the bridge a Weak ref to the session's ActivityTracker so
     /// `set_session_awaiting` can refresh the derived activity the moment it
     /// flips the awaiting flag (emit AwaitingUser without waiting for the next
@@ -875,11 +771,6 @@ impl SignalingBridge {
     pub async fn unregister_session(&self, session_id: &str) {
         self.session_projects.lock().await.remove(session_id);
         self.session_awaiting.lock().await.remove(session_id);
-        self.session_working_flag.lock().await.remove(session_id);
-        self.session_working
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(session_id);
         self.session_activity.lock().await.remove(session_id);
         self.session_phase.lock().await.remove(session_id);
         self.session_close_gate.lock().await.remove(session_id);

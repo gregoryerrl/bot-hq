@@ -80,7 +80,6 @@ describe("Providers — the slot-shaped runtime wire", () => {
       bySession: {},
       routerBySession: {},
       attentionBySession: {},
-      workingBySession: {},
     });
   });
 

@@ -113,12 +113,6 @@ pub fn phrasing(cap: Capability) -> Phrasing {
                    you are blocked and let a participant who can yield do it",
             peer: "halts the session for the user",
         },
-        DeclareWorking => Phrasing {
-            grant: "declare background work with `declare_working(reason, expected_seconds)` \
-                    so the idle watchdog holds instead of nudging",
-            deny: "declare background work — `declare_working` is refused for you",
-            peer: "declares background work",
-        },
         CloseSession => Phrasing {
             grant: "close the session with `close_session`, once the user has approved the \
                     close",
@@ -518,7 +512,6 @@ mod tests {
             "supersede_question",
             "disposition_finding",
             "override_reviewer_block",
-            "declare_working",
             "terminal_exec",
             "eyes_flag",
             "approve_finding",

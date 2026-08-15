@@ -249,7 +249,6 @@ export function SessionView() {
   const health = useHealthStore((s) => s.bySession[sessionId]);
   const routerAlive = useHealthStore((s) => s.routerBySession[sessionId]);
   const attention = useHealthStore((s) => s.attentionBySession[sessionId]);
-  const working = useHealthStore((s) => s.workingBySession[sessionId]);
   const agentContext = useContextStore((s) => s.bySession[sessionId]);
   const activity = useActivityStore((s) => s.bySession[sessionId]);
   // Per-agent busy flags for the chat-input turn-status line. Parallel to
@@ -548,17 +547,6 @@ export function SessionView() {
                   title="Idle with no question or halt parked — the duo was nudged to declare state"
                 >
                   NEEDS DIRECTION
-                </span>
-              </>
-            )}
-            {working && (
-              <>
-                <span className="mx-2 text-outline-variant">·</span>
-                <span
-                  className="rounded border border-primary/40 bg-primary/15 px-1.5 py-0.5 font-label-caps text-label-caps text-primary"
-                  title={`Background work declared: ${working}`}
-                >
-                  WORKING
                 </span>
               </>
             )}

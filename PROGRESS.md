@@ -18,7 +18,39 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
-## 2026-08-15 — Stage: compose anytime, land at the boundary
+## 2026-08-15 — every stop is a HALT; Working retired
+
+The user's collapse of the state model, arrived at while reading s-d6352684
+(a "Working" badge over a ring that had yielded 17 minutes earlier, its real
+state — waiting on the 03:15Z sweep, self-waking 03:42Z, one command theirs —
+scattered across an invisible tool-row reason, chat prose and a generic yield
+line): *"What do we need WAITING for? HALT can be for any reason… on
+turn-based, an agent doesn't hand the turn until they're finished. HALT means
+the floor is the user's."*
+
+**The model now:** BUSY is holding a turn (the busy map); everything else is
+a stop, and **every stop fills the halt slot** — an agent recap, the
+provider limit, the error streak, spin, and now mechanically the all-pass
+yield, the round cap and consensus (host-declared, `system`, generic reasons
+agents are taught to pre-empt with their own). Release is the user's message,
+only — a self-wake may post findings and re-declare a fresher recap but
+cannot start a lap. External-wait halts always name their wake time: nothing
+expires a halt, so the timestamp is the dead-timer alarm ("wakes 03:42Z"
+read at 04:10 speaks for itself).
+
+**Retired whole:** the `declare_working` tool, capability (17 → 16;
+migration 0057 scrubs the grant from role rows, `Capability::parse` already
+dropped unknowns), the WORKING badge (tile + session header), the
+`session:working` event/store plumbing, and the watchdog's TTL machinery.
+The idle-unflagged watchdog is demoted to a wedge-net: with every stop
+declared, idle + empty slot + empty tray is unreachable except through bugs
+— its condition now reads the halt slot where it read the Working flag.
+
+Pinned: the yield fills the slot (mutation-verified), the watchdog
+suppresses on `halted`, seeded roles carry no retired grant, the parity
+registry count records the deliberate 40 → 39, and the universal layer
+teaches halt-for-any-reason with the user's own examples
+(`every_stop_is_a_halt_and_working_is_retired`). Suites 1130 + 381.
 
 The user's design, built as specced: *"remove the lock on the input box.
 while agents are busy, instead of send button, it will be a toggle button…

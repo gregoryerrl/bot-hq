@@ -73,7 +73,6 @@ describe("seedRuntimeStores", () => {
         rain_health: "retrying",
         router_alive: false,
         attention: "idle_unflagged",
-        working: "gates running",
       },
       {
         session_id: "s2",
@@ -84,7 +83,6 @@ describe("seedRuntimeStores", () => {
         rain_health: null,
         router_alive: null,
         attention: null,
-        working: null,
       },
     ];
 
@@ -140,7 +138,6 @@ describe("seedRuntimeStores", () => {
           rain_health: "dead",
           router_alive: null,
           attention: null,
-          working: null,
         },
       ],
       (id, _a, b) => {

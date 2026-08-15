@@ -1126,14 +1126,6 @@ async fn spawn_session_handle(
             .await
             .unwrap_or_default(),
     ));
-    // declare_working flag — set by the bridge (MCP tool), cleared by
-    // broadcast/expiry. In-memory: a restart kills the background tasks the
-    // declaration was about, so it must not survive one.
-    let working: Arc<std::sync::Mutex<Option<(std::time::Instant, String)>>> =
-        Arc::new(std::sync::Mutex::new(None));
-    bridge
-        .register_session_working(session.id.clone(), Arc::clone(&working))
-        .await;
     // The idle nudge is addressed to the participant that can act on it, so it
     // goes to the first agent holding `edit_files` and falls back to the first
     // agent when nobody does (a review-only session still deserves the nudge).
@@ -1146,7 +1138,7 @@ async fn spawn_session_handle(
         hands_input_tx: h.input().clone(),
         ipav: Arc::clone(&ipav),
         user_broadcasts: Arc::clone(&user_broadcasts),
-        working: Arc::clone(&working),
+        session_id: session.id.clone(),
     });
     let hands_slug = live.get(hands_slot).map(|p| p.slug.clone());
     tokio::spawn(crate::core::watchdog::run_stall_watchdog(

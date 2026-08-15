@@ -35,7 +35,6 @@ const HANDS_ONLY: &[&str] = &[
     "disposition_finding",
     "override_reviewer_block",
     "halt",
-    "declare_working",
     "terminal_exec",
 ];
 
@@ -470,9 +469,10 @@ async fn the_capability_gate_reproduces_the_name_gate_for_every_tool() {
         checked += 1;
     }
     assert!(
-        checked >= 40,
+        checked >= 39,
         "expected the full tool registry, only checked {checked} — did \
-         tool_descriptors() shrink?"
+         tool_descriptors() shrink? (40 → 39 when declare_working retired, \
+         2026-08-15: every stop is a HALT; working = holding a turn)"
     );
 }
 

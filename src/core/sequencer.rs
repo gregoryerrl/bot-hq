@@ -1444,6 +1444,21 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     if halted_on_consensus(&deps, &mut holder, &mut epoch, participant_id, ending)
                         .await
                     {
+                        // Consensus is a stop, and every stop is a HALT
+                        // (2026-08-15): fill the slot so the arrival has a
+                        // banner even before any close-ask lands in the tray.
+                        if let Some(bridge) = deps.bridge.as_ref() {
+                            let _ = bridge
+                                .mark_awaiting_user(
+                                    deps.session_id.to_string(),
+                                    "system".to_string(),
+                                    "Every participant voted done — the task \
+                                     looks complete. Answer any close-ask in \
+                                     the tray, or send your next direction."
+                                        .to_string(),
+                                )
+                                .await;
+                        }
                         // The cycle just yielded on consensus with a staged
                         // response pending: deliver it now — it is the
                         // user's queued next message, and a yielded ring is
@@ -2160,6 +2175,22 @@ async fn advance_turn(
                 if !*spoke_this_lap {
                     halt(holder, epoch);
                     announce_all_passed(deps).await;
+                    // Every stop is a HALT (2026-08-15: "HALT means the floor
+                    // is the user's") — the yield fills the session's halt
+                    // slot so even the laziest stop has a banner. Agents are
+                    // taught to pre-empt this generic reason with their own
+                    // recap; this is the backstop for when nobody did.
+                    if let Some(bridge) = deps.bridge.as_ref() {
+                        let _ = bridge
+                            .mark_awaiting_user(
+                                deps.session_id.to_string(),
+                                "system".to_string(),
+                                "Every participant passed a full lap — nothing \
+                                 to add without you. Send a message to resume."
+                                    .to_string(),
+                            )
+                            .await;
+                    }
                     debug!(
                         session = %deps.session_id,
                         laps = *laps,
@@ -2189,6 +2220,23 @@ async fn advance_turn(
                     // where one that kept running because a row failed would be
                     // the backstop not backstopping.
                     announce_round_cap(deps, *laps).await;
+                    // And the halt slot (2026-08-15): the cap's stop gets the
+                    // same banner every other stop gets.
+                    if let Some(bridge) = deps.bridge.as_ref() {
+                        let _ = bridge
+                            .mark_awaiting_user(
+                                deps.session_id.to_string(),
+                                "system".to_string(),
+                                format!(
+                                    "The round cap ({laps} laps) was reached — \
+                                     something may be running away. Send a \
+                                     message to steer, or raise `round_cap` in \
+                                     Session Settings.",
+                                    laps = *laps
+                                ),
+                            )
+                            .await;
+                    }
                     warn!(
                         session = %deps.session_id,
                         laps = *laps,
@@ -7271,6 +7319,9 @@ mod tests {
         let (a, b) = (seats[0].id, seats[1].id);
         let act = tracker(&["a", "b"]).await;
         deps.activity = Some(Arc::clone(&act));
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
         post(&storage, "user", None, "go").await;
 
         let (tx, rx) = mpsc::channel(8);
@@ -7330,6 +7381,15 @@ mod tests {
             .map(|m| m.content)
             .collect();
         assert_eq!(notices.len(), 1, "one all-passed notice: {notices:?}");
+        // Every stop is a HALT (2026-08-15): the yield fills the session's
+        // halt slot so even the laziest stop wears the banner.
+        let halt = storage.session_halt("s1").await.unwrap();
+        assert!(
+            halt.as_ref()
+                .is_some_and(|(by, reason, _)| by == "system"
+                    && reason.contains("Every participant passed")),
+            "the yield fills the halt slot: {halt:?}"
+        );
 
         drop(tx);
         assert!(exited(task).await);

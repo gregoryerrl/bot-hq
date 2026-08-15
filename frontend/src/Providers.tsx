@@ -126,7 +126,6 @@ function GlobalEventSync() {
   const setHealth = useHealthStore((s) => s.setHealth);
   const setRouterHealth = useHealthStore((s) => s.setRouterHealth);
   const setAttention = useHealthStore((s) => s.setAttention);
-  const setWorking = useHealthStore((s) => s.setWorking);
   const clearHealth = useHealthStore((s) => s.clearSession);
   const setActivity = useActivityStore((s) => s.setActivity);
   const clearActivity = useActivityStore((s) => s.clearSession);
@@ -172,12 +171,6 @@ function GlobalEventSync() {
       setAttention(p.session_id, p.state ?? null);
     },
     [setAttention],
-  );
-  const onWorking = useCallback(
-    (p: { session_id: string; reason: string | null }) => {
-      setWorking(p.session_id, p.reason ?? null);
-    },
-    [setWorking],
   );
   const onActivity = useCallback(
     (p: {
@@ -235,7 +228,6 @@ function GlobalEventSync() {
   useTauriEvent("session:agent_context", onAgentContext, [onAgentContext]);
   useTauriEvent("session:router_health", onRouterHealth, [onRouterHealth]);
   useTauriEvent("session:attention", onAttention, [onAttention]);
-  useTauriEvent("session:working", onWorking, [onWorking]);
   useTauriEvent("session:activity", onActivity, [onActivity]);
   useTauriEvent("session:resync", onResync, [onResync]);
 
@@ -256,14 +248,13 @@ function GlobalEventSync() {
           setHealth,
           setRouterHealth,
           setAttention,
-          setWorking,
         ),
       )
       .catch(() => {
         // Best-effort: a failed backfill just leaves the stores to the live
         // events (the pre-fix behavior). Never block render.
       });
-  }, [setActivity, setHealth, setRouterHealth, setAttention, setWorking]);
+  }, [setActivity, setHealth, setRouterHealth, setAttention]);
 
   return null;
 }

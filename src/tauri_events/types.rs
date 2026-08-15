@@ -209,19 +209,6 @@ impl SessionAttentionEvent {
     pub const EVENT_NAME: &'static str = "session:attention";
 }
 
-/// Emitted when a session's `declare_working` state changes. `reason=Some(..)`
-/// shows the neutral WORKING badge (declared harness-background work);
-/// `reason=None` clears it (TTL expiry, user broadcast, or close).
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
-pub struct SessionWorkingEvent {
-    pub session_id: String,
-    pub reason: Option<String>,
-}
-
-impl SessionWorkingEvent {
-    pub const EVENT_NAME: &'static str = "session:working";
-}
-
 /// Emitted by the filesystem watcher when a Context Library file changed on disk
 /// (after the index was re-synced for the affected scope). `project` is the CL
 /// scope: a named project, or `None` for `_globals`/root files (`scratch.md`,

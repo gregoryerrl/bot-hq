@@ -95,7 +95,7 @@ If you receive the **idle nudge** (\"[System: this session went idle with no que
 
 **The nudge is not a mandate to invent work** (user clarification, 2026-08-05, same day the watchdog shipped). Continue only work the user already directed. If no user-given direction exists, do NOT self-assign a task, resume banked work uninvited, or manufacture activity to look busy — the correct declaration IS the question. Ground it: `ask_user_choice(\"Which direction?\", …)` when real options exist (backlog items, close), with your recommendation; `halt(\"Task complete — which direction?\")` when even a menu would be guesswork. Inventing a mandate to satisfy a nudge is the fabricated-instruction failure mode (2026-05-29) wearing a new trigger.
 
-**Background work that outlives your turn: `declare_working(reason, expected_seconds)`.** A backgrounded build/test chain is invisible to the activity tracker — your turn ends, the session reads bare-idle, and the watchdog fires a false NEEDS DIRECTION (observed live 2026-08-05). Declare it instead: the watchdog holds and a neutral WORKING badge shows your reason. The declaration EXPIRES (clamp 30–3600 s) — re-declare on each wake while work continues; a dead background task therefore surfaces as the nudge within one poll of expiry. **Size it to the work, not to habit:** while you are waiting on a subagent nothing wakes you until it returns, so you cannot re-declare mid-wait — a task that may run 45 minutes needs a declaration that covers 45 minutes. An under-sized declaration expires mid-work and the nudge fires into a session that is genuinely working (measured 2026-08-07: a 2652 s subagent under a 1800 s ceiling, and the resulting nudge killed it). Do NOT use it for user-waits (park/halt) or peer-waits (stay silent), and do not stack it to dodge the invariant — an honest reason with an honest duration.
+**Every stop is a HALT, and the recap is the state** (the user, 2026-08-15: \"HALT means the floor is the user's\"). While you hold a turn you are working; the moment you stop — for ANY reason — declare the halt with a recap naming why and what resumes it: *waiting for the 03:15Z sweep (timer wakes me 03:42Z)* · *please run this command on Laravel Cloud (pasted below)* · *waiting on your tray answers* · *task done — next-move suggestions in the tray* · *provider limit reached*. Two rules make it work. **(1) The ring stays frozen until the USER's next message** — a self-wake (a background timer, a finished watcher) may post findings and RE-declare a fresher halt, but it cannot start a lap; if what it found needs peers, say so in the recap and wait for the user. **(2) An external-wait halt ALWAYS names its wake time** — nothing expires a halt, so the timestamp is what lets the user spot a dead timer at a glance (\"wakes 03:42Z\" read at 04:10 is its own alarm). The all-pass yield, the round cap and consensus fill the halt slot mechanically as backstops with generic reasons — yours is better: declare before drifting into a lap of passes. (`declare_working` and the WORKING badge are RETIRED: \"working\" is holding a turn, nothing else.)
 
 ## Gated Bash commands (Tool Gate)
 
@@ -286,6 +286,30 @@ mod tests {
         assert!(
             !GENERAL_RULES.contains("user_actions"),
             "the reverted ledger argument must not be taught"
+        );
+    }
+
+    #[test]
+    fn every_stop_is_a_halt_and_working_is_retired() {
+        // The user, 2026-08-15: "HALT means the floor is the user's" — one
+        // stop-surface for every reason, release by user message only, wake
+        // times named because nothing expires a halt. And the Working badge
+        // is gone: "working" is holding a turn, nothing else.
+        assert!(
+            GENERAL_RULES.contains("Every stop is a HALT"),
+            "the layer must teach the one stop-surface"
+        );
+        assert!(
+            GENERAL_RULES.contains("ALWAYS names its wake time"),
+            "external-wait halts carry their timestamp — the no-TTL trade"
+        );
+        assert!(
+            GENERAL_RULES.contains("it cannot start a lap"),
+            "self-wakes post and re-declare; only the user releases the ring"
+        );
+        assert!(
+            !GENERAL_RULES.contains("declare_working("),
+            "the retired tool must not be taught"
         );
     }
 

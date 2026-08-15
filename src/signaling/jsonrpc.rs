@@ -557,43 +557,6 @@ async fn call_tool(
                 prior.as_deref(),
             )))
         }
-        "declare_working" => {
-            let reason = arg_required_str(&args, "reason")?;
-            // Upper bound is 3600, not 1800: a HANDS agent orchestrating
-            // subagents cannot re-declare mid-wait, because nothing wakes it
-            // until the subagent returns. Measured on 2026-08-07 during the B5
-            // batch — a single implementer ran 2652s, so the old 1800s ceiling
-            // guaranteed the declaration expired before the work finished, and
-            // the watchdog nudged into a genuinely-working session. One such
-            // nudge killed a subagent mid-task.
-            //
-            // The TTL still exists and still matters: a dead background task
-            // surfaces as the nudge within one poll of expiry. This widens the
-            // ceiling to cover observed durations with headroom; it does not
-            // make a declaration permanent.
-            let secs = args
-                .get("expected_seconds")
-                .and_then(Value::as_f64)
-                .unwrap_or(600.0)
-                .clamp(30.0, 3600.0);
-            let ttl = std::time::Duration::from_secs_f64(secs);
-            match bridge
-                .declare_working(&caller.session_id, &reason, ttl)
-                .await
-            {
-                Some(applied) => Ok(ToolCallResult::text(format!(
-                    "working declared for {}s — the idle watchdog holds and the WORKING \
-                     badge shows your reason. It EXPIRES: re-declare on each wake while \
-                     the background work continues, or finish with a proper park/halt/\
-                     close-ask. Cleared automatically by the user's next message.",
-                    applied.as_secs()
-                ))),
-                None => Ok(ToolCallResult::text(
-                    "declare_working unavailable — session not registered (still \
-                     spawning or already closing); proceed without it.",
-                )),
-            }
-        }
         "advance_phase" => {
             let target = arg_required_str(&args, "target")?;
             parse_phase_arg("target", &target)?;
@@ -1391,7 +1354,6 @@ mod tests {
         assert!(names.contains(&"mark_awaiting_user"));
         assert!(names.contains(&"peer_ack"));
         assert!(names.contains(&"halt"));
-        assert!(names.contains(&"declare_working"));
         assert!(names.contains(&"request_approval"));
         assert!(names.contains(&"action_gate"));
         assert!(names.contains(&"check_commit_message"));
@@ -1593,7 +1555,6 @@ mod tests {
             "request_approval",
             "action_gate",
             "halt",
-            "declare_working",
             "terminal_exec",
         ] {
             let res = dispatch(

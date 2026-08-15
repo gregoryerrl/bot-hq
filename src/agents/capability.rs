@@ -30,7 +30,6 @@ pub enum Capability {
     ParkApproval,
     SupersedeQuestion,
     Halt,
-    DeclareWorking,
     CloseSession,
     // ---- review ----
     FileFinding,
@@ -68,7 +67,7 @@ impl Capability {
     /// below. `all_lists_every_variant_exactly_once` and `capability_prompt`'s
     /// `all_covers_every_capability_the_presets_and_the_tool_map_name` then
     /// cross-check this array against three independent sources.
-    pub const ALL: [Capability; 17] = {
+    pub const ALL: [Capability; 16] = {
         use Capability::*;
         [
             ReadChannel,
@@ -77,7 +76,6 @@ impl Capability {
             ParkApproval,
             SupersedeQuestion,
             Halt,
-            DeclareWorking,
             CloseSession,
             FileFinding,
             ApproveFinding,
@@ -97,7 +95,7 @@ impl Capability {
         use Capability::*;
         match self {
             ReadChannel | PostChannel => "Channel",
-            AskUser | ParkApproval | SupersedeQuestion | Halt | DeclareWorking | CloseSession => {
+            AskUser | ParkApproval | SupersedeQuestion | Halt | CloseSession => {
                 "User-facing"
             }
             FileFinding | ApproveFinding | DispositionFinding | OverrideReviewerBlock => "Review",
@@ -116,7 +114,6 @@ impl Capability {
             ParkApproval => "Park an approval",
             SupersedeQuestion => "Supersede a question",
             Halt => "Halt",
-            DeclareWorking => "Declare working",
             CloseSession => "Close the session",
             FileFinding => "File a finding",
             ApproveFinding => "Approve a finding",
@@ -141,7 +138,6 @@ impl Capability {
             ParkApproval => "Park a request for the user to approve (`request_approval`).",
             SupersedeQuestion => "Replace a question already waiting on the user.",
             Halt => "Stop and hand the session back to the user.",
-            DeclareWorking => "Announce a long-running stretch so the UI stops looking stalled.",
             CloseSession => "End the session.",
             FileFinding => "Raise a finding against work — the reviewer's block.",
             ApproveFinding => "Sign a finding off.",
@@ -164,7 +160,6 @@ impl Capability {
             ParkApproval => "park_approval",
             SupersedeQuestion => "supersede_question",
             Halt => "halt",
-            DeclareWorking => "declare_working",
             CloseSession => "close_session",
             FileFinding => "file_finding",
             ApproveFinding => "approve_finding",
@@ -187,7 +182,6 @@ impl Capability {
             "park_approval" => ParkApproval,
             "supersede_question" => SupersedeQuestion,
             "halt" => Halt,
-            "declare_working" => DeclareWorking,
             "close_session" => CloseSession,
             "file_finding" => FileFinding,
             "approve_finding" => ApproveFinding,
@@ -232,7 +226,6 @@ pub fn required_for(tool: &str) -> Option<Capability> {
         "supersede_question" => SupersedeQuestion,
         "disposition_finding" => DispositionFinding,
         "override_reviewer_block" => OverrideReviewerBlock,
-        "declare_working" => DeclareWorking,
         "terminal_exec" => RunTerminal,
         "eyes_flag" => FileFinding,
         "approve_finding" => ApproveFinding,
@@ -355,7 +348,6 @@ impl CapabilitySet {
             ParkApproval,
             SupersedeQuestion,
             Halt,
-            DeclareWorking,
             CloseSession,
             DispositionFinding,
             OverrideReviewerBlock,
@@ -469,7 +461,6 @@ mod tests {
     const HANDS_ONLY: &[&str] = &[
         "ask_user_choice", "mark_awaiting_user", "request_approval", "action_gate",
         "supersede_question", "disposition_finding", "override_reviewer_block",
-        "halt", "declare_working", "terminal_exec",
     ];
     const EYES_ONLY: &[&str] = &["eyes_flag", "approve_finding"];
     const CL_MUTATE: &[&str] = &["cl_write_file", "cl_register_folder_description"];
@@ -604,7 +595,7 @@ mod tests {
         for cap in Capability::ALL {
             match cap {
                 ReadChannel | PostChannel | AskUser | ParkApproval | SupersedeQuestion | Halt
-                | DeclareWorking | CloseSession | FileFinding | ApproveFinding
+                | CloseSession | FileFinding | ApproveFinding
                 | DispositionFinding | OverrideReviewerBlock | EditFiles | RunBash | GatedBash
                 | RunTerminal | WriteContextLibrary => {}
             }
@@ -612,8 +603,9 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            17,
-            "a capability is missing from `Capability::ALL`"
+            16,
+            "a capability is missing from `Capability::ALL` (16 since \
+             declare_working retired, 2026-08-15: working = holding a turn)"
         );
     }
 

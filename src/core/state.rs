@@ -1173,11 +1173,6 @@ impl AppState {
         handle
             .user_broadcasts
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        // A user message supersedes any declared background work: the agents
-        // wake for it, so the WORKING badge would be stale the moment they
-        // settle into the new task. (Expiry and this are the only clears —
-        // never activity transitions.)
-        self.bridge.clear_session_working(session_id).await;
         // NOBODY is marked busy here. The ring hands the turn to the front of
         // the rotation and `hand_turn_to` marks THAT participant — the one
         // busy-true writer (rc3 D19b). This used to pre-mark every agent, which

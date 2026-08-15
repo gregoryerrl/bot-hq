@@ -129,25 +129,26 @@ pub(crate) struct IdleDecision {
 ///   count and re-arms it.
 /// - `hands_down` — HANDS health is dead/retrying/stalled: a nudge can't be
 ///   answered, so chip only (and the nudge stays un-consumed for recovery).
-/// - `working` — an unexpired `declare_working` is active: HANDS declared
-///   harness-background work (e.g. a backgrounded gate chain) that outlives
-///   its turn, so bare-Idle is expected — suppress like `pending_tray`. The
-///   TTL bounds it; on expiry the caller passes `false` again and, since
-///   `idle_for` kept accruing during suppression, the broken promise fires on
-///   the next poll rather than after a fresh grace period.
+/// - `halted` — the session's halt slot is filled: the stop is DECLARED
+///   (an agent recap, the provider-limit stall, the error streak, spin, the
+///   all-pass yield, the round cap, consensus — every stop fills the slot as
+///   of 2026-08-15). Suppress like `pending_tray`: the banner is the state,
+///   and the floor is the user's. With every legitimate stop declared, this
+///   watchdog's remaining subject is the WEDGE — idle with an empty slot,
+///   empty tray and no gate, which normal operation can no longer produce.
 pub(crate) fn idle_unflagged_decision(
     idle_for: Option<Duration>,
     user_broadcasts: u64,
     pending_tray: bool,
     nudged_at: Option<u64>,
     hands_down: bool,
-    working: bool,
+    halted: bool,
     grace: Duration,
 ) -> IdleDecision {
     let chip = idle_for.is_some_and(|d| d >= grace)
         && user_broadcasts > 0
         && !pending_tray
-        && !working;
+        && !halted;
     let nudge = chip && nudged_at != Some(user_broadcasts) && !hands_down;
     IdleDecision { chip, nudge }
 }
@@ -165,13 +166,12 @@ pub struct IdleWatch {
     /// Bumped by `AppState::broadcast` on every user prompt. In-memory on
     /// purpose: a storage count races the first poll at session start.
     pub user_broadcasts: Arc<AtomicU64>,
-    /// The `declare_working` flag: `Some((until, reason))` while HANDS has
-    /// declared background work. Shared with the bridge (which sets it) and
-    /// `AppState::broadcast` (which clears it). The watchdog EXPIRES it —
-    /// takes the entry past `until` and emits the `SessionWorking` clear.
-    /// In-memory on purpose: an app restart kills the subprocesses and their
-    /// background tasks, so post-restart suppression would be a lie.
-    pub working: Arc<Mutex<Option<(Instant, String)>>>,
+    /// The session this watch reads halt state for. Every declared stop now
+    /// fills the session's HALT SLOT (agent halts, provider-limit,
+    /// error-streak, spin, the all-pass yield, the round cap, consensus), so
+    /// the slot is the one suppression signal the nudge needs — a halted
+    /// session is declared, not stalled.
+    pub session_id: String,
 }
 
 /// Per-session watchdog loop. Holds `Weak<AgentLiveness>` per agent so it
@@ -225,26 +225,6 @@ pub async fn run_stall_watchdog(
         // is routed and would false-block turns whose text wakes the peer).
         if let Some(idle_watch) = idle_watch.as_ref() {
             let state = activity.current();
-            // declare_working expiry runs EVERY poll (not just while idle) so
-            // the WORKING badge cannot linger past its TTL through a busy
-            // stretch. This is the watchdog's only event role for the flag —
-            // activity transitions never touch it (a declared state persists
-            // across turns, per the EYES finding on the v1 plan).
-            let working = {
-                let mut g = idle_watch
-                    .working
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                match &*g {
-                    Some((until, _)) if *until <= Instant::now() => {
-                        *g = None;
-                        bridge.notify_session_working(session_id.clone(), None);
-                        false
-                    }
-                    Some(_) => true,
-                    None => false,
-                }
-            };
             if state == SessionActivity::Idle {
                 let since = *idle_since.get_or_insert_with(Instant::now);
                 let broadcasts = idle_watch.user_broadcasts.load(Ordering::Acquire);
@@ -264,6 +244,22 @@ pub async fn run_stall_watchdog(
                 } else {
                     true // not a candidate yet — value unused beyond suppressing
                 };
+                // A filled halt slot is a DECLARED stop — every stop fills it
+                // now (2026-08-15: "HALT means the floor is the user's"), so
+                // idle-under-a-halt is the design, never the anomaly. Same
+                // lazy gate and same fail-quiet posture as the tray query.
+                let halted = if candidate {
+                    match idle_watch.storage.session_halt(&idle_watch.session_id).await {
+                        Ok(h) => h.is_some(),
+                        Err(e) => {
+                            warn!(session_id = %session_id, error = %e,
+                                  "idle watchdog: halt-slot query failed; skipping tick");
+                            true
+                        }
+                    }
+                } else {
+                    true
+                };
                 // Suppress the nudge when the participant it is addressed to is
                 // down — it would be pushed into a dead stdin. Keyed on that
                 // participant's slug (rc3 D10); no `hands_slug` means nobody can
@@ -282,7 +278,7 @@ pub async fn run_stall_watchdog(
                     pending_tray,
                     nudged_at,
                     hands_down,
-                    working,
+                    halted,
                     IDLE_GRACE,
                 );
                 // One call covers both directions: sets the chip while the
@@ -506,9 +502,9 @@ mod tests {
     #[test]
     fn idle_decision_suppressed_while_working_declared() {
         // An unexpired declare_working means bare-Idle is EXPECTED — no chip,
-        // no nudge, exactly like a pending tray row. Expiry is loop-level:
-        // the caller passes false again and the accrued idle_for fires on the
-        // next poll (covered by the fires-after-grace case above).
+        // no nudge, exactly like a pending tray row. A filled halt slot is a
+        // DECLARED stop (2026-08-15: every stop is a HALT) — idle under a
+        // banner is the design, never the anomaly.
         let d = idle_unflagged_decision(OVER, 3, false, None, false, true, GRACE);
         assert_eq!(d, IdleDecision { chip: false, nudge: false });
     }
@@ -537,7 +533,7 @@ mod tests {
             hands_input_tx: crate::agents::ParticipantInput::new("s1", tx),
             ipav,
             user_broadcasts: Arc::new(AtomicU64::new(1)),
-            working: Arc::new(Mutex::new(None)),
+            session_id: "s1".to_string(),
         };
         let bridge = SignalingBridge::new();
         let activity =

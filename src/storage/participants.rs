@@ -2479,6 +2479,11 @@ mod tests {
                 !slugs.contains(&"route_gated_command".to_string()),
                 "role {role} still carries the stray `route_gated_command` grant"
             );
+            assert!(
+                !slugs.contains(&"declare_working".to_string()),
+                "role {role} still grants the retired `declare_working` — \
+                 migration 0057 scrubs it"
+            );
             for slug in &slugs {
                 assert!(
                     crate::agents::Capability::parse(slug).is_some(),
