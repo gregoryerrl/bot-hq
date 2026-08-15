@@ -475,7 +475,34 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
         return Ok(1);
     }
     let session_id = hook_session_id();
-    let policy = Policy::resolve(data_dir, project, session_id.as_deref())?;
+    // **Fail CLOSED here, and only here** (E1). Every other `?` in this file
+    // returns an error that `run_policy_check_cli` maps to exit 0 — soft-fail,
+    // so an internal bug cannot break the user's git workflow. That is right for
+    // the advisory hooks and wrong for this one: a malformed `policy.yaml` made
+    // `push_gate: ask` and `force_push: blocked` silently evaporate, which is
+    // the exact opposite of what this module's own doc promises. A gate that
+    // cannot read its policy does not know that the push is allowed.
+    let policy = match Policy::resolve(data_dir, project, session_id.as_deref()) {
+        Ok(policy) => policy,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                blocked_banner(
+                    "pre-push",
+                    &format!(
+                        "Push BLOCKED: the policy could not be read ({e}).\n\
+                         \n\
+                         This gate fails closed: with no readable policy it cannot tell \
+                         `push_gate: auto` from `push_gate: ask`, or whether force-push \
+                         is blocked. Fix the policy file (usually a YAML syntax error in \
+                         the project's `policy.yaml` or the session snapshot under \
+                         `.local/session-policies/`) and push again."
+                    ),
+                ),
+            );
+            return Ok(1);
+        }
+    };
     use crate::policy::{ForcePushMode, PushGateMode};
 
     // force_push gate — independent of push_gate and checked FIRST, so a
@@ -1732,6 +1759,33 @@ mod tests {
         // session context → blocked with guidance (exit 1) before any HTTP call.
         let code = run_pre_push(data.path(), Some("foo")).unwrap();
         assert_eq!(code, 1);
+    }
+
+    /// **A push gate that cannot read its policy BLOCKS** (E1).
+    ///
+    /// Every `?` in this file is mapped to exit 0 by `run_policy_check_cli` —
+    /// soft-fail, so an internal bug cannot break the user's git workflow. Right
+    /// for the advisory hooks, wrong for this one: a malformed `policy.yaml`
+    /// made `push_gate: ask` and `force_push: blocked` evaporate silently, which
+    /// is the opposite of what this module's doc promises. A gate that cannot
+    /// read its policy does not know the push is allowed.
+    #[test]
+    fn run_pre_push_blocks_when_the_policy_cannot_be_read() {
+        let data = tempdir().unwrap();
+        std::fs::create_dir_all(data.path().join("library/projects/foo")).unwrap();
+        // Valid YAML, wrong SHAPE — a mapping key holding a mapping where a
+        // string belongs. This is what a hand-edited policy file fails as.
+        std::fs::write(
+            data.path().join("library/projects/foo/policy.yaml"),
+            "push_gate:\n  ask: yes\n",
+        )
+        .unwrap();
+        assert_eq!(
+            run_pre_push(data.path(), Some("foo")).unwrap(),
+            1,
+            "an unreadable policy let the push through — `push_gate` and \
+             `force_push` both silently stopped applying"
+        );
     }
 
     #[tokio::test]
