@@ -1133,9 +1133,9 @@ async fn spawn_session_handle(
         .iter()
         .position(|p| participant_capabilities(p).grants(crate::agents::Capability::EditFiles))
         .unwrap_or(0);
-    let idle_watch = handles.get(hands_slot).map(|h| crate::core::watchdog::IdleWatch {
+    let idle_watch = handles.get(hands_slot).map(|_| crate::core::watchdog::IdleWatch {
         storage: storage.clone(),
-        hands_input_tx: h.input().clone(),
+        hands_participant_id: live.get(hands_slot).map(|p| p.id),
         ipav: Arc::clone(&ipav),
         user_broadcasts: Arc::clone(&user_broadcasts),
         session_id: session.id.clone(),

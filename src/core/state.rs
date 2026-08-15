@@ -1457,9 +1457,16 @@ impl AppState {
         // reads the new phase on the next message that actually has something in
         // it. Provider-limit peer notices still wake her deliberately — that is a
         // different path and stays.
-        if let Some(hands) = handle.hands() {
-            hands.deliver(&persisted).await;
-        }
+        // **No direct write.** The row is persisted, so every participant reads
+        // it off its own cursor when the ring next deals it a turn — which is
+        // also when it can act on it. Writing into a stdin here did something
+        // else: the participant is mid-turn (it just called `advance_phase`), so
+        // the message opened a generation the ring had not dealt, whose
+        // completion carries a stale epoch and is discarded. The row was then
+        // delivered a second time by the ring, off the cursor. `user_responded`
+        // above deliberately passes `release_ring = false` — no wake is wanted
+        // here (rc3 D28) — and this now matches that intent instead of
+        // contradicting it.
 
         // A2 (adherence): the peer-ack the prompts don't mechanically enforce.
         // On the Plan→Apply boundary in a duo session, remind Brian (HANDS) to
@@ -1468,7 +1475,10 @@ impl AppState {
         if Self::should_peer_ack_nudge(prev_phase, target, handle.agent_count() > 1)
             && self.storage.adherence_nudges_enabled().await
         {
-            if let Some(hands) = handle.hands() {
+            // Still gated on the executor EXISTING — the reminder is addressed
+            // to it and a session without one has nobody to remind — but the row
+            // now reaches it through the ring, so no handle is needed here.
+            if handle.hands().is_some() {
                 // Its own `system` row (0044: host injections, NULL participant).
                 // It cannot ride the phase-change row above — that one is the
                 // user-visible "advanced to Apply" notice and this is a separate
@@ -1486,9 +1496,13 @@ impl AppState {
                     .await
                 {
                     Ok(nudge) => {
+                        // Same as the phase row above: persisted, read off the
+                        // cursor at the executor's next dealt turn — which is
+                        // when it can act on the reminder — rather than written
+                        // into a stdin mid-turn, where it opened a generation
+                        // outside the ring and arrived twice.
                         self.bridge
                             .notify_message_persisted(Arc::from(session_id), nudge.message_id());
-                        hands.deliver(&nudge).await;
                     }
                     // A missed nudge is a softer failure than a failed phase
                     // advance, so it warns rather than aborting the transition.

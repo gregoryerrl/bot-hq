@@ -6,7 +6,6 @@
 //! `SessionActivity` SignalingEvent whenever the derived state changes.
 
 use crate::signaling::SignalingBridge;
-use crate::storage::Author;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -189,28 +188,6 @@ impl ActivityTracker {
         })
     }
 
-    /// The slug the legacy `Author` discriminant refers to in THIS session:
-    /// `Brian` is turn slot 0 and `Rain` is turn slot 1, which is what the
-    /// bilateral router means by them. `None` for `User` and for a slot this
-    /// session does not have.
-    fn slug_of(&self, author: Author) -> Option<&str> {
-        match author {
-            Author::User => None,
-            Author::Brian => self.slugs.first().map(String::as_str),
-            Author::Rain => self.slugs.get(1).map(String::as_str),
-        }
-    }
-
-    /// Mark an agent busy (input dispatched) or idle (`TurnComplete`/`Exited`).
-    /// No-op for `Author::User`. Emits iff the derived session state changed.
-    pub fn set_busy(&self, author: Author, busy: bool) {
-        let Some(slug) = self.slug_of(author) else {
-            return;
-        };
-        let slug = slug.to_string();
-        self.set_busy_slug(&slug, busy);
-    }
-
     /// Participant-keyed [`set_busy`] — the form B5 keeps once `Author` is gone.
     /// `Author::User` never reaches here (its early-return is in `set_busy`), so
     /// `"user"` cannot enter the map.
@@ -297,14 +274,6 @@ impl ActivityTracker {
             g.cancelling,
             self.paused.load(Ordering::Acquire),
         )
-    }
-
-    /// Whether a specific agent is mid-turn — the Batch 7 stall watchdog reads
-    /// this to tell a stall (busy + silent) from expected silence (idle).
-    pub fn is_busy(&self, author: Author) -> bool {
-        self.slug_of(author)
-            .map(|s| s.to_string())
-            .is_some_and(|s| self.is_busy_slug(&s))
     }
 
     /// Participant-keyed [`is_busy`]. An unknown slug reads idle, which is the
@@ -553,20 +522,20 @@ mod tests {
         let t = tracker("s1", awaiting.clone(), bridge.clone());
 
         // idle -> busy(brian)
-        t.set_busy(Author::Brian, true);
+        t.set_busy_slug("hands", true);
         assert_eq!(
             activity_tuple(&next_event(&mut rx).await),
             Some(("busy", true, false))
         );
 
         // redundant set (brian already busy): nothing changed → no emit.
-        t.set_busy(Author::Brian, true);
+        t.set_busy_slug("hands", true);
         assert!(rx.try_recv().is_err(), "no emit when nothing changed");
 
         // busy(brian) -> busy(brian+rain): derived state stays `busy`, but the
         // per-agent flags changed (a broadcast) → MUST re-emit so the UI can show
         // BOTH agents working, not just Brian.
-        t.set_busy(Author::Rain, true);
+        t.set_busy_slug("eyes", true);
         assert_eq!(
             activity_tuple(&next_event(&mut rx).await),
             Some(("busy", true, true))
@@ -574,14 +543,14 @@ mod tests {
 
         // brian idle, rain still busy: still `busy`, but per-agent changed (a
         // peer hand-off) → re-emit with the new flags so the label follows.
-        t.set_busy(Author::Brian, false);
+        t.set_busy_slug("hands", false);
         assert_eq!(
             activity_tuple(&next_event(&mut rx).await),
             Some(("busy", false, true))
         );
 
         // both idle -> idle.
-        t.set_busy(Author::Rain, false);
+        t.set_busy_slug("eyes", false);
         assert_eq!(activity_state(&next_event(&mut rx).await), Some("idle"));
 
         // awaiting flips externally -> awaiting_user (after refresh).
@@ -596,11 +565,11 @@ mod tests {
         // Cancelling only "sticks" while an agent is busy (the kill is
         // settling). An agent goes busy, Stop sets cancelling (overrides busy),
         // then the agent dies (idle) → cancelling AUTO-CLEARS → Idle.
-        t.set_busy(Author::Brian, true);
+        t.set_busy_slug("hands", true);
         assert_eq!(activity_state(&next_event(&mut rx).await), Some("busy"));
         t.set_cancelling(true);
         assert_eq!(activity_state(&next_event(&mut rx).await), Some("cancelling"));
-        t.set_busy(Author::Brian, false);
+        t.set_busy_slug("hands", false);
         assert_eq!(activity_state(&next_event(&mut rx).await), Some("idle"));
     }
 
@@ -644,7 +613,7 @@ mod tests {
         );
         assert_eq!(t.current(), SessionActivity::Busy);
         assert!(t.is_busy_slug("scout"));
-        assert!(!t.is_busy(Author::Brian));
+        assert!(!t.is_busy_slug("hands"));
 
         // Redundant set on the third participant: nothing changed → no emit.
         t.set_busy_slug("scout", true);
@@ -685,10 +654,10 @@ mod tests {
         let awaiting = Arc::new(AtomicBool::new(false));
         let t = tracker("s1", awaiting.clone(), bridge.clone());
 
-        t.set_busy(Author::Brian, true); // idle -> busy
+        t.set_busy_slug("hands", true); // idle -> busy
         awaiting.store(true, Ordering::Release);
         t.refresh(); // busy -> awaiting_user, Brian STILL working
-        t.set_busy(Author::Brian, false); // stays awaiting_user; flags change only
+        t.set_busy_slug("hands", false); // stays awaiting_user; flags change only
 
         // The writes are detached (recompute_locked is sync), so let them land.
         for _ in 0..50 {
@@ -737,12 +706,12 @@ mod tests {
         let bridge = SignalingBridge::new();
         let mut rx = bridge.subscribe();
         let t = tracker("s1", Arc::new(AtomicBool::new(false)), bridge.clone());
-        t.set_busy(Author::Brian, true);
+        t.set_busy_slug("hands", true);
         assert_eq!(activity_state(&next_event(&mut rx).await), Some("busy"));
         t.set_cancelling(true);
         t.set_paused(true);
         assert_eq!(activity_state(&next_event(&mut rx).await), Some("cancelling"));
-        t.set_busy(Author::Brian, false);
+        t.set_busy_slug("hands", false);
         assert_eq!(activity_state(&next_event(&mut rx).await), Some("paused"));
         assert!(t.is_paused());
         // Resume releases the latch → Idle.
@@ -770,7 +739,7 @@ mod tests {
         // never reaches idle, so there is no proof the turn stopped and the
         // SIGKILL must not be skipped.
         let t = tracker("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
-        t.set_busy(Author::Brian, true);
+        t.set_busy_slug("hands", true);
         t.set_cancelling(true);
         assert!(!t.idled_since_cancel(), "agent never went idle");
     }
@@ -778,13 +747,13 @@ mod tests {
     #[test]
     fn idled_since_cancel_flips_once_both_agents_stop() {
         let t = tracker("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
-        t.set_busy(Author::Brian, true);
-        t.set_busy(Author::Rain, true);
+        t.set_busy_slug("hands", true);
+        t.set_busy_slug("eyes", true);
         t.set_cancelling(true);
         assert!(!t.idled_since_cancel());
-        t.set_busy(Author::Brian, false);
+        t.set_busy_slug("hands", false);
         assert!(!t.idled_since_cancel(), "one agent idle is not both");
-        t.set_busy(Author::Rain, false);
+        t.set_busy_slug("eyes", false);
         assert!(t.idled_since_cancel(), "both idle = the interrupt landed");
     }
 
@@ -794,10 +763,10 @@ mod tests {
         // again at the deadline, but the earlier idle is the proof that lets
         // the supersede branch protect that new turn.
         let t = tracker("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
-        t.set_busy(Author::Brian, true);
+        t.set_busy_slug("hands", true);
         t.set_cancelling(true);
-        t.set_busy(Author::Brian, false);
-        t.set_busy(Author::Brian, true);
+        t.set_busy_slug("hands", false);
+        t.set_busy_slug("hands", true);
         assert!(t.idled_since_cancel());
     }
 
@@ -808,7 +777,7 @@ mod tests {
         let t = tracker("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
         t.set_cancelling(true);
         assert!(t.idled_since_cancel(), "starts idle");
-        t.set_busy(Author::Brian, true);
+        t.set_busy_slug("hands", true);
         t.set_cancelling(false);
         t.set_cancelling(true);
         assert!(!t.idled_since_cancel(), "a fresh cancel starts with no proof");
@@ -824,7 +793,7 @@ mod tests {
     #[tokio::test]
     async fn await_both_idle_false_when_busy_past_deadline() {
         let t = tracker("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
-        t.set_busy(Author::Brian, true);
+        t.set_busy_slug("hands", true);
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(120);
         assert!(!t.await_both_idle(deadline).await);
     }
@@ -834,11 +803,11 @@ mod tests {
         // The realistic interrupt case: an agent is busy when cancel fires, then
         // the interrupt's `result` event flips it idle within the window.
         let t = tracker("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
-        t.set_busy(Author::Brian, true);
+        t.set_busy_slug("hands", true);
         let t2 = Arc::clone(&t);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-            t2.set_busy(Author::Brian, false);
+            t2.set_busy_slug("hands", false);
         });
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1000);
         assert!(t.await_both_idle(deadline).await);

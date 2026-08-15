@@ -158,10 +158,18 @@ pub(crate) fn idle_unflagged_decision(
 /// readable.
 pub struct IdleWatch {
     pub storage: Storage,
-    /// The stdin of the participant that can act on the nudge — the first one
-    /// holding `edit_files` (rc3 D10/D11: a capability, not a name). A
-    /// review-only participant has no state-declaring verbs to answer with.
-    pub hands_input_tx: crate::agents::ParticipantInput,
+    /// The participant that can act on the nudge — the first one holding
+    /// `edit_files` (rc3 D10/D11: a capability, not a name). A review-only
+    /// participant has no state-declaring verbs to answer with.
+    ///
+    /// An id to SUMMON with, not a stdin to write to. The nudge used to go
+    /// straight into that stdin, which woke a generation the ring had not dealt:
+    /// its rows posted, its completion carried a stale epoch and was discarded,
+    /// and the busy flag was set for turn slot 0 whether or not slot 0 was this
+    /// participant. Now the row is persisted and the ring is released with this
+    /// id as a mention, so the wake is a real turn — dealt, marked and completed
+    /// like every other.
+    pub hands_participant_id: Option<i64>,
     pub ipav: Arc<tokio::sync::Mutex<IpavState>>,
     /// Bumped by `AppState::broadcast` on every user prompt. In-memory on
     /// purpose: a storage count races the first poll at session start.
@@ -393,11 +401,24 @@ async fn deliver_idle_nudge(
         }
     };
     bridge.notify_message_persisted(Arc::from(session_id), nudge.message_id());
-    if idle_watch.hands_input_tx.deliver(&nudge).await {
-        // Mirror the dispatch sites: input sent → HANDS is mid-turn, so the
-        // session reads Busy (and the chip clears) while he declares state.
-        activity.set_busy(Author::Brian, true);
-    }
+    // **The wake is a ring release, not a stdin write.** The nudge fires exactly
+    // when no turn is coming — idle, nothing parked — so the row alone would sit
+    // unread until the user typed, which is the one event this exists to spare
+    // them. Releasing the ring deals a turn that reads the row off the backlog:
+    // the participant is marked busy BY the ring (so the right one is marked,
+    // and the chip stays clear while the nudge is unanswered), and its
+    // completion is one the ring is expecting.
+    //
+    // Mentioned rather than left to the rotation: the nudge asks for a state
+    // DECLARATION, and only the participant that can act on it should be woken
+    // to give one.
+    bridge
+        .notify_ring_user_message(
+            session_id,
+            idle_watch.hands_participant_id.into_iter().collect(),
+        )
+        .await;
+    let _ = activity;
 }
 
 #[cfg(test)]
@@ -548,12 +569,11 @@ mod tests {
         // of what the watchdog sent was incomplete by the whole instruction.
         let storage = Storage::memory().await.unwrap();
         storage.create_session("s1", "t", None).await.unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let ipav = Arc::new(tokio::sync::Mutex::new(IpavState::default()));
         ipav.lock().await.advance(crate::core::ipav::IpavPhase::Apply);
         let idle_watch = IdleWatch {
             storage: storage.clone(),
-            hands_input_tx: crate::agents::ParticipantInput::new("s1", tx),
+            hands_participant_id: Some(1),
             ipav,
             user_broadcasts: Arc::new(AtomicU64::new(1)),
             session_id: "s1".to_string(),
@@ -566,6 +586,11 @@ mod tests {
                 Arc::clone(&bridge),
                 vec!["hands".into(), "eyes".into()],
             );
+        // The ring, so the wake can be observed where it now happens.
+        let (ring_tx, mut ring_rx) = tokio::sync::mpsc::channel(4);
+        bridge
+            .register_session_sequencer("s1".to_string(), ring_tx)
+            .await;
         deliver_idle_nudge("s1", &idle_watch, &activity, &bridge).await;
 
         let rows = storage.channel_after("s1", 0, 100).await.unwrap().rows;
@@ -573,30 +598,34 @@ mod tests {
         assert_eq!(rows[0].origin, "user", "the notice reads as a chat message");
         assert!(rows[0].content.starts_with("Session idled"));
         // The nudge is host-authored: `system` origin, no participant (0044).
+        // rc3 D23: it renders `[system]` on the wire, and that matters here more
+        // than anywhere — the nudge is bot-hq talking, and an agent that reads it
+        // as the USER has been handed a fabricated instruction.
         assert_eq!(rows[1].origin, "system");
         assert!(rows[1].participant_id.is_none());
+        assert!(rows[1].content.starts_with("[System: this session went idle"));
 
-        // And Brian read exactly the nudge row, phase envelope included — the
-        // same bytes the deleted `with_phase_envelope(phase, NUDGE)` produced
-        // here inline, now re-derived from the row instead.
-        let wire = next_wire(&mut rx).await.message.content;
-        assert_eq!(
-            wire,
-            format!(
-                "[{}] {}",
-                crate::storage::speaker_of(
-                    &rows[1].origin,
-                    rows[1].author.as_deref(),
-                    rows[1].speaker_label.as_deref(),
-                ),
-                crate::storage::render_wire(rows[1].envelope.as_ref(), &rows[1].content)
-            )
+        // **And the wake is a ring RELEASE, mentioning the participant that can
+        // answer it.** It used to be a write into that participant's stdin,
+        // which opened a generation the ring had not dealt: rows posted, the
+        // completion carried a stale epoch and was discarded, and the busy flag
+        // went to turn slot 0 whoever slot 0 happened to be. The nudge only
+        // works if something wakes — it fires when no turn is coming — so the
+        // wake stays; what changed is that the ring makes it a real turn.
+        match ring_rx.try_recv() {
+            Ok(crate::core::sequencer::SequencerCommand::UserMessage { mentions }) => {
+                assert_eq!(
+                    mentions,
+                    vec![1],
+                    "the nudge asks for a state declaration, so it summons the \
+                     participant that can give one"
+                );
+            }
+            other => panic!("the idle nudge did not release the ring: {other:?}"),
+        }
+        assert!(
+            ring_rx.try_recv().is_err(),
+            "one wake, not one per row — the NOTICE is not addressed to anyone"
         );
-        // rc3 D23: `[system]`, and it matters here more than anywhere. The nudge
-        // is bot-hq talking; an agent that reads it as the USER has been handed
-        // a fabricated instruction, which is the failure the general rules are
-        // built around.
-        assert!(wire.starts_with("[system] [PHASE: Apply]\n[System: this session went idle"));
-        assert!(rx.try_recv().is_err(), "the NOTICE is not wired to anyone");
     }
 }

@@ -524,7 +524,12 @@ pub async fn pump_agent(
                     && cfg.edits_files
                     && matches!(name.as_str(), "Edit" | "Write" | "NotebookEdit")
                 {
-                    if let Some(tx) = cfg.self_input_tx.as_ref() {
+                    // The guard stays on `self_input_tx`: it is what says this
+                    // pump belongs to a participant that HAS a stdin — a live
+                    // agent rather than a test harness — and the nudge is only
+                    // meaningful for one. The reminder itself no longer writes
+                    // to it (see the persist below).
+                    if cfg.self_input_tx.is_some() {
                         let phase = ipav_state.lock().await.current_phase;
                         if matches!(phase, IpavPhase::Investigate | IpavPhase::Plan)
                             && storage.adherence_nudges_enabled().await
@@ -550,7 +555,17 @@ pub async fn pump_agent(
                             {
                                 Ok(m) => {
                                     cfg.notify_persisted(m.message_id());
-                                    tx.deliver(&m).await;
+                                    // Persisted only. The direct write went into
+                                    // the stdin of the agent that is mid-EDIT,
+                                    // which cannot read it mid-generation
+                                    // anyway: it opened a fresh generation the
+                                    // ring never dealt, whose completion was
+                                    // discarded, and the row then arrived again
+                                    // off the cursor. Read at this agent's next
+                                    // dealt turn instead — later than the edit,
+                                    // and still the first moment it can act
+                                    // (advance the phase, or say why the edit
+                                    // was intended).
                                     // Burnt on a successful POST, and a failed
                                     // delivery still burns it — same as before,
                                     // when the send's error was discarded. A
@@ -2418,8 +2433,17 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn edit_during_investigate_self_nudges_brian() {
-        // A3a: Brian editing in Investigate gets a one-time self-nudge on his
-        // OWN stdin (cfg.self_input_tx), pointing him at Apply.
+        // A3a: an executor editing in Investigate gets a one-time reminder
+        // pointing it at Apply.
+        //
+        // **The reminder is a ROW now, not a stdin write.** It used to go into
+        // this pump's own `self_input_tx` while the agent was mid-edit — which
+        // it cannot read mid-generation anyway: the write opened a fresh
+        // generation the ring never dealt, whose completion carried a stale
+        // epoch and was discarded, and the same row then arrived a second time
+        // off the cursor. Persisted, it reaches the agent at its next dealt
+        // turn, which is the first moment it can act on it (advance the phase,
+        // or say why the edit was intended).
         let (storage, state) = setup().await; // default phase = Investigate
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let (self_tx, mut self_rx) = mpsc::channel(8);
@@ -2437,12 +2461,24 @@ mod tests {
             })
             .await
             .unwrap();
-
-        let nudge = next_wire(&mut self_rx).await;
-        assert!(nudge.message.content.contains("Apply"));
-
         drop(ev_tx);
         task.await.unwrap();
+
+        let nudges: Vec<String> = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.content)
+            .filter(|c| c.contains("editing files before the Apply phase"))
+            .collect();
+        assert_eq!(nudges.len(), 1, "the reminder is persisted once: {nudges:?}");
+        assert!(nudges[0].contains("Apply"));
+        assert!(
+            self_rx.try_recv().is_err(),
+            "the reminder must not open a generation outside the ring — it rides \
+             the cursor like every other row"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
