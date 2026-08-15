@@ -18,6 +18,74 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-16 — the rc3 audit's batch 1 + enforcement, executed
+
+The first self-hosted maintenance arc: bot-hq fixing what its own audit
+found. Session `s-2b866c4a` picked up `s-fc6fe0fd`'s parked work — the
+audit report and `CODEBASE.md` shipped there; the fix batches (§6 of
+`docs/plans/2026-08-15-rc3-audit.md`) are what landed here. Batch 1
+entire, plus the enforcement half of batch 2. Every fix is
+mutation-verified: break it, watch the right test go red, restore.
+
+**The three H items of batch 1.**
+
+*The D15 close epilogue had never run.* It waited `await_both_idle`
+immediately after a `broadcast` that marks nobody busy, so the wait was
+answered by the idle state the broadcast itself left — 7 ms, "Declined",
+agents SIGKILLed as the ring dealt the turn. It now ARMS on the turn
+starting and then waits for the LAP to end (the halt slot refilling, or
+sustained idle past `hand_turn_to`'s deliberate handover gap). Arming
+alone was not enough, which EYES caught before it shipped: an armed
+first-idle wait still returns between two turns of the same lap.
+`Outcome::NeverStarted` separates "the ring never dealt it" from "the
+agent took too long".
+
+*A dealt turn that cannot complete now declares.* Three triggers, one
+consequence: a participant whose stdin closed under the deal, a page its
+own input refused, an unreadable backlog — each left the holder set, the
+busy flag up, the halt slot empty and the input locked, with a Pause plus
+a SIGKILL the only way out. `Dealt::CannotComplete` unwinds and fills the
+slot. A pump that dies HOLDING a turn declares under its own slug so the
+ring ends the turn in flight. And the third trigger — an empty backlog,
+which happens on the most ordinary lap there is, since a peer turn spent
+in tool calls leaves the next participant nothing to read — PASSES the
+turn on (rc3 D25) rather than halting, bounded by the all-pass yield.
+
+*Approval gates are identified, not guessed.* The latch was a counter
+seeded from storage and incremented per notify, so one gate counted twice
+could never be cleared and the session dealt nothing for the life of the
+process; any resolve decremented, so a stranger's answer lifted somebody
+else's gate. `GateOpened`/`GateResolved` carry the `choice_id` and the
+latch is a set. The gate LIFT is now pinned — cutting it used to leave
+1131 tests green while the ring stopped dealing forever — and so is its
+twin on the withdraw path, which EYES measured as equally blind.
+
+**Also in batch 1.** `halt()` clears `sessions.current_turn_participant_id`
+on every path, so a yielded session stops reporting itself as working ·
+`unregister_session` removes all sixteen per-session maps (the ring's
+`Sender` was one of them: an orphan ring task per closed session) · the
+ring declares its own halts without the phantom `system` participant ·
+the PTY child is reaped instead of left a zombie · a second close joins
+the epilogue in flight instead of SIGKILLing it · no host write bypasses
+the ring any more, and the idle nudge wakes through a ring release that
+marks the right participant · a staged message survives a relaunch
+(migration **0058**) · and **Stop stops the ring**: the pause machinery
+shipped complete with no producer, so a Stop flipped a banner while the
+ring dealt the next participant. The user chose to wire it up.
+
+**Enforcement (batch 2).** The internal MCP server authenticates its
+callers — identity was the URL path alone, and every agent holds Bash, so
+any of them could POST as a peer; a per-(session, agent) secret rides the
+URL now, with an unregistered pair still admitted so an upgrade cannot
+strand a live session. The push gate fails closed when its policy will not
+parse. WAL. A violations log that rotates. Delivery timestamps in
+RFC3339-Z like everything else. A question is withdrawable only by the
+participant that parked it.
+
+Suites: **1162** lib + 37 external-MCP + 13 storage + 7 signaling + 2
+codebase-map + 2 doctests + 1 bin; frontend **381** in 44 files; `tsc`
+clean; release build green.
+
 ## 2026-08-15 — the wedge-net declares; the handoff to self-hosting
 
 The last build of the claude-code maintenance arc, closing the two wedges

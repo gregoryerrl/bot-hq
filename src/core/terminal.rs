@@ -142,7 +142,7 @@ impl SessionTerminal {
         }
         cmd.env("TERM", "xterm-256color");
 
-        let mut child = pair
+        let child = pair
             .slave
             .spawn_command(cmd)
             .context("PTY shell spawn failed")?;
