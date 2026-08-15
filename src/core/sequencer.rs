@@ -1707,8 +1707,15 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     }
                     None => Dealt::Live,
                 };
-                if let Dealt::CannotComplete(reason) = dealt {
-                    unwind_wedged_turn(&deps, &mut holder, &mut epoch, reason).await;
+                match dealt {
+                    Dealt::Live => {}
+                    Dealt::CannotComplete(reason) => {
+                        unwind_wedged_turn(&deps, &mut holder, &mut epoch, reason).await
+                    }
+                    // Re-drains, not deals: the turn was already running, so an
+                    // empty page here is the backlog being finished rather than
+                    // a turn with nothing in it.
+                    Dealt::NothingUnread => {}
                 }
             }
             SequencerCommand::HaltDeclared { participant_id } => {
@@ -1851,8 +1858,15 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     }
                     None => Dealt::Live,
                 };
-                if let Dealt::CannotComplete(reason) = dealt {
-                    unwind_wedged_turn(&deps, &mut holder, &mut epoch, reason).await;
+                match dealt {
+                    Dealt::Live => {}
+                    Dealt::CannotComplete(reason) => {
+                        unwind_wedged_turn(&deps, &mut holder, &mut epoch, reason).await
+                    }
+                    // Re-drains, not deals: the turn was already running, so an
+                    // empty page here is the backlog being finished rather than
+                    // a turn with nothing in it.
+                    Dealt::NothingUnread => {}
                 }
                 debug!(
                     session = %deps.session_id,
@@ -2082,9 +2096,10 @@ async fn advance_turn(
         // it cannot wrap one. No anchor update either — that IS the mechanism.
         *holder = Some(to);
         *epoch += 1;
-        if let Dealt::CannotComplete(reason) = start_turn(deps, holder, epoch, rx, deferred).await
-        {
-            unwind_wedged_turn(deps, holder, epoch, reason).await;
+        match start_turn(deps, holder, epoch, rx, deferred).await {
+            Dealt::Live => {}
+            Dealt::CannotComplete(reason) => unwind_wedged_turn(deps, holder, epoch, reason).await,
+            Dealt::NothingUnread => pass_empty_turn(deps, holder, *epoch, deferred).await,
         }
         return;
     }
@@ -2271,10 +2286,12 @@ async fn advance_turn(
             // Every step, including a restart that lands on the same
             // participant. That case is exactly why the epoch exists.
             *epoch += 1;
-            if let Dealt::CannotComplete(reason) =
-                start_turn(deps, holder, epoch, rx, deferred).await
-            {
-                unwind_wedged_turn(deps, holder, epoch, reason).await;
+            match start_turn(deps, holder, epoch, rx, deferred).await {
+                Dealt::Live => {}
+                Dealt::CannotComplete(reason) => {
+                    unwind_wedged_turn(deps, holder, epoch, reason).await
+                }
+                Dealt::NothingUnread => pass_empty_turn(deps, holder, *epoch, deferred).await,
             }
         }
     }
@@ -2397,6 +2414,51 @@ async fn unwind_wedged_turn(
             .mark_awaiting_user(deps.session_id.to_string(), "system".to_string(), reason)
             .await;
     }
+}
+
+/// A turn was dealt to a participant with nothing unread: pass it on.
+///
+/// The deal already marked the holder busy, and nothing went out — so, exactly
+/// like a wedge, no completion can ever arrive. Unlike a wedge this is ordinary:
+/// a peer turn spent entirely in tool calls leaves the next participant with an
+/// empty page, because `channel_page` withholds every peer's
+/// `tool_use`/`tool_result` and the reader's own rows. Halting on it would stop
+/// the session on its most common shape.
+///
+/// So the ring mints the ending the design already has for "nothing to add"
+/// (rc3 D25's PASS) and defers it to itself. That reuses the whole completion
+/// path — the identity+epoch guard, the ring step, the wrap, the pass counting —
+/// instead of adding a second way to move the rotation, and it is what bounds
+/// the walk: an entire lap of empty pages sets nothing `spoke_this_lap`, so the
+/// wrap fires the all-pass yield and the session halts with the banner it
+/// already has.
+async fn pass_empty_turn(
+    deps: &SequencerDeps,
+    holder: &Option<Participant>,
+    epoch: u64,
+    deferred: &mut VecDeque<SequencerCommand>,
+) {
+    let Some(to) = holder.as_ref() else {
+        return;
+    };
+    // The pump clears busy at a real turn end. There is no pump in this one, so
+    // the flag has to come down here or the input stays locked on a turn that
+    // never ran.
+    if let Some(activity) = &deps.activity {
+        activity.set_busy_slug(&to.slug, false);
+    }
+    debug!(
+        session = %deps.session_id,
+        participant_id = to.id,
+        slug = %to.slug,
+        epoch,
+        "sequencer: nothing unread for the turn just dealt; passing it on"
+    );
+    deferred.push_back(SequencerCommand::TurnComplete {
+        participant_id: to.id,
+        epoch,
+        ending: TurnEnding::Passed,
+    });
 }
 
 /// Post [`round_cap_notice`] into the channel and tell the UI it landed.
@@ -2831,6 +2893,16 @@ enum Dealt {
     /// The turn can never complete. The string is the halt reason the user
     /// reads — every stop is a HALT, including the stop nobody chose.
     CannotComplete(String),
+    /// The participant had nothing unread, so nothing went out and there is no
+    /// turn for it to end.
+    ///
+    /// **Not a wedge, and not a halt.** A page excludes the reader's own rows
+    /// and every peer's `tool_use`/`tool_result` (`channel_page`), so a peer
+    /// turn spent entirely in tools legitimately leaves the next participant
+    /// with nothing to answer. Halting there would stop the session on its most
+    /// ordinary shape. The ring passes the turn on instead — the ending the
+    /// design already has for "nothing to add" (rc3 D25).
+    NothingUnread,
 }
 
 /// Why a drain stopped before the end of its page.
@@ -2889,7 +2961,7 @@ async fn deliver_backlog(
         // recoverable wait into the user's problem.
         return Dealt::Live;
     };
-    for _ in 0..max_batches {
+    for batch in 0..max_batches {
         let page = match deps.storage.unread_for_participant(to.id).await {
             Ok(page) => page,
             Err(e) => {
@@ -2911,7 +2983,16 @@ async fn deliver_backlog(
             }
         };
         if page.rows.is_empty() {
-            return Dealt::Live;
+            // **Only the FIRST page can mean "nothing to say".** A later empty
+            // page means the drain finished — the rows went out on the pages
+            // before it, and the turn will end on them. Keying this on the
+            // batch index is what keeps the pass from firing on a participant
+            // that was just fed.
+            return if batch == 0 {
+                Dealt::NothingUnread
+            } else {
+                Dealt::Live
+            };
         }
         let total = page.rows.len();
         // `from_row` is what makes a row READ BACK deliverable: receipts are
@@ -4175,6 +4256,97 @@ mod tests {
             SignalingBridge::new(),
             slugs.iter().map(|s| s.to_string()).collect(),
         )
+    }
+
+    /// **A turn dealt with nothing unread passes instead of wedging.**
+    ///
+    /// `hand_turn_to` marks the holder busy, and `deliver_backlog` then found an
+    /// empty page and returned: busy set, nothing delivered, no completion
+    /// possible — the same wedge shape as an unreachable participant, reachable
+    /// on the most ordinary lap there is. A page withholds the reader's own rows
+    /// and every peer's `tool_use`/`tool_result` (`channel_page`), so a lap in
+    /// which both participants already read everything leaves each of them with
+    /// nothing to answer.
+    ///
+    /// Halting there would be wrong — a peer turn spent entirely in tools is not
+    /// an error — so the ring mints D25's PASS and steps. The whole lap then
+    /// passes, nothing sets `spoke_this_lap`, and the wrap fires the all-pass
+    /// yield: the session ends up asking the USER for input, which is the
+    /// correct answer to "nobody has anything unread".
+    #[tokio::test]
+    async fn a_turn_dealt_with_nothing_unread_passes_instead_of_wedging() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        let act = tracker(&["a", "b"]).await;
+        deps.activity = Some(Arc::clone(&act));
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+
+        // Lap one: both read the user's row and both speak, producing no rows of
+        // their own (a turn spent in tool calls looks exactly like this from the
+        // channel's side).
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+                ending: TurnEnding::SPOKE,
+            },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: b,
+                epoch: 2,
+                ending: TurnEnding::SPOKE,
+            },
+        )
+        .await;
+
+        // Lap two has nothing to deliver to anyone. Before the pass this is
+        // where the ring stopped: A marked busy, no rows, no completion coming.
+        for _ in 0..200 {
+            if !act.any_busy() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !act.any_busy(),
+            "a turn dealt with nothing unread left its holder busy — the input \
+             locks on a turn that can never end"
+        );
+        // And the lap ENDED rather than spinning: an all-empty lap sets nothing
+        // `spoke_this_lap`, so the wrap fires the all-pass yield and posts its
+        // notice. (The activity state cannot say so here — `ring()` carries no
+        // bridge, so the halt slot has nowhere to land.)
+        let mut yielded = false;
+        for _ in 0..200 {
+            yielded = storage
+                .messages_for_session("s1", None)
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.content.contains("Every participant passed this round"));
+            if yielded {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            yielded,
+            "the empty lap neither wedged nor yielded — the ring is walking a \
+             rotation nobody can answer"
+        );
+        assert_eq!(seats[0].drain(), nothing(), "and nothing was delivered twice");
+        drop(tx);
+        assert!(exited(task).await);
     }
 
     /// **A halt clears the column too — a yielded session must not read as a
