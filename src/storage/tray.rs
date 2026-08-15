@@ -10,6 +10,24 @@ use super::*;
 const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text";
 
+/// The options an approval gate parks with, verbatim — the discriminator that
+/// tells a GATE (action gate, push gate) from an ordinary parked question.
+///
+/// One definition, because it is compared in four places across three layers
+/// (this file's seeding query, the bridge's withdraw and resolve paths, the
+/// app layer's tray-answer classification) and a fifth in the frontend. Four
+/// hand-written copies of a JSON literal is how a gate stops being recognised
+/// on one path only — which reads as a stuck latch, not as a typo.
+pub const GATE_OPTIONS_JSON: &str = r#"["Approve","Reject"]"#;
+
+/// Is this row's `options_json` a gate's?
+///
+/// Takes the column as stored (`Option<&str>`) so every caller asks the same
+/// question of the same shape.
+pub fn is_gate_options(options_json: Option<&str>) -> bool {
+    options_json == Some(GATE_OPTIONS_JSON)
+}
+
 impl Storage {
     /// Insert a fresh tray-entry row in `pending` status. Returns the row id.
     /// `options` is required when kind=Choice (encoded to JSON); ignored
@@ -101,23 +119,31 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
-    /// How many approval gates are open for this session — pending rows whose
-    /// options are exactly `Approve`/`Reject`, which is what both gate kinds
-    /// (action gate, push gate) ask and no ordinary question ever has (the same
-    /// discriminator the UI's `isApproval` uses; verified exact across every
-    /// row ever recorded — 31 matches, all gates). Seeds the ring's gate latch
-    /// on spawn (rc3 D35), so a respawned session cannot deal turns under a
-    /// gate that parked before the restart.
-    pub async fn count_pending_gates(&self, session_id: &str) -> Result<usize> {
-        let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM session_tray \
+    /// WHICH approval gates are open for this session — the `choice_id` of every
+    /// pending row whose options are exactly `Approve`/`Reject`, which is what
+    /// both gate kinds (action gate, push gate) ask and no ordinary question
+    /// ever has (the same discriminator the UI's `isApproval` uses; verified
+    /// exact across every row ever recorded — 31 matches, all gates). Seeds the
+    /// ring's gate latch on spawn (rc3 D35), so a respawned session cannot deal
+    /// turns under a gate that parked before the restart.
+    ///
+    /// **Ids, not a count** (C2-2). The latch used to be a `usize` seeded from
+    /// here and incremented per `GateOpened`, so the SAME gate could be counted
+    /// twice — its row lands before the ring starts, its notify arrives after —
+    /// and one resolve could never clear it: the ring then deals nothing for the
+    /// life of the process. A set keyed by `choice_id` cannot double-count, and
+    /// makes a resolve for an unknown gate a no-op instead of a decrement of
+    /// somebody else's.
+    pub async fn pending_gate_ids(&self, session_id: &str) -> Result<Vec<String>> {
+        let ids: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT choice_id FROM session_tray \
              WHERE session_id = ? AND status = 'pending' \
-               AND options_json = '[\"Approve\",\"Reject\"]'",
-        )
+               AND options_json = '{GATE_OPTIONS_JSON}'"
+        ))
         .bind(session_id)
-        .fetch_one(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
-        Ok(n as usize)
+        Ok(ids)
     }
 
     /// Read all tray entries for a session, ordered oldest-first. Use for the

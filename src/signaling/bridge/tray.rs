@@ -382,7 +382,7 @@ impl SignalingBridge {
         //   cut either way; the latch stops the next deal.
         if is_approval {
             self.set_session_awaiting(&session_id, &agent, false).await;
-            self.notify_ring_gate(&session_id, true).await;
+            self.notify_ring_gate(&session_id, &choice_id, true).await;
         }
 
         // Best-effort broadcast. If no subscribers, the request still parks
@@ -480,8 +480,7 @@ impl SignalingBridge {
                     .flatten()
                     .filter(|row| {
                         row.status == "pending"
-                            && row.options_json.as_deref()
-                                == Some("[\"Approve\",\"Reject\"]")
+                            && crate::storage::is_gate_options(row.options_json.as_deref())
                     })
                     .map(|row| row.session_id),
                 None => None,
@@ -495,7 +494,7 @@ impl SignalingBridge {
         }
         drop(storage_guard);
         if let Some(session_id) = gate_session {
-            self.notify_ring_gate(&session_id, false).await;
+            self.notify_ring_gate(&session_id, choice_id, false).await;
         }
         // A withdrawn reviewer-override request is consumed unanswered — the
         // reviewer-recovery void routes here, and a stale request must never
@@ -605,15 +604,14 @@ impl SignalingBridge {
                         .ok()
                         .flatten()
                         .filter(|row| {
-                            row.options_json.as_deref()
-                                == Some("[\"Approve\",\"Reject\"]")
+                            crate::storage::is_gate_options(row.options_json.as_deref())
                         })
                         .map(|row| row.session_id),
                     None => None,
                 }
             };
             if let Some(session_id) = gate_session {
-                self.notify_ring_gate(&session_id, false).await;
+                self.notify_ring_gate(&session_id, choice_id, false).await;
             }
             // A reviewer-down override REQUEST resolves here (vision alignment,
             // 2026-08-14): Approve moves the reason into the active override —
@@ -1276,7 +1274,7 @@ mod tests {
         assert!(
             matches!(
                 rx.try_recv(),
-                Ok(crate::core::sequencer::SequencerCommand::GateOpened)
+                Ok(crate::core::sequencer::SequencerCommand::GateOpened { .. })
             ),
             "a blocking approval must open a gate — the session halts on it"
         );
@@ -1301,7 +1299,7 @@ mod tests {
         assert!(
             matches!(
                 rx.try_recv(),
-                Ok(crate::core::sequencer::SequencerCommand::GateOpened)
+                Ok(crate::core::sequencer::SequencerCommand::GateOpened { .. })
             ),
             "a PARKED approval must open a gate too — this is the s-86a81478 hole"
         );

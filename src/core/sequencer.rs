@@ -1136,12 +1136,12 @@ pub enum SequencerCommand {
     /// blocked inside its own tool call, and cutting that would kill the very
     /// command awaiting approval. The gate is a LATCH consulted where turns are
     /// dealt, not an interrupt.
-    GateOpened,
+    GateOpened { choice_id: String },
     /// An approval gate resolved (approved, rejected, or discarded). Decrements
     /// the latch and **never deals a turn itself** — the wake rides the
     /// existing release (`user_responded` → [`UserMessage`]) or the asker's own
     /// completion, so there is no second path onto a turn.
-    GateResolved,
+    GateResolved { choice_id: String },
     /// Stop: hold the cycle where it stands, hand out no further turns.
     ///
     /// **The turn in flight stays in flight.** This is not [`halt`] and must not
@@ -1290,18 +1290,27 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     // stops the ring where it stands, whoever declared it. Cleared by the
     // user's next message, like the blocked-set it replaces.
     let mut halted_pending_user = false;
-    // Open approval gates. While nonzero the ring deals no turns. Seeded from
-    // the durable rows so a respawned ring cannot deal turns under a gate that
-    // parked before the restart.
-    let mut open_gates: usize = deps
+    // Open approval gates, BY ID. While any is open the ring deals no turns.
+    // Seeded from the durable rows so a respawned ring cannot deal turns under a
+    // gate that parked before the restart.
+    //
+    // A set rather than the count it used to be (C2-2): the same gate reaches
+    // this loop twice whenever its row lands before the ring starts and its
+    // `GateOpened` arrives after, and a counter incremented twice could never be
+    // cleared by the one resolve that follows — the session then deals nothing
+    // for the life of the process. Keyed by `choice_id`, the second open is a
+    // no-op and the resolve clears it.
+    let mut open_gates: std::collections::HashSet<String> = deps
         .storage
-        .count_pending_gates(&deps.session_id)
+        .pending_gate_ids(&deps.session_id)
         .await
-        .unwrap_or(0);
-    if open_gates > 0 {
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    if !open_gates.is_empty() {
         tracing::info!(
             session = %deps.session_id,
-            open_gates,
+            open_gates = open_gates.len(),
             "sequencer: started with approval gate(s) already pending; dealing no turns until they resolve"
         );
     }
@@ -1584,7 +1593,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                                 &mut laps,
                                 &mut summons,
                                 halted_pending_user,
-                                open_gates,
+                                open_gates.len(),
                                 &mut spoke_this_lap,
                                 false,
                             )
@@ -1657,7 +1666,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     &mut laps,
                     &mut summons,
                     halted_pending_user,
-                    open_gates,
+                    open_gates.len(),
                     &mut spoke_this_lap,
                     true,
                 )
@@ -1763,7 +1772,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         &mut laps,
                         &mut summons,
                         halted_pending_user,
-                        open_gates,
+                        open_gates.len(),
                         &mut spoke_this_lap,
                         false,
                     )
@@ -1783,11 +1792,11 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     }
                 }
             }
-            SequencerCommand::GateOpened => {
-                open_gates += 1;
+            SequencerCommand::GateOpened { choice_id } => {
+                open_gates.insert(choice_id);
                 debug!(
                     session = %deps.session_id,
-                    open_gates,
+                    open_gates = open_gates.len(),
                     "sequencer: an approval gate opened; the session halts until it resolves"
                 );
                 // The asker is usually mid-turn, blocked inside the gated tool
@@ -1798,11 +1807,14 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     halt(&deps, &mut holder, &mut epoch).await;
                 }
             }
-            SequencerCommand::GateResolved => {
-                open_gates = open_gates.saturating_sub(1);
+            SequencerCommand::GateResolved { choice_id } => {
+                // `remove` rather than a decrement: a resolve for a gate this
+                // ring never saw open is a no-op instead of clearing somebody
+                // else's latch.
+                open_gates.remove(&choice_id);
                 debug!(
                     session = %deps.session_id,
-                    open_gates,
+                    open_gates = open_gates.len(),
                     "sequencer: an approval gate resolved"
                 );
                 // Deliberately deals nothing. The wake is the asker's own
@@ -3957,7 +3969,7 @@ mod tests {
     }
 
     /// Park an Approve/Reject gate row for `session` — the durable shape both
-    /// gate kinds write, and the one `count_pending_gates` seeds the latch from.
+    /// gate kinds write, and the one `pending_gate_ids` seeds the latch from.
     async fn park_gate(storage: &Storage, choice_id: &str) -> i64 {
         storage
             .insert_tray_entry(
@@ -3972,6 +3984,17 @@ mod tests {
             )
             .await
             .expect("gate row parks")
+    }
+
+    /// A gate with `choice_id` opened / resolved. Named because the latch is a
+    /// SET now: passing the same id twice is the double-open the count could not
+    /// survive, and passing different ids is two gates.
+    fn gate_opened(choice_id: &str) -> SequencerCommand {
+        SequencerCommand::GateOpened { choice_id: choice_id.to_string() }
+    }
+
+    fn gate_resolved(choice_id: &str) -> SequencerCommand {
+        SequencerCommand::GateResolved { choice_id: choice_id.to_string() }
     }
 
     /// `participant_id` declared a halt (rc3 D35: the ring stops NOW).
@@ -4348,6 +4371,66 @@ mod tests {
         // The bridge holds the other sender, so the ring outlives this test
         // until the session is unregistered — which is the lifetime
         // `closing_a_session_lets_its_ring_task_end` pins.
+        bridge.unregister_session("s1").await;
+        assert!(exited(task).await);
+    }
+
+    /// **The lift's twin: withdrawing a gate has to lift the latch too**, and
+    /// until now nothing said so.
+    ///
+    /// EYES measured it against the pin above: cutting the RESOLVE lift reddens
+    /// that test, cutting `withdraw_question`'s lift left the whole suite green —
+    /// 1146 passed — while the ring stayed latched for the life of the process.
+    /// Same latch, same discriminator, same wedge; the site's own comment
+    /// already says "the session stays halted on a gate nobody can answer any
+    /// more", which was true and untested.
+    ///
+    /// Pinned BEFORE the identity refactor on purpose: routing both sites
+    /// through one helper is exactly the change that can silently drop a call
+    /// site, and an unpinned one would take the wedge with it.
+    #[tokio::test]
+    async fn withdrawing_a_gate_lifts_the_latch_too() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        post(&storage, "user", None, "go").await;
+        storage
+            .insert_tray_entry(
+                "s1",
+                "gate-2",
+                "hands",
+                crate::storage::QuestionKind::Choice,
+                "Approve this?",
+                Some(&["Approve".to_string(), "Reject".to_string()]),
+                None,
+                None,
+            )
+            .await
+            .expect("gate row parks");
+
+        let (tx, rx) = mpsc::channel(8);
+        bridge
+            .register_session_sequencer("s1".to_string(), tx.clone())
+            .await;
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        seats[0].quiet().await;
+
+        // The agent abandons its own gate. Nobody can answer it now, so the
+        // latch it seeded has to come off with it.
+        // The return value reports whether an in-memory park was dropped, not
+        // whether the durable row moved — nothing is parked here, and the
+        // withdraw still has to lift the latch the durable row seeded.
+        bridge.withdraw_question("gate-2").await;
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "the gate was withdrawn and the ring is still latched — the session \
+             is held on a gate nobody can answer any more"
+        );
+        drop(tx);
         bridge.unregister_session("s1").await;
         assert!(exited(task).await);
     }
@@ -9225,7 +9308,7 @@ mod tests {
         // A's gated tool call parks an approval. A still holds its turn — the
         // gate cuts nothing — but when that turn ends, the ring deals no next
         // turn: the session is halted on the gate.
-        send(&tx, SequencerCommand::GateOpened).await;
+        send(&tx, gate_opened("g1")).await;
         post(&storage, "user", None, "for b").await;
         send(
             &tx,
@@ -9239,7 +9322,7 @@ mod tests {
         // quiet: the first cut of this checked only B, and a premature deal
         // goes to the FRONT (A), whose buffered row the later expect would
         // happily consume — the mutation passed until A was pinned quiet too.
-        send(&tx, SequencerCommand::GateResolved).await;
+        send(&tx, gate_resolved("g1")).await;
         seats[0].quiet().await;
         seats[1].quiet().await;
 
@@ -9264,11 +9347,11 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        send(&tx, SequencerCommand::GateOpened).await;
+        send(&tx, gate_opened("g1")).await;
         send(&tx, user_message()).await;
         seats[0].quiet().await;
 
-        send(&tx, SequencerCommand::GateResolved).await;
+        send(&tx, gate_resolved("g1")).await;
         send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
@@ -9294,14 +9377,63 @@ mod tests {
         seats[0].quiet().await;
 
         // Answering the gate (the row flips) + the resolve notify + the release
-        // is the full production sequence, in its production order.
+        // is the full production sequence, in its production order. The resolve
+        // names the gate it answers — the seeded latch holds ids now, so an
+        // unrelated id would leave it exactly where it was (below).
         storage.answer_tray_entry("c-gate-1", "Approve").await.unwrap();
-        send(&tx, SequencerCommand::GateResolved).await;
+        send(&tx, gate_resolved("c-gate-1")).await;
         send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
             "the seeded latch lifts exactly like a live one"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **The latch is keyed, so the same gate cannot count twice and a stranger
+    /// cannot clear it** (C2-2 / B1-F16).
+    ///
+    /// Both halves of one defect. A gate whose row lands before the ring starts
+    /// is SEEDED, and its `GateOpened` notify arrives after — under a `usize`
+    /// latch that was two, and the single resolve that followed left it at one:
+    /// the session dealt nothing for the life of the process, with no gate open
+    /// anywhere. And any resolve decremented, so an unrelated gate's answer
+    /// could lift a latch it had nothing to do with.
+    ///
+    /// Reproduced here in that exact order, because it is not hypothetical —
+    /// writing the seam-14 pin hit it: seeding plus a manual open, one resolve,
+    /// permanently held.
+    #[tokio::test]
+    async fn the_gate_latch_is_keyed_by_id_not_counted() {
+        let (deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        park_gate(&storage, "c-gate-1").await;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        // The same gate, announced again after the seed — the double-count.
+        send(&tx, gate_opened("c-gate-1")).await;
+        send(&tx, user_message()).await;
+        seats[0].quiet().await;
+
+        // A stranger's resolve must NOT lift this session's latch.
+        send(&tx, gate_resolved("some-other-gate")).await;
+        send(&tx, user_message()).await;
+        seats[0].quiet().await;
+
+        // The gate's own answer lifts it — once, despite having been opened
+        // twice.
+        storage.answer_tray_entry("c-gate-1", "Approve").await.unwrap();
+        send(&tx, gate_resolved("c-gate-1")).await;
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["go"],
+            "the gate was seeded AND announced, and one answer did not clear it — \
+             a counted latch cannot be brought back to zero by the one resolve \
+             that exists"
         );
         drop(tx);
         assert!(exited(task).await);

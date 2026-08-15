@@ -1622,7 +1622,7 @@ impl AppState {
         ) {
             if let Ok(Some(entry)) = self.storage.get_tray_entry(choice_id).await {
                 resolved_a_gate =
-                    entry.options_json.as_deref() == Some("[\"Approve\",\"Reject\"]");
+                    crate::storage::is_gate_options(entry.options_json.as_deref());
                 let sessions = self.sessions.lock().await;
                 if let Some(handle) = sessions.get(&entry.session_id) {
                     handle

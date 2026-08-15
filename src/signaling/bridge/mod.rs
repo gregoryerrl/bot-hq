@@ -556,13 +556,14 @@ impl SignalingBridge {
     /// `opened` is healed at the next respawn (the latch is seeded from the
     /// durable rows); a miss on `resolved` is healed the same way, and the
     /// user's release still drains the session's rows.
-    pub async fn notify_ring_gate(&self, session_id: &str, opened: bool) {
+    pub async fn notify_ring_gate(&self, session_id: &str, choice_id: &str, opened: bool) {
         let seq = self.session_sequencer.lock().await.get(session_id).cloned();
         if let Some(tx) = seq {
+            let choice_id = choice_id.to_string();
             let cmd = if opened {
-                crate::core::sequencer::SequencerCommand::GateOpened
+                crate::core::sequencer::SequencerCommand::GateOpened { choice_id }
             } else {
-                crate::core::sequencer::SequencerCommand::GateResolved
+                crate::core::sequencer::SequencerCommand::GateResolved { choice_id }
             };
             if tx.try_send(cmd).is_err() {
                 tracing::warn!(
