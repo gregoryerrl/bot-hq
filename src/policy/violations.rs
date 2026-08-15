@@ -66,6 +66,13 @@ pub struct ViolationRecord {
 }
 
 /// Append-only writer. Cheap to clone (Arc); safe to share across tasks.
+/// Roll the violations log over at this size.
+///
+/// 4 MB is ~20k records at the shape these have — years of a normal install,
+/// days of a pathological one — and is the point past which `read_all`'s
+/// parse-the-whole-file cost is noticeable on a panel open.
+const ROTATE_BYTES: u64 = 4 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct ViolationsLog {
     path: PathBuf,
@@ -122,7 +129,43 @@ impl ViolationsLog {
             .with_context(|| format!("writing violation to {}", self.path.display()))?;
         f.write_all(b"\n")
             .with_context(|| format!("writing newline to {}", self.path.display()))?;
+        // Rotate AFTER the write, still under the lock, so the file the reader
+        // opens is always a whole one.
+        self.rotate_if_oversized(&f);
         Ok(())
+    }
+
+    /// One rollover, kept next to the live file (E4).
+    ///
+    /// The log had no rotation at all and `read_all` parses ALL of it on every
+    /// Violations-panel open — an audit trail that only grows, read whole, on a
+    /// UI click. Rolling at [`ROTATE_BYTES`] keeps one generation of history:
+    /// enough that a rotation mid-incident does not lose the incident, bounded
+    /// enough that the panel cannot be made slow by age alone.
+    ///
+    /// Best-effort by construction. A failed rotation must never fail the
+    /// APPEND — the record is the point, and the append has already succeeded by
+    /// the time this runs; the cost of a missed rollover is a large file, the
+    /// cost of a propagated error is a lost violation.
+    fn rotate_if_oversized(&self, f: &std::fs::File) {
+        let too_big = f.metadata().map(|m| m.len() > ROTATE_BYTES).unwrap_or(false);
+        if !too_big {
+            return;
+        }
+        let rolled = self.path.with_extension("jsonl.1");
+        if let Err(e) = std::fs::rename(&self.path, &rolled) {
+            tracing::warn!(
+                path = %self.path.display(),
+                ?e,
+                "violations log rotation failed; it keeps growing"
+            );
+            return;
+        }
+        tracing::info!(
+            path = %self.path.display(),
+            rolled = %rolled.display(),
+            "violations log rotated"
+        );
     }
 
     /// Convenience: build + append in one call.
@@ -212,6 +255,54 @@ impl ViolationsLog {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// **The audit trail rolls over** (E4): it had no rotation at all, and
+    /// `read_all` parses the whole file on every Violations-panel open.
+    #[tokio::test]
+    async fn an_oversized_log_rolls_over_and_keeps_recording() {
+        let dir = tempdir().unwrap();
+        let log = ViolationsLog::new(dir.path());
+        let path = dir.path().join(".local").join("violations.jsonl");
+
+        // A file already past the threshold, then one ordinary append.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, vec![b'x'; (ROTATE_BYTES + 1) as usize]).unwrap();
+        log.record(
+            "s1",
+            "hands",
+            ViolationKind::PushGate,
+            "git push origin main",
+            ViolationOutcome::Approved,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            path.with_extension("jsonl.1").exists(),
+            "the oversized log was not rolled aside"
+        );
+        // The record that triggered the roll is IN the rolled file, not lost:
+        // rotation happens after the append, so nothing is written to a file
+        // that is about to be renamed away.
+        let rolled = std::fs::read_to_string(path.with_extension("jsonl.1")).unwrap();
+        assert!(rolled.contains("git push origin main"));
+
+        // And the log keeps working: the next record starts the fresh file.
+        log.record(
+            "s1",
+            "hands",
+            ViolationKind::PushGate,
+            "git push --force",
+            ViolationOutcome::Denied,
+            None,
+        )
+        .await
+        .unwrap();
+        let fresh = log.read_all().unwrap();
+        assert_eq!(fresh.len(), 1, "the fresh log holds only what came after");
+        assert_eq!(fresh[0].action, "git push --force");
+    }
 
     #[tokio::test]
     async fn append_then_read_round_trip() {

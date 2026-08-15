@@ -70,7 +70,21 @@ impl Storage {
         let opts = SqliteConnectOptions::from_str(&dsn)
             .with_context(|| format!("invalid sqlite dsn: {dsn}"))?
             .create_if_missing(true)
-            .foreign_keys(true);
+            .foreign_keys(true)
+            // **WAL, for the reader this app does not own** (F1). The journal
+            // mode was `delete`, which takes an exclusive lock for the length of
+            // every write — against an 8-connection pool AND the git hooks,
+            // which open this same file read-only from a SEPARATE PROCESS
+            // (`hooks.rs::check_findings_gate`). Under `delete` a commit's gate
+            // check can be locked out by an ordinary write; under WAL readers
+            // never block writers and writers never block readers.
+            //
+            // Set on the connection, persisted in the FILE HEADER: the first
+            // connection flips the database and every later opener — including
+            // the hook's read-only handle, which cannot set it itself — inherits
+            // it. Reverting means opening the file once with `journal_mode` back
+            // to delete; nothing in a migration can express it.
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
             .connect_with(opts)

@@ -1426,11 +1426,17 @@ impl Storage {
             sqlx::query(
                 "INSERT OR IGNORE INTO participant_deliveries \
                  (participant_id, message_id, delivered_at, withheld_reason) \
-                 VALUES (?, ?, CASE WHEN ?3 IS NULL THEN datetime('now') ELSE NULL END, ?3)",
+                 VALUES (?, ?, CASE WHEN ?3 IS NULL THEN ?4 ELSE NULL END, ?3)",
             )
             .bind(participant_id)
             .bind(message_id)
             .bind(*withheld_reason)
+            // `now_utc()`, not `datetime('now')` (F3). SQLite's is zone-less
+            // `YYYY-MM-DD HH:MM:SS` while everything else in this database is
+            // RFC3339-Z — and this file already records, twice, what that
+            // mismatch costs: a lexicographic compare between the two shapes
+            // silently broke a guard once.
+            .bind(crate::storage::now_utc())
             .execute(&mut *tx)
             .await
             .context("recording delivery")?;
@@ -1444,13 +1450,17 @@ impl Storage {
         // agent has already acted on — the staleness class this redesign
         // removes — so the MAX() is in the statement, not in the caller.
         let moved = sqlx::query(
+            // Numbered, not positional: mixing `?` with `?N` renumbers the
+            // trailing placeholders (the bare `?` after a `?3` becomes `?4`),
+            // which is how the cursor's own id ended up unbound for one run.
             "UPDATE participant_cursors \
-             SET last_read_message_id = MAX(last_read_message_id, ?), \
-                 updated_at = datetime('now') \
-             WHERE participant_id = ?",
+             SET last_read_message_id = MAX(last_read_message_id, ?1), \
+                 updated_at = ?3 \
+             WHERE participant_id = ?2",
         )
         .bind(high)
         .bind(participant_id)
+        .bind(crate::storage::now_utc())
         .execute(&mut *tx)
         .await
         .context("advancing cursor")?
@@ -4068,6 +4078,57 @@ mod tests {
         );
         // And the whole batch rolled back: no half-recorded delivery either.
         assert!(delivery_rows(&s, pid).await.is_empty());
+    }
+
+    /// **Delivery timestamps are RFC3339-Z like every other time in this
+    /// database** (F3).
+    ///
+    /// They were written with SQLite's own `datetime('now')`, which is zone-less
+    /// `YYYY-MM-DD HH:MM:SS`. This file explains twice, at length, why that
+    /// matters: the two shapes cannot be compared lexicographically, and a guard
+    /// that tried it broke silently once. Nothing reads these columns TODAY,
+    /// which is exactly why this is worth pinning now — the first reader would
+    /// inherit the bug rather than introduce it.
+    #[tokio::test]
+    async fn a_delivery_timestamps_itself_in_the_shape_everything_else_uses() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        let p = s
+            .insert_participant("s1", "hands", "HANDS", None, None, "[]", "active", 0)
+            .await
+            .unwrap();
+        let m = s
+            .post_to_channel("s1", "user", None, "text", "go", None)
+            .await
+            .unwrap();
+        s.commit_delivery(p, &[(m.message_id(), None)]).await.unwrap();
+
+        let stamps: Vec<String> = sqlx::query_scalar(
+            "SELECT delivered_at FROM participant_deliveries WHERE participant_id = ?",
+        )
+        .bind(p)
+        .fetch_all(s.pool())
+        .await
+        .unwrap();
+        assert_eq!(stamps.len(), 1);
+        assert!(
+            stamps[0].ends_with('Z') && stamps[0].contains('T'),
+            "delivered_at is not RFC3339-Z: {:?} — a zone-less stamp cannot be \
+             compared with `now_utc()` output, and this file has paid for that \
+             mistake before",
+            stamps[0]
+        );
+        let cursor: String = sqlx::query_scalar(
+            "SELECT updated_at FROM participant_cursors WHERE participant_id = ?",
+        )
+        .bind(p)
+        .fetch_one(s.pool())
+        .await
+        .unwrap();
+        assert!(
+            cursor.ends_with('Z') && cursor.contains('T'),
+            "the cursor's updated_at is not RFC3339-Z: {cursor:?}"
+        );
     }
 
     #[tokio::test]
