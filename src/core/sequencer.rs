@@ -1517,7 +1517,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                             // "halted cycle with no on-screen reason" gap this
                             // comment used to end on.
                             let streak = spin.get(&participant_id).map_or(0, |s| s.streak);
-                            halt(&mut holder, &mut epoch);
+                            halt(&deps, &mut holder, &mut epoch).await;
                             warn!(
                                 session = %deps.session_id,
                                 participant_id,
@@ -1565,7 +1565,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                             // like a typed one, and no holder's work is ever
                             // superseded by it.
                             staged_pending = false;
-                            halt(&mut holder, &mut epoch);
+                            halt(&deps, &mut holder, &mut epoch).await;
                             debug!(
                                 session = %deps.session_id,
                                 "sequencer: staged response pending at the boundary; \
@@ -1757,7 +1757,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 } else if holder.is_none() {
                     // Nothing in flight: halt outright so the epoch moves and a
                     // straggler cannot bind the retired turn.
-                    halt(&mut holder, &mut epoch);
+                    halt(&deps, &mut holder, &mut epoch).await;
                 }
                 // A staged response delivers AS THE RELEASE: the halt asked
                 // for the user's next message and one is already queued. The
@@ -1781,7 +1781,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // epoch now so a straggler cannot bind the retired turn while
                 // the gate holds the ring.
                 if holder.is_none() {
-                    halt(&mut holder, &mut epoch);
+                    halt(&deps, &mut holder, &mut epoch).await;
                 }
             }
             SequencerCommand::GateResolved => {
@@ -1951,7 +1951,7 @@ async fn advance_turn(
             open_gates,
             "sequencer: dealing is parked (halt declared or approval pending); the cycle yields"
         );
-        halt(holder, epoch);
+        halt(deps, holder, epoch).await;
         return;
     }
     // **A user message restarts the cycle at the front — UNLESS they named
@@ -2188,7 +2188,7 @@ async fn advance_turn(
                 // right now, which ends the LAP. A pass still casts no vote and
                 // still clears nothing.
                 if !*spoke_this_lap {
-                    halt(holder, epoch);
+                    halt(deps, holder, epoch).await;
                     announce_all_passed(deps).await;
                     // Every stop is a HALT (2026-08-15: "HALT means the floor
                     // is the user's") — the yield fills the session's halt
@@ -2228,7 +2228,7 @@ async fn advance_turn(
                     // cap fires INSTEAD of the turn it was about to start, not
                     // after it — and `halt` supplies the epoch bump that step
                     // would have made, so the numbering does not skip.
-                    halt(holder, epoch);
+                    halt(deps, holder, epoch).await;
                     // D7: a visible row, not just a log line. Posted after the
                     // halt so the cycle is already yielded if the write fails —
                     // a session that halted with no row is a notification gap,
@@ -2371,11 +2371,9 @@ async fn unwind_wedged_turn(
     if let Some(activity) = &deps.activity {
         activity.set_busy_slug(&stuck.slug, false);
     }
-    halt(holder, epoch);
-    // `halt` is local-only — it clears the holder this task carries and bumps
-    // the epoch. The COLUMN is what the UI reads, and leaving a dead
-    // participant named in it is how a wedged session reads as working.
-    deps.storage.set_current_turn(&deps.session_id, None).await;
+    // Clears the holder, bumps the epoch, and NULLs the column — leaving a dead
+    // participant named there is how a wedged session reads as working.
+    halt(deps, holder, epoch).await;
     warn!(
         session = %deps.session_id,
         participant_id = stuck.id,
@@ -2546,7 +2544,7 @@ async fn halted_on_consensus(
     }
     match deps.storage.all_active_voted_done(&deps.session_id).await {
         Ok(true) => {
-            halt(holder, epoch);
+            halt(deps, holder, epoch).await;
             debug!(
                 session = %deps.session_id,
                 participant_id,
@@ -2595,9 +2593,20 @@ async fn halted_on_consensus(
 ///   the test's last completion names a turn that was never handed out. A real
 ///   failure, but an arithmetic one; do not read it as the guard being pinned
 ///   from both sides.
-fn halt(holder: &mut Option<Participant>, epoch: &mut u64) {
+async fn halt(deps: &SequencerDeps, holder: &mut Option<Participant>, epoch: &mut u64) {
     *holder = None;
     *epoch += 1;
+    // **And the COLUMN, which is what everything outside this task reads.**
+    // `halt` cleared the holder this task carries and nothing else, so after a
+    // consensus / all-pass / cap / parked-question halt
+    // `sessions.current_turn_participant_id` still named the last holder: a
+    // YIELDED session read as one still working on that participant's turn.
+    // Third instance of one pattern (2026-08-13: the capped-halt row, the close
+    // epilogue's silent skip, this) — bot-hq keeps producing ending states
+    // indistinguishable from a different one, and the column is the cheapest of
+    // them to close. Best-effort by construction: `set_current_turn` warns and
+    // moves on, so a failed write costs a UI hint, never a turn.
+    deps.storage.set_current_turn(&deps.session_id, None).await;
 }
 
 /// Where a ring step landed.
@@ -4166,6 +4175,61 @@ mod tests {
             SignalingBridge::new(),
             slugs.iter().map(|s| s.to_string()).collect(),
         )
+    }
+
+    /// **A halt clears the column too — a yielded session must not read as a
+    /// working one.**
+    ///
+    /// `halt` cleared the holder the ring task carries and bumped the epoch, and
+    /// that was all: `sessions.current_turn_participant_id` kept naming whoever
+    /// held the turn when the halt landed. Every halt path was affected — the
+    /// parked question here, consensus, the all-pass yield, the round cap — so a
+    /// session whose floor was the user's still reported a participant working
+    /// on a turn that had been retired.
+    ///
+    /// Pinned on the parked-question path because it is the one a user meets
+    /// daily; the column write lives in `halt` itself, so the other four paths
+    /// cannot diverge from it.
+    #[tokio::test]
+    async fn a_halt_stops_the_column_naming_a_holder() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        async fn column(s: &Storage) -> Option<i64> {
+            let row: Option<(Option<i64>,)> =
+                sqlx::query_as("SELECT current_turn_participant_id FROM sessions WHERE id = ?")
+                    .bind("s1")
+                    .fetch_optional(s.pool())
+                    .await
+                    .unwrap();
+            row.and_then(|(id,)| id)
+        }
+        assert_eq!(column(&storage).await, Some(a), "A holds the turn");
+
+        // A parks a question: the ring halts where it stands (rc3 D35).
+        send(&tx, SequencerCommand::HaltDeclared { participant_id: Some(a) }).await;
+        // The halt is processed before anything else this channel carries, so a
+        // second command that must observe it is enough of a barrier.
+        for _ in 0..200 {
+            if column(&storage).await.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            column(&storage).await,
+            None,
+            "the session halted and the column still names A — a yielded session \
+             reporting itself as working is the state the halt exists to end"
+        );
+        drop(tx);
+        assert!(exited(task).await);
     }
 
     /// **A dealt turn that can never complete DECLARES.**
