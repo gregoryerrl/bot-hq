@@ -1712,10 +1712,17 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     Dealt::CannotComplete(reason) => {
                         unwind_wedged_turn(&deps, &mut holder, &mut epoch, reason).await
                     }
-                    // Re-drains, not deals: the turn was already running, so an
-                    // empty page here is the backlog being finished rather than
-                    // a turn with nothing in it.
-                    Dealt::NothingUnread => {}
+                    // **A first delivery, not a re-drain** — which is why this
+                    // arm passes where the resume arm below does nothing. The
+                    // frozen deal this command exists to unfreeze bailed out of
+                    // `deliver_backlog` at the no-stdin arm, BEFORE any page was
+                    // read, so nothing has ever gone to this holder. An empty
+                    // page now is the same "nothing to answer" the ordinary deal
+                    // handles — reached through the documented recovery path —
+                    // and leaving it here is the wedge, one arm over.
+                    Dealt::NothingUnread => {
+                        pass_empty_turn(&deps, &holder, epoch, &mut deferred).await
+                    }
                 }
             }
             SequencerCommand::HaltDeclared { participant_id } => {
@@ -4256,6 +4263,61 @@ mod tests {
             SignalingBridge::new(),
             slugs.iter().map(|s| s.to_string()).collect(),
         )
+    }
+
+    /// **The same pass on the JOIN path** — the wedge one arm over.
+    ///
+    /// A participant added to a live session holds a turn with no stdin: the
+    /// drain bails at the no-stdin arm BEFORE reading any page, so nothing has
+    /// been delivered and the deal's busy mark is still up. When the stdin
+    /// arrives, `ParticipantJoined` re-drains — and if the visible backlog is
+    /// empty (peers' `tool_use`/`tool_result` are withheld by `channel_page`,
+    /// so it can be), the arm that treats an empty page as "the drain finished"
+    /// leaves exactly the wedge the deal path just stopped producing.
+    ///
+    /// The resume arm's no-op is right for the same reason this one is wrong:
+    /// there the rows DID go out on an earlier page.
+    #[tokio::test]
+    async fn a_participant_that_joins_to_an_empty_backlog_passes_rather_than_freezing() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        let act = tracker(&["a", "b"]).await;
+        deps.activity = Some(Arc::clone(&act));
+        // A is in the ring with no process behind it yet.
+        deps.inputs.remove(&a);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await; // epoch 1: A holds it, undeliverable
+
+        // B reads the row out from under A. Nothing else is posted, so when A's
+        // stdin finally arrives there is nothing left for A to be told.
+        assert_eq!(seats[1].drain(), nothing(), "B has not been dealt anything yet");
+        storage.commit_delivery(a, &[(1, None)]).await.unwrap();
+
+        let (input, mut joined) = late_stdin(a);
+        send(
+            &tx,
+            SequencerCommand::ParticipantJoined {
+                participant_id: a,
+                input,
+            },
+        )
+        .await;
+
+        // The turn moves on instead of freezing on A: B is dealt next.
+        assert_eq!(
+            seats[1].expect(1).await,
+            vec!["go"],
+            "the join found nothing for A and the ring never stepped — A holds a \
+             turn nothing can end"
+        );
+        assert_eq!(joined.drain(), nothing(), "and A was told nothing, because there was nothing");
+        assert!(!act.is_busy_slug("a"), "A's deal mark outlived the turn it stood for");
+        let _ = b;
+        drop(tx);
+        assert!(exited(task).await);
     }
 
     /// **A turn dealt with nothing unread passes instead of wedging.**
