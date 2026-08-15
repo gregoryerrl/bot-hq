@@ -4272,6 +4272,86 @@ mod tests {
         )
     }
 
+    /// **The gate LIFT is a wire, and cutting it stops the session dead.**
+    ///
+    /// CODEBASE.md §14 seam 14, and the sharpest result of the rc3 audit: EYES
+    /// commented out `bridge/tray.rs`'s `notify_ring_gate(&session_id, false)`
+    /// and ran the whole library suite — **1131 passed, 0 failed**. The ring's
+    /// gate latch never lifts after an approval, so the session deals nothing
+    /// for the rest of the process, and every test said fine. The two halves
+    /// were each covered (the bridge filters the row; the ring decrements on
+    /// `GateResolved`) and the JOIN between them was covered by nothing.
+    ///
+    /// So this drives the real path: a durable gate row, the latch on, a user
+    /// message that must NOT be dealt, then `resolve_choice` — the bridge call
+    /// the tray's Approve button makes — and the same message must go out.
+    /// Deleting the lift reddens the second half only, which is the shape a
+    /// wire test should have.
+    ///
+    /// No `command_text` on the row on purpose: this pins the latch, and a gate
+    /// carrying a command would send the resolve path into `maybe_run_gated`.
+    #[tokio::test]
+    async fn resolving_a_gate_lifts_the_latch_and_the_ring_deals_again() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        post(&storage, "user", None, "go").await;
+        storage
+            .insert_tray_entry(
+                "s1",
+                "gate-1",
+                "hands",
+                crate::storage::QuestionKind::Choice,
+                "Approve this?",
+                Some(&["Approve".to_string(), "Reject".to_string()]),
+                None,
+                None,
+            )
+            .await
+            .expect("gate row parks");
+
+        let (tx, rx) = mpsc::channel(8);
+        bridge
+            .register_session_sequencer("s1".to_string(), tx.clone())
+            .await;
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        // The gate is open — seeded from the durable row at ring start, which is
+        // how a session that restarts under a pending gate stays held. (An extra
+        // `notify_ring_gate(true)` here would count the same gate twice and the
+        // single lift below could never clear it: the latch is a COUNT, which is
+        // the identity defect C2-2 tracks.)
+        send(&tx, user_message()).await;
+        seats[0].quiet().await;
+
+        // The user approves, through the call the Approve button makes.
+        bridge
+            .resolve_choice("gate-1", "Approve".to_string())
+            .await
+            .expect("the gate resolves");
+        // The release is the resolve path's own; this is the ring's next command
+        // either way, and with the latch stuck it changes nothing.
+        send(&tx, user_message()).await;
+        // Raw, not `expect`: the resolve posts the user's answer into the
+        // channel too, so what goes out is the answer row and the message —
+        // host-authored rows carry no `[speaker]`, and this assertion is about
+        // the LATCH, not the wire format.
+        let dealt = seats[0].expect_raw(1).await.join("\n");
+        assert!(
+            dealt.contains("Approve") || dealt.contains("go"),
+            "the gate resolved and the ring is still holding — the latch never \
+             lifted, so this session deals nothing for the rest of the process; \
+             got {dealt:?}"
+        );
+        drop(tx);
+        // The bridge holds the other sender, so the ring outlives this test
+        // until the session is unregistered — which is the lifetime
+        // `closing_a_session_lets_its_ring_task_end` pins.
+        bridge.unregister_session("s1").await;
+        assert!(exited(task).await);
+    }
+
     /// **Closing a session ENDS its ring task** — the map entry going away is
     /// not the same fact.
     ///
