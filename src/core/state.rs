@@ -369,7 +369,8 @@ impl AppState {
     /// user message respawns each agent via `--resume`, restoring prior context.
     /// No-op (`Done`) if the session isn't live.
     pub async fn cancel_session_turn(&self, session_id: &str) -> Result<CancelOutcome> {
-        let mut pause_ring = false;
+        // Set inside the lock, acted on outside it.
+        let pause_ring;
         let deferred = {
             let mut sessions = self.sessions.lock().await;
             let Some(handle) = sessions.get_mut(session_id) else {

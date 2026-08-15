@@ -415,6 +415,15 @@ pub struct SignalingBridge {
     /// UI chip on mount (the event fires only on change, mirroring
     /// `router_health`). Sync `Mutex` — the notify path is sync.
     session_attention: std::sync::Mutex<HashMap<String, String>>,
+    /// `session_id:agent` → the secret that agent's own mcp-config carries
+    /// (C1-1). Minted per spawn, never persisted: it is only meaningful while
+    /// the subprocess that holds it is alive, and a fresh spawn mints a fresh
+    /// one.
+    ///
+    /// Absent means "this pair has no secret registered", which is NOT the same
+    /// as "the secret is wrong" — see [`SignalingBridge::mcp_token_matches`] for
+    /// why that distinction is what keeps a mid-upgrade session working.
+    mcp_tokens: std::sync::Mutex<HashMap<String, String>>,
     /// session_id → shared open-blocking-findings count. The router reads the
     /// `Arc<AtomicUsize>` LOCK-FREE per peer-forward (for the wire banner) instead
     /// of a per-forward `SELECT COUNT(*)` + storage-`Mutex` acquire; the findings
@@ -456,6 +465,7 @@ impl SignalingBridge {
             router_health: std::sync::Mutex::new(HashMap::new()),
             session_attention: std::sync::Mutex::new(HashMap::new()),
             turn_passes: std::sync::Mutex::new(HashMap::new()),
+            mcp_tokens: std::sync::Mutex::new(HashMap::new()),
             session_open_blocking: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -571,6 +581,47 @@ impl SignalingBridge {
                     opened,
                     "a gate notification did not reach the ring; the latch reseeds on respawn"
                 );
+            }
+        }
+    }
+
+    /// Mint-and-remember the secret one agent's mcp-config will carry (C1-1).
+    ///
+    /// Called at spawn, once per agent, with the value written into that
+    /// agent's own config file and nowhere else.
+    pub fn register_mcp_token(&self, session_id: &str, agent: &str, token: &str) {
+        self.mcp_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(format!("{session_id}:{agent}"), token.to_string());
+    }
+
+    /// Does this caller hold the secret registered for the pair it claims to be?
+    ///
+    /// **Absent registration ALLOWS, and that is deliberate.** A pair with no
+    /// secret on file is a session whose agents were spawned before this
+    /// existed: refusing it would break a live session at upgrade time, which is
+    /// a worse failure than the impersonation it would prevent — and the window
+    /// closes on its own, since every spawn from here registers one. A pair WITH
+    /// a secret is checked strictly, and that is every live session after the
+    /// next relaunch.
+    ///
+    /// Constant-time compare, mirroring `external_server`: a timing oracle on a
+    /// localhost secret is a stretch, but the cost of using the right primitive
+    /// is nothing.
+    pub fn mcp_token_matches(&self, session_id: &str, agent: &str, presented: Option<&str>) -> bool {
+        use subtle::ConstantTimeEq;
+        let expected = self
+            .mcp_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&format!("{session_id}:{agent}"))
+            .cloned();
+        match (expected, presented) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(expected), Some(presented)) => {
+                expected.as_bytes().ct_eq(presented.as_bytes()).into()
             }
         }
     }
@@ -866,6 +917,10 @@ impl SignalingBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(session_id);
+        self.mcp_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|k, _| !k.starts_with(&format!("{session_id}:")));
     }
 
     /// A3b: record that the agent ran `cl_rescan` or `cl_write_file` this

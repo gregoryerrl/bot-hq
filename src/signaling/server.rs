@@ -154,10 +154,29 @@ async fn handle_request(
         None => {
             return Ok(text_response(
                 StatusCode::NOT_FOUND,
-                "expected /sessions/<id>/<agent>/mcp",
+                "expected /sessions/<id>/<agent>/<token>/mcp",
             ));
         }
     };
+    // **Who you say you are is not who you are** (C1-1). Identity used to be the
+    // URL path alone: any process that could reach this port — every agent, since
+    // they all hold Bash — could POST to a PEER's URL and call tools its own
+    // capabilities refuse. The sibling external server has done bearer +
+    // constant-time compare since it shipped; this one had nothing.
+    //
+    // The secret is minted per (session, agent) at spawn and written only into
+    // that agent's own mcp-config, so possessing it IS being that agent.
+    if !bridge.mcp_token_matches(&who.session_id, &who.agent, who.token.as_deref()) {
+        warn!(
+            session_id = %who.session_id,
+            agent = %who.agent,
+            "MCP request refused: wrong or missing per-agent secret"
+        );
+        return Ok(text_response(
+            StatusCode::FORBIDDEN,
+            "this session/agent pair does not match its registered secret",
+        ));
+    }
     // Resolve the caller's grants ONCE per request, here, so `jsonrpc::dispatch`
     // stays a pure function of its arguments (the reason it lives apart from
     // this module) and one request costs one roster read rather than one per
@@ -326,17 +345,29 @@ async fn handle_tool_gate(body: Incoming, bridge: Arc<SignalingBridge>) -> Respo
 struct CallerPath {
     session_id: String,
     agent: String,
+    /// The per-(session, agent) secret from the URL, when the caller's config
+    /// carries one. `None` is a session whose mcp-config predates C1-1.
+    token: Option<String>,
 }
 
 fn parse_path(path: &str) -> Option<CallerPath> {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
-    if parts.len() != 4 || parts[0] != "sessions" || parts[3] != "mcp" {
-        return None;
+    // `/sessions/<id>/<agent>/mcp` (no token — a session spawned before C1-1) or
+    // `/sessions/<id>/<agent>/<token>/mcp`. Both parse; whether a missing token
+    // is ACCEPTED is `authorize_caller`'s decision, not this function's.
+    match parts.as_slice() {
+        ["sessions", session_id, agent, "mcp"] => Some(CallerPath {
+            session_id: session_id.to_string(),
+            agent: agent.to_string(),
+            token: None,
+        }),
+        ["sessions", session_id, agent, token, "mcp"] => Some(CallerPath {
+            session_id: session_id.to_string(),
+            agent: agent.to_string(),
+            token: Some(token.to_string()),
+        }),
+        _ => None,
     }
-    Some(CallerPath {
-        session_id: parts[1].to_string(),
-        agent: parts[2].to_string(),
-    })
 }
 
 /// Render the mcp-config.json content claude-code expects for one agent.
@@ -357,12 +388,19 @@ pub fn mcp_config_json(
     server_addr: SocketAddr,
     session_id: &str,
     agent: &str,
+    token: Option<&str>,
     extra_servers: &serde_json::Map<String, serde_json::Value>,
 ) -> String {
-    let url = format!(
-        "http://{}/sessions/{}/{}/mcp",
-        server_addr, session_id, agent
-    );
+    let url = match token {
+        Some(token) => format!(
+            "http://{}/sessions/{}/{}/{}/mcp",
+            server_addr, session_id, agent, token
+        ),
+        None => format!(
+            "http://{}/sessions/{}/{}/mcp",
+            server_addr, session_id, agent
+        ),
+    };
     let mut servers = serde_json::Map::new();
     for (name, val) in extra_servers {
         servers.insert(name.clone(), val.clone());
@@ -599,10 +637,90 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 400);
     }
 
+    /// **A peer cannot POST as you** (C1-1) — end to end, against a live server.
+    ///
+    /// Identity was the URL path alone: every agent holds Bash, so any of them
+    /// could POST to a peer's URL and call tools its own capabilities refuse.
+    /// The secret is minted per (session, agent) at spawn and written only into
+    /// that agent's own mcp-config, so holding it IS being that agent.
+    ///
+    /// The three cases that matter are all here, because two of them are the
+    /// ones a careless fix gets wrong: the right secret works, the WRONG secret
+    /// is refused, and a pair with NO secret registered still works — that last
+    /// one is what keeps a session spawned before this upgrade alive until its
+    /// next respawn.
+    #[tokio::test]
+    async fn an_mcp_call_needs_the_secret_that_belongs_to_the_agent() {
+        let bridge = SignalingBridge::new();
+        bridge.register_mcp_token("s1", "hands", "hands-secret");
+        let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
+        let client = reqwest::Client::new();
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).to_string();
+
+        let post = |url: String, body: String| {
+            let client = client.clone();
+            async move {
+                client
+                    .post(&url)
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .as_u16()
+            }
+        };
+
+        assert_eq!(
+            post(
+                format!(
+                    "http://{}/sessions/s1/hands/hands-secret/mcp",
+                    server.local_addr
+                ),
+                body.clone()
+            )
+            .await,
+            200,
+            "the agent's own secret must work"
+        );
+        assert_eq!(
+            post(
+                format!(
+                    "http://{}/sessions/s1/hands/eyes-guessing/mcp",
+                    server.local_addr
+                ),
+                body.clone()
+            )
+            .await,
+            403,
+            "a peer POSTing to the executor's URL with the wrong secret got in"
+        );
+        assert_eq!(
+            post(
+                format!("http://{}/sessions/s1/hands/mcp", server.local_addr),
+                body.clone()
+            )
+            .await,
+            403,
+            "a registered pair must not be reachable by dropping the secret"
+        );
+        assert_eq!(
+            post(
+                format!("http://{}/sessions/s1/eyes/mcp", server.local_addr),
+                body
+            )
+            .await,
+            200,
+            "a pair with NO secret registered still works — a session spawned \
+             before this upgrade must not lose its tools mid-flight"
+        );
+    }
+
     #[test]
     fn mcp_config_shape() {
         let addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
-        let s = mcp_config_json(addr, "sess1", "brian", &serde_json::Map::new());
+        let s = mcp_config_json(addr, "sess1", "brian", None, &serde_json::Map::new());
         assert!(s.contains("mcpServers"));
         assert!(s.contains("bot-hq-signaling"));
         assert!(s.contains("\"type\": \"http\""));
@@ -617,7 +735,7 @@ mod tests {
             "chrome-devtools".into(),
             json!({ "command": "node", "args": ["main.js"] }),
         );
-        let s = mcp_config_json(addr, "sess1", "brian", &extras);
+        let s = mcp_config_json(addr, "sess1", "brian", None, &extras);
         let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
         let servers = parsed
             .get("mcpServers")

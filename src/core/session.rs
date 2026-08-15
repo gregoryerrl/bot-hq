@@ -805,6 +805,7 @@ async fn spawn_session_handle(
             signaling_addr,
             mcp_temp.path(),
             working_repo_path.clone(),
+            Some(&bridge),
         )
         .await?;
         // Supervised: a transient upstream API error (e.g. 529 Overloaded)
@@ -1542,6 +1543,9 @@ async fn participant_spawn_config(
     signaling_addr: SocketAddr,
     mcp_temp_dir: &std::path::Path,
     working_dir: Option<PathBuf>,
+    // Where this agent's MCP secret is registered so the server can check it
+    // (C1-1). `None` in the tests that only want the rendered config.
+    bridge: Option<&Arc<SignalingBridge>>,
 ) -> Result<SpawnConfig> {
     let agent_name = p.slug.as_str();
     // The participant's OWN session, not one passed alongside it. A mismatch
@@ -1568,7 +1572,22 @@ async fn participant_spawn_config(
     for name in crate::claude_config::overrides::disabled_mcp(&overrides) {
         user_servers.remove(&name);
     }
-    let json = mcp_config_json(signaling_addr, session_id, agent_name, &user_servers);
+    // The per-agent MCP secret (C1-1): minted here, written into this agent's
+    // own config and registered with the bridge that will check it. A fresh one
+    // per spawn — it is only meaningful while this subprocess is alive, and a
+    // respawn writes a new config anyway.
+    let mcp_token = bridge.map(|bridge| {
+        let token = uuid::Uuid::new_v4().to_string();
+        bridge.register_mcp_token(session_id, agent_name, &token);
+        token
+    });
+    let json = mcp_config_json(
+        signaling_addr,
+        session_id,
+        agent_name,
+        mcp_token.as_deref(),
+        &user_servers,
+    );
     std::fs::write(&mcp_config_path, json)
         .with_context(|| format!("writing mcp-config to {}", mcp_config_path.display()))?;
 
@@ -3090,6 +3109,7 @@ mod tests {
                     "127.0.0.1:1".parse().unwrap(),
                     &dir,
                     None,
+                    None,
                 )
                 .await
                 .expect("spawn config")
@@ -3158,6 +3178,7 @@ mod tests {
             composed.to_string(),
             "127.0.0.1:1".parse().unwrap(),
             mcp_temp.path(),
+            None,
             None,
         )
         .await
