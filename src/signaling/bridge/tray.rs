@@ -459,7 +459,41 @@ impl SignalingBridge {
     /// Removes the parked oneshot AND updates the storage row to status=withdrawn
     /// so the UI tray drops it. Returns true if a question was actually withdrawn,
     /// false if the choice_id was unknown or already resolved.
-    pub async fn withdraw_question(&self, choice_id: &str) -> bool {
+    /// `asker` scopes the withdrawal to the participant that PARKED the row
+    /// (A4). Without it any participant could clear any other's question out of
+    /// the user's tray — including a review-only one, which has no way to ask a
+    /// question of its own and therefore no reason to be retracting one. `None`
+    /// means the host is withdrawing (teardown, tray GC), which is not scoped.
+    ///
+    /// A mismatch is a no-op reported as "not yours", not an error: the caller
+    /// asked for a state that already holds — that row is not theirs to worry
+    /// about.
+    pub async fn withdraw_question(&self, choice_id: &str, asker: Option<&str>) -> bool {
+        if let Some(asker) = asker {
+            let owner = {
+                let storage_guard = self.storage.lock().await;
+                match storage_guard.as_ref() {
+                    Some(storage) => storage
+                        .get_tray_entry(choice_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|row| row.agent),
+                    None => None,
+                }
+            };
+            if let Some(owner) = owner {
+                if owner != asker {
+                    tracing::warn!(
+                        choice_id,
+                        asker,
+                        owner,
+                        "refusing to withdraw a question parked by another participant"
+                    );
+                    return false;
+                }
+            }
+        }
         let parked = self.pending.lock().await.remove(choice_id);
         let was_parked = parked.is_some();
         // Drop the oneshot — the agent's blocking caller (if any) gets the
@@ -487,9 +521,19 @@ impl SignalingBridge {
             }
         };
         let storage_guard = self.storage.lock().await;
+        // **The DURABLE row counts too.** The return value was "was there an
+        // in-memory park?", so withdrawing a row that outlived its process — a
+        // question parked before a restart, which is the case the durable row
+        // exists for — reported "no-op: choice_id was not pending" to the agent
+        // while actually withdrawing it. The tool's own answer said the opposite
+        // of what happened.
+        let mut withdrew_row = false;
         if let Some(storage) = storage_guard.as_ref() {
-            if let Err(e) = storage.withdraw_tray_entry(choice_id).await {
-                tracing::warn!(?e, choice_id, "withdraw_question storage update failed");
+            match storage.withdraw_tray_entry(choice_id).await {
+                Ok(rows) => withdrew_row = rows > 0,
+                Err(e) => {
+                    tracing::warn!(?e, choice_id, "withdraw_question storage update failed")
+                }
             }
         }
         drop(storage_guard);
@@ -503,7 +547,7 @@ impl SignalingBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(choice_id);
-        was_parked
+        was_parked || withdrew_row
     }
 
     /// Snapshot the `session_tray` table for a session. Convenience for the UI
@@ -1577,6 +1621,54 @@ mod tests {
             second.as_deref(),
             Some("temp.md ready, awaiting go"),
             "a second yield with no user reply must surface the earlier one"
+        );
+    }
+
+    /// **A question is withdrawn by the participant that parked it, and by
+    /// nobody else** (A4).
+    ///
+    /// `withdraw_question` took a `choice_id` and nothing else, so any
+    /// participant could clear any other's question out of the user's tray —
+    /// including a review-only one, which has no way to ask a question of its
+    /// own and therefore no reason to be retracting one.
+    ///
+    /// Scoping is not gating: WHO may call the tool is a capability question and
+    /// the parity oracle says that one is the user's. This is about WHICH ROW a
+    /// caller may act on, which was never expressed anywhere.
+    #[tokio::test]
+    async fn a_question_is_only_withdrawable_by_its_asker() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage
+            .insert_tray_entry(
+                "s1",
+                "q-1",
+                "hands",
+                crate::storage::QuestionKind::Choice,
+                "Which batch next?",
+                Some(&["one".to_string(), "two".to_string()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !bridge.withdraw_question("q-1", Some("eyes")).await,
+            "a peer cleared a question it did not park"
+        );
+        let still_there = storage.get_tray_entry("q-1").await.unwrap().unwrap();
+        assert_eq!(still_there.status, "pending", "and the row survived");
+
+        assert!(
+            bridge.withdraw_question("q-1", Some("hands")).await,
+            "the asker withdraws its own"
+        );
+        assert_eq!(
+            storage.get_tray_entry("q-1").await.unwrap().unwrap().status,
+            "withdrawn"
         );
     }
 

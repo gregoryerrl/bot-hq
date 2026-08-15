@@ -4677,7 +4677,7 @@ mod tests {
         // The return value reports whether an in-memory park was dropped, not
         // whether the durable row moved — nothing is parked here, and the
         // withdraw still has to lift the latch the durable row seeded.
-        bridge.withdraw_question("gate-2").await;
+        bridge.withdraw_question("gate-2", None).await;
         send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,

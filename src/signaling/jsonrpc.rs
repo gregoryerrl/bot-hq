@@ -842,7 +842,7 @@ async fn call_tool(
         }
         "withdraw_question" => {
             let choice_id = arg_required_str(&args, "choice_id")?;
-            let was_pending = bridge.withdraw_question(&choice_id).await;
+            let was_pending = bridge.withdraw_question(&choice_id, Some(&caller.agent)).await;
             Ok(ToolCallResult::text(if was_pending {
                 "withdrawn"
             } else {

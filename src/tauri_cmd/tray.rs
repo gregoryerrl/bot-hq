@@ -272,7 +272,7 @@ pub async fn discard_choice(
     bridge: tauri::State<'_, Arc<SignalingBridge>>,
     choice_id: String,
 ) -> Result<bool, AppError> {
-    Ok(bridge.withdraw_question(&choice_id).await)
+    Ok(bridge.withdraw_question(&choice_id, None).await)
 }
 
 #[cfg(test)]
@@ -305,7 +305,7 @@ mod tests {
             .to_string();
 
         let mut sub = bridge.subscribe();
-        assert!(bridge.withdraw_question(&cid).await, "row was pending");
+        assert!(bridge.withdraw_question(&cid, None).await, "row was pending");
 
         // Nothing resolution-shaped may be emitted by a discard.
         match sub.try_recv() {
@@ -325,7 +325,7 @@ mod tests {
     #[tokio::test]
     async fn discard_of_an_unknown_id_is_false_not_an_error() {
         let bridge = SignalingBridge::new();
-        assert!(!bridge.withdraw_question("nope").await);
+        assert!(!bridge.withdraw_question("nope", None).await);
     }
 
     #[tokio::test]

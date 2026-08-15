@@ -1254,7 +1254,7 @@ impl SignalingBridge {
                                 choice_id = %cid,
                                 "reviewer recovered; withdrawing the parked override request"
                             );
-                            let _ = bridge.withdraw_question(&cid).await;
+                            let _ = bridge.withdraw_question(&cid, None).await;
                         }
                     });
                 }
