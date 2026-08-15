@@ -442,6 +442,12 @@ async fn the_reviewer_down_gate_blocks_only_a_duo_with_a_dead_reviewer() {
 /// named here rather than skipped silently so the exception cannot grow into a
 /// place to park regressions — `the_parity_hold_is_exactly_the_known_divergence`
 /// asserts the new answer directly.
+///
+/// It stayed at one on 2026-08-16: gating `withdraw_question` was proposed
+/// (audit A4), this oracle flagged it as a divergence, and the user's answer was
+/// to leave the tool ungated and close the reported problem by scoping the
+/// withdrawal to the row's asker instead — which changes no capability and needs
+/// no entry here.
 const SANCTIONED_DIVERGENCE: &[&str] = &["close_session"];
 
 #[tokio::test]
@@ -468,11 +474,19 @@ async fn the_capability_gate_reproduces_the_name_gate_for_every_tool() {
         }
         checked += 1;
     }
-    assert!(
-        checked >= 39,
-        "expected the full tool registry, only checked {checked} — did \
-         tool_descriptors() shrink? (40 → 39 when declare_working retired, \
-         2026-08-15: every stop is a HALT; working = holding a turn)"
+    // Derived, not restated: the walk covers the whole registry MINUS the
+    // sanctioned divergences, so signing off a new divergence cannot silently
+    // shrink the coverage this guard exists to measure. (The literal it replaces
+    // had already drifted once — 40 → 39 when `declare_working` retired on
+    // 2026-08-15 — and a signed-off divergence would have drifted it again.)
+    let registry = super::protocol::tool_descriptors().len();
+    assert_eq!(
+        checked,
+        registry - SANCTIONED_DIVERGENCE.len(),
+        "the walk covered {checked} of {registry} tools with \
+         {} sanctioned divergence(s) — something is being skipped that nobody \
+         signed off",
+        SANCTIONED_DIVERGENCE.len()
     );
 }
 
@@ -545,9 +559,9 @@ async fn the_parity_hold_is_exactly_the_known_divergence() {
         .collect();
     assert_eq!(
         held,
-        vec!["close_session"],
-        "the capability model diverges from the name gate on exactly one tool; \
-         a new entry here is an unreviewed behaviour change"
+        SANCTIONED_DIVERGENCE.to_vec(),
+        "the capability model diverges from the name gate on exactly the tools \
+         the user signed off; a new entry here is an unreviewed behaviour change"
     );
 }
 

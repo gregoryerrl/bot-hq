@@ -223,14 +223,15 @@ pub fn required_for(tool: &str) -> Option<Capability> {
         "mark_awaiting_user" | "halt" => Halt,
         "request_approval" => ParkApproval,
         "action_gate" => GatedBash,
-        // NOT `withdraw_question`, deliberately (A4): gating it behind this
-        // capability is a real permission change — the parity oracle flags it as
-        // a divergence from the name gate rc3 replaced, and says in as many
-        // words that such a change is the USER's call. What the audit actually
-        // reported (any participant clearing any other's question out of the
-        // user's tray) is closed by scoping the withdrawal to the row's asker in
-        // `bridge::tray::withdraw_question`, which changes no capability. The
-        // capability half is parked for the user.
+        // **NOT `withdraw_question` — the user's call, 2026-08-16.** Gating it
+        // here is a real permission change (the pre-rc3 name gate admitted
+        // everyone), which is why the parity oracle refuses to let it pass as a
+        // cleanup. Asked, and the answer was to leave it ungated: what audit A4
+        // actually reported — any participant clearing ANOTHER's question out of
+        // the user's tray — is closed by scoping the withdrawal to the row's
+        // asker in `bridge::tray::withdraw_question`, and that changes no
+        // capability. A role with no way to ask a question has no rows of its own
+        // to withdraw, so the tool is inert for it either way.
         "supersede_question" => SupersedeQuestion,
         "disposition_finding" => DispositionFinding,
         "override_reviewer_block" => OverrideReviewerBlock,
