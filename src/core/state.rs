@@ -2053,6 +2053,46 @@ mod tests {
         );
     }
 
+    /// **The epilogue's turn runs BEFORE anything is torn down.**
+    ///
+    /// The ordering was prose in a comment and control flow in one function, and
+    /// the unregister half of teardown just became load-bearing twice over:
+    /// `unregister_session` now drops the ring's `Sender`, so a teardown that
+    /// ran first would leave the epilogue prompt with no ring to deal it — the
+    /// turn could not start at all, and the outcome row would read
+    /// `NeverStarted` for a session whose agent was perfectly willing.
+    ///
+    /// Asserted over the source for the same reason its siblings are: exercising
+    /// it needs a live session with two subprocesses. What it pins is the ORDER
+    /// inside the epilogue arm — the await of the turn, then the teardown.
+    #[test]
+    fn the_epilogue_turn_runs_before_the_teardown_that_unregisters_the_ring() {
+        let src = include_str!("state.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        let arm = prod
+            .split("ClosePlan::RunEpilogueFirst =>")
+            .nth(1)
+            .expect("the epilogue arm exists")
+            .split("\n    /// ")
+            .next()
+            .expect("a split always yields a first part");
+        let epilogue = arm
+            .find("run_close_epilogue(")
+            .expect("the epilogue arm runs the epilogue");
+        let teardown = arm
+            .find("teardown_session(")
+            .expect("the epilogue arm tears down afterwards");
+        assert!(
+            epilogue < teardown,
+            "teardown runs before the epilogue's turn — `unregister_session` drops \
+             the ring's Sender, so the turn the close just asked for could never \
+             be dealt"
+        );
+    }
+
     /// **s-f6a441ff: the paste gate.** One 2.9 MB user paste wedged both
     /// participants' contexts unrecoverably. Both user-text entry points —
     /// `broadcast` and `send_user_response` — refuse an oversized message at

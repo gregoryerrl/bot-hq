@@ -4009,6 +4009,13 @@ mod tests {
     /// Did the task END within [`DEADLINE`]? A panic inside the loop also ends
     /// the task, so the join result is unwrapped rather than counted as an exit
     /// — an unwritten `match` arm must fail here, not read as a clean shutdown.
+    /// Has this task finished ALREADY? Non-consuming, so the caller can go on
+    /// to `exited` afterwards — the "still open" half of a lifetime assertion
+    /// needs to look without taking.
+    fn exited_fast(task: &JoinHandle<()>) -> bool {
+        task.is_finished()
+    }
+
     async fn exited(task: JoinHandle<()>) -> bool {
         match tokio::time::timeout(DEADLINE, task).await {
             Ok(joined) => {
@@ -4263,6 +4270,44 @@ mod tests {
             SignalingBridge::new(),
             slugs.iter().map(|s| s.to_string()).collect(),
         )
+    }
+
+    /// **Closing a session ENDS its ring task** — the map entry going away is
+    /// not the same fact.
+    ///
+    /// `unregister_session` left six per-session maps behind, and
+    /// `session_sequencer` was the expensive one: the bridge's clone of the
+    /// ring's `Sender` is what keeps `run_sequencer`'s channel open, so an
+    /// un-removed entry means the task never returns — one orphan ring per
+    /// closed session, for the life of the process.
+    ///
+    /// The assertion is the TASK's exit, deliberately, because the map entry can
+    /// be removed while the task runs on (any other clone of the sender keeps it
+    /// alive) and a registry test would report that as success.
+    #[tokio::test]
+    async fn closing_a_session_lets_its_ring_task_end() {
+        let (deps, _storage, _seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let bridge = SignalingBridge::new();
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        bridge
+            .register_session_sequencer("s1".to_string(), tx.clone())
+            .await;
+        // The ring is running and the test is no longer holding it open: from
+        // here the bridge's registration is the only sender alive.
+        drop(tx);
+        assert!(
+            !exited_fast(&task),
+            "the bridge's registered sender should still be holding the ring open"
+        );
+
+        bridge.unregister_session("s1").await;
+        assert!(
+            exited(task).await,
+            "the session closed and its ring task is still running — the bridge is \
+             still holding the sender, so this task outlives the session for the \
+             life of the process"
+        );
     }
 
     /// **The same pass on the JOIN path** — the wedge one arm over.

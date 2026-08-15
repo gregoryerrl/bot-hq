@@ -798,6 +798,39 @@ impl SignalingBridge {
             .lock()
             .await
             .retain(|_, p| p.choice.session_id != session_id);
+        // **The six that were never removed.** Sixteen per-session maps, each
+        // needing its own line here, and six of them had none — found by reading
+        // the registrations against this function rather than by anything going
+        // wrong, which is the shape the audit calls "one map, one line, no type
+        // saying so" (the fix for that is the PerSession registry, a refactor).
+        //
+        // `session_sequencer` is the expensive one: its `Sender` is the ring
+        // task's last, so holding it here means `run_sequencer` never sees its
+        // channel close and the task lives for the life of the process — one
+        // orphan ring per closed session. `session_attention` is the visible
+        // one: `get_session_runtime` seeds the UI chip from it, so REOPENING a
+        // session id showed the previous run's attention badge.
+        self.session_sequencer.lock().await.remove(session_id);
+        self.turn_passes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|k, _| !k.starts_with(&format!("{session_id}:")));
+        self.agent_rpc_seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(s, _), _| s != session_id);
+        self.pending_override_requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|_, (s, _)| s != session_id);
+        self.session_reviewers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(session_id);
+        self.session_attention
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(session_id);
     }
 
     /// A3b: record that the agent ran `cl_rescan` or `cl_write_file` this
