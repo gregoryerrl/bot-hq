@@ -1701,8 +1701,14 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // be delivered — that is the frozen cycle the module doc
                 // describes. It is deliverable now. The ring does not move and
                 // the epoch does not change: no turn ended, one finally started.
-                if let Some(to) = holder.as_ref().filter(|h| h.id == participant_id) {
-                    deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut deferred).await;
+                let dealt = match holder.as_ref().filter(|h| h.id == participant_id) {
+                    Some(to) => {
+                        deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut deferred).await
+                    }
+                    None => Dealt::Live,
+                };
+                if let Dealt::CannotComplete(reason) = dealt {
+                    unwind_wedged_turn(&deps, &mut holder, &mut epoch, reason).await;
                 }
             }
             SequencerCommand::HaltDeclared { participant_id } => {
@@ -1839,8 +1845,14 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // what goes out is everything unread AS OF THE RESUME, and each
                 // row exactly once: `commit_delivery` moved the cursor past the
                 // prefix that landed and it never rewinds.
-                if let Some(to) = holder.as_ref() {
-                    deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut deferred).await;
+                let dealt = match holder.as_ref() {
+                    Some(to) => {
+                        deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut deferred).await
+                    }
+                    None => Dealt::Live,
+                };
+                if let Dealt::CannotComplete(reason) = dealt {
+                    unwind_wedged_turn(&deps, &mut holder, &mut epoch, reason).await;
                 }
                 debug!(
                     session = %deps.session_id,
@@ -2070,7 +2082,10 @@ async fn advance_turn(
         // it cannot wrap one. No anchor update either — that IS the mechanism.
         *holder = Some(to);
         *epoch += 1;
-        start_turn(deps, holder, epoch, rx, deferred).await;
+        if let Dealt::CannotComplete(reason) = start_turn(deps, holder, epoch, rx, deferred).await
+        {
+            unwind_wedged_turn(deps, holder, epoch, reason).await;
+        }
         return;
     }
     match hand_over(deps, current).await {
@@ -2256,7 +2271,11 @@ async fn advance_turn(
             // Every step, including a restart that lands on the same
             // participant. That case is exactly why the epoch exists.
             *epoch += 1;
-            start_turn(deps, holder, epoch, rx, deferred).await;
+            if let Dealt::CannotComplete(reason) =
+                start_turn(deps, holder, epoch, rx, deferred).await
+            {
+                unwind_wedged_turn(deps, holder, epoch, reason).await;
+            }
         }
     }
 }
@@ -2273,7 +2292,7 @@ async fn start_turn(
     epoch: &u64,
     rx: &mut mpsc::Receiver<SequencerCommand>,
     deferred: &mut VecDeque<SequencerCommand>,
-) {
+) -> Dealt {
     // The DEAL — the holder column + the busy mark — happens HERE, strictly
     // after every check that can refuse the turn (the halt latch, open gates,
     // the all-pass yield, the round cap). It lived in `hand_over`, which
@@ -2286,7 +2305,7 @@ async fn start_turn(
     // the eager placement never did.
     hand_turn_to(deps, holder.as_ref()).await;
     let Some(to) = holder.as_ref() else {
-        return;
+        return Dealt::Live;
     };
     // A new turn, so a new pass is legitimate again (rc3 D25). Cleared HERE
     // rather than when the participant passes, because the count has to survive
@@ -2322,7 +2341,64 @@ async fn start_turn(
              completions will carry 0, fail the guard, and the cycle will stop here"
         ),
     }
-    deliver_backlog(deps, to, rx, MAX_TURN_BATCHES, deferred).await;
+    deliver_backlog(deps, to, rx, MAX_TURN_BATCHES, deferred).await
+}
+
+/// A turn was dealt and can never complete — unwind it, and DECLARE.
+///
+/// Every stop is a HALT (2026-08-15), and this is the stop nobody chose. Before
+/// this existed the three ways to reach it — a participant whose stdin closed
+/// under the deal, a page its own input refused as out-of-session, a backlog
+/// that could not be read — each warned into the log and returned, leaving the
+/// holder set, its busy flag up, the halt slot empty and the input locked. The
+/// health dot did flip for a dead pump (`watchdog.rs`), and that is all: the
+/// idle nudge cannot cover a wedge that reads Busy, so the session sat working
+/// on a turn that had already failed, and the only way out was Pause plus a
+/// SIGKILL.
+///
+/// Order is deliberate: clear the flag, unwind the ring, NULL the column, then
+/// declare. Everything before the declaration is local, so a failed write leaves
+/// a session that is merely stopped rather than one that is stopped and lying.
+async fn unwind_wedged_turn(
+    deps: &SequencerDeps,
+    holder: &mut Option<Participant>,
+    epoch: &mut u64,
+    reason: String,
+) {
+    let Some(stuck) = holder.clone() else {
+        return;
+    };
+    if let Some(activity) = &deps.activity {
+        activity.set_busy_slug(&stuck.slug, false);
+    }
+    halt(holder, epoch);
+    // `halt` is local-only — it clears the holder this task carries and bumps
+    // the epoch. The COLUMN is what the UI reads, and leaving a dead
+    // participant named in it is how a wedged session reads as working.
+    deps.storage.set_current_turn(&deps.session_id, None).await;
+    warn!(
+        session = %deps.session_id,
+        participant_id = stuck.id,
+        slug = %stuck.slug,
+        reason = %reason,
+        "sequencer: a dealt turn cannot complete; unwinding and declaring the halt"
+    );
+    // A session already closed is not one to declare a halt on — the agents are
+    // being killed on purpose and their stdin closing IS the teardown. Read
+    // rather than assumed, and fail-open: an unreadable row declares, because a
+    // spurious banner on a dying session costs less than a wedge with none.
+    let closed = matches!(
+        deps.storage.get_session(&deps.session_id).await,
+        Ok(Some(s)) if s.closed_at.is_some()
+    );
+    if closed {
+        return;
+    }
+    if let Some(bridge) = deps.bridge.as_ref() {
+        let _ = bridge
+            .mark_awaiting_user(deps.session_id.to_string(), "system".to_string(), reason)
+            .await;
+    }
 }
 
 /// Post [`round_cap_notice`] into the channel and tell the UI it landed.
@@ -2730,6 +2806,24 @@ async fn hand_turn_to(deps: &SequencerDeps, next: Option<&Participant>) {
     }
 }
 
+/// What a deal left behind: whether the turn it fed can still end.
+///
+/// The ring steps on a completion, and a completion can only come from a
+/// participant that received something. So every way a drain can end without
+/// rows going out is a turn that is dealt, marked busy, and unable to complete —
+/// and until this type existed each of those paths `warn!`ed and returned,
+/// leaving the holder set, the busy flag up, no halt slot filled and nothing to
+/// clear either. The only exit was a Pause and a SIGKILL.
+#[derive(Debug, PartialEq, Eq)]
+enum Dealt {
+    /// Rows went out, or the drain stopped for a reason that owns the next step
+    /// itself (a supersede, a declared halt, a pause, session end).
+    Live,
+    /// The turn can never complete. The string is the halt reason the user
+    /// reads — every stop is a HALT, including the stop nobody chose.
+    CannotComplete(String),
+}
+
 /// Why a drain stopped before the end of its page.
 enum Stop {
     /// A user message arrived: the ring is about to reset, so the turn being
@@ -2771,7 +2865,7 @@ async fn deliver_backlog(
     rx: &mut mpsc::Receiver<SequencerCommand>,
     max_batches: usize,
     deferred: &mut VecDeque<SequencerCommand>,
-) {
+) -> Dealt {
     let Some(input) = deps.inputs.get(&to.id) else {
         warn!(
             session = %deps.session_id,
@@ -2780,7 +2874,11 @@ async fn deliver_backlog(
             "sequencer: the participant holding the turn has no stdin; delivering nothing \
              and the cycle stops here until one arrives"
         );
-        return;
+        // Deliberately NOT a wedge: this participant has no live process yet,
+        // and `SequencerCommand::ParticipantJoined` is the documented way the
+        // cycle un-freezes when one arrives. Halting here would turn a
+        // recoverable wait into the user's problem.
+        return Dealt::Live;
     };
     for _ in 0..max_batches {
         let page = match deps.storage.unread_for_participant(to.id).await {
@@ -2792,11 +2890,19 @@ async fn deliver_backlog(
                     error = %e,
                     "sequencer: backlog read failed"
                 );
-                return;
+                // Same wedge class as an unreachable stdin, one layer down: the
+                // turn is dealt and marked, and nothing it could complete on
+                // ever reached it.
+                return Dealt::CannotComplete(format!(
+                    "{}'s turn could not be read from the channel ({e}). The turn was \
+                     dealt but nothing reached them, so nothing can end it. Send a \
+                     message to deal a fresh turn.",
+                    to.slug
+                ));
             }
         };
         if page.rows.is_empty() {
-            return;
+            return Dealt::Live;
         }
         let total = page.rows.len();
         // `from_row` is what makes a row READ BACK deliverable: receipts are
@@ -2918,7 +3024,9 @@ async fn deliver_backlog(
                 error = %e,
                 "sequencer: delivery not recorded; the batch will be re-offered"
             );
-            return;
+            // The rows DID go out — the agent has them and will report — so the
+            // turn can still end. Only the bookkeeping failed.
+            return Dealt::Live;
         }
         match stop {
             None => {}
@@ -2930,7 +3038,7 @@ async fn deliver_backlog(
                     of = total,
                     "sequencer: a user message superseded this turn mid-drain"
                 );
-                return;
+                return Dealt::Live;
             }
             Some(Stop::Halted) => {
                 debug!(
@@ -2940,7 +3048,7 @@ async fn deliver_backlog(
                     of = total,
                     "sequencer: a parked question halted this turn mid-drain"
                 );
-                return;
+                return Dealt::Live;
             }
             Some(Stop::Paused) => {
                 // Costs nothing but the rows read and not delivered, exactly as
@@ -2954,7 +3062,7 @@ async fn deliver_backlog(
                     of = total,
                     "sequencer: a pause stopped this turn's delivery mid-drain"
                 );
-                return;
+                return Dealt::Live;
             }
             Some(Stop::SessionEnd) => {
                 debug!(
@@ -2964,7 +3072,7 @@ async fn deliver_backlog(
                     of = total,
                     "sequencer: session ended mid-drain"
                 );
-                return;
+                return Dealt::Live;
             }
             Some(Stop::Unreachable) => {
                 // `deliver_batch` returns `false` for two unrelated reasons —
@@ -2978,6 +3086,10 @@ async fn deliver_backlog(
                 // report a scope refusal as a closed pipe. That direction is
                 // harmless; the reverse cannot happen, because a closed sender
                 // never re-opens.
+                //
+                // Either way the page did not go out, so the turn this drain
+                // was feeding cannot end: the participant has nothing to answer
+                // and will never report. The caller unwinds and declares.
                 if input.is_closed() {
                     warn!(
                         session = %deps.session_id,
@@ -2987,22 +3099,31 @@ async fn deliver_backlog(
                         of = total,
                         "sequencer: stdin closed before this page went out; it stays past the cursor"
                     );
-                } else {
-                    warn!(
-                        session = %deps.session_id,
-                        participant_id = to.id,
-                        slug = %to.slug,
-                        delivered = landed.len(),
-                        of = total,
-                        "sequencer: a page was refused with stdin still open — a \
-                         receipt in it is out of this participant's session scope"
-                    );
+                    return Dealt::CannotComplete(format!(
+                        "{} is unreachable — their process is gone, so the turn they \
+                         were dealt can never end. Send a message to respawn them.",
+                        to.slug
+                    ));
                 }
-                return;
+                warn!(
+                    session = %deps.session_id,
+                    participant_id = to.id,
+                    slug = %to.slug,
+                    delivered = landed.len(),
+                    of = total,
+                    "sequencer: a page was refused with stdin still open — a \
+                     receipt in it is out of this participant's session scope"
+                );
+                return Dealt::CannotComplete(format!(
+                    "{}'s turn was refused by their own input as out-of-session — a \
+                     routing fault, not a stopped agent. Nothing was delivered, so \
+                     nothing can end the turn. Send a message to deal a fresh one.",
+                    to.slug
+                ));
             }
         }
         if !page.more {
-            return;
+            return Dealt::Live;
         }
     }
     warn!(
@@ -3011,6 +3132,8 @@ async fn deliver_backlog(
         batches = max_batches,
         "sequencer: backlog still not drained at the batch cap; the rest waits for the next turn"
     );
+    // Rows went out — the cap is a hand-over, not a wedge.
+    Dealt::Live
 }
 
 // ---------------------------------------------------------------------------
@@ -4043,6 +4166,75 @@ mod tests {
             SignalingBridge::new(),
             slugs.iter().map(|s| s.to_string()).collect(),
         )
+    }
+
+    /// **A dealt turn that can never complete DECLARES.**
+    ///
+    /// The wedge: the ring deals a turn, marks the holder busy, and the page
+    /// cannot go out — here because the participant's stdin is gone. Before the
+    /// `Dealt` unwind this warned into the log and returned, leaving the holder
+    /// set, the busy flag up, the input locked and the halt slot empty. The
+    /// health dot flipped for a dead pump and nothing else did; the idle nudge
+    /// cannot cover a wedge that reads Busy. The session's only exit was a Pause
+    /// and a SIGKILL.
+    ///
+    /// Three assertions, because the bug had three halves and fixing one is
+    /// what a partial fix looks like: the flag comes down, the column stops
+    /// naming a dead holder, and the user is TOLD.
+    #[tokio::test]
+    async fn a_turn_dealt_to_an_unreachable_participant_unwinds_and_declares() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let act = tracker(&["a", "b"]).await;
+        deps.activity = Some(Arc::clone(&act));
+        let bridge = SignalingBridge::new();
+        let mut events = bridge.subscribe();
+        deps.bridge = Some(Arc::clone(&bridge));
+        post(&storage, "user", None, "go").await;
+
+        // A's process is gone: its stdin receiver is dropped before the ring
+        // ever reaches it, which is what a dead subprocess looks like from here.
+        let seat_a = seats.remove(0);
+        drop(seat_a);
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+
+        let reason = tokio::time::timeout(DEADLINE, async {
+            loop {
+                match events.recv().await {
+                    Ok(crate::signaling::SignalingEvent::AwaitingUser { reason, .. }) => {
+                        return reason
+                    }
+                    Ok(_) => continue,
+                    Err(e) => panic!("the event channel closed before any halt: {e}"),
+                }
+            }
+        })
+        .await
+        .expect("a turn was dealt to an unreachable participant and nothing was declared");
+        assert!(
+            reason.contains('a') && reason.contains("unreachable"),
+            "the halt names who and why: {reason}"
+        );
+        assert!(
+            !act.is_busy_slug("a"),
+            "the busy flag outlived the turn it was set for — the input stays locked \
+             on a participant that cannot answer"
+        );
+        let column: Option<(Option<i64>,)> =
+            sqlx::query_as("SELECT current_turn_participant_id FROM sessions WHERE id = ?")
+                .bind("s1")
+                .fetch_optional(storage.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            column.and_then(|(id,)| id),
+            None,
+            "the column still names the dead holder, so the UI reads the wedge as work"
+        );
+        drop(tx);
+        assert!(exited(task).await);
     }
 
     /// **rc3 D19b: the ring records WHO holds the turn** — and until now nothing

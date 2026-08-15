@@ -386,6 +386,10 @@ pub async fn pump_agent(
     // event is being processed is a straggler from the turn that ended and must
     // not open a new one. See `DuoConfig::turn_epoch`.
     let mut last_completed_epoch: Option<u64> = None;
+    // Why this pump stopped, when it said so. `AgentEvent::Exited` carries the
+    // process's own account; a channel that simply closes carries none, and the
+    // post-loop says so rather than inventing one.
+    let mut exit_msg: Option<String> = None;
     // When this pump last had a turn CLOSED, so the next turn's first event can
     // report how long the model took to produce anything (rc3 D26). Reset at
     // completion rather than at delivery because the pump is not told about the
@@ -950,6 +954,7 @@ pub async fn pump_agent(
             }
             AgentEvent::Exited(msg) => {
                 warn!(agent = %cfg.slug, msg = %msg, "agent exited");
+                exit_msg = Some(msg.clone());
                 // Trailing prose is already in the channel as rows; a peer
                 // reads it off its cursor whenever it next takes a turn, so a
                 // dying agent no longer needs to push a final copy anywhere.
@@ -1000,6 +1005,41 @@ pub async fn pump_agent(
             &cfg.slug,
             AgentHealth::Dead.as_str(),
         );
+    }
+    // **A pump that dies HOLDING a turn has to end it.** Clearing busy above is
+    // half the job: the ring still has this participant as its holder, waiting
+    // for a completion from a process that no longer exists, and it steps on
+    // nothing else. Nothing was minted here before — the health dot went red and
+    // that was the whole account — so the cycle sat parked with an empty halt
+    // slot until the next user message, which is the same wedge the ring's own
+    // unreachable path used to leave.
+    //
+    // Declared under this agent's OWN slug, not "system": the ring resolves the
+    // asker to a participant and only the HOLDER declaring ends the turn in
+    // flight (rc3 D35), which is exactly what this is. `mark_awaiting_user`
+    // fills the halt slot and parks the ring in one call.
+    if turn_epoch.is_some() {
+        let closed = matches!(
+            storage.get_session(&cfg.session_id).await,
+            Ok(Some(s)) if s.closed_at.is_some()
+        );
+        if let (false, Some(bridge)) = (closed, &cfg.bridge) {
+            let detail = exit_msg
+                .as_deref()
+                .map(|m| format!(" ({m})"))
+                .unwrap_or_default();
+            let _ = bridge
+                .mark_awaiting_user(
+                    cfg.session_id.to_string(),
+                    cfg.slug.to_string(),
+                    format!(
+                        "{} stopped mid-turn{detail} — the turn it was holding cannot \
+                         end. Send a message to respawn them and deal a fresh turn.",
+                        cfg.slug
+                    ),
+                )
+                .await;
+        }
     }
 }
 
@@ -1244,6 +1284,86 @@ mod tests {
 
         drop(ev_tx);
         let _ = task.await;
+    }
+
+    /// **A pump that dies HOLDING a turn fills the halt slot.**
+    ///
+    /// Clearing busy on the way out was only half the unwind: the RING still had
+    /// this participant as its holder, waiting on a completion from a process
+    /// that no longer exists, and it steps on nothing else. What the session
+    /// showed was a red health dot and an empty halt slot — idle, unflagged, and
+    /// indistinguishable from a session that had simply finished. The idle nudge
+    /// could not cover it either, because for most of that window the flag still
+    /// read Busy.
+    ///
+    /// Declared under the agent's OWN slug, not "system", because only the
+    /// HOLDER declaring ends the turn in flight (rc3 D35) — the same call the
+    /// error-streak halt above makes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pump_that_dies_holding_a_turn_declares_the_halt() {
+        let (storage, state) = setup().await;
+        let (mut cfg, _ring_rx) = cfg_with_ring(Author::Brian);
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(4)));
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        // One event binds the epoch — from here the pump is holding a turn.
+        ev_tx.send(AgentEvent::Text("half a thought".into())).await.unwrap();
+        // And the process dies with the turn still open.
+        ev_tx
+            .send(AgentEvent::Exited("provider limit".into()))
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let halt = storage.session_halt("s1").await.unwrap();
+        assert!(
+            halt.as_ref().is_some_and(|(by, reason, _)| by == "hands"
+                && reason.contains("stopped mid-turn")
+                && reason.contains("provider limit")),
+            "a pump that died holding a turn left the slot empty: {halt:?}"
+        );
+    }
+
+    /// The other half, and the one that keeps the declaration honest: a pump
+    /// that ends BETWEEN turns has nothing to unwind, and a halt there would
+    /// banner every ordinary shutdown — including the close path, which kills
+    /// every agent on purpose.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pump_that_ends_between_turns_declares_nothing() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(4)));
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Text("done".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        // The completion clears the epoch, so the pump holds nothing when it
+        // stops.
+        let mut ended = None;
+        for _ in 0..200 {
+            ended = next_turn_end(&mut ring_rx);
+            if ended.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(ended.is_some(), "the turn completed");
+        drop(ev_tx);
+        task.await.unwrap();
+
+        assert!(
+            storage.session_halt("s1").await.unwrap().is_none(),
+            "a pump with no turn in flight must not declare a halt on its way out"
+        );
     }
 
     /// The other half: with boot OVER, the pump behaves exactly as it always
