@@ -253,19 +253,17 @@ should pick unilaterally:
 - **Solo sessions for non-adversarial tasks** — already possible; a
   one-participant roster runs without review laps.
 
-### Park on external signal (raised 2026-08-14, needs the user's spec)
+### Park on external signal — RESOLVED by the halt model (2026-08-15)
 
-`s-f6a441ff` spent a minute of pass-laps watching CI: the ring kept dealing
-turns to two agents whose only move was "check `gh pr checks`, nothing new,
-pass" — each pass a full model call — until the all-pass yield caught it.
-The missing shape: a session state that PARKS the ring on a named external
-signal (a CI run, a deploy) and wakes it when the signal fires, without
-burning turns in between. Open questions that are the user's to answer
-before anything is built: what may register a signal (an agent? only via a
-gate?), what the wake is (a subprocess background task completing already
-re-invokes its agent OUTSIDE the ring — see the ghost-turn note in
-PROGRESS 2026-08-14 — so the park must reconcile with that), and whether
-the user is notified while parked.
+Raised 2026-08-14 after `s-f6a441ff` burned pass-laps watching CI. Answered
+by the user's state-model decree, not by new machinery: **every stop is a
+HALT, and an external wait is a halt whose recap names the signal and the
+wake time** ("waiting for the 03:15Z sweep — timer wakes me 03:42Z"). The
+self-wake is the ghost mechanism claude-code already provides (a background
+timer/watcher re-invokes its subprocess; it posts findings and re-declares a
+fresher halt), and the ring stays frozen until the USER's message — release
+is theirs by decree, so there is no auto-resuming park state to design.
+Lived end-to-end in `s-d6352684` the same night. Nothing left to build.
 
 ### Release-autonomy gate profile (raised 2026-08-14, release-scoped)
 
