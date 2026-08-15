@@ -1,5 +1,6 @@
 //! `AppState`: top-level handle the UI layer holds.
 
+use crate::core::activity::ActivityTracker;
 use crate::core::broadcast::broadcast_user_message;
 use crate::core::close_learnings;
 use crate::core::ipav::IpavPhase;
@@ -752,24 +753,54 @@ impl AppState {
                     // failure to report — nothing was asked and nothing hung.
                     None => return,
                     Some(activity) => {
-                        let deadline = tokio::time::Instant::now()
-                            + close_learnings::CLOSE_EPILOGUE_TIMEOUT;
-                        // No settle delay, and that is load-bearing rather than
-                        // an omission: `broadcast` sets every agent's `busy`
-                        // flag ITSELF, before it returns (the turn-start
-                        // recompute), so by here the tracker already reads
-                        // Busy. Waiting for the pump's first event instead
-                        // would race — a slow first token would read the
-                        // PRE-turn idle and report every epilogue as declined.
-                        if activity.await_both_idle(deadline).await {
-                            let (wrote, _) = self.bridge.close_gate_flags(id).await;
-                            if wrote {
-                                Outcome::Wrote
-                            } else {
-                                Outcome::Declined
-                            }
+                        // WAIT FOR THE TURN, THEN FOR THE LAP — two separate
+                        // ways to answer before the agents have said anything,
+                        // and D15 shipped with both.
+                        //
+                        // 1. This used to wait `await_both_idle` immediately,
+                        //    on a comment claiming `broadcast` marks every agent
+                        //    busy before returning. It has not since `519cbba` —
+                        //    the ring is the one busy-true writer, and
+                        //    `broadcast_marks_nobody_busy` pins exactly that. So
+                        //    the wait was answered by the idle state the
+                        //    broadcast itself left behind, in 7ms, and every
+                        //    close since recorded `Declined` while
+                        //    `teardown_session` killed the agents as the ring
+                        //    dealt the turn. No epilogue had ever run.
+                        // 2. Arming on the busy edge is necessary and not
+                        //    sufficient: `await_both_idle` returns on the FIRST
+                        //    idle poll, and `hand_turn_to` deliberately leaves
+                        //    "the sub-second gap between a completion and the
+                        //    next handover" — so on an N≥2 roster the armed wait
+                        //    could return in the gap after the first turn and
+                        //    kill the participant about to write.
+                        //
+                        // Hence: arm on the turn starting, then wait for the LAP
+                        // to end (the halt slot refilling, or sustained idle
+                        // past the handover gap). The CL-write flag is read once
+                        // afterwards — never as an early exit, which would tear
+                        // down mid-lap and reintroduce (2) for whoever holds the
+                        // turn at that moment.
+                        let arm_deadline = tokio::time::Instant::now()
+                            + close_learnings::CLOSE_EPILOGUE_ARM_TIMEOUT;
+                        if !activity.await_turn_started(arm_deadline).await {
+                            Outcome::NeverStarted
                         } else {
-                            Outcome::TimedOut
+                            let deadline = tokio::time::Instant::now()
+                                + close_learnings::CLOSE_EPILOGUE_TIMEOUT;
+                            if activity
+                                .await_lap_end(deadline, ActivityTracker::LAP_QUIET_WINDOW)
+                                .await
+                            {
+                                let (wrote, _) = self.bridge.close_gate_flags(id).await;
+                                if wrote {
+                                    Outcome::Wrote
+                                } else {
+                                    Outcome::Declined
+                                }
+                            } else {
+                                Outcome::TimedOut
+                            }
                         }
                     }
                 }
@@ -1969,6 +2000,57 @@ mod tests {
                  stopped ring has always cleared (s-ff729daa)"
             );
         }
+    }
+
+    /// **The D15 epilogue waits for the LAP it asked for, not for the first
+    /// quiet instant.**
+    ///
+    /// Two shipped-and-fixed mistakes are pinned here, because they are one
+    /// mistake at two depths and the second is only reachable once the first is
+    /// fixed:
+    ///
+    /// 1. Waiting `await_both_idle` right after `broadcast`, on the premise that
+    ///    the broadcast had marked everyone busy. It has not since `519cbba`
+    ///    (`broadcast_marks_nobody_busy`, above, pins that), so the wait was
+    ///    answered by the idle state the broadcast left — 7ms, `Declined`,
+    ///    agents SIGKILLed as the ring dealt the turn. No epilogue had ever run.
+    /// 2. Arming on the busy edge and then waiting `await_both_idle` anyway. The
+    ///    ring clears the previous holder before it marks the next one, on
+    ///    purpose (`hand_turn_to`'s doc, "the sub-second gap"), so the armed
+    ///    wait can still return between two turns of the same lap.
+    ///
+    /// Asserted over the source: `run_close_epilogue` needs a live session with
+    /// two subprocesses and a running ring to exercise, which is the same reason
+    /// its sibling pins above are grep tests. What it checks is the property
+    /// that failed twice — which waiter this path uses.
+    #[test]
+    fn the_close_epilogue_waits_for_the_lap_not_the_first_idle() {
+        let src = include_str!("state.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        let body = prod
+            .split("async fn run_close_epilogue")
+            .nth(1)
+            .expect("run_close_epilogue exists")
+            .split("\n    async fn ")
+            .next()
+            .expect("a split always yields a first part");
+        for form in ["await_turn_started(", "await_lap_end("] {
+            assert!(
+                body.contains(form),
+                "the close epilogue must `{form}` — arming on the turn AND waiting \
+                 out the lap are each load-bearing; dropping either reports a \
+                 decline the agents never made"
+            );
+        }
+        assert!(
+            !body.contains("await_both_idle("),
+            "the close epilogue must not use `await_both_idle` — it returns on the \
+             first idle poll, which inside a lap is the handover gap the ring keeps \
+             deliberately (hand_turn_to's doc)"
+        );
     }
 
     /// **s-f6a441ff: the paste gate.** One 2.9 MB user paste wedged both

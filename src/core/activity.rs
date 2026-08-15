@@ -314,6 +314,80 @@ impl ActivityTracker {
         g.busy_of(slug)
     }
 
+    /// How long "nobody is busy" has to hold before it means the LAP ended
+    /// rather than the ring being between two turns.
+    ///
+    /// `hand_turn_to` does not clear the previous holder — the pump does, at its
+    /// own turn end, and the next deal marks the next participant later. That
+    /// doc calls the window "the sub-second gap between a completion and the
+    /// next handover" and keeps it deliberately (closing it buys a wedge). So a
+    /// single idle reading is indistinguishable from mid-lap, and anything
+    /// waiting for a lap to finish has to outlast the gap instead of racing it.
+    pub const LAP_QUIET_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+    /// Poll (50ms) until SOME participant is busy, or `deadline` elapses; returns
+    /// whether a turn started in time.
+    ///
+    /// The arming half of "wait for the turn I asked for". A host-side broadcast
+    /// marks nobody busy (`state::broadcast_marks_nobody_busy` pins that the ring
+    /// is the only busy-true writer), so at the instant a prompt is delivered the
+    /// tracker still reads idle — and a waiter that starts by asking "is everyone
+    /// idle?" is answered yes by the state it created. That is exactly how the
+    /// D15 close epilogue reported every session as declining in 7ms.
+    ///
+    /// A `false` here is its own outcome, not a timeout: the ring never dealt the
+    /// turn. Callers should say so rather than folding it into "still running".
+    pub async fn await_turn_started(&self, deadline: tokio::time::Instant) -> bool {
+        loop {
+            if self.any_busy() {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Poll (50ms) until the LAP ends, or `deadline` elapses.
+    ///
+    /// The lap is over when either
+    /// - the halt slot refills (`awaiting`) — an all-pass yield, consensus, the
+    ///   round cap or an agent's own recap all fill it, and `derive` ranks
+    ///   awaiting above busy, so this lands even if a straggler is still marked;
+    ///   or
+    /// - nobody has been busy for a continuous `quiet` window
+    ///   ([`LAP_QUIET_WINDOW`]), which is what distinguishes the end of the lap
+    ///   from the handover gap inside it. Any busy reading restarts the window.
+    ///
+    /// This is the difference between waiting for a lap and waiting for a turn:
+    /// [`await_both_idle`](Self::await_both_idle) returns on the first idle poll,
+    /// which is correct for the cancel escalation that owns it (an interrupt
+    /// settles when the CURRENT turn stops) and wrong for anything that needs
+    /// every participant to have had its say.
+    pub async fn await_lap_end(&self, deadline: tokio::time::Instant, quiet: std::time::Duration) -> bool {
+        let mut idle_since: Option<tokio::time::Instant> = None;
+        loop {
+            let (any_busy, awaiting) = {
+                let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+                (g.any_busy(), self.awaiting.load(Ordering::Acquire))
+            };
+            if awaiting {
+                return true;
+            }
+            let now = tokio::time::Instant::now();
+            if any_busy {
+                idle_since = None;
+            } else if now.duration_since(*idle_since.get_or_insert(now)) >= quiet {
+                return true;
+            }
+            if now >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     /// Poll (50ms) until NEITHER agent is busy, or `deadline` elapses; returns
     /// whether they went idle in time. The cancel interrupt-escalation uses this:
     /// after a `control_request` interrupt, the turn's `result` event clears the
@@ -768,5 +842,105 @@ mod tests {
         });
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1000);
         assert!(t.await_both_idle(deadline).await);
+    }
+
+    #[tokio::test]
+    async fn await_turn_started_is_false_when_the_ring_never_deals() {
+        // The arming half's whole job: a broadcast marks nobody busy, so if the
+        // ring never deals the turn nothing ever flips. Reported as its own
+        // outcome (`NeverStarted`), not as a timeout.
+        let t = tracker("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(120);
+        assert!(!t.await_turn_started(deadline).await);
+    }
+
+    #[tokio::test]
+    async fn await_turn_started_sees_the_busy_edge() {
+        let t = tracker("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
+        let t2 = Arc::clone(&t);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            t2.set_busy_slug("hands", true);
+        });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2000);
+        assert!(t.await_turn_started(deadline).await);
+    }
+
+    /// **The fixture that separates "a turn ended" from "the lap ended".**
+    ///
+    /// `hand_turn_to` clears the previous holder at turn end and marks the next
+    /// one later, so a two-participant lap reads busy → idle → busy. A waiter
+    /// that returns on the first idle poll — which is what `await_both_idle`
+    /// does, correctly, for the cancel escalation — stops in that gap and the
+    /// caller tears the session down on top of the participant whose turn is
+    /// about to start. That is the D15 epilogue bug one turn later.
+    ///
+    /// A busy → idle fixture cannot tell the two semantics apart: both return
+    /// true, both look right. Only a fixture with a gap INSIDE it can, which is
+    /// the CL's rule about aggregate-vs-point-in-time fixtures in its other
+    /// clothes.
+    #[tokio::test]
+    async fn the_handover_gap_is_not_a_lap_end() {
+        let t = tracker("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
+        let quiet = std::time::Duration::from_millis(300);
+        let gap = std::time::Duration::from_millis(100);
+
+        t.set_busy_slug("hands", true);
+        let t2 = Arc::clone(&t);
+        let driver = tokio::spawn(async move {
+            // Participant 1 finishes.
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            t2.set_busy_slug("hands", false);
+            // The handover gap — shorter than `quiet`, and the ring is mid-lap.
+            tokio::time::sleep(gap).await;
+            // Participant 2 is dealt, takes its turn, finishes. The lap ends
+            // here, and only here.
+            t2.set_busy_slug("eyes", true);
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            t2.set_busy_slug("eyes", false);
+        });
+
+        let started = tokio::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(5);
+        assert!(t.await_lap_end(deadline, quiet).await, "the lap does end");
+        let elapsed = started.elapsed();
+        driver.await.unwrap();
+
+        // Returning in the gap would land at ~180ms. The earliest honest answer
+        // is p1 (80) + gap (100) + p2 (120) + quiet (300) = 600ms.
+        assert!(
+            elapsed >= std::time::Duration::from_millis(500),
+            "returned after {elapsed:?} — that is inside the handover gap, before \
+             the second participant had its turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refilled_halt_slot_ends_the_lap_even_with_a_straggler_busy() {
+        // Every stop fills the halt slot, and `derive` ranks awaiting above busy
+        // — so an all-pass yield / consensus / declared recap ends the wait
+        // immediately, without paying the quiet window, even if a participant is
+        // still marked busy on its way out.
+        let awaiting = Arc::new(AtomicBool::new(false));
+        let t = tracker("s1", awaiting.clone(), SignalingBridge::new());
+        t.set_busy_slug("hands", true);
+        awaiting.store(true, Ordering::Release);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(120);
+        assert!(
+            t.await_lap_end(deadline, ActivityTracker::LAP_QUIET_WINDOW)
+                .await,
+            "a refilled halt slot is the lap's end, whatever the busy map says"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_lap_end_is_false_while_a_turn_runs_past_the_deadline() {
+        let t = tracker("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
+        t.set_busy_slug("hands", true);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(150);
+        assert!(
+            !t.await_lap_end(deadline, ActivityTracker::LAP_QUIET_WINDOW)
+                .await
+        );
     }
 }

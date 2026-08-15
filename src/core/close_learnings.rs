@@ -35,6 +35,19 @@ use crate::core::activity::SessionActivity;
 /// undershooting is a half-written CL file, so it errs long.
 pub const CLOSE_EPILOGUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
+/// How long the ring gets to DEAL the epilogue turn before the close gives up
+/// on it ever starting.
+///
+/// Separate from [`CLOSE_EPILOGUE_TIMEOUT`] because the two failures are not the
+/// same event and must not wear the same label: the ring is stopped when the
+/// epilogue asks (`decide` only runs it from `Idle`/`AwaitingUser`), so the deal
+/// is a release plus a stdin write and takes about as long as a subprocess
+/// notices its input — seconds at most. Spending the whole 180s budget on the
+/// arming half would report "the ring never dealt it" as
+/// [`Outcome::TimedOut`], which reads as a slow agent and sends the next
+/// diagnosis into the wrong half of the system.
+pub const CLOSE_EPILOGUE_ARM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Whether a closing session gets a learnings turn, and if not, why not.
 ///
 /// The `Skip*` arms are distinct because they are not the same event: two of
@@ -171,6 +184,18 @@ pub enum Outcome {
     Declined,
     /// The turn was still running at [`CLOSE_EPILOGUE_TIMEOUT`].
     TimedOut,
+    /// The prompt was delivered and the ring never dealt the turn within
+    /// [`CLOSE_EPILOGUE_ARM_TIMEOUT`] — nobody was ever marked busy, so there was
+    /// no turn to wait for.
+    ///
+    /// Distinct from [`Self::TimedOut`] on purpose. Both mean "no answer", and
+    /// they point at opposite halves of the system: a timeout is an agent taking
+    /// too long, this is the ring not running. bot-hq's recurring defect is
+    /// ending states that are indistinguishable from a different one — a capped
+    /// halt that read as a yield, a skipped epilogue that logged nothing, a
+    /// yielded session that read as working — so a fourth "no answer" arm that
+    /// collapsed into an existing label would be the same mistake again.
+    NeverStarted,
     /// The prompt could not be delivered at all.
     Failed(String),
 }
@@ -198,6 +223,11 @@ pub fn outcome_notice(outcome: &Outcome) -> String {
             "[System: close-out learnings — no answer within {}s. The close proceeded; \
              whether anything was written is unknown.]",
             CLOSE_EPILOGUE_TIMEOUT.as_secs()
+        ),
+        Outcome::NeverStarted => format!(
+            "[System: close-out learnings — the turn was never dealt within {}s (the ring \
+             did not run it). Nothing was written and the close proceeded.]",
+            CLOSE_EPILOGUE_ARM_TIMEOUT.as_secs()
         ),
         Outcome::Failed(e) => format!(
             "[System: close-out learnings — the session could not be asked ({e}). Nothing \
