@@ -1300,13 +1300,35 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     // cleared by the one resolve that follows — the session then deals nothing
     // for the life of the process. Keyed by `choice_id`, the second open is a
     // no-op and the resolve clears it.
-    let mut open_gates: std::collections::HashSet<String> = deps
+    let mut open_gates: std::collections::HashSet<String> = match deps
         .storage
         .pending_gate_ids(&deps.session_id)
         .await
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    {
+        Ok(ids) => ids.into_iter().collect(),
+        // **Fail-open, and said so.** An empty set here means the ring deals
+        // turns under a gate that is live in storage — the third instance of
+        // this shape in the gate path, and the one that stays, because the
+        // alternative is worse: a set cannot express "unknown", so failing
+        // closed would hold a session that may have no gates at all, with
+        // nothing for the user to answer to release it.
+        //
+        // What makes it survivable is that the same storage feeds the first
+        // deal: `unread_for_participant` failing is `Dealt::CannotComplete`,
+        // which unwinds the turn and declares the halt with the error in it. So
+        // a session whose storage is broken stops loudly on its first turn
+        // rather than running blind — this is the fallback for a hiccup, not a
+        // silent policy.
+        Err(e) => {
+            warn!(
+                session = %deps.session_id,
+                error = %e,
+                "sequencer: the gate latch could not be seeded; starting with no gates \
+                 open — a gate parked before this ring started will NOT hold it"
+            );
+            std::collections::HashSet::new()
+        }
+    };
     if !open_gates.is_empty() {
         tracing::info!(
             session = %deps.session_id,

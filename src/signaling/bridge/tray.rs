@@ -571,6 +571,37 @@ impl SignalingBridge {
             }
         }
 
+        // **Whose gate is this — asked BEFORE the flip.** After it, the only way
+        // to tell is a second read, and that read's failure is indistinguishable
+        // from "not a gate": `.ok().flatten()` swallowed it, the lift never
+        // fired, and the ring stayed latched for the life of the process. The
+        // withdraw path has always read first; this one now does too.
+        let gate_session = {
+            let storage_guard = self.storage.lock().await;
+            match storage_guard.as_ref() {
+                Some(storage) => match storage.get_tray_entry(choice_id).await {
+                    Ok(row) => row
+                        .filter(|row| {
+                            row.status == "pending"
+                                && crate::storage::is_gate_options(row.options_json.as_deref())
+                        })
+                        .map(|row| row.session_id),
+                    Err(e) => {
+                        // Not silent, and not fatal: the flip below still runs,
+                        // and the latch reseeds from the durable rows on the
+                        // next respawn.
+                        tracing::warn!(
+                            ?e,
+                            choice_id,
+                            "gate check before resolve failed; if this was a gate its \
+                             latch will not lift until the session respawns"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            }
+        };
         // Flip the row pending→answered first (so the UI/tray updates even if the
         // in-memory parked entry is gone — e.g. after a restart). `rows == 1`
         // means THIS call won the atomic transition; gate resolve-time
@@ -595,21 +626,6 @@ impl SignalingBridge {
         // that seeds the latch — and gated on `flipped` so a duplicate resolve
         // cannot decrement twice.
         if flipped {
-            let gate_session = {
-                let storage_guard = self.storage.lock().await;
-                match storage_guard.as_ref() {
-                    Some(storage) => storage
-                        .get_tray_entry(choice_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .filter(|row| {
-                            crate::storage::is_gate_options(row.options_json.as_deref())
-                        })
-                        .map(|row| row.session_id),
-                    None => None,
-                }
-            };
             if let Some(session_id) = gate_session {
                 self.notify_ring_gate(&session_id, choice_id, false).await;
             }
@@ -997,21 +1013,59 @@ impl SignalingBridge {
     /// don't populate — and it survives a restart), then emit `AwaitingUser` so
     /// the duo's peer-forward halts until the user acts.
     async fn emit_halt_row(&self, session_id: String, agent: String, text: String) {
-        self.set_session_awaiting(&session_id, &agent, true).await;
         // **A halt is SESSION state, not a tray row (rc3 D35).** The user:
         // "halt should be complete different, and not even remotely close to
         // parkable items in tray. It is now a session channel feature." One
         // slot on the session row — a later declaration replaces the earlier,
         // so "there can never be 2 halts" is schema now, not a display rule.
-        {
+        //
+        // **The WRITE comes first, and its failure is now said out loud.** The
+        // flip and the emit used to run ahead of it and ignore its result, so a
+        // failed write produced a session that showed a halt banner, stopped its
+        // ring, and had no halt anywhere in storage: the banner vanished at the
+        // next restart while the reason it existed for did not. The stop still
+        // happens either way — an agent that asked to stop must stop, and a
+        // session that keeps dealing turns under a failed write is the worse of
+        // the two — but a halt nobody can recover is not allowed to look
+        // identical to one that persisted.
+        let recorded = {
             let storage_guard = self.storage.lock().await;
-            if let Some(storage) = storage_guard.as_ref() {
-                if let Err(e) = storage
+            match storage_guard.as_ref() {
+                Some(storage) => match storage
                     .declare_session_halt(&session_id, &agent, &text)
                     .await
                 {
-                    tracing::warn!(?e, session_id, "declare_session_halt failed");
-                }
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(?e, session_id, "declare_session_halt failed");
+                        false
+                    }
+                },
+                // No storage at all is the test/bootstrap shape, not a failure
+                // to report to a user who has no session to read it in.
+                None => true,
+            }
+        };
+        self.set_session_awaiting(&session_id, &agent, true).await;
+        if !recorded {
+            // Best-effort, and on the same storage that just failed — but the
+            // failure modes are not identical (a constraint on one statement, a
+            // lock held by one writer), so it is worth the attempt. If this
+            // fails too the warning above is the whole record.
+            let storage = self.storage.lock().await.clone();
+            if let Some(storage) = storage {
+                let _ = storage
+                    .post_to_channel(
+                        std::sync::Arc::from(session_id.as_str()),
+                        "system",
+                        None,
+                        crate::storage::MessageKind::SystemNotice.as_str(),
+                        "[System: this halt could not be recorded — the session has \
+                         stopped and the banner is live, but it will not survive a \
+                         restart. Re-declare it if the app is relaunched.]",
+                        None,
+                    )
+                    .await;
             }
         }
         let _ = self.event_tx.send(SignalingEvent::AwaitingUser {
@@ -1494,6 +1548,50 @@ mod tests {
             second.as_deref(),
             Some("temp.md ready, awaiting go"),
             "a second yield with no user reply must surface the earlier one"
+        );
+    }
+
+    /// **The halt is written before it is shown, and a failed write says so.**
+    ///
+    /// The old order flipped the awaiting flag and stopped the ring FIRST and
+    /// ignored the write's result, so a failed `declare_session_halt` produced a
+    /// session that was stopped, bannered, and had no halt in storage — the
+    /// banner disappeared at the next restart while the reason for it did not.
+    ///
+    /// Asserted over the source because the failure cannot be induced from a
+    /// test: `declare_session_halt` is an UPDATE, and an UPDATE matching no rows
+    /// is `Ok`, not `Err` — there is no storage state that makes it fail on
+    /// demand. What is checkable is the ORDER and the presence of the
+    /// not-recorded branch, which are the two things that were missing.
+    #[test]
+    fn the_halt_is_recorded_before_it_is_shown() {
+        let src = include_str!("tray.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        let body = prod
+            .split("async fn emit_halt_row")
+            .nth(1)
+            .expect("emit_halt_row exists")
+            .split("\n    /// ")
+            .next()
+            .expect("a split always yields a first part");
+        let write = body
+            .find("declare_session_halt(")
+            .expect("the halt is written");
+        let stop = body
+            .find("set_session_awaiting(")
+            .expect("the halt stops the session");
+        assert!(
+            write < stop,
+            "the session is stopped and bannered before the halt is recorded — a \
+             write failure then leaves a halt that vanishes at the next restart"
+        );
+        assert!(
+            body.contains("if !recorded"),
+            "a halt that could not be recorded must not look identical to one that \
+             persisted"
         );
     }
 
