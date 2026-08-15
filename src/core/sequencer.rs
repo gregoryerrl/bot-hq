@@ -1486,10 +1486,9 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         // (2026-08-15): fill the slot so the arrival has a
                         // banner even before any close-ask lands in the tray.
                         if let Some(bridge) = deps.bridge.as_ref() {
-                            let _ = bridge
-                                .mark_awaiting_user(
-                                    deps.session_id.to_string(),
-                                    "system".to_string(),
+                            bridge
+                                .declare_host_halt(
+                                    &deps.session_id,
                                     "Every participant voted done — the task \
                                      looks complete. Answer any close-ask in \
                                      the tray, or send your next direction."
@@ -2263,10 +2262,9 @@ async fn advance_turn(
                     // taught to pre-empt this generic reason with their own
                     // recap; this is the backstop for when nobody did.
                     if let Some(bridge) = deps.bridge.as_ref() {
-                        let _ = bridge
-                            .mark_awaiting_user(
-                                deps.session_id.to_string(),
-                                "system".to_string(),
+                        bridge
+                            .declare_host_halt(
+                                &deps.session_id,
                                 "Every participant passed a full lap — nothing \
                                  to add without you. Send a message to resume."
                                     .to_string(),
@@ -2305,10 +2303,9 @@ async fn advance_turn(
                     // And the halt slot (2026-08-15): the cap's stop gets the
                     // same banner every other stop gets.
                     if let Some(bridge) = deps.bridge.as_ref() {
-                        let _ = bridge
-                            .mark_awaiting_user(
-                                deps.session_id.to_string(),
-                                "system".to_string(),
+                        bridge
+                            .declare_host_halt(
+                                &deps.session_id,
                                 format!(
                                     "The round cap ({laps} laps) was reached — \
                                      something may be running away. Send a \
@@ -2462,9 +2459,7 @@ async fn unwind_wedged_turn(
         return;
     }
     if let Some(bridge) = deps.bridge.as_ref() {
-        let _ = bridge
-            .mark_awaiting_user(deps.session_id.to_string(), "system".to_string(), reason)
-            .await;
+        bridge.declare_host_halt(&deps.session_id, reason).await;
     }
 }
 
@@ -4368,6 +4363,76 @@ mod tests {
             SignalingBridge::new(),
             slugs.iter().map(|s| s.to_string()).collect(),
         )
+    }
+
+    /// **A ring-declared halt fills the slot without asking the ring to halt
+    /// again.**
+    ///
+    /// The all-pass yield here has already cleared the holder and bumped the
+    /// epoch — `halt()` ran a line earlier. Announcing it through
+    /// `mark_awaiting_user(.., "system", ..)` sent the announcement back through
+    /// the roster, found no `system` participant (there is none: host rows are
+    /// `origin = 'system'` with a NULL participant), warned, and handed the ring
+    /// a `HaltDeclared` for the stop it had just made — a second `halt()` and
+    /// another epoch bump per yield.
+    ///
+    /// What must NOT change is the banner: the slot is filled either way, and
+    /// that is what the user reads.
+    #[tokio::test]
+    async fn a_ring_declared_halt_fills_the_slot_without_a_second_halt() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        bridge
+            .register_session_sequencer("s1".to_string(), tx.clone())
+            .await;
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+
+        // A full lap of passes: nobody spoke, so the wrap yields.
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: seats[0].id,
+                epoch: 1,
+                ending: TurnEnding::Passed,
+            },
+        )
+        .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: seats[1].id,
+                epoch: 2,
+                ending: TurnEnding::Passed,
+            },
+        )
+        .await;
+
+        // The banner: the slot carries the yield's reason, durably.
+        let mut halt = None;
+        for _ in 0..200 {
+            halt = storage.session_halt("s1").await.unwrap();
+            if halt.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let (by, reason, _) = halt.expect("an all-pass yield fills the halt slot");
+        assert_eq!(by, "system", "a ring-declared stop is the host talking");
+        assert!(reason.contains("passed a full lap"), "{reason}");
+
+        // And no `HaltDeclared` came back the other way for a stop the ring had
+        // already made. The ring's own channel is the one that would carry it.
+        drop(tx);
+        bridge.unregister_session("s1").await;
+        assert!(exited(task).await);
     }
 
     /// **A latch whose seed failed is re-read before the ring deals** — the

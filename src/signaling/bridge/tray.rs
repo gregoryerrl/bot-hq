@@ -1012,7 +1012,17 @@ impl SignalingBridge {
     /// wait via `list_pending_tray` — NOT the in-memory pending map, which halts
     /// don't populate — and it survives a restart), then emit `AwaitingUser` so
     /// the duo's peer-forward halts until the user acts.
-    async fn emit_halt_row(&self, session_id: String, agent: String, text: String) {
+    /// `halt_ring` is false when the RING ITSELF is the declarer: it has already
+    /// stopped where it stands, and telling it again is the phantom-participant
+    /// round-trip — `participant_by_slug("system")` finds nobody, warns, and
+    /// hands the ring a second `halt()` (epoch + 1) for a stop it just made.
+    async fn emit_halt_row(
+        &self,
+        session_id: String,
+        agent: String,
+        text: String,
+        halt_ring: bool,
+    ) {
         // **A halt is SESSION state, not a tray row (rc3 D35).** The user:
         // "halt should be complete different, and not even remotely close to
         // parkable items in tray. It is now a session channel feature." One
@@ -1046,7 +1056,7 @@ impl SignalingBridge {
                 None => true,
             }
         };
-        self.set_session_awaiting(&session_id, &agent, true).await;
+        self.set_session_awaiting(&session_id, &agent, halt_ring).await;
         if !recorded {
             // Best-effort, and on the same storage that just failed — but the
             // failure modes are not identical (a constraint on one statement, a
@@ -1094,8 +1104,27 @@ impl SignalingBridge {
         reason: String,
     ) -> Option<String> {
         let prior = self.pending_halt_prompt(&session_id, &agent).await;
-        self.emit_halt_row(session_id, agent, reason).await;
+        self.emit_halt_row(session_id, agent, reason, true).await;
         prior
+    }
+
+    /// **The ring's own stop, declared without a round-trip.**
+    ///
+    /// The all-pass yield, the round cap, consensus and an unwound wedge are
+    /// halts the RING makes — it has already cleared its holder and bumped its
+    /// epoch by the time it says so. They used to be announced through
+    /// `mark_awaiting_user(.., "system", ..)`, which resolves the asker against
+    /// the roster, finds nobody (there is no `system` participant — 0044 made
+    /// host rows `origin = 'system'` with a NULL participant precisely because
+    /// there is no such row), warns about it, and then hands the ring a
+    /// `HaltDeclared` for the stop it just made: a second `halt()`, epoch + 1,
+    /// and a warning line per yield that reads like a roster bug.
+    ///
+    /// Same slot, same banner, same durable row — without the trip through a
+    /// participant that does not exist.
+    pub async fn declare_host_halt(&self, session_id: &str, reason: String) {
+        self.emit_halt_row(session_id.to_string(), "system".to_string(), reason, false)
+            .await;
     }
 
     /// Storage lookup behind the repeat-halt check. Best-effort: a bridge built
@@ -1158,7 +1187,7 @@ impl SignalingBridge {
                 }
             }
         }
-        self.emit_halt_row(session_id, agent, body).await;
+        self.emit_halt_row(session_id, agent, body, true).await;
     }
 }
 
