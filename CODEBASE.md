@@ -208,8 +208,9 @@ flags read before teardown), 24 (watchdog → attention → UI, UNPINNED), 30.
 
 **Gotchas → pointers.** `spawn_session_handle` spawns subprocesses, so no test
 reaches its body — every load-bearing step must be an extracted fn.
-`agent_configs` rows exist only for `emma|brian|rain` (migration CHECK), so the
-tier-2 model fallback misses for every role-slug roster. Two close entry points
+`agent_configs` seeds nothing and takes any key since migration 0060 dropped its
+`emma|brian|rain` CHECK and rows — the tier-2 model fallback used to miss for
+every role-slug roster and is now reachable. Two close entry points
 (UI + MCP `close_session`) can race the epilogue (audit B2-5). The epilogue's
 "wait for busy" is currently inert (audit T-1). Worktree rules: ARCHITECTURE
 §Session worktrees; CL `conventions.md` (dist missing in a fresh worktree kills
@@ -263,7 +264,11 @@ commit-message check), 29 (capability ↔ tool gate: DERIVED, PINNED).
 
 **Gotchas → pointers.** Caller identity is self-asserted from the URL (audit
 C1-1). Tool descriptions are prompt text every agent reads — the D10 sweep test
-only greps "brian/rain", not "duo/peer" (audit C1-2). `VALID_PHASES` lowercase vs
+only greps "brian/rain", not "duo/peer" (audit C1-2). `wire::MODEL_ARGS` /
+`SPAWN_MODEL_FIELDS` / `LEGACY_CONFIG_KEYS` are the ONLY sanctioned `brian_*` /
+`rain_*` survivors in live code; a sweep rewrote `MODEL_ARGS` during the hard
+retirement and their test now spells the literals out so it cannot happen
+silently. `VALID_PHASES` lowercase vs
 `IpavPhase::parse` (N5, tracked). Change what a tool requires ONLY in
 `required_for`.
 
@@ -448,7 +453,7 @@ every write.
 | `src/storage/context_readings.rs` | per-turn context-window readings (P7) | M |
 | `src/storage/feedback.rs` | agent-filed bot-hq feedback | S |
 | `src/storage/models.rs` | `models` registry + `app_settings` kv | M |
-| `src/storage/agent_config.rs` | legacy `agent_configs` (CHECK `emma\|brian\|rain`) — read by the spawn chain and by the external MCP server, but UNREACHABLE for rc3 role slugs, which the CHECK rejects (pinned) | S |
+| `src/storage/agent_config.rs` | `agent_configs` — read by the spawn chain and by the external MCP server. Its `emma\|brian\|rain` CHECK made it unreachable for every rc3 role slug until 0060 rebuilt the table without it; the test that pinned the refusal now pins the acceptance | S |
 | `src/storage/projects.rs` | `projects` registry, CL path resolution | M |
 | `src/storage/plugins.rs`, `src/storage/plugin_kv.rs` | plugin registry + per-plugin kv | M / S |
 | `src/storage/cl_index.rs`, `src/storage/cl_atoms.rs` | CL index/folders/reads; FTS5 atoms + `cl_retrieve` | M / M |
@@ -464,8 +469,9 @@ blocking predicate ↔ hook query), 21 (CL index after write), 30 (boot sweeps).
 
 **Gotchas → pointers.** CL `conventions.md` §Migrations (immutable; DB reset
 2026-08-12; re-stamp is the sanctioned escape) and the memory note on edited
-migrations. `sessions.{brian,rain}_*`, `messages.author`, `rain_enabled` are
-DELIBERATE frozen legacy (deferred drop). Heaviest callers: `src/core/sequencer.rs`,
+migrations. `sessions.{brian,rain}_*` and `rain_enabled` are GONE (migration 0060 — nine
+columns dropped, two renamed to `slot0/slot1_model_at_spawn`); `messages.author`
+survives as a plain slug string, its CHECK and its `Author` enum both deleted. Heaviest callers: `src/core/sequencer.rs`,
 `src/signaling/bridge/tray.rs`, `src/core/pump.rs`.
 
 **Tests pin.** ring order/skip rules, done-vote reset, roster byte-parity, prose
@@ -538,7 +544,7 @@ on launch: keep it out of feature commits.
 **Tests pin.** command set constructs + spot export; timer/watermark/flush
 (`batch_emitter.rs`); route arms emit typed events; fs-watcher pure scoping;
 paths migrations idempotent; `sessions.rs` "no Brian/Rain in any rendered
-payload". Not pinned: `Lagged`→resync, N=20 immediate flush, the control
+payload"; the driver wire's frozen argument names (`external_jsonrpc.rs`). Not pinned: `Lagged`→resync, N=20 immediate flush, the control
 consumer.
 
 **Where to add X.** New command → `#[tauri::command] #[specta::specta]` in the

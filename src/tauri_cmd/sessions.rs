@@ -577,8 +577,15 @@ pub async fn create_session(
     title: String,
     repo_path: Option<String>,
     project: Option<String>,
-    // Create-dialog choices. Defaults preserve the historical duo behavior so
-    // older callers that omit them keep spawning Rain with agent-config models.
+    // Create-dialog choices, all optional. A caller that omits them gets the
+    // default roster at the roles' own default models.
+    //
+    // This comment used to say the defaults "keep spawning Rain with
+    // agent-config models" — false twice over as of the D10 retirement: no
+    // participant is called Rain, and 0060 carries no rows into `agent_configs`,
+    // so `get_agent_config` misses and `default_agent_config` always answers.
+    // It survived the edit one line below it because a parameter change does not
+    // prompt a re-read of the comment above it (round 3, the third instance).
     multi_participant: Option<bool>,
     slot0_model_id: Option<String>,
     slot1_model_id: Option<String>,
@@ -792,15 +799,24 @@ pub(crate) async fn dispatch_session_inner(
     // `ensure_session_roster` returns early when a roster exists, so spawn's
     // call becomes the no-op it already documents itself as.
     let seeded = seed_dispatch_roster(storage, &id, participants).await?;
-    // Read from what was ACTUALLY seeded rather than from the request: a caller
-    // asking for three on an install with one role gets one participant, and a
-    // column saying "more than one" would be the second source of truth this
-    // design exists to avoid. `sessions.rain_enabled` WAS that column and 0060
-    // dropped it; `SessionInfo.multi_participant` is derived in SQL from the
-    // roster rows, so there is nothing here left to keep in sync.
-    // Nothing to persist: `multi_participant` reads the rows `seed_dispatch_roster`
-    // just wrote. The mirror that used to sit here could disagree with them.
-    session.multi_participant = seeded > 1;
+    // **Re-read, rather than recomputing the flag here.** `session` was bound
+    // from `create_session` above, BEFORE any participant existed, so its
+    // SQL-derived `multi_participant` is necessarily false on this path; the
+    // line that used to sit here corrected it with `seeded > 1`.
+    //
+    // That correction was the same liability 0060 item 2 claims to have removed,
+    // moved from a column into a struct field: a second computation of "how many
+    // participants are there", free to disagree with the rows. `create_session`
+    // eliminated it by re-fetching after the seed; this path now matches, so the
+    // SQL derivation is authoritative in both. Found by the reviewer, whose
+    // comment here said the value already read the rows while the line below it
+    // hand-computed exactly that value.
+    let _ = seeded;
+    let session = storage
+        .get_session(&id)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?
+        .ok_or_else(|| AppError::DbError("session row vanished after seeding".into()))?;
     // Register the project mapping BEFORE spawn so the agents' system prompt
     // picks up project-scoped CL conventions.
     bridge.register_session(id.clone(), project).await;

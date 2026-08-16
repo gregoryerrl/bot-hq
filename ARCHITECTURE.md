@@ -766,27 +766,31 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
 - `messages` (id PK, session_id, author, kind, content, created_at) —
   full chat history. Index on `(session_id, created_at)`.
 - `sessions` (id PK, title, working_repo_path, base_repo_path,
-  created_at, closed_at, archived, rain_enabled, brian_model_id,
-  rain_model_id, + per-agent spawn metadata: brian/rain_model_at_spawn,
-  brian/rain_claude_session_id, brian/rain_effort, brian/rain_ultracode)
-  — **all now unread**: per-participant model, effort, ultracode and resume id
-  live on `session_participants` (rc3 D10). They survive because dropping a
-  column costs a migration and the database was reset anyway;
+  created_at, closed_at, archived, slot0/slot1_model_at_spawn) —
+  per-participant model, effort, ultracode and resume id live on
+  `session_participants` (rc3 D10). **Migration 0060 dropped the nine columns
+  that used to shadow them** (`rain_enabled`, `brian/rain_model_id`,
+  `brian/rain_claude_session_id`, `brian/rain_effort`,
+  `brian/rain_ultracode`) — every one had no reader and no writer — and renamed
+  the two that remain to the turn slots they always indexed. "Does this session
+  run more than one participant?" is now a correlated subquery over
+  `session_participants` rather than a cached boolean.
   `base_repo_path` is set for
   worktree-isolated sessions (see "Session worktrees"). There is NO
   `project` column — the project is derived at spawn from
   `working_repo_path.file_name()` — and no `phase` column (IPAV phase is
   in-memory; see "IPAV state").
 - `agent_configs` (agent_name PK, provider, model_name, base_url,
-  auth_token, `native` — unread, `context_window` — unread). CHECK
-  constraint still lists
-  `agent_name ∈ {'emma','brian','rain'}` (migration 0001 created it
-  permissive; migration 0017 purges the `emma` row but leaves the CHECK
-  as-is for legacy reasons) — only `brian`/`rain` are used. The fallback
-  for the `models` registry below (see "Per-participant model selection") —
-  and the row that supplies the model for **every session that names no
-  model**, which is why `native`/`context_window` were mirrored here by
-  migration 0038.
+  auth_token, `native` — unread, `context_window` — unread). **Seeds nothing,
+  and any key is legal.** Until migration 0060 it carried
+  `CHECK (agent_name IN ('emma','brian','rain'))` plus rows for those names, so
+  it could not hold a key any rc3 roster produces (`hands`, `eyes`, `eyes-2`,
+  `advisor`) — the spawn chain's lookup could only ever miss and fall through to
+  the built-in default. 0060 rebuilt the table without the CHECK and carried no
+  rows over, which makes this tier reachable for the first time since D10; it is
+  still the fallback for the `models` registry below (see "Per-participant model
+  selection"), and `native`/`context_window` were mirrored here by migration
+  0038.
 - `models` (id PK, label, provider, model_name, base_url, auth_token,
   `native` — unread, `context_window` — unread) — saved-model registry
   the per-session pickers reference by id. `native` (0036) opted the
@@ -832,9 +836,12 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   deliberately FK-free append-only telemetry) — one row per
   `cl_retrieve`, feeding the Measurement view.
 
-**Author enum:** `user` / `brian` / `rain`. (The `messages.author` CHECK
-still permits `'emma'` for legacy reasons, but the Rust enum no longer
-has it.) NO `system` author — phase changes synthesize as `author=user`
+**No `Author` enum.** `messages.author` is a plain string: `'user'` or a
+participant slug (`hands`, `eyes`, `eyes-2`, `advisor`). The two-variant
+`Author` enum that used to bound it was deleted in the D10 hard retirement —
+it could name `user`/`brian`/`rain` and therefore no participant this app
+creates. `messages.author`'s own CHECK was dropped earlier for the same reason.
+NO `system` author — phase changes synthesize as `author=user`
 ("phase advanced to PLAN") so chat history reads coherently and agents
 see them as natural switch prompts.
 
@@ -846,8 +853,10 @@ In-memory cache: `HashMap<SessionId, IpavState>` where `IpavState {
 current_phase, phase_log }`. Not persisted.
 
 Agents die with the app, so a restart gives fresh sessions; they resume
-their own transcript via `--resume` off the
-`brian/rain_claude_session_id` columns. The native loop was the exception
+their own transcript via `--resume` off each participant's own
+`session_participants.claude_session_id`. (It was `sessions.brian/rain_claude_session_id`
+until rc3 D10 moved the read to the roster and migration 0060 dropped the
+columns.) The native loop was the exception
 — it held `messages` in the task, so bot-hq persisted them under
 `.local/native-history/` and reloaded them at spawn. That store, its
 session-close clear and its startup orphan sweep all went with the loop

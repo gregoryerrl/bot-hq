@@ -18,6 +18,72 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-16/17 — the D10 hard retirement (round-3 tail)
+
+The user took every scope option and named the reason: *"hard retire brian and
+rain, it might cause issues (maybe hallucinations that bot-hq still has brian and
+rain), or maybe context corruption. Settle all your pending tasks here, no
+deferrals."*
+
+That reframed the work. The schema was never the point — **the Context Library
+is**, because it is what loads into an agent's context window by design. The
+reviewer caught that the investigation had inventoried the repo and missed it.
+
+Five batches, each committed separately, each reviewed before commit:
+
+- **`83d17a5`** — the `Author` enum deleted. It could name `user`/`brian`/`rain`
+  and therefore no participant this app creates. Every production `insert_message`
+  already resolved to a user row, so the participant arm was test-only.
+- **`95a9124`** — the activity wire names turn slots; 42 role-shaped identifiers.
+- **`891b807`** — **migration 0060**: nine `sessions` columns dropped, six renamed
+  across three tables, the last CHECK naming them rebuilt away, and **F8's
+  proven-fired `datetime('now')` DEFAULT** removed. Backed up first, pre-flighted
+  against a copy.
+- **`7623a09`** — the create-session wire, which the reviewer found still carried
+  six live fields and falsified the completeness claim.
+- **this** — docs, the CL sweep, the acceptance number.
+
+**F13, the finding closest to the user's stated worry.** `request_phase_advance`
+wrote its receipt as `Author::parse(&agent).unwrap_or(Author::User)` — and `parse`
+knew only the retired names, so for **every current role slug it already returned
+`None`**. Every agent phase request was stored `origin = "user"`, and rendered as
+ordinary prose under the user's name, because `ChatMessage.tsx` has no case for
+`Text`. Agents read the transcript back. **The system was manufacturing a user
+utterance** — the mechanical form of the fabricated-authorization failure the
+general rules exist to prevent. A rename would have preserved it exactly.
+
+**Acceptance: `cl_stale_refs` 27 → 25**, down two despite 0060 moving fifteen
+columns.
+
+**F14 — the metric penalises the documented remedy.** Its retirement detection is
+per LINE, but a retirement banner spans lines, so the symbol names land on
+continuation lines carrying no marker. A correct banner *raised* the count by 3;
+rewriting it so each naming line carries its own marker dropped it by 5. The
+number moved 27 → 30 → 25 with the repo unchanged. Recorded, not fixed: changing
+an audit tool while it serves as that audit's acceptance metric is the sequencing
+argument that kept F8 out of round 2.
+
+**Method, and the most reproducible thing this session found: a word-boundary
+rename cannot tell a name in use from a name being talked about.** It over-reached
+five times — twice onto sentences describing history, once into generated
+`bindings.ts`, once onto the **published driver API**, and once in the reviewer's
+own two-line script while reviewing this very hazard. Each was caught by a
+different mechanism (the suite, a read, `tsc`, a test, a self-guard); none by the
+rename. The defect belongs to the technique, not the driver.
+
+Corollary, three instances: **changing a parameter does not prompt a re-read of
+the comment above it.** And **a test that reads the thing it is proving cannot
+catch that thing changing** — the driver-wire test asserted against
+`wire::MODEL_ARGS` and went green on the rewritten constant.
+
+**Completeness, measured not asserted:** zero live code identifiers name them.
+They survive only in 12 immutable migrations, the driver wire (now pinned by a
+test), append-only evidence (`PROGRESS.md`/`issues.md`/`decisions.md`),
+`conventions.md:5` which names them in order to retire them, and legacy-data
+fixtures where the retired name IS the subject.
+
+Suites: **1239** + 392 frontend; clippy **4**; `tsc` clean; release build green.
+
 ## 2026-08-16 (round 3) — R6 finished, and an audit run against the previous round's binary
 
 Two mandates: finish R6, and audit again. Report in

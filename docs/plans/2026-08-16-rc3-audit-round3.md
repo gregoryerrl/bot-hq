@@ -8,7 +8,10 @@ checked against a *running system* rather than re-read.
 Baseline `710b8be`, clean tree. Every number below came from a command run this
 session.
 
-| gate | at `710b8be` | at the end |
+> **The table below is the R6 + audit half only** (`710b8be` → `ffd33bf`). The
+> D10 retirement that follows in the tail moved these again — final state there.
+
+| gate | at `710b8be` | after R6 + audit |
 |---|---|---|
 | `cargo test` | 1174 lib + 60 integration + 2 doc = **1236** | **1236** — green; F7 removed one test, F12 added one |
 | `npx vitest run` | 392 in 45 files | unchanged |
@@ -362,3 +365,106 @@ middle of it.
 - **No live multi-participant session was run.** R6's proof is the suite (1174,
   green at every step, zero test files touched) plus the verbatim byte-comparison
   — not a live turn through the new `on_turn_complete`.
+
+
+---
+
+# Round-3 tail — the D10 hard retirement (2026-08-16/17)
+
+The user took **every** scope option and added one: *"hard retire brian and rain,
+it might cause issues (maybe hallucinations that bot-hq still has brian and rain),
+or maybe context corruption. Settle all your pending tasks here, no deferrals."*
+
+That reason reframed the work. The schema was never the point — **the Context
+Library is**, because it is what loads into an agent's context window by design.
+
+## What shipped
+
+| batch | commit | what |
+|---|---|---|
+| 1 | `83d17a5` | `Author` enum deleted; **F13** — agent phase requests stop being filed as the user |
+| 2 | `95a9124` | the activity wire names turn slots; 42 role-shaped identifiers |
+| 3 | `891b807` | **migration 0060** — 15 columns, the last CHECK, and F8's proven-fired DEFAULT |
+| 4 | `7623a09` | the create-session wire; the driver exemption pinned by its own test |
+| 5 | this | docs, the CL sweep, and the acceptance number |
+
+**Acceptance: `cl_stale_refs(bot-hq)` 27 → 25**, measured before and after —
+*down* two despite 0060 renaming or dropping fifteen columns.
+
+## F13 · A phase request was recorded, and rendered, as the user's own words
+
+`Author::parse(&agent).unwrap_or(Author::User)`. `parse` knew `user`/`brian`/
+`rain`, so for **every rc3 role slug it already returned `None`** and the
+fallback filed the row `origin = "user", participant_id = NULL`.
+`ChatMessage.tsx` has no case for `Text`, so it rendered as ordinary authored
+prose under the user's name — and agents read the transcript back.
+
+**The system was manufacturing a user utterance.** That is the mechanical form of
+the fabricated-authorization failure the general rules exist to prevent, and it
+is closer to the user's stated worry than any column. A rename would have
+preserved it exactly: renaming does not teach a parser to see role slugs.
+
+## F14 · The acceptance metric penalises the correct way to retire a claim
+
+`cl_stale_refs`' retirement detection is **per line** (`RETIREMENT_MARKERS`,
+`cl_staleness.rs:77`). A retirement *banner* spans lines, so the symbol names
+land on continuation lines carrying no marker — and get reported as fresh
+staleness.
+
+Measured, on this round's own work: a banner saying *"Verified gone: `break_volley`,
+`last_forward`, `consecutive_short`, `user_silent_forwards` … have no occurrence
+anywhere in `src/`"* **raised the count by 3.** Rewriting it so every naming line
+carries its own marker dropped it by 5.
+
+So the number moved 27 → 30 → 25 without the repo changing in between. **A metric
+that punishes the documented remedy will train sessions to delete history instead
+of banner it** — which is the opposite of "evidence corrected beside, never
+edited". Recommended fix: scope the marker check to the markdown block (bullet or
+blockquote), not the line. Not done here: changing an audit tool while it serves
+as that audit's acceptance metric is the same bad sequencing that kept F8 out of
+round 2, and the user has twice accepted that argument.
+
+## Method — the finding this round actually produced
+
+**A word-boundary rename cannot tell a name in use from a name being talked
+about**, and this task was almost entirely the latter. It over-reached **five**
+times:
+
+1. `activity.rs` — *"B4b: took `brian_busy, rain_busy`"* → `slot0_busy`, falsifying what it took.
+2. The same line again, on the second pass — my own restored text → `hands_busy`.
+3. A doc that said *"`sessions.rain_enabled` **was** a cached count"* → *"`sessions.multi_participant` was"*, which **shipped into generated `bindings.ts`** before it was caught.
+4. `wire::MODEL_ARGS` — the **published driver API**, the one documented D10 exemption. A breaking change for every client.
+5. EYES' own two-line verification script, whose guard aborted on `Ok(session.into())` matching twice.
+
+The fifth is the one that settles it: it happened to the reviewer, on a script
+written *while reviewing this exact hazard*. **The defect belongs to the
+technique, not to whoever is driving it.** Every instance was caught by a
+different mechanism — the suite, a human read, `tsc`, a test, a self-guard — and
+none by the rename itself.
+
+Corollary, three instances (`e829b048`, `a6ea28ff`, `657c7e04`): **changing a
+parameter does not prompt a re-read of the comment above it.** All three were
+justifying asides one or two lines from an edited line, showing in `git diff` as
+context.
+
+And **a test that reads the thing it is proving cannot catch that thing
+changing** — `create_session_accepts_per_agent_model_ids` asserted against
+`wire::MODEL_ARGS` and went green on the rewritten constant. It now spells the
+literals out.
+
+## The completeness claim, measured
+
+**Zero live code identifiers** in `src/`, `tests/` or `frontend/src/` name them.
+Verified by sweep, not asserted. They survive in exactly five places, each by an
+explicit rule:
+
+1. **12 immutable migration files** — hook-blocked, sqlx-checksummed.
+2. **The driver wire** — D10's recorded exemption, now pinned by a test.
+3. **Append-only evidence** — `PROGRESS.md` 144, `issues.md` 14, `decisions.md` 14.
+4. **`conventions.md:5`** — which names them in order to retire them.
+5. **Legacy-data fixtures** — where the retired name IS the subject, e.g. the
+   test proving a row authored `brian` does not resolve against a role-derived
+   roster. Sweeping that one made its assertion vacuous, and the suite caught it.
+
+"Hard retire" cannot mean zero occurrences in this repo. It means no live code,
+schema, or CL guidance — and round 4 can check that sentence against the tree.
