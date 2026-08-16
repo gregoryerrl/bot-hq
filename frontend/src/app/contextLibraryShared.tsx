@@ -35,6 +35,14 @@ export function tabKey(tab: OpenTab): string {
  * identity and its pane remounts — the tab and the file survive, the unsaved
  * text does not. Fixing that needs tabs to carry a stable id instead of being
  * keyed by their contents; indexed rather than done here.
+ *
+ * **Depends on an upstream guarantee, named here because it is invisible from
+ * this file:** the retarget is a `map`, so it would produce two tabs sharing a
+ * `tabKey` if a project could be renamed ONTO an existing project's name — a
+ * duplicate React key in the strip and in the pane list. It cannot:
+ * `cl_rename_project` rejects that up front (`src/tauri_cmd/cl.rs:733-737`,
+ * "a project named '{new_name}' already exists"). If that check is ever
+ * relaxed, dedupe here.
  */
 export function tabsAfterProjectGone(
   tabs: OpenTab[],
