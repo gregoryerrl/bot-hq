@@ -73,6 +73,24 @@ fn is_contained(candidate: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| candidate.starts_with(root))
 }
 
+/// The viewer's size gate, split out so a test can reach it.
+///
+/// It lived inline in [`read_workspace_file`], which takes a `tauri::State` and
+/// therefore cannot be called from a unit test — so the refusal path had no
+/// test at all, and the one named for it asserted `MAX_VIEWABLE_BYTES >= 1 MiB`
+/// (a compile-time constant; clippy called it "an assertion with a constant
+/// value") against a 16-byte file. Deleting the guard left that green.
+///
+/// Boundary is `>`: a file of exactly [`MAX_VIEWABLE_BYTES`] is viewable.
+fn refuse_if_oversize(path: &str, bytes: u64) -> Result<(), AppError> {
+    if bytes > MAX_VIEWABLE_BYTES {
+        return Err(AppError::Validation(format!(
+            "{path} is {bytes} bytes — too large to preview (limit {MAX_VIEWABLE_BYTES})"
+        )));
+    }
+    Ok(())
+}
+
 /// Read a file for the viewer dialog, scoped to the session's repo + temp.
 #[tauri::command]
 #[specta::specta]
@@ -109,11 +127,7 @@ pub async fn read_workspace_file(
         return Err(AppError::Validation(format!("{path} is a directory")));
     }
     let bytes = meta.len();
-    if bytes > MAX_VIEWABLE_BYTES {
-        return Err(AppError::Validation(format!(
-            "{path} is {bytes} bytes — too large to preview (limit {MAX_VIEWABLE_BYTES})"
-        )));
-    }
+    refuse_if_oversize(&path, bytes)?;
 
     let name = canonical
         .file_name()
@@ -155,7 +169,6 @@ pub async fn read_workspace_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn containment_accepts_inside_and_rejects_outside() {
@@ -215,15 +228,46 @@ mod tests {
         assert!(!is_image_ext(""));
     }
 
+    /// **The refusal path actually runs** (round-2 R2).
+    ///
+    /// The previous version wrote a 16-byte file and asserted
+    /// `MAX_VIEWABLE_BYTES >= 1024 * 1024` — a comparison between two
+    /// compile-time constants, which clippy flagged as "an assertion with a
+    /// constant value". It never entered the branch it is named for, so
+    /// deleting the guard left it green. Its comment was honest about the
+    /// trade ("assert the constant is sane rather than writing 2 MiB"); the
+    /// name was not.
+    ///
+    /// `set_len` makes the oversize file SPARSE — no blocks are written, so
+    /// this costs nothing and `metadata().len()` still reports the real size,
+    /// which is the exact value the guard reads.
     #[test]
     fn oversize_files_are_refused_by_the_limit() {
         let dir = tempfile::tempdir().unwrap();
+
         let big = dir.path().join("big.bin");
-        let mut f = std::fs::File::create(&big).unwrap();
-        f.write_all(&vec![0u8; 16]).unwrap();
-        // The guard is a plain size compare; assert the constant is sane rather
-        // than writing 2 MiB to disk in a unit test.
-        assert!(MAX_VIEWABLE_BYTES >= 1024 * 1024);
-        assert!(std::fs::metadata(&big).unwrap().len() < MAX_VIEWABLE_BYTES);
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_VIEWABLE_BYTES + 1)
+            .unwrap();
+        let err = refuse_if_oversize("big.bin", std::fs::metadata(&big).unwrap().len())
+            .expect_err("a file over the limit must be refused");
+        assert!(
+            matches!(err, AppError::Validation(ref m) if m.contains("too large to preview")),
+            "wrong refusal: {err:?}"
+        );
+
+        // The boundary is `>`, not `>=` — a file of exactly the limit is
+        // viewable, and an off-by-one here silently shrinks what the viewer
+        // will open.
+        let edge = dir.path().join("edge.bin");
+        std::fs::File::create(&edge)
+            .unwrap()
+            .set_len(MAX_VIEWABLE_BYTES)
+            .unwrap();
+        assert!(
+            refuse_if_oversize("edge.bin", std::fs::metadata(&edge).unwrap().len()).is_ok(),
+            "a file of exactly MAX_VIEWABLE_BYTES must still be viewable"
+        );
     }
 }

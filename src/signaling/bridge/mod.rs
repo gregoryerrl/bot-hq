@@ -1809,6 +1809,20 @@ mod tests {
     /// is deliberately NO exemption list — every `HashMap` field on this struct
     /// is per-session today, and a list of sanctioned absences is precisely the
     /// thing that rots into permission for the next one.
+    ///
+    /// **What this proves, exactly.** It answers one question — *is there a
+    /// field `unregister_session` never mentions?* — and nothing more. It is a
+    /// TEXT search over this file's source, so it cannot tell a drain from a
+    /// comment: deleting the `session_attention` line and leaving a comment
+    /// that says `self.session_attention` passes here, measured. The
+    /// behavioural test above is what catches that, and only the PAIR is the
+    /// guarantee; neither half is on its own.
+    ///
+    /// The `self.` prefix on the needle is load-bearing and must survive any
+    /// refactor of this test: a bare-name needle is already satisfied by this
+    /// function's own comment block, which writes `session_sequencer` and
+    /// `session_attention` in backticks. That is round 1's "backticked NAME"
+    /// doc-guard defect in a new place — a needle a mention can satisfy.
     #[test]
     fn every_hashmap_field_is_named_in_unregister_session() {
         let src = include_str!("mod.rs");
@@ -1880,10 +1894,12 @@ mod tests {
             .collect();
         assert!(
             undrained.is_empty(),
-            "per-session map(s) with no line in `unregister_session` — every one \
-             is a leak that outlives the session, and the last two found this way \
-             were an orphan ring task per closed session and a stale attention \
-             badge on reopen: {undrained:?}"
+            "per-session map(s) `unregister_session` never MENTIONS (this is a \
+             source-text check — that they are mentioned is not proof they are \
+             drained; `unregister_session_empties_every_per_session_map` proves \
+             that). An unmentioned map is a leak that outlives its session, and \
+             the last two found this way were an orphan ring task per closed \
+             session and a stale attention badge on reopen: {undrained:?}"
         );
     }
 

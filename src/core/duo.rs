@@ -2626,16 +2626,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn the_provider_limit_notice_is_a_row_and_the_forward_is_unchanged() {
+    async fn the_provider_limit_notice_is_a_host_row_that_names_the_agent_and_quotes_the_line() {
         // B5 Task 2's remaining gap: this was the one `RouterCommand::Forward`
         // producer whose text existed nowhere but the wire — an inline `format!`
         // straight onto a peer's stdin. It now posts a row of its own.
         //
-        // The row goes BESIDE the forward, never instead of it, so the assertion
-        // that matters is the pairing: a row exists AND the router still receives
-        // the same command it always did.
+        // **Renamed in round 2.** This was
+        // `..._is_a_row_and_the_forward_is_unchanged`, and the forward half went
+        // with `core::router` in task 14 — the body says so itself, three
+        // paragraphs down. The name kept promising a pairing the test no longer
+        // checks, and the receiver it bound to check it sat unread (clippy:
+        // unused variable). What the test actually pins is below: a host-owned
+        // row, and the interpolation the peer will read.
+        //
+        // `_ring_rx` stays BOUND rather than dropped — dropping it closes the
+        // channel under the pump's `sequencer_tx`, which is a different code
+        // path from the one being tested.
         let (storage, state) = setup().await;
-        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (cfg, _ring_rx) = cfg_with_ring(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
