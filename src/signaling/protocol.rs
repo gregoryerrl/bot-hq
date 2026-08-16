@@ -188,13 +188,13 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "peer_ack",
-            description: "Acknowledge your peer WITHOUT waking them — suppresses THIS turn's peer-forward. Use when you and your peer have converged (you agree, or have nothing substantive to add) and want to stop the back-and-forth instead of bouncing another ack that wakes the peer for a full turn. Your text is still saved to the chat (the user sees it); it is simply not forwarded to the peer, so the duo settles back to Idle. This is happy-path politeness layered ON TOP of the mechanical volley-breaker — it does not replace it. Either agent may call it.\n\nBy default a LONG turn (over ~200 characters) forwards anyway, tagged, because a long turn is usually a review or correction that must not be silently dropped. That length rule is only a proxy, and it misfires on the most common way a volley actually ends: \"I agree, and here is the one reason why\" runs past the limit, so it forwards and wakes your peer. When your turn IS your closing statement, pass `final: true` to say so explicitly — suppression then does not depend on length. Nothing is lost either way: `final` skips the WAKE, not the record.\n\nDo NOT pass `final: true` on a turn that carries a new finding, a correction, or anything your peer still needs to act on.",
+            description: "Say you have converged — you agree with your peer, or have nothing substantive to add — and END the round rather than bouncing another acknowledgment that costs a full turn. Your text is still saved to the chat and the user still reads it; what the ack changes is how your TURN ENDS.\n\nA content-free ack ends the turn as DONE: a vote toward consensus, which is what stops the session cycling and hands the floor back to the user once everyone has voted. A LONG turn (over ~200 characters) is not treated as an ack, because a long turn is usually a review or a correction and those must never be silently downgraded to agreement.\n\nThat length rule is a proxy, and it misfires on the most common way a round actually ends: \"I agree, and here is the one reason why\" runs past the limit. When your turn IS your closing statement, pass `final: true` to say so explicitly — the vote then does not depend on length. Nothing is lost either way: `final` changes the VOTE, not the record.\n\nDo NOT pass `final: true` on a turn that carries a new finding, a correction, or anything your peer still needs to act on — that is a vote for finishing, cast on a turn that says the opposite.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "final": {
                         "type": "boolean",
-                        "description": "True when this turn is your closing statement — suppress the peer-forward regardless of length. Omit (or false) for the default length-based behaviour."
+                        "description": "True when this turn is your closing statement — cast the done vote regardless of length. Omit (or false) for the default length-based behaviour."
                     }
                 }
             }),
@@ -209,7 +209,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "halt",
-            description: gated_by("halt", "Yield control back to the user and unlock the chat input. Use when the participants have converged or you've finished the current slice and the next move is genuinely the user's — it ends the agent-to-agent loop cleanly. Sets the session to awaiting-user (the input unlocks even mid-turn, since awaiting outranks busy) and suppresses further peer-forwarding until the user's next message. Like mark_awaiting_user but framed as a yield rather than a specific pending question; pass an optional reason shown in the tray."),
+            description: gated_by("halt", "Yield control back to the user and unlock the chat input. Use when the participants have converged or you've finished the current slice and the next move is genuinely the user's — it ends the agent-to-agent loop cleanly. Sets the session to awaiting-user (the input unlocks even mid-turn, since awaiting outranks busy) and stops the ring until the user's next message. Like mark_awaiting_user but framed as a yield rather than a specific pending question; pass an optional reason shown in the tray."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -219,7 +219,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "advance_phase",
-            description: "Move the IPAV phase chip yourself (no user gate). Use this whenever your work crosses a phase boundary during a substantive task — investigation done -> Plan, plan stated -> Apply, mutation done -> Verify. The dashboard chip updates; both agents receive a [PHASE: X] transition notice on stdin. Phase is a self-discipline signal, not a permission gate. Use exact phase names: Investigate, Plan, Apply, Verify.",
+            description: "Move the IPAV phase chip yourself (no user gate). Use this whenever your work crosses a phase boundary during a substantive task — investigation done -> Plan, plan stated -> Apply, mutation done -> Verify. The dashboard chip updates; every participant receives a [PHASE: X] transition notice. Phase is a self-discipline signal, not a permission gate. Use exact phase names: Investigate, Plan, Apply, Verify.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -247,7 +247,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "request_phase_advance",
-            description: "OPT-IN gated phase advance — use ONLY when you want to pause for explicit user acknowledgment before crossing a boundary. Most phase transitions should use `advance_phase` (self-advance, no gate). Reserve this for irreversible / destructive Apply work (force-push, prod writes, large rewrites). Adds a chat message + halt row; the duo's peer-forward halts until the user advances the chip OR replies in chat (implicit decline).",
+            description: "OPT-IN gated phase advance — use ONLY when you want to pause for explicit user acknowledgment before crossing a boundary. Most phase transitions should use `advance_phase` (self-advance, no gate). Reserve this for irreversible / destructive Apply work (force-push, prod writes, large rewrites). Adds a chat message and fills the session's halt slot; the ring stops until the user advances the chip OR replies in chat (implicit decline).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -266,7 +266,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "file_feedback",
-            description: "File an issue or idea about BOT-HQ ITSELF — the tool you are running inside — not about the repo this session is working on. Use it when bot-hq gets in your way (a gate that renders unreadably, a round-trip that wasted the user's time, a tool whose contract surprised you) or when you think of something that would make the workflow better. It writes to a queue a later bot-hq session works through; it does NOT interrupt the user and does NOT surface mid-session, so it never costs the current task anything. Both agents may call it. Returns the reference you can quote back (e.g. 'filed as feedback #12'). Do NOT use it for bugs in the project you are working on — those belong in that project's tracker.",
+            description: "File an issue or idea about BOT-HQ ITSELF — the tool you are running inside — not about the repo this session is working on. Use it when bot-hq gets in your way (a gate that renders unreadably, a round-trip that wasted the user's time, a tool whose contract surprised you) or when you think of something that would make the workflow better. It writes to a queue a later bot-hq session works through; it does NOT interrupt the user and does NOT surface mid-session, so it never costs the current task anything. Any participant may call it. Returns the reference you can quote back (e.g. 'filed as feedback #12'). Do NOT use it for bugs in the project you are working on — those belong in that project's tracker.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -343,7 +343,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "gate_status",
-            description: "Current state of a parked action_gate command by its gate_id: pending (still awaiting the user — do not re-issue), approved (executed; output was delivered as an out-of-band message), or rejected (not run; includes the user's answer text). Read-only, callable by either agent. Use this instead of guessing whether a gated command ran.",
+            description: "Current state of a parked action_gate command by its gate_id: pending (still awaiting the user — do not re-issue), approved (executed; output was delivered as an out-of-band message), or rejected (not run; includes the user's answer text). Read-only, callable by any participant. Use this instead of guessing whether a gated command ran.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -896,6 +896,30 @@ mod tests {
                 assert!(
                     word != "brian" && word != "rain",
                     "tool `{}` still names an agent: {}",
+                    d.name,
+                    d.description
+                );
+            }
+            // **And no phrase that assumes there are exactly two of them.** The
+            // name sweep above passed while six descriptions still said "the
+            // duo", "both agents", "either agent" and "peer-forwarding" (audit
+            // C1-2) — an N-participant session reads those as instructions about
+            // a session shape it does not have, and "peer-forward" names a
+            // router deleted in `3adfc68`. Word-matching brian/rain cannot see
+            // any of it, which is why this second sweep exists.
+            for phrase in [
+                "the duo",
+                "duo's",
+                "both agents",
+                "either agent",
+                "peer-forward",
+                "peer forwarding",
+            ] {
+                assert!(
+                    !prose.contains(phrase),
+                    "tool `{}` says `{phrase}` — that is a two-participant \
+                     assumption (or deleted-router vocabulary) in prose every \
+                     agent reads: {}",
                     d.name,
                     d.description
                 );

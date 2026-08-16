@@ -488,15 +488,18 @@ async fn call_tool(
             )))
         }
         "peer_ack" => {
-            // The effect is realized in the duo pump: it observes THIS ToolUse
-            // event and suppresses the turn's peer-forward (duo.rs::pump_agent).
-            // Nothing to do bridge-side — the call just needs to succeed so the
-            // agent's turn proceeds. Either agent may call it.
+            // The effect is realized in the PUMP, which is the only place that
+            // sees a whole turn: it observes THIS ToolUse and, at turn end,
+            // `sequencer::turn_ending` turns it into the turn's ending — `Done`
+            // (a consensus vote) when the turn is content-free or `final`, and a
+            // plain `Spoke` with the ack marked overridden when it is not.
+            // Nothing to do bridge-side; the call just needs to succeed.
             Ok(ToolCallResult::text(
-                "peer_ack noted — suppressed only if this turn is content-free. If \
-                 the turn carries substantive text (>200 chars) it is still \
-                 forwarded to your peer, tagged as an overridden ack: reviews and \
-                 corrections must never be silently discarded.",
+                "peer_ack noted — it becomes a DONE vote only if this turn is \
+                 content-free (or you passed `final: true`). A turn carrying \
+                 substantive text (>200 chars) still ends as an ordinary turn, \
+                 with the ack recorded as overridden: reviews and corrections \
+                 must never be silently downgraded to agreement.",
             ))
         }
         "pass_turn" => {
