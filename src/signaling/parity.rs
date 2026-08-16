@@ -474,19 +474,34 @@ async fn the_capability_gate_reproduces_the_name_gate_for_every_tool() {
         }
         checked += 1;
     }
-    // Derived, not restated: the walk covers the whole registry MINUS the
-    // sanctioned divergences, so signing off a new divergence cannot silently
-    // shrink the coverage this guard exists to measure. (The literal it replaces
-    // had already drifted once — 40 → 39 when `declare_working` retired on
-    // 2026-08-15 — and a signed-off divergence would have drifted it again.)
     let registry = super::protocol::tool_descriptors().len();
+    // TWO guards, because they catch different things and the derived one alone
+    // catches almost nothing.
+    //
+    // The equality is an IDENTITY over this loop — `checked` increments on every
+    // descriptor the `continue` above does not skip — so the only input that can
+    // break it is a SANCTIONED name that has left the registry. That is worth
+    // asserting (a divergence signed off for a tool that no longer exists is a
+    // stale exemption) and it is all it asserts. EYES measured the gap on
+    // 2026-08-16 by deleting the `pass_turn` descriptor: the walk still passed.
     assert_eq!(
         checked,
         registry - SANCTIONED_DIVERGENCE.len(),
-        "the walk covered {checked} of {registry} tools with \
-         {} sanctioned divergence(s) — something is being skipped that nobody \
-         signed off",
+        "a sanctioned divergence names a tool the registry no longer has — \
+         {checked} walked of {registry}, {} exempt",
         SANCTIONED_DIVERGENCE.len()
+    );
+    // The floor is what actually guards COVERAGE, and it is on the REGISTRY, not
+    // on `checked`: subtracting the exemptions is exactly what let the old
+    // literal drift every time one was signed off. A tool leaving
+    // `tool_descriptors()` is a decision — `declare_working`'s retirement took it
+    // to the 40 that stand today — and a decision should not be able to land as
+    // a refactor that quietly shrinks what this file checks.
+    assert!(
+        registry >= 40,
+        "tool_descriptors() has shrunk to {registry} — deleting a tool is a \
+         decision, not a refactor. If it was deliberate, lower this floor in the \
+         same commit that removes the tool."
     );
 }
 
