@@ -253,32 +253,19 @@ impl Storage {
         Ok(rows)
     }
 
-    /// Record which model each agent was spawned with for this session. Called
-    /// by `spawn_session_handle` right after the configs are fetched so the
-    /// chat header can display the frozen model name. `rain_model` is `None` for
-    /// a solo-Brian session, stored as SQL NULL (not an empty string).
-    pub async fn set_session_spawn_models(
-        &self,
-        session_id: &str,
-        brian_model: &str,
-        rain_model: Option<&str>,
-    ) -> Result<()> {
-        sqlx::query(
-            "UPDATE sessions SET brian_model_at_spawn = ?, rain_model_at_spawn = ? \
-             WHERE id = ?",
-        )
-        .bind(brian_model)
-        .bind(rain_model)
-        .bind(session_id)
-        .execute(&self.pool)
-        .await
-        .with_context(|| format!("recording spawn models on session {session_id}"))?;
-        Ok(())
-    }
-
-    /// Record a session's Rain toggle + per-agent model selections, chosen in
-    /// the create dialog. Called once right after `create_session`, BEFORE
-    /// spawn, so `spawn_session_handle` reads the chosen models off the row.
+    /// Record a session's solo/duo bookkeeping flag. Called once right after
+    /// `create_session`, BEFORE spawn.
+    ///
+    /// **It no longer records model selections, and nothing reads a model off
+    /// this row.** `5decdcf` (round-3 F7) dropped the `brian_model_id` /
+    /// `rain_model_id` parameters because spawn takes each participant's model
+    /// from its own roster row; this doc kept claiming `spawn_session_handle`
+    /// reads the chosen models off the session row, which is a reader that does
+    /// not exist. Filed by EYES against that very commit — F7 fixed the
+    /// caller-side comment and missed the definition-side one, which is the
+    /// exact defect class F1 and F7 were themselves filed for. The lesson is
+    /// narrow and worth keeping: **when you delete a parameter, its function's
+    /// own doc is a call site.**
     pub async fn set_session_spawn_config(&self, session_id: &str, rain_enabled: bool) -> Result<()> {
         sqlx::query("UPDATE sessions SET rain_enabled = ? WHERE id = ?")
             .bind(if rain_enabled { 1 } else { 0 })

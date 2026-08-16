@@ -267,36 +267,52 @@ async fn model_round_trips_every_column_it_still_projects() {
     assert_eq!(got.context_window, None);
 }
 
+
+
+/// **The slot writer that survived round-3 F7, round-tripped.**
+///
+/// F7 deleted `set_session_spawn_models` and its round-trip test — correct, it
+/// had no reader. But that test was the last thing exercising a WRITE to
+/// `brian_model_at_spawn` / `rain_model_at_spawn`, and the live replacement
+/// (`set_session_spawn_model_slot`, called once from `spawn_session_handle`)
+/// had no test at all: six references in the tree, all definition, call site
+/// and a `warn!` string. EYES filed it against the uncommitted diff (`579f1324`)
+/// — the deletion was correct and coverage-negative at the same time.
+///
+/// Worth pinning rather than trusting, because every property here is silent
+/// when wrong: both call sites swallow the error into `warn!`, the columns are
+/// written positionally so swapping the arms is invisible to the type system,
+/// and the result is only observable as the chat header's frozen model name.
+/// The `_ =>` arm is the same shape — slot 2 exists (the backend caps at 8
+/// participants, this schema holds 2) and drops its write in silence, which is
+/// a real limit worth stating in a test rather than discovering later.
 #[tokio::test]
-async fn set_session_spawn_models_round_trip() {
-    // Sessions remember which model their agents were spawned with so the chat
-    // header reflects what's actually talking, even after a config swap.
+async fn spawn_model_slots_round_trip_and_slot_two_is_a_silent_no_op() {
     let s = Storage::memory().await.unwrap();
-    s.create_session("sess-x", "test", Some("/tmp/repo"))
-        .await
-        .unwrap();
-    let before = s.get_session("sess-x").await.unwrap().unwrap();
-    assert!(before.brian_model_at_spawn.is_none());
-    assert!(before.rain_model_at_spawn.is_none());
+    s.create_session("sess-slots", "t", None).await.unwrap();
 
-    s.set_session_spawn_models("sess-x", "claude-opus-4-7", Some("deepseek-v4-pro"))
-        .await
-        .unwrap();
-    let after = s.get_session("sess-x").await.unwrap().unwrap();
+    // Slot -> column, positionally. Asserted apart so a swapped pair fails.
+    s.set_session_spawn_model_slot("sess-slots", 0, "claude-opus-5").await.unwrap();
+    s.set_session_spawn_model_slot("sess-slots", 1, "claude-sonnet-5").await.unwrap();
+    let got = s.get_session("sess-slots").await.unwrap().unwrap();
+    assert_eq!(got.brian_model_at_spawn.as_deref(), Some("claude-opus-5"), "slot 0 is the first column");
+    assert_eq!(got.rain_model_at_spawn.as_deref(), Some("claude-sonnet-5"), "slot 1 is the second");
+
+    // The solo path: spawn clears slot 1 when only one participant spawned.
+    s.clear_session_spawn_model_slot("sess-slots", 1).await.unwrap();
+    let got = s.get_session("sess-slots").await.unwrap().unwrap();
+    assert_eq!(got.rain_model_at_spawn, None, "clearing writes SQL NULL");
     assert_eq!(
-        after.brian_model_at_spawn.as_deref(),
-        Some("claude-opus-4-7")
-    );
-    assert_eq!(
-        after.rain_model_at_spawn.as_deref(),
-        Some("deepseek-v4-pro")
+        got.brian_model_at_spawn.as_deref(),
+        Some("claude-opus-5"),
+        "clearing one slot must not touch the other"
     );
 
-    // A solo-Brian session passes None for Rain — stored as SQL NULL, not "".
-    s.set_session_spawn_models("sess-x", "claude-opus-4-7", None)
-        .await
-        .unwrap();
-    let solo = s.get_session("sess-x").await.unwrap().unwrap();
-    assert!(solo.rain_model_at_spawn.is_none());
+    // Slot 2+ has no column: Ok(()) and nothing written. A third participant's
+    // spawn model is NOT recorded anywhere — the stated limit of a 2-column
+    // schema under an N-participant roster (round-3 F7).
+    s.set_session_spawn_model_slot("sess-slots", 2, "some-model").await.unwrap();
+    let after = s.get_session("sess-slots").await.unwrap().unwrap();
+    assert_eq!(after.brian_model_at_spawn, got.brian_model_at_spawn, "slot 2 wrote nothing");
+    assert_eq!(after.rain_model_at_spawn, None, "slot 2 wrote nothing");
 }
-

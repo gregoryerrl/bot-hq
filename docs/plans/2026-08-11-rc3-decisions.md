@@ -1291,3 +1291,42 @@ latching, and four participants told to "converse with each other", nothing
 ever created a boundary — the ring dealt continuously and the D33 lock never
 lifted. With the three fixes, that session stops at the first gate (08:16) or
 the first halt, busy drains, and the box (or the gate) is the user's.
+
+---
+
+## D36 — A stuck reviewer parks a user gate; it never times out ✅ (user, 2026-08-16)
+
+**Decided by the user in `s-dbc0e856`**, resolving the escape valve that
+`issues.md` **#4** had carried as `needs-user-decision` since 2026-07-28:
+*"requiring EYES sign-off on dispositions can deadlock if EYES is down — pick
+the escape valve (override tool vs timeout)."*
+
+**The decision: the user gate.** N rounds without convergence **parks an
+Approve/Reject for the user**, matching `override_reviewer_block`. The gate stays
+**blocking** throughout. It does **not** time out into advisory.
+
+**One decision, governing every reviewer gate** — the existing
+`disposition_finding` / commit gate, and both gates proposed on 2026-08-16 (a
+phase-advance vote, and a commit gate bound to diff state). They should not
+diverge: an escape valve picked per-gate is how one of them quietly becomes
+advisory.
+
+**Why timeout was rejected, in the words of the session that produced it.** A
+timeout converts a blocking review into an advisory one at round N — which is
+*precisely* what `s-dbc0e856` demonstrated by accident. HANDS held one unbroken
+turn across the whole IPAV pass, so EYES was never dealt a turn; every one of the
+eight `check_open_findings` calls returned `ok` **because the reviewer had been
+starved, not because the work was reviewed.** A timeout would make that outcome a
+supported feature rather than a bug. The house rule already points the same way:
+nothing should wait on the user outside the system — so a stuck reviewer becomes
+a gate the user can answer, not a clock that answers for them.
+
+**The cost, stated:** a genuinely stuck or dead reviewer costs the user one
+click. That is the price of the gate meaning something, and it is bounded — one
+gate per stall, not one per round.
+
+**Evidence that the review is worth gating on** (same session, both found by a
+reviewer getting a turn *before* a commit rather than after): a predicate whose
+safety branch was pinned by nothing, and a diff that was correct, compiled, and
+green while removing the last test covering a live error-swallowing write path.
+Neither was visible to reading, clippy, or the suite — only to a cut.
