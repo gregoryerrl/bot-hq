@@ -1229,6 +1229,121 @@ pub enum SequencerCommand {
     Resume,
 }
 
+/// Everything one running ring holds between commands.
+///
+/// These were thirteen `let mut` locals in [`run_sequencer`] until the round-3
+/// audit. The struct is not tidiness: the loop's body is one `match` whose
+/// largest arm touches eight of them, so every attempt to lift an arm out as a
+/// plain function needs ten `&mut` parameters — which is exactly how
+/// [`advance_turn`] came to carry eleven. A struct is what lets an arm become a
+/// method instead, and it is why the parameter counts here go DOWN as the module
+/// is decomposed rather than up.
+///
+/// **All of it is per-CYCLE state, deliberately, and that is the invariant the
+/// type exists to hold.** Nothing here is persisted and nothing survives a
+/// session: `spin`, `laps`, `summons` and `spoke_this_lap` each describe the
+/// current uninterrupted stretch, and a stretch that ends must not leave a
+/// streak, a lap count or a summons queue behind for the next one to inherit.
+/// The individual field docs say why for each.
+#[derive(Default)]
+struct RingState {
+    /// The turn in flight. `None` is "the cycle has not started", which is also
+    /// what `next_active_participant` reads as "reset to the front".
+    holder: Option<Participant>,
+    /// Which turn that is. Bumped by every ring step, so a completion minted
+    /// before the step cannot be mistaken for one minted after it — including
+    /// when the step lands on the same participant. See `TurnComplete`.
+    epoch: u64,
+    /// Commands a drain took off `rx` without acting on them. Drained BEFORE
+    /// `recv`, so arrival order is preserved end to end.
+    deferred: VecDeque<SequencerCommand>,
+    /// Is the cycle paused? A LATCH, not a counter — see `SequencerCommand::Pause`
+    /// for what that costs. Deliberately NOT `holder`/`epoch`: a pause holds the
+    /// turn in flight, it does not end one.
+    paused: bool,
+    /// Commands that arrived while paused, in arrival order. A second queue
+    /// rather than `deferred`, which is popped before `recv` and would therefore
+    /// spin: pop, re-hold, pop. Replayed by `Resume`.
+    held: VecDeque<SequencerCommand>,
+    /// Per-participant repetition state for spin detection. In the cycle's frame
+    /// rather than storage: it describes THIS cycle, and a cycle that ends should
+    /// not leave a streak behind for the next one to inherit. Cleared outright by
+    /// a user message, which is the router's convergence reset in the ring model.
+    spin: HashMap<i64, SpinState>,
+    /// Completed laps of the ring in the CURRENT uninterrupted stretch — the
+    /// round cap's counter. In the cycle's frame for the same reason `spin` is,
+    /// and reset the same way: [`advance_turn`] zeroes it whenever it steps to
+    /// the front of the rotation, which is where a user message lands.
+    ///
+    /// **Per stretch, not per session, and that is load-bearing rather than a
+    /// convenience.** It is the unit D2's measurement is in — 3,561 UNINTERRUPTED
+    /// stretches — so a lifetime counter would be capping something nobody
+    /// measured. It is also what keeps the halt releasable: the cap's own halt
+    /// yields to the user, and a counter that survived their reply would re-fire
+    /// on the very next lap and wedge the session shut instead of backstopping
+    /// it. `a_user_message_starts_the_lap_count_over` is that case.
+    laps: u32,
+    /// Who the user has summoned, and where the rotation was when they did
+    /// (rc3 D17). In the cycle's frame for the same reason `spin` and `laps` are:
+    /// it describes THIS stretch, and a queue that outlived one would hand out a
+    /// turn nobody asked for.
+    summons: Summons,
+    /// Has any participant done anything but PASS since the current lap began
+    /// (rc3 **D27**)? A lap of nothing but passes is a lap in which nobody had
+    /// anything to say, and dealing another asks the same question again at the
+    /// price of a full-context model call per participant.
+    ///
+    /// A `Done` counts as something: it is a participant declaring it is
+    /// finished, which the consensus tally acts on. Only a pass is the absence of
+    /// an answer.
+    ///
+    /// Measured in `s-8ac0d2d0`: after boot completed with no task yet given, the
+    /// ring dealt passes for 77 seconds — 23 provider calls carrying ~240 KB
+    /// each — to produce the string "(passed — nothing to add this round)". The
+    /// only floor was the 500-lap round cap, which at ~13s a turn is over five
+    /// hours. The user stopped it by hand, which is the one thing a backstop is
+    /// supposed to make unnecessary.
+    spoke_this_lap: bool,
+    /// The Stage toggle's flag (2026-08-15): a user response is staged in
+    /// AppState and delivery is owed at the next turn boundary. The boundary
+    /// PARKS instead of dealing and emits `StagedDeliveryDue`; the delivery
+    /// then arrives as an ordinary `UserMessage` milliseconds later, so a
+    /// staged send lands exactly like a typed one — never mid-turn, never
+    /// superseding the holder.
+    staged_pending: bool,
+    /// Participants that have parked a question and cannot proceed until the user
+    /// answers (rc3 D22). The ring skips no-one on account of this — it HALTS when
+    /// it reaches one, which is what bounds the extra work at one lap. Cleared by
+    /// a user message, which is the answer.
+    /// rc3 **D35**: "a halt is a halt." One latch, not a set — a declared halt
+    /// stops the ring where it stands, whoever declared it. Cleared by the
+    /// user's next message, like the blocked-set it replaces.
+    halted_pending_user: bool,
+    /// Open approval gates, BY ID. While any is open the ring deals no turns.
+    /// Seeded from the durable rows so a respawned ring cannot deal turns under a
+    /// gate that parked before the restart.
+    ///
+    /// A set rather than the count it used to be (C2-2): the same gate reaches
+    /// this loop twice whenever its row lands before the ring starts and its
+    /// `GateOpened` arrives after, and a counter incremented twice could never be
+    /// cleared by the one resolve that follows — the session then deals nothing
+    /// for the life of the process. Keyed by `choice_id`, the second open is a
+    /// no-op and the resolve clears it.
+    open_gates: std::collections::HashSet<String>,
+    /// Whether that seed FAILED, which the set itself cannot say — an empty set
+    /// means "no gates are open" and an unreadable query means "I do not know",
+    /// and conflating them is what let a transient error at ring start deal turns
+    /// under a live gate. Cleared by the first successful re-read
+    /// ([`reseed_gates_if_needed`], run before every deal while it is set).
+    ///
+    /// **Kept beside [`open_gates`](Self::open_gates) rather than apart from it**
+    /// — the two are one concept the type system cannot express in one field, and
+    /// they were documented as one paragraph while living as two separate locals.
+    /// Neither is readable without the other: a caller that reads the set and not
+    /// this flag is reading "no gates" from "I could not tell".
+    gate_seed_failed: bool,
+}
+
 /// Run the turn sequencer for one session.
 ///
 /// Returns when `rx` closes — i.e. when the last sender is dropped, which is
@@ -1241,95 +1356,13 @@ pub enum SequencerCommand {
 /// belongs with the control struct that wires this into a session.
 pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<SequencerCommand>) {
     debug!(session = %deps.session_id, "sequencer: started");
-    // The turn in flight. `None` is "the cycle has not started", which is also
-    // what `next_active_participant` reads as "reset to the front".
-    let mut holder: Option<Participant> = None;
-    // Which turn that is. Bumped by every ring step, so a completion minted
-    // before the step cannot be mistaken for one minted after it — including
-    // when the step lands on the same participant. See `TurnComplete`.
-    let mut epoch: u64 = 0;
-    // Commands a drain took off `rx` without acting on them. Drained BEFORE
-    // `recv`, so arrival order is preserved end to end.
-    let mut deferred: VecDeque<SequencerCommand> = VecDeque::new();
-    // Is the cycle paused? A LATCH, not a counter — see `SequencerCommand::Pause`
-    // for what that costs. Deliberately NOT `holder`/`epoch`: a pause holds the
-    // turn in flight, it does not end one.
-    let mut paused = false;
-    // Commands that arrived while paused, in arrival order. A second queue
-    // rather than `deferred`, which is popped before `recv` and would therefore
-    // spin: pop, re-hold, pop. Replayed by `Resume`.
-    let mut held: VecDeque<SequencerCommand> = VecDeque::new();
-    // Per-participant repetition state for spin detection. In the loop's frame
-    // rather than storage: it describes THIS cycle, and a cycle that ends should
-    // not leave a streak behind for the next one to inherit. Cleared outright by
-    // a user message, which is the router's convergence reset in the ring model.
-    let mut spin: HashMap<i64, SpinState> = HashMap::new();
-    // Completed laps of the ring in the CURRENT uninterrupted stretch — the
-    // round cap's counter. In the loop's frame for the same reason `spin` is,
-    // and reset the same way: [`advance_turn`] zeroes it whenever it steps to
-    // the front of the rotation, which is where a user message lands.
-    //
-    // **Per stretch, not per session, and that is load-bearing rather than a
-    // convenience.** It is the unit D2's measurement is in — 3,561 UNINTERRUPTED
-    // stretches — so a lifetime counter would be capping something nobody
-    // measured. It is also what keeps the halt releasable: the cap's own halt
-    // yields to the user, and a counter that survived their reply would re-fire
-    // on the very next lap and wedge the session shut instead of backstopping
-    // it. `a_user_message_starts_the_lap_count_over` is that case.
-    let mut laps: u32 = 0;
-    // Who the user has summoned, and where the rotation was when they did
-    // (rc3 D17). In the loop's frame for the same reason `spin` and `laps` are:
-    // it describes THIS stretch, and a queue that outlived one would hand out a
-    // turn nobody asked for.
-    let mut summons = Summons::default();
-    // Has any participant done anything but PASS since the current lap began
-    // (rc3 **D27**)? A lap of nothing but passes is a lap in which nobody had
-    // anything to say, and dealing another asks the same question again at the
-    // price of a full-context model call per participant.
-    //
-    // A `Done` counts as something: it is a participant declaring it is
-    // finished, which the consensus tally acts on. Only a pass is the absence of
-    // an answer.
-    //
-    // Measured in `s-8ac0d2d0`: after boot completed with no task yet given, the
-    // ring dealt passes for 77 seconds — 23 provider calls carrying ~240 KB
-    // each — to produce the string "(passed — nothing to add this round)". The
-    // only floor was the 500-lap round cap, which at ~13s a turn is over five
-    // hours. The user stopped it by hand, which is the one thing a backstop is
-    // supposed to make unnecessary.
-    let mut spoke_this_lap = false;
-    // The Stage toggle's flag (2026-08-15): a user response is staged in
-    // AppState and delivery is owed at the next turn boundary. The boundary
-    // PARKS instead of dealing and emits `StagedDeliveryDue`; the delivery
-    // then arrives as an ordinary `UserMessage` milliseconds later, so a
-    // staged send lands exactly like a typed one — never mid-turn, never
-    // superseding the holder.
-    let mut staged_pending = false;
-    // Participants that have parked a question and cannot proceed until the user
-    // answers (rc3 D22). The ring skips no-one on account of this — it HALTS when
-    // it reaches one, which is what bounds the extra work at one lap. Cleared by
-    // a user message, which is the answer.
-    // rc3 **D35**: "a halt is a halt." One latch, not a set — a declared halt
-    // stops the ring where it stands, whoever declared it. Cleared by the
-    // user's next message, like the blocked-set it replaces.
-    let mut halted_pending_user = false;
-    // Open approval gates, BY ID. While any is open the ring deals no turns.
-    // Seeded from the durable rows so a respawned ring cannot deal turns under a
-    // gate that parked before the restart.
-    //
-    // A set rather than the count it used to be (C2-2): the same gate reaches
-    // this loop twice whenever its row lands before the ring starts and its
-    // `GateOpened` arrives after, and a counter incremented twice could never be
-    // cleared by the one resolve that follows — the session then deals nothing
-    // for the life of the process. Keyed by `choice_id`, the second open is a
-    // no-op and the resolve clears it.
-    // Whether that seed FAILED, which the set itself cannot say — an empty set
-    // means "no gates are open" and an unreadable query means "I do not know",
-    // and conflating them is what let a transient error at ring start deal turns
-    // under a live gate. Cleared by the first successful re-read
-    // ([`reseed_gates_if_needed`], run before every deal while it is set).
+    // The gate latch and its did-the-seed-fail flag are built TOGETHER, as one
+    // value, because neither is readable without the other — see
+    // [`RingState::gate_seed_failed`]. Constructing the struct once rather than
+    // `Default` + field assignment is also what keeps
+    // `clippy::field_reassign_with_default` quiet without an `#[allow]`.
     let mut gate_seed_failed = false;
-    let mut open_gates: std::collections::HashSet<String> = match deps
+    let open_gates: std::collections::HashSet<String> = match deps
         .storage
         .pending_gate_ids(&deps.session_id)
         .await
@@ -1359,15 +1392,20 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
             std::collections::HashSet::new()
         }
     };
-    if !open_gates.is_empty() {
+    let mut state = RingState {
+        open_gates,
+        gate_seed_failed,
+        ..Default::default()
+    };
+    if !state.open_gates.is_empty() {
         tracing::info!(
             session = %deps.session_id,
-            open_gates = open_gates.len(),
+            open_gates = state.open_gates.len(),
             "sequencer: started with approval gate(s) already pending; dealing no turns until they resolve"
         );
     }
     loop {
-        let cmd = match deferred.pop_front() {
+        let cmd = match state.deferred.pop_front() {
             Some(cmd) => cmd,
             None => match rx.recv().await {
                 // **The steer releases the pause, and it is the release the rest
@@ -1388,8 +1426,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // loop off the DEFERRED queue was read earlier and must not
                 // release a pause that arrived after it: it falls through to the
                 // gate below and is held like anything else.
-                Some(cmd @ SequencerCommand::UserMessage { .. }) if paused => {
-                    paused = false;
+                Some(cmd @ SequencerCommand::UserMessage { .. }) if state.paused => {
+                    state.paused = false;
                     // The steer takes its place at the END of the held queue, so
                     // everything the pause caught ahead of it — a park, a
                     // completion, a join — is applied first and in arrival order.
@@ -1401,8 +1439,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     // carries the user's mentions (D17), and minting a
                     // replacement here would release the pause while silently
                     // dropping who they summoned.
-                    held.push_back(cmd);
-                    let replayed = release_held(&mut held, &mut deferred);
+                    state.held.push_back(cmd);
+                    let replayed = release_held(&mut state.held, &mut state.deferred);
                     debug!(
                         session = %deps.session_id,
                         replayed,
@@ -1429,13 +1467,13 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
         // followed by a DELIVERY, and splitting the two would reorder a join
         // against a completion that arrived behind it. Nothing reads `inputs`
         // while paused, so waiting costs nothing.
-        if paused && !matches!(cmd, SequencerCommand::Pause | SequencerCommand::Resume) {
+        if state.paused && !matches!(cmd, SequencerCommand::Pause | SequencerCommand::Resume) {
             debug!(
                 session = %deps.session_id,
-                held = held.len() + 1,
+                held = state.held.len() + 1,
                 "sequencer: the cycle is paused; holding this command for the resume"
             );
-            held.push_back(cmd);
+            state.held.push_back(cmd);
             continue;
         }
         match cmd {
@@ -1463,8 +1501,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // the epochs senders will carry, so "well-formed" is an
                 // assumption about code that is not written yet, and this is the
                 // cheap half of the guard to keep.
-                let live = completed == epoch
-                    && holder.as_ref().is_some_and(|h| h.id == participant_id);
+                let live = completed == state.epoch
+                    && state.holder.as_ref().is_some_and(|h| h.id == participant_id);
                 // A DISCARDED completion was silent, which made a stalled ring
                 // indistinguishable from an idle one from the outside: the cycle
                 // simply stops and nothing anywhere says why. Discarding is
@@ -1477,8 +1515,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         session = %deps.session_id,
                         participant_id,
                         carried_epoch = completed,
-                        live_epoch = epoch,
-                        holder = ?holder.as_ref().map(|h| h.id),
+                        live_epoch = state.epoch,
+                        holder = ?state.holder.as_ref().map(|h| h.id),
                         "sequencer: completion discarded — the ring did NOT step"
                     );
                 }
@@ -1493,7 +1531,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     // catch a converging session and pre-empt the arrival the
                     // tally exists to reach.
                     if !matches!(ending, TurnEnding::Passed) {
-                        spoke_this_lap = true;
+                        state.spoke_this_lap = true;
                     }
                     // The vote is recorded and consensus asked BEFORE the ring
                     // is stepped: arriving means waking nobody, so a step taken
@@ -1502,7 +1540,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     // about a turn that no longer exists — counting it would
                     // let a discarded completion do the one thing discarding it
                     // was meant to prevent.
-                    if halted_on_consensus(&deps, &mut holder, &mut epoch, participant_id, ending)
+                    if halted_on_consensus(&deps, &mut state.holder, &mut state.epoch, participant_id, ending)
                         .await
                     {
                         // Consensus is a stop, and every stop is a HALT
@@ -1523,8 +1561,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         // response pending: deliver it now — it is the
                         // user's queued next message, and a yielded ring is
                         // exactly the boundary it was waiting for.
-                        if staged_pending {
-                            staged_pending = false;
+                        if state.staged_pending {
+                            state.staged_pending = false;
                             if let Some(bridge) = deps.bridge.as_ref() {
                                 bridge.notify_staged_delivery_due(&deps.session_id);
                             }
@@ -1552,7 +1590,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         // `a_participant_that_passes_every_round_never_trips_spin_detection`
                         // is that case.
                         if ending.is_substantive()
-                            && spinning(&deps, &mut spin, participant_id).await
+                            && spinning(&deps, &mut state.spin, participant_id).await
                         {
                             // The router BROKE THE VOLLEY and unlocked input. In
                             // a ring that is a halt — the same yield the parked
@@ -1576,8 +1614,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                             // declared just below via the bridge, closing the
                             // "halted cycle with no on-screen reason" gap this
                             // comment used to end on.
-                            let streak = spin.get(&participant_id).map_or(0, |s| s.streak);
-                            halt(&deps, &mut holder, &mut epoch).await;
+                            let streak = state.spin.get(&participant_id).map_or(0, |s| s.streak);
+                            halt(&deps, &mut state.holder, &mut state.epoch).await;
                             warn!(
                                 session = %deps.session_id,
                                 participant_id,
@@ -1615,7 +1653,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                                     )
                                     .await;
                             }
-                        } else if staged_pending {
+                        } else if state.staged_pending {
                             // The boundary the Stage toggle was waiting for:
                             // PARK instead of dealing (the same yield a halt
                             // takes) and hand delivery to the app layer. The
@@ -1624,8 +1662,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                             // the staged send lands between turns, exactly
                             // like a typed one, and no holder's work is ever
                             // superseded by it.
-                            staged_pending = false;
-                            halt(&deps, &mut holder, &mut epoch).await;
+                            state.staged_pending = false;
+                            halt(&deps, &mut state.holder, &mut state.epoch).await;
                             debug!(
                                 session = %deps.session_id,
                                 "sequencer: staged response pending at the boundary; \
@@ -1635,19 +1673,19 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                                 bridge.notify_staged_delivery_due(&deps.session_id);
                             }
                         } else {
-                            reseed_gates_if_needed(&deps, &mut open_gates, &mut gate_seed_failed)
+                            reseed_gates_if_needed(&deps, &mut state.open_gates, &mut state.gate_seed_failed)
                                 .await;
                             advance_turn(
                                 &deps,
                                 &mut rx,
-                                &mut holder,
-                                &mut epoch,
-                                &mut deferred,
-                                &mut laps,
-                                &mut summons,
-                                halted_pending_user,
-                                open_gates.len(),
-                                &mut spoke_this_lap,
+                                &mut state.holder,
+                                &mut state.epoch,
+                                &mut state.deferred,
+                                &mut state.laps,
+                                &mut state.summons,
+                                state.halted_pending_user,
+                                state.open_gates.len(),
+                                &mut state.spoke_this_lap,
                                 false,
                             )
                             .await;
@@ -1658,8 +1696,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         session = %deps.session_id,
                         participant_id,
                         completed,
-                        epoch,
-                        holder = ?holder.as_ref().map(|h| h.id),
+                        state.epoch,
+                        holder = ?state.holder.as_ref().map(|h| h.id),
                         "sequencer: completion does not name the turn in flight; discarded"
                     );
                 }
@@ -1674,12 +1712,12 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // it pre-empts the ring step rather than replacing the rotation
                 // — see `Summons` for why the anchor is what makes that an
                 // insertion.
-                summons.queue.extend(mentions);
+                state.summons.queue.extend(mentions);
                 // The user spoke, so nobody is waiting on them any more (rc3
                 // D22). Cleared BEFORE the ring is stepped, or the restart would
                 // land on a participant this set still calls blocked and halt on
                 // the spot — the release re-halting itself.
-                halted_pending_user = false;
+                state.halted_pending_user = false;
                 // The user's own output is substantive, so it resets the tally —
                 // but the reset is NOT written here. It rides the restart itself,
                 // in `advance_turn`; see the comment there for why this arm is
@@ -1709,25 +1747,25 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // would mean threading this map through `advance_turn` to cover
                 // a path that does not exist yet. If a second restart path ever
                 // lands, this belongs next to the tally clear, not here.
-                spin.clear();
-                reseed_gates_if_needed(&deps, &mut open_gates, &mut gate_seed_failed).await;
+                state.spin.clear();
+                reseed_gates_if_needed(&deps, &mut state.open_gates, &mut state.gate_seed_failed).await;
                 advance_turn(
                     &deps,
                     &mut rx,
-                    &mut holder,
-                    &mut epoch,
-                    &mut deferred,
-                    &mut laps,
-                    &mut summons,
-                    halted_pending_user,
-                    open_gates.len(),
-                    &mut spoke_this_lap,
+                    &mut state.holder,
+                    &mut state.epoch,
+                    &mut state.deferred,
+                    &mut state.laps,
+                    &mut state.summons,
+                    state.halted_pending_user,
+                    state.open_gates.len(),
+                    &mut state.spoke_this_lap,
                     true,
                 )
                 .await;
             }
             SequencerCommand::MessageStaged => {
-                if holder.is_none() {
+                if state.holder.is_none() {
                     // No turn in flight — the ring is parked, yielded, or
                     // between deals. There is no boundary to wait for:
                     // deliver now, exactly as the Send an open box offers.
@@ -1739,7 +1777,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         bridge.notify_staged_delivery_due(&deps.session_id);
                     }
                 } else {
-                    staged_pending = true;
+                    state.staged_pending = true;
                     debug!(
                         session = %deps.session_id,
                         "sequencer: message staged; delivers at the next turn boundary"
@@ -1747,7 +1785,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 }
             }
             SequencerCommand::MessageUnstaged => {
-                staged_pending = false;
+                state.staged_pending = false;
             }
             SequencerCommand::ParticipantJoined {
                 participant_id,
@@ -1764,16 +1802,16 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // be delivered — that is the frozen cycle the module doc
                 // describes. It is deliverable now. The ring does not move and
                 // the epoch does not change: no turn ended, one finally started.
-                let dealt = match holder.as_ref().filter(|h| h.id == participant_id) {
+                let dealt = match state.holder.as_ref().filter(|h| h.id == participant_id) {
                     Some(to) => {
-                        deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut deferred).await
+                        deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut state.deferred).await
                     }
                     None => Dealt::Live,
                 };
                 match dealt {
                     Dealt::Live => {}
                     Dealt::CannotComplete(reason) => {
-                        unwind_wedged_turn(&deps, &mut holder, &mut epoch, reason).await
+                        unwind_wedged_turn(&deps, &mut state.holder, &mut state.epoch, reason).await
                     }
                     // **A first delivery, not a re-drain** — which is why this
                     // arm passes where the resume arm below does nothing. The
@@ -1784,7 +1822,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     // handles — reached through the documented recovery path —
                     // and leaving it here is the wedge, one arm over.
                     Dealt::NothingUnread => {
-                        pass_empty_turn(&deps, &holder, epoch, &mut deferred).await
+                        pass_empty_turn(&deps, &state.holder, state.epoch, &mut state.deferred).await
                     }
                 }
             }
@@ -1801,13 +1839,13 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // means still working."* (D22's original defect — a first-turn
                 // park making peers unreachable — cannot come back this way:
                 // an ordinary QUESTION no longer sends this command at all.)
-                halted_pending_user = true;
+                state.halted_pending_user = true;
                 // Only the HOLDER parking ends the turn in flight. A halt
                 // declared by a non-holder — a tool call still live after its
                 // turn was superseded — must not cut the holder's turn (Pause
                 // is the only interrupt); the latch stops the NEXT deal, which
                 // is the halt taking effect at the boundary.
-                let ends_a_turn = holder
+                let ends_a_turn = state.holder
                     .as_ref()
                     .is_some_and(|h| Some(h.id) == participant_id);
                 debug!(
@@ -1817,59 +1855,59 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     "sequencer: a halt was declared; the ring stops where it stands"
                 );
                 if ends_a_turn {
-                    reseed_gates_if_needed(&deps, &mut open_gates, &mut gate_seed_failed).await;
+                    reseed_gates_if_needed(&deps, &mut state.open_gates, &mut state.gate_seed_failed).await;
                     advance_turn(
                         &deps,
                         &mut rx,
-                        &mut holder,
-                        &mut epoch,
-                        &mut deferred,
-                        &mut laps,
-                        &mut summons,
-                        halted_pending_user,
-                        open_gates.len(),
-                        &mut spoke_this_lap,
+                        &mut state.holder,
+                        &mut state.epoch,
+                        &mut state.deferred,
+                        &mut state.laps,
+                        &mut state.summons,
+                        state.halted_pending_user,
+                        state.open_gates.len(),
+                        &mut state.spoke_this_lap,
                         false,
                     )
                     .await;
-                } else if holder.is_none() {
+                } else if state.holder.is_none() {
                     // Nothing in flight: halt outright so the epoch moves and a
                     // straggler cannot bind the retired turn.
-                    halt(&deps, &mut holder, &mut epoch).await;
+                    halt(&deps, &mut state.holder, &mut state.epoch).await;
                 }
                 // A staged response delivers AS THE RELEASE: the halt asked
                 // for the user's next message and one is already queued. The
                 // delivery clears the halt exactly as a typed answer would.
-                if staged_pending {
-                    staged_pending = false;
+                if state.staged_pending {
+                    state.staged_pending = false;
                     if let Some(bridge) = deps.bridge.as_ref() {
                         bridge.notify_staged_delivery_due(&deps.session_id);
                     }
                 }
             }
             SequencerCommand::GateOpened { choice_id } => {
-                open_gates.insert(choice_id);
+                state.open_gates.insert(choice_id);
                 debug!(
                     session = %deps.session_id,
-                    open_gates = open_gates.len(),
+                    open_gates = state.open_gates.len(),
                     "sequencer: an approval gate opened; the session halts until it resolves"
                 );
                 // The asker is usually mid-turn, blocked inside the gated tool
                 // call — its turn stays live. With nothing in flight, move the
                 // epoch now so a straggler cannot bind the retired turn while
                 // the gate holds the ring.
-                if holder.is_none() {
-                    halt(&deps, &mut holder, &mut epoch).await;
+                if state.holder.is_none() {
+                    halt(&deps, &mut state.holder, &mut state.epoch).await;
                 }
             }
             SequencerCommand::GateResolved { choice_id } => {
                 // `remove` rather than a decrement: a resolve for a gate this
                 // ring never saw open is a no-op instead of clearing somebody
                 // else's latch.
-                open_gates.remove(&choice_id);
+                state.open_gates.remove(&choice_id);
                 debug!(
                     session = %deps.session_id,
-                    open_gates = open_gates.len(),
+                    open_gates = state.open_gates.len(),
                     "sequencer: an approval gate resolved"
                 );
                 // Deliberately deals nothing. The wake is the asker's own
@@ -1888,15 +1926,15 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 //
                 // Idempotent. A second pause latches an already-latched flag,
                 // which is what makes `Resume` a release rather than a decrement.
-                paused = true;
+                state.paused = true;
                 debug!(
                     session = %deps.session_id,
-                    holder = ?holder.as_ref().map(|h| h.id),
+                    holder = ?state.holder.as_ref().map(|h| h.id),
                     "sequencer: the cycle is paused; no further turns are handed out"
                 );
             }
             SequencerCommand::Resume => {
-                paused = false;
+                state.paused = false;
                 // **The replay goes on FIRST, ahead of anything the delivery
                 // below defers.** That delivery reads commands — it runs under
                 // the same select every drain does — so a pause arriving during
@@ -1909,7 +1947,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 //
                 // Popped from the back onto the front, which restores arrival
                 // order.
-                let replayed = release_held(&mut held, &mut deferred);
+                let replayed = release_held(&mut state.held, &mut state.deferred);
                 // Finish the delivery the pause cut short. Not a new turn — the
                 // ring does not move and the epoch does not change; this is the
                 // turn the pause interrupted, being handed the rest of what its
@@ -1926,16 +1964,16 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // what goes out is everything unread AS OF THE RESUME, and each
                 // row exactly once: `commit_delivery` moved the cursor past the
                 // prefix that landed and it never rewinds.
-                let dealt = match holder.as_ref() {
+                let dealt = match state.holder.as_ref() {
                     Some(to) => {
-                        deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut deferred).await
+                        deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut state.deferred).await
                     }
                     None => Dealt::Live,
                 };
                 match dealt {
                     Dealt::Live => {}
                     Dealt::CannotComplete(reason) => {
-                        unwind_wedged_turn(&deps, &mut holder, &mut epoch, reason).await
+                        unwind_wedged_turn(&deps, &mut state.holder, &mut state.epoch, reason).await
                     }
                     // Re-drains, not deals: the turn was already running, so an
                     // empty page here is the backlog being finished rather than
@@ -1944,7 +1982,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 }
                 debug!(
                     session = %deps.session_id,
-                    holder = ?holder.as_ref().map(|h| h.id),
+                    holder = ?state.holder.as_ref().map(|h| h.id),
                     replayed,
                     "sequencer: the cycle resumes"
                 );
