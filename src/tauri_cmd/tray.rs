@@ -283,6 +283,56 @@ pub async fn discard_choice(
 mod tests {
     use super::*;
 
+    /// A tray row with the given `asked_at`, pending and gated — the only shape
+    /// `with_staleness` acts on.
+    fn pending_gate_asked_at(asked_at: &str) -> SessionTrayView {
+        SessionTrayView {
+            id: 1,
+            session_id: "s1".into(),
+            choice_id: "c1".into(),
+            agent: "hands".into(),
+            kind: "gate".into(),
+            prompt: "run it?".into(),
+            options: vec!["Approve".into(), "Reject".into()],
+            status: "pending".into(),
+            picked_option: None,
+            command_text: Some("git push".into()),
+            asked_at: asked_at.into(),
+            answered_at: None,
+            stale: false,
+        }
+    }
+
+    /// **An `asked_at` that cannot be parsed marks the gate STALE**, so the user
+    /// gets the confirm step instead of one-click approve.
+    ///
+    /// Found by mutation during the round-3 audit, and it is the reason this
+    /// test exists at all: the predicate is
+    /// `gate_age_secs(..).is_none_or(|a| a > MAX)`, and swapping `is_none_or`
+    /// for `is_some_and` left the whole suite green. Those two differ on
+    /// **exactly one input** — the unparseable timestamp — so every other case
+    /// was pinned and this one was pinned by nothing. Which way it fails is a
+    /// safety choice (a row whose age is unknowable is not a row to wave
+    /// through), and a safety choice with no test is a comment.
+    ///
+    /// The three rows below are one per branch of that predicate, so a flip in
+    /// either direction goes red rather than only the unparseable one.
+    #[test]
+    fn a_gate_whose_age_cannot_be_read_is_stale() {
+        assert!(
+            pending_gate_asked_at("not a timestamp").with_staleness().stale,
+            "an unparseable asked_at must fail towards the confirm step"
+        );
+        assert!(
+            pending_gate_asked_at("2020-01-01T00:00:00Z").with_staleness().stale,
+            "an ancient gate is stale"
+        );
+        assert!(
+            !pending_gate_asked_at(&crate::storage::now_utc()).with_staleness().stale,
+            "a gate parked just now is not stale"
+        );
+    }
+
     #[tokio::test]
     async fn discard_drops_the_row_without_answering_the_agent() {
         // The user's trash button must not look like an answer. A parked

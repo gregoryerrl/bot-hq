@@ -75,9 +75,17 @@ stated reason for leaving the other 15 was that they never had. One table, 92
 rows, versus round 2's "rebuild 13 tables"; recorded with its cost rather than
 shipped mid-refactor. The frontend is still spot-read, not cleared.
 
-Suites: **1174** lib + 61 (59 integration + 2 doc), down one from round 2's 62 —
-that one is F7's removed test, and it is the whole delta. **392** frontend; `tsc`
-clean; all five gates run in order.
+**Verifying the round's own work found the last one.** F11 looked like a
+formatting change — clippy's own `is_none_or` suggestion in the tray staleness
+check. Mutating it back in Verify left the suite **completely green**, because
+`is_none_or` and `is_some_and` differ on exactly one input: an `asked_at` that
+does not parse. That branch decides whether a gated command of *unknowable age*
+gets one-click approval or a confirm step, and nothing tested it. A safety choice
+with no test is a comment. Now pinned, by a test that is itself mutation-verified.
+
+Suites: **1236** total (1174 lib + 59 integration + 2 doc + the new one), the same
+count as round 2 by coincidence — F7 removed a test with the writer it pinned and
+F12 added one. **392** frontend; `tsc` clean; all five gates run in order.
 
 ## 2026-08-16 (round 2, later) — the three findings the report left to the user
 

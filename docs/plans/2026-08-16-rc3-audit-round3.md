@@ -10,7 +10,7 @@ session.
 
 | gate | at `710b8be` | at the end |
 |---|---|---|
-| `cargo test` | 1174 lib + 60 integration + 2 doc = **1236** | **1235** — green; the one loss is F7's removed test |
+| `cargo test` | 1174 lib + 60 integration + 2 doc = **1236** | **1236** — green; F7 removed one test, F12 added one |
 | `npx vitest run` | 392 in 45 files | unchanged |
 | `npx tsc --noEmit` | clean | clean |
 | clippy (`^src/.*: warning:`) | **10** | **4** |
@@ -232,6 +232,38 @@ call site — not that it was a tuple.
 that an **unparseable timestamp reads as stale**, which is the deliberate side to
 fail on — and three doc-list warnings fixed by one blank `//!` line so the plugin
 catalog's closing paragraph stops parsing as a list continuation.
+
+### F12 · A safety choice pinned by nothing — found by verifying F11 · MEASURED · FIXED
+
+The one finding this round produced by **checking its own work**, and the one
+worth copying.
+
+F11 looked like a formatting change. Mutating it back in Verify —
+`is_none_or(|a| a > MAX)` → `is_some_and(|a| a > MAX)` — left the suite
+**completely green: 1174 passed, 0 failed.**
+
+Those two predicates differ on **exactly one input**: an `asked_at` that does not
+parse. Every other case was pinned; the one that decides what happens when a
+gated command's age is *unknowable* was pinned by nothing. And it is not a
+detail — `stale` is what makes an approve require a confirm step, so the untested
+branch is the one that decides whether a row of unknown age gets waved through
+with one click.
+
+The comment F11 added said which way it fails and why. **A safety choice with no
+test is a comment**, and round 2 had already written the general form of this —
+"say what a guard proves, in the guard" — one level up.
+
+Fixed with `a_gate_whose_age_cannot_be_read_is_stale`, three rows for the three
+branches, and the test is itself mutation-verified: red under exactly the flip
+that found the gap, with its own message, green on restore.
+
+**The transferable part is the order.** The gap was invisible while reading the
+predicate — both spellings read as correct — and invisible to clippy, which
+suggested the change. It appeared only when a *cut* was made. Round 2 learned
+"unnamed ≠ unpinned" the hard way, by filing four functions as unpinned that a cut
+proved were fine. This is the same rule paying out in the other direction:
+**a cut is the only pinning measurement, and it is worth making on your own
+changes, not only on the code you are auditing.**
 
 ---
 
