@@ -62,7 +62,7 @@ From the 2026-07-27 archive study — the recurring failure was confident claims
 - **Existence claims need a filesystem/tool check, not a document.** \"PLAN.md says X is unbuilt\" is a claim about PLAN.md, not about X — a stale roadmap corroborating a peer's guess reads like verification and isn't (the Cognotify incident: two unverified sources agreed, both wrong). Before asserting what exists, `ls`/`Read`/`Grep` the actual thing; when citing a doc, carry its age.
 - **State claims need same-turn tool output.** Never report UI state, git state, a commit, a merge, a test run, or the user's intent unless a tool result IN THIS TURN shows it. \"I could not verify X\" is a first-class, respectable answer — a guess shaped like an observation is the worst failure mode this system has recorded (five fabricated assertions in one archived session, three shaped like user authorization).
 - **A peer's summary of a source is not the source.** Verify citations yourself before acting on them, and before rebutting them — both directions failed in the archive (a correct 1M-context finding was rebutted for 8 hours; a fabricated approval was nearly executed).
-- **Third-party signals are dated claims, not facts.** An issue assignee, a status doc, a roadmap row — each was true when written and decays silently (2026-07-10: a stale GitHub assignment plus a stale auth-status doc sent two sessions building P2 while the team expected P1). When recorded signals contradict a verbal handoff or each other, ask the teammate/user instead of resolving the conflict by inference — the duo drafted exactly the right disambiguating question that day, then chose not to send it.
+- **Third-party signals are dated claims, not facts.** An issue assignee, a status doc, a roadmap row — each was true when written and decays silently (2026-07-10: a stale GitHub assignment plus a stale auth-status doc sent two sessions building P2 while the team expected P1). When recorded signals contradict a verbal handoff or each other, ask the teammate/user instead of resolving the conflict by inference — the session drafted exactly the right disambiguating question that day, then chose not to send it.
 
 ## UI signaling (MCP)
 
@@ -486,6 +486,31 @@ mod tests {
             GENERAL_RULES.contains("Re-verify state claims before an outbound report ships"),
             "outward-truthfulness section must require the pre-send re-check"
         );
+    }
+
+    /// **No agent-count vocabulary in the prose every agent is handed.**
+    ///
+    /// The house rule is that bot-hq is an agent harness, described by what it
+    /// does and never by how many agents are in it — and this is the layer where
+    /// that rule actually shapes behaviour, because agents learn house
+    /// vocabulary from this text. The word survived here, in an incidental
+    /// narrative aside, long after it was swept from the docs: `general_rules`
+    /// is compiled straight into every system prompt, so it shipped in every
+    /// session (EYES found it in its own prompt, 2026-08-16).
+    ///
+    /// The comment layer of this file is deliberately NOT covered — a `//` above
+    /// the const is history, and rewriting history to match current vocabulary
+    /// is how a record stops being one.
+    #[test]
+    fn the_injected_layer_carries_no_agent_count_vocabulary() {
+        for word in ["the duo", "duo's", "both agents", "either agent"] {
+            assert!(
+                !GENERAL_RULES.to_lowercase().contains(word),
+                "GENERAL_RULES says `{word}` — that is prose handed to every \
+                 participant in every session, and it teaches a two-agent shape \
+                 to a session that may not have one"
+            );
+        }
     }
 
     #[test]
