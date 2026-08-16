@@ -2009,11 +2009,27 @@ async fn advance_turn(
     // user's message BEFORE this runs (the release path), so a release deals
     // normally; an open gate holds even through a user message — the answer to
     // the gate is what lifts it, and the message waits in the channel.
-    if halted_pending_user || open_gates > 0 {
+    // **And the pause LATCH, read from the tracker rather than from this task's
+    // own flag** (EYES, 2026-08-16). `notify_ring_pause` is a `try_send` on a
+    // 256-slot channel: a full queue drops the Pause with a warning and the
+    // session silently reverts to dealing turns under a ⏸ banner. The drop is
+    // not independent of the trigger, which is what makes it worth a second
+    // reader — the queue backs up when the ring task is BLOCKED (inside
+    // `deliver_batch` on a full stdin, say), and a stuck session is exactly when
+    // a user reaches for Stop.
+    //
+    // Safe as a backstop rather than a second mechanism: `cancel_session_turn`
+    // sets this latch BEFORE it notifies, and `broadcast` clears it BEFORE it
+    // releases the ring, so on both edges the latch is authoritative and the
+    // command is the fast path. When the command DID arrive, the pause gate up
+    // in the read loop holds everything and this is never reached.
+    let paused_latch = deps.activity.as_ref().is_some_and(|a| a.is_paused());
+    if halted_pending_user || open_gates > 0 || paused_latch {
         debug!(
             session = %deps.session_id,
             halted_pending_user,
             open_gates,
+            paused_latch,
             "sequencer: dealing is parked (halt declared or approval pending); the cycle yields"
         );
         halt(deps, holder, epoch).await;
@@ -4363,6 +4379,60 @@ mod tests {
             SignalingBridge::new(),
             slugs.iter().map(|s| s.to_string()).collect(),
         )
+    }
+
+    /// **A DROPPED Pause still stops the ring** (EYES, 2026-08-16).
+    ///
+    /// `notify_ring_pause` is a `try_send` on a bounded channel, and its failure
+    /// is correlated with its trigger: the queue backs up when the ring task is
+    /// blocked, and a blocked session is when a user reaches for Stop. A dropped
+    /// command used to mean the session quietly went back to dealing turns under
+    /// a ⏸ banner — the pre-fix behaviour, restored by a warning nobody reads.
+    ///
+    /// So the tracker's latch is read as well, and it is the authoritative one:
+    /// `cancel_session_turn` sets it BEFORE it notifies. This drives exactly
+    /// that shape — the latch set, the command never sent — and asserts the deal
+    /// does not happen anyway.
+    #[tokio::test]
+    async fn a_pause_the_ring_never_heard_still_stops_the_next_deal() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let act = tracker(&["a", "b"]).await;
+        deps.activity = Some(Arc::clone(&act));
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"], "A holds the turn");
+
+        // Stop: the latch is set — and the command is NOT sent, which is what a
+        // full queue amounts to.
+        act.set_paused(true);
+        post(&storage, "user", None, "for b").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: seats[0].id,
+                epoch: 1,
+                ending: TurnEnding::SPOKE,
+            },
+        )
+        .await;
+
+        seats[1].quiet().await;
+        seats[0].quiet().await;
+
+        // And the latch releases the same way a real pause does: `broadcast`
+        // clears it before it releases the ring, so the user's message deals.
+        act.set_paused(false);
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["for b"],
+            "clearing the latch must let the cycle resume"
+        );
+        drop(tx);
+        assert!(exited(task).await);
     }
 
     /// **Stop stops the RING, not just the banner** (B1-F8, wired 2026-08-16 on
