@@ -216,15 +216,6 @@ pub enum SignalingEvent {
         brian_busy: bool,
         rain_busy: bool,
     },
-    /// The per-session peer-forward router's liveness changed. `alive=false` is
-    /// emitted by the watchdog when the router task has died while agents are
-    /// still live (forwarding is down); `alive=true` on (re)spawn. The UI shows a
-    /// router-health dot. Carried as a bool — the signaling layer stays decoupled
-    /// from core.
-    RouterHealth {
-        session_id: String,
-        alive: bool,
-    },
     /// Session-level attention flag from the idle-unflagged watchdog.
     /// `state=Some("idle_unflagged")` when the session sat Idle past grace with
     /// no tray flag parked after the first user prompt; `state=None` when the
@@ -404,16 +395,11 @@ pub struct SignalingBridge {
     /// and not a guess about what a role MEANS. Empty (or unregistered) = this
     /// session has no reviewer, which is exactly what a solo session was.
     session_reviewers: std::sync::Mutex<HashMap<String, Vec<String>>>,
-    /// Latest peer-forward-router liveness per session_id (true = alive). Written
-    /// by `notify_router_health`; read by `get_session_runtime` to seed the UI
-    /// router-health dot on mount (the event fires only on change, like
-    /// `agent_health`). Sync `Mutex` — `notify_router_health` is sync.
-    router_health: std::sync::Mutex<HashMap<String, bool>>,
     /// Latest idle-unflagged attention state per session_id (value = the
     /// attention kind, e.g. "idle_unflagged"; absent = clear). Written by
     /// `notify_session_attention`; read by `get_session_runtime` to seed the
     /// UI chip on mount (the event fires only on change, mirroring
-    /// `router_health`). Sync `Mutex` — the notify path is sync.
+    /// `agent_health`). Sync `Mutex` — the notify path is sync.
     session_attention: std::sync::Mutex<HashMap<String, String>>,
     /// `session_id:agent` → the secret that agent's own mcp-config carries
     /// (C1-1). Minted per spawn, never persisted: it is only meaningful while
@@ -462,7 +448,6 @@ impl SignalingBridge {
             reviewer_override: std::sync::Mutex::new(HashMap::new()),
             pending_override_requests: std::sync::Mutex::new(HashMap::new()),
             session_reviewers: std::sync::Mutex::new(HashMap::new()),
-            router_health: std::sync::Mutex::new(HashMap::new()),
             session_attention: std::sync::Mutex::new(HashMap::new()),
             turn_passes: std::sync::Mutex::new(HashMap::new()),
             mcp_tokens: std::sync::Mutex::new(HashMap::new()),
@@ -865,12 +850,6 @@ impl SignalingBridge {
             .unwrap_or_else(|p| p.into_inner())
             .retain(|(s, _), _| s != session_id);
         self.reviewer_override
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(session_id);
-        // router_health — std::Mutex (mirrors reviewer_override above); the
-        // forward-path `insert` is never otherwise paired with a remove.
-        self.router_health
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(session_id);
@@ -1379,33 +1358,10 @@ impl SignalingBridge {
             .is_some_and(|t| t.elapsed() <= within)
     }
 
-    /// Publish the peer-forward router's liveness change. Fire-and-forget; the UI
-    /// subscriber maps it to `session:router_health`. Caches the latest state so
-    /// `get_session_runtime` can seed the dot on a fresh mount.
-    pub fn notify_router_health(&self, session_id: String, alive: bool) {
-        self.router_health
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(session_id.clone(), alive);
-        let _ = self
-            .event_tx
-            .send(SignalingEvent::RouterHealth { session_id, alive });
-    }
-
-    /// Latest cached router liveness for a session, or `None` if never reported
-    /// (assume alive — the event fires only on change).
-    pub fn current_router_health(&self, session_id: &str) -> Option<bool> {
-        self.router_health
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(session_id)
-            .copied()
-    }
-
     /// Publish an idle-unflagged attention change. Deduped here (not at the
     /// caller): the watchdog re-evaluates every poll, so it calls this every
     /// 10s while the condition holds — only an actual transition reaches the
-    /// wire. `state=None` clears. Mirrors `notify_router_health`.
+    /// wire. `state=None` clears. Mirrors `notify_agent_health`.
     pub fn notify_session_attention(&self, session_id: String, state: Option<&str>) {
         {
             let mut map = self

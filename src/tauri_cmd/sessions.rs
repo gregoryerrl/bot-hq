@@ -798,9 +798,6 @@ pub struct SessionRuntime {
     /// Seeds the "needs direction" chip on mount; live updates arrive via
     /// `session:attention`.
     pub attention: Option<String>,
-    /// Peer-forward router liveness (duo only). `None` = solo, or never reported
-    /// (assume alive — the event fires only on change). Seeds the UI router dot.
-    pub router_alive: Option<bool>,
 }
 
 #[tauri::command]
@@ -824,7 +821,6 @@ pub async fn get_session_runtime(
             brian_health: slot(0).and_then(|s| core.bridge.current_agent_health(id, s)),
             rain_health: slot(1).and_then(|s| core.bridge.current_agent_health(id, s)),
             attention: core.bridge.current_session_attention(id),
-            router_alive: core.bridge.current_router_health(id),
         });
     }
     Ok(out)

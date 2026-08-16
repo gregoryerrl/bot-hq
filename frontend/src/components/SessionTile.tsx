@@ -5,7 +5,7 @@ import { formatRelative } from "../lib/time";
 import type { SessionInfo } from "../lib/bindings";
 import { SessionPhaseChip, phaseTintClasses } from "./SessionPhaseChip";
 import { useHealthStore, worstHealth } from "../stores/health";
-import { HealthDot, RouterHealthDot } from "./HealthDot";
+import { HealthDot } from "./HealthDot";
 import { authorColorClass } from "./authorColor";
 import { WarnIcon } from "./icons";
 import { authorLabel } from "../lib/participants";
@@ -38,7 +38,6 @@ function SessionTileImpl({
   // B2: session-level health dot (problem-only on the tile). Worst of the
   // session's agents.
   const health = useHealthStore((s) => s.bySession[session.id]);
-  const routerAlive = useHealthStore((s) => s.routerBySession[session.id]);
   // Idle-unflagged watchdog: the session sat idle past grace with no question
   // or halt parked — it probably needs direction.
   const attention = useHealthStore((s) => s.attentionBySession[session.id]);
@@ -100,7 +99,6 @@ function SessionTileImpl({
                 hideWhenHealthy
               />
             )}
-            {!closed && <RouterHealthDot alive={routerAlive} />}
             {!closed && attention === "idle_unflagged" && (
               <span
                 className="shrink-0 rounded border border-warning/50 bg-warning/15 px-1.5 py-0.5 font-label-caps text-label-caps text-warning"

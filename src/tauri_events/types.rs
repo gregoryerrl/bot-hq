@@ -183,18 +183,6 @@ impl SessionActivityEvent {
     pub const EVENT_NAME: &'static str = "session:activity";
 }
 
-/// Emitted when the per-session peer-forward router's liveness changes, so the UI
-/// can show a router-health dot. `alive=false` means the router task died while
-/// agents are still live (peer-forwarding is down).
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
-pub struct RouterHealthEvent {
-    pub session_id: String,
-    pub alive: bool,
-}
-
-impl RouterHealthEvent {
-    pub const EVENT_NAME: &'static str = "session:router_health";
-}
 
 /// Emitted when the idle-unflagged watchdog flips a session's attention state.
 /// `state=Some("idle_unflagged")` → show the "needs direction" chip;

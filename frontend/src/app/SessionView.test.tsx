@@ -152,7 +152,7 @@ function panel(name: string): HTMLElement {
 // seeded slot/slug key cannot leak into a test that assumes nothing reported.
 beforeEach(() => {
   useActivityStore.setState({ bySession: {}, busyBySession: {} });
-  useHealthStore.setState({ bySession: {}, routerBySession: {} });
+  useHealthStore.setState({ bySession: {} });
   useContextStore.setState({ bySession: {} });
   roster.rows = roster.default;
   promptCall.reply = {};

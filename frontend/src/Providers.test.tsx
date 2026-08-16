@@ -53,7 +53,6 @@ function runtimeRow(over: Record<string, unknown> = {}) {
     rain_busy: false,
     brian_health: "stalled",
     rain_health: "dead",
-    router_alive: null,
     attention: null,
     working: null,
     ...over,
@@ -78,7 +77,6 @@ describe("Providers — the slot-shaped runtime wire", () => {
     useActivityStore.setState({ bySession: {}, busyBySession: {} });
     useHealthStore.setState({
       bySession: {},
-      routerBySession: {},
       attentionBySession: {},
     });
   });

@@ -62,7 +62,6 @@ describe("seedRuntimeStores", () => {
   it("seeds activity for every row and health for non-null agents", () => {
     const setActivity = vi.fn();
     const setHealth = vi.fn();
-    const setRouterHealth = vi.fn();
     const rows: SessionRuntime[] = [
       {
         session_id: "s1",
@@ -71,7 +70,6 @@ describe("seedRuntimeStores", () => {
         rain_busy: false,
         brian_health: "running",
         rain_health: "retrying",
-        router_alive: false,
         attention: "idle_unflagged",
       },
       {
@@ -81,12 +79,11 @@ describe("seedRuntimeStores", () => {
         rain_busy: false,
         brian_health: "dead",
         rain_health: null,
-        router_alive: null,
         attention: null,
       },
     ];
 
-    seedRuntimeStores(rows, setActivity, setHealth, setRouterHealth);
+    seedRuntimeStores(rows, setActivity, setHealth);
 
     // The `brian_*` / `rain_*` field names are frozen wire naming TURN SLOTS 0
     // and 1 — `src/tauri_cmd/sessions.rs` fills them from
@@ -115,9 +112,6 @@ describe("seedRuntimeStores", () => {
       expect.anything(),
     );
     expect(setHealth).toHaveBeenCalledTimes(3);
-    // s1.router_alive is false → seeded; s2.router_alive is null → skipped.
-    expect(setRouterHealth).toHaveBeenCalledWith("s1", false);
-    expect(setRouterHealth).toHaveBeenCalledTimes(1);
   });
 
   it("seeds under keys the session header can actually resolve", () => {
@@ -136,7 +130,6 @@ describe("seedRuntimeStores", () => {
           rain_busy: false,
           brian_health: "stalled",
           rain_health: "dead",
-          router_alive: null,
           attention: null,
         },
       ],
@@ -158,10 +151,8 @@ describe("seedRuntimeStores", () => {
   it("is a no-op for an empty snapshot", () => {
     const setActivity = vi.fn();
     const setHealth = vi.fn();
-    const setRouterHealth = vi.fn();
-    seedRuntimeStores([], setActivity, setHealth, setRouterHealth);
+    seedRuntimeStores([], setActivity, setHealth);
     expect(setActivity).not.toHaveBeenCalled();
     expect(setHealth).not.toHaveBeenCalled();
-    expect(setRouterHealth).not.toHaveBeenCalled();
   });
 });

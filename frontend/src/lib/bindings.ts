@@ -2041,12 +2041,7 @@ brian_busy: boolean; rain_busy: boolean; brian_health: string | null; rain_healt
  * Seeds the "needs direction" chip on mount; live updates arrive via
  * `session:attention`.
  */
-attention: string | null; 
-/**
- * Peer-forward router liveness (duo only). `None` = solo, or never reported
- * (assume alive — the event fires only on change). Seeds the UI router dot.
- */
-router_alive: boolean | null }
+attention: string | null }
 /**
  * One durable `session_tray` row, projected for the session-view Tray tab.
  * Unlike the live in-memory pending view (`list_pending_choices`), this

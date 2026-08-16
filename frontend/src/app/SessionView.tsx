@@ -5,7 +5,7 @@ import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvok
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useHealthStore } from "../stores/health";
 import { useActivityStore } from "../stores/activity";
-import { HealthDot, RouterHealthDot } from "../components/HealthDot";
+import { HealthDot } from "../components/HealthDot";
 import { ContextMeter } from "../components/ContextMeter";
 import { useContextStore } from "../stores/context";
 import { useDragResize } from "../hooks/useDragResize";
@@ -247,7 +247,6 @@ export function SessionView() {
   const [dirtyCount, setDirtyCount] = useState(0);
   // B2: live agent health for this session (drives the header dots).
   const health = useHealthStore((s) => s.bySession[sessionId]);
-  const routerAlive = useHealthStore((s) => s.routerBySession[sessionId]);
   const attention = useHealthStore((s) => s.attentionBySession[sessionId]);
   const agentContext = useContextStore((s) => s.bySession[sessionId]);
   const activity = useActivityStore((s) => s.bySession[sessionId]);
@@ -531,14 +530,6 @@ export function SessionView() {
                 </span>
               </span>
             ))}
-            {participants.length > 1 && routerAlive === false && (
-              <>
-                <span className="mx-2 text-outline-variant">·</span>
-                <span className="text-error">
-                  router <RouterHealthDot alive={routerAlive} />
-                </span>
-              </>
-            )}
             {attention === "idle_unflagged" && (
               <>
                 <span className="mx-2 text-outline-variant">·</span>

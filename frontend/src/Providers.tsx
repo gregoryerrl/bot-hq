@@ -124,7 +124,6 @@ function GlobalEventSync() {
   const onModel = useCallback(() => invalidate(MODEL_KEYS), [invalidate]);
   const onFindings = useCallback(() => invalidate(FINDINGS_KEYS), [invalidate]);
   const setHealth = useHealthStore((s) => s.setHealth);
-  const setRouterHealth = useHealthStore((s) => s.setRouterHealth);
   const setAttention = useHealthStore((s) => s.setAttention);
   const clearHealth = useHealthStore((s) => s.clearSession);
   const setActivity = useActivityStore((s) => s.setActivity);
@@ -159,12 +158,6 @@ function GlobalEventSync() {
       setHealth(p.session_id, p.agent, p.health as AgentHealth);
     },
     [setHealth],
-  );
-  const onRouterHealth = useCallback(
-    (p: { session_id: string; alive: boolean }) => {
-      setRouterHealth(p.session_id, p.alive);
-    },
-    [setRouterHealth],
   );
   const onAttention = useCallback(
     (p: { session_id: string; state: string | null }) => {
@@ -226,7 +219,6 @@ function GlobalEventSync() {
   useTauriEvent("session:closed", onClose, [onClose]);
   useTauriEvent("session:agent_health", onHealth, [onHealth]);
   useTauriEvent("session:agent_context", onAgentContext, [onAgentContext]);
-  useTauriEvent("session:router_health", onRouterHealth, [onRouterHealth]);
   useTauriEvent("session:attention", onAttention, [onAttention]);
   useTauriEvent("session:activity", onActivity, [onActivity]);
   useTauriEvent("session:resync", onResync, [onResync]);
@@ -246,7 +238,6 @@ function GlobalEventSync() {
           rows,
           setActivity,
           setHealth,
-          setRouterHealth,
           setAttention,
         ),
       )
@@ -254,7 +245,7 @@ function GlobalEventSync() {
         // Best-effort: a failed backfill just leaves the stores to the live
         // events (the pre-fix behavior). Never block render.
       });
-  }, [setActivity, setHealth, setRouterHealth, setAttention]);
+  }, [setActivity, setHealth, setAttention]);
 
   return null;
 }

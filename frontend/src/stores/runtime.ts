@@ -15,7 +15,6 @@ export interface SessionRuntime {
   rain_busy: boolean;
   brian_health: string | null;
   rain_health: string | null;
-  router_alive: boolean | null;
   attention: string | null;
 }
 
@@ -58,7 +57,6 @@ export function seedRuntimeStores(
   rows: SessionRuntime[],
   setActivity: (id: string, a: SessionActivity, busy?: AgentBusy) => void,
   setHealth: (id: string, agent: string, h: AgentHealth) => void,
-  setRouterHealth: (id: string, alive: boolean) => void,
   setAttention?: (id: string, state: string | null) => void,
 ): void {
   for (const r of rows) {
@@ -71,9 +69,6 @@ export function seedRuntimeStores(
       setHealth(r.session_id, slotKey(0), r.brian_health as AgentHealth);
     if (r.rain_health)
       setHealth(r.session_id, slotKey(1), r.rain_health as AgentHealth);
-    // Null = solo / never reported → leave it (a missing entry reads as alive).
-    if (r.router_alive !== null && r.router_alive !== undefined)
-      setRouterHealth(r.session_id, r.router_alive);
     // Null = clear — pass it through so a stale pre-reload chip resets.
     if (setAttention) setAttention(r.session_id, r.attention ?? null);
   }
