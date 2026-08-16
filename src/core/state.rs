@@ -9,7 +9,7 @@ use crate::core::session::{
 };
 use crate::paths::Paths;
 use crate::signaling::{ExternalServer, SignalingBridge, SignalingEvent, SignalingServer};
-use crate::storage::{Author, MessageKind, PersistedMessage, Session, Storage};
+use crate::storage::{Author, MessageKind, Session, Storage};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -113,10 +113,6 @@ struct TrayWake {
     /// Lift the awaiting-user halt. Always — the user answered, and that stays
     /// true whatever happened to the row afterwards.
     clear_halt: bool,
-    /// Hold the receipt for the next `broadcast` (Send / Resume) instead of
-    /// delivering: the pause latch. A tray answer must not release a pause the
-    /// user deliberately set. Needs a receipt, since a receipt is the thing held.
-    stash: bool,
     /// Wake an idle ring so the answer is read (`user_responded`, the D28 single
     /// entry point). Needs a receipt — waking with nothing behind it hands out a
     /// turn over an empty backlog — and needs the ring NOT running: waking a
@@ -162,19 +158,6 @@ pub struct AppState {
     /// it, prepending a wire-only directive so the resumed agent verifies the
     /// workspace (lock files / partial writes) before acting on the new message.
     pending_reconcile: Mutex<HashSet<String>>,
-    /// Out-of-band wakes (answered tray questions) that arrived while the
-    /// session was PAUSED — an answer must not restart a paused duo, but it
-    /// must not be lost either. `resolve_choice` stashes the RECEIPT here
-    /// instead of waking stdin; the next `broadcast` (a user Send / Resume)
-    /// drains it to both agents after the user's message.
-    ///
-    /// Receipts rather than wire strings (B5 Task 2): `send_to_all` takes one,
-    /// and the row is already written by the time an answer is stashed. The
-    /// drain produces the same bytes the old code froze here — same body, same
-    /// envelope, both fixed at post time — but re-derives them from the row
-    /// instead of carrying a copy, so a held wake cannot drift from what the
-    /// chat shows.
-    pending_paused_wakes: Mutex<std::collections::HashMap<String, Vec<PersistedMessage>>>,
     /// The Stage toggle's content (2026-08-15): session_id → (text, staged
     /// tray picks), written when the user toggles Stage while the ring runs,
     /// taken by [`deliver_staged`](Self::deliver_staged) when the ring
@@ -213,7 +196,6 @@ impl AppState {
             app_handle: std::sync::OnceLock::new(),
             fs_watcher: std::sync::OnceLock::new(),
             pending_reconcile: Mutex::new(HashSet::new()),
-            pending_paused_wakes: Mutex::new(std::collections::HashMap::new()),
             staged_responses: Mutex::new(std::collections::HashMap::new()),
             terminals: Arc::new(crate::core::TerminalRegistry::new()),
             epilogue_in_flight: Mutex::new(HashSet::new()),
@@ -914,7 +896,6 @@ impl AppState {
         // then closed without a follow-up message would otherwise linger).
         self.pending_reconcile.lock().await.remove(id);
         // Same for wakes held during a pause — moot once the session closes.
-        self.pending_paused_wakes.lock().await.remove(id);
         // Worktree-isolated session: remove its worktree if (and only if) it
         // is clean. Never forced — a dirty worktree outlives the session so
         // uncommitted work is recoverable; the session branch always survives.
@@ -1186,13 +1167,6 @@ impl AppState {
         // below runs the duo normally (a Send while Paused = clarify/steer; the
         // Resume button routes here too, as a resume-notice broadcast).
         handle.activity.set_paused(false);
-        // Reset the L2 volley hard-cap: the user just spoke, so the consecutive
-        // peer-forward counter (`router::route_forward`) starts fresh. Deliberately
-        // here and not in `clear_awaiting` — `advance_phase` calls that too, and
-        // a phase self-advance is not a user message.
-        handle
-            .user_silent_forwards
-            .store(0, std::sync::atomic::Ordering::Release);
         let phase = handle.ipav.lock().await.current_phase;
         // Consume any queued post-cancel reconciliation directive for this
         // session (set by cancel_session_turn) — prepended wire-only so the
@@ -1250,21 +1224,6 @@ impl AppState {
         // always cleared; `broadcast_marks_nobody_busy` pins this loop deleted.
         self.bridge
             .notify_message_persisted(Arc::from(session_id), id);
-        // Release everything the pause held, BEHIND the user's message (their
-        // steer preempts; the held context follows). (1) OOB answer wakes
-        // stashed by `resolve_choice` while paused → deliver to both stdins
-        // now. (2) Tell the router to flush held peer-forwards — through its
-        // command channel, so they land in order behind anything in flight.
-        let held_wakes = self
-            .pending_paused_wakes
-            .lock()
-            .await
-            .remove(session_id)
-            .unwrap_or_default();
-        // The rows exist; the ring replays them off each cursor (rc3 D19).
-        // Fanning them into every stdin here woke participants outside their
-        // turn, which is what stranded their epochs.
-        let _ = &held_wakes;
         Ok(())
     }
 
@@ -1343,10 +1302,10 @@ impl AppState {
                 "nothing to send: empty message and no answers resolved"
             ));
         }
-        // Answers alone. Mirror the slice of `broadcast` a release needs:
-        // engagement bump (the idle watchdog re-arms on user input), the pause
-        // latch down (a Send while paused is the steer), and the stash entry
-        // dropped (the rows are persisted; the ring replays them off cursors).
+        // Answers alone. Mirror the slice of `broadcast` a release needs: the
+        // engagement bump (the idle watchdog re-arms on user input) and the
+        // pause latch down (a Send while paused is the steer). Nothing to drop
+        // — the rows are persisted and the ring replays them off cursors.
         {
             let sessions = self.sessions.lock().await;
             if let Some(handle) = sessions.get(session_id) {
@@ -1356,7 +1315,6 @@ impl AppState {
                 handle.activity.set_paused(false);
             }
         }
-        self.pending_paused_wakes.lock().await.remove(session_id);
         self.user_responded(session_id, Vec::new(), true, true).await;
         Ok(())
     }
@@ -1687,14 +1645,18 @@ impl AppState {
     /// (`activity.any_busy()` — the same signal the chat-input lock reads, so
     /// the UI and this table agree on what "working" means).
     ///
-    /// Read the three lines as "what does each consequence actually depend on":
-    /// the halt clear on nothing, the stash on the pause latch, and the release
-    /// on all three — a receipt to read, no pause to respect, and no running
-    /// ring to interrupt (rc3 D34).
+    /// Read the two lines as "what does each consequence actually depend on":
+    /// the halt clear on nothing, and the release on all three — a receipt to
+    /// read, no pause to respect, and no running ring to interrupt (rc3 D34).
+    ///
+    /// There used to be a third, `stash`, for the paused case. It set a map that
+    /// the broadcast then discarded: the rows are in the channel and every
+    /// participant reads them off its own cursor (D19), so holding a copy bought
+    /// nothing. The PAUSE still suppresses the release, which is the half that
+    /// was doing the work.
     fn tray_wake(holds_wakes: bool, recorded: bool, ring_running: bool) -> TrayWake {
         TrayWake {
             clear_halt: true,
-            stash: holds_wakes && recorded,
             release: !holds_wakes && recorded && !ring_running,
         }
     }
@@ -1764,19 +1726,17 @@ impl AppState {
                 if step.clear_halt {
                     self.clear_awaiting(handle, session_id).await;
                 }
-                if let Some(receipt) = receipt {
-                    // PAUSED gate: an answered tray question must not restart a
-                    // paused duo (the user may be triaging their tray while this
-                    // session stays parked). Stash it; the next `broadcast`
-                    // (Send / Resume) delivers it behind the user's message.
-                    if step.stash {
-                        self.pending_paused_wakes
-                            .lock()
-                            .await
-                            .entry(session_id.clone())
-                            .or_default()
-                            .push(receipt.clone());
-                    }
+                // `receipt.is_some()` is already folded into `step` by
+                // `tray_wake`; the value itself is not needed here any more —
+                // the stash that consumed it is gone.
+                if receipt.is_some() {
+                    // The PAUSED case needs nothing here. It used to stash the
+                    // receipt for the next broadcast to deliver — and the
+                    // broadcast then dropped what it collected, because the rows
+                    // are in the channel already and every participant reads
+                    // them off its own cursor (rc3 D19). A map written on one
+                    // path and discarded on the other is not a queue; it is a
+                    // leak with a comment.
                     // **No interrupt, and no release while the ring runs (rc3
                     // D34).** This block used to fire `tray-answer-preempt` at
                     // every agent and reset the ring — the issues.md #27 cure
@@ -2029,24 +1989,24 @@ mod tests {
         // no release — the exact case that used to abort the holder's turn.
         assert_eq!(
             AppState::tray_wake(false, true, true),
-            TrayWake { clear_halt: true, stash: false, release: false }
+            TrayWake { clear_halt: true, release: false }
         );
         // Idle + recorded: the one case that needs waking — nothing else will
         // ever drain the row. Through `user_responded`, the D28 entry point.
         assert_eq!(
             AppState::tray_wake(false, true, false),
-            TrayWake { clear_halt: true, stash: false, release: true }
+            TrayWake { clear_halt: true, release: true }
         );
-        // Paused + recorded: the receipt is stashed for the next broadcast.
-        // A tray answer must not release a pause the user deliberately set —
-        // whatever the busy flags say mid-drain.
+        // Paused + recorded: no release. A tray answer must not lift a pause the
+        // user deliberately set — whatever the busy flags say mid-drain. (There
+        // is nothing to stash: the row is in the channel already.)
         assert_eq!(
             AppState::tray_wake(true, true, false),
-            TrayWake { clear_halt: true, stash: true, release: false }
+            TrayWake { clear_halt: true, release: false }
         );
         assert_eq!(
             AppState::tray_wake(true, true, true),
-            TrayWake { clear_halt: true, stash: true, release: false }
+            TrayWake { clear_halt: true, release: false }
         );
         // Unrecorded — the regression the flags exist for. The insert failing
         // gates the wake and nothing else: the halt still lifts, because that
@@ -2055,11 +2015,11 @@ mod tests {
         // an empty backlog.
         assert_eq!(
             AppState::tray_wake(false, false, false),
-            TrayWake { clear_halt: true, stash: false, release: false }
+            TrayWake { clear_halt: true, release: false }
         );
         assert_eq!(
             AppState::tray_wake(true, false, true),
-            TrayWake { clear_halt: true, stash: false, release: false }
+            TrayWake { clear_halt: true, release: false }
         );
     }
 

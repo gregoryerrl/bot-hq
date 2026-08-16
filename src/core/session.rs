@@ -148,12 +148,6 @@ pub struct SessionHandle {
     /// before it forwards Brian↔Rain chunks; cleared by
     /// `core::AppState::broadcast` when the user replies.
     pub awaiting: Arc<std::sync::atomic::AtomicBool>,
-    /// Shared count of consecutive peer-forwards with no intervening user
-    /// message — the L2 volley hard-cap (interrupt redesign). The router
-    /// increments it on each forward; `AppState::broadcast` resets it to 0 on the
-    /// user's next message; past the router's hard cap the volley breaks. Unlike
-    /// `awaiting` it is NOT bridge-registered — no MCP tool touches it.
-    pub user_silent_forwards: Arc<std::sync::atomic::AtomicU32>,
     /// Count of user prompts broadcast to this session, bumped by
     /// `AppState::broadcast`. The idle-unflagged watchdog reads it: 0 =
     /// pre-first-task (never nudge), and each new prompt re-arms the
@@ -835,10 +829,6 @@ async fn spawn_session_handle(
 
     let ipav = Arc::new(Mutex::new(IpavState::default()));
     let awaiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // L2 volley hard-cap counter — incremented per peer-forward by the duo
-    // pumps, reset on the user's next message in `broadcast`. Shared into both
-    // DuoConfigs + the SessionHandle (for the reset); no bridge registration.
-    let user_silent_forwards = Arc::new(std::sync::atomic::AtomicU32::new(0));
     // Register the flag with the bridge so user-blocking MCP tools can set it
     // synchronously (before the agent's next chunk volleys). The duo pumps
     // read the same Arc, so updates propagate to both pumps with no
@@ -914,7 +904,7 @@ async fn spawn_session_handle(
     // the interleaved convergence stream; both pumps emit RouterCommand to it.
     // Lifecycle: when both pumps drop their router_tx clones (session end) the
     // command channel closes and run_router returns (like the watchdog — no
-    // explicit teardown). The shared `awaiting`/`user_silent_forwards` Arcs are
+    // explicit teardown). The shared `awaiting` Arc is
     // cloned in, so the bridge's awaiting set + broadcast's counter reset are
     // visible here with no extra plumbing.
     // **The turn ring drives every session** (task 14, 2026-08-12). The
@@ -1241,7 +1231,6 @@ async fn spawn_session_handle(
             })
             .collect(),
         awaiting,
-        user_silent_forwards,
         user_broadcasts,
         activity,
         in_atomic_tool,
@@ -2400,7 +2389,6 @@ mod tests {
                 },
             }],
             awaiting: Arc::clone(&awaiting),
-            user_silent_forwards: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             user_broadcasts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             activity: crate::core::ActivityTracker::new(
                 id,
