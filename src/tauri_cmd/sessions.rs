@@ -1414,17 +1414,17 @@ mod tests {
         picks[0].effort = Some("max".into());
         picks[0].ultracode = Some(true);
         picks[1].effort = Some("low".into());
-        let duo = resolve_participant_picks(&storage, &picks, &Default::default())
+        let roster = resolve_participant_picks(&storage, &picks, &Default::default())
             .await
             .unwrap();
-        assert!(duo.rain_enabled, "two participants is not a solo session");
-        assert_eq!(duo.drafts.len(), 2);
-        assert_eq!(duo.drafts[0].model_id.as_deref(), Some("opus"));
-        assert_eq!(duo.drafts[0].effort.as_deref(), Some("max"));
-        assert_eq!(duo.drafts[0].ultracode, Some(true));
-        assert_eq!(duo.drafts[1].model_id.as_deref(), Some("sonnet"));
-        assert_eq!(duo.drafts[1].effort.as_deref(), Some("low"));
-        assert_eq!(duo.drafts[1].ultracode, None, "an unset knob inherits");
+        assert!(roster.rain_enabled, "two participants is not a solo session");
+        assert_eq!(roster.drafts.len(), 2);
+        assert_eq!(roster.drafts[0].model_id.as_deref(), Some("opus"));
+        assert_eq!(roster.drafts[0].effort.as_deref(), Some("max"));
+        assert_eq!(roster.drafts[0].ultracode, Some(true));
+        assert_eq!(roster.drafts[1].model_id.as_deref(), Some("sonnet"));
+        assert_eq!(roster.drafts[1].effort.as_deref(), Some("low"));
+        assert_eq!(roster.drafts[1].ultracode, None, "an unset knob inherits");
 
         // The pre-D12 per-agent fields still land on slots 0 and 1 when the row
         // says nothing, so a caller that has not been updated keeps working.

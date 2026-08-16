@@ -2205,7 +2205,7 @@ impl Storage {
             // No label here, and it costs nothing: every caller that DELIVERS a
             // write-time receipt posts as `system` or `user`, neither of which
             // takes a label. Participant rows are written by the output pump
-            // (`duo.rs`), which only notifies — its peers read the row back
+            // (`pump.rs`), which only notifies — its peers read the row back
             // through the ring, where the join supplies the label.
             speaker: speaker_of(origin, Some(legacy_author), None),
         })

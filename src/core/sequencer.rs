@@ -310,9 +310,17 @@
 //! there was nothing left to do.
 //!
 //! Production writers on that path exist today. Three are `origin = "system"`
-//! host injections and nothing else: `session`'s first-spawn phase nudge
-//! (`session.rs:908`), `state`'s per-agent phase instruction (`state.rs:920`)
-//! and `duo`'s two adherence nudges (`duo.rs:310`, `duo.rs:459`).
+//! host injections and nothing else: `session`'s first-spawn phase nudge,
+//! `state`'s per-agent phase instruction, and the pump's A3a adherence nudge
+//! (the `mutate_nudged` path).
+//!
+//! **Cited by name, not by line** (round-2 audit): this paragraph carried four
+//! `file.rs:NNN` citations and every one of them had rotted — `session.rs:908`
+//! pointed at a comment about the bridge, `state.rs:920` at an unrelated match
+//! arm, and the two pump lines at `}` and a bare argument. A line number is a
+//! claim that decays on the next edit to the file it names, silently, and a
+//! stale citation in a module doc argues against live code. Symbol names decay
+//! too, but they decay LOUDLY — a reader greps and finds nothing.
 //!
 //! **`watchdog`'s idle nudge is not one of them, and an earlier draft listed it
 //! as one.** `deliver_idle_nudge` writes TWO rows for the two things it says.
@@ -5884,7 +5892,7 @@ mod tests {
         .await;
         assert_eq!(seats[1].expect(1).await, vec!["go"]);
 
-        // The pass row the pump posts alongside the completion (`duo.rs`
+        // The pass row the pump posts alongside the completion (`pump.rs`
         // PASS_NOTICE). Posted here because the sequencer writes no rows — and
         // it is also what gives A something unread to be woken WITH, so the
         // wake below is a real observation rather than an empty-backlog no-op.
