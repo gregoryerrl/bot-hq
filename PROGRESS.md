@@ -18,6 +18,67 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-16 (round 3) — R6 finished, and an audit run against the previous round's binary
+
+Two mandates: finish R6, and audit again. Report in
+[`docs/plans/2026-08-16-rc3-audit-round3.md`](docs/plans/2026-08-16-rc3-audit-round3.md).
+
+**R6 shipped, in the three steps round 2 recorded.** `run_sequencer` **714 → 407
+lines**; `advance_turn` **11 → 4 parameters**; clippy **10 → 4**; the suite green
+at every step with **zero test files touched**.
+
+The design was right and its count was wrong: it listed 11 ring-state locals and
+there are **13**. The two it omitted — `open_gates` and `gate_seed_failed` — are
+exactly the pair the struct most needed, since a `HashSet` cannot express "I
+could not read the gates" and the source documents both in **one comment
+paragraph while declaring them as two locals**. Caught at the start of step 1, so
+it cost nothing; discovered mid-step it would have been the half-finished state
+the plan warned about.
+
+Two techniques carried the risk. The rename was **compiler-driven** — collapse
+the declarations, let `E0425` name all 98 sites with a column — because comments
+and strings mention these words constantly and produce no error, so they could
+not be touched by accident. And the 212-line arm extraction is **verified
+verbatim by byte-comparison**, not asserted: two of the four substitutions had to
+be narrowed (`&mut state` must not match `&mut state.holder`), and both wrong
+versions compiled far enough to look plausible. The compiler caught them only
+because the types differed.
+
+**The audit's new angle: this binary was built from round 2's fixes, so they
+could be checked against a running system.** Migration 0059 applied at boot;
+`participant_deliveries.delivered_at` is **4370/4370 RFC3339** where round 2
+measured 4011 zone-less, and `participant_cursors.updated_at` **92/92**. Both
+populations *grew* in between, so live traffic — not a fixture — is what confirms
+the writers.
+
+**Deletions leave phantoms that no line-number check can see.** Rounds 1–2 closed
+citation rot in `file.rs:NNN` form. This round's largest finding is the next
+layer: `run_stall_watchdog`'s doc claimed it "watches the peer-forward router …
+emit a router-health event once", when `router.rs` was deleted by task 14 and a
+grep for that event across `src/` returns **one hit — the sentence itself**. A
+reader asking whether forwarding was monitored came away believing it was.
+`pump.rs` had the same shape, pointing test coverage at the deleted module.
+
+**Two write paths had no readers.** `set_session_effort_config` (4 columns) is
+gone; `set_session_spawn_config` narrowed to the one column that is read. The
+create path already carried a comment saying the writes changed nothing, and the
+comment justifying the other one named `respawn_session` as its reader —
+a four-line function that calls `ensure_session_started`.
+
+Also: G4's duplicate timestamp parser closed (open since round 2), four clippy
+items, and the round-2 report's own two stale `OPEN` headers corrected beside
+themselves.
+
+**Left deliberately:** `participant_cursors.updated_at` still carries the
+`datetime('now')` default — the one default *proven* to fire, where round 2's
+stated reason for leaving the other 15 was that they never had. One table, 92
+rows, versus round 2's "rebuild 13 tables"; recorded with its cost rather than
+shipped mid-refactor. The frontend is still spot-read, not cleared.
+
+Suites: **1174** lib + 61 (59 integration + 2 doc), down one from round 2's 62 —
+that one is F7's removed test, and it is the whole delta. **392** frontend; `tsc`
+clean; all five gates run in order.
+
 ## 2026-08-16 (round 2, later) — the three findings the report left to the user
 
 The user took all of them, and the push. Two shipped; the third was measured and

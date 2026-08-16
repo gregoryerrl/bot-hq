@@ -259,7 +259,11 @@ they would have rotted next.
 
 ### Open — need a decision, not a fix
 
-**B3 · The plugin wire expresses roster size as a boolean · TRACED · OPEN**
+**B3 · The plugin wire expresses roster size as a boolean · TRACED · ~~OPEN~~ → FIXED
+`0059b0b` + `a1aee95`** *(header corrected by round 3, 2026-08-16: the finding
+below and `PROGRESS.md` both record this shipped; only the status word was left
+behind. The trace is kept as written — it describes the tree it was filed
+against.)*
 
 `plugin_api.rs:396` `duo: bool` → `dispatch_session_inner(rain_override)` → `sessions.rs:744`
 `unwrap_or(false)` → `sessions.rain_enabled` → `session.rs:721`
@@ -289,7 +293,12 @@ legacy caller's only way to name a slot's model); `rain_busy` is a live event fi
 frontend. **If E2 lands in a "dead code deletion, zero behaviour change" batch it breaks roster
 seeding.**
 
-**G3 · The RFC3339 fix normalized the writer, not the data · MEASURED · OPEN**
+**G3 · The RFC3339 fix normalized the writer, not the data · MEASURED · ~~OPEN~~ →
+FIXED `5e43eaa`** *(header corrected by round 3, 2026-08-16 — the body already
+said FIXED nine lines down. Round 3 re-measured the live database: both columns
+are now 100% RFC3339, and both populations have GROWN since, which confirms the
+writers against traffic rather than against a fixture. The systemic half below
+stays open — see round 3's F8.)*
 
 `1a575e8` made `commit_delivery` bind `now_utc()` and shipped a guard. No backfill.
 *Measured* — `sqlite3 ~/.bot-hq/.local/bot-hq.db "select … from participant_deliveries"`:
@@ -338,6 +347,16 @@ ten-plus arms; the `TurnComplete` arm alone is **225 lines**. `run_sequencer` de
 `let mut` ring-state locals** (`holder`, `epoch`, `deferred`, `paused`, `held`, `spin`, `laps`,
 `summons`, `spoke_this_lap`, `staged_pending`, `halted_pending_user`), and that one arm touches at
 least **eight** of them.
+
+> **Corrected by round 3 (2026-08-16), before step 1 was taken: there are THIRTEEN,
+> not eleven.** The list above omits `gate_seed_failed` and `open_gates`
+> (`sequencer.rs:1331-1332` at `710b8be`) — and those two are precisely the pair
+> with an invariant. A `HashSet` cannot express "I could not read the gates", so
+> the flag carries that third state; the source documents them in ONE comment
+> paragraph while declaring them as two separate locals, which is the defect in
+> miniature. A `RingState` built to the count above would have left behind exactly
+> the two fields whose relationship most needed holding in one place. The
+> measurement stands otherwise: 10 arms, `TurnComplete` 225 lines.
 
 So extracting an arm as a plain function means roughly ten `&mut` parameters — which is precisely
 why `advance_turn` already trips clippy's `too many arguments (11/7)`. Adding a second
