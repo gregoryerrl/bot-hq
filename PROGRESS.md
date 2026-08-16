@@ -18,6 +18,50 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-16 (round 2, later) — the three findings the report left to the user
+
+The user took all of them, and the push. Two shipped; the third was measured and
+deliberately left, with its design written down.
+
+**B3 — a cap enforced on one path of three.** `MAX_SESSION_PARTICIPANTS` was
+checked in `resolve_participant_picks`, the create DIALOG's path. The other two
+paths SEED a roster rather than picking one, and `ensure_session_roster` had no
+ceiling: a plugin's `duo:true` or the driver's `solo:false` took every active
+non-`on_mention` role. Three roles today, so it looked right; a fourth widens
+every plugin-created session and every participant is a subprocess with its own
+bill. The constant moved beside the invariant it protects and the seeder clamps.
+
+The first wire fix was **inert** and the reviewer measured it: `participants: <n>`
+reached only `rain_enabled = n > 1`, so 2, 3 and 8 were the same session — a wire
+that reads honest over unchanged behaviour, worse than the vague flag it
+replaced. `ensure_session_roster` takes a count now, and the roster is seeded
+EAGERLY at create, which is what the dialog has always done; that removes a
+divergence instead of adding a persisted count that could disagree with the
+rows. `rain_enabled` is derived from what was actually seeded.
+
+**R5 — the pre-flight found a column nobody had flagged.** Proving by query
+which defaults actually fire, before writing the migration, turned up
+`participant_cursors.updated_at`: 85 of 90 rows zone-less, from a live-firing
+default the seeding INSERT omitted. Alongside `participant_deliveries`' 4011
+un-backfilled rows, that is the whole contamination — the other 15 defaults
+measured clean, so they are left rather than rebuilt across 13 tables.
+
+The guard that missed it had *named* the column and *asserted* the right shape:
+it reached the value through the UPDATE path, which writes correctly, and never
+through the INSERT default that does not. That is the third guard this round
+with the same defect — **the fixture reached the value by a path that is not the
+one under suspicion** — and it is the sharpest pattern the round produced.
+
+**R6 — not started, deliberately.** `run_sequencer` is 714 lines over eleven
+`let mut` ring-state locals, and its largest match arm touches eight of them, so
+extracting an arm means ~10 `&mut` parameters — exactly why `advance_turn`
+already trips `too many arguments`. The real shape is a `RingState` struct, a
+design change through a 3653-line module and 99 tests, in the code that deals
+turns, where a half-finished state wedges sessions rather than failing loudly.
+The report carries the three-step sequencing.
+
+Suites: **1174** lib + 62; clippy 10.
+
 ## 2026-08-16 (round 2) — auditing the audit's own fix batch
 
 A second audit pass over `632c163`, reported in

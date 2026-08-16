@@ -294,14 +294,21 @@ seeding.**
 `1a575e8` made `commit_delivery` bind `now_utc()` and shipped a guard. No backfill.
 *Measured* — `sqlite3 ~/.bot-hq/.local/bot-hq.db "select … from participant_deliveries"`:
 
-| shape | rows |
+| shape | rows (measured 2026-08-16) |
 |---|---|
 | RFC3339-Z | **14** |
 | zone-less | **4011** (`2026-08-12 14:12:08` → `2026-08-16 04:05:22`) |
 
-99.65% of the table is in the shape the fix declared wrong, and the guard only inspects a row it
-just wrote. **Latent, not live:** `delivered_at` has no prod comparison — INSERT and a test
-SELECT, nothing else.
+The ratio is **dated on purpose.** Measured twice hours apart, the zone-less figure stayed exactly
+4011 while the total moved 4025 → 4277: every one of the 252 rows written during this session was
+well-formed, which confirms the writer against live traffic in a way no fixture can — and is why a
+bare ratio would read as current while quietly ceasing to be.
+
+The guard only inspects a row it just wrote, so it could not see the legacy population.
+**Latent, not live:** `delivered_at` has no prod comparison — INSERT and a test SELECT, nothing
+else. **FIXED** in `5e43eaa` (migration 0059), together with a second contaminated column the
+pre-flight found: `participant_cursors.updated_at`, 85 of 90 rows, from a live-firing column
+default the seeding INSERT omitted.
 
 *Systemic version:* 17 columns still default to `datetime('now')` / `CURRENT_TIMESTAMP`, with
 three lexicographic SQL windows over them (`messages.rs:80`, `:108`, `retrieval_events.rs:84`).
@@ -316,10 +323,48 @@ the identical two-branch parse **while `tray.rs:9` already imports `parse_tray_t
 `cl_facade.rs:22` RFC3339-only. The third is **not** a defect — the reviewer confirmed both shapes
 `cl_index.updated_at` holds are valid RFC3339, and `disk_is_newer` compares them parsed.
 
-**E1 · `sequencer.rs` · TRACED · OPEN** — 9781 lines, **3653 prod**: a 680-line module doc, then
+**E1 · `sequencer.rs` · TRACED · OPEN — deliberately NOT STARTED, with the design below** — 9781 lines, **3653 prod**: a 680-line module doc, then
 `run_sequencer` **714 lines**, `advance_turn` **372**, `deliver_backlog` **285** — three functions
 = 38% of the prod file, 20 top-level fns. Round 1's B1-F1 argued the *doc*; the **function**
 decomposition was never on the table.
+
+### R6 — why it was not attempted, and what it needs
+
+The user authorised all of B3/R5/R6. B3 and R5 shipped; **R6 was measured and deliberately left**,
+because the shape of the work makes a partial attempt worse than none.
+
+*Measured:* `run_sequencer` is 714 lines whose body is one `match` over `SequencerCommand` with
+ten-plus arms; the `TurnComplete` arm alone is **225 lines**. `run_sequencer` declares **11
+`let mut` ring-state locals** (`holder`, `epoch`, `deferred`, `paused`, `held`, `spin`, `laps`,
+`summons`, `spoke_this_lap`, `staged_pending`, `halted_pending_user`), and that one arm touches at
+least **eight** of them.
+
+So extracting an arm as a plain function means roughly ten `&mut` parameters — which is precisely
+why `advance_turn` already trips clippy's `too many arguments (11/7)`. Adding a second
+ten-parameter function would make the module measurably worse while looking like progress.
+
+**The real shape is a `RingState` struct** holding those eleven locals, with the arms becoming
+`impl RingState` methods taking `&mut self` plus `&SequencerDeps`. That also retires the
+`too_many_arguments` allow rather than adding another. It is a genuine design change threading
+through a 3653-line module and its 99 tests, and it is the most delicate code in the repo — the
+thing that deals turns, where a half-finished state does not fail loudly, it wedges sessions.
+
+**Sequencing for whoever takes it**, in the order that keeps the suite meaningful throughout:
+
+1. Introduce `RingState` with the eleven fields and `Default`, constructed at the top of
+   `run_sequencer`; replace the locals with `state.field` in place. No behaviour, no extraction —
+   the suite must stay green on a pure rename.
+2. Convert the existing extracted helpers (`advance_turn`, `deliver_backlog`, `unwind_wedged_turn`,
+   `pass_empty_turn`, `reseed_gates_if_needed`) to take `&mut RingState` instead of their current
+   parameter lists. Each conversion is independently verifiable, and `advance_turn`'s
+   `#[allow(clippy::too_many_arguments)]` should come off as its own commit so the warning count
+   proves the parameter list actually shrank.
+3. Only then extract the match arms, largest first (`TurnComplete`, 225 lines).
+
+**Do not skip step 1**, and do not extract an arm while the state is still eleven separate locals:
+that is the version that adds a ten-parameter function. The clippy count is the progress signal
+here — it should fall, never rise, and this round already recorded one case where a displaced
+attribute was invisible to everything except that number.
 
 **Batch-9 scope, now numbered.** Of **100** `#[tauri::command]` fns, **94** take `tauri::State`,
 and **9 of them hold 13 inline `return Err(…)` refusal guards** unreachable from a unit test:
