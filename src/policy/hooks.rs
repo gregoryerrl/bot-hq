@@ -1346,12 +1346,35 @@ fn current_branch() -> Option<String> {
     git_output(&["symbolic-ref", "--short", "HEAD"]).map(|s| s.trim().to_string())
 }
 
+/// Git stdout → text the scanners can read. **Lossy on purpose.**
+///
+/// Git calls a file binary only when it finds a NUL in the first 8 KB, so any
+/// NUL-free file in a non-UTF-8 encoding (a latin-1 source file, a fixture with
+/// one stray high byte) has its RAW BYTES emitted into `git diff` / `git show`.
+/// A strict `String::from_utf8` fails on that, and four of `git_output`'s
+/// callers read `None` as "nothing to scan": `run_pre_commit`'s forbidden-word
+/// layer (`:203`), `check_immutable_artifacts` (`:302`), and BOTH halves of the
+/// post-commit verifier (`:331`, `:332`). The last one is why this had to be
+/// fixed here rather than at one call site — the post-commit backstop exists to
+/// catch what pre-commit missed, and it read the same helper, so it went blind
+/// on exactly the input that defeated pre-commit. Neither layer was independent.
+///
+/// U+FFFD replaces only the invalid bytes, so a forbidden word on an untouched
+/// line still matches — which is why lossy beats blocking: a block would refuse
+/// the commit without naming the word that tripped it.
+///
+/// After this, `None` from `git_output` means git actually FAILED (spawn error
+/// or non-zero exit), never "the output was not UTF-8".
+fn decode_git_stdout(bytes: Vec<u8>) -> String {
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 fn git_output(args: &[&str]) -> Option<String> {
     let out = Command::new("git").args(args).output().ok()?;
     if !out.status.success() {
         return None;
     }
-    String::from_utf8(out.stdout).ok()
+    Some(decode_git_stdout(out.stdout))
 }
 
 #[cfg(test)]
@@ -1643,6 +1666,60 @@ mod tests {
         let data = tempdir().unwrap();
         let code = run_pre_commit(data.path(), Some("nope")).unwrap();
         assert_eq!(code, 0);
+    }
+
+    /// **A staged non-UTF-8 file must not switch the forbidden-word scan off.**
+    ///
+    /// Measured before the fix (round-2 audit H1): staging one NUL-free latin-1
+    /// file made `git diff --cached` invalid UTF-8, the strict `from_utf8` in
+    /// `git_output` returned `None`, `run_pre_commit:203`'s `unwrap_or_default()`
+    /// turned that into an empty diff, and the commit passed the gate with the
+    /// forbidden word in it — exit 0, no warning.
+    ///
+    /// Driven by REAL git bytes rather than a hand-written `Vec<u8>`, because
+    /// the premise being pinned is git's own behaviour (it emits raw bytes for
+    /// any file without a NUL in the first 8 KB). The `is_err()` assertion below
+    /// is load-bearing: without it a fixture that quietly became valid UTF-8
+    /// would leave this test green while proving nothing.
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn a_staged_non_utf8_file_cannot_hide_a_forbidden_word() {
+        let repo = tempdir().unwrap();
+        init_repo(repo.path());
+        // A stand-in term, NOT this repo's real forbidden word: the fixture is
+        // itself a staged diff, so spelling the real one here would trip our own
+        // pre-commit hook on every commit that touches this file. The policy
+        // below is local to the test, so the word is arbitrary — the hyphen is
+        // kept because it exercises `contains_word`'s non-word boundary.
+        // 0xE9 is latin-1 'é' — invalid UTF-8, and no NUL, so git calls it text.
+        std::fs::write(
+            repo.path().join("note.txt"),
+            b"Acme-Trailer: someone\ncaf\xe9 latin1\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "note.txt"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        let out = Command::new("git")
+            .args(["diff", "--cached", "--no-color"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8(out.stdout.clone()).is_err(),
+            "fixture is no longer invalid UTF-8 — this test would prove nothing"
+        );
+
+        let text = decode_git_stdout(out.stdout);
+        let mut p = Policy::default();
+        p.forbidden_in_commits = vec!["Acme-Trailer".into()];
+        assert_eq!(
+            p.first_forbidden_word(&added_lines_only(&text)),
+            Some("Acme-Trailer"),
+            "the scan went blind on a diff it could not decode"
+        );
     }
 
     #[test]
