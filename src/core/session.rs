@@ -49,8 +49,8 @@ pub struct OpenSessionRequest {
     /// order — `models[0]` overrides the first participant's model, `models[1]`
     /// the second, and a short vec leaves the rest on the role's default.
     /// `None` in a slot = fall back to the role's `default_model_id`, which is
-    /// the historical behaviour (rc3 **D10**: was `brian_model_id` /
-    /// `rain_model_id`).
+    /// the historical behaviour (rc3 **D10**: was `slot0_model_id` /
+    /// `slot1_model_id`).
     pub models: Vec<Option<String>>,
 }
 
@@ -400,7 +400,7 @@ pub async fn open_session(
 /// creation path that has no participant list — the external driver's
 /// `open_session`, `create_session` called without `participants`,
 /// `dispatch_session_inner` — used to hand spawn its picks through
-/// `sessions.brian_model_id` / `rain_effort` / …, and spawn no longer reads
+/// `sessions.slot0_model_id` / `slot1_effort` / …, and spawn no longer reads
 /// those columns. `models[i]` / `knobs[i]` therefore belong to TURN SLOT `i` and
 /// are written onto that participant's row, which is where spawn now looks.
 ///

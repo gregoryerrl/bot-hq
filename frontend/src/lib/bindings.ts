@@ -5,9 +5,9 @@
 
 
 export const commands = {
-async createSession(id: string, title: string, repoPath: string | null, project: string | null, multiParticipant: boolean | null, brianModelId: string | null, rainModelId: string | null, options: SessionCreateOptions) : Promise<Result<SessionInfo, AppError>> {
+async createSession(id: string, title: string, repoPath: string | null, project: string | null, multiParticipant: boolean | null, slot0ModelId: string | null, slot1ModelId: string | null, options: SessionCreateOptions) : Promise<Result<SessionInfo, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("create_session", { id, title, repoPath, project, multiParticipant, brianModelId, rainModelId, options }) };
+    return { status: "ok", data: await TAURI_INVOKE("create_session", { id, title, repoPath, project, multiParticipant, slot0ModelId, slot1ModelId, options }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1923,7 +1923,7 @@ has_builtin_prose: boolean; archived: boolean }
  * limit; every field is `None` = inherit the configured default.
  * (Renamed from `SessionEffortChoices` when `use_worktree` joined.)
  */
-export type SessionCreateOptions = { brianEffort: string | null; rainEffort: string | null; brianUltracode: boolean | null; rainUltracode: boolean | null; 
+export type SessionCreateOptions = { slot0Effort: string | null; slot1Effort: string | null; slot0Ultracode: boolean | null; slot1Ultracode: boolean | null; 
 /**
  * Run the session in an isolated git worktree (None → the
  * `worktree_default` app setting, which defaults ON for repo-backed

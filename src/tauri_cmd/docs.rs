@@ -288,7 +288,7 @@ pub async fn summarize_session_doc(
     // participant runs on; else `resolve_spawn_config` falls through to the
     // hardcoded default.
     //
-    // rc3 D10: this read `sessions.brian_model_id`, which the create paths no
+    // rc3 D10: this read `sessions.slot0_model_id`, which the create paths no
     // longer write — it would have silently degraded to the app default on every
     // session. The roster is where a participant's model lives now, and slot 0
     // is the same participant the old column named.

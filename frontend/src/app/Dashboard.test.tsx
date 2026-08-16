@@ -193,13 +193,13 @@ describe("New session dialog — participants", () => {
     // The roster is the single source: the solo flag and both model columns are
     // derived from it backend-side, so the dialog must not also assert them.
     const args = mockInvoke.mock.calls.find((c) => c[0] === "create_session")?.[1] as {
-      rainEnabled: boolean | null;
-      brianModelId: string | null;
-      rainModelId: string | null;
+      multiParticipant: boolean | null;
+      slot0ModelId: string | null;
+      slot1ModelId: string | null;
     };
-    expect(args.rainEnabled).toBeNull();
-    expect(args.brianModelId).toBeNull();
-    expect(args.rainModelId).toBeNull();
+    expect(args.multiParticipant).toBeNull();
+    expect(args.slot0ModelId).toBeNull();
+    expect(args.slot1ModelId).toBeNull();
   });
 
   it("stops at the participant cap, wherever the cap is set", async () => {
@@ -323,8 +323,8 @@ describe("New session dialog — per-participant effort (D12)", () => {
     ]);
     // The per-slot columns spawn still reads are a projection of those same
     // rows, so they cannot disagree with the roster they came from.
-    expect(sentOptions().brianEffort).toBe("max");
-    expect(sentOptions().rainEffort).toBe("low");
+    expect(sentOptions().slot0Effort).toBe("max");
+    expect(sentOptions().slot1Effort).toBe("low");
   });
 
   it("carries a row's ultracode tick into that row's payload entry", async () => {
@@ -345,7 +345,7 @@ describe("New session dialog — per-participant effort (D12)", () => {
     expect(sentOptions().participants).toEqual([
       { roleId: 1, modelId: null, effort: null, ultracode: true, color: null, label: null },
     ]);
-    expect(sentOptions().brianUltracode).toBe(true);
+    expect(sentOptions().slot0Ultracode).toBe(true);
   });
 
   it("offers ultracode only to a role that can edit files", async () => {

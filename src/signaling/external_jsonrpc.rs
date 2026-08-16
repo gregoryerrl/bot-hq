@@ -36,12 +36,29 @@ use std::time::Duration;
 /// and the constant is dead code; rename the constant and the schema follows.
 pub(crate) mod wire {
     /// `create_session`'s two positional model arguments, by turn slot.
+    ///
+    /// **These strings are the DRIVER'S argument names and must not track the
+    /// Rust parameter names.** The parameters behind them are `slot0_model_id` /
+    /// `slot1_model_id` as of the D10 hard retirement; these stayed, because a
+    /// rename here breaks every driver client. A blind sweep changed them during
+    /// that retirement and it had to be reverted — the exemption is the reason
+    /// this module exists.
     pub const MODEL_ARGS: [&str; 2] = ["brian_model_id", "rain_model_id"];
-    /// The spawn-model fields `list_sessions` / `get_session_snapshot` return,
-    /// which are the `sessions` table's own column names.
+    /// The spawn-model fields `list_sessions` / `get_session_snapshot` return.
+    ///
+    /// They were the `sessions` table's own column names until 0060 renamed
+    /// those to `slot0_model_at_spawn` / `slot1_model_at_spawn`. The WIRE keeps
+    /// the old names for the same reason as above, so this is no longer a
+    /// mirror of the schema — it is a frozen response shape, and the mapping
+    /// from column to field now happens at the two call sites.
     pub const SPAWN_MODEL_FIELDS: [&str; 2] = ["brian_model_at_spawn", "rain_model_at_spawn"];
-    /// The two PRIMARY KEYS the legacy `agent_configs` table holds. Not agent
-    /// names any spawn resolves — rc3 D10's role-derived slugs never match one.
+    /// The two PRIMARY KEYS the legacy `agent_configs` table used to hold.
+    ///
+    /// 0060 dropped both rows and the CHECK that allowed only them, so these
+    /// name nothing in the database now. Kept because the driver's
+    /// `agent_config` tool still declares them as its `agent_name` enum, and
+    /// narrowing a published enum is a breaking change; a driver passing either
+    /// gets an empty result rather than an error.
     pub const LEGACY_CONFIG_KEYS: [&str; 2] = ["brian", "rain"];
 }
 
@@ -824,11 +841,23 @@ fn eval_in_webview(core: &Arc<CoreAppState>, js: &str) -> Result<(), JsonRpcErro
 mod tests {
     use super::*;
 
+    /// The driver's model arguments are declared, **and still under the names
+    /// the exemption froze.**
+    ///
+    /// Two assertions, deliberately. The first is the original one: without
+    /// these a driver-created session leaves both model ids NULL and falls back
+    /// to `agent_configs`, so a driver could never name the model a session runs
+    /// on. The second pins the D10 EXEMPTION itself — `CODEBASE.md` records this
+    /// module as the only documented place `brian_*`/`rain_*` survives, because
+    /// renaming a published argument breaks every driver client.
+    ///
+    /// The literals are spelled out rather than read from `wire::MODEL_ARGS`, so
+    /// changing the constant fails here instead of silently redefining what the
+    /// test proves. That is not hypothetical: during the hard retirement a blind
+    /// sweep rewrote `MODEL_ARGS` to the slot names, and this assertion —
+    /// written against the constant at the time — went green on the new value.
     #[test]
-    fn create_session_accepts_per_agent_model_ids() {
-        // Without these, a driver-created session leaves brian/rain_model_id NULL
-        // and falls back to `agent_configs` — so a driver could never name the
-        // model a session runs on, whatever the create call said.
+    fn create_session_accepts_per_agent_model_ids_under_their_frozen_names() {
         let d = external_tool_descriptors()
             .iter()
             .find(|d| d.name == "create_session")
@@ -836,6 +865,13 @@ mod tests {
         let props = &d.input_schema["properties"];
         assert!(props["brian_model_id"].is_object(), "brian_model_id undeclared");
         assert!(props["rain_model_id"].is_object(), "rain_model_id undeclared");
+        assert_eq!(
+            wire::MODEL_ARGS,
+            ["brian_model_id", "rain_model_id"],
+            "the driver's argument names are a published contract — the Rust \
+             parameters behind them are slot0_model_id/slot1_model_id, and that \
+             is where a rename belongs"
+        );
         // Still optional — omitting them must keep the historical behaviour.
         let required = d.input_schema["required"].as_array().unwrap();
         assert_eq!(required.len(), 1);

@@ -4663,7 +4663,7 @@ mod tests {
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
         // Each role's own default model — the source spawn reads now, in place
-        // of `sessions.brian_model_id` / `rain_model_id`.
+        // of `sessions.slot0_model_id` / `slot1_model_id`.
         sqlx::query("UPDATE roles SET default_model_id = 'opus' WHERE slug = 'hands'")
             .execute(s.pool()).await.unwrap();
         sqlx::query("UPDATE roles SET default_model_id = 'sonnet' WHERE slug = 'eyes'")

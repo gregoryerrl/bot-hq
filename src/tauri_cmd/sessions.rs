@@ -103,10 +103,10 @@ pub async fn get_session_project_info(
 #[derive(Debug, Clone, Default, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionCreateOptions {
-    pub brian_effort: Option<String>,
-    pub rain_effort: Option<String>,
-    pub brian_ultracode: Option<bool>,
-    pub rain_ultracode: Option<bool>,
+    pub slot0_effort: Option<String>,
+    pub slot1_effort: Option<String>,
+    pub slot0_ultracode: Option<bool>,
+    pub slot1_ultracode: Option<bool>,
     /// Run the session in an isolated git worktree (None → the
     /// `worktree_default` app setting, which defaults ON for repo-backed
     /// sessions).
@@ -220,8 +220,8 @@ pub(crate) async fn resolve_participant_picks(
         // slots 0 and 1 when the pick leaves them unset, so a caller that has
         // not been updated to the per-row form keeps working unchanged.
         let legacy = match slot {
-            0 => (options.brian_effort.clone(), options.brian_ultracode),
-            1 => (options.rain_effort.clone(), options.rain_ultracode),
+            0 => (options.slot0_effort.clone(), options.slot0_ultracode),
+            1 => (options.slot1_effort.clone(), options.slot1_ultracode),
             _ => (None, None),
         };
         drafts.push(crate::storage::ParticipantDraft {
@@ -580,8 +580,8 @@ pub async fn create_session(
     // Create-dialog choices. Defaults preserve the historical duo behavior so
     // older callers that omit them keep spawning Rain with agent-config models.
     multi_participant: Option<bool>,
-    brian_model_id: Option<String>,
-    rain_model_id: Option<String>,
+    slot0_model_id: Option<String>,
+    slot1_model_id: Option<String>,
     // Effort/ultracode/worktree picks (bundled — see SessionCreateOptions).
     options: SessionCreateOptions,
 ) -> Result<SessionInfo, AppError> {
@@ -598,9 +598,9 @@ pub async fn create_session(
     // only written to `sessions` on the legacy path, where they are the caller's
     // only way to say which model a slot runs — and `ensure_session_roster`'s
     // seed is what carries them there.
-    let (multi_participant, brian_model_id, rain_model_id) = match &roster {
+    let (multi_participant, slot0_model_id, slot1_model_id) = match &roster {
         Some(r) => (r.multi_participant, None, None),
-        None => (multi_participant.unwrap_or(true), brian_model_id, rain_model_id),
+        None => (multi_participant.unwrap_or(true), slot0_model_id, slot1_model_id),
     };
     let (working, base) = resolve_session_placement(
         storage,
@@ -641,10 +641,10 @@ pub async fn create_session(
                 storage,
                 &id,
                 !multi_participant,
-                &[brian_model_id.clone(), rain_model_id.clone()],
+                &[slot0_model_id.clone(), slot1_model_id.clone()],
                 &[
-                    (options.brian_effort.clone(), options.brian_ultracode),
-                    (options.rain_effort.clone(), options.rain_ultracode),
+                    (options.slot0_effort.clone(), options.slot0_ultracode),
+                    (options.slot1_effort.clone(), options.slot1_ultracode),
                 ],
             )
             .await
@@ -1528,9 +1528,9 @@ mod tests {
         // The pre-D12 per-agent fields still land on slots 0 and 1 when the row
         // says nothing, so a caller that has not been updated keeps working.
         let legacy = SessionCreateOptions {
-            brian_effort: Some("high".into()),
-            rain_effort: Some("none".into()),
-            brian_ultracode: Some(false),
+            slot0_effort: Some("high".into()),
+            slot1_effort: Some("none".into()),
+            slot0_ultracode: Some(false),
             ..Default::default()
         };
         let inherited = resolve_participant_picks(

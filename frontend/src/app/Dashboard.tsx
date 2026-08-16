@@ -235,9 +235,9 @@ export function Dashboard() {
       // Null: derived from `options.participants` by the backend, which is the
       // single source now that the dialog picks participants rather than
       // toggling a second agent and choosing two models by name.
-      rainEnabled: boolean | null;
-      brianModelId: string | null;
-      rainModelId: string | null;
+      multiParticipant: boolean | null;
+      slot0ModelId: string | null;
+      slot1ModelId: string | null;
       // Effort/ultracode/worktree/participant picks (bundled — at the tauri
       // 10-arg limit).
       options: {
@@ -245,10 +245,10 @@ export function Dashboard() {
         // because they are the columns spawn reads TODAY. Not a second source
         // — nothing writes them but the projection in `handleCreate`, so they
         // cannot disagree with the roster they are derived from.
-        brianEffort: string | null;
-        rainEffort: string | null;
-        brianUltracode: boolean | null;
-        rainUltracode: boolean | null;
+        slot0Effort: string | null;
+        slot1Effort: string | null;
+        slot0Ultracode: boolean | null;
+        slot1Ultracode: boolean | null;
         useWorktree: boolean | null;
         participants: {
           roleId: number;
@@ -400,18 +400,23 @@ export function Dashboard() {
         // The roster is the source: the backend derives the solo/duo flag and
         // both model columns from `participants`, so sending them here too
         // would be a second source that can disagree with it.
-        rainEnabled: null,
-        brianModelId: null,
-        rainModelId: null,
+        multiParticipant: null,
+        slot0ModelId: null,
+        slot1ModelId: null,
         options: {
           // rc3 D12: the ROW is the source. The per-slot fields below are a
-          // mechanical projection of rows 0 and 1 — the columns spawn reads
-          // today are still per-slot, so dropping them here would silently
-          // stop honouring effort until the backend reads the new fields.
-          brianEffort: participants[0]?.effort ?? null,
-          rainEffort: participants[1]?.effort ?? null,
-          brianUltracode: participants[0]?.ultracode ?? null,
-          rainUltracode: participants[1]?.ultracode ?? null,
+          // mechanical projection of rows 0 and 1, kept as the fallback for a
+          // caller that sends no `participants` array at all — `resolve_participant_picks`
+          // applies them to slots 0 and 1 only when a pick leaves effort unset.
+          //
+          // They were `brianEffort` / `rainEffort` until the D10 hard
+          // retirement. The justification written here then — that the columns
+          // spawn reads are still per-slot — stopped being true when 0060
+          // dropped those columns; spawn reads each participant's own row.
+          slot0Effort: participants[0]?.effort ?? null,
+          slot1Effort: participants[1]?.effort ?? null,
+          slot0Ultracode: participants[0]?.ultracode ?? null,
+          slot1Ultracode: participants[1]?.ultracode ?? null,
           useWorktree,
           participants: participants.map((p) => ({
             roleId: p.roleId as number,

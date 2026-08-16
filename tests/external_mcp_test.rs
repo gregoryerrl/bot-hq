@@ -292,7 +292,7 @@ async fn list_sessions_includes_created_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_models_exposes_the_spawn_fields_and_redacts_the_token() {
-    // The driver could pass `brian_model_id` / `rain_model_id` but had no API to
+    // The driver could pass `slot0_model_id` / `slot1_model_id` but had no API to
     // discover an id, so it had to hardcode a UUID — and a wrong one fell back
     // silently.
     //

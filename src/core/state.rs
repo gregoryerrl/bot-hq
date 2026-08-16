@@ -219,7 +219,7 @@ impl AppState {
 
     /// Open a session from the external driver.
     ///
-    /// `brian_model_id` / `rain_model_id` are saved-model ids; `None` falls back
+    /// `slot0_model_id` / `slot1_model_id` are saved-model ids; `None` falls back
     /// to the per-agent config, which is the historical behaviour. Pass them when
     /// the caller wants a SPECIFIC model for this session. The two parameter
     /// NAMES are the driver's wire contract and are left alone; what they mean
@@ -230,14 +230,14 @@ impl AppState {
     /// read is deleted, and design §1 puts the default at one agent). See
     /// [`Storage::ensure_session_roster`], which seeds it. A driver that wants a
     /// second participant has to add the role to the session it creates; passing
-    /// `rain_model_id` alone does NOT add one, and there is no roster slot for
+    /// `slot1_model_id` alone does NOT add one, and there is no roster slot for
     /// it to land on.
     pub async fn open_session(
         &self,
         title: impl Into<String>,
         working_repo_path: Option<std::path::PathBuf>,
-        brian_model_id: Option<String>,
-        rain_model_id: Option<String>,
+        slot0_model_id: Option<String>,
+        slot1_model_id: Option<String>,
     ) -> Result<String> {
         let mut req = OpenSessionRequest::full(title, working_repo_path);
         // rc3 D13: the product default with no UI behind it. One participant.
@@ -245,7 +245,7 @@ impl AppState {
         // Positional over the default roster's turn order. The two parameter
         // NAMES are the external driver's wire contract and are left alone; what
         // they mean here is slot 0 and slot 1 (rc3 D10).
-        req.models = vec![brian_model_id, rain_model_id];
+        req.models = vec![slot0_model_id, slot1_model_id];
         let handle = open_session(
             req,
             &self.paths,
