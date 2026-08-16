@@ -122,7 +122,7 @@ async fn seeded_bridge() -> Arc<SignalingBridge> {
     let storage = Storage::memory().await.unwrap();
     bridge.set_storage(storage.clone()).await;
     storage.create_session("s-parity", "parity", None).await.unwrap();
-    let seeded = storage.ensure_session_roster("s-parity", false).await.unwrap();
+    let seeded = storage.ensure_session_roster("s-parity", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
     assert_eq!(seeded, 2, "the parity roster must hold both participants");
     bridge
 }

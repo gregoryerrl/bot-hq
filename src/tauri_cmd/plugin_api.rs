@@ -117,6 +117,31 @@ fn opt_i64(args: &Value, key: &str) -> Option<i64> {
     args.get(key).and_then(|v| v.as_i64())
 }
 
+/// How many participants a `plugin_session_create` call asked for.
+///
+/// `None` = the caller said nothing, so the host's default (one) applies.
+///
+/// **`participants` is the number, `duo` its legacy alias** (round-2 audit B3).
+/// The wire only had `duo: bool`, which cannot express rc3's roster — and
+/// `duo:true` seeded EVERY active non-`on_mention` role, so a plugin consented
+/// to a pair and got however many roles the user had configured. `duo` is not
+/// removed, because dropping a wire key breaks installed plugins; it maps to 2,
+/// and `participants` wins when both arrive.
+///
+/// Clamped here as well as in the seeder: a plugin sending `participants: 500`
+/// should not depend on a storage-layer clamp to avoid asking for 500
+/// subprocesses, and the two clamps agree because both read the same constant.
+fn requested_participants(args: &Value) -> Option<usize> {
+    args.get("participants")
+        .and_then(Value::as_u64)
+        .map(|n| n.clamp(1, crate::storage::MAX_SESSION_PARTICIPANTS as u64) as usize)
+        .or_else(|| {
+            args.get("duo")
+                .and_then(Value::as_bool)
+                .map(|d| if d { 2 } else { 1 })
+        })
+}
+
 fn opt_str_vec(args: &Value, key: &str) -> Option<Vec<String>> {
     args.get(key).and_then(|v| v.as_array()).map(|arr| {
         arr.iter()
@@ -408,15 +433,7 @@ pub(crate) async fn dispatch(
             // "more than one". It maps to the roster this host seeds by default
             // for a multi-participant session, and `participants` wins when both
             // are sent.
-            let requested = args
-                .get("participants")
-                .and_then(Value::as_u64)
-                .map(|n| n.clamp(1, crate::storage::MAX_SESSION_PARTICIPANTS as u64) as usize)
-                .or_else(|| {
-                    args.get("duo")
-                        .and_then(Value::as_bool)
-                        .map(|d| if d { 2 } else { 1 })
-                });
+            let requested = requested_participants(args);
             let core = core.ok_or_else(|| {
                 AppError::Internal("core state unavailable for plugin_session_create".into())
             })?;
@@ -552,6 +569,40 @@ mod tests {
     use super::*;
     use crate::plugins::PluginRegistry;
     use tempfile::TempDir;
+
+    /// **`participants` is the roster size; `duo` is its legacy alias**
+    /// (round-2 audit B3).
+    ///
+    /// The wire had only `duo: bool`, and `true` meant "every active role" — a
+    /// plugin consented to a pair and got however many the user had configured.
+    /// Both keys stay accepted; a plugin that ships against `duo` keeps working.
+    #[test]
+    fn the_plugin_wire_reads_a_participant_count() {
+        let v = |s: &str| serde_json::from_str::<Value>(s).unwrap();
+        // Silence means silence — the host applies its own default (one), and
+        // this must NOT read as a request for one, or a later default change
+        // would silently not reach plugins.
+        assert_eq!(requested_participants(&v("{}")), None);
+        assert_eq!(requested_participants(&v(r#"{"participants":3}"#)), Some(3));
+        assert_eq!(requested_participants(&v(r#"{"participants":1}"#)), Some(1));
+        // The legacy alias, both ways.
+        assert_eq!(requested_participants(&v(r#"{"duo":true}"#)), Some(2));
+        assert_eq!(requested_participants(&v(r#"{"duo":false}"#)), Some(1));
+        // Explicit beats legacy when a plugin sends both.
+        assert_eq!(
+            requested_participants(&v(r#"{"participants":4,"duo":true}"#)),
+            Some(4)
+        );
+        // Clamped here, not only in storage: a plugin asking for 500 must not
+        // depend on a storage-layer clamp to avoid 500 subprocesses.
+        assert_eq!(
+            requested_participants(&v(r#"{"participants":500}"#)),
+            Some(crate::storage::MAX_SESSION_PARTICIPANTS)
+        );
+        assert_eq!(requested_participants(&v(r#"{"participants":0}"#)), Some(1));
+        // Junk is not a request.
+        assert_eq!(requested_participants(&v(r#"{"participants":"two"}"#)), None);
+    }
 
     /// Registry with one plugin granting `caps` (seeded into the
     /// consent-frozen grant cache, the way boot/install do), enabled per

@@ -17,7 +17,7 @@ async fn seeded_bridge() -> Arc<SignalingBridge> {
         .create_session("s1", "signaling", None)
         .await
         .unwrap();
-    storage.ensure_session_roster("s1", false).await.unwrap();
+    storage.ensure_session_roster("s1", bot_hq::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
     bridge
 }
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

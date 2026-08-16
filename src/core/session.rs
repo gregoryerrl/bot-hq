@@ -403,7 +403,7 @@ pub(crate) async fn seed_default_roster(
     models: &[Option<String>],
     knobs: &[(Option<String>, Option<bool>)],
 ) {
-    if let Err(e) = storage.ensure_session_roster(session_id, solo).await {
+    if let Err(e) = storage.ensure_session_roster(session_id, if solo { 1 } else { crate::storage::MAX_SESSION_PARTICIPANTS }).await {
         warn!(session_id, ?e, "seeding session roster failed");
         return;
     }
@@ -731,7 +731,10 @@ async fn spawn_session_handle(
     // must not block the spawn: `author` still carries attribution and the
     // agents still run.
     if let Err(e) = storage
-        .ensure_session_roster(&session.id, session.rain_enabled == 0)
+        .ensure_session_roster(
+            &session.id,
+            if session.rain_enabled == 0 { 1 } else { crate::storage::MAX_SESSION_PARTICIPANTS },
+        )
         .await
     {
         warn!(session_id = %session.id, ?e, "seeding session roster failed");
@@ -2868,7 +2871,7 @@ mod tests {
         use crate::agents::Capability;
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
         let live = resolve_spawn_roster(&SignalingBridge::new(), "s1", &roster);
 
@@ -2946,7 +2949,7 @@ mod tests {
     async fn the_roles_default_model_is_used_when_the_session_names_none() {
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
 
         // A saved model, made the EYES role's default — the Roles tab's job.
         sqlx::query(
@@ -3066,7 +3069,7 @@ mod tests {
         use crate::claude_config::{save_overrides, ClaudeOverrides};
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let data_dir = TempDir::new().unwrap();
 
         let mut store = ClaudeOverrides::default();
@@ -3161,7 +3164,7 @@ mod tests {
     async fn the_prompt_file_a_spawn_config_names_holds_the_composed_prompt() {
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let data_dir = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
         let mcp_temp = TempDir::new().unwrap();
@@ -3503,7 +3506,7 @@ mod tests {
     async fn role_prose_resolves_through_the_roster_and_degrades_to_none() {
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
 
         let hands = roster.iter().find(|p| p.slug == "hands").expect("seeded HANDS");
@@ -3579,7 +3582,7 @@ mod tests {
         paths.init().unwrap();
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         sqlx::query(
             "INSERT INTO models (id, display_name, provider, model_name) \
              VALUES ('m-eyes', 'DeepSeek V4', 'anthropic', 'deepseek-v4')",
@@ -3635,7 +3638,7 @@ mod tests {
         paths.init().unwrap();
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
 
         let brian_facts = resolve_roster_facts(&s, &roster, roster.iter().find(|p| p.slug == "hands").unwrap()).await.unwrap();
@@ -3692,7 +3695,7 @@ mod tests {
         paths.init().unwrap();
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
         let facts = resolve_roster_facts(&s, &roster, roster.iter().find(|p| p.slug == "eyes").unwrap()).await.unwrap();
         let prompt = read_system_prompt(&paths, "eyes", None, None, None, None, Some(&facts))
@@ -3814,7 +3817,7 @@ mod tests {
         std::fs::write(paths.cl_dir.join("custom-instructions.md"), "SENTINEL_CI_7T").unwrap();
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
         let facts = resolve_roster_facts(&s, &roster, roster.iter().find(|p| p.slug == "eyes").unwrap()).await.unwrap();
 
@@ -3866,7 +3869,7 @@ mod tests {
         paths.init().unwrap();
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
 
         // Both enabled first, so the assertions below cannot pass by the peer
         // never having been there.
@@ -3916,7 +3919,7 @@ mod tests {
         paths.init().unwrap();
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
 
         // A participant whose own capabilities column will not decode gets no
@@ -4186,7 +4189,7 @@ mod tests {
     async fn starting_the_ring_registers_it_so_a_parked_question_can_halt_it() {
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let bridge = Arc::new(SignalingBridge::new());
         bridge.set_storage(s.clone()).await;
         bridge
@@ -4244,7 +4247,7 @@ mod tests {
         paths.init().unwrap();
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
 
         // Edited by raw UPDATE rather than through `update_role`, matching the

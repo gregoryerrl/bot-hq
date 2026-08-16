@@ -708,6 +708,41 @@ pub async fn create_session(
 /// proxy (`plugin_api.rs`, the `spawn_session` and `plugin_session_create`
 /// arms) is what keeps this reachable — which is why it takes plain refs, not
 /// `tauri::State`.
+/// Seed the roster for a dialog-less create, at the size the caller asked for.
+///
+/// Split out of [`dispatch_session_inner`] so a test can drive it: that function
+/// needs a `CoreAppState`, whose constructor binds a `SignalingServer` port, so
+/// nothing in the suite builds one. This takes `&Storage` and the caller's
+/// count, which is the join the round-2 B3 finding was actually about — the
+/// first fix let the count reach only a `wanted > 1` boolean, and replacing it
+/// with a hardcoded `2` left the whole suite green.
+///
+/// **Residue, stated:** the single call site inside `dispatch_session_inner` is
+/// still deletable with the suite green. Extraction fixes the assertion;
+/// threading fixes the wire, and threading here means an integration test that
+/// binds a port. Pinning the two halves and naming the one-line gap is the
+/// honest maximum without it.
+pub(crate) async fn seed_dispatch_roster(
+    storage: &Storage,
+    id: &str,
+    participants: Option<usize>,
+) -> Result<usize, AppError> {
+    // rc3 D13: the product default is ONE participant, so an absent count is 1,
+    // not "the whole roster". `ensure_session_roster` clamps the upper end.
+    let wanted = participants.unwrap_or(1).max(1);
+    storage
+        .ensure_session_roster(id, wanted)
+        .await
+        .map(|n| n as usize)
+        .map_err(|e| AppError::DbError(format!("{e:#}")))
+}
+
+// Kept ON this function rather than above the helper before it: inserting
+// `seed_dispatch_roster` between the attribute and its target moved the allow
+// onto a three-argument function and left this nine-argument one warning. That
+// is round-2 finding A1 — an attribute bound to the item after it rather than
+// the one it was written for — reproduced by the hand that fixed it, and caught
+// only because clippy's count moved from 10 to 11.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_session_inner(
     core: &CoreAppState,
@@ -756,12 +791,36 @@ pub(crate) async fn dispatch_session_inner(
     // agent. A caller that wants more names a count; the seed itself is
     // `Storage::ensure_session_roster`, which documents the same rule.
     // Models stay NULL = role/agent defaults, as the dialog's "(agent default)".
-    let wanted = participants.unwrap_or(1).max(1);
+    // **Seed the roster FIRST, with the count** (round-2 audit B3, second half).
+    //
+    // The first attempt let `wanted` reach only `rain_enabled = wanted > 1`,
+    // and the reviewer measured what that was worth: replacing the caller's
+    // count with a hardcoded `2` left the whole suite green, because the
+    // carrier between create and spawn is that one boolean column and spawn's
+    // `ensure_session_roster` re-derived a roster from it. `participants: 3`,
+    // `: 2` and `: 8` were the same session. A wire that reads honest over
+    // unchanged behaviour is worse than the vague one it replaced — a plugin
+    // author gets a specific expectation the host does not keep.
+    //
+    // Seeding eagerly is what carries the number, and it MATCHES THE DIALOG,
+    // which has always written its picked roster at create (`seed_session_roster`
+    // above) precisely so the background spawn finds one. That is why this beats
+    // persisting a count: the roster rows are the truth, a count column would be
+    // a second number free to disagree with them, and it would need a migration.
+    // `ensure_session_roster` returns early when a roster exists, so spawn's
+    // call becomes the no-op it already documents itself as.
+    let seeded = seed_dispatch_roster(storage, &id, participants).await?;
     // `sessions.rain_enabled` stays a BOOKKEEPING flag — spawn reads the
     // roster, not this column, and `SessionInfo.rain_enabled` is part of the
     // frozen frontend shape. "More than one participant" is all it has ever
     // meant on this path.
-    let rain_enabled = wanted > 1;
+    //
+    // Derived from what was ACTUALLY seeded rather than from the request, so
+    // the flag cannot disagree with the rows: a caller asking for three on an
+    // install with one role gets one participant, and a column saying "more
+    // than one" would be the second source of truth this design exists to
+    // avoid. It also removes a duplicate of the count resolution that sat here.
+    let rain_enabled = seeded > 1;
     storage
         .set_session_spawn_config(&id, rain_enabled, None, None)
         .await
@@ -1123,6 +1182,51 @@ mod tests {
         (s, b)
     }
 
+    /// **The dialog-less create seeds the size it was asked for** (round-2 B3).
+    ///
+    /// The first fix threaded a count into `dispatch_session_inner` and let it
+    /// reach only `rain_enabled = wanted > 1`; the reviewer replaced the count
+    /// with a hardcoded `2` and the whole suite stayed green, because nothing
+    /// distinguished 2 from 3 from 8. This is the join that cut exercised.
+    #[tokio::test]
+    async fn a_dialog_less_create_seeds_the_count_it_was_given() {
+        let (s, _b) = setup().await;
+        for i in 0..4 {
+            s.create_role(&crate::storage::RoleDraft {
+                display_name: format!("EXTRA{i}"),
+                capabilities: "[\"read_channel\"]".into(),
+                participation_mode: "active".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+
+        // Distinct sizes, because one size cannot tell "honours the count" from
+        // "seeds whatever exists".
+        // Indexed, not keyed by `expect` — `None` and `Some(1)` share an
+        // expectation and would collide on the session id.
+        for (i, (wanted, expect)) in [(None, 1usize), (Some(1), 1), (Some(2), 2), (Some(4), 4)]
+            .into_iter()
+            .enumerate()
+        {
+            let id = format!("s-case-{i}");
+            s.create_session(&id, "t", None).await.unwrap();
+            let seeded = seed_dispatch_roster(&s, &id, wanted).await.unwrap();
+            assert_eq!(seeded, expect, "asked for {wanted:?}");
+            assert_eq!(
+                s.participants_for_session(&id).await.unwrap().len(),
+                expect,
+                "roster rows for {wanted:?}"
+            );
+        }
+
+        // Absent means the product default of ONE, not "the whole roster" —
+        // the rc3 D13 rule this path is the last caller of.
+        s.create_session("s-default", "t", None).await.unwrap();
+        assert_eq!(seed_dispatch_roster(&s, "s-default", None).await.unwrap(), 1);
+    }
+
     /// rc3 **P1**: the three ways a prompt can be absent are three different
     /// sentences, and none of them is an empty pane.
     ///
@@ -1277,7 +1381,7 @@ mod tests {
     async fn participant_views_carry_the_rows_effort_and_ultracode() {
         let (storage, _b) = setup().await;
         storage.create_session("s1", "t", None).await.unwrap();
-        storage.ensure_session_roster("s1", false).await.unwrap();
+        storage.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = storage.participants_for_session("s1").await.unwrap();
 
         // Only the first row is given knobs, so the assertion is a DIFFERENCE

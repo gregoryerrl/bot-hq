@@ -1616,7 +1616,7 @@ mod tests {
         storage.create_session("s1", "t", None).await.unwrap();
         // A real roster, so the row can name the participant by the display
         // rule rather than by its slug.
-        storage.ensure_session_roster("s1", false).await.unwrap();
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
 
         let hands = CallerIdentity {
             session_id: "s1".into(),

@@ -309,7 +309,7 @@ mod tests {
         let storage = crate::storage::Storage::memory().await.unwrap();
         bridge.set_storage(storage.clone()).await;
         storage.create_session("s1", "test", None).await.unwrap();
-        storage.ensure_session_roster("s1", false).await.unwrap();
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let reviewer = storage
             .participants_for_session("s1")
             .await

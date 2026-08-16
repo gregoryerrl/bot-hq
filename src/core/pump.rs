@@ -1882,7 +1882,7 @@ mod tests {
     #[tokio::test]
     async fn an_init_event_persists_the_resume_id_on_the_participants_own_row() {
         let (storage, state) = setup().await;
-        storage.ensure_session_roster("s1", false).await.unwrap();
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let eyes = storage
             .participant_by_slug("s1", "eyes")
             .await
@@ -1928,7 +1928,7 @@ mod tests {
         let (storage, state) = setup().await;
         // `create_session` seeds no roster; the participants have to exist for
         // the row to resolve to one.
-        storage.ensure_session_roster("s1", false).await.unwrap();
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let brian = storage
             .participant_by_slug("s1", "hands")
             .await
@@ -2029,7 +2029,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_substantive_turn_overrides_its_own_pass() {
         let (storage, state) = setup().await;
-        storage.ensure_session_roster("s1", false).await.unwrap();
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let brian = storage
             .participant_by_slug("s1", "hands")
             .await
@@ -2099,7 +2099,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn the_pass_flag_does_not_leak_into_the_next_turn() {
         let (storage, state) = setup().await;
-        storage.ensure_session_roster("s1", false).await.unwrap();
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let brian = storage
             .participant_by_slug("s1", "hands")
             .await

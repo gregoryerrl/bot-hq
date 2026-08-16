@@ -938,11 +938,7 @@ impl Storage {
     /// **This is the DEFAULT roster, not the only one.** A session created
     /// through [`Storage::seed_session_roster`] already has the roster its
     /// creator chose, and this must not add to it — hence the count guard.
-    pub async fn ensure_session_roster(
-        &self,
-        session_id: &str,
-        first_role_only: bool,
-    ) -> Result<u64> {
+    pub async fn ensure_session_roster(&self, session_id: &str, wanted: usize) -> Result<u64> {
         // Seed only into a session that has NO roster.
         //
         // `OR IGNORE` on `UNIQUE (session_id, slug)` was the whole idempotence
@@ -978,28 +974,30 @@ impl Storage {
             // subqueries used to produce silently.
             return Ok(0);
         }
-        // The default-1 cut, applied to BOTH the drafts and the role list they
-        // are zipped against — `insert_roster` reads the slug and display name
-        // off the matching role, so truncating one without the other would seed
-        // a participant under the wrong role's name.
+        // The cut, applied to BOTH the drafts and the role list they are zipped
+        // against — `insert_roster` reads the slug and display name off the
+        // matching role, so truncating one without the other would seed a
+        // participant under the wrong role's name.
         //
-        // **And the ceiling** (round-2 audit B3). `first_role_only = false` used
-        // to mean "every active non-`on_mention` role", with no upper bound —
-        // while the create dialog's path refused more than
-        // [`MAX_SESSION_PARTICIPANTS`] in `resolve_participant_picks`. The two
-        // non-dialog creation paths reach this function instead: a plugin's
-        // `plugin_session_create` and the external driver's `create_session`.
-        // Both express roster size as a BOOLEAN, so neither can ask for a
-        // number, and neither got the cap. With three active roles today it
-        // seeds three and looks right; adding a fourth in Settings → Roles
-        // silently widened every plugin-created session. Every participant is a
-        // claude-code subprocess with its own bill, so an unbounded seed is a
-        // spend the caller never asked for.
-        let roles: Vec<Role> = if first_role_only {
-            roles.into_iter().take(1).collect()
-        } else {
-            roles.into_iter().take(MAX_SESSION_PARTICIPANTS).collect()
-        };
+        // **`wanted` is a COUNT, and this was a `first_role_only: bool`**
+        // (round-2 audit B3). The boolean had two failures at once. It could not
+        // express a roster: `false` meant "every active non-`on_mention` role",
+        // so a caller asking for a pair got however many roles the user had
+        // configured — three today, silently four the moment one is added in
+        // Settings → Roles, and every participant is a claude-code subprocess
+        // with its own bill. And it had no ceiling, while the create DIALOG's
+        // path refused more than [`MAX_SESSION_PARTICIPANTS`] in
+        // `resolve_participant_picks` — a cap on one path of three is a cap on
+        // none of them.
+        //
+        // Clamped, not rejected: this is the SEED path, whose callers are
+        // asking for a default rather than naming a roster, and there is
+        // nothing useful to fail for when a caller wants more roles than the
+        // install has. Asking for more than exists yields what exists.
+        let roles: Vec<Role> = roles
+            .into_iter()
+            .take(wanted.clamp(1, MAX_SESSION_PARTICIPANTS))
+            .collect();
         let drafts: Vec<ParticipantDraft> = roles
             .iter()
             .map(|role| ParticipantDraft {
@@ -2463,7 +2461,7 @@ mod tests {
 
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
         assert_eq!(roster.len(), 2, "the roster did not seed, so nothing is compared");
 
@@ -3291,7 +3289,7 @@ mod tests {
         // against a re-derived slug those resolve to NULL, and the session gets
         // a roster whose `role_id` is NULL with nothing reporting an error.
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
         assert_eq!(roster.len(), 2);
         assert_eq!(roster[0].role_id, Some(hands.id));
@@ -3462,7 +3460,7 @@ mod tests {
     async fn a_participant_is_delivered_prose_but_never_a_peers_tool_plumbing() {
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
         let (me, peer) = (roster[0].id, roster[1].id);
 
@@ -3735,7 +3733,7 @@ mod tests {
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
         // `false` = the whole roster: the first-role-only variant has no `eyes`.
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let eyes = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap();
         sqlx::query("UPDATE session_participants SET label = ? WHERE id = ?")
             .bind("  Skeptic  ")
@@ -3772,7 +3770,7 @@ mod tests {
         // every summons meant for the other.
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let hands = s.participant_by_slug("s1", "hands").await.unwrap().unwrap();
         let eyes = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap();
         sqlx::query("UPDATE session_participants SET label = ? WHERE id = ?")
@@ -4027,7 +4025,7 @@ mod tests {
         // costs. There is now one call and one COMMIT.
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let brian = s.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
         let rain = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
 
@@ -4324,7 +4322,7 @@ mod tests {
         // read a session with more history than one turn should carry.
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let rain = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
         for n in 0..UNREAD_BATCH_LIMIT + 1 {
             s.post_to_channel("s1", "user", None, "text", format!("m{n}"), None)
@@ -4354,7 +4352,7 @@ mod tests {
         // read what it wrote.
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let brian = s.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
         let rain = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
 
@@ -4453,8 +4451,8 @@ mod tests {
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
         s.create_session("s2", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
-        s.ensure_session_roster("s2", false).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
+        s.ensure_session_roster("s2", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let brian1 = s.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
         let brian2 = s.participant_by_slug("s2", "hands").await.unwrap().unwrap().id;
         assert_ne!(brian1, brian2, "precondition: two rosters, two 'brian' rows");
@@ -4602,7 +4600,7 @@ mod tests {
         sqlx::query("UPDATE roles SET default_model_id = 'sonnet' WHERE slug = 'eyes'")
             .execute(s.pool()).await.unwrap();
 
-        assert_eq!(s.ensure_session_roster("s1", false).await.unwrap(), 2);
+        assert_eq!(s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap(), 2);
 
         let roster = s.participants_for_session("s1").await.unwrap();
         assert_eq!(roster.len(), 2);
@@ -4636,7 +4634,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(s.ensure_session_roster("s2", false).await.unwrap(), 3);
+        assert_eq!(s.ensure_session_roster("s2", MAX_SESSION_PARTICIPANTS).await.unwrap(), 3);
         let three = s.participants_for_session("s2").await.unwrap();
         assert_eq!(
             three.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
@@ -4650,7 +4648,7 @@ mod tests {
         // — nothing wakes it, so it would be a seat with no process).
         s.create_session("s3", "t", None).await.unwrap();
         s.set_role_archived(auditor.id, true).await.unwrap();
-        assert_eq!(s.ensure_session_roster("s3", false).await.unwrap(), 2);
+        assert_eq!(s.ensure_session_roster("s3", MAX_SESSION_PARTICIPANTS).await.unwrap(), 2);
     }
 
     /// **The seed path obeys the cap the pick path always did** (round-2 B3).
@@ -4695,7 +4693,7 @@ mod tests {
         );
 
         s.create_session("s-capped", "t", None).await.unwrap();
-        let seeded = s.ensure_session_roster("s-capped", false).await.unwrap();
+        let seeded = s.ensure_session_roster("s-capped", MAX_SESSION_PARTICIPANTS).await.unwrap();
         assert_eq!(
             seeded as usize, MAX_SESSION_PARTICIPANTS,
             "a seeded roster took {seeded} of {active} active roles — the seed \
@@ -4710,7 +4708,68 @@ mod tests {
         // The solo cut is unaffected — it is a different question from the
         // ceiling, and capping must not turn "one participant" into eight.
         s.create_session("s-solo", "t", None).await.unwrap();
-        assert_eq!(s.ensure_session_roster("s-solo", true).await.unwrap(), 1);
+        assert_eq!(s.ensure_session_roster("s-solo", 1).await.unwrap(), 1);
+    }
+
+    /// **The count is the roster size, not a flag for "more than one"**
+    /// (round-2 B3, second half).
+    ///
+    /// `ensure_session_roster` took a `first_role_only: bool`, so every value
+    /// above 1 collapsed to the same roster. The reviewer measured what that
+    /// cost: replacing a caller's count with a hardcoded `2` left the whole
+    /// suite green, because nothing anywhere distinguished 2 from 3 from 8.
+    ///
+    /// Asserted as a SEQUENCE of distinct sizes rather than one call, because a
+    /// single-count fixture cannot tell "honours the number" from "seeds
+    /// whatever exists" — the same fixture-shape rule `conventions.md` records
+    /// from the three-numerators incident.
+    #[tokio::test]
+    async fn a_seeded_roster_is_exactly_the_size_asked_for() {
+        let s = Storage::memory().await.unwrap();
+        let seeded = s.list_roles().await.unwrap().len();
+        for i in seeded..6 {
+            s.create_role(&RoleDraft {
+                display_name: format!("ROLE{i}"),
+                capabilities: "[\"read_channel\"]".into(),
+                participation_mode: "active".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+
+        for wanted in [1usize, 2, 3, 5] {
+            let sid = format!("s-{wanted}");
+            s.create_session(&sid, "t", None).await.unwrap();
+            assert_eq!(
+                s.ensure_session_roster(&sid, wanted).await.unwrap() as usize,
+                wanted,
+                "asked for {wanted} participants"
+            );
+            assert_eq!(
+                s.participants_for_session(&sid).await.unwrap().len(),
+                wanted,
+                "roster rows for {wanted}"
+            );
+        }
+
+        // More than the install has yields what it has — this is the seed path,
+        // whose callers ask for a default rather than name a roster, so there is
+        // nothing useful to fail for.
+        s.create_session("s-greedy", "t", None).await.unwrap();
+        let active = s
+            .list_roles()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| !r.archived && r.participation_mode == MODE_ACTIVE)
+            .count();
+        assert_eq!(
+            s.ensure_session_roster("s-greedy", MAX_SESSION_PARTICIPANTS)
+                .await
+                .unwrap() as usize,
+            active
+        );
     }
 
     /// Two participants of ONE role are both addressable — the collision rule
@@ -4754,8 +4813,8 @@ mod tests {
         // duplicate roster per restart.
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
-        assert_eq!(s.ensure_session_roster("s1", false).await.unwrap(), 2);
-        assert_eq!(s.ensure_session_roster("s1", false).await.unwrap(), 0, "second call inserts nothing");
+        assert_eq!(s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap(), 2);
+        assert_eq!(s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap(), 0, "second call inserts nothing");
         assert_eq!(s.participants_for_session("s1").await.unwrap().len(), 2);
     }
 
@@ -4770,7 +4829,7 @@ mod tests {
     async fn the_dialogless_default_seeds_exactly_one_participant() {
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
-        assert_eq!(s.ensure_session_roster("s1", true).await.unwrap(), 1);
+        assert_eq!(s.ensure_session_roster("s1", 1).await.unwrap(), 1);
         let roster = s.participants_for_session("s1").await.unwrap();
         assert_eq!(roster.len(), 1, "no row for a role nobody invited");
         assert!(roster[0].enabled, "the one participant runs");
@@ -4910,7 +4969,7 @@ mod tests {
         // what `core::session::seed_default_roster` does for every path that has
         // no participant list.
         s.create_session("s-old", "t", None).await.unwrap();
-        assert_eq!(s.ensure_session_roster("s-old", false).await.unwrap(), 2);
+        assert_eq!(s.ensure_session_roster("s-old", MAX_SESSION_PARTICIPANTS).await.unwrap(), 2);
         let seeded = s.participants_for_session("s-old").await.unwrap();
         for (p, (model, effort, ultracode)) in seeded.iter().zip([
             ("opus", "max", true),
@@ -5077,8 +5136,8 @@ mod tests {
         .unwrap();
         let before = roster_verbatim(&s, "s1").await;
 
-        assert_eq!(s.ensure_session_roster("s1", false).await.unwrap(), 0, "nothing to seed");
-        assert_eq!(s.ensure_session_roster("s1", false).await.unwrap(), 0, "still nothing on respawn");
+        assert_eq!(s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap(), 0, "nothing to seed");
+        assert_eq!(s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap(), 0, "still nothing on respawn");
 
         assert_eq!(roster_verbatim(&s, "s1").await, before, "the chosen roster is untouched");
     }
@@ -5097,9 +5156,9 @@ mod tests {
         s.set_session_spawn_config("s-backfilled", true, Some("opus"), Some("sonnet"))
             .await
             .unwrap();
-        s.ensure_session_roster("s-backfilled", false).await.unwrap();
+        s.ensure_session_roster("s-backfilled", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let backfilled = roster_verbatim(&s, "s-backfilled").await;
-        assert_eq!(s.ensure_session_roster("s-backfilled", false).await.unwrap(), 0);
+        assert_eq!(s.ensure_session_roster("s-backfilled", MAX_SESSION_PARTICIPANTS).await.unwrap(), 0);
         assert_eq!(
             roster_verbatim(&s, "s-backfilled").await,
             backfilled,
@@ -5115,7 +5174,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            s.ensure_session_roster("s-rosterless", false).await.unwrap(),
+            s.ensure_session_roster("s-rosterless", MAX_SESSION_PARTICIPANTS).await.unwrap(),
             2,
             "the heal path still seeds both"
         );
@@ -5205,7 +5264,7 @@ mod tests {
         let before = all_rows(&s, "s1").await;
         assert!(before.iter().all(|m| m.participant_id.is_none()), "precondition: unmapped");
 
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
 
         let roster = s.participants_for_session("s1").await.unwrap();
         let after = all_rows(&s, "s1").await;
@@ -5221,7 +5280,7 @@ mod tests {
         // subquery resolves, so nothing new accumulates unmapped.
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
         s.post_to_channel("s1", "participant", Some("hands"), "text", "work", None)
             .await
             .unwrap();
@@ -5257,7 +5316,7 @@ mod tests {
         // this type exists to rule out.
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let pm = s
             .post_to_channel("s1", "participant", Some("hands"), "text", "work",
                              Some(Envelope::phase("Apply")))

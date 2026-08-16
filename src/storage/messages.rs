@@ -245,7 +245,7 @@ mod tests {
         s.create_session("s1", "S", None).await.unwrap();
         // `create_session` seeds no roster — 0044 backfilled the sessions that
         // already existed, and every one created since is seeded here, pre-spawn.
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let pid = s
             .participant_by_slug("s1", "hands")
             .await

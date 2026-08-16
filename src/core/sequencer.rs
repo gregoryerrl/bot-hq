@@ -9425,7 +9425,7 @@ mod tests {
 
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", false).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let pid = s.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
 
         // Warm both paths, so neither measurement pays one-time pool, statement
