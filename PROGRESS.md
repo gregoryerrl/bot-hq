@@ -18,6 +18,60 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-16 (later) — batches 3–7, and three guards that were not guarding
+
+Same session, second half. Where the first half fixed behaviour, this half was
+mostly about docs and tests telling the truth — and the recurring find is that a
+guard can pass for a WEAKER property than its own commit message claims. Three
+of them, every one caught by the reviewer CUTTING the thing the guard protects,
+never by reading it:
+
+- a parity coverage guard rewritten as `checked == registry - SANCTIONED.len()`
+  was an identity over its own loop, so deleting a whole tool left it green;
+- a new doc guard's needle was a backticked NAME, so deleting an entire README
+  table row passed — 30 of the 40 tools are also named in prose. It pinned
+  "mentioned" where the message claimed "listed";
+- a CL-editor dirty cleanup looked unpinned and turned out to be redundant with
+  a second guard, so only cutting BOTH reddened anything.
+
+**The CL editor lost unsaved text on every tab SWITCH**, not just on close:
+`EditorArea` rendered the active tab alone, keyed by path, while the working
+copy is component-local state. Type in A, open B, come back: gone, no prompt.
+Fixed by keeping every open pane mounted and hiding the inactive ones — nothing
+is restored, so the adoption logic cannot be handed a stale "clean" reading —
+plus a tab-strip dirty marker, a confirm on closing a dirty tab, and a project
+RENAME that retargets its tabs instead of closing them.
+
+**The approval gate scrolled sideways** on the one surface where seeing half a
+command is the whole risk; both boxes now wrap and scroll vertically only.
+
+**Docs stopped describing a bot-hq that no longer exists.** ARCHITECTURE
+contradicted itself about where a model comes from (the code resolves per
+participant: participant pick → role default → `agent_configs` → built-in);
+the public site led with "Two AI agents. One builds, one reviews.", against the
+house framing rule, and carried 15 uses of the retired names; CLAUDE.md's plugin
+paragraph was wrong on three counts; README and INSTALL still offered the
+deleted native loop as a second backend; PLAN listed shipped work as unstarted
+and a REVERSED fix as shipped. The tool list said 36 against a registry of 40 —
+now checked by a test, anchored to the table row and the list paragraph.
+
+**And the prose every agent is handed still said "the duo"** — inside
+`GENERAL_RULES`, so it shipped in every session's system prompt. Fixed and
+guarded; the comment layer is deliberately left, because a comment describing a
+2026-07-10 incident in that day's vocabulary is a record, not drift.
+
+Deleted, each verified dead at the line first: the router-health chain (end to
+end — event, map, Tauri event, subscriber arm, view field, store slice,
+component), two router-era mechanisms (`user_silent_forwards`, and a
+`pending_paused_wakes` map one path filled and the other dropped), and the three
+dead agent-config Tauri commands — whose deletion would have taken the LIVE
+storage layer's only test with it, and which surfaced that
+`agent_configs`' CHECK still excludes every rc3 role slug, so that spawn
+fallback tier is unreachable for any current roster (pinned).
+
+Suites at the end: **1165** lib + 37 + 13 + 7 + 2 + 2 + 1; frontend **389** in
+44 files; tsc clean; release build clean, zero warnings.
+
 ## 2026-08-16 — the rc3 audit's batch 1 + enforcement, executed
 
 The first self-hosted maintenance arc: bot-hq fixing what its own audit
