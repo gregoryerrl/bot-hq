@@ -18,6 +18,69 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-17 (round 4) — a dead feature, and the instrument that hid two live names
+
+Report in [`docs/plans/2026-08-17-rc3-audit-round4.md`](docs/plans/2026-08-17-rc3-audit-round4.md).
+Two mandates: audit again, and use this binary as live evidence of round 3.
+
+**Live evidence.** `participant_cursors` 94/94 and `participant_deliveries`
+4 647/4 647 are RFC3339-Z with zero zone-less — round 3 measured 85 and 4 011, so
+**636 delivery rows written since the fix are all well-formed.** Migration 0060 is
+applied (`_sqlx_migrations` = 60). **F13 is NOT observable**: zero `[PHASE REQUEST%`
+rows exist in the whole database, so its proof stays the test, not the record — and
+the 114 `phase_change` rows that read like its residue are deliberately synthetic
+host rows (`storage/messages.rs:122`), recorded so round 5 does not re-flag them.
+
+**F1 — rc3 D20's per-participant Name was dead in the UI.**
+`frontend/src/lib/participants.ts` still carried a merge instruction from a
+two-unit split — *"delete `ParticipantView` from this file, import it from
+`../lib/bindings`"* — that was never executed. The hand mirror had 8 fields to the
+contract's 11, so `participantLabel` implemented a three-input display rule where
+`participant_display_name` is four-input and **the label replaces the role half**.
+Six live rows carry user-typed labels. The reviewer sharpened it past "not
+rendered": `display_name_of` feeds `resolve_roster_facts`, i.e. **the agent's own
+prompt roster**, so a labelled participant was told it is `Driver · Claude Opus 5`
+while every UI surface said `HANDS · Claude Opus 5` — two surfaces asserting
+different identities for one row. The gate that should have caught it asserted the
+shared rule with `label: None` in every fixture row.
+
+Executing that instruction would have made it worse — `bindings.ts` is
+`@ts-nocheck` and regenerates only at app launch, so the instruction was the stale
+artifact, not the mirror. Fixed by keeping the mirror, adding the field and the
+branch, and mirroring the Rust case table (including all four blank forms) in
+vitest. The Rust fixture now labels one row and not the other: **a difference
+between rows, not a constant a view could invent.**
+
+**F4 — round 3's completeness claim is still false, and the instrument is why.**
+`spawn.rs:1122 fn build_rain_disallowed_tools()` and `state.rs:1600
+should_peer_ack_nudge(…, has_rain: bool)` are live and in none of the seven
+"exists to name a retired thing" categories. The recorded sweep is `rg -w`, and
+**`_` is a word character** — a word-boundary search returns ZERO for both. Three
+rounds measured the class where a live name cannot hide. `state.rs` was stale three
+ways: the parameter, a doc saying *"a duo session … the nudge to Brian"*, and the
+gate, which is `agent_count() > 1`.
+
+**F5 — the guard that ends it.** The frontend cannot regress (`framing.test.ts`);
+Rust's only sweep covers MCP tool descriptions. Nothing swept Rust identifiers.
+`tests/retired_identifier_test.rs` splits on `_` and compares SEGMENTS — flags
+`has_rain`, ignores `the_drain_rather_than`, ignores a bare `"brian"` string. The
+exemption tax turned out to be **two files**, both already documented as frozen,
+and a second test fails if an exemption stops earning its place.
+
+**F3 — round 4's named task, closed.** 522 / 292 reproduces round 3 exactly. Eight
+tests have the inert shape; all eight hand-read; **seven are real assertions.** The
+272 are stale fixture names, not inert assertions. Three misleading failure
+messages fixed (`participants.rs:4527`, `tray.rs:1589`/`:2393`).
+
+Declined with reasons: the `participant_views` N+1 (measured — 5 queries against
+one open session), `large_enum_variant` on `Handover`, the three remaining
+`too_many_arguments`, ~24 over-exported frontend symbols. Parked for the user:
+`effort`/`ultracode` have zero consumers, so adding them to the mirror would
+rebuild the dead-wire shape one layer up.
+
+Suites: **1247** Rust (+7, the guard) + **400** frontend (+8); clippy 4; `tsc`
+clean; release build green.
+
 ## 2026-08-16/17 — the D10 hard retirement (round-3 tail)
 
 The user took every scope option and named the reason: *"hard retire brian and

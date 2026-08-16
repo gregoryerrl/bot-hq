@@ -539,6 +539,17 @@ times in this session.
 
 ### The claim, restated to what is true
 
+> ⚠️ **CORRECTED 2026-08-17 by round 4 — the restatement below is still FALSE.**
+> Two live production identifiers name a retired agent as a current thing:
+> `spawn.rs:1122 fn build_rain_disallowed_tools()` and `state.rs:1600
+> should_peer_ack_nudge(…, has_rain: bool)`. Neither is in any of the seven
+> categories. **The measurement instrument is why:** the command recorded above
+> uses `rg -w`, `_` is a word character, and so a word-boundary search can never
+> match a compound identifier — it returns ZERO for both sites. Every round has
+> been measuring the class where a live name CANNOT hide. Both are fixed and
+> `tests/retired_identifier_test.rs` now guards the class by comparing `_`-split
+> segments. See `docs/plans/2026-08-17-rc3-audit-round4.md` §F4/§F5.
+
 > **No production identifier names them as a current thing.** Every one of the 20
 > production occurrences is in a category that exists to name a retired thing:
 > a frozen template, a frozen wire, a frozen gate transcription, or a ban-guard's
