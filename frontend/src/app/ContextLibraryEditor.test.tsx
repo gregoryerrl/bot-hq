@@ -134,6 +134,80 @@ describe("Context Library editor", () => {
     expect(onCloseTab).toHaveBeenCalledWith(0);
   });
 
+  it("forgets a closed tab's dirty state — reopening it is a clean tab", async () => {
+    // The dirty set is keyed by `tabKey`, and a closed tab's key has to leave
+    // it. If it lingers, reopening the same file shows a marker on a clean tab
+    // and its close button prompts "discard" over nothing — a guard that cries
+    // wolf is a guard the user learns to click through.
+    const files: Record<string, string> = { "a.md": "alpha", "b.md": "beta" };
+    mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === "cl_read_file") {
+        const fp = (args as { filePath: string }).filePath;
+        return {
+          project: "p",
+          file_path: fp,
+          content: files[fp] ?? "",
+          size_bytes: (files[fp] ?? "").length,
+          truncated: false,
+          binary: false,
+        };
+      }
+      return [];
+    });
+    const a: OpenTab = { kind: "file", project: "p", filePath: "a.md" };
+    const b: OpenTab = { kind: "file", project: "p", filePath: "b.md" };
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    function Harness() {
+      const [tabs, setTabs] = useState<OpenTab[]>([a, b]);
+      const [active, setActive] = useState(0);
+      return (
+        <QueryClientProvider client={qc}>
+          <button type="button" onClick={() => { setTabs([a, b]); setActive(0); }}>
+            reopen a.md
+          </button>
+          <EditorArea
+            tabs={tabs}
+            activeTabIndex={active}
+            onSelectTab={setActive}
+            onCloseTab={(i) => {
+              setTabs((prev) => prev.filter((_, n) => n !== i));
+              setActive(0);
+            }}
+            entries={[]}
+            folders={[]}
+            projects={[]}
+            onRefetchIndex={() => {}}
+            onRefetchFolders={() => {}}
+            onProjectChanged={() => {}}
+            onProjectGone={() => {}}
+          />
+        </QueryClientProvider>
+      );
+    }
+    render(<Harness />);
+    await waitFor(() =>
+      expect(screen.getAllByLabelText("File content editor")).toHaveLength(2),
+    );
+
+    // Dirty it, then close it through the confirm.
+    fireEvent.change(screen.getAllByLabelText("File content editor")[0], {
+      target: { value: "alpha EDITED" },
+    });
+    expect(await screen.findByLabelText("Unsaved changes")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Close a\.md/ }));
+    fireEvent.click(screen.getByRole("button", { name: /discard and close/i }));
+    await waitFor(() => expect(screen.queryByTitle("p — a.md")).toBeNull());
+
+    // Reopen the same file: clean tab, no marker, and closing it must not ask.
+    fireEvent.click(screen.getByRole("button", { name: /reopen a\.md/ }));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText("File content editor")).toHaveLength(2),
+    );
+    expect(screen.queryByLabelText("Unsaved changes")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Close a\.md/ }));
+    expect(screen.queryByText(/closing discards them/i)).toBeNull();
+  });
+
   it("closes a clean tab without asking", async () => {
     const { onCloseTab } = renderTwoTabs();
     await waitFor(() =>

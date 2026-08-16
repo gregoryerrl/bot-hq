@@ -436,6 +436,18 @@ function EditorPane({
     onDirtyChange?.(key, dirty);
   }, [key, dirty, onDirtyChange]);
   // And on unmount (the tab really closing), stop claiming it is dirty.
+  //
+  // **Redundant with the report above, deliberately, and that is why neither
+  // one alone can be pinned.** The reopened pane reports `false` on its own
+  // first effect, so cutting THIS line leaves the reopen test green; cutting the
+  // report's clearing half leaves it green too, because this fires. Only
+  // removing BOTH reddens `forgets a closed tab's dirty state` — measured
+  // 2026-08-16, all three ways.
+  //
+  // Keep both anyway: the report clears one effect-cycle AFTER the reopened pane
+  // paints, so this is what closes the frame where the strip would show a marker
+  // for a file the user just reopened clean. Belt and braces on a guard whose
+  // failure trains the user to click through a confirm.
   useEffect(() => () => onDirtyChange?.(key, false), [key, onDirtyChange]);
 
   const [saving, setSaving] = useState(false);
