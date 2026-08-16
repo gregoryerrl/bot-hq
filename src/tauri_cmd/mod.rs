@@ -23,7 +23,6 @@
 //! `tauri_specta_gen::builder()` wires the full set into the Tauri builder's
 //! invoke handler at startup (`main.rs`).
 
-pub mod agent_configs;
 pub mod claude_config;
 pub mod cl;
 pub mod docs;

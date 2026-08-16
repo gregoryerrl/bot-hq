@@ -448,7 +448,7 @@ every write.
 | `src/storage/context_readings.rs` | per-turn context-window readings (P7) | M |
 | `src/storage/feedback.rs` | agent-filed bot-hq feedback | S |
 | `src/storage/models.rs` | `models` registry + `app_settings` kv | M |
-| `src/storage/agent_config.rs` | legacy `agent_configs` (CHECK `emma|brian|rain`), still the tier-2 spawn fallback | S |
+| `src/storage/agent_config.rs` | legacy `agent_configs` (CHECK `emma\|brian\|rain`) — read by the spawn chain and by the external MCP server, but UNREACHABLE for rc3 role slugs, which the CHECK rejects (pinned) | S |
 | `src/storage/projects.rs` | `projects` registry, CL path resolution | M |
 | `src/storage/plugins.rs`, `src/storage/plugin_kv.rs` | plugin registry + per-plugin kv | M / S |
 | `src/storage/cl_index.rs`, `src/storage/cl_atoms.rs` | CL index/folders/reads; FTS5 atoms + `cl_retrieve` | M / M |
@@ -509,7 +509,6 @@ fs watcher (`cl:changed`, `session:worktree_changed`, `plugin:assets_changed`).
 | `src/tauri_cmd/docs.rs` | session docs search, `compute_apply_diff` (git in `spawn_blocking`), `summarize_session_doc` (headless `claude -p`), `validate_model` | L |
 | `src/tauri_cmd/findings.rs`, `src/tauri_cmd/feedback.rs`, `src/tauri_cmd/models.rs`, `src/tauri_cmd/updates.rs`, `src/tauri_cmd/terminal.rs`, `src/tauri_cmd/tool_gate.rs` | thin wrappers | S |
 | `src/tauri_cmd/files.rs` | `read_workspace_file` (path-guarded, size-capped) | M |
-| `src/tauri_cmd/agent_configs.rs` | legacy per-agent config CRUD — all 3 commands DEAD (Agents tab deleted, D8) | S |
 | `src/tauri_cmd/roles.rs` | roles CRUD + capabilities | L |
 | `src/tauri_cmd/policy.rs` | 3-tier policy get/set + `read_violations` (no limit) | M |
 | `src/tauri_cmd/screenshot.rs` | NOT a command: `capture_main_window` helper for the `webview_screenshot` MCP tool | S |

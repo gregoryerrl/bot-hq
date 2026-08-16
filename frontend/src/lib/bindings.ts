@@ -306,30 +306,6 @@ async terminalResize(sessionId: string, cols: number, rows: number) : Promise<Re
     else return { status: "error", error: e  as any };
 }
 },
-async getAgentConfig(agentName: string) : Promise<Result<AgentConfigView | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_agent_config", { agentName }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listAgentConfigs() : Promise<Result<AgentConfigView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_agent_configs") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async upsertAgentConfig(cfg: AgentConfigView) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("upsert_agent_config", { cfg }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 /**
  * `include_archived = false` is what a picker wants; `true` is what the tab's
  * own list wants, so an archived role can be brought back.
@@ -1225,13 +1201,6 @@ async checkForUpdate() : Promise<Result<UpdateInfo, AppError>> {
 
 /** user-defined types **/
 
-export type AgentConfigView = { agent_name: string; provider: string; model_name: string; base_url: string | null; auth_token: string | null; updated_at: string; 
-/**
- * The context window the user supplied for the assigned model. `None` =
- * unknown. Carried but unread since rc3 D9 — see
- * [`AgentConfig::context_window`](crate::storage::AgentConfig).
- */
-context_window: number | null }
 /**
  * One feedback row, projected for the UI.
  */
