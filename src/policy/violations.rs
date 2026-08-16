@@ -106,12 +106,31 @@ impl ViolationsLog {
     /// Synchronous sibling of [`append`](Self::append). Safe in any context,
     /// with or without a tokio runtime present.
     pub fn append_blocking(&self, rec: ViolationRecord) -> Result<()> {
-        let line =
+        // Record AND newline in ONE buffer, written with ONE `write_all` (G5).
+        //
+        // This used to be two `write_all` calls. `write_lock` below is a
+        // `std::sync::Mutex`, which serializes appends **within one process** —
+        // and this log has several writers that are separate PROCESSES: every
+        // git hook is its own `bot-hq` subprocess (five `ViolationsLog::new`
+        // sites in `policy::hooks`) alongside the app's own (`main.rs`). No
+        // in-process lock reaches across that, so two hooks firing near each
+        // other could interleave as `{j1}{j2}\n\n` — one unparseable line plus
+        // an empty one, so `read_all` skipped it and **both** records vanished
+        // from the trail that proves the gates fired.
+        //
+        // `O_APPEND` is what makes a single `write` atomic with respect to the
+        // file offset; that is precisely why the bug was that a record took two
+        // of them. One buffer, one call, and concurrent writers can only ever
+        // produce whole lines.
+        let mut line =
             serde_json::to_string(&rec).context("serializing violation record to JSON")?;
+        line.push('\n');
         // std (not tokio) Mutex: the critical section is a small blocking write
         // with no await inside, so a sync lock is correct and lets sync and
         // async callers share one serialization point. Recover from poison so a
-        // writer that panicked mid-append can't permanently wedge the log.
+        // writer that panicked mid-append can't permanently wedge the log. It
+        // still earns its keep for same-process concurrency (it serializes the
+        // open/write/rotate sequence); it simply cannot be the whole answer.
         let _g = self
             .write_lock
             .lock()
@@ -127,8 +146,6 @@ impl ViolationsLog {
             .with_context(|| format!("opening violations log at {}", self.path.display()))?;
         f.write_all(line.as_bytes())
             .with_context(|| format!("writing violation to {}", self.path.display()))?;
-        f.write_all(b"\n")
-            .with_context(|| format!("writing newline to {}", self.path.display()))?;
         // Rotate AFTER the write, still under the lock, so the file the reader
         // opens is always a whole one.
         self.rotate_if_oversized(&f);
@@ -418,5 +435,57 @@ mod tests {
         .unwrap();
         let recs = log.read_all().unwrap();
         assert_eq!(recs.len(), 1);
+    }
+
+    /// **Concurrent writers cannot merge two records into one line** (G5).
+    ///
+    /// Every thread builds its OWN `ViolationsLog`, and that is the entire
+    /// design of this test: `write_lock` is a per-instance `std::sync::Mutex`,
+    /// so N instances over one path hold N independent locks — which is exactly
+    /// the shape of the N separate `bot-hq` processes that really write this
+    /// file (five `ViolationsLog::new` sites across the git hooks, plus the
+    /// app's own). Sharing one instance would serialize the writers and prove
+    /// nothing about the case that actually loses records.
+    ///
+    /// Before the fix a record was two `write_all` calls, so two writers could
+    /// interleave to `{j1}{j2}\n\n`: one unparseable line, both records gone.
+    /// The assertion is a COUNT rather than a shape check because that is the
+    /// user-visible harm — the audit trail is what proves a gate fired, and a
+    /// merge deletes two proofs at once.
+    #[test]
+    fn concurrent_writers_never_merge_records() {
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 50;
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        std::thread::scope(|s| {
+            for t in 0..THREADS {
+                s.spawn(move || {
+                    // Own instance == own lock == a separate process's posture.
+                    let log = ViolationsLog::new(root);
+                    for i in 0..PER_THREAD {
+                        log.append_blocking(ViolationsLog::build_record(
+                            "s1",
+                            "hands",
+                            ViolationKind::PushGate,
+                            format!("cmd-{t}-{i}"),
+                            ViolationOutcome::Denied,
+                            None,
+                        ))
+                        .unwrap();
+                    }
+                });
+            }
+        });
+
+        let recs = ViolationsLog::new(root).read_all().unwrap();
+        assert_eq!(
+            recs.len(),
+            THREADS * PER_THREAD,
+            "records were merged or lost by concurrent appends: got {} of {}",
+            recs.len(),
+            THREADS * PER_THREAD
+        );
     }
 }
