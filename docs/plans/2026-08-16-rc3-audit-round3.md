@@ -467,26 +467,54 @@ transferable part:
 |---|---|---|
 | `awk` with `\b` | **0** | macOS awk has no `\b` word boundary — the filter excluded everything |
 | `grep -E '(brian\|rain)'` | **450** | no word boundary — matched `rain` inside `mid-d**rain**` |
-| `grep -P` with lookarounds | **356** | correct |
+| `grep -P` with lookarounds | **356** | right tool, but my per-file filter under-counted, AND the command is not portable — see below |
+| `rg -w`, both tools cross-checked | **292** | correct, and re-runnable by both participants |
 
-A claim of completeness is only as good as the sweep behind it, and **two
-plausible-looking sweeps disagreed with each other by 450**. Neither would have
-been caught by anything except running a third.
+A claim of completeness is only as good as the sweep behind it, and **four
+plausible-looking sweeps produced 0, 450, 356 and 292**. Each was caught only by
+running another. The sharper rule, which is the reviewer's: **a correction
+inherits the defect unless its method is RE-RUNNABLE** — record the exact command
+and the tool that ran it, verified present, because `grep -P` is not portable
+even between two participants of this session.
 
-### What the 356 actually are
+### What they actually are — RE-MEASURED after a third method disagreed
 
-| | count | verdict |
-|---|---|---|
-| inside `#[cfg(test)]` in `src/` | **242** | test fixtures passing `"brian"`/`"rain"` as an arbitrary agent slug — **NOT swept** |
-| production in `src/` | **16** | all legitimate, in seven categories (below) |
-| `tests/` + `frontend/src/` | ~98 | fixtures and ban-guards |
+The reviewer challenged the figure on the grounds that `grep -P` is not present
+on this machine. **It is present for me and not for them**, which turned out to
+be the more useful fact: `grep` in this shell is a FUNCTION shadowing the system
+binary and routing to `ugrep 7.5.0 (+pcre2jit)`, which supports `-P`; the
+reviewer's environment has no such wrapper and hit BSD grep. **The same recorded
+command produced different results for two participants of one session.**
 
-**The 242 are not cosmetic, and the reviewer proved it.**
+Settled by running both tools over the identical query: **ugrep and ripgrep agree
+exactly — 522 matching lines in `src/`, zero diff.** So the tool was never the
+problem. **My per-file filter was**, and it under-counted by 34.
+
+Re-measured with ripgrep, which both participants have:
+
+```
+rg -n --no-heading -w -e brian -e rain -e Brian -e Rain src -g '*.rs'
+```
+
+| | `src/` |
+|---|---|
+| matching lines, all | **522** |
+| comment-first lines | 230 |
+| **non-comment** | **292** |
+| — inside `#[cfg(test)]` | **272** |
+| — **production** | **20** |
+
+(Previously recorded as 258 / 242 / 16 — wrong in the aggregate, right in the
+part that carries weight: the production set is the same ~20 lines, hand-read
+and hand-classified, and the reviewer independently declined to dispute that
+half.)
+
+**The 272 are not cosmetic, and the reviewer proved it.**
 `session.rs:2471` asserted `!is_busy_slug("brian")` inside a test whose fixture
 seeds `"hands"` — an assertion that *could not fail*, on a property whose failure
 **wedges a session** (an agent marked busy for a write that never happened, with
 no `TurnComplete` coming to clear it). Re-pointed at `"hands"` it passes, so that
-one was inert rather than masking a live bug. **How many of the other 241 are
+one was inert rather than masking a live bug. **How many of the other 271 are
 inert is unmeasured.** That is round 4's most concrete task, and it is a
 per-case read, not a sweep — blind renaming is the technique that failed five
 times in this session.
@@ -511,10 +539,10 @@ times in this session.
 
 ### The claim, restated to what is true
 
-> **No production identifier names them as a current thing.** Every one of the 16
+> **No production identifier names them as a current thing.** Every one of the 20
 > production occurrences is in a category that exists to name a retired thing:
 > a frozen template, a frozen wire, a frozen gate transcription, or a ban-guard's
-> word list. **242 test-fixture occurrences remain unswept**, at least one of
+> word list. **272 test-fixture occurrences remain unswept**, at least one of
 > which was an inert assertion.
 
 That sentence is checkable. The first one was not, and it took the reviewer's

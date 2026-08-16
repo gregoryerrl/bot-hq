@@ -78,14 +78,20 @@ catch that thing changing** — the driver-wire test asserted against
 
 **Completeness — the first claim here was FALSE, and the correction is the
 finding.** It said "zero live code identifiers name them". The real figure is
-**356** word-boundary non-comment occurrences. Two of my own sweeps disagreed by
-450: `awk`'s `\b` (no word boundary on macOS) reported 0; an unbounded `grep -E`
-reported 450 by matching `rain` inside `mid-drain`; `grep -P` reports 356.
+**292** word-boundary non-comment lines in `src/`. Four sweeps produced four
+answers — `awk`'s `\b` (absent on macOS) said 0; an unbounded `grep -E` said 450
+by matching `rain` inside `mid-drain`; `grep -P` said 356; cross-checking ugrep
+against ripgrep on an identical query (**522 lines, zero diff**) proved the tools
+agree and my per-file FILTER was under-counting by 34. The reviewer's challenge —
+that `grep -P` is absent here — was right for their shell and wrong for mine:
+`grep` is a function routing to `ugrep +pcre2jit`. **The same recorded command
+gave two participants different results**, which is the real lesson: a correction
+inherits the defect unless its method is re-runnable.
 
-Of those: **242 are test fixtures** passing the retired slug as an arbitrary
+Of those: **272 are test fixtures** passing the retired slug as an arbitrary
 agent name — **unswept**, and the reviewer proved at least one was an *inert
 assertion* (`session.rs:2471` checked `!is_busy_slug("brian")` in a test seeding
-`"hands"`, on a property whose failure wedges a session). **16 are production**,
+`"hands"`, on a property whose failure wedges a session). **20 are production**,
 and all sit in categories that exist to name a retired thing — including two the
 first claim missed: `paths.rs`'s byte-frozen `LEGACY_*_CUSTOM_INSTRUCTION`
 (editing it makes an untouched seed read as user content) and `parity.rs`'s
