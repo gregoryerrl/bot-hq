@@ -49,6 +49,21 @@
 //! agent name). Round 3 hand-classified 272 of those and found one defect among
 //! them; the class is not where live names hide. This guard is aimed at the class
 //! that IS: a compound identifier the compiler carries.
+//!
+//! # Two bounds, so neither reads as an oversight
+//!
+//! **It walks `src/` only, and that is load-bearing, not laziness.** This file
+//! spells `has_rain` and `build_rain_disallowed_tools` as string literals in
+//! `rule_tests` — they are the specimens the rule is proved against. Widening the
+//! walk to `tests/` would make the guard fail on its own evidence, and the obvious
+//! repair (delete the specimens) removes the only proof the rule works. `tests/`
+//! was swept by hand at round 4 and holds no retired identifier outside comments.
+//!
+//! **`code_of` truncates at a non-`://` `//` inside a string literal**, so an
+//! identifier written after one in the same string is not scanned. That is a false
+//! NEGATIVE, never a false positive: the guard can miss, it cannot cry wolf, and a
+//! guard that cries wolf is one people learn to skip. Proper string-literal
+//! parsing is the fix if a real case ever appears.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

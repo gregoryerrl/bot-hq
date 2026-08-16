@@ -409,15 +409,19 @@ impl ActivityTracker {
         if next != g.last || g.per_agent_changed() {
             g.last = next;
             g.last_busy.clone_from(&g.busy);
-            // The wire payload still carries exactly two booleans, derived from
-            // the map. The frontend contract (`SessionRuntime.slot0_busy` /
-            // `.slot1_busy`) is frozen while the session view is rewritten — a
-            // roster-shaped payload here would be a UI change smuggled into a
-            // runtime batch, and a parallel unit owns those files.
+            // The wire payload carries exactly two booleans, derived from the
+            // map, and they name the first two TURN SLOTS — not two agents
+            // (rc3 D10). `busy_of` on a slug this session does not have reads
+            // false, which is the right answer for a slot nobody occupies.
             //
-            // rc3 D10: they are now the first two TURN SLOTS, not two agent
-            // names. `busy_of` on a slug this session does not have reads false,
-            // which is the right answer for a slot nobody occupies.
+            // **A roster-shaped payload here would be a UI change**, so the
+            // shape stays: `list_session_participants` is the roster-shaped
+            // read, and the session view asks it rather than growing this
+            // event. That is the reason, and it does not expire — the previous
+            // wording ("frozen while the session view is rewritten … a parallel
+            // unit owns those files") was a merge-era instruction that outlived
+            // its merge, and round 4 deleted the same premise from the three
+            // sites that restated it.
             let slot = |i: usize| {
                 self.slugs
                     .get(i)

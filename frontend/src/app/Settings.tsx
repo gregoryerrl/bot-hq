@@ -217,9 +217,14 @@ function GlobalPolicyPanel() {
  * participant"). The user: *"There's no 'disable rain by default' on rc3, thats
  * moot. Just don't add the role to your session creation."* It was a toggle
  * only because the roster was fixed at two; now the New-session dialog picks
- * the roster, so starting solo is just not adding a second participant. A
- * parallel unit deletes the `rain_disabled_default` key and its backend
- * readers.
+ * the roster, so starting solo is just not adding a second participant.
+ *
+ * The `rain_disabled_default` key and its backend readers **are gone** — every
+ * remaining mention in `src/` is a past-tense record of the deletion, and
+ * `Settings.test.tsx:126` pins that this panel never asks for the key at all.
+ * This line said "a parallel unit deletes" it until round 4: a merge-era
+ * instruction that outlived its merge, the same shape as the one that left
+ * `ParticipantView` three fields short.
  */
 function SessionDefaults() {
   const { data: worktreeDefault, refetch } = useTauriQuery<string | null>(
