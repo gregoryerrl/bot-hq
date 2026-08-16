@@ -120,7 +120,8 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
                 })?;
             run_commit_msg(&data_dir, project.as_deref(), &path)
         }
-        "pre-commit" => run_pre_commit(&data_dir, project.as_deref()),
+        // `"."` — every hook git invokes runs with the repo root as its CWD.
+        "pre-commit" => run_pre_commit(&data_dir, project.as_deref(), Path::new(".")),
         "post-commit" => run_post_commit(&data_dir, project.as_deref(), session.as_deref()),
         "pre-push" => run_pre_push(&data_dir, project.as_deref()),
         "tool-gate" => run_tool_gate(&data_dir),
@@ -180,7 +181,7 @@ fn run_commit_msg(data_dir: &Path, project: Option<&str>, msg_path: &Path) -> Re
 /// pre-commit handler. Scans the staged DIFF only (forbidden words in
 /// source code being committed). Commit message scanning lives in
 /// commit-msg because pre-commit fires before git parses `-m`.
-fn run_pre_commit(data_dir: &Path, project: Option<&str>) -> Result<i32> {
+fn run_pre_commit(data_dir: &Path, project: Option<&str>, repo: &Path) -> Result<i32> {
     audit_at_hook(data_dir, project, "pre-commit");
     // Layer 1 — EYES-sign-off gate. Independent of the forbidden-word policy, so
     // it must run BEFORE the empty-list early return below (a project with no
@@ -192,7 +193,7 @@ fn run_pre_commit(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     // runs before the empty-forbidden-list early return below. Blocks a sweep or
     // refactor from editing a committed append-only file (e.g. an applied sqlx
     // migration whose bytes sqlx checksums) — editing one breaks boot.
-    if check_immutable_artifacts() != 0 {
+    if check_immutable_artifacts(repo) != 0 {
         return Ok(1);
     }
     // Layer 3 — forbidden-word scan.
@@ -200,7 +201,7 @@ fn run_pre_commit(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     if policy.forbidden_in_commits.is_empty() {
         return Ok(0);
     }
-    let diff = read_staged_diff().unwrap_or_default();
+    let diff = read_staged_diff(repo).unwrap_or_default();
     let added_only = added_lines_only(&diff);
     match policy.first_forbidden_word(&added_only) {
         None => Ok(0),
@@ -292,14 +293,14 @@ fn immutable_violations(name_status: &str) -> Vec<String> {
 /// Returns 1 (block) on violation, else 0. Fail-open if the index can't be read
 /// (e.g. not a git repo). Bypass a genuinely-intentional edit with
 /// `BOTHQ_ALLOW_IMMUTABLE_EDIT=1` (since `--no-verify` is forbidden).
-fn check_immutable_artifacts() -> i32 {
+fn check_immutable_artifacts(repo: &Path) -> i32 {
     if matches!(
         std::env::var("BOTHQ_ALLOW_IMMUTABLE_EDIT").as_deref(),
         Ok("1")
     ) {
         return 0;
     }
-    let Some(status) = git_output(&["diff", "--cached", "--name-status"]) else {
+    let Some(status) = git_output_in(repo, &["diff", "--cached", "--name-status"]) else {
         return 0;
     };
     let hits = immutable_violations(&status);
@@ -1338,8 +1339,8 @@ fn findings_block_body(findings: &[(String, String, Option<String>)]) -> String 
 
 // ---- git helpers ----
 
-fn read_staged_diff() -> Option<String> {
-    git_output(&["diff", "--cached", "--no-color"])
+fn read_staged_diff(repo: &Path) -> Option<String> {
+    git_output_in(repo, &["diff", "--cached", "--no-color"])
 }
 
 fn current_branch() -> Option<String> {
@@ -1369,12 +1370,29 @@ fn decode_git_stdout(bytes: Vec<u8>) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-fn git_output(args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).output().ok()?;
+/// Run git in `repo` and decode its stdout.
+///
+/// The explicit directory is what makes the gates testable. Every hook runs
+/// with the repo root as its CWD, so production passes `"."` and nothing about
+/// the behaviour changes — but a test can point a gate at a tempdir instead of
+/// calling `set_current_dir`, which is process-global and races a parallel
+/// suite. Without this the only reachable seam was the decode helper, and a
+/// test on the decode alone leaves the line the audit actually found (the
+/// strict `from_utf8` here) revertible with the suite green.
+fn git_output_in(repo: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
     Some(decode_git_stdout(out.stdout))
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    git_output_in(Path::new("."), args)
 }
 
 #[cfg(test)]
@@ -1664,7 +1682,7 @@ mod tests {
     #[test]
     fn run_pre_commit_exits_zero_with_empty_policy() {
         let data = tempdir().unwrap();
-        let code = run_pre_commit(data.path(), Some("nope")).unwrap();
+        let code = run_pre_commit(data.path(), Some("nope"), Path::new(".")).unwrap();
         assert_eq!(code, 0);
     }
 
@@ -1681,10 +1699,24 @@ mod tests {
     /// any file without a NUL in the first 8 KB). The `is_err()` assertion below
     /// is load-bearing: without it a fixture that quietly became valid UTF-8
     /// would leave this test green while proving nothing.
+    ///
+    /// **It drives `run_pre_commit`, not the decode helper.** The first version
+    /// of this test called `decode_git_stdout` directly and passed with the bug
+    /// fully restored — the reviewer measured it — because the line the audit
+    /// found is the strict `from_utf8` in `git_output`, and nothing exercised
+    /// the join. That is the defect this whole round is about, committed inside
+    /// its own fix. `git_output_in`'s explicit repo path is what made the real
+    /// wire reachable without `set_current_dir`.
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
     fn a_staged_non_utf8_file_cannot_hide_a_forbidden_word() {
         let repo = tempdir().unwrap();
+        let data = tempdir().unwrap();
+        std::fs::create_dir_all(data.path().join("library/projects/p")).unwrap();
+        std::fs::write(
+            data.path().join("library/projects/p/policy.yaml"),
+            "forbidden_in_commits:\n  - Acme-Trailer\n",
+        )
+        .unwrap();
         init_repo(repo.path());
         // A stand-in term, NOT this repo's real forbidden word: the fixture is
         // itself a staged diff, so spelling the real one here would trip our own
@@ -1708,17 +1740,14 @@ mod tests {
             .output()
             .unwrap();
         assert!(
-            String::from_utf8(out.stdout.clone()).is_err(),
+            String::from_utf8(out.stdout).is_err(),
             "fixture is no longer invalid UTF-8 — this test would prove nothing"
         );
 
-        let text = decode_git_stdout(out.stdout);
-        let mut p = Policy::default();
-        p.forbidden_in_commits = vec!["Acme-Trailer".into()];
         assert_eq!(
-            p.first_forbidden_word(&added_lines_only(&text)),
-            Some("Acme-Trailer"),
-            "the scan went blind on a diff it could not decode"
+            run_pre_commit(data.path(), Some("p"), repo.path()).unwrap(),
+            1,
+            "the forbidden-word gate went blind on a diff it could not decode"
         );
     }
 
