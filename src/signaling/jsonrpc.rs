@@ -2046,7 +2046,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cl_write_file_dispatch_writes_for_brian_and_denies_rain() {
+    async fn cl_write_file_dispatch_writes_for_the_writer_and_denies_the_reviewer() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("library/projects/bot-hq")).unwrap();
         let log = crate::policy::ViolationsLog::new(tmp.path());

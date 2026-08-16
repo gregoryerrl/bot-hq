@@ -1057,13 +1057,14 @@ async fn supervise<S, Fut>(
     }
 }
 
-/// EYES (`rain`) runs read-only under `--permission-mode dontAsk`. Tools with a
+/// A participant without `Capability::EditFiles` runs read-only under
+/// `--permission-mode dontAsk`. Tools with a
 /// read form worth keeping (`git branch`, `gh`) are denied BY WRITE VERB rather
 /// than by blanket noun, so the read forms fall through to the allowed `Bash`
 /// (deny wins over allow, so a blanket `Bash(gh issue:*)` / `Bash(git branch:*)`
 /// would also kill the reads). These const lists are the single source of truth:
-/// both `build_rain_disallowed_tools` AND the `eyes_denies_*` tests iterate them,
-/// so enforcement and its test can't drift. New write verbs go here.
+/// both `build_read_only_disallowed_tools` AND the `eyes_denies_*` tests iterate
+/// them, so enforcement and its test can't drift. New write verbs go here.
 ///
 /// Mutating `git branch` forms. Read forms (bare / `--show-current` / `-a` / `-r`
 /// / `--list` / `--contains`) fall through. 2026-06-17: replaced the blanket
@@ -1114,12 +1115,18 @@ fn deny_write_verbs(tool: &str, verbs: &[&str]) -> String {
         .join(" ")
 }
 
-/// EYES's `--disallowedTools` value: static denies (Edit/Write/Task + the
+/// The `--disallowedTools` value for a participant that may not edit files:
+/// static denies (Edit/Write/Task + the
 /// full-noun git mutations that have no read form worth preserving) plus the
 /// deny-by-write-verb collections for `git branch` and `gh`. `gh api` is fully
 /// denied — the POST/PATCH/DELETE escape hatch. Covered by the `eyes_denies_*`
 /// tests, which assert against the same `*_WRITE_VERBS` consts.
-fn build_rain_disallowed_tools() -> String {
+///
+/// Selected by CAPABILITY, never by slug — the caller is
+/// `if !cfg.capabilities.grants(Capability::EditFiles)`. The name said `rain`
+/// until round-4 F6, which was cosmetic but read as if a deleted slug still
+/// gated enforcement.
+fn build_read_only_disallowed_tools() -> String {
     let mut parts: Vec<String> = [
         "Edit",
         "Write",
@@ -1284,8 +1291,9 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     // prompts into stream-json (never reaching our UI), and hang the agent.
     //
     // A role that may NOT edit is review-only and must be MECHANICALLY unable
-    // to mutate. A prompt instruction alone failed (2026-05-28: Rain ran Edit +
-    // git commit + gh issue create on a client repo). `--dangerously-skip-
+    // to mutate. A prompt instruction alone failed (2026-05-28: the reviewer of
+    // the day ran Edit + git commit + gh issue create on a client repo).
+    // `--dangerously-skip-
     // permissions` (bypass mode) CANNOT be used to enforce this because bypass
     // mode disables the permission layer entirely — deny rules are ignored.
     // Instead: `dontAsk` (no prompts, deny-by-default) + an allowlist of read-
@@ -1328,9 +1336,10 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // tool loader at no safety cost. Auth + routing are unaffected:
         // ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL are set as env below
         // regardless of mode. Read-only enforcement lives in `dontAsk` + the
-        // allow/deny lists, NOT in --bare. (Trade-off: without --bare Rain now
-        // syncs plugins + autodiscovers CLAUDE.md/auto-memory like Brian —
-        // heavier startup; suppress per-agent via the override env if needed.)
+        // allow/deny lists, NOT in --bare. (Trade-off: without --bare a
+        // read-only participant syncs plugins + autodiscovers
+        // CLAUDE.md/auto-memory the same as an editing one — heavier startup;
+        // suppress per-agent via the override env if needed.)
         cmd.args(["--permission-mode", "dontAsk"]);
         cmd.args([
             "--allowedTools",
@@ -1340,9 +1349,9 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // for tools whose read forms we keep (`git branch`, `gh`), so the reads
         // fall through to the allowed `Bash` (deny wins over allow). Verb lists +
         // rationale live on the `*_WRITE_VERBS` consts above; the value is
-        // assembled by `build_rain_disallowed_tools`, and the `eyes_denies_*`
+        // assembled by `build_read_only_disallowed_tools`, and the `eyes_denies_*`
         // tests assert against the SAME consts so enforcement + test can't drift.
-        let disallowed = build_rain_disallowed_tools();
+        let disallowed = build_read_only_disallowed_tools();
         cmd.args(["--disallowedTools", &disallowed]);
     } else {
         cmd.arg("--dangerously-skip-permissions");

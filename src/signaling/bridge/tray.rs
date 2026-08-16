@@ -1586,7 +1586,7 @@ mod tests {
         }
         assert!(
             !flag.load(Ordering::Acquire),
-            "resolve must clear the awaiting halt so the duo resumes"
+            "resolve must clear the awaiting halt so the session resumes"
         );
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert!(msgs
@@ -2390,7 +2390,7 @@ mod tests {
         assert!(matches!(outcome, ResolveOutcome::Delivered));
         assert!(
             !flag.load(Ordering::Acquire),
-            "a Delivered resolve must clear the awaiting halt so the duo resumes"
+            "a Delivered resolve must clear the awaiting halt so the session resumes"
         );
     }
 

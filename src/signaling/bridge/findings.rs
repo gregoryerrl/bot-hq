@@ -512,7 +512,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reraise_dedups_and_escalates_only_after_brian_turn() {
+    async fn reraise_dedups_and_escalates_only_after_the_executor_turn() {
         let bridge = SignalingBridge::new();
         let storage = Storage::memory().await.unwrap();
         bridge.set_storage(storage.clone()).await;

@@ -4425,11 +4425,11 @@ mod tests {
         let hands = s.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
         let eyes = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
 
-        let by_brian = s
+        let by_hands = s
             .post_to_channel("s1", "participant", Some("hands"), "text", "my turn", None)
             .await
             .unwrap();
-        let by_rain = s
+        let by_eyes = s
             .post_to_channel("s1", "participant", Some("eyes"), "text", "review", None)
             .await
             .unwrap();
@@ -4458,13 +4458,13 @@ mod tests {
             .map(|m| m.id)
             .collect();
         assert!(
-            !unread.contains(&by_brian.message_id()),
+            !unread.contains(&by_hands.message_id()),
             "a participant must not be handed its own turn as fresh input"
         );
         assert_eq!(
             unread,
             vec![
-                by_rain.message_id(),
+                by_eyes.message_id(),
                 by_user.message_id(),
                 by_host.message_id(),
                 orphan.message_id(),
@@ -4473,8 +4473,8 @@ mod tests {
              unattributed row are all still delivered"
         );
 
-        // Rain's backlog is the mirror image — the filter is per participant,
-        // not a blanket "drop participant rows".
+        // The reviewer's backlog is the mirror image — the filter is per
+        // participant, not a blanket "drop participant rows".
         let eyes_unread: Vec<i64> = s
             .unread_for_participant(eyes)
             .await
@@ -4486,7 +4486,7 @@ mod tests {
         assert_eq!(
             eyes_unread,
             vec![
-                by_brian.message_id(),
+                by_hands.message_id(),
                 by_user.message_id(),
                 by_host.message_id(),
                 orphan.message_id(),
@@ -4522,9 +4522,9 @@ mod tests {
         s.create_session("s2", "t", None).await.unwrap();
         s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
         s.ensure_session_roster("s2", MAX_SESSION_PARTICIPANTS).await.unwrap();
-        let brian1 = s.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
-        let brian2 = s.participant_by_slug("s2", "hands").await.unwrap().unwrap().id;
-        assert_ne!(brian1, brian2, "precondition: two rosters, two 'brian' rows");
+        let hands_s1 = s.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
+        let hands_s2 = s.participant_by_slug("s2", "hands").await.unwrap().unwrap().id;
+        assert_ne!(hands_s1, hands_s2, "precondition: two rosters, two 'hands' rows");
 
         let known = s
             .post_to_channel("s1", "participant", Some("hands"), "text", "mine", None)
@@ -4550,7 +4550,7 @@ mod tests {
         let rows = all_rows(&s, "s1").await;
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].id, known.message_id());
-        assert_eq!(rows[0].participant_id, Some(brian1), "a known slug resolves");
+        assert_eq!(rows[0].participant_id, Some(hands_s1), "a known slug resolves");
         assert_eq!(rows[1].id, unknown.message_id());
         assert_eq!(rows[1].participant_id, None, "an unknown slug resolves to NULL");
         assert_eq!(rows[1].content, "orphan", "and the row is written regardless");
@@ -4572,7 +4572,7 @@ mod tests {
         assert_eq!(other[0].id, elsewhere.message_id());
         assert_eq!(
             other[0].participant_id,
-            Some(brian2),
+            Some(hands_s2),
             "resolution is scoped to the posting session, not the slug globally"
         );
     }

@@ -166,11 +166,12 @@ impl AgentContextEvent {
     pub const EVENT_NAME: &'static str = "session:agent_context";
 }
 
-/// Emitted when a session's duo activity changes (idle / busy / awaiting-user /
-/// cancelling), so the chat input can lock while the duo is working and re-open
-/// when it's the user's turn. `state` is the `SessionActivity::as_str` string;
-/// `slot0_busy`/`slot1_busy` are the per-agent flags the UI uses to label which
-/// agent is working (the derived `state` collapses them to a single `busy`).
+/// Emitted when a session's activity changes (idle / busy / awaiting-user /
+/// cancelling), so the chat input can lock while a participant is working and
+/// re-open when it's the user's turn. `state` is the `SessionActivity::as_str`
+/// string; `slot0_busy`/`slot1_busy` are the per-TURN-SLOT flags the UI uses to
+/// label which participant is working (the derived `state` collapses them to a
+/// single `busy`).
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct SessionActivityEvent {
     pub session_id: String,

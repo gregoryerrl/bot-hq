@@ -175,7 +175,7 @@ pub fn phrasing(cap: Capability) -> Phrasing {
             // Also deliberately not "run any shell command". `RunBash` is one
             // grant with no read-only variant, while the spawn path can hand a
             // participant a `--disallowedTools` list that denies the mutating
-            // forms (`build_rain_disallowed_tools`). Wording the grant as
+            // forms (`build_read_only_disallowed_tools`). Wording the grant as
             // unconditional would make this section — which claims to be the
             // authority — overclaim against a restriction that really applies.
             grant: "run shell commands, within whatever your spawn's tool denies and the Tool \

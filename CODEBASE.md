@@ -756,6 +756,7 @@ to `isPolicyFile` → branch in `EditorAreaImpl`.
 | `docs/plans/` | 22 planning docs; BINDING: `docs/plans/2026-08-11-rc3-decisions.md`, `docs/plans/2026-08-12-rc3-reframe-contract.md`; the rest are dated handoffs (stale by construction) or queues |
 | `docs/PLUGINS.md`, `docs/SIGNING.md`, `docs/WINDOWS-TESTING.md`, `docs/stream-json-events.md`, `docs/design/`, `docs/rebuild-archive/` | contracts, release notes, schema notes, mocks, frozen history |
 | `tests/codebase_map_test.rs` | pins THIS map to the tree both ways (every source file placed; every named path exists) — the map's anti-staleness device |
+| `tests/retired_identifier_test.rs` | no source IDENTIFIER names a D10-retired agent: splits on `_` and compares SEGMENTS, which is what `-w` could not do (`_` is a word char, so three audit rounds could not see `has_rain`). Comments and bare words exempt by design; two files carved out with reasons |
 | `examples/dump_role_prose.rs` | LIVE: generator for the role-prose reseed migrations |
 | `examples/native_loop.rs`, `examples/subscription_loop.rs` | research spikes for the native loop that D9 deleted (historical) |
 | `scripts/`, `packaging/`, `site/`, `bench/`, `templates/`, `start` | turn-latency tool · Homebrew cask · landing page · eval harnesses · CL seeds · dev launcher |

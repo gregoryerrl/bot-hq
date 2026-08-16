@@ -623,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn eyes_reviews_brian_output_bottom_up() {
+    fn eyes_reviews_the_executor_output_bottom_up() {
         // June-3 idea, sharpened by the 2026-06-16 duo-survey convergence:
         // Rain reads BOTTOM-UP (tests → error paths → callers → impl →
         // architecture), the inverse of Brian's top-down — but as a REVIEW
@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn eyes_verifies_brian_output_not_parallel_rederive() {
+    fn eyes_verifies_the_executor_output_not_parallel_rederive() {
         // 2026-06-16 duo-survey #2 (converged across both duos): EYES
         // re-deriving the same findings as HANDS in parallel is waste. Rain's
         // primary job is to VERIFY Brian's outputs (plan/diff/conclusions),

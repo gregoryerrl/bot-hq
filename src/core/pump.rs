@@ -2425,7 +2425,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn edit_during_investigate_self_nudges_brian() {
+    async fn edit_during_investigate_self_nudges_the_editor() {
         // A3a: an executor editing in Investigate gets a one-time reminder
         // pointing it at Apply.
         //

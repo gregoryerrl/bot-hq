@@ -1594,11 +1594,17 @@ impl AppState {
          which wakes them) and do non-mutating prep meanwhile. Don't park on the USER \
          for a peer wait.";
 
-    /// A2 (adherence): whether the Plan→Apply boundary in a duo session warrants
-    /// the peer-ack nudge to Brian. Pure for testing; the caller additionally
-    /// AND-gates the `adherence_nudges` setting.
-    fn should_peer_ack_nudge(prev: IpavPhase, target: IpavPhase, has_rain: bool) -> bool {
-        has_rain && prev == IpavPhase::Plan && target == IpavPhase::Apply
+    /// A2 (adherence): whether a Plan→Apply boundary warrants the peer-ack
+    /// nudge to the participant crossing it. Pure for testing; the caller
+    /// additionally AND-gates the `adherence_nudges` setting.
+    ///
+    /// `has_peer` is *any* roster above one — the call site passes
+    /// `handle.agent_count() > 1`, not a test for a particular participant. It
+    /// was named `has_rain` and documented as "a duo session … the nudge to
+    /// Brian" until round-4 F6; both described a session shape this gate never
+    /// checked.
+    fn should_peer_ack_nudge(prev: IpavPhase, target: IpavPhase, has_peer: bool) -> bool {
+        has_peer && prev == IpavPhase::Plan && target == IpavPhase::Apply
     }
 
     /// Decide a cancel escalation's outcome after the interrupt window. Pure for

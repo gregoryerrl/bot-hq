@@ -5,9 +5,10 @@ import { slotKey } from "../lib/participants";
 /** One live session's runtime snapshot from the backend `get_session_runtime`
  *  command (Bug C backfill). Mirrors the Rust `SessionRuntime` (snake_case).
  *
- *  The `brian_*` / `rain_*` field names are frozen wire and name **turn slots 0
- *  and 1**, not agents — `src/tauri_cmd/sessions.rs` fills them from
- *  `handle.participants.get(0)` / `.get(1)`. See {@link slotKey}. */
+ *  The `slot0_*` / `slot1_*` field names are **turn slots 0 and 1**, not
+ *  agents — `src/tauri_cmd/sessions.rs` fills them from
+ *  `handle.participants.get(0)` / `.get(1)`. They were `brian_*` / `rain_*`
+ *  until the D10 hard retirement. See {@link slotKey}. */
 export interface SessionRuntime {
   session_id: string;
   activity: string;
