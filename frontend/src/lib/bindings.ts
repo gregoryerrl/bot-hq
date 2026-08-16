@@ -1998,13 +1998,14 @@ export type SessionRuntime = { session_id: string; activity: string;
  * Per-slot busy flags (the derived `activity` collapses them) so the chat
  * input can label who is working after a backfill, not just guess.
  * 
- * **The field NAMES are frozen wire, and they name TURN SLOTS, not agents**
- * (rc3 D10). `brian_*` is the participant at turn position 0 and `rain_*`
- * the one at position 1; a session with one participant leaves the second
- * pair at its empty value and a session with three does not report the
- * rest here — `list_session_participants` is the roster-shaped read. They
- * keep these names only until the session view that consumes them is
- * rewritten.
+ * **The field NAMES are TURN SLOTS, not agents**: `slot0_*` is the
+ * participant at turn position 0 and `slot1_*` the one at position 1. A
+ * session with one participant leaves the second pair at its empty value,
+ * and a session with three does not report the rest here —
+ * `list_session_participants` is the roster-shaped read.
+ * 
+ * They were `brian_*` / `rain_*` until the D10 hard retirement (migration
+ * 0060), which is what the names had always meant.
  */
 slot0_busy: boolean; slot1_busy: boolean; slot0_health: string | null; slot1_health: string | null; 
 /**
