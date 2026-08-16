@@ -325,14 +325,16 @@
 //! **`watchdog`'s idle nudge is not one of them, and an earlier draft listed it
 //! as one.** `deliver_idle_nudge` writes TWO rows for the two things it says.
 //! NOTICE — the one-line summary the user reads in the chat — goes through
-//! `insert_message(.., Author::User, ..)` (`watchdog.rs:364`), which
-//! `storage/messages.rs:60` maps to `origin = "user"`. Only NUDGE, the
-//! instruction Brian reads, is posted as `"system"` (`watchdog.rs:379`).
+//! `insert_message(.., Author::User, ..)` (`watchdog::deliver_idle_nudge`),
+//! which `Storage::insert_message` maps to `origin = "user"`. Only NUDGE, the
+//! instruction the executor reads, is posted as `"system"` — same function,
+//! the second of its two rows.
 //!
 //! It is not alone: `AppState::advance_phase` writes its transition notice as
-//! `Author::User` too (`state.rs:878-882`), and `request_phase_advance` FALLS
-//! BACK to that author when an agent slug will not parse
-//! (`bridge/tray.rs:916`). So **rows land on this path under the user's origin
+//! `Author::User` too (its `insert_message` in `AppState::advance_phase`), and
+//! `request_phase_advance` FALLS BACK to that author when an agent slug will
+//! not parse (`Author::parse(&agent).unwrap_or(Author::User)`). So **rows land
+//! on this path under the user's origin
 //! with no human behind them**, which matters more for the pause than it does
 //! here — see "what releases a pause" below for the obligation that puts on
 //! whoever mints [`UserMessage`](SequencerCommand::UserMessage).
@@ -554,20 +556,19 @@
 //! commands is the code that already flips the latch". **That is false, and the
 //! writer list in the command-set section names the counter-examples.** It
 //! holds for `state`'s user-message path, which calls `set_paused(false)` under
-//! the comment "a user message is the steer" (`state.rs:737-740`) — and
+//! the comment "a user message is the steer" — and
 //! therefore for the Resume button, which is a broadcast and routes through it.
 //! It does not hold for:
 //!
 //! - `AppState::advance_phase`, which writes its transition notice as
-//!   `Author::User` (`state.rs:878-882`) → `origin = "user"`
-//!   (`storage/messages.rs:60`), and calls `clear_awaiting` but **never**
-//!   `set_paused(false)`. `state.rs:743-744` says why in as many words: "a phase
+//!   `Author::User` → `origin = "user"` (`Author::as_origin` in
+//!   `storage/messages.rs`), and calls `clear_awaiting` but **never**
+//!   `set_paused(false)`. Its own comment says why in as many words: "a phase
 //!   self-advance is not a user message";
-//! - `watchdog`'s idle-nudge NOTICE (`watchdog.rs:364`), same mapping, same
-//!   absence.
+//! - `watchdog::deliver_idle_nudge`'s NOTICE row, same mapping, same absence.
 //!
 //! The first one is reachable while stopped. An agent self-advances on its own
-//! initiative — `general_rules.rs:166` tells it to, "no user click needed" — and
+//! initiative — `GENERAL_RULES` tells it to, "no user click needed" — and
 //! **a pause holds WAKES, not the holder**: the participant whose turn was in
 //! flight keeps working by design, so it can reach that tool mid-pause. Mint a
 //! [`UserMessage`](SequencerCommand::UserMessage) off that row and this loop
