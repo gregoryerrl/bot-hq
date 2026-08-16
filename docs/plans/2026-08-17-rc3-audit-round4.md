@@ -256,6 +256,43 @@ learnings file is left as dated record.
 introduced no new CL staleness. Round 3 reported 27 → 25 as its acceptance; that
 figure was measuring something narrower than it reads.
 
+### F8 · F1's CLASS — merge-era instructions still sitting in the tree as if pending · MED · FIXED
+
+Raised by the reviewer in Verify, and the framing is the point: F1 fixed an
+*instance*. Nobody had asked how many others there were. Swept — the class has
+exactly three members, and two were still open **after** batch 2:
+
+| site | instruction | state |
+|---|---|---|
+| `frontend/src/lib/participants.ts:27` | *"when the two units merge, delete `ParticipantView` … import it from `../lib/bindings`"* | F1 |
+| `src/core/activity.rs:412-416` | *"frozen while the session view is rewritten … **a parallel unit owns those files**"* | **open, and self-contradicting** |
+| `frontend/src/app/Settings.tsx:221` | *"**A parallel unit deletes** the `rain_disabled_default` key and its backend readers"* | **open; it did** |
+
+`activity.rs` is the sharper one: **batch 2 created a contradiction and did not
+close it.** It deleted *"frozen wire"* and *"until the session view is rewritten"*
+from the three sites that restated the premise, while `activity.rs` went on
+asserting it — so the tree held two comments that could not both be right. The
+constraint they were protecting is real, so it is restated as a reason that does
+not expire: a roster-shaped payload here would be a UI change, and
+`list_session_participants` is the roster-shaped read that already exists.
+
+`Settings.tsx`'s clause was verified independently rather than taken from the
+review: every remaining `rain_disabled_default` mention in `src/` is past tense
+("is deleted", "used to read", "used to answer"), no backend reader exists, and
+`Settings.test.tsx:126` pins that the panel never asks for the key. The deletion
+happened; only the sentence promising it survived.
+
+**The class is now empty** — the only surviving matches for *"a parallel unit"* /
+*"when the two units merge"* are the two past-tense records of these fixes.
+
+**What it adds to F1's lesson.** A future-tense instruction is a claim with an
+expiry date and no alarm on it. It reads as a live to-do forever, and the thing it
+promised has usually already happened — so the danger is not that the work is
+undone (`Settings.tsx`) but that a reader executes an instruction whose premise has
+reversed (`participants.ts`, where executing it would have put the only checked
+declaration behind `@ts-nocheck`). **Fixing an instance without sweeping the class
+is what left two of three open here**, in a batch that had just fixed the third.
+
 ---
 
 ## 3. Declined, with the reasons recorded so round 5 does not re-derive them

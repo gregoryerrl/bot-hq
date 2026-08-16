@@ -72,6 +72,23 @@ tests have the inert shape; all eight hand-read; **seven are real assertions.** 
 272 are stale fixture names, not inert assertions. Three misleading failure
 messages fixed (`participants.rs:4527`, `tray.rs:1589`/`:2393`).
 
+**F7 — the metric could not see the staleness this round created.** The renames
+left `issues.md` citing `build_rain_disallowed_tools` in the present tense, and
+`cl_stale_refs` reported 25 either way: `source_corpus` counts a symbol present if
+its string appears anywhere in tracked code, and the guard's own test fixture plus
+the new past-tense doc comment both put it there. Round 3's F14 found the metric
+penalising the documented remedy; this is the remedy suppressing it. CL corrected;
+the metric deliberately not changed, under round 3's own sequencing rule.
+
+**F8 — F1's class, swept.** F1 fixed one never-executed merge instruction; nobody
+asked how many there were. Three, and two were still open after batch 2.
+`core/activity.rs` still asserted the "frozen … a parallel unit owns those files"
+premise batch 2 had just deleted from three sites, so the tree held two comments
+that could not both be right; `Settings.tsx` promised a deletion that had already
+happened. The class is now empty. The lesson is that a future-tense instruction is
+a claim with an expiry date and no alarm — and the danger is less that the work is
+undone than that a reader executes an instruction whose premise has reversed.
+
 Declined with reasons: the `participant_views` N+1 (measured — 5 queries against
 one open session), `large_enum_variant` on `Handover`, the three remaining
 `too_many_arguments`, ~24 over-exported frontend symbols. Parked for the user:
