@@ -279,53 +279,13 @@ impl Storage {
     /// Record a session's Rain toggle + per-agent model selections, chosen in
     /// the create dialog. Called once right after `create_session`, BEFORE
     /// spawn, so `spawn_session_handle` reads the chosen models off the row.
-    pub async fn set_session_spawn_config(
-        &self,
-        session_id: &str,
-        rain_enabled: bool,
-        brian_model_id: Option<&str>,
-        rain_model_id: Option<&str>,
-    ) -> Result<()> {
-        sqlx::query(
-            "UPDATE sessions \
-             SET rain_enabled = ?, brian_model_id = ?, rain_model_id = ? \
-             WHERE id = ?",
-        )
-        .bind(if rain_enabled { 1 } else { 0 })
-        .bind(brian_model_id)
-        .bind(rain_model_id)
-        .bind(session_id)
-        .execute(&self.pool)
-        .await
-        .with_context(|| format!("recording spawn config on session {session_id}"))?;
-        Ok(())
-    }
-
-    /// Record a session's per-agent effort/ultracode overrides, chosen in the
-    /// create dialog. Separate from `set_session_spawn_config` to avoid an
-    /// 8-positional-param method; `create_session` calls both back-to-back
-    /// before spawn. `None` = inherit the Settings defaults (column left NULL).
-    pub async fn set_session_effort_config(
-        &self,
-        session_id: &str,
-        brian_effort: Option<&str>,
-        rain_effort: Option<&str>,
-        brian_ultracode: Option<bool>,
-        rain_ultracode: Option<bool>,
-    ) -> Result<()> {
-        sqlx::query(
-            "UPDATE sessions \
-             SET brian_effort = ?, rain_effort = ?, brian_ultracode = ?, rain_ultracode = ? \
-             WHERE id = ?",
-        )
-        .bind(brian_effort)
-        .bind(rain_effort)
-        .bind(brian_ultracode)
-        .bind(rain_ultracode)
-        .bind(session_id)
-        .execute(&self.pool)
-        .await
-        .with_context(|| format!("recording effort config on session {session_id}"))?;
+    pub async fn set_session_spawn_config(&self, session_id: &str, rain_enabled: bool) -> Result<()> {
+        sqlx::query("UPDATE sessions SET rain_enabled = ? WHERE id = ?")
+            .bind(if rain_enabled { 1 } else { 0 })
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("recording spawn config on session {session_id}"))?;
         Ok(())
     }
 

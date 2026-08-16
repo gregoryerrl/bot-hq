@@ -362,7 +362,7 @@ pub async fn open_session(
     // decides whether the participants after the first are enabled. Mirror onto
     // the in-memory struct so we don't need a re-fetch.
     storage
-        .set_session_spawn_config(&id, !req.solo, None, None)
+        .set_session_spawn_config(&id, !req.solo)
         .await
         .context("recording session spawn config")?;
     session.rain_enabled = if req.solo { 0 } else { 1 };

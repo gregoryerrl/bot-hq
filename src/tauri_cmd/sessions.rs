@@ -618,27 +618,11 @@ pub async fn create_session(
             .await
             .map_err(|e| AppError::DbError(e.to_string()))?;
     }
-    // Persist the Rain toggle + per-agent model picks on the row BEFORE the
-    // session is spawned (respawn_session reads them off the row).
+    // The solo/duo bookkeeping flag. It is all that is written to `sessions`
+    // here now: the model and effort picks below go onto the PARTICIPANT rows,
+    // which is where spawn reads them (round 3, F7).
     storage
-        .set_session_spawn_config(
-            &id,
-            rain_enabled,
-            brian_model_id.as_deref(),
-            rain_model_id.as_deref(),
-        )
-        .await
-        .map_err(|e| AppError::DbError(e.to_string()))?;
-    // Per-session effort/ultracode overrides (separate setter to avoid an
-    // 8-param method; also persisted pre-spawn).
-    storage
-        .set_session_effort_config(
-            &id,
-            options.brian_effort.as_deref(),
-            options.rain_effort.as_deref(),
-            options.brian_ultracode,
-            options.rain_ultracode,
-        )
+        .set_session_spawn_config(&id, rain_enabled)
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
     // The picked roster, written before the background spawn below reaches
@@ -822,7 +806,7 @@ pub(crate) async fn dispatch_session_inner(
     // avoid. It also removes a duplicate of the count resolution that sat here.
     let rain_enabled = seeded > 1;
     storage
-        .set_session_spawn_config(&id, rain_enabled, None, None)
+        .set_session_spawn_config(&id, rain_enabled)
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
     session.rain_enabled = if rain_enabled { 1 } else { 0 };
