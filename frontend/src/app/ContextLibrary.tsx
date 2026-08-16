@@ -15,6 +15,7 @@ import {
   type CtxTarget,
   isInternalGlobalsPath,
   tabKey,
+  tabsAfterProjectGone,
   type OpenTab,
   type TreeNode,
 } from "./contextLibraryShared";
@@ -473,15 +474,16 @@ function LibraryTree() {
   const onProjectGone = useCallback(
     (name: string, replacement?: string) => {
       setTabs((prev) => {
-        const next = prev.filter((t) => t.project !== name);
+        const next = tabsAfterProjectGone(prev, name, replacement);
         setActiveTabIndex((cur) => Math.min(cur, Math.max(0, next.length - 1)));
         return next;
       });
       onProjectChanged();
-      if (replacement) {
-        setQuery("");
-        openFolder(replacement, "");
-      }
+      // No reopen on rename any more: the tabs FOLLOW the project, so the one
+      // the user was looking at is still in front of them. Reopening the root
+      // here would also have raced its own dedupe — `openTab` compares against
+      // the `tabs` from this closure, which is the pre-retarget array.
+      if (replacement) setQuery("");
     },
     [onProjectChanged, openFolder],
   );

@@ -3,8 +3,10 @@ import {
   buildTree,
   isInternalGlobalsPath,
   splitGlobals,
+  tabsAfterProjectGone,
   treeProjectIds,
 } from "./contextLibraryShared";
+import type { OpenTab } from "./contextLibraryShared";
 import type { ClIndexEntryView } from "../lib/bindings";
 
 const entry = (id: number, file_path: string): ClIndexEntryView => ({
@@ -139,5 +141,38 @@ describe("treeProjectIds", () => {
   it("sorts and dedups", () => {
     const ids = treeProjectIds(["b", "a"], ["a", "c"], false, null);
     expect(ids).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("tabsAfterProjectGone", () => {
+  const tabs: OpenTab[] = [
+    { kind: "folder", project: "old", folderPath: "" },
+    { kind: "file", project: "old", filePath: "notes.md" },
+    { kind: "file", project: "other", filePath: "keep.md" },
+  ];
+
+  it("follows the files when a project is RENAMED", () => {
+    // The old rule filtered by project name in both cases, so renaming closed
+    // every tab open in that project — including one holding unsaved text —
+    // while the file and the text both still existed under the new name. The
+    // rename has already happened when this runs, so a confirm would have
+    // nothing to offer; following the file is what keeps anything.
+    expect(tabsAfterProjectGone(tabs, "old", "new")).toEqual([
+      { kind: "folder", project: "new", folderPath: "" },
+      { kind: "file", project: "new", filePath: "notes.md" },
+      { kind: "file", project: "other", filePath: "keep.md" },
+    ]);
+  });
+
+  it("drops them when a project is DELETED", () => {
+    // Nothing behind the tab and nothing to save back to.
+    expect(tabsAfterProjectGone(tabs, "old")).toEqual([
+      { kind: "file", project: "other", filePath: "keep.md" },
+    ]);
+  });
+
+  it("leaves other projects' tabs alone either way", () => {
+    expect(tabsAfterProjectGone(tabs, "nobody", "x")).toEqual(tabs);
+    expect(tabsAfterProjectGone(tabs, "nobody")).toEqual(tabs);
   });
 });

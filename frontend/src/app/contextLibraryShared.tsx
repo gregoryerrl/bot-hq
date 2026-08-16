@@ -19,6 +19,32 @@ export function tabKey(tab: OpenTab): string {
   return `folder:${tab.project}/${tab.folderPath}`;
 }
 
+/** What the open tabs become when a project is deleted or RENAMED.
+ *
+ * Delete (`replacement` undefined): drop them. The files are gone, so a tab
+ * pointing at one has nothing behind it and nothing to save back to.
+ *
+ * Rename: **retarget, do not drop.** The old code filtered by the old project
+ * name in both cases, so renaming a project closed every tab you had open in it
+ * — including one holding unsaved text — while the file and the text both still
+ * existed under the new name. The rename has already happened by the time this
+ * runs (it is a notification, not a request), so a confirm would have nothing to
+ * offer; following the file is the only answer that keeps anything.
+ *
+ * Known residual: `tabKey` includes the project, so a retargeted tab changes
+ * identity and its pane remounts — the tab and the file survive, the unsaved
+ * text does not. Fixing that needs tabs to carry a stable id instead of being
+ * keyed by their contents; indexed rather than done here.
+ */
+export function tabsAfterProjectGone(
+  tabs: OpenTab[],
+  name: string,
+  replacement?: string,
+): OpenTab[] {
+  if (!replacement) return tabs.filter((t) => t.project !== name);
+  return tabs.map((t) => (t.project === name ? { ...t, project: replacement } : t));
+}
+
 // Tab strip label. A folder with an empty path is the project root, so it
 // shows the project name; everything else shows the trailing path segment.
 export function tabLabel(tab: OpenTab): string {
