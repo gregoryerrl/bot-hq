@@ -18,6 +18,61 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-16 (round 2) — auditing the audit's own fix batch
+
+A second audit pass over `632c163`, reported in
+[`docs/plans/2026-08-16-rc3-audit-round2.md`](docs/plans/2026-08-16-rc3-audit-round2.md).
+Its distinctive scope was the one surface round 1 could not cover — **its own
+fix batch**: 42 commits and +5466 lines had landed since round 1's HEAD, and
+round 1 audited the ring *before* it was rewritten. Two of the three most
+serious findings sit in a **+146-line** delta inside `src/policy`, code that did
+not exist when round 1 ran.
+
+**A staged file could switch the commit gate off.** `git_output`'s strict
+`from_utf8` returned `None` for any NUL-free non-UTF-8 file — git emits raw
+bytes for those — and four callers read `None` as "nothing to scan": the
+forbidden-word layer, the migrations gate, and BOTH halves of the post-commit
+verifier. The backstop went blind on exactly the input that defeated
+pre-commit, so for this bug class the two layers were not independent. Measured
+with a probe: a staged latin-1 file carrying a forbidden term commits clean.
+Lossy decode fixes all four, and keeps the word visible so the refusal can name
+it.
+
+**The violations log was losing most of itself.** A record was two `write_all`
+calls under a per-instance mutex — but its writers are separate processes (five
+hook sites plus the app). 8 threads × 50 records: **102–197 of 400 survived**
+before, 400/400 after, red 9/9 and green 11/11 across both agents' runs. And
+separately, rotating the log made its history unreachable: `read_all` never
+opened the rolled file, so a rollover emptied the audit trail from the panel
+and the driver both — strictly worse than the no-rotation state it replaced.
+
+**A guard that had never run, and the reason nobody noticed.** The
+tool-description name sweep had no `#[test]`: its attribute sat above the
+previous test's doc comment, so both attributes bound to that test. The
+duplicate registered it TWICE, so the suite total was identical with the guard
+present or absent — **no count-based check could have caught it**, and both
+compiler warnings had shipped in every build since.
+
+**Fourteen of sixteen session drains were unpinned**, measured by cutting them
+with a positive control in the cut set. Two guards now: behavioural (both
+directions per map — a drain fails by not running *or* by over-reaching) and
+structural (derived from the struct's own fields, so a seventeenth map cannot
+arrive without a line).
+
+**The framing sweep reached rendered text.** Round 1 swept doc prose; three
+survivors were user-visible strings, including one tooltip duplicated verbatim
+across two components. `lib/framing.ts` now sweeps every source file, with all
+three exemptions stated as properties of the file. `core/duo.rs` became
+`core/pump.rs`, and the dead `Author` pump discriminant went with it.
+
+**`file.rs:NNN` citations cannot be audited, only converted.** Six of nine live
+ones in `sequencer.rs`'s module doc were stale — and `src/` holds 13 duplicated
+basenames (`tray.rs` has three copies), so a bare citation may not even name a
+file. All nine are symbol-anchored now, including the three still accurate.
+
+Suites: **1169** lib + 37 + 13 + 7 + 2 + 2 + 1; frontend **392** in 45 files;
+tsc clean; clippy **19 → 12**.
+
 ## 2026-08-16 (later) — batches 3–7, and three guards that were not guarding
 
 Same session, second half. Where the first half fixed behaviour, this half was
