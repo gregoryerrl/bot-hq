@@ -779,8 +779,19 @@ impl Storage {
         .with_context(|| format!("inserting participant {slug} into {session_id}"))?
         .last_insert_rowid();
         // Every participant reads the channel, so every participant has a cursor.
-        sqlx::query("INSERT INTO participant_cursors (participant_id) VALUES (?)")
+        // `updated_at` bound explicitly, NOT left to the column default
+        // (round-2 audit R5). The default is `datetime('now')`, which SQLite
+        // emits zone-less (`2026-08-12 15:48:26`) while every other time in
+        // this database is RFC3339-Z — and this insert omitted the column, so
+        // the default fired on every cursor ever created: 85 of 90 rows in the
+        // live database were zone-less, and only the ones a later `UPDATE` had
+        // touched were right. A zone-less stamp sorts BEFORE any same-day
+        // RFC3339 one (`' '` 0x20 < `'T'` 0x54), and the frontend parses it as
+        // LOCAL time, which is the staleness hallucination `storage::time`
+        // exists to prevent.
+        sqlx::query("INSERT INTO participant_cursors (participant_id, updated_at) VALUES (?, ?)")
             .bind(id)
+            .bind(crate::storage::now_utc())
             .execute(&self.pool)
             .await
             .context("seeding participant cursor")?;
@@ -1158,11 +1169,15 @@ impl Storage {
             // cursor from birth — the invariant `insert_participant` also holds.
             // Without it a delivery records itself, leaves the cursor at 0, and
             // re-offers the same batch every turn while reporting success.
-            sqlx::query("INSERT INTO participant_cursors (participant_id) VALUES (?)")
-                .bind(id)
-                .execute(&mut *tx)
-                .await
-                .context("seeding participant cursor")?;
+            // `updated_at` bound, not defaulted — see `insert_participant`.
+            sqlx::query(
+                "INSERT INTO participant_cursors (participant_id, updated_at) VALUES (?, ?)",
+            )
+            .bind(id)
+            .bind(crate::storage::now_utc())
+            .execute(&mut *tx)
+            .await
+            .context("seeding participant cursor")?;
             ids.push(id);
         }
         tx.commit().await.context("committing the roster")?;
@@ -4155,6 +4170,60 @@ mod tests {
             cursor.ends_with('Z') && cursor.contains('T'),
             "the cursor's updated_at is not RFC3339-Z: {cursor:?}"
         );
+    }
+
+    /// **A cursor is RFC3339-Z from BIRTH, not from its first delivery**
+    /// (round-2 audit R5).
+    ///
+    /// The guard above already named `participant_cursors.updated_at` and
+    /// already asserted RFC3339-Z on it — and 85 of 90 rows in the live
+    /// database were zone-less anyway. It reached the column through the
+    /// UPDATE path (`commit_delivery` binds `now_utc()`), so it only ever
+    /// inspected a row that had already been corrected. The INSERT omitted
+    /// `updated_at` entirely and let the column's `datetime('now')` DEFAULT
+    /// fire, which is what every cursor was born with.
+    ///
+    /// So this asserts on a freshly inserted participant with NO delivery
+    /// behind it. That is the whole difference between the two tests, and it is
+    /// the fixture-shape rule again: a fixture that reaches the value through
+    /// the path that writes it correctly cannot see the path that does not.
+    #[tokio::test]
+    async fn a_cursor_is_rfc3339_before_any_delivery_touches_it() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+
+        // Both seeding paths: the single insert, and the roster transaction.
+        let solo = s
+            .insert_participant("s1", "hands", "HANDS", None, None, "[]", "active", 0)
+            .await
+            .unwrap();
+        s.create_session("s2", "t", None).await.unwrap();
+        s.ensure_session_roster("s2", 2).await.unwrap();
+        let seeded: Vec<i64> = s
+            .participants_for_session("s2")
+            .await
+            .unwrap()
+            .iter()
+            .map(|p| p.id)
+            .collect();
+
+        for pid in std::iter::once(solo).chain(seeded) {
+            let stamp: String = sqlx::query_scalar(
+                "SELECT updated_at FROM participant_cursors WHERE participant_id = ?",
+            )
+            .bind(pid)
+            .fetch_one(s.pool())
+            .await
+            .unwrap();
+            assert!(
+                stamp.contains('T') && stamp.ends_with('Z'),
+                "cursor {pid} was born zone-less: {stamp:?} — the column's \
+                 `datetime('now')` DEFAULT fired because the INSERT omitted it, \
+                 and ' ' (0x20) sorts before 'T' (0x54), so this row reads as \
+                 EARLIER than midnight of its own day in every lexicographic \
+                 window over it"
+            );
+        }
     }
 
     #[tokio::test]
