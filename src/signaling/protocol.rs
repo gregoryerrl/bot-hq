@@ -889,22 +889,36 @@ mod tests {
     fn every_registered_tool_is_documented() {
         let arch = include_str!("../../ARCHITECTURE.md");
         let readme = include_str!("../../README.md");
+        // **LISTED, not merely mentioned** — the distinction is the whole test.
+        // A bare backtick-name needle is satisfied by any prose mention, and 30
+        // of the 40 tools are named more than once in at least one of these
+        // docs, so their table row could be deleted with the test still green
+        // (measured by EYES on `e300995`, by deleting `action_gate`'s row). The
+        // needles below are the shapes a READER scans:
+        //   * README's table row starts `| ` + backtick-name;
+        //   * ARCHITECTURE's list is one paragraph, so the name must appear
+        //     inside THAT paragraph rather than anywhere in the file.
+        let arch_list = arch
+            .split("**Internal tools (")
+            .nth(1)
+            .expect("ARCHITECTURE.md has an internal-tools list")
+            .split("\n\n")
+            .next()
+            .expect("a split always yields a first part");
         let mut missing: Vec<String> = Vec::new();
         for d in tool_descriptors() {
-            // Backtick-prefixed so `cl_rescan` cannot be satisfied by prose that
-            // merely mentions rescanning, and so `README`'s call-signature rows
-            // (`` `pass_turn()` ``) match without hard-coding their arguments.
-            let needle = format!("`{}", d.name);
-            if !arch.contains(&needle) {
-                missing.push(format!("ARCHITECTURE.md: {}", d.name));
+            if !arch_list.contains(&format!("`{}`", d.name)) {
+                missing.push(format!("ARCHITECTURE.md list: {}", d.name));
             }
-            if !readme.contains(&needle) {
-                missing.push(format!("README.md: {}", d.name));
+            if !readme.contains(&format!("| `{}", d.name)) {
+                missing.push(format!("README.md table: {}", d.name));
             }
         }
         assert!(
             missing.is_empty(),
-            "tools an agent can call that the canonical docs never mention: {missing:?}"
+            "tools an agent can call that the canonical docs do not LIST — a \
+             prose mention elsewhere does not count, because a reader looking \
+             for the tool surface reads the table and the list: {missing:?}"
         );
         // And the COUNT in ARCHITECTURE's heading, which is the part that read
         // as authoritative while being wrong.
