@@ -602,7 +602,6 @@ function LibraryTree() {
         activeTabIndex={activeTabIndex}
         onSelectTab={setActiveTabIndex}
         onCloseTab={closeTab}
-        activeTab={activeTab}
         entries={entries}
         folders={folders}
         projects={projects}

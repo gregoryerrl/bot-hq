@@ -1,8 +1,9 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { useServerDraft } from "../hooks/useServerDraft";
 import { cn } from "../lib/cn";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import type {
   ClFileContentView,
   ClFolderView,
@@ -38,7 +39,6 @@ interface EditorAreaProps {
   activeTabIndex: number;
   onSelectTab: (i: number) => void;
   onCloseTab: (i: number) => void;
-  activeTab: OpenTab | null;
   entries: ClIndexEntryView[];
   folders: ClFolderView[];
   projects: ProjectView[];
@@ -53,7 +53,6 @@ function EditorAreaImpl({
   activeTabIndex,
   onSelectTab,
   onCloseTab,
-  activeTab,
   entries,
   folders,
   projects,
@@ -62,6 +61,34 @@ function EditorAreaImpl({
   onProjectChanged,
   onProjectGone,
 }: EditorAreaProps) {
+  // **Which open tabs hold unsaved text.** Keyed by `tabKey`, because every
+  // pane is mounted (below) and reports independently.
+  const [dirtyTabs, setDirtyTabs] = useState<Set<string>>(() => new Set());
+  // Stable by construction — see `EditorPane`'s `onDirtyChange` doc for what an
+  // unstable one costs once N panes are mounted.
+  const onPaneDirty = useCallback((key: string, dirty: boolean) => {
+    setDirtyTabs((prev) => {
+      if (prev.has(key) === dirty) return prev;
+      const next = new Set(prev);
+      if (dirty) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }, []);
+
+  // Closing a tab with unsaved text asks first. Without this the dirty marker
+  // is an invitation to lose work: the user can finally SEE the tab is dirty,
+  // and the close button still discards it silently.
+  const [pendingClose, setPendingClose] = useState<number | null>(null);
+  const requestClose = useCallback(
+    (index: number) => {
+      const tab = tabs[index];
+      if (tab && dirtyTabs.has(tabKey(tab))) setPendingClose(index);
+      else onCloseTab(index);
+    },
+    [tabs, dirtyTabs, onCloseTab],
+  );
+
   return (
     <div className="flex min-w-0 flex-1 flex-col">
       {tabs.length > 0 && (
@@ -69,38 +96,77 @@ function EditorAreaImpl({
           tabs={tabs}
           activeTabIndex={activeTabIndex}
           onSelectTab={onSelectTab}
-          onCloseTab={onCloseTab}
+          onCloseTab={requestClose}
+          dirtyTabs={dirtyTabs}
         />
       )}
-      {activeTab == null ? (
+      {/* **Every open tab is MOUNTED; only the active one is shown.**
+          This used to render the active tab alone, keyed by path — so switching
+          tabs unmounted the pane and took its unsaved text with it, silently
+          (the working copy is component-local state). Hiding instead of
+          swapping is what fixes that, and it fixes it without restoring
+          anything: no draft is lifted, no baseline is re-derived, so the
+          `syncedContent` adoption logic below cannot be handed a stale
+          "clean" reading. Scroll position and focus survive too.
+
+          The cost, measured rather than assumed: each mounted pane holds a
+          `cl_read_file` query, and `cl:changed` invalidates that key for all of
+          them (`Providers.tsx` CL_KEYS) — N open tabs means N reads per CL
+          write instead of one. That is deliberate, and it is also a FEATURE:
+          the adoption effect runs in hidden panes too, so a background tab
+          stays fresh while clean and keeps the user's text while dirty. Do not
+          "optimize" it by skipping hidden panes — that reintroduces the
+          absorb-an-external-edit bug through the side door.
+
+          `contents` on the active wrapper so it generates no box and the
+          children stay direct flex items; `hidden` on the rest. */}
+      {tabs.length === 0 ? (
         <EmptyEditor />
-      ) : activeTab.kind === "folder" ? (
-        <FolderView
-          key={tabKey(activeTab)}
-          tab={activeTab}
-          folders={folders}
-          project={
-            projects.find((p) => p.name === activeTab.project) ?? null
-          }
-          onSaved={onRefetchFolders}
-          onProjectChanged={onProjectChanged}
-          onProjectGone={onProjectGone}
-        />
-      ) : isPolicyFile(activeTab.filePath) ? (
-        <ProjectPolicyEditor
-          key={tabKey(activeTab)}
-          tab={activeTab}
-          entries={entries}
-          onRefetchIndex={onRefetchIndex}
-        />
       ) : (
-        <EditorPane
-          key={tabKey(activeTab)}
-          tab={activeTab}
-          entries={entries}
-          onRefetchIndex={onRefetchIndex}
-        />
+        tabs.map((t, i) => (
+          <div
+            key={tabKey(t)}
+            className={i === activeTabIndex ? "contents" : "hidden"}
+            aria-hidden={i === activeTabIndex ? undefined : true}
+          >
+            {t.kind === "folder" ? (
+              <FolderView
+                tab={t}
+                folders={folders}
+                project={projects.find((p) => p.name === t.project) ?? null}
+                onSaved={onRefetchFolders}
+                onProjectChanged={onProjectChanged}
+                onProjectGone={onProjectGone}
+              />
+            ) : isPolicyFile(t.filePath) ? (
+              <ProjectPolicyEditor
+                tab={t}
+                entries={entries}
+                onRefetchIndex={onRefetchIndex}
+              />
+            ) : (
+              <EditorPane
+                tab={t}
+                entries={entries}
+                onRefetchIndex={onRefetchIndex}
+                onDirtyChange={onPaneDirty}
+              />
+            )}
+          </div>
+        ))
       )}
+      <ConfirmDialog
+        open={pendingClose != null}
+        title="Close this tab?"
+        message="It has unsaved changes. Closing discards them."
+        confirmLabel="Discard and close"
+        confirmVariant="danger"
+        onConfirm={() => {
+          if (pendingClose != null) onCloseTab(pendingClose);
+          setPendingClose(null);
+        }}
+        onCancel={() => setPendingClose(null)}
+      />
     </div>
   );
 }
@@ -222,11 +288,16 @@ function TabStrip({
   activeTabIndex,
   onSelectTab,
   onCloseTab,
+  dirtyTabs,
 }: {
   tabs: OpenTab[];
   activeTabIndex: number;
   onSelectTab: (i: number) => void;
   onCloseTab: (i: number) => void;
+  /** Tabs holding unsaved text, by `tabKey`. Until this existed the editor knew
+   *  it was dirty and nothing outside it did — so the user could not see which
+   *  tab still owed a save. */
+  dirtyTabs: Set<string>;
 }) {
   return (
     <div className="flex flex-shrink-0 flex-wrap items-center border-b border-outline-variant bg-surface-container">
@@ -257,6 +328,15 @@ function TabStrip({
                 <FileIcon className="shrink-0 text-on-surface-variant/60" />
               )}
               <span className="truncate">{tabLabel(t)}</span>
+              {dirtyTabs.has(tabKey(t)) && (
+                <span
+                  className="shrink-0 text-primary"
+                  title="Unsaved changes"
+                  aria-label="Unsaved changes"
+                >
+                  •
+                </span>
+              )}
             </button>
             <button
               type="button"
@@ -284,10 +364,21 @@ function EditorPane({
   tab,
   entries,
   onRefetchIndex,
+  onDirtyChange,
 }: {
   tab: Extract<OpenTab, { kind: "file" }>;
   entries: ClIndexEntryView[];
   onRefetchIndex: () => void;
+  /** Report this pane's UNSAVED-BODY state to the tab owner, keyed by tab.
+   *
+   *  Keyed, not a bare bool: every open pane is mounted now, so N of these
+   *  arrive and a single flag upstairs would be last-reporter-wins — a clean
+   *  background pane would clear the marker on the dirty tab.
+   *
+   *  Distinct from the existing `onDirtyChange` further down this file, which
+   *  belongs to the METADATA sub-editor. The body draft had no outward channel
+   *  at all before this. */
+  onDirtyChange?: (tabKey: string, dirty: boolean) => void;
 }) {
   const {
     data: fileContent,
@@ -334,6 +425,18 @@ function EditorPane({
     fileContent != null &&
     draft != null &&
     draft !== fileContent.content;
+
+  // Tell the tab owner, so the strip can mark this tab and closing it can ask
+  // first. `key` is this pane's identity; the callback is stable (the owner
+  // builds it with `useCallback`), which matters because every open pane is
+  // mounted — an inline lambda would re-run this effect in ALL of them on every
+  // parent render, each calling setState upward.
+  const key = tabKey(tab);
+  useEffect(() => {
+    onDirtyChange?.(key, dirty);
+  }, [key, dirty, onDirtyChange]);
+  // And on unmount (the tab really closing), stop claiming it is dirty.
+  useEffect(() => () => onDirtyChange?.(key, false), [key, onDirtyChange]);
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);

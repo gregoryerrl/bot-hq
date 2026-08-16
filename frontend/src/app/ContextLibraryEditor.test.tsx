@@ -1,4 +1,5 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { EditorArea } from "./ContextLibraryEditor";
@@ -20,7 +21,6 @@ function renderEditor(
         activeTabIndex={0}
         onSelectTab={() => {}}
         onCloseTab={() => {}}
-        activeTab={tab}
         entries={[]}
         folders={[]}
         projects={[]}
@@ -36,6 +36,112 @@ function renderEditor(
 
 describe("Context Library editor", () => {
   beforeEach(() => mockInvoke.mockReset());
+
+  /** Two file tabs, rendered by the real EditorArea, with `activeTabIndex`
+   *  controlled by the test so a switch is exactly what the app does. */
+  function renderTwoTabs() {
+    const files: Record<string, string> = { "a.md": "alpha", "b.md": "beta" };
+    mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === "cl_read_file") {
+        const fp = (args as { filePath: string }).filePath;
+        return {
+          project: "p",
+          file_path: fp,
+          content: files[fp] ?? "",
+          size_bytes: (files[fp] ?? "").length,
+          truncated: false,
+          binary: false,
+        };
+      }
+      return [];
+    });
+    const tabs: OpenTab[] = [
+      { kind: "file", project: "p", filePath: "a.md" },
+      { kind: "file", project: "p", filePath: "b.md" },
+    ];
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const onCloseTab = vi.fn();
+    function Harness() {
+      const [active, setActive] = useState(0);
+      return (
+        <QueryClientProvider client={qc}>
+          <EditorArea
+            tabs={tabs}
+            activeTabIndex={active}
+            onSelectTab={setActive}
+            onCloseTab={onCloseTab}
+            entries={[]}
+            folders={[]}
+            projects={[]}
+            onRefetchIndex={() => {}}
+            onRefetchFolders={() => {}}
+            onProjectChanged={() => {}}
+            onProjectGone={() => {}}
+          />
+        </QueryClientProvider>
+      );
+    }
+    return { ...render(<Harness />), onCloseTab };
+  }
+
+  it("keeps unsaved text when you switch tabs and come back", async () => {
+    // The bug this pins: EditorArea rendered only the active tab, keyed by
+    // path, so a switch UNMOUNTED the pane and the working copy — component
+    // -local state — went with it. Type in A, open B, come back: gone, no
+    // prompt. Now every open pane stays mounted and the inactive ones are
+    // hidden, so nothing is restored and nothing can be lost.
+    renderTwoTabs();
+
+    // Both panes mount, but their reads resolve independently — wait for the
+    // second rather than racing it.
+    await waitFor(() =>
+      expect(screen.getAllByLabelText("File content editor")).toHaveLength(2),
+    );
+    const a = screen.getAllByLabelText("File content editor")[0];
+    expect(a).toHaveValue("alpha");
+    fireEvent.change(a, { target: { value: "alpha EDITED" } });
+
+    // Switch to B and back.
+    fireEvent.click(screen.getByTitle("p — b.md"));
+    fireEvent.click(screen.getByTitle("p — a.md"));
+
+    expect(screen.getAllByLabelText("File content editor")[0]).toHaveValue(
+      "alpha EDITED",
+    );
+  });
+
+  it("marks the dirty tab and asks before closing it", async () => {
+    // Two halves of one promise: the user can SEE which tab owes a save, and
+    // the close button stops discarding it silently. Shipping the marker alone
+    // would have been an invitation to lose text.
+    const { onCloseTab } = renderTwoTabs();
+    await waitFor(() =>
+      expect(screen.getAllByLabelText("File content editor")).toHaveLength(2),
+    );
+    fireEvent.change(screen.getAllByLabelText("File content editor")[0], {
+      target: { value: "alpha EDITED" },
+    });
+
+    expect(await screen.findByLabelText("Unsaved changes")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Close a\.md/ }));
+    expect(onCloseTab).not.toHaveBeenCalled();
+    // The dialog, not the tab marker — both say "unsaved changes", which is the
+    // point: the marker warned, and the dialog is the thing that stops the loss.
+    expect(screen.getByText(/closing discards them/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /discard and close/i }));
+    expect(onCloseTab).toHaveBeenCalledWith(0);
+  });
+
+  it("closes a clean tab without asking", async () => {
+    const { onCloseTab } = renderTwoTabs();
+    await waitFor(() =>
+      expect(screen.getAllByLabelText("File content editor")).toHaveLength(2),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Close a\.md/ }));
+    expect(onCloseTab).toHaveBeenCalledWith(0);
+  });
 
   it("edits file content and saves it via cl_write_file", async () => {
     // Stateful mock: cl_write_file updates what the next cl_read_file returns,
