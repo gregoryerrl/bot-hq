@@ -594,6 +594,18 @@ impl SignalingBridge {
     /// Constant-time compare, mirroring `external_server`: a timing oracle on a
     /// localhost secret is a stretch, but the cost of using the right primitive
     /// is nothing.
+    ///
+    /// **SCOPE — this is not an adversarial boundary between same-user agents,
+    /// and should not be mistaken for one later.** The secret is written with
+    /// `std::fs::write` into the per-agent temp dir at default permissions, and
+    /// every participant runs as the same uid holding `Read` and `Bash`: a peer
+    /// that goes LOOKING can read a sibling's config and present its token. What
+    /// this closes is everything short of that — misrouting, guessing, a URL
+    /// copied from a log, and any caller with no filesystem access to that
+    /// sibling directory (a plugin webview, an external process). Making it hold
+    /// against a determined peer needs the secret out of a readable file
+    /// (per-agent 0600 at minimum, or handed over a channel only that
+    /// subprocess can read), which is a separate change.
     pub fn mcp_token_matches(&self, session_id: &str, agent: &str, presented: Option<&str>) -> bool {
         use subtle::ConstantTimeEq;
         let expected = self

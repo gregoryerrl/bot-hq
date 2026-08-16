@@ -426,22 +426,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
-    /// `recv()` with a deadline.
-    ///
-    /// A bare `rx.recv().await` turns a regression into a HANG rather than a
-    /// failure: the test waits forever for a wire the broken code never sends,
-    /// and prints nothing. This batch produced two — one wedged a run for seven
-    /// minutes, and one hung `cargo test` outright when a session-id mismatch
-    /// made a scope check refuse every wire. Both would have been a clean
-    /// failure in seconds through this.
-    async fn next_wire<T>(rx: &mut tokio::sync::mpsc::Receiver<T>) -> T {
-        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("expected a wire within 2s; none arrived")
-            .expect("the sender was dropped before a wire arrived")
-    }
-
-
     #[test]
     fn liveness_touch_and_tools() {
         let l = AgentLiveness::new();
