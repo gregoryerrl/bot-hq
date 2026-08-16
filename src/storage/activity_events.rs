@@ -23,7 +23,7 @@ impl Storage {
     ) -> Result<i64> {
         let res = sqlx::query(
             "INSERT INTO activity_events \
-             (session_id, recorded_at, state, brian_busy, rain_busy) \
+             (session_id, recorded_at, state, slot0_busy, slot1_busy) \
              VALUES (?, ?, ?, ?, ?)",
         )
         .bind(session_id)
@@ -44,15 +44,13 @@ impl Storage {
         &self,
         session_id: Option<&str>,
     ) -> Result<Vec<ActivityEvent>> {
-        // **The SQL names the LIVE columns and ALIASES them to the struct
-        // fields.** `brian_busy`/`rain_busy` are what the table still has;
-        // migration 0060 renames them to match, and this line loses the
-        // aliases then. Renaming the Rust field ahead of the column is what
-        // broke four tests during the D10 retirement — the schema and its
-        // readers have to move together, which is why the migration is its
-        // own batch.
-        const COLS: &str = "id, session_id, recorded_at, state, \
-             brian_busy AS slot0_busy, rain_busy AS slot1_busy";
+        // Column and struct field agree again. They did not for one commit:
+        // the Rust side was renamed first and bridged with
+        // `brian_busy AS slot0_busy` until 0060 caught up, because renaming a
+        // SQL literal ahead of its column turned four tests red. The schema and
+        // its readers have to move together — that is why the migration was its
+        // own batch, and the alias is what made the intermediate state legal.
+        const COLS: &str = "id, session_id, recorded_at, state, slot0_busy, slot1_busy";
         let rows = match session_id {
             Some(sid) => {
                 sqlx::query_as::<_, ActivityEvent>(&format!(
@@ -147,7 +145,7 @@ mod tests {
         // `recorded_at` is stamped by the insert — the point is the cutoff, not
         // the stamping.
         sqlx::query(
-            "INSERT INTO activity_events (session_id, recorded_at, state, brian_busy, rain_busy) \
+            "INSERT INTO activity_events (session_id, recorded_at, state, slot0_busy, slot1_busy) \
              VALUES ('s1', '2026-01-01T00:00:00.000Z', 'idle', 0, 0)",
         )
         .execute(&s.pool)

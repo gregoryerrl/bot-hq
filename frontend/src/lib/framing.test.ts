@@ -22,7 +22,7 @@ describe("framing detection", () => {
       [],
     );
     expect(findRetiredFraming("/* Brian and Rain are legacy */")).toEqual([]);
-    expect(findRetiredFraming("if (!session.rain_enabled) return null;")).toEqual(
+    expect(findRetiredFraming("const k = \"rain_disabled_default\";")).toEqual(
       [],
     );
     // And the shape that must.

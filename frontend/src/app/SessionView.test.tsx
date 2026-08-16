@@ -107,9 +107,9 @@ vi.mock("@tauri-apps/api/core", () => ({
           archived: false,
           created_at: "2026-07-18T00:00:00Z",
           closed_at: null,
-          brian_model_at_spawn: null,
-          rain_model_at_spawn: null,
-          rain_enabled: true,
+          slot0_model_at_spawn: null,
+          slot1_model_at_spawn: null,
+          multi_participant: true,
         });
       case "get_session_phase":
         return Promise.resolve(null);

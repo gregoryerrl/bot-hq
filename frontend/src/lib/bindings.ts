@@ -5,9 +5,9 @@
 
 
 export const commands = {
-async createSession(id: string, title: string, repoPath: string | null, project: string | null, rainEnabled: boolean | null, brianModelId: string | null, rainModelId: string | null, options: SessionCreateOptions) : Promise<Result<SessionInfo, AppError>> {
+async createSession(id: string, title: string, repoPath: string | null, project: string | null, multiParticipant: boolean | null, brianModelId: string | null, rainModelId: string | null, options: SessionCreateOptions) : Promise<Result<SessionInfo, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("create_session", { id, title, repoPath, project, rainEnabled, brianModelId, rainModelId, options }) };
+    return { status: "ok", data: await TAURI_INVOKE("create_session", { id, title, repoPath, project, multiParticipant, brianModelId, rainModelId, options }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1960,11 +1960,13 @@ export type SessionInfo = { id: string; title: string; working_repo_path: string
  * `working_repo_path` is then the worktree and this is the repo it was
  * carved from. None = direct mode.
  */
-base_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null; 
+base_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; slot0_model_at_spawn: string | null; slot1_model_at_spawn: string | null; 
 /**
- * False = solo-Brian session (Rain disabled at create).
+ * False = this session runs a single participant. **Derived from the
+ * roster**, not read from a column — `sessions.rain_enabled` was a cached
+ * count of `session_participants` and went with the D10 retirement (0060).
  */
-rain_enabled: boolean; 
+multi_participant: boolean; 
 /**
  * First line preview of the latest text message + its author, for the
  * dashboard Quickview. Both None on the closed-session and external

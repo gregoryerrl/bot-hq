@@ -8,9 +8,9 @@ use super::*;
 /// Centralized so adding a column is one edit, not four — a missing column
 /// fails `query_as` at runtime, not compile time.
 const SESSION_COLUMNS: &str = "id, title, working_repo_path, created_at, closed_at, \
-    archived, brian_model_at_spawn, rain_model_at_spawn, brian_claude_session_id, \
-    rain_claude_session_id, rain_enabled, brian_model_id, rain_model_id, brian_effort, \
-    rain_effort, brian_ultracode, rain_ultracode, base_repo_path, created_by_plugin";
+    archived, slot0_model_at_spawn, slot1_model_at_spawn, base_repo_path, created_by_plugin, \
+    (SELECT COUNT(*) > 1 FROM session_participants p \
+     WHERE p.session_id = sessions.id AND p.enabled <> 0) AS multi_participant";
 
 impl Storage {
     pub async fn create_session(
@@ -253,29 +253,6 @@ impl Storage {
         Ok(rows)
     }
 
-    /// Record a session's solo/duo bookkeeping flag. Called once right after
-    /// `create_session`, BEFORE spawn.
-    ///
-    /// **It no longer records model selections, and nothing reads a model off
-    /// this row.** `5decdcf` (round-3 F7) dropped the `brian_model_id` /
-    /// `rain_model_id` parameters because spawn takes each participant's model
-    /// from its own roster row; this doc kept claiming `spawn_session_handle`
-    /// reads the chosen models off the session row, which is a reader that does
-    /// not exist. Filed by EYES against that very commit — F7 fixed the
-    /// caller-side comment and missed the definition-side one, which is the
-    /// exact defect class F1 and F7 were themselves filed for. The lesson is
-    /// narrow and worth keeping: **when you delete a parameter, its function's
-    /// own doc is a call site.**
-    pub async fn set_session_spawn_config(&self, session_id: &str, rain_enabled: bool) -> Result<()> {
-        sqlx::query("UPDATE sessions SET rain_enabled = ? WHERE id = ?")
-            .bind(if rain_enabled { 1 } else { 0 })
-            .bind(session_id)
-            .execute(&self.pool)
-            .await
-            .with_context(|| format!("recording spawn config on session {session_id}"))?;
-        Ok(())
-    }
-
     /// Record the user's main repo for a worktree-isolated session. Called at
     /// create time (before spawn) together with the worktree placement —
     /// `working_repo_path` then carries the worktree path and this column the
@@ -339,8 +316,8 @@ impl Storage {
         model: &str,
     ) -> Result<()> {
         let column = match slot {
-            0 => "brian_model_at_spawn",
-            1 => "rain_model_at_spawn",
+            0 => "slot0_model_at_spawn",
+            1 => "slot1_model_at_spawn",
             _ => return Ok(()),
         };
         sqlx::query(&format!("UPDATE sessions SET {column} = ? WHERE id = ?"))
@@ -360,8 +337,8 @@ impl Storage {
         slot: usize,
     ) -> Result<()> {
         let column = match slot {
-            0 => "brian_model_at_spawn",
-            1 => "rain_model_at_spawn",
+            0 => "slot0_model_at_spawn",
+            1 => "slot1_model_at_spawn",
             _ => return Ok(()),
         };
         sqlx::query(&format!("UPDATE sessions SET {column} = NULL WHERE id = ?"))

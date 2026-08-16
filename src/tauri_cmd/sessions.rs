@@ -22,10 +22,12 @@ pub struct SessionInfo {
     pub archived: bool,
     pub created_at: String,
     pub closed_at: Option<String>,
-    pub brian_model_at_spawn: Option<String>,
-    pub rain_model_at_spawn: Option<String>,
-    /// False = solo-Brian session (Rain disabled at create).
-    pub rain_enabled: bool,
+    pub slot0_model_at_spawn: Option<String>,
+    pub slot1_model_at_spawn: Option<String>,
+    /// False = this session runs a single participant. **Derived from the
+    /// roster**, not read from a column — `sessions.rain_enabled` was a cached
+    /// count of `session_participants` and went with the D10 retirement (0060).
+    pub multi_participant: bool,
     /// First line preview of the latest text message + its author, for the
     /// dashboard Quickview. Both None on the closed-session and external
     /// JSON-RPC paths — only the dashboard `list_sessions` command populates
@@ -44,9 +46,9 @@ impl From<Session> for SessionInfo {
             archived: s.archived != 0,
             created_at: s.created_at,
             closed_at: s.closed_at,
-            brian_model_at_spawn: s.brian_model_at_spawn,
-            rain_model_at_spawn: s.rain_model_at_spawn,
-            rain_enabled: s.rain_enabled != 0,
+            slot0_model_at_spawn: s.slot0_model_at_spawn,
+            slot1_model_at_spawn: s.slot1_model_at_spawn,
+            multi_participant: s.multi_participant,
             last_message: None,
             last_author: None,
         }
@@ -165,10 +167,10 @@ pub use crate::storage::MAX_SESSION_PARTICIPANTS;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ResolvedRoster {
     pub drafts: Vec<crate::storage::ParticipantDraft>,
-    /// `sessions.rain_enabled`, which is now only a solo/duo BOOKKEEPING flag:
-    /// spawn reads the roster, not this column. It is still written because
-    /// `SessionInfo.rain_enabled` is part of the frozen frontend shape.
-    pub rain_enabled: bool,
+    /// Whether this roster runs more than one participant. Carried so the
+    /// caller need not re-count; nothing persists it (0060 dropped the column
+    /// it used to feed).
+    pub multi_participant: bool,
 }
 
 /// Turn the dialog's picks into a roster, refusing the ones that cannot run.
@@ -248,7 +250,7 @@ pub(crate) async fn resolve_participant_picks(
         ));
     }
     Ok(ResolvedRoster {
-        rain_enabled: picks.len() >= 2,
+        multi_participant: picks.len() >= 2,
         drafts,
     })
 }
@@ -577,7 +579,7 @@ pub async fn create_session(
     project: Option<String>,
     // Create-dialog choices. Defaults preserve the historical duo behavior so
     // older callers that omit them keep spawning Rain with agent-config models.
-    rain_enabled: Option<bool>,
+    multi_participant: Option<bool>,
     brian_model_id: Option<String>,
     rain_model_id: Option<String>,
     // Effort/ultracode/worktree picks (bundled — see SessionCreateOptions).
@@ -596,9 +598,9 @@ pub async fn create_session(
     // only written to `sessions` on the legacy path, where they are the caller's
     // only way to say which model a slot runs — and `ensure_session_roster`'s
     // seed is what carries them there.
-    let (rain_enabled, brian_model_id, rain_model_id) = match &roster {
-        Some(r) => (r.rain_enabled, None, None),
-        None => (rain_enabled.unwrap_or(true), brian_model_id, rain_model_id),
+    let (multi_participant, brian_model_id, rain_model_id) = match &roster {
+        Some(r) => (r.multi_participant, None, None),
+        None => (multi_participant.unwrap_or(true), brian_model_id, rain_model_id),
     };
     let (working, base) = resolve_session_placement(
         storage,
@@ -618,13 +620,9 @@ pub async fn create_session(
             .await
             .map_err(|e| AppError::DbError(e.to_string()))?;
     }
-    // The solo/duo bookkeeping flag. It is all that is written to `sessions`
-    // here now: the model and effort picks below go onto the PARTICIPANT rows,
-    // which is where spawn reads them (round 3, F7).
-    storage
-        .set_session_spawn_config(&id, rain_enabled)
-        .await
-        .map_err(|e| AppError::DbError(e.to_string()))?;
+    // Nothing about the roster is written to `sessions` any more: the picks
+    // below go onto the PARTICIPANT rows, which is where spawn reads them
+    // (round 3, F7), and `multi_participant` is derived from those same rows.
     // The picked roster, written before the background spawn below reaches
     // `ensure_session_roster` — which seeds the default only into a session
     // that has none, so the two never both fire.
@@ -642,7 +640,7 @@ pub async fn create_session(
             crate::core::session::seed_default_roster(
                 storage,
                 &id,
-                !rain_enabled,
+                !multi_participant,
                 &[brian_model_id.clone(), rain_model_id.clone()],
                 &[
                     (options.brian_effort.clone(), options.brian_ultracode),
@@ -777,7 +775,7 @@ pub(crate) async fn dispatch_session_inner(
     // Models stay NULL = role/agent defaults, as the dialog's "(agent default)".
     // **Seed the roster FIRST, with the count** (round-2 audit B3, second half).
     //
-    // The first attempt let `wanted` reach only `rain_enabled = wanted > 1`,
+    // The first attempt let `wanted` reach only `multi_participant = wanted > 1`,
     // and the reviewer measured what that was worth: replacing the caller's
     // count with a hardcoded `2` left the whole suite green, because the
     // carrier between create and spawn is that one boolean column and spawn's
@@ -794,22 +792,15 @@ pub(crate) async fn dispatch_session_inner(
     // `ensure_session_roster` returns early when a roster exists, so spawn's
     // call becomes the no-op it already documents itself as.
     let seeded = seed_dispatch_roster(storage, &id, participants).await?;
-    // `sessions.rain_enabled` stays a BOOKKEEPING flag — spawn reads the
-    // roster, not this column, and `SessionInfo.rain_enabled` is part of the
-    // frozen frontend shape. "More than one participant" is all it has ever
-    // meant on this path.
-    //
-    // Derived from what was ACTUALLY seeded rather than from the request, so
-    // the flag cannot disagree with the rows: a caller asking for three on an
-    // install with one role gets one participant, and a column saying "more
-    // than one" would be the second source of truth this design exists to
-    // avoid. It also removes a duplicate of the count resolution that sat here.
-    let rain_enabled = seeded > 1;
-    storage
-        .set_session_spawn_config(&id, rain_enabled)
-        .await
-        .map_err(|e| AppError::DbError(e.to_string()))?;
-    session.rain_enabled = if rain_enabled { 1 } else { 0 };
+    // Read from what was ACTUALLY seeded rather than from the request: a caller
+    // asking for three on an install with one role gets one participant, and a
+    // column saying "more than one" would be the second source of truth this
+    // design exists to avoid. `sessions.rain_enabled` WAS that column and 0060
+    // dropped it; `SessionInfo.multi_participant` is derived in SQL from the
+    // roster rows, so there is nothing here left to keep in sync.
+    // Nothing to persist: `multi_participant` reads the rows `seed_dispatch_roster`
+    // just wrote. The mirror that used to sit here could disagree with them.
+    session.multi_participant = seeded > 1;
     // Register the project mapping BEFORE spawn so the agents' system prompt
     // picks up project-scoped CL conventions.
     bridge.register_session(id.clone(), project).await;
@@ -1169,7 +1160,7 @@ mod tests {
     /// **The dialog-less create seeds the size it was asked for** (round-2 B3).
     ///
     /// The first fix threaded a count into `dispatch_session_inner` and let it
-    /// reach only `rain_enabled = wanted > 1`; the reviewer replaced the count
+    /// reach only `multi_participant = wanted > 1`; the reviewer replaced the count
     /// with a hardcoded `2` and the whole suite stayed green, because nothing
     /// distinguished 2 from 3 from 8. This is the join that cut exercised.
     #[tokio::test]
@@ -1525,7 +1516,7 @@ mod tests {
         let roster = resolve_participant_picks(&storage, &picks, &Default::default())
             .await
             .unwrap();
-        assert!(roster.rain_enabled, "two participants is not a solo session");
+        assert!(roster.multi_participant, "two participants is not a solo session");
         assert_eq!(roster.drafts.len(), 2);
         assert_eq!(roster.drafts[0].model_id.as_deref(), Some("opus"));
         assert_eq!(roster.drafts[0].effort.as_deref(), Some("max"));
@@ -1556,7 +1547,7 @@ mod tests {
         let solo = resolve_participant_picks(&storage, &[pick(hands.id, None)], &Default::default())
             .await
             .unwrap();
-        assert!(!solo.rain_enabled, "one participant is a solo session");
+        assert!(!solo.multi_participant, "one participant is a solo session");
     }
 
     #[tokio::test]

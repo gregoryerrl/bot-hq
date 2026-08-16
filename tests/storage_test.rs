@@ -3,12 +3,16 @@ use bot_hq::storage::{AgentConfig, MessageKind, Storage};
 #[tokio::test]
 async fn migration_runs_on_empty_db() {
     let s = Storage::memory().await.unwrap();
+    // `agent_configs` seeds NOTHING now. It used to arrive with `brian` and
+    // `rain` rows (and `emma` until 0017) behind a CHECK that allowed only
+    // those three names — so the table could not hold a key any live session
+    // produces. 0060 rebuilt it without the CHECK and dropped the rows.
     let cfgs = s.list_agent_configs().await.unwrap();
-    let names: Vec<_> = cfgs.iter().map(|c| c.agent_name.as_str()).collect();
-    assert!(names.contains(&"brian"));
-    assert!(names.contains(&"rain"));
-    // Emma was removed: no emma agent_config is seeded anymore.
-    assert!(!names.contains(&"emma"));
+    assert!(
+        cfgs.is_empty(),
+        "expected an empty agent_configs, found {:?}",
+        cfgs.iter().map(|c| c.agent_name.as_str()).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -162,23 +166,34 @@ async fn active_sessions_excludes_closed() {
 #[tokio::test]
 async fn upsert_agent_config_overwrites() {
     let s = Storage::memory().await.unwrap();
-    let mut cfg = s.get_agent_config("brian").await.unwrap().unwrap();
+    // Insert-then-overwrite on a ROLE slug, which only became a legal key when
+    // 0060 dropped the legacy CHECK.
+    let cfg = AgentConfig {
+        agent_name: "hands".into(),
+        provider: "anthropic".into(),
+        model_name: "seed".into(),
+        base_url: None,
+        auth_token: None,
+        updated_at: String::new(),
+        context_window: None,
+    };
+    s.upsert_agent_config(&cfg).await.unwrap();
+    let mut cfg = s.get_agent_config("hands").await.unwrap().unwrap();
     cfg.model_name = "claude-haiku-4-5".to_string();
     cfg.auth_token = Some("sk-test-123".to_string());
     s.upsert_agent_config(&cfg).await.unwrap();
-    let reloaded = s.get_agent_config("brian").await.unwrap().unwrap();
+    let reloaded = s.get_agent_config("hands").await.unwrap().unwrap();
     assert_eq!(reloaded.model_name, "claude-haiku-4-5");
     assert_eq!(reloaded.auth_token.as_deref(), Some("sk-test-123"));
 }
 
 #[tokio::test]
 async fn upsert_agent_config_inserts_new_via_constructor() {
-    // agent_configs' legacy CHECK constraint still lists emma/brian/rain, but
-    // only brian/rain are seeded post-removal. Use the seeded "rain" row as the
-    // canonical upsert target.
+    // No row is seeded any more and any key is legal, so the constructor path
+    // inserts a fresh ROLE slug rather than overwriting a seeded legacy name.
     let s = Storage::memory().await.unwrap();
     let cfg = AgentConfig {
-        agent_name: "rain".into(),
+        agent_name: "eyes".into(),
         provider: "deepseek".into(),
         model_name: "deepseek-coder".into(),
         base_url: Some("https://api.deepseek.com".into()),
@@ -187,7 +202,7 @@ async fn upsert_agent_config_inserts_new_via_constructor() {
         context_window: None,
     };
     s.upsert_agent_config(&cfg).await.unwrap();
-    let got = s.get_agent_config("rain").await.unwrap().unwrap();
+    let got = s.get_agent_config("eyes").await.unwrap().unwrap();
     assert_eq!(got.provider, "deepseek");
     assert_eq!(got.model_name, "deepseek-coder");
     assert_eq!(got.base_url.as_deref(), Some("https://api.deepseek.com"));
@@ -278,7 +293,7 @@ async fn model_round_trips_every_column_it_still_projects() {
 ///
 /// F7 deleted `set_session_spawn_models` and its round-trip test — correct, it
 /// had no reader. But that test was the last thing exercising a WRITE to
-/// `brian_model_at_spawn` / `rain_model_at_spawn`, and the live replacement
+/// `slot0_model_at_spawn` / `slot1_model_at_spawn`, and the live replacement
 /// (`set_session_spawn_model_slot`, called once from `spawn_session_handle`)
 /// had no test at all: six references in the tree, all definition, call site
 /// and a `warn!` string. EYES filed it against the uncommitted diff (`579f1324`)
@@ -300,15 +315,15 @@ async fn spawn_model_slots_round_trip_and_slot_two_is_a_silent_no_op() {
     s.set_session_spawn_model_slot("sess-slots", 0, "claude-opus-5").await.unwrap();
     s.set_session_spawn_model_slot("sess-slots", 1, "claude-sonnet-5").await.unwrap();
     let got = s.get_session("sess-slots").await.unwrap().unwrap();
-    assert_eq!(got.brian_model_at_spawn.as_deref(), Some("claude-opus-5"), "slot 0 is the first column");
-    assert_eq!(got.rain_model_at_spawn.as_deref(), Some("claude-sonnet-5"), "slot 1 is the second");
+    assert_eq!(got.slot0_model_at_spawn.as_deref(), Some("claude-opus-5"), "slot 0 is the first column");
+    assert_eq!(got.slot1_model_at_spawn.as_deref(), Some("claude-sonnet-5"), "slot 1 is the second");
 
     // The solo path: spawn clears slot 1 when only one participant spawned.
     s.clear_session_spawn_model_slot("sess-slots", 1).await.unwrap();
     let got = s.get_session("sess-slots").await.unwrap().unwrap();
-    assert_eq!(got.rain_model_at_spawn, None, "clearing writes SQL NULL");
+    assert_eq!(got.slot1_model_at_spawn, None, "clearing writes SQL NULL");
     assert_eq!(
-        got.brian_model_at_spawn.as_deref(),
+        got.slot0_model_at_spawn.as_deref(),
         Some("claude-opus-5"),
         "clearing one slot must not touch the other"
     );
@@ -318,6 +333,52 @@ async fn spawn_model_slots_round_trip_and_slot_two_is_a_silent_no_op() {
     // schema under an N-participant roster (round-3 F7).
     s.set_session_spawn_model_slot("sess-slots", 2, "some-model").await.unwrap();
     let after = s.get_session("sess-slots").await.unwrap().unwrap();
-    assert_eq!(after.brian_model_at_spawn, got.brian_model_at_spawn, "slot 2 wrote nothing");
-    assert_eq!(after.rain_model_at_spawn, None, "slot 2 wrote nothing");
+    assert_eq!(after.slot0_model_at_spawn, got.slot0_model_at_spawn, "slot 2 wrote nothing");
+    assert_eq!(after.slot1_model_at_spawn, None, "slot 2 wrote nothing");
+}
+
+/// **Every `SESSION_COLUMNS` query is EXECUTED here, not just compiled.**
+///
+/// `SESSION_COLUMNS`' own comment states the hazard: *"a missing column fails
+/// `query_as` at runtime, not compile time."* Migration 0060 dropped nine
+/// columns from `sessions`, renamed two, and replaced `rain_enabled` with a
+/// correlated subquery — so a projection that disagreed with the `Session`
+/// struct would build perfectly and fail only when a query ran. Nothing else in
+/// the suite forces all three query shapes.
+///
+/// Required as a definition-of-done by the reviewer before 0060 shipped, and it
+/// is the right shape for the risk: the three sites share one const, so an edit
+/// to it can only be caught by running each of them.
+#[tokio::test]
+async fn every_session_projection_executes_after_0060() {
+    let s = Storage::memory().await.unwrap();
+    s.create_session("s-proj", "t", Some("/tmp/r")).await.unwrap();
+
+    // 1. get_session — the single-row path.
+    let one = s.get_session("s-proj").await.unwrap().expect("row reads back");
+    assert_eq!(one.id, "s-proj");
+    assert!(!one.multi_participant, "no roster seeded yet, so not multi");
+    assert_eq!(one.slot0_model_at_spawn, None);
+    assert_eq!(one.slot1_model_at_spawn, None);
+
+    // 2. list_active_sessions — the multi-row path.
+    let active = s.list_active_sessions().await.unwrap();
+    assert!(active.iter().any(|x| x.id == "s-proj"), "listed");
+
+    // 3. The flattened preview path, whose prefix is the same const.
+    let preview = s.list_active_sessions_with_preview().await.unwrap();
+    assert!(preview.iter().any(|x| x.session.id == "s-proj"), "previewed");
+
+    // The derived column tracks the ROSTER, which is the whole reason
+    // `rain_enabled` was dropped rather than renamed: seed participants and the
+    // same query answers differently, with nothing to write and nothing to
+    // fall out of sync.
+    s.ensure_session_roster("s-proj", bot_hq::storage::MAX_SESSION_PARTICIPANTS)
+        .await
+        .unwrap();
+    let after = s.get_session("s-proj").await.unwrap().unwrap();
+    assert!(
+        after.multi_participant,
+        "a seeded roster of 2+ must read as multi-participant"
+    );
 }

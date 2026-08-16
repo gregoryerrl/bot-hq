@@ -100,19 +100,28 @@ mod tests {
         assert!(storage.get_agent_config("nobody").await.unwrap().is_none());
     }
 
-    /// **This fallback tier cannot serve any current roster** (audit B2-4), and
-    /// the reason is a CHECK constraint in `0001_init.sql`: `agent_name IN
-    /// ('emma', 'brian', 'rain')`. rc3 rosters use role slugs — `hands`, `eyes`,
-    /// `hands-2` — so `resolve_spawn_config`'s third tier can never match one,
-    /// and a spawn with no participant model and no role default falls through
-    /// to the built-in default rather than to anything a user configured here.
+    /// **A role slug is a legal `agent_configs` key again** — and until 0060 it
+    /// was not.
     ///
-    /// Recorded as a test rather than a comment because it is the kind of fact
-    /// that reads as a bug later: the tier LOOKS live in `session.rs`, and it is
-    /// — for two names nothing spawns any more. `0001` is applied and immutable,
-    /// so changing it is a new migration and a decision, not a fix.
+    /// `0001_init.sql` declared `agent_name TEXT PRIMARY KEY CHECK (agent_name
+    /// IN ('emma','brian','rain'))`. rc3 rosters use role slugs (`hands`,
+    /// `eyes`, `hands-2`), so the CHECK rejected every key a live session could
+    /// produce: `resolve_spawn_config`'s `agent_configs` tier LOOKED live and
+    /// could only ever match two names nothing spawns any more, falling through
+    /// to the built-in default instead of to anything a user had configured.
+    ///
+    /// This test used to assert the opposite — that every rc3 slug was
+    /// REFUSED — and recorded the refusal as a fact to be aware of rather than
+    /// a bug to fix, because `0001` is immutable and widening it needed a
+    /// migration and a decision. 0060 is that migration: it rebuilds the table
+    /// without the CHECK and drops the three seeded rows, none of which named a
+    /// participant this app can create.
+    ///
+    /// Inverted rather than deleted, deliberately: the assertion is the same
+    /// question asked of the opposite answer, so the tier's reachability stays
+    /// pinned in both directions.
     #[tokio::test]
-    async fn the_legacy_check_constraint_excludes_every_rc3_role_slug() {
+    async fn a_role_slug_is_a_legal_agent_config_key() {
         let storage = Storage::memory().await.unwrap();
         for slug in ["hands", "eyes", "hands-2"] {
             let cfg = AgentConfig {
@@ -124,11 +133,26 @@ mod tests {
                 updated_at: String::new(),
                 context_window: None,
             };
+            storage.upsert_agent_config(&cfg).await.unwrap_or_else(|e| {
+                panic!("`{slug}` was refused ({e}) — the legacy CHECK is back, and \
+                        `resolve_spawn_config`'s agent_configs tier is unreachable \
+                        for every roster a session can produce")
+            });
+            let back = storage.get_agent_config(slug).await.unwrap();
+            assert!(back.is_some(), "`{slug}` did not round-trip");
+        }
+    }
+
+    /// The three names the dropped CHECK used to allow are gone from the table.
+    /// Not "no longer special" — absent: they named two agents retired by D10
+    /// and one removed in 0017.
+    #[tokio::test]
+    async fn the_retired_names_are_not_seeded_any_more() {
+        let storage = Storage::memory().await.unwrap();
+        for slug in ["emma", "brian", "rain"] {
             assert!(
-                storage.upsert_agent_config(&cfg).await.is_err(),
-                "`{slug}` was accepted — if the CHECK was widened, \
-                 `resolve_spawn_config`'s agent_configs tier just became \
-                 reachable for real rosters and wants a second look"
+                storage.get_agent_config(slug).await.unwrap().is_none(),
+                "`{slug}` is still seeded"
             );
         }
     }

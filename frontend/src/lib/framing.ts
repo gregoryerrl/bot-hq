@@ -10,9 +10,12 @@
 
 /**
  * Word-boundary matched with `_` counted as a word character — the same rule as
- * the Rust `contains_word`, and load-bearing here: `session.rain_enabled` is a
- * live field name (a DB column named for a retired agent, round-2 finding E2),
- * and a substring check would flag it on every render path reading that flag.
+ * the Rust `contains_word`, and still load-bearing after the hard retirement:
+ * `rain_disabled_default` is a live identifier (the settings key D13 deleted,
+ * kept as a legacy fixture in `Settings.test.tsx`), and a substring check would
+ * flag it. It used to be justified by `session.rain_enabled`, a DB column named
+ * for a retired agent — that column is gone as of migration 0060, so the
+ * example moved but the rule did not.
  */
 export const RETIRED_FRAMING =
   /(?<![A-Za-z0-9_])(brian|rain|duo)(?![A-Za-z0-9_])/gi;

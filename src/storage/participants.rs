@@ -5222,9 +5222,6 @@ mod tests {
 
         // A session as 0044 left it: both rows, seeded before this change.
         s.create_session("s-backfilled", "t", None).await.unwrap();
-        s.set_session_spawn_config("s-backfilled", true)
-            .await
-            .unwrap();
         s.ensure_session_roster("s-backfilled", MAX_SESSION_PARTICIPANTS).await.unwrap();
         let backfilled = roster_verbatim(&s, "s-backfilled").await;
         assert_eq!(s.ensure_session_roster("s-backfilled", MAX_SESSION_PARTICIPANTS).await.unwrap(), 0);
@@ -5236,9 +5233,6 @@ mod tests {
 
         // A session from the window where nothing seeded a roster at all.
         s.create_session("s-rosterless", "t", None).await.unwrap();
-        s.set_session_spawn_config("s-rosterless", true)
-            .await
-            .unwrap();
         s.post_to_channel("s-rosterless", "participant", Some("hands"), "text", "work", None)
             .await
             .unwrap();

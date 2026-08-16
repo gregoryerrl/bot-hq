@@ -69,22 +69,23 @@ pub struct Session {
     pub created_at: String,
     pub closed_at: Option<String>,
     pub archived: i64,
-    pub brian_model_at_spawn: Option<String>,
-    pub rain_model_at_spawn: Option<String>,
-    pub brian_claude_session_id: Option<String>,
-    pub rain_claude_session_id: Option<String>,
-    /// 0 = solo Brian (Rain disabled for this session); 1 = duo. Default 1.
-    pub rain_enabled: i64,
-    /// Saved-model ids chosen at create time (NULL = fall back to agent config).
-    pub brian_model_id: Option<String>,
-    pub rain_model_id: Option<String>,
-    /// Per-session effort/ultracode overrides chosen at create time (NULL =
-    /// inherit the Settings → Claude Config defaults). ultracode applies to
-    /// Brian only (EYES gets no --settings).
-    pub brian_effort: Option<String>,
-    pub rain_effort: Option<String>,
-    pub brian_ultracode: Option<bool>,
-    pub rain_ultracode: Option<bool>,
+    /// The model each SPAWN SLOT ran with, frozen at spawn so the chat header
+    /// shows what the session actually started on. Slot-indexed, and only two
+    /// of them: a third participant's spawn model is recorded nowhere, which is
+    /// a real limit of this shape rather than an oversight — see
+    /// `spawn_model_slots_round_trip_and_slot_two_is_a_silent_no_op`.
+    pub slot0_model_at_spawn: Option<String>,
+    pub slot1_model_at_spawn: Option<String>,
+    /// Does this session run more than one participant?
+    ///
+    /// **Computed in SQL from `session_participants`, not stored.** It used to
+    /// be a `rain_enabled` column written from `seeded > 1` at one site — a
+    /// cached count of the roster, and therefore a second source of truth free
+    /// to disagree with the rows it summarised. That is the shape behind round
+    /// 2's B3, where a boolean that could not carry a count made rosters of 2,
+    /// 3 and 8 produce identical sessions. Derived, the roster is the only
+    /// place the answer lives.
+    pub multi_participant: bool,
     /// The user's main repo when this session runs in an isolated git
     /// worktree (then `working_repo_path` is the worktree). NULL = session
     /// runs directly in `working_repo_path`.
@@ -340,8 +341,8 @@ pub struct CancelEvent {
     pub deferred_ms: i64,
     pub deferral_capped: i64,
     /// 1 = queued, 0 = dropped (full/closed channel), None = no such agent.
-    pub brian_interrupt_queued: Option<i64>,
-    pub rain_interrupt_queued: Option<i64>,
+    pub slot0_interrupt_queued: Option<i64>,
+    pub slot1_interrupt_queued: Option<i64>,
     pub both_idle: i64,
     pub cancel_superseded: i64,
     pub idled_since_cancel: i64,

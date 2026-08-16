@@ -349,7 +349,7 @@ pub async fn open_session(
     signaling_addr: SocketAddr,
 ) -> Result<SessionHandle> {
     let id = Uuid::new_v4().to_string();
-    let mut session = storage
+    storage
         .create_session(
             &id,
             &req.title,
@@ -358,16 +358,30 @@ pub async fn open_session(
         .await
         .context("creating session row")?;
 
-    // Persist the solo/duo choice BEFORE the roster is seeded — it is what
-    // decides whether the participants after the first are enabled. Mirror onto
-    // the in-memory struct so we don't need a re-fetch.
-    storage
-        .set_session_spawn_config(&id, !req.solo)
-        .await
-        .context("recording session spawn config")?;
-    session.rain_enabled = if req.solo { 0 } else { 1 };
-
+    // The solo/duo choice needs no column: this is what decides whether the
+    // participants after the first are enabled, and `Session::multi_participant`
+    // is derived from the rows it writes. The `set_session_spawn_config` write
+    // that used to mirror it into `sessions.rain_enabled` was a cached count of
+    // the roster and went with the column (0060).
     seed_default_roster(&storage, &id, req.solo, &req.models, &[]).await;
+
+    // **Re-read AFTER seeding, and that ordering is the whole point of deriving
+    // the flag.** `multi_participant` is computed by the SELECT, so the row
+    // fetched by `create_session` — taken before any participant existed —
+    // answers `false` for every session, including a duo. `spawn_session_handle`
+    // reads it to size `ensure_session_roster`, so a stale copy would ask for a
+    // roster of one.
+    //
+    // The mirrored write this replaces had the same hazard pointing the other
+    // way: it kept an in-memory field in step with a column that a later reader
+    // could still find disagreeing with the rows. Derived state has to be read
+    // after the thing it derives from; the cost is one SELECT per session
+    // created.
+    let session = storage
+        .get_session(&id)
+        .await
+        .context("re-reading the session after its roster was seeded")?
+        .context("session row vanished between create and spawn")?;
 
     spawn_session_handle(
         session,
@@ -733,7 +747,7 @@ async fn spawn_session_handle(
     if let Err(e) = storage
         .ensure_session_roster(
             &session.id,
-            if session.rain_enabled == 0 { 1 } else { crate::storage::MAX_SESSION_PARTICIPANTS },
+            if session.multi_participant { crate::storage::MAX_SESSION_PARTICIPANTS } else { 1 },
         )
         .await
     {
@@ -2917,13 +2931,25 @@ mod tests {
     #[tokio::test]
     async fn the_agent_default_reaches_the_spawner_when_no_model_id_is_given() {
         let s = Storage::memory().await.unwrap();
-        let mut cfg = s.get_agent_config("rain").await.unwrap().unwrap();
+        // Built by hand rather than fetched: 0060 dropped the seeded
+        // `emma`/`brian`/`rain` rows along with the CHECK that only allowed
+        // those three names. A role slug is now a legal key, which is the point
+        // — this tier was unreachable for every roster a session can produce.
+        let mut cfg = crate::storage::AgentConfig {
+            agent_name: "eyes".to_string(),
+            provider: "anthropic".to_string(),
+            model_name: "m".to_string(),
+            base_url: None,
+            auth_token: None,
+            updated_at: String::new(),
+            context_window: None,
+        };
         cfg.model_name = "kimi-k3".into();
         cfg.base_url = Some("https://gw.example/anthropic".into());
         cfg.auth_token = Some("tok-from-the-agent-row".into());
         s.upsert_agent_config(&cfg).await.unwrap();
 
-        let resolved = resolve_spawn_config(&s, "rain", None).await;
+        let resolved = resolve_spawn_config(&s, "eyes", None).await;
         assert_eq!(resolved.model_name, "kimi-k3");
         assert_eq!(
             resolved.base_url.as_deref(),
@@ -3205,7 +3231,19 @@ mod tests {
         // Picking a model in the create dialog has to beat whatever the per-agent
         // row says — every field, not just the name.
         let s = Storage::memory().await.unwrap();
-        let mut cfg = s.get_agent_config("rain").await.unwrap().unwrap();
+        // Built by hand rather than fetched: 0060 dropped the seeded
+        // `emma`/`brian`/`rain` rows along with the CHECK that only allowed
+        // those three names. A role slug is now a legal key, which is the point
+        // — this tier was unreachable for every roster a session can produce.
+        let mut cfg = crate::storage::AgentConfig {
+            agent_name: "eyes".to_string(),
+            provider: "anthropic".to_string(),
+            model_name: "m".to_string(),
+            base_url: None,
+            auth_token: None,
+            updated_at: String::new(),
+            context_window: None,
+        };
         cfg.model_name = "from-the-agent-row".into();
         cfg.auth_token = Some("agent-row-token".into());
         s.upsert_agent_config(&cfg).await.unwrap();
@@ -3224,7 +3262,7 @@ mod tests {
         .await
         .unwrap();
 
-        let resolved = resolve_spawn_config(&s, "rain", Some("m-cli")).await;
+        let resolved = resolve_spawn_config(&s, "eyes", Some("m-cli")).await;
         assert_eq!(resolved.model_name, "claude-opus-5");
         assert_eq!(
             resolved.auth_token.as_deref(),

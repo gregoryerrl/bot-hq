@@ -112,7 +112,7 @@ function SessionTileImpl({
                 {ATTENTION_IDLE_LABEL}
               </span>
             )}
-            {!session.rain_enabled && (
+            {!session.multi_participant && (
               <span
                 className="shrink-0 rounded border border-primary/40 bg-primary/15 px-1.5 py-0.5 font-label-caps text-label-caps text-primary"
                 title="One participant — this session runs a single agent"

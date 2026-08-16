@@ -441,8 +441,8 @@ async fn call_external_tool(
                         "title": s.title,
                         "working_repo_path": s.working_repo_path,
                         "created_at": s.created_at,
-                        wire::SPAWN_MODEL_FIELDS[0]: s.brian_model_at_spawn,
-                        wire::SPAWN_MODEL_FIELDS[1]: s.rain_model_at_spawn,
+                        wire::SPAWN_MODEL_FIELDS[0]: s.slot0_model_at_spawn,
+                        wire::SPAWN_MODEL_FIELDS[1]: s.slot1_model_at_spawn,
                     })
                 })
                 .collect();
@@ -767,8 +767,8 @@ async fn call_external_tool(
                     "working_repo_path": s.working_repo_path,
                     "created_at": s.created_at,
                     "closed_at": s.closed_at,
-                    wire::SPAWN_MODEL_FIELDS[0]: s.brian_model_at_spawn,
-                    wire::SPAWN_MODEL_FIELDS[1]: s.rain_model_at_spawn,
+                    wire::SPAWN_MODEL_FIELDS[0]: s.slot0_model_at_spawn,
+                    wire::SPAWN_MODEL_FIELDS[1]: s.slot1_model_at_spawn,
                 })),
                 "phase": phase,
                 "awaiting": awaiting,

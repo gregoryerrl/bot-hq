@@ -12,9 +12,9 @@ const session: SessionInfo = {
   archived: false,
   created_at: "2026-05-26T18:00:00Z",
   closed_at: null,
-  brian_model_at_spawn: null,
-  rain_model_at_spawn: null,
-  rain_enabled: true,
+  slot0_model_at_spawn: null,
+  slot1_model_at_spawn: null,
+  multi_participant: true,
   last_message: null,
   last_author: null,
 };

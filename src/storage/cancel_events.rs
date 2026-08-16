@@ -19,8 +19,8 @@ pub struct CancelEventRecord {
     pub deferred_ms: i64,
     pub deferral_capped: bool,
     /// `None` when the session has no such agent (e.g. Rain disabled).
-    pub brian_interrupt_queued: Option<bool>,
-    pub rain_interrupt_queued: Option<bool>,
+    pub slot0_interrupt_queued: Option<bool>,
+    pub slot1_interrupt_queued: Option<bool>,
     pub both_idle: bool,
     pub cancel_superseded: bool,
     pub idled_since_cancel: bool,
@@ -34,7 +34,7 @@ impl Storage {
         let res = sqlx::query(
             "INSERT INTO cancel_events \
              (session_id, pressed_at, settled_at, deferred_ms, deferral_capped, \
-              brian_interrupt_queued, rain_interrupt_queued, both_idle, \
+              slot0_interrupt_queued, slot1_interrupt_queued, both_idle, \
               cancel_superseded, idled_since_cancel, outcome) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
@@ -43,8 +43,8 @@ impl Storage {
         .bind(&r.settled_at)
         .bind(r.deferred_ms)
         .bind(r.deferral_capped as i64)
-        .bind(r.brian_interrupt_queued.map(|b| b as i64))
-        .bind(r.rain_interrupt_queued.map(|b| b as i64))
+        .bind(r.slot0_interrupt_queued.map(|b| b as i64))
+        .bind(r.slot1_interrupt_queued.map(|b| b as i64))
         .bind(r.both_idle as i64)
         .bind(r.cancel_superseded as i64)
         .bind(r.idled_since_cancel as i64)
@@ -59,7 +59,7 @@ impl Storage {
     /// the cross-session view is the point when hunting a recurring failure.
     pub async fn list_cancel_events(&self, session_id: Option<&str>) -> Result<Vec<CancelEvent>> {
         const COLS: &str = "id, session_id, pressed_at, settled_at, deferred_ms, \
-                            deferral_capped, brian_interrupt_queued, rain_interrupt_queued, \
+                            deferral_capped, slot0_interrupt_queued, slot1_interrupt_queued, \
                             both_idle, cancel_superseded, idled_since_cancel, outcome";
         let rows = match session_id {
             Some(sid) => {
@@ -94,8 +94,8 @@ mod tests {
             settled_at: "2026-07-29T01:00:02Z".into(),
             deferred_ms: 0,
             deferral_capped: false,
-            brian_interrupt_queued: Some(true),
-            rain_interrupt_queued: Some(true),
+            slot0_interrupt_queued: Some(true),
+            slot1_interrupt_queued: Some(true),
             both_idle: outcome == "honored",
             cancel_superseded: false,
             idled_since_cancel: outcome != "sigkill",
@@ -109,8 +109,8 @@ mod tests {
         let mut r = rec("s1", "sigkill");
         r.deferred_ms = 8000;
         r.deferral_capped = true;
-        r.brian_interrupt_queued = Some(false); // dropped
-        r.rain_interrupt_queued = None; // Rain disabled
+        r.slot0_interrupt_queued = Some(false); // dropped
+        r.slot1_interrupt_queued = None; // Rain disabled
         r.cancel_superseded = true;
         s.insert_cancel_event(&r).await.unwrap();
 
@@ -121,8 +121,8 @@ mod tests {
         assert_eq!(e.deferred_ms, 8000);
         assert_eq!(e.deferral_capped, 1);
         // The distinction the old code threw away: dropped vs ignored vs absent.
-        assert_eq!(e.brian_interrupt_queued, Some(0), "dropped interrupt");
-        assert_eq!(e.rain_interrupt_queued, None, "no Rain in this session");
+        assert_eq!(e.slot0_interrupt_queued, Some(0), "dropped interrupt");
+        assert_eq!(e.slot1_interrupt_queued, None, "no Rain in this session");
         assert_eq!(e.cancel_superseded, 1);
         assert_eq!(e.both_idle, 0);
     }
