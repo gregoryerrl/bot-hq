@@ -1673,19 +1673,12 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                                 bridge.notify_staged_delivery_due(&deps.session_id);
                             }
                         } else {
-                            reseed_gates_if_needed(&deps, &mut state.open_gates, &mut state.gate_seed_failed)
+                            state.reseed_gates_if_needed(&deps)
                                 .await;
                             advance_turn(
                                 &deps,
                                 &mut rx,
-                                &mut state.holder,
-                                &mut state.epoch,
-                                &mut state.deferred,
-                                &mut state.laps,
-                                &mut state.summons,
-                                state.halted_pending_user,
-                                state.open_gates.len(),
-                                &mut state.spoke_this_lap,
+                                &mut state,
                                 false,
                             )
                             .await;
@@ -1748,18 +1741,11 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // a path that does not exist yet. If a second restart path ever
                 // lands, this belongs next to the tally clear, not here.
                 state.spin.clear();
-                reseed_gates_if_needed(&deps, &mut state.open_gates, &mut state.gate_seed_failed).await;
+                state.reseed_gates_if_needed(&deps).await;
                 advance_turn(
                     &deps,
                     &mut rx,
-                    &mut state.holder,
-                    &mut state.epoch,
-                    &mut state.deferred,
-                    &mut state.laps,
-                    &mut state.summons,
-                    state.halted_pending_user,
-                    state.open_gates.len(),
-                    &mut state.spoke_this_lap,
+                    &mut state,
                     true,
                 )
                 .await;
@@ -1855,18 +1841,11 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     "sequencer: a halt was declared; the ring stops where it stands"
                 );
                 if ends_a_turn {
-                    reseed_gates_if_needed(&deps, &mut state.open_gates, &mut state.gate_seed_failed).await;
+                    state.reseed_gates_if_needed(&deps).await;
                     advance_turn(
                         &deps,
                         &mut rx,
-                        &mut state.holder,
-                        &mut state.epoch,
-                        &mut state.deferred,
-                        &mut state.laps,
-                        &mut state.summons,
-                        state.halted_pending_user,
-                        state.open_gates.len(),
-                        &mut state.spoke_this_lap,
+                        &mut state,
                         false,
                     )
                     .await;
@@ -2053,16 +2032,29 @@ fn release_held(
 async fn advance_turn(
     deps: &SequencerDeps,
     rx: &mut mpsc::Receiver<SequencerCommand>,
-    holder: &mut Option<Participant>,
-    epoch: &mut u64,
-    deferred: &mut VecDeque<SequencerCommand>,
-    laps: &mut u32,
-    summons: &mut Summons,
-    halted_pending_user: bool,
-    open_gates: usize,
-    spoke_this_lap: &mut bool,
+    state: &mut RingState,
     user_spoke: bool,
 ) {
+    // Destructured rather than reached through `state.` at each of the sixty-odd
+    // uses below, and that is deliberate: binding through a `&mut RingState`
+    // gives every name back at EXACTLY the type it had as a parameter, so the
+    // body is untouched by this conversion and the diff cannot hide a change of
+    // meaning. The two that do change type are the two that used to be passed by
+    // value — see their uses immediately below.
+    //
+    // `user_spoke` stays a parameter because it is not ring state: it is what
+    // THIS call is, not what the cycle holds.
+    let RingState {
+        holder,
+        epoch,
+        deferred,
+        laps,
+        summons,
+        spoke_this_lap,
+        halted_pending_user,
+        open_gates,
+        ..
+    } = state;
     // **rc3 D35: nothing is dealt while the session is halted or gated.**
     // Checked before ANY handover is minted, so no busy flag is ever set for a
     // turn that will be refused — the whole D31 take-back becomes unreachable
@@ -2085,11 +2077,14 @@ async fn advance_turn(
     // command is the fast path. When the command DID arrive, the pause gate up
     // in the read loop holds everything and this is never reached.
     let paused_latch = deps.activity.as_ref().is_some_and(|a| a.is_paused());
-    if halted_pending_user || open_gates > 0 || paused_latch {
+    if *halted_pending_user || !open_gates.is_empty() || paused_latch {
         debug!(
             session = %deps.session_id,
-            halted_pending_user,
-            open_gates,
+            halted_pending_user = *halted_pending_user,
+            // Still the COUNT in the log line, not the set: the field kept its
+            // meaning across the conversion so a log grep written against the
+            // old shape still reads.
+            open_gates = open_gates.len(),
             paused_latch,
             "sequencer: dealing is parked (halt declared or approval pending); the cycle yields"
         );
@@ -2553,32 +2548,36 @@ async fn unwind_wedged_turn(
 /// So the not-knowing is carried in its own flag and answered before the first
 /// deal instead of being folded into the set. No cost on the healthy path: the
 /// flag is false and this returns without touching storage.
-async fn reseed_gates_if_needed(
-    deps: &SequencerDeps,
-    open_gates: &mut std::collections::HashSet<String>,
-    gate_seed_failed: &mut bool,
-) {
-    if !*gate_seed_failed {
-        return;
-    }
-    match deps.storage.pending_gate_ids(&deps.session_id).await {
-        Ok(ids) => {
-            // Union, not replace: a `GateOpened` that arrived while the seed was
-            // unknown is already in the set, and the durable rows are what the
-            // seed would have found. Neither is a superset of the other.
-            open_gates.extend(ids);
-            *gate_seed_failed = false;
-            debug!(
-                session = %deps.session_id,
-                open_gates = open_gates.len(),
-                "sequencer: the gate latch reseeded after its failed read"
-            );
+///
+/// **A method rather than a free function taking the two halves separately**
+/// (round 3). This is the one place that reads and writes BOTH the set and the
+/// flag, and the old signature was the shape that let them be passed apart —
+/// which is how they came to be two locals documented by one comment paragraph.
+/// On `&mut self` there is no call site that can hand over one without the other.
+impl RingState {
+    async fn reseed_gates_if_needed(&mut self, deps: &SequencerDeps) {
+        if !self.gate_seed_failed {
+            return;
         }
-        Err(e) => warn!(
-            session = %deps.session_id,
-            error = %e,
-            "sequencer: the gate latch still cannot be read; dealing without it"
-        ),
+        match deps.storage.pending_gate_ids(&deps.session_id).await {
+            Ok(ids) => {
+                // Union, not replace: a `GateOpened` that arrived while the seed
+                // was unknown is already in the set, and the durable rows are what
+                // the seed would have found. Neither is a superset of the other.
+                self.open_gates.extend(ids);
+                self.gate_seed_failed = false;
+                debug!(
+                    session = %deps.session_id,
+                    open_gates = self.open_gates.len(),
+                    "sequencer: the gate latch reseeded after its failed read"
+                );
+            }
+            Err(e) => warn!(
+                session = %deps.session_id,
+                error = %e,
+                "sequencer: the gate latch still cannot be read; dealing without it"
+            ),
+        }
     }
 }
 
