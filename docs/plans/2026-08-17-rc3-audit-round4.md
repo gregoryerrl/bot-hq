@@ -214,6 +214,48 @@ Verified by mutation: reverting `has_peer` to `has_rain` fails the guard naming
 both lines, while the past-tense comment mentioning `has_rain` one line above is
 correctly ignored.
 
+### F7 · A retirement's own record blinds the staleness metric · MED · RECORDED, NOT FIXED
+
+Found in Verify, by checking whether this round's own renames had created stale CL
+citations. They had — `issues.md` cited `build_rain_disallowed_tools` twice, in the
+present tense, as the function that denies a reviewer's write tools. **`cl_stale_refs`
+reported 25, exactly round 3's acceptance number, and would have reported 25 either
+way.**
+
+Two independent reasons, and the second is the transferable one:
+
+1. `issues.md` is in `HISTORY_FILES` (`cl_staleness.rs:96`) and is never reported —
+   correct by design, but it means the number says nothing about a live tracker.
+2. **The corpus keeps the retired symbol alive.** `source_corpus`
+   (`cl_staleness.rs:168-196`) concatenates every tracked file with a code
+   extension, and a symbol counts as present if the string appears anywhere in it.
+   Both artifacts that *document* this retirement put it there:
+   `tests/retired_identifier_test.rs` asserts
+   `names_retired("build_rain_disallowed_tools")` as a string literal, and
+   `core/state.rs`'s new doc comment says the parameter *was named `has_rain`*.
+   Verified by grep over the tracked code set: those two files are the only
+   remaining holders of either string.
+
+So `learnings-2026-07-26-connector-investigate.md:37` — which cites the symbol with
+no retirement marker on the line, and which the tool DID report other lines of —
+goes unreported purely because the guard's fixture spells the dead name.
+
+Round 3's F14 found the metric *penalising* the documented remedy. This is the same
+class one turn further: **the remedy suppresses the metric.** A name is "still in the
+codebase" to this tool if the codebase merely talks about it.
+
+**Not fixed, and the reason is round 3's own sequencing argument** — changing an
+audit tool while it serves as that audit's acceptance metric is what kept F8 out of
+round 2 and F14 out of round 3. Applying it consistently keeps it out of round 4.
+The fix is one line of scope (exclude `tests/`, or match a symbol only where it is
+*defined* rather than mentioned) and it belongs to a round that is not being measured
+by it. **The `issues.md` citation itself is corrected in the CL**; the obsolete-banner
+learnings file is left as dated record.
+
+**Consequence to carry:** `cl_stale_refs`'s number is not evidence that a round
+introduced no new CL staleness. Round 3 reported 27 → 25 as its acceptance; that
+figure was measuring something narrower than it reads.
+
 ---
 
 ## 3. Declined, with the reasons recorded so round 5 does not re-derive them
