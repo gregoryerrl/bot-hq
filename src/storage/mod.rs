@@ -51,7 +51,7 @@ pub use participants::{
 pub use feedback::{FEEDBACK_KINDS, FEEDBACK_STATUSES};
 pub use tray::{is_gate_options, GATE_OPTIONS_JSON};
 pub use row_types::{
-    AgentConfig, AgentFeedback, Author, CancelEvent, ClFolder, ForwardEvent, ClIndexEntry, ClRead,
+    AgentConfig, AgentFeedback, CancelEvent, ClFolder, ForwardEvent, ClIndexEntry, ClRead,
     Finding, FindingSeverity, FindingStatus, Message, MessageKind, Model, Plugin, Project,
     QuestionKind, RetrievalStats, Session, SessionDocument, SessionTrayEntry, SessionWithPreview,
 };

@@ -9,7 +9,7 @@ use crate::core::session::{
 };
 use crate::paths::Paths;
 use crate::signaling::{ExternalServer, SignalingBridge, SignalingEvent, SignalingServer};
-use crate::storage::{Author, MessageKind, Session, Storage};
+use crate::storage::{MessageKind, Session, Storage};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -1497,9 +1497,7 @@ impl AppState {
         // because the wire moved the owned copy, and that consumer is gone.
         let persisted = self
             .storage
-            .insert_message(
-                session_id,
-                Author::User,
+            .insert_message(session_id,
                 MessageKind::PhaseChange,
                 target.transition_notice(),
             )

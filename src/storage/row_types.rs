@@ -3,34 +3,6 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-/// Who authored a message. ARCHITECTURE.md "Author enum" — no `system` author.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Author {
-    User,
-    Brian,
-    Rain,
-}
-
-impl Author {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Author::User => "user",
-            Author::Brian => "brian",
-            Author::Rain => "rain",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "user" => Author::User,
-            "brian" => Author::Brian,
-            "rain" => Author::Rain,
-            _ => return None,
-        })
-    }
-}
-
 /// What kind of payload a message holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -136,7 +108,9 @@ pub struct SessionWithPreview {
     /// First 200 chars of the most recent `kind='text'` message, or None when
     /// the session has no text messages yet.
     pub last_message: Option<String>,
-    /// Author of that latest text message ('user' | 'brian' | 'rain').
+    /// Author of that latest text message: `'user'` or a participant slug
+    /// (`'hands'`, `'eyes'`, `'eyes-2'`, …). Was `'user' | 'brian' | 'rain'`
+    /// when a two-party `Author` enum bounded it.
     pub last_author: Option<String>,
 }
 
@@ -148,12 +122,6 @@ pub struct Message {
     pub kind: String,
     pub content: String,
     pub created_at: String,
-}
-
-impl Message {
-    pub fn author_typed(&self) -> Option<Author> {
-        Author::parse(&self.author)
-    }
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

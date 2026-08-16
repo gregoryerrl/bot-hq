@@ -486,7 +486,7 @@ mod tests {
 
     #[tokio::test]
     async fn active_sessions_order_by_last_activity() {
-        use crate::storage::{Author, MessageKind};
+        use crate::storage::{MessageKind};
         let s = Storage::memory().await.unwrap();
         s.create_session("s-old", "Older", None).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -504,7 +504,7 @@ mod tests {
 
         // Activity on the older session bumps it to the top.
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        s.insert_message("s-old", Author::User, MessageKind::Text, "hi")
+        s.insert_message("s-old", MessageKind::Text, "hi")
             .await
             .unwrap();
         let ids: Vec<String> = s
@@ -519,7 +519,7 @@ mod tests {
 
     #[tokio::test]
     async fn preview_carries_latest_text_message() {
-        use crate::storage::{Author, MessageKind};
+        use crate::storage::{MessageKind};
         let s = Storage::memory().await.unwrap();
         s.create_session("s-msg", "Has messages", None)
             .await
@@ -529,20 +529,20 @@ mod tests {
             .unwrap();
 
         // Newest TEXT message wins; a later tool_use must NOT shadow it.
-        s.insert_message("s-msg", Author::User, MessageKind::Text, "first prompt")
+        s.insert_message("s-msg", MessageKind::Text, "first prompt")
             .await
             .unwrap();
-        s.insert_message("s-msg", Author::Brian, MessageKind::Text, "brian reply")
+        s.post_to_channel("s-msg", "participant", Some("hands"), MessageKind::Text.as_str(), "brian reply", None)
             .await
             .unwrap();
-        s.insert_message("s-msg", Author::Brian, MessageKind::ToolUse, "{\"tool\":\"x\"}")
+        s.post_to_channel("s-msg", "participant", Some("hands"), MessageKind::ToolUse.as_str(), "{\"tool\":\"x\"}", None)
             .await
             .unwrap();
 
         let rows = s.list_active_sessions_with_preview().await.unwrap();
         let msg = rows.iter().find(|r| r.session.id == "s-msg").unwrap();
         assert_eq!(msg.last_message.as_deref(), Some("brian reply"));
-        assert_eq!(msg.last_author.as_deref(), Some("brian"));
+        assert_eq!(msg.last_author.as_deref(), Some("hands"));
 
         // A session with no text messages → None preview, not an error.
         let empty = rows.iter().find(|r| r.session.id == "s-empty").unwrap();

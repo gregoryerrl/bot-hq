@@ -1,4 +1,4 @@
-use bot_hq::storage::{AgentConfig, Author, MessageKind, Storage};
+use bot_hq::storage::{AgentConfig, MessageKind, Storage};
 
 #[tokio::test]
 async fn migration_runs_on_empty_db() {
@@ -93,12 +93,12 @@ async fn message_round_trip() {
         .await
         .unwrap();
     let id1 = s
-        .insert_message("sess1", Author::User, MessageKind::Text, "hello")
+        .insert_message("sess1", MessageKind::Text, "hello")
         .await
         .unwrap()
         .message_id();
     let id2 = s
-        .insert_message("sess1", Author::Brian, MessageKind::Text, "world")
+        .post_to_channel("sess1", "participant", Some("hands"), MessageKind::Text.as_str(), "world", None)
         .await
         .unwrap()
         .message_id();
@@ -107,8 +107,13 @@ async fn message_round_trip() {
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0].content, "hello");
     assert_eq!(msgs[1].content, "world");
-    assert_eq!(msgs[0].author_typed(), Some(Author::User));
-    assert_eq!(msgs[1].author_typed(), Some(Author::Brian));
+    // Author strings, not an enum: `Author` and its `author_typed` accessor were
+    // deleted in the D10 retirement. The enum could only ever name `user`,
+    // `brian` and `rain`, so it could not describe a single participant this
+    // app now creates — `author_typed` returned `None` for every live slug and
+    // had no callers outside this line.
+    assert_eq!(msgs[0].author, "user");
+    assert_eq!(msgs[1].author, "hands");
 }
 
 #[tokio::test]
@@ -116,14 +121,14 @@ async fn messages_since_id_filter() {
     let s = Storage::memory().await.unwrap();
     s.create_session("sess1", "test", None).await.unwrap();
     let id1 = s
-        .insert_message("sess1", Author::User, MessageKind::Text, "a")
+        .insert_message("sess1", MessageKind::Text, "a")
         .await
         .unwrap()
         .message_id();
-    s.insert_message("sess1", Author::Brian, MessageKind::Text, "b")
+    s.post_to_channel("sess1", "participant", Some("hands"), MessageKind::Text.as_str(), "b", None)
         .await
         .unwrap();
-    s.insert_message("sess1", Author::Rain, MessageKind::Text, "c")
+    s.post_to_channel("sess1", "participant", Some("eyes"), MessageKind::Text.as_str(), "c", None)
         .await
         .unwrap();
     let after = s.messages_for_session("sess1", Some(id1)).await.unwrap();

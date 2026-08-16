@@ -691,7 +691,7 @@ async fn tools_list_includes_iter4_tools() {
 async fn wait_for_change_returns_immediately_when_messages_exist() {
     let env = setup().await;
     // Insert a message before the call so storage has data > since_id=0.
-    use bot_hq::storage::{Author, MessageKind};
+    use bot_hq::storage::{MessageKind};
     env._core
         .storage
         .create_session("s-wait1", "Test", None)
@@ -699,7 +699,7 @@ async fn wait_for_change_returns_immediately_when_messages_exist() {
         .unwrap();
     env._core
         .storage
-        .insert_message("s-wait1", Author::User, MessageKind::Text, "hello before")
+        .insert_message("s-wait1", MessageKind::Text, "hello before")
         .await
         .unwrap();
     let h = auth_header(&env.token);
@@ -763,10 +763,10 @@ async fn wait_for_change_wakes_up_on_persisted_event() {
     let core_clone = std::sync::Arc::clone(&env._core);
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        use bot_hq::storage::{Author, MessageKind};
+        use bot_hq::storage::{MessageKind};
         let id = core_clone
             .storage
-            .insert_message("s-wait3", Author::User, MessageKind::Text, "arrived late")
+            .insert_message("s-wait3", MessageKind::Text, "arrived late")
             .await
             .unwrap()
             .message_id();
@@ -796,7 +796,7 @@ async fn wait_for_change_wakes_up_on_persisted_event() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_session_snapshot_combines_everything() {
     let env = setup().await;
-    use bot_hq::storage::{Author, MessageKind};
+    use bot_hq::storage::{MessageKind};
     env._core
         .storage
         .create_session("s-snap1", "Test", None)
@@ -806,7 +806,7 @@ async fn get_session_snapshot_combines_everything() {
     for body in ["msg1", "msg2", "msg3"] {
         env._core
             .storage
-            .insert_message("s-snap1", Author::User, MessageKind::Text, body)
+            .insert_message("s-snap1", MessageKind::Text, body)
             .await
             .unwrap();
     }
@@ -843,7 +843,7 @@ async fn get_session_snapshot_combines_everything() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_session_snapshot_msg_limit_keeps_most_recent() {
     let env = setup().await;
-    use bot_hq::storage::{Author, MessageKind};
+    use bot_hq::storage::{MessageKind};
     env._core
         .storage
         .create_session("s-snap2", "Test", None)
@@ -852,7 +852,7 @@ async fn get_session_snapshot_msg_limit_keeps_most_recent() {
     for i in 0..10 {
         env._core
             .storage
-            .insert_message("s-snap2", Author::User, MessageKind::Text, &format!("m{i}"))
+            .insert_message("s-snap2", MessageKind::Text, &format!("m{i}"))
             .await
             .unwrap();
     }

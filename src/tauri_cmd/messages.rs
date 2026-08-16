@@ -38,18 +38,18 @@ pub async fn broadcast_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{Author, MessageKind};
+    use crate::storage::{MessageKind};
 
     #[tokio::test]
     async fn get_session_messages_returns_in_order() {
         let storage = Arc::new(Storage::memory().await.unwrap());
         storage.create_session("s1", "t", None).await.unwrap();
         storage
-            .insert_message("s1", Author::Brian, MessageKind::Text, "a")
+            .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), "a", None)
             .await
             .unwrap();
         storage
-            .insert_message("s1", Author::Rain, MessageKind::Text, "b")
+            .post_to_channel("s1", "participant", Some("eyes"), MessageKind::Text.as_str(), "b", None)
             .await
             .unwrap();
 
@@ -57,8 +57,8 @@ mod tests {
         let agent_msgs: Vec<AgentMessage> = msgs.into_iter().map(AgentMessage::from).collect();
         assert_eq!(agent_msgs.len(), 2);
         assert_eq!(agent_msgs[0].content, "a");
-        assert_eq!(agent_msgs[0].author, "brian");
-        assert_eq!(agent_msgs[1].author, "rain");
+        assert_eq!(agent_msgs[0].author, "hands");
+        assert_eq!(agent_msgs[1].author, "eyes");
     }
 
     #[tokio::test]
@@ -66,12 +66,12 @@ mod tests {
         let storage = Arc::new(Storage::memory().await.unwrap());
         storage.create_session("s1", "t", None).await.unwrap();
         let id1 = storage
-            .insert_message("s1", Author::Brian, MessageKind::Text, "first")
+            .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), "first", None)
             .await
             .unwrap()
             .message_id();
         storage
-            .insert_message("s1", Author::Brian, MessageKind::Text, "second")
+            .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), "second", None)
             .await
             .unwrap();
 

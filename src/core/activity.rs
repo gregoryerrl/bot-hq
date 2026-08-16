@@ -78,9 +78,9 @@ struct Inner {
     /// Per-participant busy, keyed by participant **slug**. B4b: was
     /// `brian_busy` / `rain_busy`.
     ///
-    /// Slug, not `participant_id`, on purpose: `set_busy` is still `Author`-keyed
-    /// (the router needs `Author` until B5 deletes it) and runs at every turn
-    /// end, so an id key would force an `Author`→id lookup on the hot path for
+    /// Slug, not `participant_id`, on purpose: `set_busy` is slug-keyed and runs
+    /// at every turn end, so an id key would force a slug→id lookup on the hot
+    /// path for
     /// no gain. The slug IS the legacy author string by construction — 0044
     /// mapped `slug` 1:1 onto `author` and `ensure_session_roster` preserves
     /// that — so it is the one key both worlds already agree on. B5 switches the
@@ -188,9 +188,9 @@ impl ActivityTracker {
         })
     }
 
-    /// Participant-keyed [`set_busy`] — the form B5 keeps once `Author` is gone.
-    /// `Author::User` never reaches here (its early-return is in `set_busy`), so
-    /// `"user"` cannot enter the map.
+    /// Participant-keyed [`set_busy`], and now the only form — the two-party
+    /// `Author` discriminant it was named against was deleted in the D10
+    /// retirement. `"user"` cannot enter the map: `set_busy` early-returns on it.
     pub fn set_busy_slug(&self, slug: &str, busy: bool) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.busy.insert(slug.to_string(), busy);
@@ -496,7 +496,7 @@ mod tests {
         awaiting: Arc<AtomicBool>,
         bridge: Arc<SignalingBridge>,
     ) -> Arc<ActivityTracker> {
-        // The two turn slots the legacy `Author` discriminant addresses. Named
+        // The two turn slots the deleted `Author` discriminant used to address. Named
         // after the seeded roles, because that is what a real session now
         // carries; these tests exercise the slot mapping, not the names.
         ActivityTracker::new(session, awaiting, bridge, vec!["hands".into(), "eyes".into()])

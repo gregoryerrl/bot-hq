@@ -1208,18 +1208,33 @@ impl SignalingBridge {
         {
             let storage_guard = self.storage.lock().await;
             if let Some(storage) = storage_guard.as_ref() {
-                let author =
-                    crate::storage::Author::parse(&agent).unwrap_or(crate::storage::Author::User);
                 // The receipt is dropped: this row records the agent's request,
                 // and the only thing done with `body` afterwards is
                 // `emit_halt_row` — a UI event, not a wire into any agent's
                 // stdin. There is no send on this path for a receipt to gate.
+                //
+                // **Written as the REQUESTING PARTICIPANT, which it had never
+                // been (round-3 F13).** This line used to read
+                // `Author::parse(&agent).unwrap_or(Author::User)`, and `parse`
+                // knew only `user`/`brian`/`rain` — so for every rc3 role slug
+                // it returned `None` and the `unwrap_or` filed the row as
+                // `origin = "user", slug = NULL`. An agent asking for a phase
+                // advance was recorded, and RENDERED, as something the user
+                // said: `ChatMessage.tsx` has no case for `Text`, so the row
+                // fell through to ordinary authored prose under the user's
+                // label. Agents read the transcript back, so the system was
+                // manufacturing a user utterance — the mechanical version of
+                // the fabricated-authorization failure the general rules exist
+                // to prevent. A rename would have preserved it exactly, since
+                // renaming does not teach a parser to see role slugs.
                 match storage
-                    .insert_message(
+                    .post_to_channel(
                         session_id.as_str(),
-                        author,
-                        crate::storage::MessageKind::Text,
+                        "participant",
+                        Some(agent.as_str()),
+                        crate::storage::MessageKind::Text.as_str(),
                         &body,
+                        None,
                     )
                     .await
                 {
@@ -1239,6 +1254,55 @@ impl SignalingBridge {
 mod tests {
     use super::*;
     use crate::policy::ViolationOutcome;
+
+    /// **A phase request is recorded as the AGENT that asked, not as the user**
+    /// (round-3 F13).
+    ///
+    /// The bug this pins was live, not hypothetical. The receipt used to be
+    /// written `Author::parse(&agent).unwrap_or(Author::User)`, and `parse`
+    /// knew only `user` / `brian` / `rain` — so for every rc3 role slug it
+    /// returned `None` and the fallback filed the row as `origin = "user"`,
+    /// `participant_id = NULL`.
+    ///
+    /// Why that is worse than a wrong label: `ChatMessage.tsx` has no case for
+    /// `Text`, so the row rendered as ordinary authored prose under the USER's
+    /// name, and agents read the transcript back. The system was manufacturing
+    /// a user utterance — the mechanical form of the fabricated-authorization
+    /// failure the general rules exist to prevent.
+    ///
+    /// It also survived every earlier sweep by construction: a rename of the
+    /// two variants would have left `parse` exactly as unable to see a role
+    /// slug, so the `unwrap_or` would still fire. Only deleting the type
+    /// removed the fallback.
+    #[tokio::test]
+    async fn a_phase_request_is_attributed_to_the_agent_that_asked() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage
+            .ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS)
+            .await
+            .unwrap();
+
+        bridge
+            .request_phase_advance("s1".into(), "eyes".into(), "Apply".into(), "ready".into())
+            .await;
+
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        let receipt = rows
+            .iter()
+            .find(|m| m.content.contains("[PHASE REQUEST -> Apply]"))
+            .expect("the receipt row was written");
+        assert_eq!(
+            receipt.author, "eyes",
+            "the requesting participant owns the row; `user` is the bug"
+        );
+        assert_ne!(
+            receipt.author, "user",
+            "a phase request must never render as something the user said"
+        );
+    }
 
     /// **Parking a question must HALT THE RING, not merely set a flag.**
     ///

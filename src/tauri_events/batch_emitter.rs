@@ -157,7 +157,7 @@ async fn flush_once<F>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{Author, MessageKind, Storage};
+    use crate::storage::{MessageKind, Storage};
     use std::sync::Mutex;
 
     async fn test_storage_with_messages(
@@ -167,7 +167,7 @@ mod tests {
         let s = Storage::memory().await.unwrap();
         s.create_session(session_id, "test", None).await.unwrap();
         for c in contents {
-            s.insert_message(session_id, Author::Brian, MessageKind::Text, *c)
+            s.post_to_channel(session_id, "participant", Some("hands"), MessageKind::Text.as_str(), *c, None)
                 .await
                 .unwrap();
         }
@@ -210,11 +210,11 @@ mod tests {
 
         // First batch: 2 messages
         let id1 = storage
-            .insert_message("s1", Author::Brian, MessageKind::Text, "a")
+            .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), "a", None)
             .await
             .unwrap();
         let id2 = storage
-            .insert_message("s1", Author::Brian, MessageKind::Text, "b")
+            .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), "b", None)
             .await
             .unwrap();
         emitter.touch("s1".into());
@@ -225,7 +225,7 @@ mod tests {
 
         // Second batch: 1 new message, should fetch only it (watermark advanced)
         let id3 = storage
-            .insert_message("s1", Author::Brian, MessageKind::Text, "c")
+            .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), "c", None)
             .await
             .unwrap();
         emitter.touch("s1".into());

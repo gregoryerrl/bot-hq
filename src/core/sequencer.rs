@@ -273,8 +273,8 @@
 //! - `mark_awaiting_user` parks with no `messages` row at all (`emit_halt_row`
 //!   writes only `session_tray`, and halts never populate the pending map), but
 //!   its releases still post one: a user broadcast, or `advance_phase`, which
-//!   writes its transition notice as `Author::User` — and `insert_message` maps
-//!   that author to `origin = "user"`.
+//!   writes its transition notice through `insert_message`, which posts with
+//!   `origin = "user"`.
 //!
 //! So a second command for "the user answered" would fire on exactly the
 //! occasions `UserMessage` already does, and would be handled identically —
@@ -325,19 +325,24 @@
 //! **`watchdog`'s idle nudge is not one of them, and an earlier draft listed it
 //! as one.** `deliver_idle_nudge` writes TWO rows for the two things it says.
 //! NOTICE — the one-line summary the user reads in the chat — goes through
-//! `insert_message(.., Author::User, ..)` (`watchdog::deliver_idle_nudge`),
-//! which `Storage::insert_message` maps to `origin = "user"`. Only NUDGE, the
+//! `insert_message` (`watchdog::deliver_idle_nudge`), which posts with
+//! `origin = "user"`. Only NUDGE, the
 //! instruction the executor reads, is posted as `"system"` — same function,
 //! the second of its two rows.
 //!
-//! It is not alone: `AppState::advance_phase` writes its transition notice as
-//! `Author::User` too (its `insert_message` in `AppState::advance_phase`), and
-//! `request_phase_advance` FALLS BACK to that author when an agent slug will
-//! not parse (`Author::parse(&agent).unwrap_or(Author::User)`). So **rows land
-//! on this path under the user's origin
+//! It is not alone: `AppState::advance_phase` writes its transition notice with
+//! `origin = "user"` too. So **rows land on this path under the user's origin
 //! with no human behind them**, which matters more for the pause than it does
 //! here — see "what releases a pause" below for the obligation that puts on
 //! whoever mints [`UserMessage`](SequencerCommand::UserMessage).
+//!
+//! **`request_phase_advance` used to be a third, and was a BUG rather than a
+//! design** (round-3 F13, fixed): its receipt read
+//! `Author::parse(&agent).unwrap_or(Author::User)`, and that parser knew only
+//! `user`/`brian`/`rain` — so every rc3 role slug fell back, and an agent's
+//! phase request was stored AND rendered as something the user said. It now
+//! posts as the requesting participant. The remaining two rows above are
+//! deliberate host attribution; that one was a parser failing open.
 //!
 //! (`broadcast` and `tray` write `origin = "user"` too — that is the one origin
 //! a command already covers, and theirs really is the user, so they are not on
@@ -561,8 +566,8 @@
 //! It does not hold for:
 //!
 //! - `AppState::advance_phase`, which writes its transition notice as
-//!   `Author::User` → `origin = "user"` (`Author::as_origin` in
-//!   `storage/messages.rs`), and calls `clear_awaiting` but **never**
+//!   `origin = "user"` (`insert_message` in `storage/messages.rs`), and calls
+//!   `clear_awaiting` but **never**
 //!   `set_paused(false)`. Its own comment says why in as many words: "a phase
 //!   self-advance is not a user message";
 //! - `watchdog::deliver_idle_nudge`'s NOTICE row, same mapping, same absence.

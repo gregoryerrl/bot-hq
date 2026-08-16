@@ -10,7 +10,7 @@
 use crate::core::activity::{ActivityTracker, SessionActivity};
 use crate::core::ipav::IpavState;
 use crate::signaling::SignalingBridge;
-use crate::storage::{Author, Envelope, MessageKind, Storage};
+use crate::storage::{Envelope, MessageKind, Storage};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -200,9 +200,15 @@ pub struct IdleWatch {
 ///
 /// `agents` is keyed by participant SLUG, so a session with three participants
 /// gets three health streams instead of two (rc3 D10 — it was a `Vec<(Author,
-/// …)>`, and `Author` has exactly two agent variants). `hands_slug` names the
-/// participant whose health the idle nudge is suppressed on; `None` when this
-/// session has nobody that can act on it.
+/// …)>`, and `Author` had exactly two agent variants; the type itself is now
+/// deleted). `hands_slug` names the participant whose health the idle nudge is
+/// suppressed on; `None` when this session has nobody that can act on it.
+///
+/// **This doc block has now produced two stale claims in one session** — the
+/// phantom router-health watch above (round-3 F1) and the tense of that clause
+/// (EYES, `a6ea28ff`), fourteen lines apart. Both were justifying asides about
+/// subsystems that had been deleted, and neither was reachable by any check the
+/// repo runs. If a third turns up, the block is the defect, not the sentence.
 pub async fn run_stall_watchdog(
     session_id: String,
     agents: Vec<(String, Weak<AgentLiveness>)>,
@@ -378,7 +384,7 @@ async fn deliver_idle_nudge(
     // short by the entire instruction — the widest of the divergences.
     match idle_watch
         .storage
-        .insert_message(session_id, Author::User, MessageKind::SystemNotice, NOTICE)
+        .insert_message(session_id, MessageKind::SystemNotice, NOTICE)
         .await
     {
         Ok(m) => bridge.notify_message_persisted(Arc::from(session_id), m.message_id()),

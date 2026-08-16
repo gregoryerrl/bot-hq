@@ -542,12 +542,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .insert_message(
-                "s1",
-                crate::storage::Author::Brian,
-                crate::storage::MessageKind::Text,
-                "looking",
-            )
+            .post_to_channel("s1", "participant", Some("hands"), crate::storage::MessageKind::Text.as_str(), "looking", None)
             .await
             .unwrap();
         // Re-flag now that Brian has had a turn → escalates.

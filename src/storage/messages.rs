@@ -7,8 +7,8 @@ use super::*;
 const MESSAGE_COLUMNS: &str = "id, session_id, author, kind, content, created_at";
 
 impl Storage {
-    /// The legacy write path — the `Author` + `MessageKind` shape ~30 call
-    /// sites still speak — expressed as a thin wrapper over
+    /// The user-row write path — a `MessageKind` + content shape — expressed as
+    /// a thin wrapper over
     /// [`Storage::post_to_channel`]. It owns no SQL of its own, so there is
     /// exactly ONE insert into `messages` and exactly one place a
     /// [`PersistedMessage`] can be minted.
@@ -23,10 +23,14 @@ impl Storage {
     /// receipt — a SELECT per chunk, and forgery-by-reconstruction back on the
     /// table.
     ///
-    /// The `Author` → `(origin, participant_slug)` map is total and lossless:
-    /// `Author` has no `system` variant, and 0044 seeded participants on
-    /// exactly the identity `slug == author`, so the slug IS the legacy author
-    /// string rather than a translation of it.
+    /// **It writes `origin = "user"` unconditionally, and that is the whole
+    /// contract now.** It used to take an `Author` and map it to
+    /// `(origin, participant_slug)`; every production caller passed
+    /// `Author::User`, so the participant arm was reachable only from tests, and
+    /// the enum could not name a single participant this app creates. Deleted in
+    /// the D10 retirement. Participant rows go through
+    /// [`Storage::post_to_channel`] with their own slug — which is what the
+    /// production paths already did.
     ///
     /// **What changed and what did not.** `author`, `origin` and the RFC3339-Z
     /// timestamp are written with the same values as before. `participant_id`
@@ -52,15 +56,10 @@ impl Storage {
     pub async fn insert_message(
         &self,
         session_id: impl Into<std::sync::Arc<str>>,
-        author: Author,
         kind: MessageKind,
         content: impl Into<String>,
     ) -> Result<PersistedMessage> {
-        let (origin, slug) = match author {
-            Author::User => ("user", None),
-            participant => ("participant", Some(participant.as_str())),
-        };
-        self.post_to_channel(session_id, origin, slug, kind.as_str(), content, None)
+        self.post_to_channel(session_id, "user", None, kind.as_str(), content, None)
             .await
     }
 
@@ -225,7 +224,7 @@ impl Storage {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::{Author, MessageKind, Storage};
+    use crate::storage::{MessageKind, Storage};
 
     /// Pins the three decisions in [`Storage::participant_text_since`] that the
     /// sequencer's own spin tests cannot fail: the `kind` filter, the watermark
@@ -304,24 +303,24 @@ mod tests {
         s.create_session("s-2", "Other", None).await.unwrap();
 
         // Two real user prompts (incl. an OOB answer, stored the same way)…
-        s.insert_message("s-1", Author::User, MessageKind::Text, "task")
+        s.insert_message("s-1", MessageKind::Text, "task")
             .await
             .unwrap();
-        s.insert_message("s-1", Author::User, MessageKind::Text, "oob answer")
+        s.insert_message("s-1", MessageKind::Text, "oob answer")
             .await
             .unwrap();
         // …plus synthetic author=user host rows that must NOT count…
-        s.insert_message("s-1", Author::User, MessageKind::PhaseChange, "Plan")
+        s.insert_message("s-1", MessageKind::PhaseChange, "Plan")
             .await
             .unwrap();
-        s.insert_message("s-1", Author::User, MessageKind::SystemNotice, "nudged")
+        s.insert_message("s-1", MessageKind::SystemNotice, "nudged")
             .await
             .unwrap();
         // …plus agent text and another session's user text (both excluded).
-        s.insert_message("s-1", Author::Brian, MessageKind::Text, "ack")
+        s.post_to_channel("s-1", "participant", Some("hands"), MessageKind::Text.as_str(), "ack", None)
             .await
             .unwrap();
-        s.insert_message("s-2", Author::User, MessageKind::Text, "elsewhere")
+        s.insert_message("s-2", MessageKind::Text, "elsewhere")
             .await
             .unwrap();
 
@@ -343,7 +342,7 @@ mod tests {
         // turn-evidence guard.
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "S", None).await.unwrap();
-        s.insert_message("s1", Author::Brian, MessageKind::Text, "work")
+        s.post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), "work", None)
             .await
             .unwrap();
 
@@ -358,7 +357,7 @@ mod tests {
         // than midnight of the same day and this goes false.
         let midnight = format!("{}T00:00:00.000Z", &ts[..10]);
         assert!(
-            s.has_message_from_author_since("s1", "brian", &midnight).await.unwrap(),
+            s.has_message_from_author_since("s1", "hands", &midnight).await.unwrap(),
             "a row written today must read as after today's midnight ({ts} vs {midnight})"
         );
     }
@@ -373,7 +372,7 @@ mod tests {
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "S", None).await.unwrap();
         let pm = s
-            .insert_message("s1", Author::Brian, MessageKind::Text, "work")
+            .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), "work", None)
             .await
             .unwrap();
 
@@ -384,13 +383,14 @@ mod tests {
         assert_eq!(pm.body(), rows[0].content);
         assert_eq!(pm.envelope(), None, "the legacy shape carries no envelope");
 
-        // A user row takes the other arm of the `Author` map and still returns
+        // A user row is the only arm now — `insert_message` writes
+        // `origin = "user"` unconditionally — and it still returns
         // a receipt for its own row — there is no receipt-less variant to fall
         // through to, which is the point of deleting the id-only shim: it took
         // the same argument list, so swapping it in would have compiled
         // silently and dropped the receipt with no diagnostic.
         let user = s
-            .insert_message("s1", Author::User, MessageKind::Text, "reply")
+            .insert_message("s1", MessageKind::Text, "reply")
             .await
             .unwrap();
         let rows = s.messages_for_session("s1", None).await.unwrap();

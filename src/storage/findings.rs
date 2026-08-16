@@ -319,17 +319,12 @@ mod tests {
     async fn has_message_from_author_since_detects_turn() {
         let s = Storage::memory().await.unwrap();
         seed(&s).await;
-        s.insert_message(
-            "s1",
-            crate::storage::Author::Brian,
-            crate::storage::MessageKind::Text,
-            "looking",
-        )
+        s.post_to_channel("s1", "participant", Some("hands"), crate::storage::MessageKind::Text.as_str(), "looking", None)
         .await
         .unwrap();
         // Fixed-string bounds avoid wall-clock flakiness.
         assert!(s
-            .has_message_from_author_since("s1", "brian", "2000-01-01T00:00:00.000Z")
+            .has_message_from_author_since("s1", "hands", "2000-01-01T00:00:00.000Z")
             .await
             .unwrap());
         assert!(!s

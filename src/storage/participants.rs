@@ -4266,12 +4266,12 @@ mod tests {
 
         // The write path, untouched by B3a.
         let id = s
-            .insert_message("s1", Author::Brian, MessageKind::Text, "hello")
+            .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), "hello", None)
             .await
             .unwrap()
             .message_id();
         assert!(id > 0, "legacy insert_message must still work post-0044");
-        s.insert_message("s1", Author::User, MessageKind::Text, "hi back")
+        s.insert_message("s1", MessageKind::Text, "hi back")
             .await
             .unwrap();
 
@@ -4283,7 +4283,7 @@ mod tests {
         );
         let msgs = s.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 2, "both rows readable through the legacy path");
-        assert_eq!(msgs[0].author, Author::Brian.as_str());
+        assert_eq!(msgs[0].author, "hands");
     }
 
     #[tokio::test]
@@ -4598,7 +4598,7 @@ mod tests {
         s.post_to_channel("s1", "participant", Some("hands"), "text", "work", None)
             .await
             .unwrap();
-        s.insert_message("s1", Author::User, MessageKind::Text, "reply").await.unwrap();
+        s.insert_message("s1", MessageKind::Text, "reply").await.unwrap();
 
         let rows = all_rows(&s, "s1").await;
         assert_eq!(rows.len(), 2);
@@ -4618,7 +4618,7 @@ mod tests {
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
         let id = s
-            .insert_message("s1", Author::Rain, MessageKind::Text, "no roster yet")
+            .post_to_channel("s1", "participant", Some("eyes"), MessageKind::Text.as_str(), "no roster yet", None)
             .await
             .unwrap()
             .message_id();
@@ -4628,7 +4628,7 @@ mod tests {
         assert_eq!(rows[0].origin, "participant");
         // The legacy path still attributes it correctly.
         let legacy = s.messages_for_session("s1", None).await.unwrap();
-        assert_eq!(legacy[0].author, "rain");
+        assert_eq!(legacy[0].author, "eyes");
     }
 
     #[tokio::test]
@@ -5329,7 +5329,7 @@ mod tests {
         s.post_to_channel("s1", "participant", Some("eyes"), "text", "review", None)
             .await
             .unwrap();
-        s.insert_message("s1", Author::User, MessageKind::Text, "reply").await.unwrap();
+        s.insert_message("s1", MessageKind::Text, "reply").await.unwrap();
         let before = all_rows(&s, "s1").await;
         assert!(before.iter().all(|m| m.participant_id.is_none()), "precondition: unmapped");
 
@@ -5361,7 +5361,13 @@ mod tests {
         // rc3 D10, stated rather than assumed: a LEGACY row authored `brian`
         // does not resolve against a role-derived roster, and is not meant to.
         // It keeps its author string and renders as history.
-        s.insert_message("s1", Author::Brian, MessageKind::Text, "legacy")
+        //
+        // **The retired slug is deliberate here and must not be swept.** This
+        // fixture's entire subject is a row written under a name no role
+        // answers to; replacing it with `hands` makes the row resolve and the
+        // test asserts nothing. Same category as the dated incident labels in
+        // the CL — a retired name used to NAME the retired thing.
+        s.post_to_channel("s1", "participant", Some("brian"), MessageKind::Text.as_str(), "legacy", None)
             .await
             .unwrap();
         let rows = all_rows(&s, "s1").await;

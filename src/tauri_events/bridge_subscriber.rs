@@ -214,7 +214,7 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
 mod tests {
     use super::*;
     use crate::signaling::SignalingBridge;
-    use crate::storage::{Author, MessageKind, Storage};
+    use crate::storage::{MessageKind, Storage};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -229,7 +229,7 @@ mod tests {
         let bridge = SignalingBridge::new();
         let storage = test_storage().await;
         let id = storage
-            .insert_message("s1", Author::Brian, MessageKind::Text, "hi")
+            .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), "hi", None)
             .await
             .unwrap()
             .message_id();
