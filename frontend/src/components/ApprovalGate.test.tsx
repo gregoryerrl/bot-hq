@@ -33,6 +33,26 @@ describe("ApprovalGate", () => {
     expect(screen.getByText("gh pr create --base main")).toBeInTheDocument();
   });
 
+  it("never scrolls the command sideways — a half-read command is a half-read approval", () => {
+    // The house rule is vertical-only scrolling, and this is the surface where
+    // breaking it costs the most: the user approves what they can SEE, and a
+    // long command ran off the right edge of a `overflow-auto` box. The pair is
+    // load-bearing — a bare `overflow-y-auto` still computes `overflow-x` to
+    // `auto` — so both halves are asserted, plus the wrap that gives the text
+    // somewhere to go.
+    const long =
+      "gh pr create --base main --head feat/a-very-long-branch-name --title 'x' --body 'y'";
+    render(
+      <ApprovalGate rows={[approval({ command_text: long })]} onResolve={resolved()} />,
+    );
+    const box = screen.getByText(long);
+    expect(box.className).toContain("overflow-y-auto");
+    expect(box.className).toContain("overflow-x-hidden");
+    expect(box.className).not.toMatch(/(^|\s)overflow-auto(\s|$)/);
+    expect(box.className).toContain("whitespace-pre-wrap");
+    expect(box.className).toContain("break-all");
+  });
+
   it("resolves on the spot — one click, no Send", async () => {
     // The whole point of the gate. In the tray an approval had a Send button of
     // its own, which is what let the user answer a row and watch nothing move.

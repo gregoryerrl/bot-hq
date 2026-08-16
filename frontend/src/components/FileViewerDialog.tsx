@@ -137,7 +137,10 @@ export function FileViewerDialog({
           </Button>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
+        {/* The pair, not a bare `overflow-auto`: CSS computes an unspecified
+            `overflow-x` to `auto` once the other axis is non-visible, so this
+            scrolled sideways. House rule is vertical-only, everywhere. */}
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3">
           {error && (
             <ErrorBanner
               label="Couldn't open this file:"

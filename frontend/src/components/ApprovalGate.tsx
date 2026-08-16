@@ -126,9 +126,20 @@ export function ApprovalGate({
       <p className="mt-1.5 text-sm text-on-surface">{gatePrompt(row)}</p>
 
       {/* The command verbatim. Never truncated — approving something you were
-          shown half of is not approval. It scrolls; the page does not. */}
+          shown half of is not approval. It scrolls VERTICALLY; the page does
+          not, and neither does this.
+
+          `overflow-auto` was a horizontal scroller on the one surface where a
+          half-read line is the whole risk: a long command ran off the right edge
+          and the user approved what they could see. The house rule (no
+          horizontal scrolling, ever) is the pair `overflow-y-auto
+          overflow-x-hidden` — a bare `overflow-y-auto` is not enough, since CSS
+          computes an unspecified `overflow-x` to `auto` when the other axis is
+          non-visible — plus wrapping, so the long line goes DOWN into a box that
+          already scrolls. `break-all`, not `break-words`: a command is one
+          unbroken token far more often than prose is. */}
       {row.command_text && (
-        <pre className="mt-1.5 max-h-32 overflow-auto rounded border border-outline-variant bg-surface-container px-2 py-1.5 font-mono text-xs text-on-surface">
+        <pre className="mt-1.5 max-h-32 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container px-2 py-1.5 font-mono text-xs text-on-surface">
           {row.command_text}
         </pre>
       )}
@@ -279,7 +290,10 @@ function GateDetailsDialog({
               <p className="mt-3 text-xs font-medium text-on-surface-variant">
                 Exact command — runs verbatim on Approve
               </p>
-              <pre className="mt-1 overflow-auto rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-mono text-xs text-on-surface">
+              {/* Same pair as the box above, and this one matters more: it is
+                  the stale-gate confirm, where the user is being asked to
+                  re-approve a command against a repo that may have moved. */}
+              <pre className="mt-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-mono text-xs text-on-surface">
                 {row.command_text}
               </pre>
             </>
