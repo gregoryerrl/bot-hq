@@ -2,6 +2,11 @@ import { memo } from "react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/time";
+import {
+  ATTENTION_IDLE_LABEL,
+  ATTENTION_IDLE_TOOLTIP,
+  ATTENTION_IDLE_UNFLAGGED,
+} from "../lib/attention";
 import type { SessionInfo } from "../lib/bindings";
 import { SessionPhaseChip, phaseTintClasses } from "./SessionPhaseChip";
 import { useHealthStore, worstHealth } from "../stores/health";
@@ -99,12 +104,12 @@ function SessionTileImpl({
                 hideWhenHealthy
               />
             )}
-            {!closed && attention === "idle_unflagged" && (
+            {!closed && attention === ATTENTION_IDLE_UNFLAGGED && (
               <span
                 className="shrink-0 rounded border border-warning/50 bg-warning/15 px-1.5 py-0.5 font-label-caps text-label-caps text-warning"
-                title="Idle with no question or halt parked — the duo was nudged to declare state"
+                title={ATTENTION_IDLE_TOOLTIP}
               >
-                NEEDS DIRECTION
+                {ATTENTION_IDLE_LABEL}
               </span>
             )}
             {!session.rain_enabled && (

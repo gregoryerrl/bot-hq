@@ -301,9 +301,10 @@ function ArchivePanel() {
           Archived Sessions
         </h1>
         <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
-          Every closed session. Click one to reopen it for review — the duo
-          re-spawns via <code>--resume</code>, picking up prior context when
-          it's still available (the session view notes it otherwise).
+          Every closed session. Click one to reopen it for review — its
+          participants re-spawn via <code>--resume</code>, picking up prior
+          context when it's still available (the session view notes it
+          otherwise).
         </p>
       </div>
       {isLoading ? (

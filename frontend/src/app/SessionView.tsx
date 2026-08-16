@@ -21,6 +21,11 @@ import { SessionFindingsBanner } from "../components/SessionFindingsBanner";
 import { SessionPolicyPanel } from "./SessionPolicyPanel";
 import { cn } from "../lib/cn";
 import {
+  ATTENTION_IDLE_LABEL,
+  ATTENTION_IDLE_TOOLTIP,
+  ATTENTION_IDLE_UNFLAGGED,
+} from "../lib/attention";
+import {
   authorLabel,
   participantLabel,
   participantRuntime,
@@ -530,14 +535,14 @@ export function SessionView() {
                 </span>
               </span>
             ))}
-            {attention === "idle_unflagged" && (
+            {attention === ATTENTION_IDLE_UNFLAGGED && (
               <>
                 <span className="mx-2 text-outline-variant">·</span>
                 <span
                   className="rounded border border-warning/50 bg-warning/15 px-1.5 py-0.5 font-label-caps text-label-caps text-warning"
-                  title="Idle with no question or halt parked — the duo was nudged to declare state"
+                  title={ATTENTION_IDLE_TOOLTIP}
                 >
-                  NEEDS DIRECTION
+                  {ATTENTION_IDLE_LABEL}
                 </span>
               </>
             )}

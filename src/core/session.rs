@@ -12,7 +12,7 @@ use crate::signaling::{
     default_user_settings_paths, load_user_mcp_servers, mcp_config_json, SignalingBridge,
 };
 use crate::storage::{
-    AgentConfig, Author, ClIndexEntry, Envelope, MessageKind, PersistedMessage, Session, Storage,
+    AgentConfig, ClIndexEntry, Envelope, MessageKind, PersistedMessage, Session, Storage,
 };
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
@@ -1005,15 +1005,13 @@ async fn spawn_session_handle(
             // rc3 D21 — orientation is not a turn. See `DuoConfig::booting`.
             booting: Some(Arc::clone(&booting)),
             boot_done: Some(boot_done_tx.clone()),
-            // Router-only two-party discriminant, and only meaningful when the
-            // arm above actually spawned a router: slot 0 is the `Brian` side of
-            // its bilateral forward, slot 1 the `Rain` side. Nothing else reads
-            // it — the pump identifies its participant by `slug`.
-            ..DuoConfig::new(
-                session.id.clone(),
-                if slot == 0 { Author::Brian } else { Author::Rain },
-                p.slug.clone(),
-            )
+            // The pump identifies its participant by `slug`, and always did
+            // (rc3 D10). This used to also pass a two-party `Author`
+            // discriminant — slot 0 the `Brian` side of `core::router`'s
+            // bilateral forward, slot 1 the `Rain` side — which was constructed
+            // per pump, per session, and read by nothing once task 14 deleted
+            // the router.
+            ..DuoConfig::new(session.id.clone(), p.slug.clone())
         };
         let storage_clone = storage.clone();
         let ipav_clone = Arc::clone(&ipav);

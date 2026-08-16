@@ -5,7 +5,7 @@ use crate::agents::{AgentEvent, AgentHealth};
 use crate::core::activity::ActivityTracker;
 use crate::core::ipav::{IpavPhase, IpavState};
 use crate::signaling::SignalingBridge;
-use crate::storage::{Author, MessageKind, Storage};
+use crate::storage::{MessageKind, Storage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 // Test-only since Batch 6 removed the buffered-window timer (the sole non-test
@@ -42,15 +42,6 @@ pub struct DuoConfig {
     /// refcount bump beats a heap copy. Threaded as `Arc<str>` through
     /// `MessagePersisted` into the `BatchEmitter` dirty-set / watermark keys (O5).
     pub session_id: Arc<str>,
-    /// **Router-only two-party discriminant.** `Brian` is turn slot 0 and `Rain`
-    /// is turn slot 1 — that is all either variant means here, because
-    /// `core::router` forwards bilaterally and has no third case. It is set for
-    /// every pump but only READ when a router was actually spawned, which
-    /// `spawn_session_handle` only does for a two-participant session.
-    ///
-    /// Nothing that identifies the participant reads this; that is [`Self::slug`]
-    /// (rc3 D10).
-    pub author: Author,
     /// This participant's roster slug — its `messages.author` string, its
     /// `ActivityTracker` key, and its handle in the tray.
     pub slug: Arc<str>,
@@ -164,14 +155,9 @@ pub struct DuoConfig {
 }
 
 impl DuoConfig {
-    pub fn new(
-        session_id: impl Into<Arc<str>>,
-        author: Author,
-        slug: impl Into<Arc<str>>,
-    ) -> Self {
+    pub fn new(session_id: impl Into<Arc<str>>, slug: impl Into<Arc<str>>) -> Self {
         Self {
             session_id: session_id.into(),
-            author,
             slug: slug.into(),
             edits_files: false,
             participant_id: None,
@@ -1087,14 +1073,18 @@ mod tests {
         (s, st)
     }
 
-    fn fast_cfg(author: Author) -> DuoConfig {
+    /// `slug` is the roster slug a real session carries (`"hands"` / `"eyes"`).
+    ///
+    /// It used to be an `Author`, from which both the slug and `edits_files`
+    /// were derived — the retired two-party discriminant standing in for "which
+    /// of the seeded roles". Taking the slug directly is what rc3 D10 says
+    /// identity is, and `edits_files` stays a capability question rather than a
+    /// name question.
+    fn fast_cfg(slug: &str) -> DuoConfig {
         DuoConfig {
             session_id: "s1".into(),
-            author,
-            // The two seeded roles, whose slugs are what a real session now
-            // carries. `Author` is only the router.s two-party discriminant.
-            slug: if matches!(author, Author::Brian) { "hands".into() } else { "eyes".into() },
-            edits_files: matches!(author, Author::Brian),
+            slug: slug.into(),
+            edits_files: slug == "hands",
             participant_id: None,
             bridge: None,
             self_input_tx: None,
@@ -1115,7 +1105,7 @@ mod tests {
     /// A pump wired to the ring. `participant_id` is required: the pump only
     /// reports a turn end when it knows which participant ended it.
     fn cfg_with_ring(
-        author: Author,
+        slug: &str,
     ) -> (
         DuoConfig,
         mpsc::Receiver<crate::core::sequencer::SequencerCommand>,
@@ -1124,7 +1114,7 @@ mod tests {
         let cfg = DuoConfig {
             sequencer_tx: Some(tx),
             participant_id: Some(1),
-            ..fast_cfg(author)
+            ..fast_cfg(slug)
         };
         (cfg, rx)
     }
@@ -1191,7 +1181,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn every_completed_turn_records_a_context_reading() {
         let (storage, state) = setup().await;
-        let (cfg, _ring_rx) = cfg_with_ring(Author::Brian);
+        let (cfg, _ring_rx) = cfg_with_ring("hands");
         let slug = cfg.slug.to_string();
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
@@ -1260,7 +1250,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_booting_participant_reports_readiness_instead_of_completing_a_turn() {
         let (storage, state) = setup().await;
-        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
         // The cell as it actually is before the ring starts: nothing handed out.
         cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(0)));
         cfg.booting = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
@@ -1317,7 +1307,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_pump_that_dies_holding_a_turn_declares_the_halt() {
         let (storage, state) = setup().await;
-        let (mut cfg, _ring_rx) = cfg_with_ring(Author::Brian);
+        let (mut cfg, _ring_rx) = cfg_with_ring("hands");
         cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(4)));
         let bridge = SignalingBridge::new();
         bridge.set_storage(storage.clone()).await;
@@ -1351,7 +1341,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_pump_that_ends_between_turns_declares_nothing() {
         let (storage, state) = setup().await;
-        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
         cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(4)));
         let bridge = SignalingBridge::new();
         bridge.set_storage(storage.clone()).await;
@@ -1387,7 +1377,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_participant_that_has_finished_booting_completes_turns_normally() {
         let (storage, state) = setup().await;
-        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
         cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(7)));
         // Wired, but CLEARED — the state the session is in from turn one on.
         cfg.booting = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
@@ -1429,7 +1419,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_participant_still_booting_when_the_ring_starts_binds_the_real_epoch() {
         let (storage, state) = setup().await;
-        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
         let cell = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let booting = Arc::new(std::sync::atomic::AtomicBool::new(true));
         cfg.turn_epoch = Some(Arc::clone(&cell));
@@ -1493,7 +1483,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_straggler_after_a_completed_turn_does_not_bind_the_next_one() {
         let (storage, state) = setup().await;
-        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
         let cell = Arc::new(std::sync::atomic::AtomicU64::new(9));
         cfg.turn_epoch = Some(Arc::clone(&cell));
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
@@ -1554,7 +1544,7 @@ mod tests {
         // is prevented by the ending being `done: false` with no prose row to
         // wake anyone with — not by withholding the completion.
         let (storage, state) = setup().await;
-        let (cfg, mut ring_rx) = cfg_with_ring(Author::Rain);
+        let (cfg, mut ring_rx) = cfg_with_ring("eyes");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
@@ -1595,7 +1585,7 @@ mod tests {
         // a row from one pump = this participant cannot work: the pump fills
         // the session's halt slot so the stop has a banner, not a shrug.
         let (storage, state) = setup().await;
-        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
         let bridge = SignalingBridge::new();
         bridge.set_storage(storage.clone()).await;
         cfg.bridge = Some(Arc::clone(&bridge));
@@ -1670,7 +1660,7 @@ mod tests {
         // I/P is turn-based: text does NOT emit a Forward mid-turn; the pump emits
         // exactly one Forward on TurnComplete carrying the buffered text.
         let (storage, state) = setup().await; // default phase = Investigate
-        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
@@ -1713,7 +1703,7 @@ mod tests {
         let (storage, state) = setup().await;
         state.lock().await.current_phase = IpavPhase::Apply;
 
-        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
@@ -1761,7 +1751,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn turn_complete_emits_forward() {
         let (storage, state) = setup().await;
-        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -1790,7 +1780,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn tool_use_persists_but_emits_no_forward() {
         let (storage, state) = setup().await;
-        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -1901,7 +1891,7 @@ mod tests {
             .id;
         // Not slot 0, on purpose: the old two-column writer would have put a
         // slot-1 id in the wrong column had it been keyed positionally.
-        let cfg = DuoConfig { participant_id: Some(eyes), ..fast_cfg(Author::Rain) };
+        let cfg = DuoConfig { participant_id: Some(eyes), ..fast_cfg("eyes") };
 
         let (ev_tx, ev_rx) = mpsc::channel(4);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
@@ -1961,7 +1951,7 @@ mod tests {
         let cfg = DuoConfig {
             participant_id: Some(brian),
             sequencer_tx: Some(seq_tx),
-            ..fast_cfg(Author::Brian)
+            ..fast_cfg("hands")
         };
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
@@ -2051,7 +2041,7 @@ mod tests {
         let cfg = DuoConfig {
             participant_id: Some(brian),
             sequencer_tx: Some(seq_tx),
-            ..fast_cfg(Author::Brian)
+            ..fast_cfg("hands")
         };
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
@@ -2121,7 +2111,7 @@ mod tests {
         let cfg = DuoConfig {
             participant_id: Some(brian),
             sequencer_tx: Some(seq_tx),
-            ..fast_cfg(Author::Brian)
+            ..fast_cfg("hands")
         };
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
@@ -2180,7 +2170,7 @@ mod tests {
         // peer_ack is PASSED THROUGH to the router (which suppresses the wake): the
         // pump emits a Forward with peer_ack=true. The text is still persisted.
         let (storage, state) = setup().await;
-        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -2229,7 +2219,7 @@ mod tests {
         // The peer_ack flag applies only to the turn it was called in: turn 1's
         // Forward carries peer_ack=true, turn 2's (no ack) carries peer_ack=false.
         let (storage, state) = setup().await;
-        let (cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (cfg, mut ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -2340,7 +2330,7 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(false));
         let cfg = DuoConfig {
             in_atomic_tool: Some(Arc::clone(&flag)),
-            ..fast_cfg(Author::Brian)
+            ..fast_cfg("hands")
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -2396,7 +2386,7 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(false));
         let cfg = DuoConfig {
             in_atomic_tool: Some(Arc::clone(&flag)),
-            ..fast_cfg(Author::Brian)
+            ..fast_cfg("hands")
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -2449,7 +2439,7 @@ mod tests {
         let (self_tx, mut self_rx) = mpsc::channel(8);
         let cfg = DuoConfig {
             self_input_tx: Some(crate::agents::ParticipantInput::new("s1", self_tx)),
-            ..fast_cfg(Author::Brian)
+            ..fast_cfg("hands")
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -2490,7 +2480,7 @@ mod tests {
         let (self_tx, mut self_rx) = mpsc::channel(8);
         let cfg = DuoConfig {
             self_input_tx: Some(crate::agents::ParticipantInput::new("s1", self_tx)),
-            ..fast_cfg(Author::Brian)
+            ..fast_cfg("hands")
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -2549,7 +2539,7 @@ mod tests {
         // rendering as ordinary speech in a merely-quiet session (3h13m dead in
         // the archive study).
         let (storage, state) = setup().await;
-        let (mut cfg, mut ring_rx) = cfg_with_ring(Author::Brian);
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
         let bridge = SignalingBridge::new();
         bridge.set_storage(storage.clone()).await;
         cfg.bridge = Some(Arc::clone(&bridge));
@@ -2643,7 +2633,7 @@ mod tests {
         // channel under the pump's `sequencer_tx`, which is a different code
         // path from the one being tested.
         let (storage, state) = setup().await;
-        let (cfg, _ring_rx) = cfg_with_ring(Author::Brian);
+        let (cfg, _ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
@@ -2718,7 +2708,7 @@ mod tests {
         bridge.set_storage(storage.clone()).await;
         let cfg = DuoConfig {
             bridge: Some(Arc::clone(&bridge)),
-            ..fast_cfg(Author::Brian) // no router_tx
+            ..fast_cfg("hands") // no router_tx
         };
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));

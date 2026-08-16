@@ -695,6 +695,8 @@ every other FE area imports.
 | `frontend/src/lib/participants.ts` | `ParticipantView`, label/slug/slot-key resolution, `isSpawnable` (stale mirror), runtime keys | M |
 | `frontend/src/lib/participantNames.ts` | `UNKNOWN_PARTICIPANT` leaf (breaks a cycle) | S |
 | `frontend/src/lib/time.ts`, `frontend/src/lib/phase.ts`, `frontend/src/lib/diffGroups.ts`, `frontend/src/lib/cn.ts` | time/phase/diff-grouping/clsx helpers | S |
+| `frontend/src/lib/attention.ts` | idle-unflagged badge label + tooltip; single source for SessionTile and SessionView, which had it duplicated verbatim | S |
+| `frontend/src/lib/framing.ts` | retired-agent / pair-assumption detection for user-facing strings; `framing.test.ts` sweeps `frontend/src/` with it | S |
 | `frontend/src/index.css`, `frontend/tailwind.config.ts`, `frontend/package.json`, `frontend/vite.config.ts`, `frontend/tsconfig.json` | tokens + build config | — |
 
 **Seams (§14):** 23 (`ParticipantView` mirror), 26–27 (command/event string

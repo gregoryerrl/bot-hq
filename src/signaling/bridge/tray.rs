@@ -4,7 +4,7 @@
 //! supersede + resolve machinery, `mark_awaiting_user`,
 //! `request_phase_advance`, and the pending-choice snapshots. This is the
 //! biggest slice of the bridge — everything that parks a oneshot, mirrors a
-//! tray row, or sets the duo's awaiting-halt flag.
+//! tray row, or sets the session's awaiting-halt flag.
 
 use super::util::{oob_resolution_body, outcome_from_picked, parse_tray_ts};
 use super::*;

@@ -225,7 +225,6 @@ impl Storage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::storage::{Author, MessageKind, Storage};
 
     /// Pins the three decisions in [`Storage::participant_text_since`] that the
