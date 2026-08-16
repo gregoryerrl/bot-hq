@@ -8,9 +8,9 @@ Round 1 is [`2026-08-15-rc3-audit.md`](2026-08-15-rc3-audit.md), executed in ses
 
 **Baseline at the audited commit:** `cargo test` green — 1165 lib + 62 across the other
 binaries, 1 ignored (`the_ring_runs_against_a_real_session`, needs `/tmp/smoke.db`).
-`cargo clippy --all-targets` exit 0, 19 warnings.
+`cargo clippy --all-targets` exit 0, **17** diagnostics (lib 10 + 7 unique in the test profile).
 **At `f339f6d`:** cargo **1169** + 62 · vitest **392** in 45 files · `tsc --noEmit` clean ·
-clippy **12**.
+clippy **10**.
 
 ---
 

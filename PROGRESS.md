@@ -71,7 +71,7 @@ basenames (`tray.rs` has three copies), so a bare citation may not even name a
 file. All nine are symbol-anchored now, including the three still accurate.
 
 Suites: **1169** lib + 37 + 13 + 7 + 2 + 2 + 1; frontend **392** in 45 files;
-tsc clean; clippy **19 → 12**.
+tsc clean; clippy **17 → 10** diagnostics.
 
 ## 2026-08-16 (later) — batches 3–7, and three guards that were not guarding
 
