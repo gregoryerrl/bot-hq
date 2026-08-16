@@ -8,10 +8,12 @@
 //! done ([`Storage::all_active_voted_done`]) — or immediately, when a
 //! participant parks a question for the user.
 //!
-//! **What is implemented is the ring advance, the delivery, both halts —
-//! consensus, and a parked question — and the pause.** Spin detection is a later
-//! task and is NOT here. Nothing spawns this yet, so no session behaves
-//! differently because it exists.
+//! **This is the session's only turn engine.** `spawn_ring` starts one per
+//! session and the bilateral router it replaced was deleted (`3adfc68`), so
+//! every turn any participant takes is dealt here. Implemented: the ring
+//! advance, delivery, every halt (consensus, a parked question, the all-pass
+//! yield, the round cap), the pause, and spin detection — which the paragraph
+//! above this one used to call "a later task".
 //!
 //! ## What the storage helpers guarantee
 //!
@@ -644,10 +646,17 @@
 //!
 //! The host already has this notion of paused:
 //! [`ActivityTracker::holds_wakes`](crate::core::activity::ActivityTracker::holds_wakes)
-//! answers "cancelling or paused", and `core::router` reads it lock-free on
-//! every forward. It is not reused here, for the reason
-//! [`HaltDeclared`](SequencerCommand::HaltDeclared) already gives about the
-//! awaiting flag: **a flag is a LEVEL and this loop needs an EDGE.** The
+//! answers "cancelling or paused". It is not the ORDERING mechanism here, for
+//! the reason [`HaltDeclared`](SequencerCommand::HaltDeclared) already gives
+//! about the awaiting flag: **a flag is a LEVEL and this loop needs an EDGE.**
+//!
+//! It IS read as a level, in one place and deliberately: `advance_turn`'s D35
+//! gate consults `is_paused()` beside the halt latch and the open gates, so a
+//! [`Pause`](SequencerCommand::Pause) that never arrived — `notify_ring_pause`
+//! is a `try_send`, and its queue backs up exactly when the ring is blocked,
+//! which is when a user reaches for Stop — fails closed instead of open. That is
+//! the sound use of a level: a gate at a decision point, not an ordering signal
+//! between commands. Do not read the paragraph above as forbidding it. The
 //! sequencer sits in `recv().await` between turns, so a latch flipped elsewhere
 //! is only ever observed wherever the loop happens to look, with no defined order
 //! against [`Resume`](SequencerCommand::Resume) or
@@ -658,11 +667,13 @@
 //!
 //! The NOTION is the same one, though, and the two are meant to agree: whoever
 //! mints [`Pause`](SequencerCommand::Pause) MUST be the code that calls
-//! `set_paused(true)`, and that wiring belongs to the task that spawns this
-//! loop, alongside the epoch round trip. An obligation on the producer, stated
-//! the same way and for the same reason as the one on
-//! [`UserMessage`](SequencerCommand::UserMessage)'s producers above — nothing
-//! today mints this command, so there is no existing site to read it off.
+//! `set_paused(true)`. **That obligation is now MET, and by one function**:
+//! `AppState::cancel_session_turn` sets the latch (`state.rs`, in the
+//! `sessions` lock) and then mints the command (outside it), in that order —
+//! which is what lets the D35 gate treat the latch as authoritative when the
+//! command is dropped. Wired 2026-08-16; before that the whole pause vocabulary
+//! had no producer at all and a Stop flipped a banner while this loop dealt the
+//! next participant.
 //!
 //! The latch shape is borrowed deliberately — `set_paused` is a plain store
 //! rather than a counter, and so is this.
@@ -801,8 +812,11 @@ fn round_cap_notice(laps: u32) -> String {
     )
 }
 
-/// What the sequencer task needs, cloned from the session's own state at spawn
-/// — the same arrangement [`RouterDeps`](crate::core::RouterDeps) uses.
+/// What the sequencer task needs, cloned from the session's own state at spawn.
+///
+/// (The comparison that used to sit here named `RouterDeps`, which went with the
+/// router in `3adfc68` — a rustdoc link to a deleted type, which resolves to
+/// nothing and reads as a live sibling.)
 pub struct SequencerDeps {
     /// The session whose turn cycle this task runs. Every ring, cursor and
     /// consensus query is scoped by it.
@@ -812,7 +826,7 @@ pub struct SequencerDeps {
     pub storage: Storage,
     /// Each live participant's stdin, keyed by `session_participants.id`.
     ///
-    /// A clone per participant rather than a [`SessionHandle`] — see the
+    /// A clone per participant rather than a [`crate::core::SessionHandle`] — see the
     /// scope-check section of the module doc for why the task cannot hold the
     /// handle, and why holding stdin still gets the session-scope compare.
     ///
@@ -1017,7 +1031,7 @@ pub enum SequencerCommand {
     /// The user STAGED a response while the ring runs (the Stage toggle,
     /// 2026-08-15): the content sits in `AppState`; this is only the flag.
     /// At the next turn boundary the ring parks instead of dealing and emits
-    /// [`SignalingEvent::StagedDeliveryDue`] — the delivery then arrives as
+    /// [`SignalingEvent::StagedDeliveryDue`](crate::signaling::SignalingEvent) — the delivery then arrives as
     /// an ordinary [`UserMessage`](Self::UserMessage), which is what makes a
     /// staged send land exactly like a typed one, never mid-turn. Pause is
     /// still the only interrupt; staging changes WHEN the user may compose,
@@ -1139,7 +1153,7 @@ pub enum SequencerCommand {
     GateOpened { choice_id: String },
     /// An approval gate resolved (approved, rejected, or discarded). Decrements
     /// the latch and **never deals a turn itself** — the wake rides the
-    /// existing release (`user_responded` → [`UserMessage`]) or the asker's own
+    /// existing release (`user_responded` → [`UserMessage`](SequencerCommand::UserMessage)) or the asker's own
     /// completion, so there is no second path onto a turn.
     GateResolved { choice_id: String },
     /// Stop: hold the cycle where it stands, hand out no further turns.
@@ -2922,13 +2936,13 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Hando
 /// FALSE: [`halt`] only clears the local holder and bumps the epoch, it never
 /// calls this. The one reachable `None` is [`hand_over`]'s nobody-active arm.
 ///
-/// The consequence is a live gap this function does not close: after a real
-/// halt `sessions.current_turn_participant_id` still names the last holder, so
-/// a yielded session reads as working in the UI. Same shape as D7's capped-halt
-/// row and item 4A's silent skip arms — an ending state indistinguishable from
-/// a different one. Closing it means threading `deps` into `halt` and calling
-/// this with `None` there; noted rather than done, because it is the same
-/// "a yield must say it yielded" change the idle-nudge work needs.
+/// That gap — after a real halt the column still named the last holder, so a
+/// yielded session read as working — was CLOSED on 2026-08-16 (`92eeba5`), the
+/// way this comment predicted: `deps` threaded into [`halt`], which now NULLs
+/// the column itself on every halt path. So a `None` here is no longer the only
+/// way the column comes down, and the ending state stopped being
+/// indistinguishable from a different one (the same shape as D7's capped-halt
+/// row and the close epilogue's silent skip arms).
 ///
 /// The INPUT LOCK is unaffected either way, and that is worth separating: the
 /// pump clears each participant's busy flag at its own turn end, so after a halt
