@@ -120,12 +120,27 @@ the agent (the bot-hq policy gates already prompt the user). Enforcement
 is provided by the policy layer + git hooks.
 
 Per-agent model swap via env-vars: `ANTHROPIC_BASE_URL`,
-`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`. The model is resolved per
-session from the picker stored on the `sessions` row (`brian_model_id` /
-`rain_model_id`) against the saved-model `models` registry, falling back
-to the `agent_configs` table then a built-in default (see "Per-agent
-model selection"). `BOT_HQ_SESSION_ID` is also injected so git-hook
-subprocesses can read session-scoped state.
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`. The model is resolved **per
+participant**, in this order (`core/session.rs::resolve_participant_config`
+→ `resolve_spawn_config`):
+
+1. `session_participants.model_id` — the create dialog's pick for that
+   participant;
+2. else the participant's ROLE default (`roles.model_id`), re-read at spawn so a
+   roster seeded before the role had a default still gets the current one;
+3. else the `agent_configs` row for that agent name;
+4. else a built-in default, with a warning naming the participant.
+
+Whichever id wins is looked up in the saved-model `models` registry for the
+provider, base URL, token and context window.
+
+This paragraph used to say the pick came from `sessions.brian_model_id` /
+`rain_model_id`, which the Storage section below already described as unread —
+one document contradicting itself about where a load-bearing value comes from.
+Those columns are frozen legacy (rc3 D10); nothing reads them at spawn.
+
+`BOT_HQ_SESSION_ID` is also injected so git-hook subprocesses can read
+session-scoped state.
 
 **LLM proxy (`src/agents/llm_proxy.rs`):** agents pointed at a
 non-Anthropic Anthropic-compatible gateway (e.g. DeepSeek) route
@@ -768,7 +783,7 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   `agent_name ∈ {'emma','brian','rain'}` (migration 0001 created it
   permissive; migration 0017 purges the `emma` row but leaves the CHECK
   as-is for legacy reasons) — only `brian`/`rain` are used. The fallback
-  for the `models` registry below (see "Per-agent model selection") —
+  for the `models` registry below (see "Per-participant model selection") —
   and the row that supplies the model for **every session that names no
   model**, which is why `native`/`context_window` were mirrored here by
   migration 0038.

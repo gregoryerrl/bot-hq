@@ -11,9 +11,10 @@ it must be installed and authenticated first:
 <https://docs.claude.com/en/docs/claude-code>. `git` is also required for the
 repositories you point bot-hq at.
 
-(An agent on a non-Anthropic model can instead run on bot-hq's own built-in agent
-loop, which needs no CLI — but that is a per-model opt-in for the reviewer agent
-only, so claude-code is still required.)
+(A non-Anthropic model runs through the same CLI, with the base URL and token
+swapped per agent — so claude-code is required whatever model you point a
+participant at. The built-in agent loop that once avoided it was removed in
+rc3 D9.)
 
 A released build is otherwise self-contained — you do **not** need Rust or Node
 to run it (those are only for building from source; see [README.md](README.md)).

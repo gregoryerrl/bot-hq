@@ -248,12 +248,12 @@ apart — otherwise they share one Context Library, sqlite DB, and instance lock
 
 - **Stack:** single Rust binary — Tauri v2 shell + React 18 UI, with the Rust core
   on a Tokio multi-thread runtime. Tauri owns the OS main thread.
-- **Two agent backends:** an agent is spawned either as `claude -p` in stream-json
-  mode — with bot-hq's role prompt appended and a per-agent MCP config, model swap via
-  `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` — or on bot-hq's
-  own in-process Rust loop, which owns the turn cycle, tool execution and context
-  accounting itself. Chosen per saved model; reviewer-only in v1, since the
-  subscription binds him to the CLI. Nothing downstream can tell them apart.
+- **One agent backend:** every participant is spawned as `claude -p` in
+  stream-json mode, with bot-hq's role prompt appended and a per-agent MCP
+  config, and the model swapped via `ANTHROPIC_BASE_URL` /
+  `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` — which is how a non-Anthropic
+  model runs through the same CLI. (A second, in-process Rust agent loop existed
+  as an opt-in until rc3 D9 removed it; the CLI is the only connector.)
 - **Two MCP servers:** an **internal** one (UI-signaling tools served to the
   agents) on an ephemeral localhost port, and an **external** one on `127.0.0.1:7892`
   (driver tools for any bearer-token-authenticated MCP client).

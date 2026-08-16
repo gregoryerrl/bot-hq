@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>bot-hq — Two AI agents. One builds, one reviews. You orchestrate.</title>
-  <meta name="description" content="A desktop app for running AI-assisted coding sessions you can trust: a builder agent, an adversarial reviewer agent, a project knowledge base, and guardrails — with you in control." />
+  <title>bot-hq — An agent harness you command. Gates, review, and a memory that lasts.</title>
+  <meta name="description" content="A desktop app for running AI-assisted coding sessions you can trust: agents that execute and review under gates you set, a project knowledge base that outlives the session, and full visibility into everything they see — with you in control." />
 
   <!-- Open Graph -->
   <meta property="og:title" content="bot-hq" />
-  <meta property="og:description" content="Two AI agents — one builds, one reviews. You orchestrate. A desktop app for disciplined, reviewable AI coding sessions." />
+  <meta property="og:description" content="An agent harness you command — gates, adversarial review, and a memory that outlives the session. A desktop app for disciplined, reviewable AI coding sessions." />
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://gregoryerrl.github.io/bot-hq/" />
   <meta property="og:image" content="https://gregoryerrl.github.io/bot-hq/logo.png" />
@@ -27,9 +27,9 @@
       --line:        rgba(255, 255, 255, 0.08);
       --line-strong: rgba(255, 255, 255, 0.14);
 
-      --hands:       #ff7a00;   /* Brian — HANDS */
+      --hands:       #ff7a00;   /* the executing role */
       --hands-soft:  #ffb68b;
-      --eyes:        #a259ff;   /* Rain — EYES  */
+      --eyes:        #a259ff;   /* the reviewing role */
       --eyes-soft:   #ddb7ff;
       --user:        #adc6ff;   /* You — orchestrator */
 
@@ -166,8 +166,8 @@
     .chatlog { padding: 16px; display: flex; flex-direction: column; gap: 13px; font-size: 13.5px; }
     .msg { display: grid; grid-template-columns: 58px 1fr; gap: 12px; align-items: baseline; }
     .who-tag { font-family: var(--mono); font-size: 11px; font-weight: 700; text-align: right; }
-    .who-tag.brian { color: var(--hands); }
-    .who-tag.rain  { color: var(--eyes); }
+    .who-tag.hands { color: var(--hands); }
+    .who-tag.eyes  { color: var(--eyes); }
     .who-tag.you   { color: var(--user); }
     .msg p { color: var(--text-dim); line-height: 1.5; }
     .msg p code { font-family: var(--mono); font-size: 12px; color: var(--hands-soft); background: rgba(255,122,0,0.08); padding: 1px 5px; border-radius: 3px; }
@@ -278,7 +278,7 @@
       </a>
       <div class="nav-links">
         <a href="#why">Why</a>
-        <a href="#duo">The duo</a>
+        <a href="#roles">The roles</a>
         <a href="#workflow">Workflow</a>
         <a href="#library">Context Library</a>
         <a class="nav-cta" href="https://github.com/gregoryerrl/bot-hq/releases">Download</a>
@@ -291,8 +291,8 @@
     <div class="wrap">
       <div>
         <img class="hero-logo" src="logo.png" alt="bot-hq logo" />
-        <h1>Two AI agents.<br />One <span class="accent">builds</span>, one reviews.<br />You orchestrate.</h1>
-        <p class="sub">bot-hq is a desktop app for running AI-assisted coding sessions you can actually trust — a builder, an adversarial reviewer, and a project knowledge base, all under your control.</p>
+        <h1>An agent harness<br />you <span class="accent">command</span>.<br />Nothing ships unwatched.</h1>
+        <p class="sub">bot-hq is a desktop app for running AI-assisted coding sessions you can actually trust — agents that execute and review each other under gates you set, a project knowledge base that outlives the session, and every decision surfaced to you.</p>
         <p class="who">For developers &amp; teams who want the speed of AI coding without giving up oversight. <b>You stay the conductor.</b></p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://github.com/gregoryerrl/bot-hq/releases">⬇ Download</a>
@@ -315,9 +315,9 @@
         </div>
         <div class="chatlog">
           <div class="msg"><span class="who-tag you">You</span><p>Fix the off-by-one in the pagination cursor.</p></div>
-          <div class="msg"><span class="who-tag brian">Brian</span><p>Found it in <code>paginate()</code> — patching the bound and adding a test. <span class="phase-chip">APPLY</span></p></div>
-          <div class="msg"><span class="who-tag rain">Rain</span><p>Reviewed the diff. The fix is right, but the test doesn't cover the empty-page case — flagging.</p></div>
-          <div class="msg"><span class="who-tag brian">Brian</span><p>Good catch. Added the empty-page assertion. Tests green.</p></div>
+          <div class="msg"><span class="who-tag hands">HANDS</span><p>Found it in <code>paginate()</code> — patching the bound and adding a test. <span class="phase-chip">APPLY</span></p></div>
+          <div class="msg"><span class="who-tag eyes">EYES</span><p>Reviewed the diff. The fix is right, but the test doesn't cover the empty-page case — flagging.</p></div>
+          <div class="msg"><span class="who-tag hands">HANDS</span><p>Good catch. Added the empty-page assertion. Tests green.</p></div>
         </div>
       </div>
     </div>
@@ -351,22 +351,22 @@
   </section>
 
   <!-- ============ THE DUO ============ -->
-  <section id="duo">
+  <section id="roles">
     <div class="wrap">
-      <p class="eyebrow">The duo you orchestrate</p>
+      <p class="eyebrow">The roles you compose</p>
       <h2>Two roles. Enforced, not suggested.</h2>
       <p class="lead">Every session spawns two agents with distinct jobs — and a hard boundary between them. The reviewer literally cannot edit files.</p>
 
       <div class="grid grid-3" style="margin-top: 40px;">
         <div class="card role-card hands">
-          <div class="role-name">Brian · HANDS</div>
+          <div class="role-name">HANDS · the executor</div>
           <h3>The builder</h3>
           <p>Writes code, runs commands, makes commits. Your AI pair-programmer doing the actual work in the repo.</p>
         </div>
         <div class="card role-card eyes">
-          <div class="role-name">Rain · EYES</div>
+          <div class="role-name">EYES · the reviewer</div>
           <h3>The reviewer</h3>
-          <p>Reads Brian's work and pushes back adversarially. Write tools are blocked at the source — review only, no surprises.</p>
+          <p>Reads the executor's work and pushes back adversarially. Write tools are blocked at the source — review only, no surprises.</p>
         </div>
         <div class="card role-card you">
           <div class="role-name">You · ORCHESTRATOR</div>
@@ -376,7 +376,7 @@
       </div>
 
       <div class="note">
-        <p><b>Why two models?</b> Rain can run on a different model than Brian. A reviewer that doesn't share the author's blind spots catches more — cross-model diversity buys a real second opinion instead of an echo chamber.</p>
+        <p><b>Why two models?</b> The reviewer can run on a different model than the executor. A reviewer that doesn't share the author's blind spots catches more — cross-model diversity buys a real second opinion instead of an echo chamber.</p>
       </div>
     </div>
   </section>
@@ -397,12 +397,12 @@
         <div class="step">
           <div class="letter">P</div>
           <h4>Plan</h4>
-          <p>Brian proposes the approach and tradeoffs; Rain reviews it <em>before</em> any code is written.</p>
+          <p>The executor proposes the approach and tradeoffs; the reviewer reviews it <em>before</em> any code is written.</p>
         </div>
         <div class="step">
           <div class="letter">A</div>
           <h4>Apply</h4>
-          <p>Brian produces the work — the actual edits, commits, and commands.</p>
+          <p>The executor produces the work — the actual edits, commits, and commands.</p>
         </div>
         <div class="step">
           <div class="letter">V</div>
@@ -459,7 +459,7 @@
         </div>
         <div class="guard">
           <span class="gi">✓</span>
-          <div><h4>Review sign-off</h4><p>When Rain flags a real problem as blocking, Brian can't commit over it until it's resolved or explicitly rebutted.</p></div>
+          <div><h4>Review sign-off</h4><p>When the reviewer flags a real problem as blocking, the executor can't commit over it until it's resolved or explicitly rebutted.</p></div>
         </div>
         <div class="guard">
           <span class="gi">⌘</span>

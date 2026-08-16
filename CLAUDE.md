@@ -52,9 +52,15 @@ watermark, 50ms / N=20 coalesce) → `app.emit(name, payload)`. TypeScript
 bindings auto-generate via `tauri-specta` on each app launch (writes
 `frontend/src/lib/bindings.ts`).
 
-Plugin model (scaffolded; live plugins TBD): per-plugin origin via
-custom URI scheme (`https://plugin-<id>.localhost`), capability-gated
-via Tauri JSON, host-side heartbeat watcher at app-shell level.
+Plugin runtime (**shipped 2026-07-04**, not scaffolding): plugins are static
+frontend bundles in sandboxed iframes served over one `bhq-plugin://` scheme —
+the plugin id rides the URL host on macOS/Linux and the first path segment under
+the Windows `https://bhq-plugin.localhost` fold. Plugins never call Tauri: they
+postMessage the shell, which forwards to the single Rust enforcement point
+`plugin_invoke_proxy`, re-checking enabled ∧ granted ∧ catalog-listed per call.
+See ARCHITECTURE.md §Plugin runtime — this paragraph was wrong on all three
+counts (it called a live runtime scaffolding, named a scheme that never
+shipped, and credited Tauri-JSON capability gating that the proxy replaced).
 
 ---
 
