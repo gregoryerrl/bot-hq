@@ -852,28 +852,6 @@ impl ToolCallResult {
 mod tests {
     use super::*;
 
-    /// **Nothing an agent reads names a person (rc3 D10).**
-    ///
-    /// The name-removal commit claimed this and it was not true: six tool
-    /// descriptions still said `EYES-only (rain)` / `HANDS-only (brian)`, and
-    /// tool descriptions are read by every agent on every session, so they are
-    /// among the most-read text in the product. Sweeping the WHOLE descriptor
-    /// list — rather than the six that were wrong — is what stops the seventh.
-    ///
-    /// **Both lists.** The first version of this sweep took `tool_descriptors()`
-    /// only, so the external driver's toolset kept shipping `create_session`
-    /// with agent-named parameters and nothing said so. A sweep that covers one
-    /// of two lists is how the seventh arrives anyway; the driver is an AI client
-    /// reading these descriptions exactly as a spawned agent does.
-    ///
-    /// The only survivors are `external_jsonrpc::wire`'s identifiers — keys a
-    /// driver sends or the server returns, exempted string-by-string (see that
-    /// module for why renaming them is a behaviour change, not a prose fix). A
-    /// new agent-named key is not on that list and still fails.
-    ///
-    /// Word-boundary matched: `constraint` contains `rain`, and a substring
-    /// check would fail on prose that is perfectly fine.
-    #[test]
     /// **The canonical docs list every registered tool** (audit M-F10/M-T1).
     ///
     /// `ARCHITECTURE.md` said "Internal tools (36)" against a registry of 40,
@@ -930,6 +908,36 @@ mod tests {
         );
     }
 
+    /// **Nothing an agent reads names a person (rc3 D10).**
+    ///
+    /// The name-removal commit claimed this and it was not true: six tool
+    /// descriptions still said `EYES-only (rain)` / `HANDS-only (brian)`, and
+    /// tool descriptions are read by every agent on every session, so they are
+    /// among the most-read text in the product. Sweeping the WHOLE descriptor
+    /// list — rather than the six that were wrong — is what stops the seventh.
+    ///
+    /// **Both lists.** The first version of this sweep took `tool_descriptors()`
+    /// only, so the external driver's toolset kept shipping `create_session`
+    /// with agent-named parameters and nothing said so. A sweep that covers one
+    /// of two lists is how the seventh arrives anyway; the driver is an AI client
+    /// reading these descriptions exactly as a spawned agent does.
+    ///
+    /// The only survivors are `external_jsonrpc::wire`'s identifiers — keys a
+    /// driver sends or the server returns, exempted string-by-string (see that
+    /// module for why renaming them is a behaviour change, not a prose fix). A
+    /// new agent-named key is not on that list and still fails.
+    ///
+    /// Word-boundary matched: `constraint` contains `rain`, and a substring
+    /// check would fail on prose that is perfectly fine.
+    ///
+    /// **This never ran until round 2.** Its `#[test]` was written above the
+    /// PREVIOUS test's doc comment, so Rust merged both doc blocks and both
+    /// attributes onto `every_registered_tool_is_documented` and left this
+    /// function with neither — an ordinary private fn nothing called. The
+    /// compiler said so twice, in every build: `duplicated attribute` on the
+    /// pair, and `function is never used` here. Two warnings nobody read, for a
+    /// guard written to stop a regression that had already happened once.
+    #[test]
     fn no_tool_description_an_agent_reads_names_an_agent() {
         use crate::signaling::external_jsonrpc::{external_tool_descriptors, wire};
         // Rendered exactly as the schema carries them: the model args and spawn
