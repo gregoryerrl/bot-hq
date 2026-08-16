@@ -36,7 +36,7 @@ struct ToolResultRow<'a> {
 }
 
 #[derive(Clone)]
-pub struct DuoConfig {
+pub struct PumpConfig {
     /// `Arc<str>` (not `String`): cloned once per persisted message on the hottest
     /// path (`notify_persisted` fires on every Text / ToolUse / ToolResult), so a
     /// refcount bump beats a heap copy. Threaded as `Arc<str>` through
@@ -154,7 +154,7 @@ pub struct DuoConfig {
     pub boot_done: Option<tokio::sync::mpsc::Sender<i64>>,
 }
 
-impl DuoConfig {
+impl PumpConfig {
     pub fn new(session_id: impl Into<Arc<str>>, slug: impl Into<Arc<str>>) -> Self {
         Self {
             session_id: session_id.into(),
@@ -324,7 +324,7 @@ const LIMIT_NOTICE_DEDUPE: std::time::Duration = std::time::Duration::from_secs(
 /// path depends on the current IPAV phase. `TurnComplete` flushes pending
 /// buffered text immediately regardless of phase.
 pub async fn pump_agent(
-    cfg: DuoConfig,
+    cfg: PumpConfig,
     mut event_rx: mpsc::Receiver<AgentEvent>,
     storage: Storage,
     ipav_state: Arc<Mutex<IpavState>>,
@@ -370,7 +370,7 @@ pub async fn pump_agent(
     // The epoch this pump last COMPLETED with (rc3 D24). A cell still reading
     // this value means the ring has not handed out a turn since, so whatever
     // event is being processed is a straggler from the turn that ended and must
-    // not open a new one. See `DuoConfig::turn_epoch`.
+    // not open a new one. See `PumpConfig::turn_epoch`.
     let mut last_completed_epoch: Option<u64> = None;
     // Why this pump stopped, when it said so. `AgentEvent::Exited` carries the
     // process's own account; a channel that simply closes carries none, and the
@@ -1080,8 +1080,8 @@ mod tests {
     /// of the seeded roles". Taking the slug directly is what rc3 D10 says
     /// identity is, and `edits_files` stays a capability question rather than a
     /// name question.
-    fn fast_cfg(slug: &str) -> DuoConfig {
-        DuoConfig {
+    fn fast_cfg(slug: &str) -> PumpConfig {
+        PumpConfig {
             session_id: "s1".into(),
             slug: slug.into(),
             edits_files: slug == "hands",
@@ -1107,11 +1107,11 @@ mod tests {
     fn cfg_with_ring(
         slug: &str,
     ) -> (
-        DuoConfig,
+        PumpConfig,
         mpsc::Receiver<crate::core::sequencer::SequencerCommand>,
     ) {
         let (tx, rx) = mpsc::channel(16);
-        let cfg = DuoConfig {
+        let cfg = PumpConfig {
             sequencer_tx: Some(tx),
             participant_id: Some(1),
             ..fast_cfg(slug)
@@ -1891,7 +1891,7 @@ mod tests {
             .id;
         // Not slot 0, on purpose: the old two-column writer would have put a
         // slot-1 id in the wrong column had it been keyed positionally.
-        let cfg = DuoConfig { participant_id: Some(eyes), ..fast_cfg("eyes") };
+        let cfg = PumpConfig { participant_id: Some(eyes), ..fast_cfg("eyes") };
 
         let (ev_tx, ev_rx) = mpsc::channel(4);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
@@ -1948,7 +1948,7 @@ mod tests {
             .send(crate::core::sequencer::SequencerCommand::UserMessage { mentions: Vec::new() })
             .await
             .unwrap();
-        let cfg = DuoConfig {
+        let cfg = PumpConfig {
             participant_id: Some(brian),
             sequencer_tx: Some(seq_tx),
             ..fast_cfg("hands")
@@ -2038,7 +2038,7 @@ mod tests {
             .id;
 
         let (seq_tx, mut seq_rx) = mpsc::channel(8);
-        let cfg = DuoConfig {
+        let cfg = PumpConfig {
             participant_id: Some(brian),
             sequencer_tx: Some(seq_tx),
             ..fast_cfg("hands")
@@ -2108,7 +2108,7 @@ mod tests {
             .id;
 
         let (seq_tx, mut seq_rx) = mpsc::channel(8);
-        let cfg = DuoConfig {
+        let cfg = PumpConfig {
             participant_id: Some(brian),
             sequencer_tx: Some(seq_tx),
             ..fast_cfg("hands")
@@ -2328,7 +2328,7 @@ mod tests {
         let (storage, state) = setup().await;
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let flag = Arc::new(AtomicBool::new(false));
-        let cfg = DuoConfig {
+        let cfg = PumpConfig {
             in_atomic_tool: Some(Arc::clone(&flag)),
             ..fast_cfg("hands")
         };
@@ -2384,7 +2384,7 @@ mod tests {
         let (storage, state) = setup().await;
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let flag = Arc::new(AtomicBool::new(false));
-        let cfg = DuoConfig {
+        let cfg = PumpConfig {
             in_atomic_tool: Some(Arc::clone(&flag)),
             ..fast_cfg("hands")
         };
@@ -2437,7 +2437,7 @@ mod tests {
         let (storage, state) = setup().await; // default phase = Investigate
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let (self_tx, mut self_rx) = mpsc::channel(8);
-        let cfg = DuoConfig {
+        let cfg = PumpConfig {
             self_input_tx: Some(crate::agents::ParticipantInput::new("s1", self_tx)),
             ..fast_cfg("hands")
         };
@@ -2478,7 +2478,7 @@ mod tests {
         state.lock().await.current_phase = IpavPhase::Apply;
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let (self_tx, mut self_rx) = mpsc::channel(8);
-        let cfg = DuoConfig {
+        let cfg = PumpConfig {
             self_input_tx: Some(crate::agents::ParticipantInput::new("s1", self_tx)),
             ..fast_cfg("hands")
         };
@@ -2706,7 +2706,7 @@ mod tests {
         let (storage, state) = setup().await;
         let bridge = SignalingBridge::new();
         bridge.set_storage(storage.clone()).await;
-        let cfg = DuoConfig {
+        let cfg = PumpConfig {
             bridge: Some(Arc::clone(&bridge)),
             ..fast_cfg("hands") // no router_tx
         };

@@ -10,7 +10,7 @@ pub mod activity;
 mod broadcast;
 pub mod mentions;
 pub mod close_learnings;
-pub mod duo;
+pub mod pump;
 pub mod ipav;
 pub mod sequencer;
 pub mod session;

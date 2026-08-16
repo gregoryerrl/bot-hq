@@ -136,7 +136,7 @@ D15 epilogue, phase advance, tray answers, Stage.
 |---|---|---|
 | `src/core/mod.rs` | module list (doc still says "duo coordination") | S |
 | `src/core/sequencer.rs` | the ring: `run_sequencer`, `SequencerCommand`, `advance_turn`, `start_turn`/`hand_turn_to`, `deliver_backlog`, consensus/spin/cap/all-pass/Stage yields, `TurnEnding` — the 600-line module doc is a design diary, not current behaviour | XL |
-| `src/core/duo.rs` | `pump_agent` + `DuoConfig`: rows, boot rows, provider-limit/error-streak halts, pass row, epoch bind + `TurnComplete` mint | XL |
+| `src/core/pump.rs` | `pump_agent` + `PumpConfig`: rows, boot rows, provider-limit/error-streak halts, pass row, epoch bind + `TurnComplete` mint | XL |
 | `src/core/activity.rs` | `ActivityTracker` (per-slug busy map + latches) → `SessionActivity` + `session:activity` emit | L |
 | `src/core/state.rs` | `AppState`: open/ensure/restart, cancel→interrupt→SIGKILL, resume, `close_session` + epilogue + `teardown_session`, `broadcast`, `send_user_response`, Stage, `advance_phase`, `resolve_choice`, `halt_declared` | XL |
 | `src/core/broadcast.rs` | `broadcast_user_message`: envelope + `post_to_channel("user")`; writes no stdin (D19) | S |
@@ -466,7 +466,7 @@ blocking predicate ↔ hook query), 21 (CL index after write), 30 (boot sweeps).
 2026-08-12; re-stamp is the sanctioned escape) and the memory note on edited
 migrations. `sessions.{brian,rain}_*`, `messages.author`, `rain_enabled` are
 DELIBERATE frozen legacy (deferred drop). Heaviest callers: `src/core/sequencer.rs`,
-`src/signaling/bridge/tray.rs`, `src/core/duo.rs`.
+`src/signaling/bridge/tray.rs`, `src/core/pump.rs`.
 
 **Tests pin.** ring order/skip rules, done-vote reset, roster byte-parity, prose
 migration provenance (0046/0048/0049 oracles), delivery/cursor invariants, 200-row
@@ -772,7 +772,7 @@ registry).
    `HaltsCleared`) → `notify_ring_user_message` → `SequencerCommand::UserMessage`
    → `advance_turn` → `hand_turn_to` (`set_current_turn`, busy) → `deliver_backlog`
    → `deliver_batch` (`src/agents/spawn.rs`) → stdin → agent → stream-json →
-   `pump_agent` (`src/core/duo.rs`) → `post_to_channel` row + `notify_message_persisted`
+   `pump_agent` (`src/core/pump.rs`) → `post_to_channel` row + `notify_message_persisted`
    → `bridge_subscriber` → `BatchEmitter` → `agent:messages:batch` → `ChatPane`.
    Stage: `stage_user_response` holds the text in `AppState` memory →
    `MessageStaged` → boundary → `StagedDeliveryDue` → main.rs → `deliver_staged`.
@@ -825,7 +825,7 @@ half does not count. Details, evidence and the cheapest pins are in
 | 8 | ring step → deal → persist (F ↔ B1) | `next_active_participant` → `hand_turn_to` → `set_current_turn`/`set_round_number` | PINNED end to end |
 | 9 | deal → stdin → commit (B1 → A → F) | `deliver_backlog` → `deliver_batch` → `commit_delivery` | PINNED; failure path is `warn!` only (no event, no row) |
 | 10 | pump → row → UI (B1 → C2 → G → J) | `notify_persisted` → `route` → `BatchEmitter` → `agent:messages:batch` | pump→notify UNPINNED; downstream PINNED |
-| 11 | epoch cell shared by pump and ring (B2 wiring) | `deps.epochs[p.id]` vs `DuoConfig.turn_epoch` per slot | **UNPINNED join** — a mis-pairing wedges the ring after turn 1 |
+| 11 | epoch cell shared by pump and ring (B2 wiring) | `deps.epochs[p.id]` vs `PumpConfig.turn_epoch` per slot | **UNPINNED join** — a mis-pairing wedges the ring after turn 1 |
 | 12 | `ask_user_choice` park → answer → OOB row → ring (C1 → C2 → F → J → B1) | `ask_user_choice_inner`, `resolve_choice_confirmable`, `deliver_oob`, `user_responded` | PINNED at the bridge; core hop pinned by source-grep only |
 | 13 | halt declare/clear (C2 → F → G → J; clear in B1) | `emit_halt_row`, `declare_session_halt`, `halt_declared` (main.rs), `user_responded` | bridge→ring PINNED; main.rs interrupt hop UNPINNED; clear pinned by grep only |
 | 14 | approval gate latch/lift (C2 ↔ B1) | `notify_ring_gate(true/false)`, `count_pending_gates` seed | open PINNED; **LIFT UNPINNED** — cut ⇒ ring deals nothing after the first approval |

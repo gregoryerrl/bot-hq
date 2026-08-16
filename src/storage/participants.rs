@@ -1937,7 +1937,7 @@ pub struct PersistedMessage {
     /// point that knows both ids. The field buys detection; that check is what
     /// makes it prevention.
     ///
-    /// `Arc<str>` rather than `String` to match `DuoConfig::session_id` and the
+    /// `Arc<str>` rather than `String` to match `PumpConfig::session_id` and the
     /// `MessagePersisted` / `BatchEmitter` threading this will flow into.
     session_id: Arc<str>,
     body: String,
@@ -2110,7 +2110,7 @@ impl Storage {
         envelope: Option<Envelope>,
     ) -> Result<PersistedMessage> {
         // `impl Into<Arc<str>>` so a caller already holding one — Task 3's do,
-        // from `DuoConfig::session_id` — passes a refcount bump instead of
+        // from `PumpConfig::session_id` — passes a refcount bump instead of
         // deref-ing to `&str` and re-allocating. To be clear about the size of
         // the win: a ~36-byte copy next to a SQLite INSERT is noise. This is
         // consistency with the ownership argument above, not a perf claim, and

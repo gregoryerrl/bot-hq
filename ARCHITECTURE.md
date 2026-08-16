@@ -98,7 +98,7 @@ loop, in-process, opted into per saved model, EYES-only. It was deleted
 outright rather than feature-flagged, because a second runtime nobody builds
 still costs every reviewer a re-read and every refactor a second case. What
 made the deletion cheap is what made the loop additive in the first place:
-`AgentHandle` is a pure channel struct — `core/duo.rs`, `core/sequencer.rs`, the
+`AgentHandle` is a pure channel struct — `core/pump.rs`, `core/sequencer.rs`, the
 policy layer, the UI event path and the context meter speak only `AgentEvent`
 and `OutgoingUserMessage` — so nothing downstream ever knew which backend it
 had, and nothing downstream changed when one went away.
@@ -218,7 +218,7 @@ policy block in layer 6).
 
 **One participant holds the turn at a time.** `src/core/sequencer.rs` runs a
 fixed rotation over the session's ACTIVE participants in `turn_position` order;
-`on_mention` participants are skipped rather than handed a no-op turn. Each participant's pump (`src/core/duo.rs::pump_agent`) reports
+`on_mention` participants are skipped rather than handed a no-op turn. Each participant's pump (`src/core/pump.rs::pump_agent`) reports
 `SequencerCommand::TurnComplete` when its turn ends — on BOTH the substantive and
 the errored branch, because the ring steps on the completion, not on the text.
 

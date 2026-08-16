@@ -867,7 +867,7 @@ pub struct SequencerDeps {
     pub data_dir: Option<PathBuf>,
     /// Where the capped halt's row is announced, so the UI refreshes on it.
     ///
-    /// Optional for the same reason [`crate::core::duo::DuoConfig`]'s is: the
+    /// Optional for the same reason [`crate::core::pump::PumpConfig`]'s is: the
     /// unit tests have no bridge, and a missed notification costs a row the
     /// user sees on their next refetch rather than immediately. The ROW is
     /// posted either way — that is the half D7 requires, and it does not depend

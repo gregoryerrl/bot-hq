@@ -5,7 +5,7 @@
 //! and registers the session in `AppState`.
 
 use crate::agents::{spawn_supervised_agent, AgentHandle, RetryPolicy, SpawnConfig};
-use crate::core::duo::{pump_agent, DuoConfig};
+use crate::core::pump::{pump_agent, PumpConfig};
 use crate::core::ipav::{IpavPhase, IpavState};
 use crate::paths::Paths;
 use crate::signaling::{
@@ -986,7 +986,7 @@ async fn spawn_session_handle(
     // the participant row.
     for ((slot, p), events) in live.iter().enumerate().zip(event_rxs) {
         let caps = participant_capabilities(p);
-        let cfg = DuoConfig {
+        let cfg = PumpConfig {
             sequencer_tx: sequencer_tx.clone(),
             turn_epoch: turn_epochs[slot].clone(),
             bridge: Some(Arc::clone(&bridge)),
@@ -1002,7 +1002,7 @@ async fn spawn_session_handle(
                 .grants(crate::agents::Capability::EditFiles)
                 .then(|| handles[slot].input().clone()),
             edits_files: caps.grants(crate::agents::Capability::EditFiles),
-            // rc3 D21 — orientation is not a turn. See `DuoConfig::booting`.
+            // rc3 D21 — orientation is not a turn. See `PumpConfig::booting`.
             booting: Some(Arc::clone(&booting)),
             boot_done: Some(boot_done_tx.clone()),
             // The pump identifies its participant by `slug`, and always did
@@ -1011,7 +1011,7 @@ async fn spawn_session_handle(
             // bilateral forward, slot 1 the `Rain` side — which was constructed
             // per pump, per session, and read by nothing once task 14 deleted
             // the router.
-            ..DuoConfig::new(session.id.clone(), p.slug.clone())
+            ..PumpConfig::new(session.id.clone(), p.slug.clone())
         };
         let storage_clone = storage.clone();
         let ipav_clone = Arc::clone(&ipav);

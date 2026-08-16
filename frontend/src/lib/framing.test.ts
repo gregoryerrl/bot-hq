@@ -54,25 +54,33 @@ describe("user-facing framing", () => {
   }) as Record<string, string>;
 
   /**
-   * Two files, each for a reason that is a property of the file rather than a
-   * judgement about its contents — which is what keeps this from being the
-   * sanctioned-absence list that rots into permission for the next one.
+   * THREE exemptions, each for a reason that is a property of the file rather
+   * than a judgement about its contents — which is what keeps this from being
+   * the sanctioned-absence list that rots into permission for the next one.
+   * All three are named here; an unstated exemption is the one that rots.
    *
-   * - `bindings.ts` is GENERATED from Rust at app launch and is `@ts-nocheck`.
-   *   Its content is the wire, which keeps the retired names deliberately (the
-   *   external driver's fields); an edit here is overwritten on next launch.
-   * - `framing.ts` DEFINES the pattern, so it necessarily spells the words it
+   * - `*.test.ts(x)` — a test file is never rendered to a screen. A component
+   *   whose string regresses is still caught in the COMPONENT, even when its
+   *   own test asserts the new text, so sweeping tests would only flag the
+   *   fixtures that quote the old wording on purpose. (This one was a silent
+   *   filter in the predicate below until the reviewer named it.)
+   * - `bindings.ts` — GENERATED from Rust at app launch and `@ts-nocheck`. Its
+   *   content is the wire, which keeps the retired names deliberately (the
+   *   external driver's fields), and no human can author a regression into it:
+   *   an edit here is overwritten on next launch. The exemption cannot become
+   *   a hiding place.
+   * - `framing.ts` — DEFINES the pattern, so it necessarily spells the words it
    *   searches for. Building the regex from fragments to slip past its own
    *   check would be rewording around the gate — the exact move the general
-   *   rules forbid — so the exemption is stated instead of hidden.
+   *   rules forbid — so the exemption is stated where it is auditable instead
+   *   of hidden in a clever regex.
    */
-  const EXEMPT = ["bindings.ts", "framing.ts"];
+  const EXEMPT_FILES = ["bindings.ts", "framing.ts"];
+  const isExempt = (p: string) =>
+    /\.test\.tsx?$/.test(p) || EXEMPT_FILES.some((e) => p.endsWith(`/${e}`));
 
   it("no rendered string names a retired agent or assumes a pair", () => {
-    const files = Object.keys(SOURCES).filter(
-      (p) =>
-        !/\.test\.tsx?$/.test(p) && !EXEMPT.some((e) => p.endsWith(`/${e}`)),
-    );
+    const files = Object.keys(SOURCES).filter((p) => !isExempt(p));
     // The sweep is only meaningful if it actually walked the tree; an empty
     // file list would pass silently and pin nothing.
     expect(files.length).toBeGreaterThan(40);
