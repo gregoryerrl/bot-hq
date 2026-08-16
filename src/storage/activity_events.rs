@@ -18,8 +18,8 @@ impl Storage {
         &self,
         session_id: &str,
         state: &str,
-        brian_busy: bool,
-        rain_busy: bool,
+        slot0_busy: bool,
+        slot1_busy: bool,
     ) -> Result<i64> {
         let res = sqlx::query(
             "INSERT INTO activity_events \
@@ -29,8 +29,8 @@ impl Storage {
         .bind(session_id)
         .bind(now_utc())
         .bind(state)
-        .bind(brian_busy as i64)
-        .bind(rain_busy as i64)
+        .bind(slot0_busy as i64)
+        .bind(slot1_busy as i64)
         .execute(&self.pool)
         .await
         .with_context(|| format!("recording activity event for {session_id}"))?;
@@ -44,7 +44,15 @@ impl Storage {
         &self,
         session_id: Option<&str>,
     ) -> Result<Vec<ActivityEvent>> {
-        const COLS: &str = "id, session_id, recorded_at, state, brian_busy, rain_busy";
+        // **The SQL names the LIVE columns and ALIASES them to the struct
+        // fields.** `brian_busy`/`rain_busy` are what the table still has;
+        // migration 0060 renames them to match, and this line loses the
+        // aliases then. Renaming the Rust field ahead of the column is what
+        // broke four tests during the D10 retirement — the schema and its
+        // readers have to move together, which is why the migration is its
+        // own batch.
+        const COLS: &str = "id, session_id, recorded_at, state, \
+             brian_busy AS slot0_busy, rain_busy AS slot1_busy";
         let rows = match session_id {
             Some(sid) => {
                 sqlx::query_as::<_, ActivityEvent>(&format!(
@@ -116,12 +124,12 @@ mod tests {
         assert_eq!(rows.len(), 3, "other sessions must not leak in");
         // Newest-first.
         assert_eq!(rows[0].state, "awaiting_user");
-        assert_eq!(rows[0].brian_busy, 0);
+        assert_eq!(rows[0].slot0_busy, 0);
         // The middle row is the one a state-change-only trigger would have
         // dropped — and without it the latest awaiting_user row would still
-        // claim brian_busy = 1 after he stopped.
+        // claim slot0_busy = 1 after that participant stopped.
         assert_eq!(rows[1].state, "awaiting_user");
-        assert_eq!(rows[1].brian_busy, 1);
+        assert_eq!(rows[1].slot0_busy, 1);
         assert_eq!(rows[2].state, "busy");
 
         let all = s.list_activity_events(None).await.unwrap();

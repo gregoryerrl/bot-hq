@@ -1989,7 +1989,7 @@ provenance: ProjectProvenance }
  * during the respawn window before the React listeners mount (Bug C: footer /
  * tiles / input-indicator left stale until the next transition). snake_case
  * return (mirrors `SessionInfo`); React reads `session_id`/`activity`/
- * `brian_health`/`rain_health`.
+ * `slot0_health`/`slot1_health`.
  */
 export type SessionRuntime = { session_id: string; activity: string; 
 /**
@@ -2004,7 +2004,7 @@ export type SessionRuntime = { session_id: string; activity: string;
  * keep these names only until the session view that consumes them is
  * rewritten.
  */
-brian_busy: boolean; rain_busy: boolean; brian_health: string | null; rain_health: string | null; 
+slot0_busy: boolean; slot1_busy: boolean; slot0_health: string | null; slot1_health: string | null; 
 /**
  * Idle-unflagged attention state ("idle_unflagged" or None = clear).
  * Seeds the "needs direction" chip on mount; live updates arrive via

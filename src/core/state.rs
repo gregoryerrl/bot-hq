@@ -453,7 +453,7 @@ impl AppState {
         deferred_ms: u64,
         deferral_capped: bool,
     ) {
-        let (activity, cancel_superseded, brian_queued, rain_queued) = {
+        let (activity, cancel_superseded, hands_queued, eyes_queued) = {
             let sessions = self.sessions.lock().await;
             let Some(handle) = sessions.get(session_id) else {
                 return; // session gone → nothing to cancel
@@ -474,25 +474,25 @@ impl AppState {
             // role-derived slugs that predicate matched EVERY agent, so the
             // executor would have been interrupted first, mid-tool. `None` =
             // this session has no non-mutating peer.
-            let mut rain_queued: Option<bool> = None;
+            let mut eyes_queued: Option<bool> = None;
             for agent in handle.agents().filter(|a| !a.edits_files()) {
                 let queued = agent.handle.interrupt("cancel");
                 if !queued {
                     tracing::warn!(session_id, slug = %agent.slug, "cancel: peer interrupt was NOT queued");
                 }
-                rain_queued = Some(rain_queued.unwrap_or(true) && queued);
+                eyes_queued = Some(eyes_queued.unwrap_or(true) && queued);
             }
-            let brian_queued = handle
+            let hands_queued = handle
                 .hands()
                 .is_some_and(|h| h.handle.interrupt("cancel"));
-            if !brian_queued {
+            if !hands_queued {
                 tracing::warn!(session_id, "cancel: HANDS interrupt was NOT queued");
             }
             (
                 Arc::clone(&handle.activity),
                 Arc::clone(&handle.cancel_superseded),
-                brian_queued,
-                rain_queued,
+                hands_queued,
+                eyes_queued,
             )
         };
 
@@ -511,8 +511,8 @@ impl AppState {
             settled_at: crate::storage::now_utc(),
             deferred_ms: deferred_ms as i64,
             deferral_capped,
-            brian_interrupt_queued: Some(brian_queued),
-            rain_interrupt_queued: rain_queued,
+            brian_interrupt_queued: Some(hands_queued),
+            rain_interrupt_queued: eyes_queued,
             both_idle,
             cancel_superseded: superseded,
             idled_since_cancel: idled,

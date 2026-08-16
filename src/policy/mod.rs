@@ -402,7 +402,7 @@ pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<()> {
 
 /// True iff `needle` occurs in `haystack` bounded by non-word chars on both
 /// edges — regex `\b{needle}\b` semantics, where a word char is `[A-Za-z0-9_]`
-/// (so `_` IS a word char: `rain` does not match "rain_check"). Case-INsensitive.
+/// (so `_` IS a word char: `rain` does not match "eyes_check"). Case-INsensitive.
 /// An empty needle never matches.
 ///
 /// `match_indices` yields the byte offset where `needle` starts; that offset and
@@ -709,7 +709,7 @@ mod tests {
             "it was raining earlier",
             "wire up AcmeConfig.tsx",
             "the AcmeOverrides store",
-            "rain_check is a word char boundary", // `_` is a word char
+            "eyes_check is a word char boundary", // `_` is a word char
         ] {
             assert_eq!(p.first_forbidden_word(ok), None, "should NOT trip: {ok:?}");
         }
@@ -732,7 +732,7 @@ mod tests {
         assert!(contains_word("rain.", "rain"));
         assert!(!contains_word("constraint", "rain"));
         assert!(!contains_word("AcmeConfig", "Acme"));
-        assert!(!contains_word("rain_check", "rain")); // `_` is a word char
+        assert!(!contains_word("eyes_check", "rain")); // `_` is a word char
         assert!(contains_word("bot-hq is here", "bot-hq")); // hyphen edges are boundaries
         assert!(!contains_word("anything", "")); // empty needle never matches
     }

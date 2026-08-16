@@ -176,7 +176,7 @@ describe("SessionView turn-status line (rc3 D10)", () => {
     // prop could be deleted with the suite still green).
     //
     // The key is a SLOT key because that is what `session:activity` produces:
-    // `brian_busy` / `rain_busy` are frozen wire naming turn slots 0 and 1
+    // `slot0_busy` / `slot1_busy` are frozen wire naming turn slots 0 and 1
     // (`src/core/activity.rs` fills them from `slugs.get(0)` / `.get(1)`).
     useActivityStore.setState({
       bySession: { s1: "busy" },
@@ -207,7 +207,7 @@ describe("SessionView turn-status line (rc3 D10)", () => {
 describe("SessionView health dots + context meters (rc3 D10)", () => {
   it("finds a participant's runtime state under EITHER key the backend emits", async () => {
     // The two halves disagreed silently. `get_session_runtime`'s
-    // `brian_health` / `rain_health` are SLOT-shaped (filled from
+    // `slot0_health` / `slot1_health` are SLOT-shaped (filled from
     // `handle.participants.get(0)` / `.get(1)`), while the live
     // `session:agent_health` event keys by the participant's own slug. A
     // lookup keyed to one space alone leaves the other blank — and a blank dot

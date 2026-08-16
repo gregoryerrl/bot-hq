@@ -744,7 +744,7 @@ pub(crate) async fn dispatch_session_inner(
     // the caller pins it (the `plugin_sessions` create arm, the external
     // driver) or from the product default below.
     //
-    // **This was `rain_override: Option<bool>`** (round-2 audit B3). A boolean
+    // **This was `eyes_override: Option<bool>`** (round-2 audit B3). A boolean
     // cannot express rc3's roster, and `true` meant "seed every active role" —
     // so both non-dialog creation paths asked for a pair and got whatever
     // number of roles existed. Callers name a count now; the value is clamped
@@ -838,7 +838,7 @@ pub async fn get_session(
 /// during the respawn window before the React listeners mount (Bug C: footer /
 /// tiles / input-indicator left stale until the next transition). snake_case
 /// return (mirrors `SessionInfo`); React reads `session_id`/`activity`/
-/// `brian_health`/`rain_health`.
+/// `slot0_health`/`slot1_health`.
 #[derive(Debug, Clone, Serialize, Type)]
 pub struct SessionRuntime {
     pub session_id: String,
@@ -853,10 +853,10 @@ pub struct SessionRuntime {
     /// rest here — `list_session_participants` is the roster-shaped read. They
     /// keep these names only until the session view that consumes them is
     /// rewritten.
-    pub brian_busy: bool,
-    pub rain_busy: bool,
-    pub brian_health: Option<String>,
-    pub rain_health: Option<String>,
+    pub slot0_busy: bool,
+    pub slot1_busy: bool,
+    pub slot0_health: Option<String>,
+    pub slot1_health: Option<String>,
     /// Idle-unflagged attention state ("idle_unflagged" or None = clear).
     /// Seeds the "needs direction" chip on mount; live updates arrive via
     /// `session:attention`.
@@ -879,10 +879,10 @@ pub async fn get_session_runtime(
         out.push(SessionRuntime {
             session_id: id.clone(),
             activity: handle.activity.current().as_str().to_string(),
-            brian_busy: slot(0).is_some_and(|s| handle.activity.is_busy_slug(s)),
-            rain_busy: slot(1).is_some_and(|s| handle.activity.is_busy_slug(s)),
-            brian_health: slot(0).and_then(|s| core.bridge.current_agent_health(id, s)),
-            rain_health: slot(1).and_then(|s| core.bridge.current_agent_health(id, s)),
+            slot0_busy: slot(0).is_some_and(|s| handle.activity.is_busy_slug(s)),
+            slot1_busy: slot(1).is_some_and(|s| handle.activity.is_busy_slug(s)),
+            slot0_health: slot(0).and_then(|s| core.bridge.current_agent_health(id, s)),
+            slot1_health: slot(1).and_then(|s| core.bridge.current_agent_health(id, s)),
             attention: core.bridge.current_session_attention(id),
         });
     }

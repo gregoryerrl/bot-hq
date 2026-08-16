@@ -51,7 +51,8 @@ impl SessionActivity {
     /// the commanded state is Paused); `awaiting` wins over `busy` so a parked
     /// question re-opens input even though a turn is technically still in flight.
     ///
-    /// B4b: took `brian_busy, rain_busy` before the participant rekey. The
+    /// B4b: took `brian_busy, rain_busy` before the participant rekey (those
+    /// were the field names then; they are `slot0_busy`/`slot1_busy` now). The
     /// collapse to `any_busy` is what makes this N-participant-shaped — and it
     /// is also why per-participant edges must be tracked separately (see
     /// `Inner::per_agent_changed`), since this state cannot express a hand-off.
@@ -76,7 +77,8 @@ impl SessionActivity {
 /// `Busy{rain}` during a peer hand-off).
 struct Inner {
     /// Per-participant busy, keyed by participant **slug**. B4b: was
-    /// `brian_busy` / `rain_busy`.
+    /// `brian_busy` / `rain_busy` — the names of the day, now `slot0_busy` /
+    /// `slot1_busy`.
     ///
     /// Slug, not `participant_id`, on purpose: `set_busy` is slug-keyed and runs
     /// at every turn end, so an id key would force a slug→id lookup on the hot
@@ -408,8 +410,8 @@ impl ActivityTracker {
             g.last = next;
             g.last_busy.clone_from(&g.busy);
             // The wire payload still carries exactly two booleans, derived from
-            // the map. The frontend contract (`SessionRuntime.brian_busy` /
-            // `.rain_busy`) is frozen while the session view is rewritten — a
+            // the map. The frontend contract (`SessionRuntime.slot0_busy` /
+            // `.slot1_busy`) is frozen while the session view is rewritten — a
             // roster-shaped payload here would be a UI change smuggled into a
             // runtime batch, and a parallel unit owns those files.
             //
@@ -421,12 +423,12 @@ impl ActivityTracker {
                     .get(i)
                     .is_some_and(|s| g.busy_of(s))
             };
-            let (brian_busy, rain_busy) = (slot(0), slot(1));
+            let (slot0_busy, slot1_busy) = (slot(0), slot(1));
             self.bridge.notify_session_activity(
                 self.session_id.clone(),
                 next.as_str(),
-                brian_busy,
-                rain_busy,
+                slot0_busy,
+                slot1_busy,
             );
         }
     }
@@ -506,10 +508,10 @@ mod tests {
         match ev {
             SignalingEvent::SessionActivity {
                 state,
-                brian_busy,
-                rain_busy,
+                slot0_busy,
+                slot1_busy,
                 ..
-            } => Some((state, *brian_busy, *rain_busy)),
+            } => Some((state, *slot0_busy, *slot1_busy)),
             _ => None,
         }
     }
@@ -643,9 +645,9 @@ mod tests {
     async fn transitions_are_persisted_including_flag_only_changes() {
         // The reported-bug sequence, and the reason this table records per-agent
         // flag changes and not just derived-state changes: while `awaiting_user`
-        // holds, Brian stopping produces NO state change. If that weren't
-        // recorded, the newest row would still assert brian_busy = 1 long after
-        // he finished, and every query would inherit that stale claim.
+        // holds, slot 0 stopping produces NO state change. If that weren't
+        // recorded, the newest row would still assert slot0_busy = 1 long after
+        // that participant finished, and every query would inherit the stale claim.
         let bridge = SignalingBridge::new();
         let storage = crate::storage::Storage::memory().await.unwrap();
         storage.create_session("s1", "One", None).await.unwrap();
@@ -671,7 +673,7 @@ mod tests {
         let seq: Vec<(String, i64)> = rows
             .iter()
             .rev() // list is newest-first; read it forwards
-            .map(|r| (r.state.clone(), r.brian_busy))
+            .map(|r| (r.state.clone(), r.slot0_busy))
             .collect();
         assert_eq!(
             seq,

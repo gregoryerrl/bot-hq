@@ -129,8 +129,8 @@ import { UNKNOWN_PARTICIPANT } from "./participantNames";
  * The key a SLOT-SHAPED runtime field lands under.
  *
  * Two of the backend's runtime payloads are still shaped as a fixed pair —
- * `SessionActivityEvent { brian_busy, rain_busy }` and
- * `SessionRuntime { brian_health, rain_health }`. Those field names are frozen
+ * `SessionActivityEvent { slot0_busy, slot1_busy }` and
+ * `SessionRuntime { slot0_health, slot1_health }`. Those field names are frozen
  * wire that names **turn slots, not agents**: `src/core/activity.rs` fills them
  * from `slugs.get(0)` / `slugs.get(1)`, and `src/tauri_cmd/sessions.rs` from
  * `handle.participants.get(0)` / `.get(1)`.

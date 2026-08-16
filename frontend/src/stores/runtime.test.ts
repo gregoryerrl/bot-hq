@@ -36,7 +36,7 @@ describe("busyBySlot — the frozen pair, unpacked once", () => {
   // the pair is unpacked, so the live event and the backfill cannot key the
   // same session two different ways.
   it("keys the pair by turn slot, never by an agent name", () => {
-    const busy = busyBySlot({ brian_busy: true, rain_busy: false });
+    const busy = busyBySlot({ slot0_busy: true, slot1_busy: false });
     expect(busy).toEqual({ "#slot0": true, "#slot1": false });
     expect(Object.keys(busy)).not.toContain("brian");
     expect(Object.keys(busy)).not.toContain("rain");
@@ -46,7 +46,7 @@ describe("busyBySlot — the frozen pair, unpacked once", () => {
     // The wire, end to end: the event payload goes in, and the label the status
     // line prints comes out — via the same index the chat byline uses. Cutting
     // either half (the unpack keys, or the label index's slot entries) fails.
-    const busy = busyBySlot({ brian_busy: false, rain_busy: true });
+    const busy = busyBySlot({ slot0_busy: false, slot1_busy: true });
     const labels = participantLabelIndex(ROSTER);
     const working = Object.keys(busy).filter((k) => busy[k]);
     expect(working.map((k) => authorLabel(k, labels))).toEqual([
@@ -66,19 +66,19 @@ describe("seedRuntimeStores", () => {
       {
         session_id: "s1",
         activity: "busy",
-        brian_busy: true,
-        rain_busy: false,
-        brian_health: "running",
-        rain_health: "retrying",
+        slot0_busy: true,
+        slot1_busy: false,
+        slot0_health: "running",
+        slot1_health: "retrying",
         attention: "idle_unflagged",
       },
       {
         session_id: "s2",
         activity: "awaiting_user",
-        brian_busy: false,
-        rain_busy: false,
-        brian_health: "dead",
-        rain_health: null,
+        slot0_busy: false,
+        slot1_busy: false,
+        slot0_health: "dead",
+        slot1_health: null,
         attention: null,
       },
     ];
@@ -105,7 +105,7 @@ describe("seedRuntimeStores", () => {
     // No agent name reaches the store as a key.
     expect(setHealth).not.toHaveBeenCalledWith("s1", "brian", expect.anything());
     expect(setHealth).not.toHaveBeenCalledWith("s1", "rain", expect.anything());
-    // s2.rain_health is null → no setHealth call for slot 1.
+    // s2.slot1_health is null → no setHealth call for slot 1.
     expect(setHealth).not.toHaveBeenCalledWith(
       "s2",
       slotKey(1),
@@ -126,10 +126,10 @@ describe("seedRuntimeStores", () => {
         {
           session_id: "s1",
           activity: "busy",
-          brian_busy: true,
-          rain_busy: false,
-          brian_health: "stalled",
-          rain_health: "dead",
+          slot0_busy: true,
+          slot1_busy: false,
+          slot0_health: "stalled",
+          slot1_health: "dead",
           attention: null,
         },
       ],

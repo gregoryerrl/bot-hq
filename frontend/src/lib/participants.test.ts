@@ -119,7 +119,7 @@ describe("authorLabel", () => {
 
 describe("the two runtime key spaces", () => {
   // Two of the backend's runtime payloads are a frozen fixed pair naming TURN
-  // SLOTS (`SessionActivityEvent.brian_busy` / `SessionRuntime.brian_health`,
+  // SLOTS (`SessionActivityEvent.slot0_busy` / `SessionRuntime.slot0_health`,
   // filled from `slugs.get(0)` / `participants.get(0)`), while the live
   // `session:agent_health` / `session:agent_context` events key by the
   // participant's slug. Both have to reach the same participant.
@@ -254,7 +254,7 @@ describe("spawnSlotOf — a slot is a place in the SPAWNABLE roster", () => {
   });
 
   it("does not hand one participant's runtime state to another", () => {
-    // The defect in one assertion: the backfill reports `brian_health` for its
+    // The defect in one assertion: the backfill reports `slot0_health` for its
     // slot 0, which here is EYES. Reading by turn position showed it on the
     // disabled row and left EYES blank.
     const roster = [{ ...hands, enabled: false }, eyes];

@@ -4475,7 +4475,7 @@ mod tests {
 
         // Rain's backlog is the mirror image — the filter is per participant,
         // not a blanket "drop participant rows".
-        let rain_unread: Vec<i64> = s
+        let eyes_unread: Vec<i64> = s
             .unread_for_participant(rain)
             .await
             .unwrap()
@@ -4484,7 +4484,7 @@ mod tests {
             .map(|m| m.id)
             .collect();
         assert_eq!(
-            rain_unread,
+            eyes_unread,
             vec![
                 by_brian.message_id(),
                 by_user.message_id(),

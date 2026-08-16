@@ -11,10 +11,10 @@ import { slotKey } from "../lib/participants";
 export interface SessionRuntime {
   session_id: string;
   activity: string;
-  brian_busy: boolean;
-  rain_busy: boolean;
-  brian_health: string | null;
-  rain_health: string | null;
+  slot0_busy: boolean;
+  slot1_busy: boolean;
+  slot0_health: string | null;
+  slot1_health: string | null;
   attention: string | null;
 }
 
@@ -23,7 +23,7 @@ export interface SessionRuntime {
  *
  * **The single place the frozen pair is unpacked.** Both producers of a busy
  * map are this shape — the live `session:activity` event
- * (`SessionActivityEvent { brian_busy, rain_busy }`, filled in
+ * (`SessionActivityEvent { slot0_busy, slot1_busy }`, filled in
  * `src/core/activity.rs` from `slugs.get(0)` / `.get(1)`) and the
  * `get_session_runtime` backfill below — and both go through here, so they
  * cannot land under different keys and leave the turn-status line resolving one
@@ -40,10 +40,10 @@ export interface SessionRuntime {
  * store, so they fail when the wire is cut rather than when the unpacker is.
  */
 export function busyBySlot(p: {
-  brian_busy: boolean;
-  rain_busy: boolean;
+  slot0_busy: boolean;
+  slot1_busy: boolean;
 }): AgentBusy {
-  return { [slotKey(0)]: p.brian_busy, [slotKey(1)]: p.rain_busy };
+  return { [slotKey(0)]: p.slot0_busy, [slotKey(1)]: p.slot1_busy };
 }
 
 /** Seed the event-driven activity + health stores from a one-shot runtime
@@ -65,10 +65,10 @@ export function seedRuntimeStores(
     // blanked every health dot after a restart: no rc3 roster has those slugs,
     // so `SessionView`'s per-participant lookup missed every entry this seeded.
     setActivity(r.session_id, r.activity as SessionActivity, busyBySlot(r));
-    if (r.brian_health)
-      setHealth(r.session_id, slotKey(0), r.brian_health as AgentHealth);
-    if (r.rain_health)
-      setHealth(r.session_id, slotKey(1), r.rain_health as AgentHealth);
+    if (r.slot0_health)
+      setHealth(r.session_id, slotKey(0), r.slot0_health as AgentHealth);
+    if (r.slot1_health)
+      setHealth(r.session_id, slotKey(1), r.slot1_health as AgentHealth);
     // Null = clear — pass it through so a stale pre-reload chip resets.
     if (setAttention) setAttention(r.session_id, r.attention ?? null);
   }

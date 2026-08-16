@@ -281,7 +281,7 @@ mod tests {
     /// `core::session::tests::the_composed_eyes_prompt_carries_observations_only
     /// _and_the_tool_inventory`; this is the constant half.
     #[test]
-    fn rain_carries_the_observations_only_rule() {
+    fn eyes_carries_the_observations_only_rule() {
         assert!(
             EYES_ROLE.contains("## Observations only"),
             "EYES lost the observations-only rule"
@@ -404,13 +404,13 @@ mod tests {
     }
 
     #[test]
-    fn brian_mentions_ask_close() {
+    fn hands_mentions_ask_close() {
         assert!(HANDS_ROLE.contains("Close session"));
         assert!(HANDS_ROLE.contains("ask_user_choice"));
     }
 
     #[test]
-    fn brian_carries_terminal_evidence_guidance() {
+    fn hands_carries_terminal_evidence_guidance() {
         assert!(HANDS_ROLE.contains("Session terminal — visible evidence"));
         assert!(HANDS_ROLE.contains("terminal_exec"));
         assert!(HANDS_ROLE.contains("for the user to SEE"));
@@ -426,7 +426,7 @@ mod tests {
     /// `core::session::tests::role_deny_prose_removed_from_the_constant_is_regenerated_by_layer_2`,
     /// which composes a real prompt rather than reading a constant.
     #[test]
-    fn rain_carries_terminal_read_guidance() {
+    fn eyes_carries_terminal_read_guidance() {
         assert!(EYES_ROLE.contains("terminal_read"));
         assert!(EYES_ROLE.contains("independently verify what actually ran"));
         // `terminal_exec` is still NAMED above, as the thing whose output
@@ -451,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_does_not_have_user_tools() {
+    fn eyes_does_not_have_user_tools() {
         // Defensive: if someone copies the close-prompt block into Rain by
         // mistake, the HANDS-only gate at the jsonrpc layer will reject the
         // call anyway, but the prompt should match the gate.
@@ -468,7 +468,7 @@ mod tests {
     /// runtime-independent and those spellings are not. Only the constant can
     /// say `Edit`, so the constant says it — see the module header.
     #[test]
-    fn rain_explicitly_forbids_mutating_tools() {
+    fn eyes_explicitly_forbids_mutating_tools() {
         // The whole bullet, because the pre-0048 version of this test asserted
         // bare `Edit` and `Write` and those two are also named in `## Re-sync
         // from the tree` — so only `NotebookEdit` was ever load-bearing here.
@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_allows_read_only_bash() {
+    fn eyes_allows_read_only_bash() {
         // Regression guard: today's session showed Rain ignoring the old
         // "Bash is Brian's, even read-only" rule by running git log/diff/
         // status repeatedly. The pragmatic fix was to allow read-only Bash
@@ -537,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_forbids_state_transition_relays() {
+    fn eyes_forbids_state_transition_relays() {
         // Regression guard for the #374 session observation: Rain emitted
         // "User approved. Go ahead, Brian.", "Standing by for the test
         // results", "Review complete." — heartbeat-style relays of state
@@ -548,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn brian_teaches_question_introspection() {
+    fn hands_teaches_question_introspection() {
         // Retry-duplicate antipattern: on ask_user_choice timeout, Brian
         // would just re-call ask_user_choice repeatedly, accumulating
         // identical pending choices in the tray. Prompt must point him at
@@ -558,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn brian_distinguishes_halt_from_close_ask() {
+    fn hands_distinguishes_halt_from_close_ask() {
         // Today's session showed Brian calling mark_awaiting_user after
         // settled work instead of ask_user_choice("Close session?", ...).
         // The session lingered and accumulated stale questions. The prompt
@@ -569,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn brian_handles_ambiguous_resume_words() {
+    fn hands_handles_ambiguous_resume_words() {
         // Today's session: user typed "proceed" with multiple plausible
         // threads in flight. Brian inferred scope from current working-tree
         // state and missed the prior task framing. Prompt must teach the
@@ -579,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_web_search_guidance_is_conditional_not_blanket() {
+    fn eyes_web_search_guidance_is_conditional_not_blanket() {
         // June-6 #5: the old "Prefer web_search for live lookups" was vague
         // and read as "always search." Sharpened to when-to-search: only when
         // the question reaches outside the repo. Lock the conditional framing
@@ -613,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn brian_owns_one_rewritable_doc_per_phase_and_chains() {
+    fn hands_owns_one_rewritable_doc_per_phase_and_chains() {
         // The CL/IPAV tightening: Brian authors ONE rewritable doc per phase
         // (no plan-v2), and each phase builds on the prior phase's doc.
         assert!(HANDS_ROLE.contains("One doc per phase"));
@@ -623,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_reviews_brian_output_bottom_up() {
+    fn eyes_reviews_brian_output_bottom_up() {
         // June-3 idea, sharpened by the 2026-06-16 duo-survey convergence:
         // Rain reads BOTTOM-UP (tests → error paths → callers → impl →
         // architecture), the inverse of Brian's top-down — but as a REVIEW
@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_verifies_brian_output_not_parallel_rederive() {
+    fn eyes_verifies_brian_output_not_parallel_rederive() {
         // 2026-06-16 duo-survey #2 (converged across both duos): EYES
         // re-deriving the same findings as HANDS in parallel is waste. Rain's
         // primary job is to VERIFY Brian's outputs (plan/diff/conclusions),
@@ -651,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_resyncs_from_tree_before_review() {
+    fn eyes_resyncs_from_tree_before_review() {
         // Rain can't see Brian's tool calls (Edit/Bash/Read) through the peer
         // channel — only prose, and nothing during an awaiting-halt. So before
         // reviewing she re-syncs from source of truth: the apply doc first
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_contributes_to_co_located_eyes_phase_doc() {
+    fn eyes_contributes_to_co_located_eyes_phase_doc() {
         // 2026-06-16 duo-survey: EYES gets a durable voice in the phase tab
         // WITHOUT clobbering Brian's doc — a phase-tagged write from Rain lands
         // in a co-located `<phase>-eyes` doc, not Brian's single per-phase doc.

@@ -1062,7 +1062,7 @@ async fn supervise<S, Fut>(
 /// than by blanket noun, so the read forms fall through to the allowed `Bash`
 /// (deny wins over allow, so a blanket `Bash(gh issue:*)` / `Bash(git branch:*)`
 /// would also kill the reads). These const lists are the single source of truth:
-/// both `build_rain_disallowed_tools` AND the `rain_denies_*` tests iterate them,
+/// both `build_rain_disallowed_tools` AND the `eyes_denies_*` tests iterate them,
 /// so enforcement and its test can't drift. New write verbs go here.
 ///
 /// Mutating `git branch` forms. Read forms (bare / `--show-current` / `-a` / `-r`
@@ -1117,7 +1117,7 @@ fn deny_write_verbs(tool: &str, verbs: &[&str]) -> String {
 /// EYES's `--disallowedTools` value: static denies (Edit/Write/Task + the
 /// full-noun git mutations that have no read form worth preserving) plus the
 /// deny-by-write-verb collections for `git branch` and `gh`. `gh api` is fully
-/// denied — the POST/PATCH/DELETE escape hatch. Covered by the `rain_denies_*`
+/// denied — the POST/PATCH/DELETE escape hatch. Covered by the `eyes_denies_*`
 /// tests, which assert against the same `*_WRITE_VERBS` consts.
 fn build_rain_disallowed_tools() -> String {
     let mut parts: Vec<String> = [
@@ -1340,7 +1340,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // for tools whose read forms we keep (`git branch`, `gh`), so the reads
         // fall through to the allowed `Bash` (deny wins over allow). Verb lists +
         // rationale live on the `*_WRITE_VERBS` consts above; the value is
-        // assembled by `build_rain_disallowed_tools`, and the `rain_denies_*`
+        // assembled by `build_rain_disallowed_tools`, and the `eyes_denies_*`
         // tests assert against the SAME consts so enforcement + test can't drift.
         let disallowed = build_rain_disallowed_tools();
         cmd.args(["--disallowedTools", &disallowed]);
@@ -2321,7 +2321,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_gets_deny_by_default_not_bypass() {
+    fn eyes_gets_deny_by_default_not_bypass() {
         // EYES enforcement: Rain must NOT get bypass mode (which nullifies
         // deny rules); she gets dontAsk + an allowlist + a mutation denylist.
         let c = eyes_cfg();
@@ -2377,7 +2377,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_denies_gh_write_allows_gh_read() {
+    fn eyes_denies_gh_write_allows_gh_read() {
         // Issue (2026-06-05): Rain should keep read-only `gh` (view/list/diff)
         // while every mutating `gh` form stays blocked. Deny wins over allow, so
         // the denylist must NOT contain a blanket `gh <noun>:*` (that would also
@@ -2439,7 +2439,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_denies_git_branch_write_allows_read() {
+    fn eyes_denies_git_branch_write_allows_read() {
         // 2026-06-17 cross-model survey: the blanket `Bash(git branch:*)` deny
         // blocked read-only listing too — DeepSeek-EYES hit 10+ false denials on
         // legit `git branch --show-current`/`-a` reads (incl. compound
@@ -2479,7 +2479,7 @@ mod tests {
     }
 
     #[test]
-    fn brian_still_gets_bypass() {
+    fn hands_still_gets_bypass() {
         // HANDS keeps full power — bypass mode, no allow/deny lists.
         let argv = debug_command(&cfg()); // cfg() is brian
         assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"));
@@ -2493,7 +2493,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_runs_without_bare_so_tool_loader_works() {
+    fn eyes_runs_without_bare_so_tool_loader_works() {
         // Rain must NOT run `--bare`. `--bare` (CLAUDE_CODE_SIMPLE=1) disables
         // claude-code's deferred-tool loader (`ToolSearch`), which left Rain's
         // Grep/Glob/WebFetch/ToolSearch/TodoWrite inert ("exists but is not
@@ -2524,7 +2524,7 @@ mod tests {
     }
 
     #[test]
-    fn brian_gets_tool_gate_pretooluse_hook() {
+    fn hands_gets_tool_gate_pretooluse_hook() {
         let argv = debug_command(&cfg()); // cfg() is brian
         let settings = argv
             .windows(2)
@@ -2547,7 +2547,7 @@ mod tests {
     }
 
     #[test]
-    fn rain_does_not_get_tool_gate_hook() {
+    fn eyes_does_not_get_tool_gate_hook() {
         // The tool-gate PreToolUse hook is injected via --settings in the HANDS
         // (Brian) branch only; Rain is already mechanically read-only via the
         // deny list, so she gets no --settings at all.

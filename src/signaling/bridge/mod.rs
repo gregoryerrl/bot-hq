@@ -207,14 +207,14 @@ pub enum SignalingEvent {
     /// input while `busy`/`cancelling`, re-enables on `idle`/`awaiting_user`.
     /// `state` is the `SessionActivity::as_str` string — carried as a String so
     /// the signaling layer stays decoupled from the core activity enum.
-    /// `brian_busy`/`rain_busy` carry the per-agent busy flags (the derived
+    /// `slot0_busy`/`slot1_busy` carry the per-agent busy flags (the derived
     /// `state` collapses them) so the UI can show *which* agent is working —
     /// e.g. a broadcast sets both busy at once.
     SessionActivity {
         session_id: String,
         state: String,
-        brian_busy: bool,
-        rain_busy: bool,
+        slot0_busy: bool,
+        slot1_busy: bool,
     },
     /// Session-level attention flag from the idle-unflagged watchdog.
     /// `state=Some("idle_unflagged")` when the session sat Idle past grace with
@@ -1500,21 +1500,21 @@ impl SignalingBridge {
     /// Publish a session's duo-activity change (idle / busy / awaiting-user /
     /// cancelling). Fire-and-forget; the UI subscriber maps it to a
     /// `session:activity` event that gates the chat input + Cancel button.
-    /// `state` is the `SessionActivity::as_str` string; `brian_busy`/`rain_busy`
+    /// `state` is the `SessionActivity::as_str` string; `slot0_busy`/`slot1_busy`
     /// are the per-agent flags the UI uses to label which agent is working.
     pub fn notify_session_activity(
         &self,
         session_id: String,
         state: &str,
-        brian_busy: bool,
-        rain_busy: bool,
+        slot0_busy: bool,
+        slot1_busy: bool,
     ) {
-        self.persist_activity_event(&session_id, state, brian_busy, rain_busy);
+        self.persist_activity_event(&session_id, state, slot0_busy, slot1_busy);
         let _ = self.event_tx.send(SignalingEvent::SessionActivity {
             session_id,
             state: state.to_string(),
-            brian_busy,
-            rain_busy,
+            slot0_busy,
+            slot1_busy,
         });
     }
 
@@ -1538,8 +1538,8 @@ impl SignalingBridge {
         &self,
         session_id: &str,
         state: &str,
-        brian_busy: bool,
-        rain_busy: bool,
+        slot0_busy: bool,
+        slot1_busy: bool,
     ) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
@@ -1556,7 +1556,7 @@ impl SignalingBridge {
         let state = state.to_string();
         handle.spawn(async move {
             if let Err(e) = storage
-                .insert_activity_event(&session_id, &state, brian_busy, rain_busy)
+                .insert_activity_event(&session_id, &state, slot0_busy, slot1_busy)
                 .await
             {
                 tracing::warn!(?e, %session_id, %state, "persisting activity event failed");

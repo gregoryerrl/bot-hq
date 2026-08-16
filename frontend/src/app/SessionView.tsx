@@ -738,7 +738,7 @@ export function SessionView() {
               activity={activity}
               busy={busy}
               // The busy map's keys are slot keys (Providers.tsx unpacks the
-              // frozen `brian_busy`/`rain_busy` pair); `labels` indexes both
+              // frozen `slot0_busy`/`slot1_busy` pair); `labels` indexes both
               // key spaces, so one lookup names the participant either way.
               busyLabel={(key) => authorLabel(key, labels)}
               authorHues={hues}

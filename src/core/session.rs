@@ -3641,11 +3641,11 @@ mod tests {
         s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
 
-        let brian_facts = resolve_roster_facts(&s, &roster, roster.iter().find(|p| p.slug == "hands").unwrap()).await.unwrap();
-        let brian = read_system_prompt(&paths, "hands", None, None, None, None, Some(&brian_facts))
+        let hands_facts = resolve_roster_facts(&s, &roster, roster.iter().find(|p| p.slug == "hands").unwrap()).await.unwrap();
+        let brian = read_system_prompt(&paths, "hands", None, None, None, None, Some(&hands_facts))
             .unwrap();
-        let rain_facts = resolve_roster_facts(&s, &roster, roster.iter().find(|p| p.slug == "eyes").unwrap()).await.unwrap();
-        let rain = read_system_prompt(&paths, "eyes", None, None, None, None, Some(&rain_facts))
+        let eyes_facts = resolve_roster_facts(&s, &roster, roster.iter().find(|p| p.slug == "eyes").unwrap()).await.unwrap();
+        let rain = read_system_prompt(&paths, "eyes", None, None, None, None, Some(&eyes_facts))
             .unwrap();
 
         let edit = crate::agents::capability_prompt::phrasing(crate::agents::Capability::EditFiles);

@@ -1312,7 +1312,7 @@ mod tests {
     }
 
     /// An EYES caller. See [`caller`] for why the preset is trustworthy here.
-    fn rain_caller() -> CallerIdentity {
+    fn eyes_caller() -> CallerIdentity {
         CallerIdentity {
             session_id: "s1".into(),
             agent: "rain".into(),
@@ -1550,7 +1550,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rain_rejected_from_hands_only_tools() {
+    async fn eyes_rejected_from_hands_only_tools() {
         let bridge = SignalingBridge::new();
         for tool in &[
             "mark_awaiting_user",
@@ -1575,7 +1575,7 @@ mod tests {
                     }),
                     1,
                 ),
-                &rain_caller(),
+                &eyes_caller(),
                 &bridge,
             )
             .await
@@ -1669,7 +1669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn brian_rejected_from_eyes_only_eyes_flag() {
+    async fn hands_rejected_from_eyes_only_eyes_flag() {
         // eyes_flag is the inverse gate: EYES-only, so HANDS (brian) is rejected.
         let bridge = SignalingBridge::new();
         let res = dispatch(
@@ -1692,7 +1692,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rain_rejected_from_disposition_finding() {
+    async fn eyes_rejected_from_disposition_finding() {
         // disposition_finding joins HANDS_ONLY_TOOLS — EYES (rain) is rejected.
         let bridge = SignalingBridge::new();
         let res = dispatch(
@@ -1701,7 +1701,7 @@ mod tests {
                 json!({"name": "disposition_finding", "arguments": {"finding_id": "f1", "status": "fixed", "reason": "x"}}),
                 1,
             ),
-            &rain_caller(),
+            &eyes_caller(),
             &bridge,
         )
         .await
@@ -1737,7 +1737,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn brian_rejected_from_approve_finding() {
+    async fn hands_rejected_from_approve_finding() {
         // approve_finding is EYES-only — only the reviewer who raised a finding
         // can sign off its fix; HANDS can't self-approve.
         let bridge = SignalingBridge::new();
@@ -1777,7 +1777,7 @@ mod tests {
                 json!({"name": "eyes_flag", "arguments": {"severity": "blocking", "summary": "NPE on null id", "code_ref": "job.rs:42"}}),
                 1,
             ),
-            &rain_caller(),
+            &eyes_caller(),
             &bridge,
         )
         .await
@@ -2070,7 +2070,7 @@ mod tests {
                 }}),
                 1,
             ),
-            &rain_caller(),
+            &eyes_caller(),
             &bridge,
         )
         .await
@@ -2117,7 +2117,7 @@ mod tests {
         // real suppression happens in the duo pump; here we just assert the
         // dispatch accepts the call from either agent.)
         let bridge = SignalingBridge::new();
-        for c in [caller(), rain_caller()] {
+        for c in [caller(), eyes_caller()] {
             let agent = c.agent.clone();
             let res = dispatch(
                 req("tools/call", json!({"name": "peer_ack", "arguments": {}}), 1),
@@ -2146,7 +2146,7 @@ mod tests {
         // parameters, and an agent reaching for it mid-turn must not be able to
         // fail the call by omitting something.
         let bridge = SignalingBridge::new();
-        for c in [caller(), rain_caller()] {
+        for c in [caller(), eyes_caller()] {
             let agent = c.agent.clone();
             let res = dispatch(
                 req("tools/call", json!({"name": "pass_turn", "arguments": {}}), 1),
@@ -2217,7 +2217,7 @@ mod tests {
     #[tokio::test]
     async fn one_participants_pass_does_not_spend_anothers() {
         let bridge = SignalingBridge::new();
-        for c in [caller(), rain_caller()] {
+        for c in [caller(), eyes_caller()] {
             let v = serde_json::to_value(
                 dispatch(
                     req("tools/call", json!({"name": "pass_turn", "arguments": {}}), 1),
@@ -2325,7 +2325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rain_can_self_advance_phase() {
+    async fn eyes_can_self_advance_phase() {
         // Self-advance is not HANDS-only — either agent can move the chip.
         // The user retains override via the dashboard chip click.
         let bridge = SignalingBridge::new();
@@ -2338,7 +2338,7 @@ mod tests {
                 }),
                 1,
             ),
-            &rain_caller(),
+            &eyes_caller(),
             &bridge,
         )
         .await
@@ -2407,7 +2407,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rain_can_call_request_phase_advance() {
+    async fn eyes_can_call_request_phase_advance() {
         // Phase requests are not HANDS-only — Rain (EYES) should also be able
         // to ask the user to back off to Investigate when Brian is about to
         // mutate without a plan.
@@ -2421,7 +2421,7 @@ mod tests {
                 }),
                 1,
             ),
-            &rain_caller(),
+            &eyes_caller(),
             &bridge,
         )
         .await
@@ -2825,7 +2825,7 @@ mod tests {
                 }),
                 1,
             ),
-            &rain_caller(),
+            &eyes_caller(),
             &bridge,
         )
         .await
@@ -2863,7 +2863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rain_untagged_doc_write_allowed() {
+    async fn eyes_untagged_doc_write_allowed() {
         // The gate is narrow: Rain may still keep her own UNTAGGED scratch doc
         // (EYES_ROLE explicitly permits this). Only the phase-tagged form is
         // HANDS-only.
@@ -2881,7 +2881,7 @@ mod tests {
                 }),
                 1,
             ),
-            &rain_caller(),
+            &eyes_caller(),
             &bridge,
         )
         .await

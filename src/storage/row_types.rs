@@ -324,8 +324,8 @@ pub struct ActivityEvent {
     pub recorded_at: String,
     /// `idle` | `busy` | `awaiting_user` | `cancelling` | `paused`.
     pub state: String,
-    pub brian_busy: i64,
-    pub rain_busy: i64,
+    pub slot0_busy: i64,
+    pub slot1_busy: i64,
 }
 
 /// A row from the `cancel_events` table — one Stop, with everything needed to

@@ -169,12 +169,14 @@ function GlobalEventSync() {
     (p: {
       session_id: string;
       state: string;
-      brian_busy: boolean;
-      rain_busy: boolean;
+      slot0_busy: boolean;
+      slot1_busy: boolean;
     }) => {
-      // `brian_busy` / `rain_busy` are frozen wire naming TURN SLOTS 0 and 1,
-      // not agents — `src/core/activity.rs` fills them from `slugs.get(0)` /
-      // `.get(1)`. Keying them by the literal slugs is what made the
+      // `slot0_busy` / `slot1_busy` name TURN SLOTS 0 and 1, not agents —
+      // `src/core/activity.rs` fills them from `slugs.get(0)` / `.get(1)`.
+      // They were `brian_busy` / `rain_busy` until the D10 hard retirement, and
+      // the names now say what they always meant. Keying them by literal slugs
+      // is what made the
       // turn-status line print "brian is working": no rc3 roster has that
       // slug, so the lookup missed and the raw key rendered (rc3 D10).
       //

@@ -49,10 +49,10 @@ function runtimeRow(over: Record<string, unknown> = {}) {
   return {
     session_id: "s1",
     activity: "busy",
-    brian_busy: true,
-    rain_busy: false,
-    brian_health: "stalled",
-    rain_health: "dead",
+    slot0_busy: true,
+    slot1_busy: false,
+    slot0_health: "stalled",
+    slot1_health: "dead",
     attention: null,
     working: null,
     ...over,
@@ -88,8 +88,8 @@ describe("Providers — the slot-shaped runtime wire", () => {
     emit("session:activity", {
       session_id: "s1",
       state: "busy",
-      brian_busy: true,
-      rain_busy: false,
+      slot0_busy: true,
+      slot1_busy: false,
     });
 
     const { bySession, busyBySession } = useActivityStore.getState();
@@ -112,8 +112,8 @@ describe("Providers — the slot-shaped runtime wire", () => {
     emit("session:activity", {
       session_id: "s1",
       state: "busy",
-      brian_busy: false,
-      rain_busy: true,
+      slot0_busy: false,
+      slot1_busy: true,
     });
 
     expect(useActivityStore.getState().busyBySession.s1).toEqual({
