@@ -1344,6 +1344,244 @@ struct RingState {
     gate_seed_failed: bool,
 }
 
+impl RingState {
+    /// Apply a `TurnComplete` (`SequencerCommand::TurnComplete`).
+    ///
+    /// Step 3 of R6, and the arm the decomposition was FOR: the largest of the
+    /// ten, touching eight of the thirteen ring fields. As a free function it
+    /// would have needed roughly ten `&mut` parameters — the shape that put
+    /// eleven on `advance_turn` — which is why the struct had to come first and
+    /// why the recorded plan forbade extracting an arm before it. It takes
+    /// `&mut self` and the completion's own payload, and nothing else that is
+    /// not a dependency.
+    ///
+    /// Lifted VERBATIM. `state.` became `self.`, and `&deps` / `&mut rx` became
+    /// the borrows the caller hands over; no line of reasoning, ordering or
+    /// control flow was touched. The comments below are the module's own, in
+    /// their original words — they are why this arm is the length it is.
+    async fn on_turn_complete(
+        &mut self,
+        deps: &SequencerDeps,
+        rx: &mut mpsc::Receiver<SequencerCommand>,
+        participant_id: i64,
+        completed: u64,
+        ending: TurnEnding,
+    ) {
+            // The completion has to name the turn in flight: the same
+            // participant AND the same turn.
+            //
+            // **The two halves are not symmetric.** The epoch is what
+            // separates two turns — see the variant doc for the case that
+            // `participant_id` alone lets through, and
+            // `a_completion_from_a_turn_the_user_restarted_is_discarded`,
+            // which fails without it. There is no mirror case: an epoch
+            // names exactly one turn and a turn has exactly one holder, so
+            // for a sender that returns the epoch it was handed the identity
+            // compare is redundant — mutating it to `true` leaves the whole
+            // suite green, and no test here pins it.
+            //
+            // It stays as defence against a MALFORMED sender: one that
+            // echoes a live epoch back under the wrong participant id (a
+            // crossed round trip, a copied field). Nothing in this file mints
+            // the epochs senders will carry, so "well-formed" is an
+            // assumption about code that is not written yet, and this is the
+            // cheap half of the guard to keep.
+            let live = completed == self.epoch
+                && self.holder.as_ref().is_some_and(|h| h.id == participant_id);
+            // A DISCARDED completion was silent, which made a stalled ring
+            // indistinguishable from an idle one from the outside: the cycle
+            // simply stops and nothing anywhere says why. Discarding is
+            // usually correct (a superseded turn, a restarted cycle), so this
+            // is `debug` rather than a warning — but it must be SAYABLE, or
+            // the only way to diagnose a ring that stopped is to infer it
+            // from delivery rows after the fact.
+            if !live {
+                debug!(
+                    session = %deps.session_id,
+                    participant_id,
+                    carried_epoch = completed,
+                    live_epoch = self.epoch,
+                    holder = ?self.holder.as_ref().map(|h| h.id),
+                    "sequencer: completion discarded — the ring did NOT step"
+                );
+            }
+            if live {
+                // A substantive turn is what makes a lap worth dealing
+                // (rc3 D27). Recorded before the consensus check so a turn
+                // that BOTH speaks and halts still counts as speech.
+                // Only a lap of NOTHING BUT passes yields (rc3 D27). A
+                // `Done` is a participant saying it is finished — that is
+                // information, and the consensus tally is what acts on it.
+                // Treating "no substantive output" as the trigger would also
+                // catch a converging session and pre-empt the arrival the
+                // tally exists to reach.
+                if !matches!(ending, TurnEnding::Passed) {
+                    self.spoke_this_lap = true;
+                }
+                // The vote is recorded and consensus asked BEFORE the ring
+                // is stepped: arriving means waking nobody, so a step taken
+                // first would have to be taken back. Both are inside the
+                // guard, because a superseded turn's vote is an opinion
+                // about a turn that no longer exists — counting it would
+                // let a discarded completion do the one thing discarding it
+                // was meant to prevent.
+                if halted_on_consensus(deps, &mut self.holder, &mut self.epoch, participant_id, ending)
+                    .await
+                {
+                    // Consensus is a stop, and every stop is a HALT
+                    // (2026-08-15): fill the slot so the arrival has a
+                    // banner even before any close-ask lands in the tray.
+                    if let Some(bridge) = deps.bridge.as_ref() {
+                        bridge
+                            .declare_host_halt(
+                                &deps.session_id,
+                                "Every participant voted done — the task \
+                                 looks complete. Answer any close-ask in \
+                                 the tray, or send your next direction."
+                                    .to_string(),
+                            )
+                            .await;
+                    }
+                    // The cycle just yielded on consensus with a staged
+                    // response pending: deliver it now — it is the
+                    // user's queued next message, and a yielded ring is
+                    // exactly the boundary it was waiting for.
+                    if self.staged_pending {
+                        self.staged_pending = false;
+                        if let Some(bridge) = deps.bridge.as_ref() {
+                            bridge.notify_staged_delivery_due(&deps.session_id);
+                        }
+                    }
+                } else {
+                    // Spin is a property of SUBSTANTIVE output. A `done`
+                    // vote is a participant saying it has nothing left to
+                    // add — the cycle converging rather than failing to —
+                    // and judging that as repetition would halt on exactly
+                    // the ending the consensus tally exists to reach. The
+                    // read is skipped with it, so prose from a done-voting
+                    // turn folds into the next substantive comparison
+                    // instead of being dropped.
+                    //
+                    // **A pass is skipped for the same reason, and the
+                    // false positive it avoids is the sharper one.** A pass
+                    // is the sanctioned way to stay quiet, so its rows are
+                    // near-identical BY DESIGN — the one shape the Jaccard
+                    // test cannot tell from a participant that is stuck. A
+                    // reviewer passing while an executor works productively
+                    // would trip the streak within three rounds and halt a
+                    // healthy cycle, which is the "punishes long-but-
+                    // productive work as a false positive" the design names
+                    // when it rejects a round cap as the wrong instrument.
+                    // `a_participant_that_passes_every_round_never_trips_spin_detection`
+                    // is that case.
+                    if ending.is_substantive()
+                        && spinning(deps, &mut self.spin, participant_id).await
+                    {
+                        // The router BROKE THE VOLLEY and unlocked input. In
+                        // a ring that is a halt — the same yield the parked
+                        // question takes: stop handing out turns and let the
+                        // user back in. Nothing is suppressed, which is the
+                        // whole difference from the path this replaces: the
+                        // message that tripped it is already a row, visible,
+                        // and stays that way.
+                        //
+                        // **Structurally identical to the parked-question
+                        // halt**, which is what keeps mutation M7 alive: this
+                        // leaves no holder, so no later completion can be
+                        // `live`, so `advance_turn(reset = false)` stays
+                        // unreachable with a `None` holder. Re-measured after
+                        // this landed — see the note in `advance_turn`.
+                        //
+                        // `warn` rather than a `system_notice` row: the
+                        // notice lane already carries five host injections
+                        // and is sized for one line (task 16). The
+                        // on-screen reason rides the HALT SLOT instead —
+                        // declared just below via the bridge, closing the
+                        // "halted cycle with no on-screen reason" gap this
+                        // comment used to end on.
+                        let streak = self.spin.get(&participant_id).map_or(0, |s| s.streak);
+                        halt(deps, &mut self.holder, &mut self.epoch).await;
+                        warn!(
+                            session = %deps.session_id,
+                            participant_id,
+                            streak,
+                            "sequencer: participant repeating itself across rounds; cycle halted"
+                        );
+                        // The halted cycle gets an ON-SCREEN reason (the
+                        // gap the comment above used to end on). Same
+                        // route as the provider-limit and error-streak
+                        // halts: the session's halt slot + the banner,
+                        // via `mark_awaiting_user` — which also latches
+                        // the ring and interrupts the spinning
+                        // participant's generation if one is in flight.
+                        // s-f6a441ff sat "just quiet" for exactly this.
+                        if let Some(bridge) = deps.bridge.as_ref() {
+                            let slug = deps
+                                .storage
+                                .participant_by_id(participant_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|p| p.slug)
+                                .unwrap_or_else(|| format!("participant {participant_id}"));
+                            let _ = bridge
+                                .mark_awaiting_user(
+                                    deps.session_id.to_string(),
+                                    slug.clone(),
+                                    format!(
+                                        "⚠ {slug} is repeating itself across rounds \
+                                         (streak {streak}) — the cycle halted so you \
+                                         can steer. Its last messages were near-\
+                                         identical; send a message to redirect, or \
+                                         close the session if the task is done."
+                                    ),
+                                )
+                                .await;
+                        }
+                    } else if self.staged_pending {
+                        // The boundary the Stage toggle was waiting for:
+                        // PARK instead of dealing (the same yield a halt
+                        // takes) and hand delivery to the app layer. The
+                        // delivery arrives as an ordinary UserMessage
+                        // milliseconds later and deals to the front — so
+                        // the staged send lands between turns, exactly
+                        // like a typed one, and no holder's work is ever
+                        // superseded by it.
+                        self.staged_pending = false;
+                        halt(deps, &mut self.holder, &mut self.epoch).await;
+                        debug!(
+                            session = %deps.session_id,
+                            "sequencer: staged response pending at the boundary; \
+                             parking and handing delivery to the app"
+                        );
+                        if let Some(bridge) = deps.bridge.as_ref() {
+                            bridge.notify_staged_delivery_due(&deps.session_id);
+                        }
+                    } else {
+                        self.reseed_gates_if_needed(deps)
+                            .await;
+                        advance_turn(
+                            deps,
+                            rx,
+                            self,
+                            false,
+                        )
+                        .await;
+                    }
+                }
+            } else {
+                debug!(
+                    session = %deps.session_id,
+                    participant_id,
+                    completed,
+                    self.epoch,
+                    holder = ?self.holder.as_ref().map(|h| h.id),
+                    "sequencer: completion does not name the turn in flight; discarded"
+                );
+            }
+    }
+}
+
 /// Run the turn sequencer for one session.
 ///
 /// Returns when `rx` closes — i.e. when the last sender is dropped, which is
@@ -1482,218 +1720,9 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 epoch: completed,
                 ending,
             } => {
-                // The completion has to name the turn in flight: the same
-                // participant AND the same turn.
-                //
-                // **The two halves are not symmetric.** The epoch is what
-                // separates two turns — see the variant doc for the case that
-                // `participant_id` alone lets through, and
-                // `a_completion_from_a_turn_the_user_restarted_is_discarded`,
-                // which fails without it. There is no mirror case: an epoch
-                // names exactly one turn and a turn has exactly one holder, so
-                // for a sender that returns the epoch it was handed the identity
-                // compare is redundant — mutating it to `true` leaves the whole
-                // suite green, and no test here pins it.
-                //
-                // It stays as defence against a MALFORMED sender: one that
-                // echoes a live epoch back under the wrong participant id (a
-                // crossed round trip, a copied field). Nothing in this file mints
-                // the epochs senders will carry, so "well-formed" is an
-                // assumption about code that is not written yet, and this is the
-                // cheap half of the guard to keep.
-                let live = completed == state.epoch
-                    && state.holder.as_ref().is_some_and(|h| h.id == participant_id);
-                // A DISCARDED completion was silent, which made a stalled ring
-                // indistinguishable from an idle one from the outside: the cycle
-                // simply stops and nothing anywhere says why. Discarding is
-                // usually correct (a superseded turn, a restarted cycle), so this
-                // is `debug` rather than a warning — but it must be SAYABLE, or
-                // the only way to diagnose a ring that stopped is to infer it
-                // from delivery rows after the fact.
-                if !live {
-                    debug!(
-                        session = %deps.session_id,
-                        participant_id,
-                        carried_epoch = completed,
-                        live_epoch = state.epoch,
-                        holder = ?state.holder.as_ref().map(|h| h.id),
-                        "sequencer: completion discarded — the ring did NOT step"
-                    );
-                }
-                if live {
-                    // A substantive turn is what makes a lap worth dealing
-                    // (rc3 D27). Recorded before the consensus check so a turn
-                    // that BOTH speaks and halts still counts as speech.
-                    // Only a lap of NOTHING BUT passes yields (rc3 D27). A
-                    // `Done` is a participant saying it is finished — that is
-                    // information, and the consensus tally is what acts on it.
-                    // Treating "no substantive output" as the trigger would also
-                    // catch a converging session and pre-empt the arrival the
-                    // tally exists to reach.
-                    if !matches!(ending, TurnEnding::Passed) {
-                        state.spoke_this_lap = true;
-                    }
-                    // The vote is recorded and consensus asked BEFORE the ring
-                    // is stepped: arriving means waking nobody, so a step taken
-                    // first would have to be taken back. Both are inside the
-                    // guard, because a superseded turn's vote is an opinion
-                    // about a turn that no longer exists — counting it would
-                    // let a discarded completion do the one thing discarding it
-                    // was meant to prevent.
-                    if halted_on_consensus(&deps, &mut state.holder, &mut state.epoch, participant_id, ending)
-                        .await
-                    {
-                        // Consensus is a stop, and every stop is a HALT
-                        // (2026-08-15): fill the slot so the arrival has a
-                        // banner even before any close-ask lands in the tray.
-                        if let Some(bridge) = deps.bridge.as_ref() {
-                            bridge
-                                .declare_host_halt(
-                                    &deps.session_id,
-                                    "Every participant voted done — the task \
-                                     looks complete. Answer any close-ask in \
-                                     the tray, or send your next direction."
-                                        .to_string(),
-                                )
-                                .await;
-                        }
-                        // The cycle just yielded on consensus with a staged
-                        // response pending: deliver it now — it is the
-                        // user's queued next message, and a yielded ring is
-                        // exactly the boundary it was waiting for.
-                        if state.staged_pending {
-                            state.staged_pending = false;
-                            if let Some(bridge) = deps.bridge.as_ref() {
-                                bridge.notify_staged_delivery_due(&deps.session_id);
-                            }
-                        }
-                    } else {
-                        // Spin is a property of SUBSTANTIVE output. A `done`
-                        // vote is a participant saying it has nothing left to
-                        // add — the cycle converging rather than failing to —
-                        // and judging that as repetition would halt on exactly
-                        // the ending the consensus tally exists to reach. The
-                        // read is skipped with it, so prose from a done-voting
-                        // turn folds into the next substantive comparison
-                        // instead of being dropped.
-                        //
-                        // **A pass is skipped for the same reason, and the
-                        // false positive it avoids is the sharper one.** A pass
-                        // is the sanctioned way to stay quiet, so its rows are
-                        // near-identical BY DESIGN — the one shape the Jaccard
-                        // test cannot tell from a participant that is stuck. A
-                        // reviewer passing while an executor works productively
-                        // would trip the streak within three rounds and halt a
-                        // healthy cycle, which is the "punishes long-but-
-                        // productive work as a false positive" the design names
-                        // when it rejects a round cap as the wrong instrument.
-                        // `a_participant_that_passes_every_round_never_trips_spin_detection`
-                        // is that case.
-                        if ending.is_substantive()
-                            && spinning(&deps, &mut state.spin, participant_id).await
-                        {
-                            // The router BROKE THE VOLLEY and unlocked input. In
-                            // a ring that is a halt — the same yield the parked
-                            // question takes: stop handing out turns and let the
-                            // user back in. Nothing is suppressed, which is the
-                            // whole difference from the path this replaces: the
-                            // message that tripped it is already a row, visible,
-                            // and stays that way.
-                            //
-                            // **Structurally identical to the parked-question
-                            // halt**, which is what keeps mutation M7 alive: this
-                            // leaves no holder, so no later completion can be
-                            // `live`, so `advance_turn(reset = false)` stays
-                            // unreachable with a `None` holder. Re-measured after
-                            // this landed — see the note in `advance_turn`.
-                            //
-                            // `warn` rather than a `system_notice` row: the
-                            // notice lane already carries five host injections
-                            // and is sized for one line (task 16). The
-                            // on-screen reason rides the HALT SLOT instead —
-                            // declared just below via the bridge, closing the
-                            // "halted cycle with no on-screen reason" gap this
-                            // comment used to end on.
-                            let streak = state.spin.get(&participant_id).map_or(0, |s| s.streak);
-                            halt(&deps, &mut state.holder, &mut state.epoch).await;
-                            warn!(
-                                session = %deps.session_id,
-                                participant_id,
-                                streak,
-                                "sequencer: participant repeating itself across rounds; cycle halted"
-                            );
-                            // The halted cycle gets an ON-SCREEN reason (the
-                            // gap the comment above used to end on). Same
-                            // route as the provider-limit and error-streak
-                            // halts: the session's halt slot + the banner,
-                            // via `mark_awaiting_user` — which also latches
-                            // the ring and interrupts the spinning
-                            // participant's generation if one is in flight.
-                            // s-f6a441ff sat "just quiet" for exactly this.
-                            if let Some(bridge) = deps.bridge.as_ref() {
-                                let slug = deps
-                                    .storage
-                                    .participant_by_id(participant_id)
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .map(|p| p.slug)
-                                    .unwrap_or_else(|| format!("participant {participant_id}"));
-                                let _ = bridge
-                                    .mark_awaiting_user(
-                                        deps.session_id.to_string(),
-                                        slug.clone(),
-                                        format!(
-                                            "⚠ {slug} is repeating itself across rounds \
-                                             (streak {streak}) — the cycle halted so you \
-                                             can steer. Its last messages were near-\
-                                             identical; send a message to redirect, or \
-                                             close the session if the task is done."
-                                        ),
-                                    )
-                                    .await;
-                            }
-                        } else if state.staged_pending {
-                            // The boundary the Stage toggle was waiting for:
-                            // PARK instead of dealing (the same yield a halt
-                            // takes) and hand delivery to the app layer. The
-                            // delivery arrives as an ordinary UserMessage
-                            // milliseconds later and deals to the front — so
-                            // the staged send lands between turns, exactly
-                            // like a typed one, and no holder's work is ever
-                            // superseded by it.
-                            state.staged_pending = false;
-                            halt(&deps, &mut state.holder, &mut state.epoch).await;
-                            debug!(
-                                session = %deps.session_id,
-                                "sequencer: staged response pending at the boundary; \
-                                 parking and handing delivery to the app"
-                            );
-                            if let Some(bridge) = deps.bridge.as_ref() {
-                                bridge.notify_staged_delivery_due(&deps.session_id);
-                            }
-                        } else {
-                            state.reseed_gates_if_needed(&deps)
-                                .await;
-                            advance_turn(
-                                &deps,
-                                &mut rx,
-                                &mut state,
-                                false,
-                            )
-                            .await;
-                        }
-                    }
-                } else {
-                    debug!(
-                        session = %deps.session_id,
-                        participant_id,
-                        completed,
-                        state.epoch,
-                        holder = ?state.holder.as_ref().map(|h| h.id),
-                        "sequencer: completion does not name the turn in flight; discarded"
-                    );
-                }
+                state
+                    .on_turn_complete(&deps, &mut rx, participant_id, completed, ending)
+                    .await;
             }
             SequencerCommand::UserMessage { mentions } => {
                 // **Whoever the user named takes the next turn, in the order
