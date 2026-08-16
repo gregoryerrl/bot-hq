@@ -1098,12 +1098,15 @@ mod tests {
         }
     }
 
-    /// A cfg wired to a fresh router command channel, returning the receiver so a
-    /// test can assert WHICH `RouterCommand`s the pump emits. The pump's contract
-    /// is "emit the right Forward on a completed turn"; the router's decision logic
-    /// (forward / suppress / break) is tested in `core::router`.
     /// A pump wired to the ring. `participant_id` is required: the pump only
     /// reports a turn end when it knows which participant ended it.
+    ///
+    /// The paragraph that used to sit above this one said the forward/suppress/
+    /// break decision "is tested in `core::router`" — a module task 14 deleted,
+    /// so it pointed a reader at coverage that cannot be there (round 3). The
+    /// decision itself moved into the ring with everything else; what this
+    /// helper still pins is the pump's own half, which is emitting the right
+    /// turn-end signal.
     fn cfg_with_ring(
         slug: &str,
     ) -> (

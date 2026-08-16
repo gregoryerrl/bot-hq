@@ -124,6 +124,21 @@ struct TrayWake {
 /// best-effort. Bounds a pathological respawn→stale→respawn cycle.
 const BROADCAST_MAX_RESPAWNS: u32 = 3;
 
+/// One staged tray answer: `(choice_id, the option the user picked)`. The pair
+/// `send_user_response` destructures at its resolve loop.
+type StagedPick = (String, String);
+
+/// What the Stage toggle holds for one session: the typed message, and the tray
+/// answers staged alongside it.
+///
+/// An alias rather than a struct, on purpose — this shape crosses
+/// `send_user_response`, `deliver_staged` and the rehydrate read as a plain
+/// tuple, and a struct would change all three signatures plus the frontend's
+/// hand-written mirror for a naming gain. What was actually wrong was that
+/// `Vec<(String, String)>` said nothing at any of those call sites; now the two
+/// names do, and `staged_responses`' type is readable in one line.
+type StagedResponse = (String, Vec<StagedPick>);
+
 pub struct AppState {
     pub paths: Paths,
     pub storage: Storage,
@@ -164,7 +179,7 @@ pub struct AppState {
     /// reaches a boundary. The SEQUENCER holds only a flag; the content
     /// lives here so a reloaded frontend can rehydrate its toggle and an
     /// unstage is a plain remove.
-    staged_responses: Mutex<std::collections::HashMap<String, (String, Vec<(String, String)>)>>,
+    staged_responses: Mutex<std::collections::HashMap<String, StagedResponse>>,
     /// Per-session PTY terminals (Terminal subtab). Lazily spawned on first
     /// `terminal_open`, killed on `close_session`. Shared as an `Arc` so the
     /// signaling bridge's MCP handlers can reach the same PTYs.
@@ -1253,7 +1268,7 @@ impl AppState {
         &self,
         session_id: &str,
         text: &str,
-        picks: Vec<(String, String)>,
+        picks: Vec<StagedPick>,
     ) -> Result<()> {
         // Same paste gate as `broadcast`, checked BEFORE the picks resolve —
         // a Send refused halfway would consume the staged answers and drop the
@@ -1362,7 +1377,7 @@ impl AppState {
         &self,
         session_id: &str,
         text: &str,
-        picks: Vec<(String, String)>,
+        picks: Vec<StagedPick>,
     ) -> Result<()> {
         // The paste gate applies at STAGE time so the user hears the refusal
         // immediately, not minutes later at a boundary they aren't watching.
@@ -1410,7 +1425,7 @@ impl AppState {
     pub async fn staged_response(
         &self,
         session_id: &str,
-    ) -> Option<(String, Vec<(String, String)>)> {
+    ) -> Option<StagedResponse> {
         self.staged_responses.lock().await.get(session_id).cloned()
     }
 

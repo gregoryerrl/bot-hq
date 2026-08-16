@@ -184,9 +184,19 @@ pub struct IdleWatch {
 
 /// Per-session watchdog loop. Holds `Weak<AgentLiveness>` per agent so it
 /// self-terminates once every pump has exited (the session ended) — no leaked
-/// task. Emits health only on change via the bridge registry. Also watches the
-/// peer-forward router (`router`): a dead router while agents are live is an
-/// anomaly (forwarding is down) — warn + emit a router-health event once.
+/// task. Emits health only on change via the bridge registry, and runs the
+/// idle-unflagged nudge (see [`IdleWatch`]).
+///
+/// **It watches nothing else.** Until the round-3 audit this doc also claimed it
+/// "watches the peer-forward router (`router`): a dead router while agents are
+/// live is an anomaly (forwarding is down) — warn + emit a router-health event
+/// once." `core/router.rs` was deleted by task 14 and there has never been a
+/// router-health event: a grep for one across `src/` returned exactly one hit,
+/// that sentence. The claim survived its subject by four days and described a
+/// monitor that does not exist, in the file that documents this session's
+/// monitoring — so a reader checking whether forwarding was watched came away
+/// believing it was. Nothing watches forwarding, and with one turn engine there
+/// is no separate forwarder left to watch.
 ///
 /// `agents` is keyed by participant SLUG, so a session with three participants
 /// gets three health streams instead of two (rc3 D10 — it was a `Vec<(Author,

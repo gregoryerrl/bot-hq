@@ -209,9 +209,13 @@ impl SessionTrayView {
     /// receiver and the old liveness key marked every pending gate stale.
     fn with_staleness(mut self) -> Self {
         use crate::signaling::{gate_age_secs, STALE_GATE_MAX_AGE_SECS};
+        // `is_none_or`, not `!…is_some_and`: an UNPARSEABLE `asked_at` reads as
+        // stale, which is the deliberate side to fail on — a row whose age
+        // cannot be established gets the confirm step rather than one-click
+        // approval. The double negative said the same thing and hid it.
         self.stale = self.status == "pending"
             && self.command_text.is_some()
-            && !gate_age_secs(&self.asked_at).is_some_and(|a| a <= STALE_GATE_MAX_AGE_SECS);
+            && gate_age_secs(&self.asked_at).is_none_or(|a| a > STALE_GATE_MAX_AGE_SECS);
         self
     }
 }

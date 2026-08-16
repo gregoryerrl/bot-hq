@@ -19,15 +19,15 @@ pub const STALE_GATE_MAX_AGE_SECS: i64 = 900;
 
 /// Age of a tray row in seconds, from its `asked_at` (now_utc RFC3339-Z;
 /// sqlite `datetime('now')` shape accepted defensively). None = unparseable.
+///
+/// The two-branch parse is [`parse_tray_ts`], which this file already imports
+/// (round-2 audit G4). It used to be hand-rolled here — same two branches, same
+/// fallback, same `None` — eight lines from the helper sitting at the top of the
+/// same module. Worth naming rather than quietly deleting: the duplicate is what
+/// makes a tolerance change land in one of two places, and the tolerance is the
+/// thing this pair exists for.
 pub fn gate_age_secs(asked_at: &str) -> Option<i64> {
-    let asked = chrono::DateTime::parse_from_rfc3339(asked_at)
-        .map(|t| t.with_timezone(&chrono::Utc))
-        .or_else(|_| {
-            chrono::NaiveDateTime::parse_from_str(asked_at, "%Y-%m-%d %H:%M:%S")
-                .map(|n| n.and_utc())
-        })
-        .ok()?;
-    Some((chrono::Utc::now() - asked).num_seconds())
+    Some((chrono::Utc::now() - parse_tray_ts(asked_at)?).num_seconds())
 }
 
 impl SignalingBridge {

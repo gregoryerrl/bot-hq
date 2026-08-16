@@ -22,6 +22,7 @@
 //!     or close the user's own sessions or another plugin's. Consent is the
 //!     install-time grant (no per-call dialog — the ownership fence plus
 //!     dashboard visibility are the guardrails).
+//!
 //! CL writes stay user/agent-only — never a plugin surface. The raw
 //! `create_session` / `broadcast_message` / `close_session` names stay
 //! non-grantable — plugins reach sessions ONLY through the fenced arms above.
