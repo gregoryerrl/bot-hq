@@ -1,6 +1,6 @@
 # bot-hq Plugins — Author Contract (api_version 1)
 
-bot-hq is a lean core — the duo (Brian/Rain), policy enforcement, the
+bot-hq is a lean core — the agent harness, policy enforcement, the
 Context Library, sessions — and plugins extend everything else. A plugin
 is a **static frontend bundle in a sandboxed iframe**: no build step
 required, no host process, talking to bot-hq over one narrow,

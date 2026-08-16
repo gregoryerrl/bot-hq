@@ -10,6 +10,11 @@
 # universal .dmg from the GitHub release), and copy this file to the tap.
 
 cask "bot-hq" do
+  # NOTE (2026-08-16): this version + sha are the v0.1.0 release's. The repo is
+  # at 1.0.0-rc3 and the only published GitHub release is rc2, so bumping the
+  # string alone would point Homebrew at a .dmg that does not exist. Left
+  # deliberately stale, with the mismatch stated, until a release is cut — the
+  # `sha256` cannot be computed before the artifact exists.
   version "0.1.0"
   sha256 "1cffff49aa5cddfb56c96a221533fb01302249c1217ccbcebf0ebc24172212bc"
 

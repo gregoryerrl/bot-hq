@@ -25,7 +25,7 @@ freshness), and — most recently — **rc3, which is now essentially complete**
 roles as user-owned data with editable prose, capability enforcement wired to
 the runtime, participants identified by role rather than by name, N-participant
 sessions, the turn ring as the only turn engine, and the bilateral router
-deleted. Decisions D1–D16 are recorded in
+deleted. Decisions D1–D35+ are recorded in
 [`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md).
 
 Test + build status (live counts) lives in PROGRESS.md, not here — it
@@ -49,7 +49,7 @@ plugin only". What remains for an actual plugin migration is packaging and the
 plugin runtime tiers, not core surgery.
 
 Vision wording: project CL `vision.md` ("The harness, not the crew"); decision
-record: CL `decisions.md` (2026-08-05) and rc3 D1–D16.
+record: CL `decisions.md` (2026-08-05) and rc3 D1–D35+.
 
 **Explicitly DEFERRED behind this migration** (user call, 2026-08-05,
 after the Aug-5 session study — CL `issues.md` #26–#31): the
@@ -73,9 +73,14 @@ Read those before starting; this section is the map, not the territory.
 
 **Track 1 — harness fixes (standalone; none touch the duo pump):**
 
-1. ~~**#27 — tray answers preempt a running turn**~~ — SHIPPED 2026-08-06
-   (`d71c4d1`). The OOB tray-resolve arm now fires the same idle-harmless
-   interrupt `broadcast` does, before delivering.
+1. **#27 — tray answers preempt a running turn** — shipped 2026-08-06
+   (`d71c4d1`) and **REVERSED by rc3 D34** (`7e1e04d`). The preempt interrupt is
+   deleted on purpose: it aborted the holder's whole in-flight turn, which made
+   a tray click a hidden interrupt when Pause is meant to be the only one
+   (`core/state.rs`, "The `deliver` flag … is gone, and that is rc3 D34"). This
+   entry read as shipped-and-standing until the audit's T pass; the issue is
+   open again in the sense that the exposure it named is now bounded by the
+   remainder of the current turn rather than cured.
 2. ~~**#29 — gate refusals**~~ — SHIPPED 2026-08-06 (`c0a66b7`), with the
    issue's premise corrected by measurement: no same-command retry loop
    exists (the "19 refusals" were 19 `tool_blocklist` rows = 18 approved
@@ -135,7 +140,7 @@ classification.
 
 ## In flight
 
-**Nothing blocking.** The **rc3** arc closed 2026-08-13 — decisions D1–D21 in
+**Nothing blocking.** The **rc3** arc closed 2026-08-13 — decisions D1–D35+ in
 [`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md).
 D17 (summon by `@mention`), D18 (two participation modes), D19/D19a/D19b (the
 ring is the only delivery path) all shipped that day.
@@ -145,27 +150,25 @@ Also shipped that day: **D16** (`close_session` gates on the role's tick),
 delivered row says who wrote it) and **D24** (a straggler cannot bind the next
 turn's epoch).
 
-Spec'd and unstarted:
+Spec'd and **since SHIPPED** (both were still listed here as unstarted on
+2026-08-16, which the rc3 audit's T pass caught):
 
-- **D20, second half** — the user-set label that overrides the ordinal, and its
-  editor in the New Session dialog. The ordinal itself shipped (`f3f4809`), which
-  is what the reported complaint was about.
-- **D21** — a parallel BOOT phase: every participant orients at once, nobody
-  acts until the ring starts. Rides D19a's `kind` filter, and needs an explicit
-  turn-start signal or it reintroduces the epoch-0 discard.
+- **D20, second half** — the user-set label overriding the ordinal, plus its
+  editor in the New Session dialog: shipped `4e531c8` + migration
+  `0053_participant_label.sql`.
+- **D21** — the parallel BOOT phase, every participant orienting at once with
+  nobody acting until the ring starts: shipped `584f06f` / `db7c3a6`.
 
 Found by live sessions, not yet decided:
 
-- **The backlog is N stdin writes, not one.** `deliver_backlog` delivers a row at
-  a time, so rows 2..N land inside the turn row 1 opened and read as
-  interruptions. D23's speaker label removes most of the confusion; whether
-  coalescing is still worth the change to partial-delivery semantics should be
-  measured on a real session first.
+- ~~**The backlog is N stdin writes, not one.**~~ **FIXED `7060d97`** — a page is
+  one write, so rows 2..N no longer land inside the turn row 1 opened.
 - **The tail of the ring starves.** Every user message resets to the front, so at
   N=3 with an active driver slot 2 gets roughly half the turns of slot 0 —
   2-vs-6 in `s-534b8761`, 2-vs-6 in `s-206e8921`.
-- **`sessions.round_number` has no writer**, exactly as
-  `current_turn_participant_id` had none before D19b.
+- ~~**`sessions.round_number` has no writer**~~ **FIXED `1984e61`** — written
+  beside the lap counter it measures. (`current_turn_participant_id`, the column
+  it was compared to, is now also cleared on every halt — `92eeba5`.)
 
 Also open: the proposals in the project CL's
 `improvements-2026-08-12-visibility-and-verification.md` that were not taken —
