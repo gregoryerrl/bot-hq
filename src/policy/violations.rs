@@ -152,7 +152,7 @@ impl ViolationsLog {
         if !too_big {
             return;
         }
-        let rolled = self.path.with_extension("jsonl.1");
+        let rolled = self.rolled_path();
         if let Err(e) = std::fs::rename(&self.path, &rolled) {
             tracing::warn!(
                 path = %self.path.display(),
@@ -218,18 +218,53 @@ impl ViolationsLog {
         }
     }
 
-    /// Read back the entire log. Lines that fail to parse are skipped (logged
-    /// at warn level); intended for the UI's "Recent enforcement events" panel.
+    /// Where [`Self::rotate_if_oversized`] moves the previous generation.
+    fn rolled_path(&self) -> PathBuf {
+        self.path.with_extension("jsonl.1")
+    }
+
+    /// Read back the entire log — **both generations**. Lines that fail to parse
+    /// are skipped (logged at warn level); intended for the UI's "Recent
+    /// enforcement events" panel.
+    ///
+    /// Round-2 audit G1: this used to read `self.path` alone, so the rollover
+    /// that shipped to *preserve* one generation of history made that history
+    /// unreachable instead. Nothing else in the tree ever opened `.jsonl.1`, and
+    /// both consumers of this method — the Violations panel
+    /// (`tauri_cmd/policy.rs`) and the external driver (`external_jsonrpc.rs`) —
+    /// go through here, so a rotation emptied the audit trail from every surface
+    /// a user or driver has. That was strictly worse than the no-rotation state
+    /// it replaced.
+    ///
+    /// **Rolled generation first.** Rotation renames the live file aside *after*
+    /// the append, so `.jsonl.1` holds the OLDER records and chronological order
+    /// needs them ahead of the fresh file. Both consumers reverse before capping
+    /// (`external_jsonrpc.rs` reverses then truncates to `limit`;
+    /// `ViolationsPanel.tsx` reverses the whole list), so older records land
+    /// where a truncate drops them rather than at the head of the panel.
+    ///
+    /// Cost: a panel open now parses up to `2 * ROTATE_BYTES` instead of
+    /// `ROTATE_BYTES`. That is the price of the history being readable at all,
+    /// and it is bounded by rotation — which is what `ROTATE_BYTES` is for.
     pub fn read_all(&self) -> Result<Vec<ViolationRecord>> {
-        let body = match std::fs::read_to_string(&self.path) {
+        let mut out = Vec::new();
+        self.read_generation(&self.rolled_path(), &mut out)?;
+        self.read_generation(&self.path, &mut out)?;
+        Ok(out)
+    }
+
+    /// Parse one generation onto `out`. A missing file is not an error — the
+    /// rolled one does not exist until the first rotation, and the live one does
+    /// not exist until the first violation.
+    fn read_generation(&self, path: &Path, out: &mut Vec<ViolationRecord>) -> Result<()> {
+        let body = match std::fs::read_to_string(path) {
             Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => {
                 return Err(e)
-                    .with_context(|| format!("reading violations log at {}", self.path.display()))
+                    .with_context(|| format!("reading violations log at {}", path.display()))
             }
         };
-        let mut out = Vec::new();
         for (i, line) in body.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -239,7 +274,7 @@ impl ViolationsLog {
                 Ok(r) => out.push(r),
                 Err(err) => {
                     tracing::warn!(
-                        path = %self.path.display(),
+                        path = %path.display(),
                         line = i + 1,
                         %err,
                         "skipping malformed violations record"
@@ -247,7 +282,7 @@ impl ViolationsLog {
                 }
             }
         }
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -265,8 +300,19 @@ mod tests {
         let path = dir.path().join(".local").join("violations.jsonl");
 
         // A file already past the threshold, then one ordinary append.
+        //
+        // The filler is newline-TERMINATED, which the original fixture was not.
+        // Without it the appended record concatenates onto the filler's open
+        // last line and the whole thing is one unparseable line — invisible
+        // while this test only substring-matched the raw file, and the first
+        // thing the `read_all` assertion below caught. Production always ends a
+        // record with `\n`, so a terminated file is the realistic shape; the
+        // filler line itself stays malformed on purpose and is skipped, which is
+        // the documented tolerance (`malformed_line_is_skipped`).
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, vec![b'x'; (ROTATE_BYTES + 1) as usize]).unwrap();
+        let mut filler = vec![b'x'; ROTATE_BYTES as usize];
+        filler.push(b'\n');
+        std::fs::write(&path, filler).unwrap();
         log.record(
             "s1",
             "hands",
@@ -285,10 +331,22 @@ mod tests {
         // The record that triggered the roll is IN the rolled file, not lost:
         // rotation happens after the append, so nothing is written to a file
         // that is about to be renamed away.
-        let rolled = std::fs::read_to_string(path.with_extension("jsonl.1")).unwrap();
-        assert!(rolled.contains("git push origin main"));
+        //
+        // Read through `read_all`, NOT `std::fs::read_to_string` — that is the
+        // whole of round-2 audit G1. The first version of this assertion opened
+        // the rolled file directly, which proves the bytes survived on disk
+        // while saying nothing about whether any consumer can still see them.
+        // They could not: `read_all` is the only path the Violations panel and
+        // the external driver have, and it read the live file alone.
+        let rolled = log.read_all().unwrap();
+        assert!(
+            rolled.iter().any(|r| r.action == "git push origin main"),
+            "the rolled generation is unreachable through the only reader \
+             consumers have: {rolled:?}"
+        );
 
-        // And the log keeps working: the next record starts the fresh file.
+        // And the log keeps working: the next record starts the fresh file,
+        // and BOTH generations come back, oldest first.
         log.record(
             "s1",
             "hands",
@@ -299,9 +357,12 @@ mod tests {
         )
         .await
         .unwrap();
-        let fresh = log.read_all().unwrap();
-        assert_eq!(fresh.len(), 1, "the fresh log holds only what came after");
-        assert_eq!(fresh[0].action, "git push --force");
+        let both = log.read_all().unwrap();
+        assert_eq!(
+            both.iter().map(|r| r.action.as_str()).collect::<Vec<_>>(),
+            vec!["git push origin main", "git push --force"],
+            "both generations, chronological — the rolled one first"
+        );
     }
 
     #[tokio::test]
