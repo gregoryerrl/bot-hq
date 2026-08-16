@@ -1595,6 +1595,298 @@ mod tests {
         assert_eq!(bridge.current_agent_health("s2", "rain"), None);
     }
 
+    /// **Every per-session map is actually emptied** (round-2 audit, R2).
+    ///
+    /// `unregister_session` has sixteen drain lines and, before this, ONE was
+    /// pinned — `closing_a_session_unregisters_its_phase` below asserts on
+    /// `session_phase` alone, and `session_sequencer` turned out to be covered
+    /// from `sequencer.rs`'s own module. The reviewer cut the other fourteen in
+    /// one go, with `session_phase` deliberately left in the cut set as a
+    /// positive control, and the suite reported `1164 passed; 1 failed` — the
+    /// control. Fourteen drains deleted green, including `session_attention`,
+    /// whose absence was a USER-VISIBLE bug batch 1 had just fixed (reopening a
+    /// session id showed the previous run's attention badge).
+    ///
+    /// Seeded by writing the maps directly rather than through sixteen
+    /// registration APIs: this is a test of the DRAIN, and routing through the
+    /// registrations would make it fail for reasons that are not the drain's.
+    #[tokio::test]
+    async fn unregister_session_empties_every_per_session_map() {
+        let b = SignalingBridge::new();
+        let sid = "s-doomed";
+        let keep = "s-survivor";
+
+        // Seed both sessions into all sixteen maps. `keep` is the negative
+        // control: a drain that over-reaches (clear() instead of remove()) is
+        // as wrong as one that never runs, and only a second session shows it.
+        for s in [sid, keep] {
+            b.session_projects
+                .lock()
+                .await
+                .insert(s.into(), Some("p".into()));
+            b.session_awaiting
+                .lock()
+                .await
+                .insert(s.into(), Arc::new(AtomicBool::new(true)));
+            b.session_activity.lock().await.insert(s.into(), Weak::new());
+            b.session_phase.lock().await.insert(s.into(), Weak::new());
+            b.session_close_gate
+                .lock()
+                .await
+                .insert(s.into(), CloseGateState::default());
+            b.session_sequencer
+                .lock()
+                .await
+                .insert(s.into(), tokio::sync::mpsc::channel(1).0);
+            b.pending.lock().await.insert(
+                format!("{s}-choice"),
+                Parked {
+                    tx: tokio::sync::oneshot::channel().0,
+                    choice: PendingChoice {
+                        choice_id: format!("{s}-choice"),
+                        session_id: s.into(),
+                        agent: "hands".into(),
+                        question: "q".into(),
+                        options: vec!["a".into()],
+                        approval: None,
+                    },
+                },
+            );
+            b.agent_health
+                .lock()
+                .unwrap()
+                .insert((s.into(), "hands".into()), "running".into());
+            b.agent_rpc_seen
+                .lock()
+                .unwrap()
+                .insert((s.into(), "hands".into()), std::time::Instant::now());
+            b.reviewer_override
+                .lock()
+                .unwrap()
+                .insert(s.into(), "why".into());
+            b.session_open_blocking
+                .lock()
+                .unwrap()
+                .insert(s.into(), Arc::new(AtomicUsize::new(1)));
+            b.turn_passes.lock().unwrap().insert(format!("{s}:hands"), 1);
+            b.pending_override_requests
+                .lock()
+                .unwrap()
+                .insert(format!("{s}-req"), (s.into(), "hands".into()));
+            b.session_reviewers
+                .lock()
+                .unwrap()
+                .insert(s.into(), vec!["eyes".into()]);
+            b.session_attention
+                .lock()
+                .unwrap()
+                .insert(s.into(), "idle_unflagged".into());
+            b.mcp_tokens
+                .lock()
+                .unwrap()
+                .insert(format!("{s}:hands"), "tok".into());
+        }
+
+        b.unregister_session(sid).await;
+
+        // `(map, still-holds-doomed, still-holds-survivor)` — both directions
+        // per map, because a drain can fail two ways and only one of them is
+        // the absent line. `clear()` where `remove()` was meant empties the map
+        // for every LIVE session too, and a length check cannot tell the two
+        // apart.
+        let mut report: Vec<(&str, bool, bool)> = Vec::new();
+        // The predicate is a token pattern, not a closure argument: a closure
+        // passed INTO a macro has no call site to infer its parameter from, so
+        // every one of the sixteen would need a spelled-out map type.
+        macro_rules! check {
+            ($name:literal, $guard:expr, |$m:ident, $s:ident| $body:expr) => {{
+                let g = $guard;
+                let probe = |$s: &str| -> bool {
+                    let $m = &*g;
+                    $body
+                };
+                report.push(($name, probe(sid), probe(keep)));
+            }};
+        }
+        check!("session_projects", b.session_projects.lock().await, |m, s| {
+            m.contains_key(s)
+        });
+        check!("session_awaiting", b.session_awaiting.lock().await, |m, s| {
+            m.contains_key(s)
+        });
+        check!("session_activity", b.session_activity.lock().await, |m, s| {
+            m.contains_key(s)
+        });
+        check!("session_phase", b.session_phase.lock().await, |m, s| {
+            m.contains_key(s)
+        });
+        check!(
+            "session_close_gate",
+            b.session_close_gate.lock().await,
+            |m, s| m.contains_key(s)
+        );
+        check!(
+            "session_sequencer",
+            b.session_sequencer.lock().await,
+            |m, s| m.contains_key(s)
+        );
+        check!("pending", b.pending.lock().await, |m, s| {
+            m.values().any(|p| p.choice.session_id == s)
+        });
+        check!("agent_health", b.agent_health.lock().unwrap(), |m, s| {
+            m.keys().any(|(k, _)| k == s)
+        });
+        check!("agent_rpc_seen", b.agent_rpc_seen.lock().unwrap(), |m, s| {
+            m.keys().any(|(k, _)| k == s)
+        });
+        check!(
+            "reviewer_override",
+            b.reviewer_override.lock().unwrap(),
+            |m, s| m.contains_key(s)
+        );
+        check!(
+            "session_open_blocking",
+            b.session_open_blocking.lock().unwrap(),
+            |m, s| m.contains_key(s)
+        );
+        check!("turn_passes", b.turn_passes.lock().unwrap(), |m, s| {
+            m.keys().any(|k| k.starts_with(&format!("{s}:")))
+        });
+        check!(
+            "pending_override_requests",
+            b.pending_override_requests.lock().unwrap(),
+            |m, s| m.values().any(|(owner, _)| owner == s)
+        );
+        check!(
+            "session_reviewers",
+            b.session_reviewers.lock().unwrap(),
+            |m, s| m.contains_key(s)
+        );
+        check!(
+            "session_attention",
+            b.session_attention.lock().unwrap(),
+            |m, s| m.contains_key(s)
+        );
+        check!("mcp_tokens", b.mcp_tokens.lock().unwrap(), |m, s| {
+            m.keys().any(|k| k.starts_with(&format!("{s}:")))
+        });
+
+        assert_eq!(report.len(), 16, "a map was dropped from this test's sweep");
+        let undrained: Vec<&str> = report
+            .iter()
+            .filter(|(_, doomed, _)| *doomed)
+            .map(|(n, _, _)| *n)
+            .collect();
+        assert!(
+            undrained.is_empty(),
+            "map(s) still holding the CLOSED session — each one outlives the \
+             session it belongs to: {undrained:?}"
+        );
+        let over_reached: Vec<&str> = report
+            .iter()
+            .filter(|(_, _, survivor)| !*survivor)
+            .map(|(n, _, _)| *n)
+            .collect();
+        assert!(
+            over_reached.is_empty(),
+            "map(s) that also dropped an UNRELATED live session — `clear()` \
+             where `remove()` was meant: {over_reached:?}"
+        );
+    }
+
+    /// **A seventeenth map cannot be added without a drain line** (round-2, R2).
+    ///
+    /// The behavioural test above pins the sixteen that exist; nothing pins the
+    /// one somebody adds next, and THAT is the failure this function keeps
+    /// having — six maps once had no drain line at all, and batch 1's own fix
+    /// introduced a seventeenth (`mcp_tokens`) while its commit message said
+    /// "all sixteen". The audit's structural answer is a `PerSession` registry
+    /// so the type system says it; until that lands, this says it from the
+    /// source.
+    ///
+    /// Derived, not restated: the expectation is computed from the struct's own
+    /// fields, so the only way to pass is to agree with the declaration. There
+    /// is deliberately NO exemption list — every `HashMap` field on this struct
+    /// is per-session today, and a list of sanctioned absences is precisely the
+    /// thing that rots into permission for the next one.
+    #[test]
+    fn every_hashmap_field_is_named_in_unregister_session() {
+        let src = include_str!("mod.rs");
+
+        let struct_start = src
+            .find("pub struct SignalingBridge {")
+            .expect("the struct declaration moved");
+        let struct_body = &src[struct_start..][..src[struct_start..]
+            .find("\n}\n")
+            .expect("unterminated struct")];
+
+        let fn_start = src
+            .find("pub async fn unregister_session(&self, session_id: &str) {")
+            .expect("unregister_session's signature moved");
+        let fn_body = &src[fn_start..][..src[fn_start..]
+            .find("\n    }\n")
+            .expect("unterminated fn")];
+
+        // Field name → the text of its declared type, joined across the
+        // multi-line declarations (`session_sequencer` is one).
+        let mut current: Option<(String, String)> = None;
+        let mut fields: Vec<(String, String)> = Vec::new();
+        for line in struct_body.lines().skip(1) {
+            let t = line.trim_start();
+            if t.starts_with("///") || t.starts_with("//") || t.starts_with('#') {
+                continue;
+            }
+            let decl = t
+                .strip_prefix("pub(super) ")
+                .or_else(|| t.strip_prefix("pub "))
+                .unwrap_or(t);
+            match decl.split_once(':') {
+                Some((name, rest))
+                    if !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()) =>
+                {
+                    if let Some(f) = current.take() {
+                        fields.push(f);
+                    }
+                    current = Some((name.to_string(), rest.to_string()));
+                }
+                _ => {
+                    if let Some((_, ty)) = current.as_mut() {
+                        ty.push_str(t);
+                    }
+                }
+            }
+        }
+        if let Some(f) = current.take() {
+            fields.push(f);
+        }
+
+        let maps: Vec<&str> = fields
+            .iter()
+            .filter(|(_, ty)| ty.contains("HashMap"))
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert!(
+            maps.len() >= 16,
+            "field parse found only {} maps — the parser broke, not the code: {maps:?}",
+            maps.len()
+        );
+
+        let undrained: Vec<&&str> = maps
+            .iter()
+            .filter(|n| !fn_body.contains(&format!("self.{n}")))
+            .collect();
+        assert!(
+            undrained.is_empty(),
+            "per-session map(s) with no line in `unregister_session` — every one \
+             is a leak that outlives the session, and the last two found this way \
+             were an orphan ring task per closed session and a stale attention \
+             badge on reopen: {undrained:?}"
+        );
+    }
+
     #[tokio::test]
     async fn closing_a_session_unregisters_its_phase() {
         // `session_phase` joins the maps `unregister_session` drains. Missing
