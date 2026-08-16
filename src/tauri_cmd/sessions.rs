@@ -150,7 +150,16 @@ pub struct ParticipantPick {
 /// roster, so the cap is now only a sanity bound on what one session can
 /// usefully run — every participant is a claude-code subprocess with its own
 /// context window and its own bill.
-pub const MAX_SESSION_PARTICIPANTS: usize = 8;
+///
+/// **Re-exported from `storage`, not declared here** (round-2 audit B3). It sat
+/// in this module and was enforced in `resolve_participant_picks` alone — the
+/// path the create DIALOG takes. The other two creation paths seed a roster
+/// instead of picking one (`Storage::ensure_session_roster`), and that function
+/// had no ceiling at all: a plugin's `duo:true` or a driver's `solo:false` took
+/// every active non-`on_mention` role, however many that was. A cap enforced on
+/// one of three paths is a cap on none of them, so it now lives beside the
+/// invariant it protects.
+pub use crate::storage::MAX_SESSION_PARTICIPANTS;
 
 /// What a resolved participant list means beyond the roster rows themselves.
 #[derive(Debug, Clone, PartialEq)]
@@ -709,12 +718,18 @@ pub(crate) async fn dispatch_session_inner(
     project: Option<String>,
     repo_path: Option<String>,
     prompt: String,
-    rain_override: Option<bool>,
+    participants: Option<usize>,
 ) -> Result<SessionInfo, AppError> {
     // No create dialog on this path → placement comes from the configured
-    // default (worktree_default), and the roster from `rain_override` when the
-    // caller pins it (the `plugin_sessions` create arm) or from the product
-    // default below.
+    // default (worktree_default), and the roster size from `participants` when
+    // the caller pins it (the `plugin_sessions` create arm, the external
+    // driver) or from the product default below.
+    //
+    // **This was `rain_override: Option<bool>`** (round-2 audit B3). A boolean
+    // cannot express rc3's roster, and `true` meant "seed every active role" —
+    // so both non-dialog creation paths asked for a pair and got whatever
+    // number of roles existed. Callers name a count now; the value is clamped
+    // to [`MAX_SESSION_PARTICIPANTS`] by the seeder regardless.
     let (working, base) = resolve_session_placement(
         storage,
         &core.paths.data_dir,
@@ -738,10 +753,15 @@ pub(crate) async fn dispatch_session_inner(
     // participant.** The `rain_disabled_default` toggle this used to read is
     // deleted ("there is no 'disable the reviewer by default'; just don't add
     // the role to your session creation"), and design §1 puts the default at one
-    // agent. A caller that wants more pins it through `rain_override`; the seed
-    // itself is `Storage::ensure_session_roster`, which documents the same rule.
+    // agent. A caller that wants more names a count; the seed itself is
+    // `Storage::ensure_session_roster`, which documents the same rule.
     // Models stay NULL = role/agent defaults, as the dialog's "(agent default)".
-    let rain_enabled = rain_override.unwrap_or(false);
+    let wanted = participants.unwrap_or(1).max(1);
+    // `sessions.rain_enabled` stays a BOOKKEEPING flag — spawn reads the
+    // roster, not this column, and `SessionInfo.rain_enabled` is part of the
+    // frozen frontend shape. "More than one participant" is all it has ever
+    // meant on this path.
+    let rain_enabled = wanted > 1;
     storage
         .set_session_spawn_config(&id, rain_enabled, None, None)
         .await

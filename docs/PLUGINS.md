@@ -249,7 +249,7 @@ host's JSON views (same shapes the bot-hq UI renders).
 | `list_projects` | — | registered projects |
 | `compute_apply_diff` | `session_id` | a session's color-classified git diff |
 | `spawn_session` | `prompt`, `project?`, `title?` | open a NEW agent session with that prompt (per-spawn confirm dialog — below; returns `{ session_id }`) |
-| `plugin_session_create` | `first_message`, `project?`, `title?`, `duo?` | (needs `plugin_sessions`) create a helper session you own; returns `{ session_id }`; single agent unless `duo:true` |
+| `plugin_session_create` | `first_message`, `project?`, `title?`, `participants?`, `duo?` | (needs `plugin_sessions`) create a helper session you own; returns `{ session_id }`; one agent unless you ask for more |
 | `plugin_session_send` | `session_id`, `text` | (needs `plugin_sessions`) send a message to a session you created |
 | `plugin_session_wait` | `session_id`, `since_id?`, `timeout_ms?` | (needs `plugin_sessions`) long-poll new messages (default 25 s, clamp 100 ms–60 s) → `[AgentMessage]` |
 | `plugin_session_messages` | `session_id`, `since_id?` | (needs `plugin_sessions`) read a created session's messages → `[AgentMessage]` |
@@ -335,10 +335,22 @@ which session ids exist. That bounded blast radius — exactly the
 sessions that plugin minted — is what makes the capability safe to grant
 to third-party plugins.
 
-**Single-agent by default.** `create` runs solo unless you pass
-`duo: true` (a Brian+Rain review pair — double the cost). New sessions
-appear in the user's dashboard and run under the same policy gates as
-any session; `close` archives (recoverable), never hard-deletes.
+**One agent by default.** `create` runs a single participant unless you
+ask for more with `participants: <n>` — every participant is a separate
+claude-code subprocess with its own context window and its own bill, so
+`participants: 3` is roughly triple the cost of the default.
+
+`n` is clamped to the host's session cap (8). Which ROLES fill those seats
+is the user's configuration, not yours: the host seeds the first `n` of
+their active roles, in creation order.
+
+`duo: true` is still accepted as a legacy alias for `participants: 2`, and
+`participants` wins if you send both. It used to mean "every active role",
+which is why it was replaced — a plugin consented to a pair and got however
+many roles the user happened to have configured.
+
+New sessions appear in the user's dashboard and run under the same policy
+gates as any session; `close` archives (recoverable), never hard-deletes.
 
 **Consent model — install grant, no per-call dialog.** Unlike
 `spawn_session` (a confirm dialog on every create), `plugin_sessions` is

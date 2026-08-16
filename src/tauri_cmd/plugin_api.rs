@@ -391,16 +391,47 @@ pub(crate) async fn dispatch(
             let title = opt_str(args, "title")
                 .filter(|t| !t.trim().is_empty())
                 .unwrap_or_else(|| format!("{plugin_id} session"));
-            // Solo by default (cheap, predictable, honest "single agent"
-            // consent); a plugin may opt into a Brian+Rain duo with duo:true.
-            let duo = args.get("duo").and_then(|v| v.as_bool()).unwrap_or(false);
+            // Solo by default — cheap, predictable, and an honest "one agent"
+            // consent, since every participant is a claude-code subprocess with
+            // its own bill.
+            //
+            // **`participants` is the number; `duo` is its legacy alias**
+            // (round-2 audit B3). The wire only had `duo: bool`, which cannot
+            // express rc3's roster: `duo:true` seeded EVERY active
+            // non-`on_mention` role, so a plugin consented to two and got
+            // however many roles the user happened to have. The seeder is capped
+            // now (`MAX_SESSION_PARTICIPANTS`), but a boolean still cannot say
+            // "three", so the wire gains a count.
+            //
+            // `duo` is NOT removed: renaming or dropping a wire key breaks
+            // installed plugins, and a plugin that sends `duo:true` still means
+            // "more than one". It maps to the roster this host seeds by default
+            // for a multi-participant session, and `participants` wins when both
+            // are sent.
+            let requested = args
+                .get("participants")
+                .and_then(Value::as_u64)
+                .map(|n| n.clamp(1, crate::storage::MAX_SESSION_PARTICIPANTS as u64) as usize)
+                .or_else(|| {
+                    args.get("duo")
+                        .and_then(Value::as_bool)
+                        .map(|d| if d { 2 } else { 1 })
+                });
             let core = core.ok_or_else(|| {
                 AppError::Internal("core state unavailable for plugin_session_create".into())
             })?;
             // Same id shape the host UI mints (s-<uuid4 first 8>).
             let id = format!("s-{}", &uuid::Uuid::new_v4().to_string()[..8]);
             let info = crate::tauri_cmd::sessions::dispatch_session_inner(
-                core, storage, bridge, id, title, project, None, first_message, Some(duo),
+                core,
+                storage,
+                bridge,
+                id,
+                title,
+                project,
+                None,
+                first_message,
+                requested,
             )
             .await?;
             // Stamp ownership immediately — before the plugin learns the id

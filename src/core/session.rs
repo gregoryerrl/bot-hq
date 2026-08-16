@@ -26,11 +26,24 @@ use uuid::Uuid;
 pub struct OpenSessionRequest {
     pub title: String,
     pub working_repo_path: Option<PathBuf>,
-    /// Seed only the FIRST active role (`true`) or every one of them (`false`).
+    /// Seed only the FIRST active role (`true`) or a full roster (`false`).
     ///
     /// The external driver has no create dialog and the setting that used to
     /// answer for it is deleted, so it passes `true` — the rc3 D13 product
     /// default of one participant. See [`Storage::ensure_session_roster`].
+    ///
+    /// **`false` no longer means "however many roles exist"** (round-2 audit
+    /// B3). It meant exactly that until the seeder gained a ceiling: a caller
+    /// asking for a non-solo session got every active non-`on_mention` role,
+    /// so adding a role in Settings silently widened every driver-created
+    /// session and the subprocess bill with it. The seeder now clamps to
+    /// `MAX_SESSION_PARTICIPANTS`.
+    ///
+    /// It stays a boolean here rather than becoming a count, deliberately:
+    /// this is a wire the external driver sends, and the plugin path — which
+    /// is the one the audit found reachable with a surprising roster — gained
+    /// the `participants` count instead. Widening this one is a second
+    /// breaking change with no caller asking for it yet.
     pub solo: bool,
     /// Per-slot saved-model ids, positional over the default roster's turn
     /// order — `models[0]` overrides the first participant's model, `models[1]`

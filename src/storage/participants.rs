@@ -110,6 +110,21 @@ pub const MODE_ACTIVE: &str = "active";
 /// The mode that waits to be summoned. See [`PARTICIPATION_MODES`].
 pub const MODE_ON_MENTION: &str = "on_mention";
 
+/// How many participants one session may run.
+///
+/// **Declared here, beside the roster invariant, rather than in the command
+/// layer** (round-2 audit B3). It used to live in `tauri_cmd::sessions` and be
+/// enforced in `resolve_participant_picks` — the create DIALOG's path, one of
+/// three. The other two seed instead of picking, through
+/// [`Storage::ensure_session_roster`], and that path had no ceiling: a plugin
+/// or the external driver got every active non-`on_mention` role, however many
+/// existed. A limit enforced on one path of three is a limit on none of them.
+///
+/// Not the runtime limit — rc3 D10 made spawn iterate the roster, so this is a
+/// sanity bound on what one session can usefully run. Every participant is a
+/// claude-code subprocess with its own context window and its own bill.
+pub const MAX_SESSION_PARTICIPANTS: usize = 8;
+
 /// The slug a role whose display name contains no ASCII alphanumerics falls
 /// back to. See [`slugify`] for why that case exists at all.
 const FALLBACK_SLUG: &str = "role";
@@ -967,10 +982,23 @@ impl Storage {
         // are zipped against — `insert_roster` reads the slug and display name
         // off the matching role, so truncating one without the other would seed
         // a participant under the wrong role's name.
+        //
+        // **And the ceiling** (round-2 audit B3). `first_role_only = false` used
+        // to mean "every active non-`on_mention` role", with no upper bound —
+        // while the create dialog's path refused more than
+        // [`MAX_SESSION_PARTICIPANTS`] in `resolve_participant_picks`. The two
+        // non-dialog creation paths reach this function instead: a plugin's
+        // `plugin_session_create` and the external driver's `create_session`.
+        // Both express roster size as a BOOLEAN, so neither can ask for a
+        // number, and neither got the cap. With three active roles today it
+        // seeds three and looks right; adding a fourth in Settings → Roles
+        // silently widened every plugin-created session. Every participant is a
+        // claude-code subprocess with its own bill, so an unbounded seed is a
+        // spend the caller never asked for.
         let roles: Vec<Role> = if first_role_only {
             roles.into_iter().take(1).collect()
         } else {
-            roles
+            roles.into_iter().take(MAX_SESSION_PARTICIPANTS).collect()
         };
         let drafts: Vec<ParticipantDraft> = roles
             .iter()
@@ -4623,6 +4651,66 @@ mod tests {
         s.create_session("s3", "t", None).await.unwrap();
         s.set_role_archived(auditor.id, true).await.unwrap();
         assert_eq!(s.ensure_session_roster("s3", false).await.unwrap(), 2);
+    }
+
+    /// **The seed path obeys the cap the pick path always did** (round-2 B3).
+    ///
+    /// `MAX_SESSION_PARTICIPANTS` was enforced in `resolve_participant_picks`
+    /// — the create DIALOG's path. The other two creation paths seed instead of
+    /// picking, and reach this function: `plugin_session_create`'s `duo:true`
+    /// and the external driver's `solo:false`. Both express roster size as a
+    /// BOOLEAN, so neither can name a number, and neither got the cap. Seeding
+    /// took *every* active non-`on_mention` role.
+    ///
+    /// It looked correct because the live install has three roles. The test
+    /// creates more than the cap so the ceiling is the thing under test rather
+    /// than an accident of how many roles happen to exist — the same reason
+    /// `conventions.md` requires a fixture that can tell the candidate
+    /// behaviours apart.
+    #[tokio::test]
+    async fn seeding_a_roster_cannot_exceed_the_participant_cap() {
+        let s = Storage::memory().await.unwrap();
+        // Two roles are seeded by migration; add enough to pass the cap.
+        let seeded = s.list_roles().await.unwrap().len();
+        for i in seeded..(MAX_SESSION_PARTICIPANTS + 3) {
+            s.create_role(&RoleDraft {
+                display_name: format!("ROLE{i}"),
+                capabilities: "[\"read_channel\"]".into(),
+                participation_mode: "active".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+        let active = s
+            .list_roles()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| !r.archived && r.participation_mode == MODE_ACTIVE)
+            .count();
+        assert!(
+            active > MAX_SESSION_PARTICIPANTS,
+            "fixture must exceed the cap or it proves nothing: {active} roles"
+        );
+
+        s.create_session("s-capped", "t", None).await.unwrap();
+        let seeded = s.ensure_session_roster("s-capped", false).await.unwrap();
+        assert_eq!(
+            seeded as usize, MAX_SESSION_PARTICIPANTS,
+            "a seeded roster took {seeded} of {active} active roles — the seed \
+             path is uncapped, so one boolean on the plugin wire spawns however \
+             many roles happen to exist"
+        );
+        assert_eq!(
+            s.participants_for_session("s-capped").await.unwrap().len(),
+            MAX_SESSION_PARTICIPANTS
+        );
+
+        // The solo cut is unaffected — it is a different question from the
+        // ceiling, and capping must not turn "one participant" into eight.
+        s.create_session("s-solo", "t", None).await.unwrap();
+        assert_eq!(s.ensure_session_roster("s-solo", true).await.unwrap(), 1);
     }
 
     /// Two participants of ONE role are both addressable — the collision rule
