@@ -12,6 +12,14 @@ binaries, 1 ignored (`the_ring_runs_against_a_real_session`, needs `/tmp/smoke.d
 **At `f339f6d`:** cargo **1169** + 62 · vitest **392** in 45 files · `tsc --noEmit` clean ·
 clippy **10**.
 
+**Who measured what**, since this report's whole discipline is that a reader can tell:
+the HEAD figures were run independently by both participants and agree — including clippy's
+10, reached by the same arithmetic from two separate runs. The **17 baseline is measured by
+one participant only**, at `632c163`; corroborating it needs a checkout, which is a tree
+mutation the reviewer declined to make. So the delta's left-hand side is asserted, not
+independently confirmed. `cargo build --release` was likewise run by one participant; the
+reviewer confirmed its observable artifact (the 39,932-byte dist CSS) but not the build.
+
 ---
 
 ## 0. How to read the status column
