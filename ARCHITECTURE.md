@@ -486,19 +486,25 @@ submodule tree). Surface:
   tools.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools (36)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (40)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
-`mark_awaiting_user`, `peer_ack`, `halt`, `advance_phase`, `request_phase_advance`,
-`request_approval`, `action_gate`, `check_commit_message`, `eyes_flag`,
+`mark_awaiting_user`, `peer_ack`, `pass_turn`, `halt`, `advance_phase`,
+`web_search`, `request_phase_advance`, `file_feedback`, `request_approval`,
+`action_gate`, `gate_status`, `check_commit_message`, `eyes_flag`,
 `disposition_finding`, `check_open_findings`, `override_reviewer_block`,
 `approve_finding`, `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_search`,
-`session_doc_read`, `cl_index_search`, `cl_retrieve`, `cl_write_file`,
-`cl_register_read`, `cl_rescan`,
-`cl_folder_search`, `cl_register_folder_description`, `web_search`,
+`session_doc_read`, `cl_index_search`, `cl_retrieve`, `cl_stale_refs`,
+`cl_write_file`, `cl_register_read`, `cl_rescan`,
+`cl_folder_search`, `cl_register_folder_description`,
 `terminal_exec`, `terminal_read`,
 `webview_screenshot`, `webview_click`, `webview_type`, `webview_scroll`,
 `webview_press_key`.
+
+This list is checked against the live registry by
+`protocol.rs::every_registered_tool_is_documented` — it said 36 for four tools'
+worth of drift before that test existed, and a list nothing compares to the code
+is a list that is wrong and does not know it.
 
 **Session terminal (Terminal subtab).** Each session lazily spawns one PTY
 shell (`core/terminal.rs`) in its working repo — rendered by the session

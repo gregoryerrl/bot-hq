@@ -874,6 +874,48 @@ mod tests {
     /// Word-boundary matched: `constraint` contains `rain`, and a substring
     /// check would fail on prose that is perfectly fine.
     #[test]
+    /// **The canonical docs list every registered tool** (audit M-F10/M-T1).
+    ///
+    /// `ARCHITECTURE.md` said "Internal tools (36)" against a registry of 40,
+    /// and `README.md`'s table was missing five — `pass_turn`, `file_feedback`,
+    /// `gate_status`, `cl_stale_refs`, `cl_retrieve` — which is four tools'
+    /// worth of drift plus one that was never added. Nothing compared either
+    /// list to the code, so both were wrong and neither knew it.
+    ///
+    /// Asserted from the REGISTRY outward, not the other way round: a doc naming
+    /// a tool that no longer exists is a different (and less costly) problem
+    /// than a tool an agent can call and no human-facing doc mentions.
+    #[test]
+    fn every_registered_tool_is_documented() {
+        let arch = include_str!("../../ARCHITECTURE.md");
+        let readme = include_str!("../../README.md");
+        let mut missing: Vec<String> = Vec::new();
+        for d in tool_descriptors() {
+            // Backtick-prefixed so `cl_rescan` cannot be satisfied by prose that
+            // merely mentions rescanning, and so `README`'s call-signature rows
+            // (`` `pass_turn()` ``) match without hard-coding their arguments.
+            let needle = format!("`{}", d.name);
+            if !arch.contains(&needle) {
+                missing.push(format!("ARCHITECTURE.md: {}", d.name));
+            }
+            if !readme.contains(&needle) {
+                missing.push(format!("README.md: {}", d.name));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "tools an agent can call that the canonical docs never mention: {missing:?}"
+        );
+        // And the COUNT in ARCHITECTURE's heading, which is the part that read
+        // as authoritative while being wrong.
+        let n = tool_descriptors().len();
+        assert!(
+            arch.contains(&format!("**Internal tools ({n})**")),
+            "ARCHITECTURE.md's tool count is not {n} — the registry moved and \
+             the heading did not"
+        );
+    }
+
     fn no_tool_description_an_agent_reads_names_an_agent() {
         use crate::signaling::external_jsonrpc::{external_tool_descriptors, wire};
         // Rendered exactly as the schema carries them: the model args and spawn

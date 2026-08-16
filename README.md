@@ -279,7 +279,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 |---|---|
 | `ask_user_choice(question, options)` | Park a structured question for the user. Returns a parked ack; the pick arrives out-of-band. |
 | `mark_awaiting_user(reason)` | Flag the session's `[Need User Input]` badge. Non-blocking. |
-| `peer_ack()` | Acknowledge your peer WITHOUT waking them — suppresses this turn's peer-forward so a converged duo settles to Idle instead of volleying. Either agent. Sits on top of the mechanical volley-breaker. |
+| `peer_ack(final?)` | Say you have converged and end the round instead of bouncing another acknowledgment. A content-free ack (or `final: true`) ends the turn as a DONE vote toward consensus; a substantive turn stays an ordinary turn with the ack recorded as overridden, so a review is never silently downgraded to agreement. |
 | `halt(reason?)` | Yield to the user and unlock the chat input (sets awaiting, which outranks busy). Like `mark_awaiting_user` framed as a yield. HANDS only. |
 | `request_approval(kind, action, …)` | Per-action approval gate. Used by push gate, force-push, per-action approval. |
 | `action_gate(command)` | Run a Bash command the Tool Gate blocked: bot-hq surfaces Approve/Reject and, on approve, executes it in the session repo and returns the output. |
@@ -293,7 +293,8 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `list_my_pending_questions()` | List questions THIS agent has parked but haven't been answered. Used to avoid duplicate retries. |
 | `withdraw_question(choice_id)` | Withdraw a stale parked question. |
 | `supersede_question(choice_id, …)` | Replace a parked question with a rephrased one (links old→new). |
-| `cl_index_search(project, query?)` | Search the SQLite-backed Context Library index. |
+| `cl_index_search(project, query?)` | Search the SQLite-backed Context Library index — lightweight rows, so an agent can decide what is worth opening. |
+| `cl_retrieve(project, query, paths?, budget_tokens?)` | Pull ranked CL CONTENT inline under a token budget, instead of the search-then-read-whole-file loop. The 95% path for getting CL knowledge on a topic. |
 | `cl_folder_search(project, query?)` | Search CL folder descriptions (folder-level parallel to `cl_index_search`). |
 | `cl_register_read(project, file_path)` | Audit insert recording which CL file the agent read. |
 | `cl_register_folder_description(project, folder_path, …)` | Write a CL folder description (HANDS only). |
@@ -312,6 +313,10 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `webview_type(selector, text)` | Type into a webview element. |
 | `webview_scroll(selector?, y)` | Scroll an element or the page in the webview. |
 | `webview_press_key(key)` | Dispatch a keypress in the webview. |
+| `pass_turn()` | Decline this turn — recorded in the chat so the user sees you were asked and chose to stay quiet. Not the same as being finished: a pass counts toward nothing and cannot settle the session on its own. |
+| `file_feedback(kind, title, body)` | File an issue or idea about BOT-HQ ITSELF into a queue a later session works through. Never interrupts the user, never surfaces mid-session. |
+| `gate_status(gate_id)` | Current state of a parked `action_gate` command: pending, approved (with output), or rejected. Read this instead of guessing whether a gated command ran. |
+| `cl_stale_refs(project)` | Report CL claims that name code the repo no longer has. Report-only; never edits. |
 
 Role boundary (enforced server-side, from the role's capability ticks): a reviewer is blocked from the
 HANDS-only tools — `ask_user_choice`, `mark_awaiting_user`, `halt`, `request_approval`,
@@ -393,7 +398,7 @@ Restart that claude-code; the bot-hq tools appear as `mcp__bot-hq__*`.
 | `advance_phase(session_id, phase)` | Move through I/P/A/V. |
 | `resolve_choice(choice_id, picked)` | Answer a parked `ask_user_choice`. |
 | `get_pending_choices` | List parked choices with their choice_ids. |
-| `close_session(session_id, archive?)` | Kill duo + mark closed. |
+| `close_session(session_id, archive?)` | Kill the session's agents and mark it closed. |
 | `get_status` | Version, addresses, session count, uptime. |
 | `get_agent_configs` | Read agent configs (auth_token redacted to last 4 chars). |
 | `set_agent_config(agent_name, …)` | Upsert a row; empty string clears a field. |
