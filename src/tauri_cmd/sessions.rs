@@ -853,13 +853,14 @@ pub struct SessionRuntime {
     /// Per-slot busy flags (the derived `activity` collapses them) so the chat
     /// input can label who is working after a backfill, not just guess.
     ///
-    /// **The field NAMES are frozen wire, and they name TURN SLOTS, not agents**
-    /// (rc3 D10). `brian_*` is the participant at turn position 0 and `rain_*`
-    /// the one at position 1; a session with one participant leaves the second
-    /// pair at its empty value and a session with three does not report the
-    /// rest here — `list_session_participants` is the roster-shaped read. They
-    /// keep these names only until the session view that consumes them is
-    /// rewritten.
+    /// **The field NAMES are TURN SLOTS, not agents**: `slot0_*` is the
+    /// participant at turn position 0 and `slot1_*` the one at position 1. A
+    /// session with one participant leaves the second pair at its empty value,
+    /// and a session with three does not report the rest here —
+    /// `list_session_participants` is the roster-shaped read.
+    ///
+    /// They were `brian_*` / `rain_*` until the D10 hard retirement (migration
+    /// 0060), which is what the names had always meant.
     pub slot0_busy: bool,
     pub slot1_busy: bool,
     pub slot0_health: Option<String>,
@@ -1391,7 +1392,39 @@ mod tests {
         assert_eq!(views[1].model_display_name, None);
 
         // The display rule, over exactly the halves this command returns. The
-        // frontend joins them the same way; this is the shared implementation.
+        // frontend joins them the same way (`frontend/src/lib/participants.ts`
+        // `participantLabel`); this is the shared implementation.
+        //
+        // **`label` is asserted as a DIFFERENCE between the two rows, not as a
+        // constant** (round-4 F1, and the same argument
+        // `participant_views_carry_the_rows_effort_and_ultracode` makes below).
+        // Every row here passed `label: None` until round 4, so the assertion
+        // could not separate "the label was honoured" from "the label was
+        // ignored" — and the frontend half had no label branch at all for as
+        // long as this test was green. One labelled row and one unlabelled is
+        // what makes the claim above checkable.
+        sqlx::query("UPDATE session_participants SET label = 'Driver' WHERE slug = 'hands'")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let views = participant_views(&storage, "s1").await.unwrap();
+        assert_eq!(views[0].label.as_deref(), Some("Driver"), "the row's label reaches the view");
+        assert_eq!(views[1].label, None, "the unlabelled row stays unlabelled");
+        assert_eq!(
+            crate::storage::participant_display_name(
+                views[0].role_display_name.as_deref(),
+                views[0].model_display_name.as_deref(),
+                &views[0].slug,
+                views[0].label.as_deref(),
+            ),
+            "Driver · Claude Opus 5",
+            "the label replaces the role half and the model suffix survives"
+        );
+        sqlx::query("UPDATE session_participants SET label = NULL WHERE slug = 'hands'")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let views = participant_views(&storage, "s1").await.unwrap();
         assert_eq!(
             crate::storage::participant_display_name(
                 views[0].role_display_name.as_deref(),

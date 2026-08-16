@@ -22,6 +22,8 @@ function p(over: Partial<ParticipantView> = {}): ParticipantView {
     model_display_name: "Claude Opus 5",
     turn_position: 0,
     participation_mode: "active",
+    color: null,
+    label: null,
     enabled: true,
     ...over,
   };
@@ -58,6 +60,74 @@ describe("participantLabel — the contract's display rule", () => {
       "Claude Opus 5",
     );
   });
+});
+
+/**
+ * rc3 **D20** (migration 0053) — the user's own name for a participant.
+ *
+ * **Mirrors `participant_display_name`'s case table** in
+ * `src/storage/participants.rs` one-for-one rather than adding a happy path.
+ * The two implement one rule on two surfaces, and until round-4 F1 only the
+ * Rust one had a label branch at all: a named participant read as `Driver ·
+ * Claude Opus 5` in the agent's own prompt roster and as `HANDS · Claude Opus
+ * 5` everywhere in the UI. The blank cases are here because the divergence
+ * that fix could re-create is a `"  "` label rendering `"  · Claude Opus 5"`
+ * on screen while the prompt still says `EYES-2 · DeepSeek V4 Pro`.
+ */
+describe("participantLabel — the user's label (rc3 D20)", () => {
+  it("replaces the role half and keeps the model suffix", () => {
+    // What a participant RUNS is a different fact from what the user named it.
+    expect(participantLabel(p({ label: "Driver" }))).toBe(
+      "Driver · Claude Opus 5",
+    );
+  });
+
+  it("stands alone when there is no model", () => {
+    expect(
+      participantLabel(p({ label: "Driver", model_display_name: null })),
+    ).toBe("Driver");
+  });
+
+  it("wins over the role AND its ordinal", () => {
+    // The ordinal exists to tell two participants of one role apart; a label
+    // the user chose does that job better, so it replaces both halves at once.
+    expect(
+      participantLabel(
+        p({ slug: "eyes-2", role_display_name: "EYES", label: "Skeptic" }),
+      ),
+    ).toBe("Skeptic · Claude Opus 5");
+  });
+
+  it("renders the label without its padding", () => {
+    expect(
+      participantLabel(
+        p({
+          slug: "eyes-2",
+          role_display_name: "EYES",
+          model_display_name: null,
+          label: "  Skeptic  ",
+        }),
+      ),
+    ).toBe("Skeptic");
+  });
+
+  it.each(["", "   ", "\t", "\n "])(
+    "treats %o as absent, falling back to the ordinal",
+    (blank) => {
+      // A UI that writes `""` for an untouched input must not thereby erase
+      // the participant's name. Same four cases as the Rust side.
+      expect(
+        participantLabel(
+          p({
+            slug: "eyes-2",
+            role_display_name: "EYES",
+            model_display_name: "DeepSeek V4 Pro",
+            label: blank,
+          }),
+        ),
+      ).toBe("EYES-2 · DeepSeek V4 Pro");
+    },
+  );
 });
 
 describe("authorLabel", () => {
@@ -315,6 +385,7 @@ describe("participantLabel ordinals", () => {
     slug: "eyes",
     role_display_name: "EYES",
     model_display_name: "DeepSeek V4 Pro",
+    label: null,
   };
 
   it("numbers the second participant of a role", () => {
@@ -357,6 +428,7 @@ describe("participantLabel ordinals", () => {
         slug: "eyes-2",
         role_display_name: null,
         model_display_name: null,
+        label: null,
       }),
     ).toBe("eyes-2");
   });

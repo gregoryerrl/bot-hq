@@ -12,18 +12,23 @@ import { colorByName, participantHue } from "../components/authorColor";
  * `claude-overrides.json` scopes); this module is the boundary they stop at.
  *
  * ---
- * ## THE ONE HAND-WRITTEN CONTRACT TYPE — reconcile HERE at merge
+ * ## The hand-written mirror of `ParticipantView`
  *
- * `ParticipantView` and `list_session_participants` are being added by the
- * parallel BACKEND unit, which owns `frontend/src/lib/bindings.ts` and
- * regenerates it with `cargo run -- export-bindings`. This frontend unit must
- * not regenerate that file, so the shape below is transcribed by hand from the
- * shared contract.
+ * Must stay in step with `pub struct ParticipantView` in
+ * `src/tauri_cmd/sessions.rs`, which `list_session_participants` returns.
  *
- * When the two units merge: delete `ParticipantView` from this file, import it
- * from `../lib/bindings` instead, and check the generated shape field-for-field
- * against the contract quoted here. Nothing else in the frontend declares it,
- * so this is the only place to look.
+ * Hand-written on purpose, and it stays that way: `frontend/src/lib/bindings.ts`
+ * is `@ts-nocheck` and regenerates only at app launch (or via `cargo run --
+ * export-bindings`), so importing the contract from there would put the
+ * frontend's only *checked* declaration of it behind a no-check barrier and
+ * leave a fresh clone type-checking against whatever was last committed. This is
+ * the house pattern for every Rust view type the frontend reads.
+ *
+ * This block used to say the opposite — "when the two units merge, delete
+ * `ParticipantView` from this file and import it from `../lib/bindings`". The
+ * merge landed and that step was never run, which is how the mirror sat three
+ * fields short of the contract for long enough for `label` to go unrendered
+ * (round-4 F1). The instruction was the stale artifact, not the mirror.
  */
 export type ParticipantView = {
   id: number;
@@ -38,29 +43,51 @@ export type ParticipantView = {
   participation_mode: string;
   /** The user's colour pick by palette NAME, or null to take the rotation
    *  (rc3 D20). */
-  color?: string | null;
+  color: string | null;
+  /** The user's own name for this participant, or null to take the role and
+   *  ordinal (rc3 **D20**, migration 0053). See {@link participantLabel}. */
+  label: string | null;
   enabled: boolean;
 };
 
-/** The read command the backend unit is adding. Named once, here. */
+/** The roster read (`src/tauri_cmd/sessions.rs`). Named once, here. */
 export const LIST_PARTICIPANTS_CMD = "list_session_participants";
 
 /**
  * The contract's display rule, in one function:
  *
- * > `role_display_name · model_display_name`, e.g. `HANDS · Claude Opus 5`.
- * > When `role_display_name` is null fall back to the model alone; when both
- * > are null fall back to the slug.
+ * > The user's `label`, else `role_display_name` with its ordinal. Then
+ * > ` · model_display_name` when there is a model. When the first half is
+ * > absent fall back to the model alone; when both are absent, the slug.
+ *
+ * **The label replaces the role-and-ordinal half, and only that half** (rc3
+ * **D20**, migration 0053). The model suffix survives it, because what a
+ * participant RUNS is a different fact from what the user named it.
+ *
+ * Blank is not a name: an empty or whitespace label falls back to the ordinal
+ * rather than rendering an empty byline.
  *
  * The slug fallback is the ONLY path that can put an internal key on screen,
  * and it only fires when there is nothing else to say.
+ *
+ * **Must stay in step with `participant_display_name` in
+ * `src/storage/participants.rs`** — same rule, same case table, two surfaces.
+ * The label branch was missing here until round-4 F1, so a user who named a
+ * participant saw that name in the agent's own prompt roster
+ * (`core/session.rs::resolve_roster_facts`) and in session-doc attribution,
+ * and never anywhere in the UI: two surfaces asserting different identities
+ * for one row.
  */
 export function participantLabel(
-  p: Pick<ParticipantView, "slug" | "role_display_name" | "model_display_name">,
+  p: Pick<
+    ParticipantView,
+    "slug" | "role_display_name" | "model_display_name" | "label"
+  >,
 ): string {
   const ordinal = slugOrdinal(p.slug);
+  const named = p.label?.trim() || null;
   const bare = p.role_display_name?.trim() || null;
-  const role = bare && ordinal ? `${bare}-${ordinal}` : bare;
+  const role = named ?? (bare && ordinal ? `${bare}-${ordinal}` : bare);
   const model = p.model_display_name?.trim() || null;
   if (role && model) return `${role} · ${model}`;
   if (role) return role;

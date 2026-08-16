@@ -17,6 +17,8 @@ const ROSTER: ParticipantView[] = [
     model_display_name: "Claude Opus 5",
     turn_position: 0,
     participation_mode: "active",
+    color: null,
+    label: null,
     enabled: true,
   },
   {
@@ -26,6 +28,8 @@ const ROSTER: ParticipantView[] = [
     model_display_name: "DeepSeek R2",
     turn_position: 1,
     participation_mode: "active",
+    color: null,
+    label: null,
     enabled: true,
   },
 ];
@@ -85,12 +89,13 @@ describe("seedRuntimeStores", () => {
 
     seedRuntimeStores(rows, setActivity, setHealth);
 
-    // The `brian_*` / `rain_*` field names are frozen wire naming TURN SLOTS 0
-    // and 1 — `src/tauri_cmd/sessions.rs` fills them from
-    // `handle.participants.get(0)` / `.get(1)`. Unpacking them under the
-    // LITERAL slugs `"brian"` / `"rain"` is what blanked every health dot after
-    // a restart: no rc3 roster has those slugs, so the session header's
-    // per-participant lookup missed every entry this seeds.
+    // The `slot0_*` / `slot1_*` field names name TURN SLOTS 0 and 1 —
+    // `src/tauri_cmd/sessions.rs` fills them from
+    // `handle.participants.get(0)` / `.get(1)`. They were `brian_*` / `rain_*`
+    // until the D10 hard retirement, and unpacking them under the LITERAL slugs
+    // `"brian"` / `"rain"` is what blanked every health dot after a restart: no
+    // rc3 roster has those slugs, so the session header's per-participant
+    // lookup missed every entry this seeds.
     expect(setActivity).toHaveBeenCalledWith("s1", "busy", {
       [slotKey(0)]: true,
       [slotKey(1)]: false,
