@@ -1932,13 +1932,13 @@ mod tests {
         // `create_session` seeds no roster; the participants have to exist for
         // the row to resolve to one.
         storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
-        let brian = storage
+        let hands = storage
             .participant_by_slug("s1", "hands")
             .await
             .unwrap()
             .expect("ensure_session_roster seeds brian")
             .id;
-        let rain = storage
+        let eyes = storage
             .participant_by_slug("s1", "eyes")
             .await
             .unwrap()
@@ -1952,7 +1952,7 @@ mod tests {
             .await
             .unwrap();
         let cfg = PumpConfig {
-            participant_id: Some(brian),
+            participant_id: Some(hands),
             sequencer_tx: Some(seq_tx),
             ..fast_cfg("hands")
         };
@@ -1981,7 +1981,7 @@ mod tests {
         // Wait for the row WHILE the completion cannot yet be delivered.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let row = loop {
-            let unread = storage.unread_for_participant(rain).await.unwrap();
+            let unread = storage.unread_for_participant(eyes).await.unwrap();
             if let Some(r) = unread.rows.iter().find(|r| r.content.contains("passed")) {
                 break r.clone();
             }
@@ -1993,7 +1993,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         assert_eq!(row.origin, "participant", "rc3: a pass row is the participant's");
-        assert_eq!(row.participant_id, Some(brian), "and attributed to the passer");
+        assert_eq!(row.participant_id, Some(hands), "and attributed to the passer");
         assert_eq!(row.kind, "text");
 
         // Now let the completion through and read what it says.
@@ -2007,7 +2007,7 @@ mod tests {
                 ending,
                 ..
             } => {
-                assert_eq!(participant_id, brian);
+                assert_eq!(participant_id, hands);
                 assert_eq!(
                     ending,
                     crate::core::sequencer::TurnEnding::Passed,
@@ -2033,7 +2033,7 @@ mod tests {
     async fn a_substantive_turn_overrides_its_own_pass() {
         let (storage, state) = setup().await;
         storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
-        let brian = storage
+        let hands = storage
             .participant_by_slug("s1", "hands")
             .await
             .unwrap()
@@ -2042,7 +2042,7 @@ mod tests {
 
         let (seq_tx, mut seq_rx) = mpsc::channel(8);
         let cfg = PumpConfig {
-            participant_id: Some(brian),
+            participant_id: Some(hands),
             sequencer_tx: Some(seq_tx),
             ..fast_cfg("hands")
         };
@@ -2103,7 +2103,7 @@ mod tests {
     async fn the_pass_flag_does_not_leak_into_the_next_turn() {
         let (storage, state) = setup().await;
         storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
-        let brian = storage
+        let hands = storage
             .participant_by_slug("s1", "hands")
             .await
             .unwrap()
@@ -2112,7 +2112,7 @@ mod tests {
 
         let (seq_tx, mut seq_rx) = mpsc::channel(8);
         let cfg = PumpConfig {
-            participant_id: Some(brian),
+            participant_id: Some(hands),
             sequencer_tx: Some(seq_tx),
             ..fast_cfg("hands")
         };

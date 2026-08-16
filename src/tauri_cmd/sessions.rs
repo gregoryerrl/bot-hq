@@ -1173,6 +1173,82 @@ mod tests {
         (s, b)
     }
 
+    /// **`SessionInfo.multi_participant` tracks the ROSTER, and distinguishes
+    /// counts** — the property `sessions.rain_enabled` failed to hold.
+    ///
+    /// Filed by the reviewer (`07e1353d`, extended `0e5b3774`) after cutting the
+    /// wire on both create paths: forcing the value false in `create_session`
+    /// and deleting the correction in `dispatch_session_inner` each left the
+    /// suite **fully green, 1239 passed**. The storage derivation was pinned and
+    /// the view was pinned; the join between them was pinned by nothing — the
+    /// "pin the wire, not the halves" shape the CL says has shipped here five
+    /// times.
+    ///
+    /// It matters because this is the field that replaced `rain_enabled`, and
+    /// `rain_enabled`'s defect (round-2 B3) was exactly a value that could not
+    /// distinguish roster sizes: 2, 3 and 8 produced indistinguishable sessions.
+    /// **Hence the one-participant row** — without it a hardcoded `true` passes.
+    ///
+    /// **Residue, stated** (same honesty as `seed_dispatch_roster`'s doc, and the
+    /// same cause): neither command can be driven from the suite, because
+    /// `CoreAppState`'s constructor binds a `SignalingServer` port. So what is
+    /// pinned here is the derivation reaching the view. What is NOT pinned is
+    /// each command re-reading the session AFTER seeding its roster — the
+    /// ordering clippy's `unused mut` caught by accident. Closing that needs an
+    /// integration test that binds a port.
+    #[tokio::test]
+    async fn the_session_view_reports_the_roster_it_actually_has() {
+        let (s, _b) = setup().await;
+
+        // Two participants: the seeded default roster.
+        s.create_session("s-duo", "t", None).await.unwrap();
+        let seeded = s
+            .ensure_session_roster("s-duo", crate::storage::MAX_SESSION_PARTICIPANTS)
+            .await
+            .unwrap();
+        assert!(seeded >= 2, "fixture needs a multi-participant roster, got {seeded}");
+        let view: SessionInfo = s.get_session("s-duo").await.unwrap().unwrap().into();
+        assert!(
+            view.multi_participant,
+            "a session with {seeded} participants must not report as solo"
+        );
+
+        // One participant: the same query, the opposite answer. A constant fails.
+        s.create_session("s-solo", "t", None).await.unwrap();
+        assert_eq!(s.ensure_session_roster("s-solo", 1).await.unwrap(), 1);
+        let view: SessionInfo = s.get_session("s-solo").await.unwrap().unwrap().into();
+        assert!(
+            !view.multi_participant,
+            "a one-participant session must report as solo"
+        );
+
+        // And a roster that GROWS flips it, so the value cannot be cached at
+        // create time — which is exactly what the dropped column did.
+        //
+        // Grown by INSERT rather than by `ensure_session_roster`, because that
+        // method is idempotent and early-returns on a session that already has
+        // a roster; asking it for more does not add any. (Learned by writing
+        // this the obvious way first and watching it fail.)
+        s.create_session("s-grow", "t", None).await.unwrap();
+        s.ensure_session_roster("s-grow", 1).await.unwrap();
+        let before: SessionInfo = s.get_session("s-grow").await.unwrap().unwrap().into();
+        assert!(!before.multi_participant, "starts solo");
+        sqlx::query(
+            "INSERT INTO session_participants \
+             (session_id, slug, display_name, turn_position, enabled) \
+             VALUES ('s-grow', 'eyes', 'EYES', 1, 1)",
+        )
+        .execute(s.pool())
+        .await
+        .unwrap();
+        let after: SessionInfo = s.get_session("s-grow").await.unwrap().unwrap().into();
+        assert!(
+            after.multi_participant,
+            "the same session must re-answer once its roster grew — a value \
+             cached at create time could not"
+        );
+    }
+
     /// **The dialog-less create seeds the size it was asked for** (round-2 B3).
     ///
     /// The first fix threaded a count into `dispatch_session_inner` and let it

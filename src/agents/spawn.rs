@@ -1410,7 +1410,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     cmd.env("BOT_HQ_SESSION_ID", &cfg.session_id);
     // BOT_HQ_AGENT lets the pre-push hook attribute the push-approval prompt to
     // the pushing agent (only HANDS/Brian pushes; Rain can't push).
-    // All agents route through build_command, so this lands for brian/rain.
+    // All agents route through build_command, so this lands for every participant.
     cmd.env("BOT_HQ_AGENT", &cfg.agent_name);
     if let Some(token) = &cfg.config.auth_token {
         if !token.is_empty() {

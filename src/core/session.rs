@@ -2468,8 +2468,12 @@ mod tests {
         // return value buys, and it was wrong before the check moved down too —
         // the old early-return skipped the busy flip only because it skipped the
         // whole loop.
+        // **Pointed at the slug the fixture actually seeds.** It read `"brian"`,
+        // which no participant has answered to since D10 — so the assertion could
+        // not fail, on a property whose failure WEDGES a session. Found by the
+        // reviewer sweeping the retirement's completeness claim (`840fcb11`).
         assert!(
-            !a.activity.is_busy_slug("brian"),
+            !a.activity.is_busy_slug("hands"),
             "a refused receipt must not mark the agent busy"
         );
 
@@ -3680,22 +3684,22 @@ mod tests {
         let roster = s.participants_for_session("s1").await.unwrap();
 
         let hands_facts = resolve_roster_facts(&s, &roster, roster.iter().find(|p| p.slug == "hands").unwrap()).await.unwrap();
-        let brian = read_system_prompt(&paths, "hands", None, None, None, None, Some(&hands_facts))
+        let hands = read_system_prompt(&paths, "hands", None, None, None, None, Some(&hands_facts))
             .unwrap();
         let eyes_facts = resolve_roster_facts(&s, &roster, roster.iter().find(|p| p.slug == "eyes").unwrap()).await.unwrap();
-        let rain = read_system_prompt(&paths, "eyes", None, None, None, None, Some(&eyes_facts))
+        let eyes = read_system_prompt(&paths, "eyes", None, None, None, None, Some(&eyes_facts))
             .unwrap();
 
         let edit = crate::agents::capability_prompt::phrasing(crate::agents::Capability::EditFiles);
         let flag =
             crate::agents::capability_prompt::phrasing(crate::agents::Capability::FileFinding);
-        assert!(brian.contains(&format!("- {}.\n", edit.grant)), "HANDS lost edit_files");
+        assert!(hands.contains(&format!("- {}.\n", edit.grant)), "HANDS lost edit_files");
         assert!(
-            brian.contains(&format!("- {}.\n", flag.deny)),
+            hands.contains(&format!("- {}.\n", flag.deny)),
             "HANDS was not told it cannot flag"
         );
-        assert!(rain.contains(&format!("- {}.\n", flag.grant)), "EYES lost file_finding");
-        assert!(rain.contains(&format!("- {}.\n", edit.deny)), "EYES was not told it cannot edit");
+        assert!(eyes.contains(&format!("- {}.\n", flag.grant)), "EYES lost file_finding");
+        assert!(eyes.contains(&format!("- {}.\n", edit.deny)), "EYES was not told it cannot edit");
     }
 
     /// **The parity test for migration 0048's prose edit.** Refusals were
@@ -4303,29 +4307,29 @@ mod tests {
                 .unwrap();
         }
 
-        let brian = compose_system_prompt(&s, &roster, &paths, roster.iter().find(|p| p.slug == "hands").unwrap(), None, None, None)
+        let hands = compose_system_prompt(&s, &roster, &paths, roster.iter().find(|p| p.slug == "hands").unwrap(), None, None, None)
             .await
             .unwrap();
-        let rain = compose_system_prompt(&s, &roster, &paths, roster.iter().find(|p| p.slug == "eyes").unwrap(), None, None, None)
+        let eyes = compose_system_prompt(&s, &roster, &paths, roster.iter().find(|p| p.slug == "eyes").unwrap(), None, None, None)
             .await
             .unwrap();
 
         assert!(
-            brian.contains("SENTINEL_HANDS_R7Q"),
-            "the edited 'hands' prose never reached brian's prompt"
+            hands.contains("SENTINEL_HANDS_R7Q"),
+            "the edited 'hands' prose never reached the HANDS prompt"
         );
         assert!(
-            rain.contains("SENTINEL_EYES_R7Q"),
-            "the edited 'eyes' prose never reached rain's prompt"
+            eyes.contains("SENTINEL_EYES_R7Q"),
+            "the edited 'eyes' prose never reached the EYES prompt"
         );
 
         // Each agent gets ITS role's prose, not the other's and not both.
         assert!(
-            !brian.contains("SENTINEL_EYES_R7Q"),
+            !hands.contains("SENTINEL_EYES_R7Q"),
             "brian was briefed with the 'eyes' role"
         );
         assert!(
-            !rain.contains("SENTINEL_HANDS_R7Q"),
+            !eyes.contains("SENTINEL_HANDS_R7Q"),
             "rain was briefed with the 'hands' role"
         );
 
@@ -4334,7 +4338,7 @@ mod tests {
         // carrying two contradictory role sections.
         let builtin = crate::agents::prompts::HANDS_ROLE.replace("<your project>", "\"_globals\"");
         assert!(
-            !brian.contains(&builtin),
+            !hands.contains(&builtin),
             "the built-in role survived alongside the edited one"
         );
     }
@@ -4350,10 +4354,10 @@ mod tests {
         )
         .unwrap();
         // The single consolidated file reaches BOTH agents' prompts.
-        let brian = read_system_prompt(&paths, "hands", None, None, None, None, None).unwrap();
-        assert!(brian.contains("SHARED_CUSTOM_PREFS_X9Q"));
-        let rain = read_system_prompt(&paths, "eyes", None, None, None, None, None).unwrap();
-        assert!(rain.contains("SHARED_CUSTOM_PREFS_X9Q"));
+        let hands = read_system_prompt(&paths, "hands", None, None, None, None, None).unwrap();
+        assert!(hands.contains("SHARED_CUSTOM_PREFS_X9Q"));
+        let eyes = read_system_prompt(&paths, "eyes", None, None, None, None, None).unwrap();
+        assert!(eyes.contains("SHARED_CUSTOM_PREFS_X9Q"));
     }
 
     #[test]

@@ -1876,10 +1876,10 @@ mod tests {
         bridge
             .mark_awaiting_user("s1".into(), "rain".into(), "rain waits".into())
             .await;
-        let brian = bridge
+        let hands = bridge
             .mark_awaiting_user("s1".into(), "brian".into(), "brian waits".into())
             .await;
-        assert!(brian.is_none(), "another agent's halt is not this agent's repeat");
+        assert!(hands.is_none(), "another agent's halt is not this agent's repeat");
     }
 
     #[tokio::test]

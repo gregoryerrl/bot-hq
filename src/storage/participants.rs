@@ -4041,8 +4041,8 @@ mod tests {
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
         s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
-        let brian = s.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
-        let rain = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
+        let hands = s.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
+        let eyes = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
 
         let m1 = s.post_to_channel("s1", "user", None, "text", "one", None).await.unwrap();
         let m2 = s
@@ -4051,10 +4051,10 @@ mod tests {
             .unwrap();
         let m3 = s.post_to_channel("s1", "user", None, "text", "three", None).await.unwrap();
 
-        let backlog = s.unread_for_participant(rain).await.unwrap().rows;
+        let backlog = s.unread_for_participant(eyes).await.unwrap().rows;
         assert_eq!(backlog.len(), 3, "precondition: three rows past the cursor");
         s.commit_delivery(
-            rain,
+            eyes,
             &[
                 (m1.message_id(), None),
                 (m2.message_id(), Some("spin")),
@@ -4066,7 +4066,7 @@ mod tests {
 
         // Every row in the batch has a record, withheld or not…
         assert_eq!(
-            delivery_rows(&s, rain).await,
+            delivery_rows(&s, eyes).await,
             vec![
                 (m1.message_id(), None),
                 (m2.message_id(), Some("spin".to_string())),
@@ -4074,14 +4074,14 @@ mod tests {
             ]
         );
         // …and the cursor sat past the whole batch in the same commit.
-        assert_eq!(s.cursor_for(rain).await.unwrap(), m3.message_id());
+        assert_eq!(s.cursor_for(eyes).await.unwrap(), m3.message_id());
         assert!(
-            s.unread_for_participant(rain).await.unwrap().rows.is_empty(),
+            s.unread_for_participant(eyes).await.unwrap().rows.is_empty(),
             "a withheld row is recorded, not re-offered forever"
         );
         // Scoped to one participant: Brian's cursor and records are untouched.
-        assert_eq!(s.cursor_for(brian).await.unwrap(), 0);
-        assert!(delivery_rows(&s, brian).await.is_empty());
+        assert_eq!(s.cursor_for(hands).await.unwrap(), 0);
+        assert!(delivery_rows(&s, hands).await.is_empty());
     }
 
     #[tokio::test]
@@ -4392,22 +4392,22 @@ mod tests {
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
         s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
-        let rain = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
+        let eyes = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
         for n in 0..UNREAD_BATCH_LIMIT + 1 {
             s.post_to_channel("s1", "user", None, "text", format!("m{n}"), None)
                 .await
                 .unwrap();
         }
 
-        let first = s.unread_for_participant(rain).await.unwrap();
+        let first = s.unread_for_participant(eyes).await.unwrap();
         assert_eq!(first.rows.len() as i64, UNREAD_BATCH_LIMIT);
         assert!(first.more, "one row over the cap is one row still owed");
 
         // Committing the batch is what makes the next call return the rest.
         let batch: Vec<(i64, Option<&str>)> =
             first.rows.iter().map(|m| (m.id, None)).collect();
-        s.commit_delivery(rain, &batch).await.unwrap();
-        let second = s.unread_for_participant(rain).await.unwrap();
+        s.commit_delivery(eyes, &batch).await.unwrap();
+        let second = s.unread_for_participant(eyes).await.unwrap();
         assert_eq!(second.rows.len(), 1);
         assert!(!second.more);
     }
@@ -4422,8 +4422,8 @@ mod tests {
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
         s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
-        let brian = s.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
-        let rain = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
+        let hands = s.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
+        let eyes = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
 
         let by_brian = s
             .post_to_channel("s1", "participant", Some("hands"), "text", "my turn", None)
@@ -4450,7 +4450,7 @@ mod tests {
             .unwrap();
 
         let unread: Vec<i64> = s
-            .unread_for_participant(brian)
+            .unread_for_participant(hands)
             .await
             .unwrap()
             .rows
@@ -4476,7 +4476,7 @@ mod tests {
         // Rain's backlog is the mirror image — the filter is per participant,
         // not a blanket "drop participant rows".
         let eyes_unread: Vec<i64> = s
-            .unread_for_participant(rain)
+            .unread_for_participant(eyes)
             .await
             .unwrap()
             .rows

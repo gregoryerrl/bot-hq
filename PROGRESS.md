@@ -76,11 +76,24 @@ the comment above it.** And **a test that reads the thing it is proving cannot
 catch that thing changing** — the driver-wire test asserted against
 `wire::MODEL_ARGS` and went green on the rewritten constant.
 
-**Completeness, measured not asserted:** zero live code identifiers name them.
-They survive only in 12 immutable migrations, the driver wire (now pinned by a
-test), append-only evidence (`PROGRESS.md`/`issues.md`/`decisions.md`),
-`conventions.md:5` which names them in order to retire them, and legacy-data
-fixtures where the retired name IS the subject.
+**Completeness — the first claim here was FALSE, and the correction is the
+finding.** It said "zero live code identifiers name them". The real figure is
+**356** word-boundary non-comment occurrences. Two of my own sweeps disagreed by
+450: `awk`'s `\b` (no word boundary on macOS) reported 0; an unbounded `grep -E`
+reported 450 by matching `rain` inside `mid-drain`; `grep -P` reports 356.
+
+Of those: **242 are test fixtures** passing the retired slug as an arbitrary
+agent name — **unswept**, and the reviewer proved at least one was an *inert
+assertion* (`session.rs:2471` checked `!is_busy_slug("brian")` in a test seeding
+`"hands"`, on a property whose failure wedges a session). **16 are production**,
+and all sit in categories that exist to name a retired thing — including two the
+first claim missed: `paths.rs`'s byte-frozen `LEGACY_*_CUSTOM_INSTRUCTION`
+(editing it makes an untouched seed read as user content) and `parity.rs`'s
+deliberate transcription of the pre-rc3 gate.
+
+Restated: **no production identifier names them as a current thing**; 242 test
+fixtures remain, and how many are inert is unmeasured — round 4's most concrete
+task, and a per-case read rather than a sweep.
 
 Suites: **1239** + 392 frontend; clippy **4**; `tsc` clean; release build green.
 

@@ -452,19 +452,70 @@ changing** — `create_session_accepts_per_agent_model_ids` asserted against
 `wire::MODEL_ARGS` and went green on the rewritten constant. It now spells the
 literals out.
 
-## The completeness claim, measured
+## The completeness claim — CORRECTED, and the correction is the finding
 
-**Zero live code identifiers** in `src/`, `tests/` or `frontend/src/` name them.
-Verified by sweep, not asserted. They survive in exactly five places, each by an
-explicit rule:
+**The claim first written here was false**, and it is corrected rather than
+quietly amended because round 4 will grep exactly the way the reviewer did.
+
+It read: *"zero live code identifiers name them."* The real figure is **356**
+word-boundary, non-comment occurrences across 70+ files.
+
+**Both of my measurements were wrong, in opposite directions**, which is the
+transferable part:
+
+| attempt | reported | why it was wrong |
+|---|---|---|
+| `awk` with `\b` | **0** | macOS awk has no `\b` word boundary — the filter excluded everything |
+| `grep -E '(brian\|rain)'` | **450** | no word boundary — matched `rain` inside `mid-d**rain**` |
+| `grep -P` with lookarounds | **356** | correct |
+
+A claim of completeness is only as good as the sweep behind it, and **two
+plausible-looking sweeps disagreed with each other by 450**. Neither would have
+been caught by anything except running a third.
+
+### What the 356 actually are
+
+| | count | verdict |
+|---|---|---|
+| inside `#[cfg(test)]` in `src/` | **242** | test fixtures passing `"brian"`/`"rain"` as an arbitrary agent slug — **NOT swept** |
+| production in `src/` | **16** | all legitimate, in seven categories (below) |
+| `tests/` + `frontend/src/` | ~98 | fixtures and ban-guards |
+
+**The 242 are not cosmetic, and the reviewer proved it.**
+`session.rs:2471` asserted `!is_busy_slug("brian")` inside a test whose fixture
+seeds `"hands"` — an assertion that *could not fail*, on a property whose failure
+**wedges a session** (an agent marked busy for a write that never happened, with
+no `TurnComplete` coming to clear it). Re-pointed at `"hands"` it passes, so that
+one was inert rather than masking a live bug. **How many of the other 241 are
+inert is unmeasured.** That is round 4's most concrete task, and it is a
+per-case read, not a sweep — blind renaming is the technique that failed five
+times in this session.
+
+### The seven surviving categories, two of which the first claim missed
 
 1. **12 immutable migration files** — hook-blocked, sqlx-checksummed.
-2. **The driver wire** — D10's recorded exemption, now pinned by a test.
+2. **The driver wire** (`external_jsonrpc.rs::wire`) — D10's recorded exemption,
+   now pinned by its own test.
 3. **Append-only evidence** — `PROGRESS.md` 144, `issues.md` 14, `decisions.md` 14.
-4. **`conventions.md:5`** — which names them in order to retire them.
-5. **Legacy-data fixtures** — where the retired name IS the subject, e.g. the
-   test proving a row authored `brian` does not resolve against a role-derived
-   roster. Sweeping that one made its assertion vacuous, and the suite caught it.
+4. **`conventions.md:5`** — names them in order to retire them.
+5. **Legacy-data fixtures** — where the retired name IS the subject.
+6. **`paths.rs`'s `LEGACY_*_CUSTOM_INSTRUCTION`** — **MISSED BY THE FIRST CLAIM.**
+   Byte-frozen: `migrate_agent_custom_instructions` compares
+   `body.trim() != legacy_template.trim()`, so *any* character change makes an
+   untouched seed read as real user content. Round 2 recorded this as "same class
+   as an applied migration"; a completeness sweep that edited it would have
+   silently changed migration behaviour.
+7. **`parity.rs`** — **MISSED BY THE FIRST CLAIM.** The parity oracle holds a
+   deliberate transcription of the pre-rc3 gate, including `"hands" => "brian"`.
+   It names the retired vocabulary *because that is what it compares against*.
 
-"Hard retire" cannot mean zero occurrences in this repo. It means no live code,
-schema, or CL guidance — and round 4 can check that sentence against the tree.
+### The claim, restated to what is true
+
+> **No production identifier names them as a current thing.** Every one of the 16
+> production occurrences is in a category that exists to name a retired thing:
+> a frozen template, a frozen wire, a frozen gate transcription, or a ban-guard's
+> word list. **242 test-fixture occurrences remain unswept**, at least one of
+> which was an inert assertion.
+
+That sentence is checkable. The first one was not, and it took the reviewer's
+sweep plus two of my own broken measurements to find that out.
