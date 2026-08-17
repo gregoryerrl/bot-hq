@@ -1517,10 +1517,13 @@ impl RingState {
                         // gap the comment above used to end on). Same
                         // route as the provider-limit and error-streak
                         // halts: the session's halt slot + the banner,
-                        // via `mark_awaiting_user` — which also latches
-                        // the ring and interrupts the spinning
-                        // participant's generation if one is in flight.
-                        // s-f6a441ff sat "just quiet" for exactly this.
+                        // via `mark_awaiting_user_for` — the HOST-declared
+                        // halt, which also latches the ring and, through
+                        // `HaltAcked`, interrupts the spinning
+                        // participant's generation at once if one is in
+                        // flight (round 8: the agent's own halt tool waits
+                        // for its result; a host halt has none to wait
+                        // for). s-f6a441ff sat "just quiet" for exactly this.
                         if let Some(bridge) = deps.bridge.as_ref() {
                             let slug = deps
                                 .storage
@@ -1531,7 +1534,7 @@ impl RingState {
                                 .map(|p| p.slug)
                                 .unwrap_or_else(|| format!("participant {participant_id}"));
                             let _ = bridge
-                                .mark_awaiting_user(
+                                .mark_awaiting_user_for(
                                     deps.session_id.to_string(),
                                     slug.clone(),
                                     format!(
@@ -8893,6 +8896,7 @@ mod tests {
         let a = seats[0].id;
         let bridge = SignalingBridge::new();
         bridge.set_storage(storage.clone()).await;
+        let mut events = bridge.subscribe();
         deps.bridge = Some(Arc::clone(&bridge));
         post(&storage, "user", None, "go").await;
 
@@ -8921,6 +8925,20 @@ mod tests {
                 && reason.contains("repeating itself")),
             "the spin halt names the participant and the reason in the halt slot: {halt:?}"
         );
+        // And the spinner is INTERRUPTED (rc3 D35): a host-declared halt has
+        // no tool ack to wait for, so `HaltAcked` fires with the halt — the
+        // route main.rs turns into `halt_declared` (round 8; the reviewer
+        // found the first A1b cut had dropped this for every host halt).
+        let mut acked = false;
+        while let Ok(ev) = events.try_recv() {
+            if matches!(
+                ev,
+                crate::signaling::SignalingEvent::HaltAcked { ref agent, .. } if agent == "a"
+            ) {
+                acked = true;
+            }
+        }
+        assert!(acked, "the spin halt must interrupt the spinning participant (HaltAcked for a)");
 
         drop(tx);
         assert!(exited(task).await);

@@ -1152,6 +1152,29 @@ impl SignalingBridge {
         prior
     }
 
+    /// **A halt the HOST declares under an agent's slug** — the provider-limit
+    /// and error-streak halts (pump), the spin breaker (sequencer), the idle
+    /// watchdog: same slot, banner and durable row as the agent's own
+    /// `mark_awaiting_user`, PLUS the rc3 D35 self-interrupt at once via
+    /// `HaltAcked` (round 8, A1b). The agent's own tool gets its interrupt from
+    /// its pump when the tool RESULT lands in its stream — that is what keeps
+    /// the interrupt from racing the tool ack — but a host-declared halt has no
+    /// tool call, no ack and no result, so there is nothing to wait for and
+    /// firing now is what "if a generation is in flight, stop it" means. Every
+    /// host caller goes through here; a source guard keeps `mark_awaiting_user`
+    /// itself to the JSON-RPC handler, so a host halt cannot quietly lose its
+    /// interrupt again (the reviewer's finding on batch 13).
+    pub async fn mark_awaiting_user_for(
+        &self,
+        session_id: String,
+        agent: String,
+        reason: String,
+    ) -> Option<String> {
+        let prior = self.mark_awaiting_user(session_id.clone(), agent.clone(), reason).await;
+        self.notify_halt_acked(&session_id, &agent);
+        prior
+    }
+
     /// **The ring's own stop, declared without a round-trip.**
     ///
     /// The all-pass yield, the round cap, consensus and an unwound wedge are

@@ -2111,16 +2111,17 @@ impl AppState {
     /// interrupt; peers are untouched (the ring latch already stops the next
     /// deal, and a non-declarer holding a live turn keeps it).
     ///
-    /// Known cost, documented rather than fixed: this interrupt reaches the
-    /// subprocess off the serial event worker (`main.rs`), on a different path
-    /// from the tool's JSON-RPC ack, and it usually wins — so the declarer's own
-    /// transcript shows its `halt` answered with claude-code's cancellation text
-    /// ("The user doesn't want to proceed with this tool use…"). That text is
-    /// claude-code's, not ours; what made it harmful was the pump counting the
-    /// aborted turn as an error (fixed via `SessionAgent::interrupt`'s epoch
-    /// stamp). The deterministic fix — interrupting on the dispatch path AFTER
-    /// the response is written — is a separate change; a delay here would only
-    /// bet on which of two unrelated paths runs first.
+    /// **When it fires (round 8, A1b):** on `SignalingEvent::HaltAcked`, which
+    /// the declarer's own PUMP emits when the ID-matched, non-error `ToolResult`
+    /// of its `halt` / `mark_awaiting_user` call arrives in its stream — not on
+    /// the `AwaitingUser` state change. Fired from the state change (rc3 D35's
+    /// first cut) the interrupt reached the subprocess off the serial event
+    /// worker while the tool's JSON-RPC ack was still being written, usually
+    /// won, and the declarer's transcript showed its own `halt` answered with
+    /// claude-code's cancellation text ("The user doesn't want to proceed with
+    /// this tool use…"). By the time the result is in the stream there is
+    /// nothing left to race; a halt whose result is an error took no effect
+    /// and does not interrupt. `main.rs` pins the routing.
     pub async fn halt_declared(&self, session_id: &str, agent_slug: &str) {
         let sessions = self.sessions.lock().await;
         if let Some(handle) = sessions.get(session_id) {
@@ -2456,6 +2457,96 @@ mod tests {
             close < reap,
             "the sessions guard's block must close before the terminal reap"
         );
+    }
+
+    /// **The D35 self-interrupt is keyed on the halt tool's RESULT, not on the
+    /// halt state** (round 8, A1b). `main.rs`'s control worker routes
+    /// `HaltAcked` to `halt_declared`; `AwaitingUser` no longer reaches it.
+    /// Pinned in the source: `halt_declared` is called from exactly one arm and
+    /// that arm matches `HaltAcked`; the forwarder list carries `HaltAcked` and
+    /// not `AwaitingUser`. Kill-tested: route `AwaitingUser` to `halt_declared`
+    /// again → red.
+    #[test]
+    fn the_halt_interrupt_is_routed_from_the_halt_ack_not_the_halt_state() {
+        let main = include_str!("../main.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let calls: Vec<usize> = main
+            .match_indices("halt_declared(")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(calls.len(), 1, "halt_declared has exactly one caller in main.rs");
+        let arm_start = main[..calls[0]]
+            .rfind("SignalingEvent::")
+            .expect("the call sits inside a match arm");
+        let arm = &main[arm_start..calls[0]];
+        assert!(
+            arm.starts_with("SignalingEvent::HaltAcked {"),
+            "halt_declared must be reached from the HaltAcked arm, got: {}",
+            &arm[..arm.len().min(80)]
+        );
+        assert!(
+            !main.contains("SignalingEvent::AwaitingUser { session_id, agent, .. } =>"),
+            "the AwaitingUser arm must not come back into the control worker"
+        );
+        // The forwarder that feeds the worker carries HaltAcked.
+        let fwd = main
+            .find("ev @ (SignalingEvent::SessionCloseRequest")
+            .expect("the control-event forwarder exists");
+        let fwd_block = &main[fwd..fwd + 400];
+        assert!(fwd_block.contains("SignalingEvent::HaltAcked { .. }"), "HaltAcked is forwarded");
+        assert!(
+            !fwd_block.contains("SignalingEvent::AwaitingUser"),
+            "AwaitingUser is not a control event any more"
+        );
+    }
+
+    /// **Every host-declared halt interrupts** (round 8, A1b — the reviewer's
+    /// blocking finding on the first cut). The agent's own `mark_awaiting_user`
+    /// gets its D35 interrupt from its pump when the tool RESULT lands; a halt
+    /// the HOST declares under an agent's slug (provider limit, error streak,
+    /// spin breaker, idle watchdog) has no result to wait for and must fire it
+    /// at once — that is `mark_awaiting_user_for`. So the bare
+    /// `mark_awaiting_user(` may be called, in production, only by the JSON-RPC
+    /// handler; every other production caller uses the host verb. Kill-tested:
+    /// switch one host site back → red.
+    #[test]
+    fn host_declared_halts_go_through_the_interrupting_verb() {
+        let files: &[(&str, &str)] = &[
+            ("core/pump.rs", include_str!("pump.rs")),
+            ("core/sequencer.rs", include_str!("sequencer.rs")),
+            ("core/watchdog.rs", include_str!("watchdog.rs")),
+            ("core/session.rs", include_str!("session.rs")),
+            ("core/state.rs", include_str!("state.rs")),
+        ];
+        for (name, src) in files {
+            let prod = match src.find("\n#[cfg(test)]") {
+                Some(at) => &src[..at],
+                None => src,
+            };
+            let code = prod
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !code.contains(".mark_awaiting_user("),
+                "{name}: a host-declared halt must use mark_awaiting_user_for (it interrupts)"
+            );
+        }
+        // And the host verb interrupts: it emits the ack alongside the halt.
+        let tray = include_str!("../signaling/bridge/tray.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let at = tray
+            .find("pub async fn mark_awaiting_user_for(")
+            .expect("the host verb exists");
+        let body = &tray[at..at + 600];
+        assert!(body.contains("self.notify_halt_acked("), "the host verb fires HaltAcked");
     }
 
     /// **A teardown cannot be respawned into** (round 8, R1).

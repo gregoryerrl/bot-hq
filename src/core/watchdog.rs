@@ -335,7 +335,7 @@ pub async fn run_stall_watchdog(
                         && !activity.holds_wakes()
                     {
                         let _ = bridge
-                            .mark_awaiting_user(
+                            .mark_awaiting_user_for(
                                 session_id.clone(),
                                 "system".to_string(),
                                 "This session went idle with nothing declared — \

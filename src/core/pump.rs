@@ -242,6 +242,15 @@ fn is_peer_ack_tool(name: &str) -> bool {
     name == "peer_ack" || name.ends_with("__peer_ack")
 }
 
+/// True for the two halt declarations — `mark_awaiting_user` and its alias
+/// `halt` — bare or MCP-prefixed (round 8, A1b).
+fn is_halt_tool(name: &str) -> bool {
+    name == "halt"
+        || name.ends_with("__halt")
+        || name == "mark_awaiting_user"
+        || name.ends_with("__mark_awaiting_user")
+}
+
 /// True for a `peer_ack` call that passed `final: true` — the agent asserting
 /// "this turn is my closing statement; record it, don't wake my peer".
 ///
@@ -368,6 +377,14 @@ pub async fn pump_agent(
     // match the clearing ToolResult by id — claude-code can emit parallel tool
     // calls, so clearing on ANY result would race a still-running commit.
     let mut atomic_tool_id: Option<String> = None;
+    // A1b (round 8): the tool_use_id of an in-flight `halt` /
+    // `mark_awaiting_user` call. Its ID-matched, non-error ToolResult is the
+    // moment the D35 self-interrupt fires (`HaltAcked` → `halt_declared`): the
+    // ack is in the declarer's transcript by then, so the interrupt cannot
+    // turn it into a rejection. Id-matched like the atomic flag (parallel tool
+    // calls), cleared with it at turn end so a stranded id cannot fire on the
+    // next turn's unrelated result.
+    let mut halt_tool_id: Option<String> = None;
     // Provider-limit detection: the first matching line seen this turn, and the
     // last time a notice fired (per-incarnation dedupe — one notice per
     // incident, not one per nudged retry).
@@ -511,6 +528,11 @@ pub async fn pump_agent(
                 if is_pass_turn_tool(&name) {
                     pass_pending = true;
                 }
+                // A1b: remember a halt declaration's id — the interrupt waits
+                // for ITS result (see `halt_tool_id`).
+                if is_halt_tool(&name) {
+                    halt_tool_id = Some(id.clone());
+                }
                 // Batch 7: a tool call started — suppress stall detection until
                 // its ToolResult (a long build/install emits no events meanwhile).
                 if let Some(liveness) = &cfg.liveness {
@@ -616,6 +638,19 @@ pub async fn pump_agent(
                     }
                     atomic_tool_id = None;
                 }
+                // A1b: the declarer's halt was acked in its own stream — now
+                // the residual generation can be interrupted (rc3 D35). Only a
+                // NON-error result: a halt that failed took no effect, and a
+                // declarer whose halt never landed must not be cut off. The
+                // id match, not the position: parallel tool calls.
+                if halt_tool_id.as_deref() == Some(tool_use_id.as_str()) {
+                    halt_tool_id = None;
+                    if !is_error {
+                        if let Some(bridge) = &cfg.bridge {
+                            bridge.notify_halt_acked(&cfg.session_id, &cfg.slug);
+                        }
+                    }
+                }
                 let payload = serde_json::to_string(&ToolResultRow {
                     content: content.as_str(),
                     is_error,
@@ -720,7 +755,7 @@ pub async fn pump_agent(
                             // state; a provider-limit stall is the host parking
                             // the session and there is no agent turn to advise.
                             let _ = bridge
-                                .mark_awaiting_user(
+                                .mark_awaiting_user_for(
                                     cfg.session_id.to_string(),
                                     cfg.slug.to_string(),
                                     format!(
@@ -820,7 +855,7 @@ pub async fn pump_agent(
                         );
                         if let Some(bridge) = &cfg.bridge {
                             let _ = bridge
-                                .mark_awaiting_user(
+                                .mark_awaiting_user_for(
                                     cfg.session_id.to_string(),
                                     cfg.slug.to_string(),
                                     format!(
@@ -969,6 +1004,9 @@ pub async fn pump_agent(
                     }
                     atomic_tool_id = None;
                 }
+                // A1b: same for a halt declaration whose result never came —
+                // it must not fire on the next turn's unrelated result.
+                halt_tool_id = None;
             }
             AgentEvent::Init { session_id, .. } => {
                 debug!(agent = %cfg.slug, ?session_id, "init received");
@@ -1064,7 +1102,7 @@ pub async fn pump_agent(
                 .map(|m| format!(" ({m})"))
                 .unwrap_or_default();
             let _ = bridge
-                .mark_awaiting_user(
+                .mark_awaiting_user_for(
                     cfg.session_id.to_string(),
                     cfg.slug.to_string(),
                     format!(
@@ -2464,6 +2502,105 @@ mod tests {
         // Missing / null command → false (no panic).
         assert!(!is_atomic_command("Bash", &json!({})));
         assert!(!is_atomic_command("Bash", &json!({"command": null})));
+    }
+
+    /// **The D35 self-interrupt fires on the halt tool's own RESULT** (round 8,
+    /// A1b). Fired from the `AwaitingUser` state change it raced the tool ack
+    /// and usually won, so the declarer's transcript showed its own `halt`
+    /// answered with claude-code's cancellation text. Now: the ID-matched,
+    /// non-error `ToolResult` of a `halt` / `mark_awaiting_user` call emits
+    /// `HaltAcked` (main.rs → `halt_declared` → the interrupt); an unrelated
+    /// result does not; an ERROR result does not (a halt that failed took no
+    /// effect); a stranded halt id is cleared at turn end and cannot fire on
+    /// the next turn's result. Kill-tested: drop the emit → the first case
+    /// fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_halt_declaration_is_interrupted_when_its_own_result_lands() {
+        let (storage, state) = setup().await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let mut events = bridge.subscribe();
+        let cfg = PumpConfig {
+            bridge: Some(Arc::clone(&bridge)),
+            ..fast_cfg("hands")
+        };
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(16);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+        use crate::signaling::SignalingEvent;
+        let drain_acks = |events: &mut tokio::sync::broadcast::Receiver<SignalingEvent>| {
+            let mut n = 0;
+            while let Ok(ev) = events.try_recv() {
+                if matches!(ev, SignalingEvent::HaltAcked { .. }) {
+                    n += 1;
+                }
+            }
+            n
+        };
+        let tool_use = |id: &str, name: &str| AgentEvent::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input: serde_json::json!({"reason": "waiting on the user"}),
+        };
+        let result = |id: &str, is_error: bool| AgentEvent::ToolResult {
+            tool_use_id: id.into(),
+            content: "ok".into(),
+            is_error,
+        };
+        let complete = || AgentEvent::TurnComplete {
+            stop_reason: None,
+            subtype: None,
+            is_error: false,
+            api_error_status: None,
+            context: ContextReport::none(ContextVerdict::NoWindow),
+        };
+
+        // 1. A halt call, an UNRELATED result, then ITS result → exactly one ack,
+        //    and only at the id match (not the position).
+        ev_tx.send(tool_use("tu_halt", "mcp__bot-hq-signaling__halt")).await.unwrap();
+        ev_tx.send(result("tu_other", false)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(drain_acks(&mut events), 0, "an unrelated result must not fire the interrupt");
+        ev_tx.send(result("tu_halt", false)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(drain_acks(&mut events), 1, "the halt's own result fires exactly one HaltAcked");
+
+        // 2. An ERROR result for a halt call → nothing (the halt took no effect).
+        ev_tx.send(tool_use("tu_halt2", "mcp__bot-hq-signaling__mark_awaiting_user")).await.unwrap();
+        ev_tx.send(result("tu_halt2", true)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(drain_acks(&mut events), 0, "a failed halt must not interrupt the declarer");
+
+        // 3. A stranded halt call (turn ends without its result) → cleared; the
+        //    NEXT turn's unrelated result does not fire it.
+        ev_tx.send(tool_use("tu_halt3", "halt")).await.unwrap();
+        ev_tx.send(complete()).await.unwrap();
+        ev_tx.send(result("tu_halt3", false)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(drain_acks(&mut events), 0, "a stranded halt id must be cleared at turn end");
+
+        // 4. A plain tool → nothing.
+        ev_tx.send(tool_use("tu_read", "Read")).await.unwrap();
+        ev_tx.send(result("tu_read", false)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(drain_acks(&mut events), 0, "a plain tool result is not a halt ack");
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn is_halt_tool_matches_both_declarations_bare_and_prefixed() {
+        for name in [
+            "halt",
+            "mcp__bot-hq-signaling__halt",
+            "mark_awaiting_user",
+            "mcp__bot-hq-signaling__mark_awaiting_user",
+        ] {
+            assert!(is_halt_tool(name), "{name}");
+        }
+        for name in ["ask_user_choice", "Edit", "shalt", "halted", "peer_ack"] {
+            assert!(!is_halt_tool(name), "{name}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

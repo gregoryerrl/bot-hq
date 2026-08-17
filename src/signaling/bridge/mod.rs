@@ -155,6 +155,20 @@ pub enum SignalingEvent {
     StageDelivered {
         session_id: String,
     },
+    /// The declarer's own stream showed the tool RESULT of its `halt` /
+    /// `mark_awaiting_user` call (round 8, A1b). Routed by main.rs to
+    /// `AppState::halt_declared`, which interrupts that participant's residual
+    /// generation (rc3 D35). Keyed on the result, not on `AwaitingUser`,
+    /// because the halt state is set inside the tool call while the ack is
+    /// still being written — an interrupt fired from the state change raced
+    /// the ack and usually won, so the declarer's transcript showed its own
+    /// `halt` answered with claude-code's cancellation text. The result row is
+    /// in the transcript before this fires. Internal plumbing: the UI never
+    /// sees this.
+    HaltAcked {
+        session_id: String,
+        agent: String,
+    },
     /// A session document was written/updated (`session_doc_write`). The UI
     /// invalidates its doc queries so a freshly-written phase doc appears
     /// without a manual tab-switch.
@@ -706,6 +720,17 @@ impl SignalingBridge {
                 );
             }
         }
+    }
+
+    /// The declarer's `halt` / `mark_awaiting_user` tool RESULT landed in its
+    /// own stream — the moment its residual generation can be interrupted
+    /// without turning the tool ack into a rejection (round 8, A1b). Emitted
+    /// by the pump; main.rs routes it to `AppState::halt_declared`.
+    pub fn notify_halt_acked(&self, session_id: &str, agent: &str) {
+        let _ = self.event_tx.send(SignalingEvent::HaltAcked {
+            session_id: session_id.to_string(),
+            agent: agent.to_string(),
+        });
     }
 
     /// The ring reached a boundary with a stage pending: hand delivery to the

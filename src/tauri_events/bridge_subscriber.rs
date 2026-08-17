@@ -143,6 +143,11 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             // Internal plumbing: main.rs routes this to AppState::deliver_staged.
             // The UI hears about the OUTCOME via StageDelivered below.
         }
+        SignalingEvent::HaltAcked { .. } => {
+            // Internal plumbing: main.rs routes this to AppState::halt_declared
+            // (the D35 self-interrupt). The UI already saw the halt itself via
+            // AwaitingUser above.
+        }
         SignalingEvent::StageDelivered { session_id } => {
             // The staged response landed: the composer clears its Stage
             // toggle + draft and the staged tray picks are consumed.

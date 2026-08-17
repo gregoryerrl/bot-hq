@@ -488,9 +488,16 @@ fn main() -> Result<()> {
                                 tracing::warn!(?e, %session_id, "close_session via MCP event failed");
                             }
                         }
-                        SignalingEvent::AwaitingUser { session_id, agent, .. } => {
+                        SignalingEvent::HaltAcked { session_id, agent } => {
                             // rc3 D35: the declarer said it is waiting — stop
                             // its residual generation so the halt is a halt.
+                            // Keyed on the halt tool's RESULT reaching the
+                            // declarer's own stream (round 8, A1b), not on the
+                            // AwaitingUser state change: fired from the state
+                            // change, the interrupt raced the tool ack and the
+                            // agent's transcript showed its own halt as
+                            // rejected. By the time the result is in the
+                            // stream there is nothing left to race.
                             core_for_worker.halt_declared(&session_id, &agent).await;
                         }
                         SignalingEvent::StagedDeliveryDue { session_id } => {
@@ -530,7 +537,7 @@ fn main() -> Result<()> {
                         Ok(
                             ev @ (SignalingEvent::SessionCloseRequest { .. }
                             | SignalingEvent::AgentAdvancePhase { .. }
-                            | SignalingEvent::AwaitingUser { .. }
+                            | SignalingEvent::HaltAcked { .. }
                             | SignalingEvent::StagedDeliveryDue { .. }),
                         ) => {
                             // Unbounded hand-off → never blocks the broadcast drain.
