@@ -1577,6 +1577,42 @@ impl Storage {
         Ok((voted, electorate.len()))
     }
 
+    /// An open phase vote for this session, as `(target, voted, of)` — a tally
+    /// that has been started at the CURRENT epoch and is not complete.
+    ///
+    /// Exists because a stopped session has to say WHY it stopped. The all-pass
+    /// yield (rc3 D27) halts after one silent lap with "every participant passed
+    /// — nothing to add without you", and that is the wrong sentence when a vote
+    /// is deadlocked: the participants had plenty to add, said it, and could not
+    /// agree. The user is then told nobody had anything to say while the actual
+    /// state is that the phase cannot move.
+    ///
+    /// `None` when nothing is pending, so the generic recap still covers the
+    /// ordinary case.
+    pub async fn open_phase_vote(&self, session_id: &str) -> Result<Option<(String, usize, usize)>> {
+        let epoch = self.phase_epoch(session_id).await?;
+        let targets: Vec<(String, String)> = sqlx::query_as(
+            "SELECT DISTINCT target_phase, artifact_fingerprint FROM phase_votes \
+             WHERE session_id = ? AND phase_epoch = ?",
+        )
+        .bind(session_id)
+        .bind(epoch)
+        .fetch_all(&self.pool)
+        .await
+        .context("looking for an open phase vote")?;
+        for (target, fingerprint) in targets {
+            let (voted, of) = self
+                .phase_vote_tally(session_id, &target, &fingerprint, epoch)
+                .await?;
+            // A complete tally is not open — it advanced, or is about to.
+            // `of == 0` is the empty electorate, which is vacuously complete.
+            if of > 0 && voted < of {
+                return Ok(Some((target, voted, of)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Record one participant's vote to advance.
     ///
     /// Idempotent by primary key: voting twice for the same question is one

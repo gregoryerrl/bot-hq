@@ -2368,6 +2368,18 @@ async fn advance_turn(
                     // taught to pre-empt this generic reason with their own
                     // recap; this is the backstop for when nobody did.
                     if let Some(bridge) = deps.bridge.as_ref() {
+                        // **NOT the place to name a stuck phase vote**, and the
+                        // reason is a feature interaction worth stating: an
+                        // all-pass lap means every ring participant passed, and
+                        // a pass RETRACTS that participant's phase vote — so by
+                        // the time this branch runs, `open_phase_vote` is
+                        // necessarily `None`. Measured, not reasoned: a version
+                        // of this that consulted it found zero votes remaining.
+                        //
+                        // Which is coherent — nobody who passed is asserting the
+                        // phase should move — and it puts the escape valve on the
+                        // ROUND CAP instead, where a deadlock that keeps talking
+                        // leaves its votes standing.
                         bridge
                             .declare_host_halt(
                                 &deps.session_id,
@@ -2409,18 +2421,40 @@ async fn advance_turn(
                     // And the halt slot (2026-08-15): the cap's stop gets the
                     // same banner every other stop gets.
                     if let Some(bridge) = deps.bridge.as_ref() {
-                        bridge
-                            .declare_host_halt(
-                                &deps.session_id,
-                                format!(
-                                    "The round cap ({laps} laps) was reached — \
-                                     something may be running away. Send a \
-                                     message to steer, or raise `round_cap` in \
-                                     Session Settings.",
-                                    laps = *laps
-                                ),
-                            )
-                            .await;
+                        // **D36's escape valve, on the path where it can
+                        // actually fire.** A phase-advance vote that deadlocks
+                        // while participants keep TALKING leaves its votes
+                        // standing and burns laps until the cap — this branch.
+                        // (The all-pass yield above is the other way a deadlock
+                        // ends, and it cannot carry this: a pass retracts the
+                        // passer's vote, so a silent lap leaves nothing to
+                        // report.)
+                        //
+                        // D36, the user's decision: the gate is the USER's, it
+                        // stays blocking, and it never times out into advisory.
+                        // So this names the deadlock and points at the control
+                        // that resolves it. It does not force the advance — a
+                        // timeout that advanced on its own is precisely what was
+                        // rejected, because it converts a blocking review into
+                        // an advisory one at lap N.
+                        let stuck = deps.storage.open_phase_vote(&deps.session_id).await;
+                        let reason = match stuck {
+                            Ok(Some((target, voted, of))) => format!(
+                                "The phase-advance vote is stuck at {voted} of {of} for \
+                                 {target} after {laps} laps — the participants are still \
+                                 talking and have not converged. Reply to break the tie, \
+                                 or move the phase yourself in the session header.",
+                                laps = *laps
+                            ),
+                            _ => format!(
+                                "The round cap ({laps} laps) was reached — \
+                                 something may be running away. Send a \
+                                 message to steer, or raise `round_cap` in \
+                                 Session Settings.",
+                                laps = *laps
+                            ),
+                        };
+                        bridge.declare_host_halt(&deps.session_id, reason).await;
                     }
                     warn!(
                         session = %deps.session_id,
@@ -8504,6 +8538,77 @@ mod tests {
         drop(tx);
         assert!(exited(task).await, "the loop outlives a spin halt");
     }
+    /// **A deadlocked vote is named when the cap fires — D36's escape valve.**
+    ///
+    /// It lives on the ROUND CAP and not on the all-pass yield, and the reason
+    /// is a feature interaction I got wrong first and measured second: an
+    /// all-pass lap means everyone passed, a pass RETRACTS the passer's phase
+    /// vote, so by the time that branch runs there is nothing left to report —
+    /// a version of this test pointed there found zero votes remaining.
+    ///
+    /// The reachable deadlock is the PRODUCTIVE one: participants keep posting
+    /// findings, nobody converges, the votes stand, and the laps burn to the
+    /// cap. That is what this pins.
+    ///
+    /// It does NOT force the advance. D36 is explicit that the gate stays
+    /// blocking and never times out — a cap that advanced on its own would
+    /// convert a blocking review into an advisory one at lap N, the option the
+    /// user rejected.
+    #[tokio::test]
+    async fn the_round_cap_names_a_stuck_phase_vote() {
+        let (mut deps, storage, mut seats, _dir) =
+            capped_ring(&[("a", "active"), ("b", "active")], Some(1)).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        // The halt SLOT is bridge-gated; `capped_ring` wires none, and the
+        // neighbouring cap test asserts the notice row instead. This one is
+        // about the recap, so it needs the bridge.
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+
+        // A voted to advance; B never did, and both keep SPEAKING — nothing
+        // retracts, so the tally stands while the laps burn.
+        storage.cast_phase_vote("s1", a, "Plan", "fp1", 0).await.unwrap();
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // A -> B is mid-lap; the wrap on B's completion is the cap of 1.
+        let _ = lap_step(&storage, &tx, &mut seats[1], a, 1, "still arguing").await;
+        post(&storage, "user", None, "and again").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: SPOKE },
+        )
+        .await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+
+        let halt = storage
+            .session_halt("s1")
+            .await
+            .unwrap()
+            .expect("the round cap must fill the halt slot");
+        assert!(
+            halt.1.contains("stuck at 1 of 2"),
+            "the cap must name the deadlock rather than report a runaway: {}",
+            halt.1
+        );
+        assert!(
+            !halt.1.contains("running away"),
+            "the generic cap recap describes a different problem: {}",
+            halt.1
+        );
+
+        drop(tx);
+        let _ = exited(task).await;
+    }
+
+
+
 
     /// **An all-pass yield leaves nobody busy and the input open.** The
     /// s-f6a441ff complaint, verbatim: "all agents passed, but input is still
