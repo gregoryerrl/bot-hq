@@ -160,7 +160,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         vec![
         ToolDescriptor {
             name: "ask_user_choice",
-            description: gated_by("ask_user_choice", "Ask the user to pick one option from a list. Returns IMMEDIATELY with a parked acknowledgment (status=parked plus a choice_id) — it does NOT block and it halts NOTHING: the question sits in the user's tray while the session keeps working, and the pick arrives later as a user row you read at your next dealt turn — an idle session is dealt one the moment the user answers, a working session reads it at its next boundary (often alongside the user's next send). After calling it, carry on with whatever else is workable (or pass if nothing is) — don't guess the answer, poll, or re-ask; if you must rephrase, withdraw the old question first. Use this whenever a decision belongs to the user."),
+            description: gated_by("ask_user_choice", "Ask the user to pick one option from a list. Returns IMMEDIATELY with a parked acknowledgment (status=parked plus a choice_id) — it does NOT block and it halts NOTHING: the question sits in the user's tray while the session keeps working, and the pick arrives later as a user row you read at your next dealt turn — an idle session (unless paused) is dealt one the moment the user answers, a working session reads it at its next boundary (often alongside the user's next send). After calling it, carry on with whatever else is workable (or pass if nothing is) — don't guess the answer, poll, or re-ask; if you must rephrase, withdraw the old question first. Use this whenever a decision belongs to the user."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -414,7 +414,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "override_reviewer_block",
-            description: gated_by("override_reviewer_block", "REQUEST an override of a 'reviewer down' commit block when this session's reviewer is Stalled/Dead and you've confirmed the change is safe to ship unreviewed. It does NOT lift the block itself: it parks an Approve/Reject decision for the user (returns at once with the gate id) and the block lifts only on their Approve — the user decides, you do not. `reason` is REQUIRED and is shown to them beside the decision (the fail-closed escape valve). Only needed when check_open_findings returns 'blocked: reviewer down'."),
+            description: gated_by("override_reviewer_block", "REQUEST an override of a 'reviewer down' commit block when this session's reviewer is Stalled/Dead and you've confirmed the change is safe to ship unreviewed. It does NOT lift the block itself: it parks an Approve/Reject decision for the user (returns at once with the gate id) and the block lifts only on their Approve — the user decides, you do not. `reason` is REQUIRED and is shown to them beside the decision (the fail-closed escape valve). An approved override auto-clears when the reviewer recovers — and a request still parked when it recovers is voided. Only needed when check_open_findings returns 'blocked: reviewer down'."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -945,7 +945,7 @@ mod tests {
         assert!(!req.contains("self-advance"), "no self-advance framing: {req}");
         // Round 8, second pass — the same defect class, four more tools.
         assert!(
-            ask.contains("next dealt turn") && ask.contains("idle session is dealt one"),
+            ask.contains("next dealt turn") && ask.contains("idle session (unless paused) is dealt one"),
             "the pick is read at the next dealt turn, at once when idle: {ask}"
         );
         assert!(
@@ -959,7 +959,10 @@ mod tests {
         let ovr = desc("override_reviewer_block");
         assert!(ovr.contains("REQUEST an override"), "it requests, it does not override: {ovr}");
         assert!(ovr.contains("lifts only on their Approve"), "the user decides: {ovr}");
-        assert!(!ovr.contains("auto-clears"), "nothing auto-clears: {ovr}");
+        assert!(
+            ovr.contains("An approved override auto-clears when the reviewer recovers"),
+            "the recovery clear (bridge/mod.rs set_agent_health) is stated: {ovr}"
+        );
         let pend = desc("list_my_pending_questions");
         assert!(!pend.contains("mark_awaiting_user halts"), "no halt rows exist since D35: {pend}");
         assert!(pend.contains("A halt is not a tray row"), "and it says where the halt lives: {pend}");
