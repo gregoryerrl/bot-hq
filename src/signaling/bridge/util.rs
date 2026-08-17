@@ -261,12 +261,6 @@ pub(super) fn outcome_from_picked(picked: &str) -> ViolationOutcome {
     }
 }
 
-/// Build the out-of-band "your question resolved" message body fed back to an
-/// agent that is no longer blocked on the original `ask_user_choice` tool
-/// call — either because the MCP call timed out client-side, or because the
-/// session was closed + reopened and the asking subprocess was replaced.
-/// Shared by both resolve_choice fallbacks (dropped-receiver and the
-/// reopened-session `None` path) so the wording stays identical.
 /// A resolution older than this gets an explicit re-verify warning in the OOB
 /// body: a mooted question answered hours later once read as CURRENT repo
 /// state and produced three fabricated "not pushed yet" assertions
@@ -338,63 +332,101 @@ fn mooting_block(mooting: &[(String, String)], asked: Option<chrono::DateTime<ch
     )
 }
 
+/// The user-side row an answered tray item becomes — what the asking agent
+/// reads at its next turn boundary.
+///
+/// **This is the PRIMARY delivery for every `ask_user_choice`, not a fallback**
+/// (rc3 D35 made the tool non-blocking; the receiver is dropped at park time,
+/// so 100 % of answers arrive this way). Its previous shape was written for the
+/// old fallback case — it opened "(out-of-band) Your earlier `ask_user_choice`
+/// … resolved while you were no longer waiting on the tool call", restated the
+/// full menu every time, age-stamped every answer and closed with a three-line
+/// instruction — and for an approval it repeated the whole gated command
+/// twice. Measured in `s-a4e6da79` (2026-08-17): 28 such rows / 37,293 chars
+/// against 7 typed rows / 2,140 chars — 94.6 % of the user-voice channel was
+/// envelope, ≈9.3k tokens in one session; one row was 1,394 chars to convey
+/// `Approve` + `exit 0`.
+///
+/// Compact by rule (the user's call, round 7): the id, the question, the pick.
+/// The menu is restated ONLY when the pick is not one of the options — that is
+/// the one case the archive study's "keep the decision frame" argument holds
+/// (the agent must know its menu was overruled); the age line ONLY when the
+/// answer is old enough that its premise may have moved (`STALE_ANSWER_WARN_
+/// MINS`); the "approved since you asked" block ONLY when non-empty. A gate
+/// (`command` present) prints its verdict and the command's first line once —
+/// the executed output that follows carries the exit code.
+///
+/// `id8` is the choice id's first eight characters — enough to correlate with
+/// the parked ack (`{status:"parked", choice_id}`) and `gate_status`.
 pub(super) fn oob_resolution_body(
-    agent_label: &str,
+    choice_id: &str,
     question: &str,
     options: &[String],
     picked: &str,
     asked_at: Option<&str>,
+    command: Option<&str>,
     mooting: &[(String, String)],
 ) -> String {
-    // Restate the full option list: every observed resolution arrives this way
-    // (47/47 in the 2026-07-27 archive study), and without the menu the agent
-    // loses its own decision frame — it can no longer tell whether the pick was
-    // one of its options or the user reaching past the menu with free text.
-    let options_block = if options.is_empty() {
-        String::new()
-    } else {
-        let listed = options
-            .iter()
-            .enumerate()
-            .map(|(i, o)| format!("{}. {o}", i + 1))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("**Options were:**\n{listed}\n")
-    };
-    // Age-stamp the replay (issues.md #18): a resolution can arrive hours after
-    // the ask, and an unstamped replay reads as CURRENT state — an agent once
-    // adopted a 2.5h-dead premise and asserted un-pushed work three times
-    // without a single verification command. Old answers carry an explicit
-    // re-verify instruction.
+    let id8: String = choice_id.chars().take(8).collect();
     let asked_ts = asked_at.and_then(parse_tray_ts);
-    let asked_block = match asked_ts {
+    // Only a stale answer earns an age line: the fresh case is the common one
+    // and the line then says nothing the agent can act on.
+    let stale_block = match asked_ts {
         Some(ts) => {
             let mins = (chrono::Utc::now() - ts).num_minutes().max(0);
-            let age = render_age(mins);
             if mins >= STALE_ANSWER_WARN_MINS {
                 format!(
-                    "**Asked:** {age} ago. State may have moved since — re-verify \
-                     anything this question describes (pushes, merges, deploys, file \
-                     state) before treating its premise as current.\n"
+                    "Asked {} ago — state may have moved since; re-verify anything this \
+                     question describes (pushes, merges, deploys, file state) before \
+                     treating its premise as current.\n",
+                    render_age(mins)
                 )
             } else {
-                format!("**Asked:** {age} ago.\n")
+                String::new()
             }
         }
         None => String::new(),
     };
+    let mooting_block = mooting_block(mooting, asked_ts);
+    if let Some(command) = command {
+        // A gate: the prompt IS the command, so print the verdict and the
+        // command's first line once; the executed output (appended by the
+        // caller on Approve) carries the rest and the exit code.
+        let verdict = match outcome_from_picked(picked) {
+            crate::policy::ViolationOutcome::Approved => "approved".to_string(),
+            _ => format!("rejected ({picked})"),
+        };
+        let first = command.lines().next().unwrap_or("").trim();
+        let shown: String = if first.chars().count() > 160 {
+            format!("{}…", first.chars().take(160).collect::<String>())
+        } else {
+            first.to_string()
+        };
+        // The gate's menu is exactly Approve/Reject; anything else is the user
+        // typing — the command stays refused (fail-closed on the verdict), and
+        // the agent is told to act on the words, as for a question.
+        let typed = if options.iter().any(|o| o == picked) {
+            String::new()
+        } else {
+            "The pick is the user answering in their own words; honor the words, \
+             not the menu.\n"
+                .to_string()
+        };
+        return format!("Gate {id8} {verdict}: `{shown}`\n{typed}{stale_block}{mooting_block}");
+    }
+    let listed = options.iter().any(|o| o == picked);
+    let free_text_block = if options.is_empty() || listed {
+        String::new()
+    } else {
+        format!(
+            "Options were: {} — the pick is the user answering in their own words; \
+             honor the words, not the menu.\n",
+            options.join(" | ")
+        )
+    };
     format!(
-        "(out-of-band) Your earlier `ask_user_choice` for {agent_label} resolved while \
-         you were no longer waiting on the tool call.\n\n\
-         **Question:** {question}\n\
-         {options_block}\
-         **User picked:** {picked}\n\
-         {asked_block}\
-         {mooting_block}\n\
-         Treat this as the user's reply (a pick outside the listed options is the \
-         user answering in their own words — honor the words, not the menu). \
-         Continue from here.",
-        mooting_block = mooting_block(mooting, asked_ts)
+        "Tray answer {id8} — Q: {question}\nPicked: {picked}\n\
+         {free_text_block}{stale_block}{mooting_block}"
     )
 }
 
@@ -533,60 +565,127 @@ mod tests {
         assert!(split_into_atoms("   \n\n  ").is_empty());
     }
 
+    /// The compact shape (round 7): id, question, pick — and NOTHING else for
+    /// the common case. The old body opened with a fallback-era preamble,
+    /// restated the whole menu, age-stamped every answer and closed with a
+    /// three-line instruction; 94.6 % of one session's user-voice channel was
+    /// that envelope.
     #[test]
-    fn oob_resolution_body_restates_the_full_menu() {
+    fn oob_resolution_body_is_compact_for_a_listed_pick() {
         let body = super::oob_resolution_body(
-            "brian",
+            "c6f79538-1a55-4353-bce7-a19b827f932a",
             "Push now?",
             &["Push 9a07930".to_string(), "Hold for review".to_string()],
             "Hold for review",
             None,
+            None,
             &[],
         );
-        assert!(body.contains("**Options were:**"));
-        assert!(body.contains("1. Push 9a07930"));
-        assert!(body.contains("2. Hold for review"));
-        assert!(body.contains("**User picked:** Hold for review"));
-        // No asked_at → no age line.
-        assert!(!body.contains("**Asked:**"));
+        assert_eq!(body, "Tray answer c6f79538 — Q: Push now?\nPicked: Hold for review\n");
+        // None of the old envelope: no preamble, no menu, no trailer.
+        assert!(!body.contains("out-of-band"));
+        assert!(!body.contains("no longer waiting"));
+        assert!(!body.contains("Options were"));
+        assert!(!body.contains("Continue from here"));
+    }
 
-        // No options (free-text/halt shapes): no empty menu block.
-        let bare = super::oob_resolution_body("brian", "Anything else?", &[], "done", None, &[]);
+    /// The menu comes back exactly when it carries information: the pick is
+    /// not one of the options, so the agent must know its menu was overruled
+    /// (the archive study's "decision frame" argument, kept for this case only).
+    #[test]
+    fn oob_resolution_body_restates_the_menu_only_for_a_free_text_pick() {
+        let free = super::oob_resolution_body(
+            "abcdefgh-1",
+            "Push now?",
+            &["Push".to_string(), "Hold".to_string()],
+            "hold on, let me check something first",
+            None,
+            None,
+            &[],
+        );
+        assert!(free.contains("Picked: hold on, let me check something first"));
+        assert!(free.contains("Options were: Push | Hold"));
+        assert!(free.contains("honor the words, not the menu"));
+        // No options at all (halt shapes): nothing to restate.
+        let bare = super::oob_resolution_body("abcdefgh-1", "Anything else?", &[], "done", None, None, &[]);
         assert!(!bare.contains("Options were"));
     }
 
+    /// A gate prints its verdict and the command's first line ONCE; the output
+    /// the caller appends carries the exit code. The old shape carried the
+    /// whole `gh … --body` twice — 1,394 chars to say `Approve` + `exit 0`.
     #[test]
-    fn oob_resolution_body_age_stamps_late_answers_with_reverify_warning() {
-        // 2.5h-old ask (the s-bb938f62 shape): age line + re-verify warning.
-        let old = (chrono::Utc::now() - chrono::Duration::minutes(150)).to_rfc3339();
-        let body = super::oob_resolution_body(
-            "brian",
-            "Re-push to staging?",
-            &[],
-            "discard",
-            Some(&old),
+    fn oob_resolution_body_for_a_gate_names_the_command_once() {
+        let approved = super::oob_resolution_body(
+            "621f164e-2ffb",
+            "Run gated command in this session's repo?\n\n`git push origin main`",
+            &["Approve".to_string(), "Reject".to_string()],
+            "Approve",
+            None,
+            Some("git push origin main"),
             &[],
         );
-        assert!(body.contains("**Asked:** 2h 30m ago"));
+        assert_eq!(approved, "Gate 621f164e approved: `git push origin main`\n");
+        assert_eq!(approved.matches("git push origin main").count(), 1);
+        let rejected = super::oob_resolution_body(
+            "621f164e-2ffb",
+            "Run gated command in this session's repo?",
+            &["Approve".to_string(), "Reject".to_string()],
+            "Reject",
+            None,
+            Some("git push origin main\n# a second line"),
+            &[],
+        );
+        assert!(rejected.starts_with("Gate 621f164e rejected (Reject): `git push origin main`"));
+        assert!(!rejected.contains("second line"), "first line only");
+        assert!(!rejected.contains("honor the words"), "a listed pick needs no clause");
+        // Typed on a gate: refused on the verdict line, and the agent is told to
+        // act on the words (the tray permits typing on any row).
+        let typed = super::oob_resolution_body(
+            "621f164e-2ffb",
+            "Run gated command in this session's repo?",
+            &["Approve".to_string(), "Reject".to_string()],
+            "use gh edit instead of a new comment",
+            None,
+            Some("git push origin main"),
+            &[],
+        );
+        assert!(typed.starts_with("Gate 621f164e rejected (use gh edit instead of a new comment): `git push origin main`"));
+        assert!(typed.contains("honor the words, not the menu"));
+        // A very long single-line command is truncated at 160 chars.
+        let long = "x".repeat(400);
+        let cut = super::oob_resolution_body("id", "q", &[], "Approve", None, Some(&long), &[]);
+        assert!(cut.contains(&format!("`{}…`", "x".repeat(160))));
+    }
+
+    /// The age line appears ONLY once the answer is old enough that its
+    /// premise may have moved (`STALE_ANSWER_WARN_MINS`); a fresh answer says
+    /// nothing about time. Both timestamp shapes parse; garbage is ignored.
+    #[test]
+    fn oob_resolution_body_age_stamps_only_stale_answers() {
+        // 2.5h-old ask (the s-bb938f62 shape): age + re-verify warning.
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(150)).to_rfc3339();
+        let body = super::oob_resolution_body("id", "Re-push to staging?", &[], "discard", Some(&old), None, &[]);
+        assert!(body.contains("Asked 2h 30m ago"));
         assert!(body.contains("re-verify"));
 
-        // Fresh ask: age line, no warning.
+        // Fresh ask: no age line at all.
         let fresh = chrono::Utc::now().to_rfc3339();
-        let quick = super::oob_resolution_body("brian", "Close?", &[], "yes", Some(&fresh), &[]);
-        assert!(quick.contains("**Asked:** 0m ago"));
+        let quick = super::oob_resolution_body("id", "Close?", &[], "yes", Some(&fresh), None, &[]);
+        assert!(!quick.contains("Asked "));
         assert!(!quick.contains("re-verify"));
 
         // Sqlite datetime('now') format parses too.
         let sqlite_ts = (chrono::Utc::now() - chrono::Duration::minutes(75))
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
-        let s = super::oob_resolution_body("rain", "Q?", &[], "ok", Some(&sqlite_ts), &[]);
-        assert!(s.contains("**Asked:** 1h 15m ago"));
+        let s = super::oob_resolution_body("id", "Q?", &[], "ok", Some(&sqlite_ts), None, &[]);
+        assert!(s.contains("Asked 1h 15m ago"));
 
         // Garbage timestamp: line omitted, body still well-formed.
-        let g = super::oob_resolution_body("brian", "Q?", &[], "ok", Some("not-a-time"), &[]);
-        assert!(!g.contains("**Asked:**"));
-        assert!(g.contains("**User picked:** ok"));
+        let g = super::oob_resolution_body("id", "Q?", &[], "ok", Some("not-a-time"), None, &[]);
+        assert!(!g.contains("Asked "));
+        assert!(g.contains("Picked: ok"));
     }
 
     #[test]
@@ -596,11 +695,12 @@ mod tests {
         let asked = chrono::Utc::now() - chrono::Duration::minutes(150);
         let approved = asked + chrono::Duration::minutes(121);
         let body = super::oob_resolution_body(
-            "brian",
+            "id",
             "Re-push to staging?",
             &[],
             "discard",
             Some(&asked.to_rfc3339()),
+            None,
             &[(
                 "git push origin staging".to_string(),
                 approved.to_rfc3339(),
@@ -612,16 +712,17 @@ mod tests {
         // user approved it (an approved-but-failed gate looks identical here).
         assert!(body.contains("whether it succeeded is not recorded"));
         assert!(!body.contains("Ran in this session"));
-        // The age-stamp block still renders alongside it.
-        assert!(body.contains("**Asked:** 2h 30m ago"));
+        // The stale-age line still renders alongside it.
+        assert!(body.contains("Asked 2h 30m ago"));
 
         // No overtaking commands → no block at all.
         let clean = super::oob_resolution_body(
-            "brian",
+            "id",
             "Re-push?",
             &[],
             "discard",
             Some(&asked.to_rfc3339()),
+            None,
             &[],
         );
         assert!(!clean.contains("**Approved in this session"));
@@ -639,11 +740,12 @@ mod tests {
             })
             .collect();
         let body = super::oob_resolution_body(
-            "brian",
+            "id",
             "Q?",
             &[],
             "ok",
             Some(&asked.to_rfc3339()),
+            None,
             &many,
         );
         assert!(body.contains("`cmd-4` (5m later)"));
@@ -653,11 +755,12 @@ mod tests {
         // Unparseable answered_at: the command is still named, the delta is
         // simply omitted — never a wrong "(0m later)".
         let junk = super::oob_resolution_body(
-            "brian",
+            "id",
             "Q?",
             &[],
             "ok",
             Some(&asked.to_rfc3339()),
+            None,
             &[("git push".to_string(), "not-a-time".to_string())],
         );
         assert!(junk.contains("- `git push`\n"));

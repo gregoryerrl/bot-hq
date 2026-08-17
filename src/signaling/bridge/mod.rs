@@ -61,19 +61,18 @@ pub struct ClRescanReport {
 
 /// What happened when a parked choice was resolved.
 ///
-/// The happy path (`Delivered`) means the agent's blocking tool call was
-/// still waiting and received the picked option synchronously. The
-/// fallback (`AgentReceiverDroppedFellBack`) means the agent's tool call
-/// already client-side timed out, so the bridge persisted an out-of-band
-/// `user` message into session storage; the caller (typically
-/// `CoreAppState::resolve_choice`) is responsible for **also** delivering
-/// that row through the duo's input channels so the agent's subprocess
-/// wakes up and sees it (clearing the awaiting flag alone won't deliver
-/// — the agent is blocked on stdin and needs an actual stdin write).
+/// `Delivered` means a BLOCKING call (`request_approval`, the pre-push gate)
+/// was still waiting and received the pick synchronously. `DeliveredOutOfBand`
+/// is the normal outcome for every `ask_user_choice` (non-blocking since rc3
+/// D35: the receiver is dropped at park time) and for any durable row whose
+/// park predates a restart: the bridge persisted the answer as the user's row
+/// in session storage; the caller (`CoreAppState::resolve_choice`) wakes an
+/// idle ring so the row is read at the next boundary — the row IS the
+/// delivery, nothing is written to a stdin here.
 #[derive(Debug, Clone)]
 pub enum ResolveOutcome {
     Delivered,
-    AgentReceiverDroppedFellBack {
+    DeliveredOutOfBand {
         session_id: String,
         /// What the answer SAYS — the composed replay text, before the phase
         /// envelope. Retained beside the receipt because it is meaningful even

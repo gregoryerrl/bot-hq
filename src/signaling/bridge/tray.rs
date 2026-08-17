@@ -725,24 +725,23 @@ impl SignalingBridge {
                         .await;
                 }
 
-                // Clear the awaiting halt the matching ask set, BEFORE delivering
-                // the pick. The agent's blocking call returns on `p.tx.send`, so
-                // the duo pump must already see `awaiting == false` by the time the
-                // resumed agent's first chunk arrives — else `router::route_forward`
-                // suppresses that chunk (and every later Brian<->Rain peer-forward)
-                // until the user types free text or advances a phase (the duo goes
-                // silent right after the user answers). The bridge set the flag
-                // (set_session_awaiting), so the bridge clears it on resolve. Also
-                // covers the Err fall-through below (core then re-clears + wakes
-                // stdin — harmlessly redundant).
+                // Clear the awaiting halt the matching ask set (approvals only —
+                // an ordinary question sets none), BEFORE delivering the pick, so
+                // the input-lock state the flag drives is right by the time the
+                // answer is read. The bridge set the flag (set_session_awaiting),
+                // so the bridge clears it on resolve. Also covers the Err
+                // fall-through below (core then re-clears — harmlessly redundant).
                 self.clear_session_awaiting(&p.choice.session_id).await;
                 match p.tx.send(picked) {
                     Ok(()) => Ok(ResolveOutcome::Delivered),
                     Err(picked) => {
-                        // The agent's blocking `ask_user_choice` timed out client-side
-                        // before we delivered the pick (the answer is still captured —
-                        // violations already logged above). Fall back to OOB; the gated
-                        // command, if any, comes from the in-memory approval ctx.
+                        // Nobody is waiting on the oneshot. For `ask_user_choice`
+                        // that is the NORMAL case — the tool is non-blocking (rc3
+                        // D35) and dropped its receiver at park time — so this is the
+                        // primary path, not a fallback; for a blocking approval it
+                        // means the client-side MCP timeout beat the pick. Either
+                        // way the answer becomes the user's row; the gated command,
+                        // if any, comes from the in-memory approval ctx.
                         let command = p.choice.approval.as_ref().and_then(|c| {
                             matches!(c.kind, crate::policy::ViolationKind::ToolBlocklist)
                                 .then_some(c.action.as_str())
@@ -817,21 +816,24 @@ impl SignalingBridge {
         }
     }
 
-    /// Persist + broadcast an out-of-band choice resolution for the two
-    /// receiver-gone paths (client-timeout `Err(picked)` and post-restart /
-    /// reopened `None`). Builds the synthetic user message, runs any approved
-    /// gated command when `flipped` (the atomic exactly-once already won),
-    /// invalidates the bell / tray via `ChoiceResolved`, and returns
-    /// `AgentReceiverDroppedFellBack` — carrying the RECEIPT — so
-    /// `CoreAppState::resolve_choice` can wake the live (respawned) subprocess
-    /// via stdin. The callers differ only in where `session_id` / `agent` /
-    /// `question` / `command_text` come from.
+    /// Persist + broadcast a tray answer as the user's row — **the primary
+    /// delivery for every `ask_user_choice`** (the tool parks and drops its
+    /// receiver at park time, rc3 D35, so `resolve_choice`'s in-memory `send`
+    /// always misses and lands here) and the only one for a durable row whose
+    /// park predates a restart. Builds the compact user message, runs any
+    /// approved gated command when `flipped` (the atomic exactly-once already
+    /// won), invalidates the bell / tray via `ChoiceResolved`, and returns
+    /// `DeliveredOutOfBand` — carrying the RECEIPT — so
+    /// `CoreAppState::resolve_choice` can wake an idle ring. The callers differ
+    /// only in where `session_id` / `question` / `command_text` come from.
+    /// (This used to be documented as the two "receiver-gone" fallbacks; that
+    /// was true until the tool stopped blocking.)
     #[allow(clippy::too_many_arguments)]
     async fn deliver_oob(
         &self,
         choice_id: &str,
         session_id: String,
-        agent: &str,
+        _agent: &str,
         question: &str,
         options: &[String],
         picked: String,
@@ -843,11 +845,12 @@ impl SignalingBridge {
             .gates_approved_since(&session_id, choice_id, asked_at.as_deref())
             .await;
         let mut body = oob_resolution_body(
-            agent,
+            choice_id,
             question,
             options,
             &picked,
             asked_at.as_deref(),
+            command_text,
             &mooting,
         );
         if flipped {
@@ -925,7 +928,7 @@ impl SignalingBridge {
             choice_id: choice_id.to_string(),
             picked,
         });
-        ResolveOutcome::AgentReceiverDroppedFellBack {
+        ResolveOutcome::DeliveredOutOfBand {
             session_id,
             body,
             receipt,
@@ -998,9 +1001,10 @@ impl SignalingBridge {
         ) {
             return;
         }
-        body.push_str(
-            "\n\n(Your action_gate request was approved; bot-hq executed it — output below.)\n",
-        );
+        // The verdict line above already says "approved" and names the command;
+        // this is the output, headed by one short line so an empty stdout is
+        // still visibly a result rather than nothing.
+        body.push_str("Output:\n");
         match self.execute_gated(session_id, command).await {
             Ok(output) => body.push_str(&output),
             Err(e) => body.push_str(&format!("action_gate could not run `{command}`: {e}")),
@@ -1571,10 +1575,10 @@ mod tests {
         // the OOB path: a synthetic user message + awaiting cleared.
         let outcome = bridge.resolve_choice(&choice_id, "Yes".into()).await.unwrap();
         match outcome {
-            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body, .. } => {
+            ResolveOutcome::DeliveredOutOfBand { session_id, body, .. } => {
                 assert_eq!(session_id, "s1");
                 assert!(
-                    body.contains("User picked:") && body.contains("Yes"),
+                    body.contains("Picked: Yes"),
                     "body: {body}"
                 );
             }
@@ -1587,7 +1591,7 @@ mod tests {
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert!(msgs
             .iter()
-            .any(|m| m.content.contains("(out-of-band)") && m.content.contains("Yes")));
+            .any(|m| m.content.starts_with("Tray answer ") && m.content.contains("Picked: Yes")));
     }
 
     #[tokio::test]
@@ -1623,7 +1627,7 @@ mod tests {
             .unwrap();
 
         let outcome = bridge.resolve_choice("cid-phase", "A".into()).await.unwrap();
-        let ResolveOutcome::AgentReceiverDroppedFellBack { body, receipt, .. } = outcome else {
+        let ResolveOutcome::DeliveredOutOfBand { body, receipt, .. } = outcome else {
             panic!("expected the OOB fallback path");
         };
         let receipt = receipt.expect("storage is wired, so the answer became a row");
@@ -1650,7 +1654,7 @@ mod tests {
             .await
             .unwrap();
         let outcome = bridge.resolve_choice("cid-closed", "A".into()).await.unwrap();
-        let ResolveOutcome::AgentReceiverDroppedFellBack { body, receipt, .. } = outcome else {
+        let ResolveOutcome::DeliveredOutOfBand { body, receipt, .. } = outcome else {
             panic!("expected the OOB fallback path");
         };
         // No phase to envelope (the session's IPAV state is gone), so the wire
@@ -1977,7 +1981,7 @@ mod tests {
             .await
             .expect("reopened-session resolve should fall back, not error");
         match outcome {
-            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body, .. } => {
+            ResolveOutcome::DeliveredOutOfBand { session_id, body, .. } => {
                 assert_eq!(session_id, "s-reopen");
                 assert!(body.contains("Ship it?"), "body: {body}");
                 assert!(body.contains("Yes"), "body: {body}");
@@ -1991,7 +1995,7 @@ mod tests {
             .unwrap();
         assert!(msgs
             .iter()
-            .any(|m| m.content.contains("(out-of-band)") && m.content.contains("Yes")));
+            .any(|m| m.content.starts_with("Tray answer ") && m.content.contains("Picked: Yes")));
         // Question row marked answered so the tray clears.
         let q = storage
             .get_tray_entry("old-choice-id")
@@ -2097,12 +2101,11 @@ mod tests {
         // Verify we surfaced the wake info to the caller so CoreAppState can
         // route the body through input_tx and actually unblock the subprocess.
         match outcome {
-            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body, .. } => {
+            ResolveOutcome::DeliveredOutOfBand { session_id, body, .. } => {
                 assert_eq!(session_id, "s-fallback");
-                assert!(body.contains("User picked:"));
-                assert!(body.contains("A"));
+                assert!(body.contains("Picked: A"), "body: {body}");
             }
-            other => panic!("expected AgentReceiverDroppedFellBack, got {other:?}"),
+            other => panic!("expected DeliveredOutOfBand, got {other:?}"),
         }
 
         // Verify the out-of-band message also landed in storage (for UI + poll).
@@ -2112,11 +2115,10 @@ mod tests {
             .unwrap();
         let oob = msgs
             .iter()
-            .find(|m| m.content.contains("(out-of-band)"))
-            .expect("expected synthetic out-of-band message");
+            .find(|m| m.content.starts_with("Tray answer "))
+            .expect("expected the tray-answer user row");
         assert_eq!(oob.author, "user");
-        assert!(oob.content.contains("User picked:"));
-        assert!(oob.content.contains("A"));
+        assert!(oob.content.contains("Picked: A"));
 
         // The OOB insert must fire MessagePersisted so the chat reflects the
         // answer live (event-driven), not only after a manual tab-switch.
@@ -2195,7 +2197,7 @@ mod tests {
             .resolve_choice("cid-q", "discard".into())
             .await
             .expect("stale question resolves through the storage path");
-        let ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } = outcome else {
+        let ResolveOutcome::DeliveredOutOfBand { body, .. } = outcome else {
             panic!("expected the OOB fallback path");
         };
         assert!(body.contains("**Approved in this session after you asked:**"));
@@ -2252,12 +2254,12 @@ mod tests {
             .unwrap();
 
         let outcome = bridge.resolve_choice("cid-q", "A".into()).await.unwrap();
-        let ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } = outcome else {
+        let ResolveOutcome::DeliveredOutOfBand { body, .. } = outcome else {
             panic!("expected the OOB fallback path");
         };
         assert!(!body.contains("Approved in this session after you asked"));
         assert!(!body.contains("git push origin main"));
-        assert!(body.contains("**User picked:** A"));
+        assert!(body.contains("Picked: A"));
     }
 
     #[tokio::test]

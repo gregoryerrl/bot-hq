@@ -195,7 +195,7 @@ impl SignalingBridge {
         })?;
 
         let out = tool_gate::run_in_repo(command, &cwd, tool_gate::DEFAULT_TIMEOUT).await;
-        Ok(format_command_output(command, &out))
+        Ok(format_command_output(&out))
     }
 
     /// The session's `working_repo_path` from storage — the source of truth on
@@ -227,7 +227,12 @@ fn parked_gate_text(gate_id: &str, command: &str, existing: bool) -> String {
 
 /// Format combined output roughly the way the agent would have seen it from its
 /// own Bash call, plus an exit-code footer so a non-zero result is unambiguous.
-fn format_command_output(command: &str, out: &tool_gate::CommandOutput) -> String {
+///
+/// The footer does NOT repeat the command (round 7, A5): in-band the agent
+/// issued the command it is reading the result of, and out-of-band the
+/// tray-answer row names it once on its verdict line — the old footer put a
+/// 550-char gated command into the user-voice channel a second time.
+fn format_command_output(out: &tool_gate::CommandOutput) -> String {
     let mut s = String::new();
     if !out.stdout.is_empty() {
         s.push_str(&out.stdout);
@@ -241,10 +246,7 @@ fn format_command_output(command: &str, out: &tool_gate::CommandOutput) -> Strin
             s.push('\n');
         }
     }
-    s.push_str(&format!(
-        "[action_gate executed `{command}` → exit {}]",
-        out.code
-    ));
+    s.push_str(&format!("[action_gate → exit {}]", out.code));
     s
 }
 
@@ -391,7 +393,7 @@ mod tests {
             .to_string();
         let outcome = bridge.resolve_choice(&cid, "Approve".into()).await.unwrap();
         match outcome {
-            ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => {
                 assert!(body.contains("exit 0"), "approve delivers output OOB: {body}")
             }
             other => panic!("expected OOB delivery, got {other:?}"),
@@ -487,11 +489,11 @@ mod tests {
             .await
             .unwrap();
         match outcome {
-            ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => assert!(
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => assert!(
                 body.contains("exit 0"),
                 "OOB body must carry the executed command output: {body}"
             ),
-            other => panic!("expected AgentReceiverDroppedFellBack, got {other:?}"),
+            other => panic!("expected DeliveredOutOfBand, got {other:?}"),
         }
         assert!(
             marker.exists(),
@@ -539,11 +541,11 @@ mod tests {
             .await
             .unwrap();
         match outcome {
-            ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => assert!(
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => assert!(
                 body.contains("exit 0"),
                 "durable row must execute + carry output via OOB: {body}"
             ),
-            other => panic!("expected AgentReceiverDroppedFellBack, got {other:?}"),
+            other => panic!("expected DeliveredOutOfBand, got {other:?}"),
         }
         assert!(
             marker.exists(),
@@ -584,8 +586,8 @@ mod tests {
             .unwrap();
 
         let body_of = |o| match o {
-            ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => body,
-            other => panic!("expected AgentReceiverDroppedFellBack, got {other:?}"),
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => body,
+            other => panic!("expected DeliveredOutOfBand, got {other:?}"),
         };
         // confirm_stale = true on both (no in-memory parked → stale path).
         let first = body_of(
@@ -600,9 +602,9 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        assert!(first.contains("output below"), "first resolve must execute: {first}");
+        assert!(first.contains("Output:"), "first resolve must execute: {first}");
         assert!(
-            !second.contains("output below"),
+            !second.contains("Output:"),
             "second resolve must NOT re-execute (exactly-once): {second}"
         );
     }
@@ -696,10 +698,10 @@ mod tests {
             .await
             .unwrap();
         match outcome {
-            ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => {
                 assert!(body.contains("exit 0"), "confirmed run carries output: {body}")
             }
-            other => panic!("expected AgentReceiverDroppedFellBack, got {other:?}"),
+            other => panic!("expected DeliveredOutOfBand, got {other:?}"),
         }
         assert!(marker.exists(), "confirmed stale command must execute");
     }
@@ -794,7 +796,7 @@ mod tests {
             .await
             .unwrap();
         match outcome {
-            ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => {
                 assert!(body.contains("exit 0"), "approve carries output: {body}")
             }
             other => panic!("expected OOB delivery, got {other:?}"),
@@ -858,7 +860,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(outcome, ResolveOutcome::AgentReceiverDroppedFellBack { .. }),
+            matches!(outcome, ResolveOutcome::DeliveredOutOfBand { .. }),
             "fresh gate approves one-click, got {outcome:?}"
         );
         assert!(marker.exists(), "fresh approve executes");

@@ -1885,7 +1885,7 @@ impl AppState {
         let mut resolved_a_gate = false;
         if matches!(
             outcome,
-            ResolveOutcome::Delivered | ResolveOutcome::AgentReceiverDroppedFellBack { .. }
+            ResolveOutcome::Delivered | ResolveOutcome::DeliveredOutOfBand { .. }
         ) {
             if let Ok(Some(entry)) = self.storage.get_tray_entry(choice_id).await {
                 resolved_a_gate =
@@ -1912,7 +1912,7 @@ impl AppState {
         // and which it must NOT — is [`AppState::tray_wake`]'s decision, kept
         // pure so every combination is a value a test can compare rather than a
         // shape a test has to guess at.
-        if let ResolveOutcome::AgentReceiverDroppedFellBack {
+        if let ResolveOutcome::DeliveredOutOfBand {
             session_id, receipt, ..
         } = &outcome
         {
