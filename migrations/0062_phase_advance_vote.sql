@@ -28,9 +28,20 @@
 --
 -- **`artifact_fingerprint`** closes the speech axis: a vote is about a specific
 -- state of the work, so talking never invalidates it and changing the work
--- always does. For Investigate that is the phase document's revision; a phase
--- with no document gets a sentinel no vote can match, so nothing can be voted
--- through empty.
+-- always does. It digests ALL of the session's phase documents — count, latest
+-- `updated_at`, total body length — rather than the current phase's alone. That
+-- keeps it answerable from storage (the live phase is in-memory `AppState` and
+-- unreachable where the vote is cast) and is the stricter rule anyway: editing
+-- the Investigate document while voting to leave Plan invalidates too, which is
+-- correct, because the votes were cast on a body of work that has since moved.
+--
+-- A session with no documents has a stable digest of its empty state, so a phase
+-- that legitimately produces no document can still be voted through. An earlier
+-- draft of this comment specified a sentinel that no vote could match, to make
+-- empty work unvotable; that was rejected before implementation. The guard
+-- against advancing on nothing is the REVIEWER'S vote, which is a judgement about
+-- whether the work is done — a sentinel would instead have made a whole class of
+-- phase permanently unadvanceable.
 --
 -- **`phase_epoch`** closes the TIME axis, and it is the half the first design
 -- missed — caught in review. Phases run backward. A vote cast in Plan survives
