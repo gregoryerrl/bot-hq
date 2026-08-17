@@ -236,7 +236,7 @@ mod tests {
         let canonical = joined.canonicalize().expect("the traversal names a real file");
         assert_eq!(canonical, target.canonicalize().unwrap());
         assert!(
-            !is_contained(&canonical, &[repo_canon.clone()]),
+            !is_contained(&canonical, std::slice::from_ref(&repo_canon)),
             "the canonical path left the repo and must be refused: {canonical:?}"
         );
     }
