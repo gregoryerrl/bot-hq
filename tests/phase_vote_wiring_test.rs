@@ -125,50 +125,215 @@ fn code_of(line: &str) -> &str {
 /// guard whose only job is to refuse false reassurance, is the reason this
 /// function exists and is documented rather than inlined.
 ///
-/// **Splitting on `mod tests {` was wrong (round 5, E2), and splitting on a bare
-/// `#[cfg(test)]` was also wrong (round 6, F3).** Both failures are the same
-/// mistake in different clothes: matching a proxy for "the test module starts
-/// here" instead of the thing itself.
+/// **This function has been wrong three times. Read the history before changing
+/// it, because two of the three fixes look like each other's bug.**
 ///
-/// - `mod tests {` misses the five modules in `src/` that are named something
-///   else — `phase_vote_tests`, `plugin_kv_tests`, `plugin_tests`,
-///   `ensure_claude_runnable_tests`, `session_doc_tests`. `bridge/mod.rs` holds
-///   `phase_vote_tests` at 1727 *and* a later `mod tests {`, so the split cut at
-///   the wrong one and handed 112 lines of the phase vote's own tests to the
-///   guard as production — in the very file carrying five of the seven wires.
-/// - A bare `#[cfg(test)]` matches the attribute on ANY item, not just a module.
-///   `core/pump.rs:13` is `#[cfg(test)] use std::time::Duration;` — an import —
-///   so the production half was **12 lines of 1046**. `core/sequencer.rs:3539` is
-///   a test-only `fn jaccard_similarity`, hiding 263 more. 1297 production lines
-///   invisible, in the two largest files in the crate.
+/// Each attempt matched a PROXY for "this is test code" instead of the thing
+/// itself, and each proxy missed a different shape:
 ///
-/// So the split is on `#[cfg(test)]` **followed by `mod`**, which is what was
-/// meant both times.
+/// 1. **`split("mod tests {")`** (pre-round-5) missed the five modules in `src/`
+///    named something else — `phase_vote_tests`, `plugin_kv_tests`,
+///    `plugin_tests`, `ensure_claude_runnable_tests`, `session_doc_tests`.
+///    `bridge/mod.rs` holds `phase_vote_tests` *and* a later `mod tests {`, so
+///    the split cut at the wrong one and handed 112 lines of the phase vote's
+///    own tests to the guard as production — in the file carrying five wires.
+/// 2. **`split("#[cfg(test)]")`** (round 5, E2) matched the attribute on ANY
+///    item. `core/pump.rs:13` is `#[cfg(test)] use std::time::Duration;`, so the
+///    production half was **12 lines of 1046**; `core/sequencer.rs:3539` is a
+///    test-only `fn`, hiding 263 more. 1297 lines invisible (round 6, F3).
+/// 3. **Truncating at `#[cfg(test)]` + `mod`** (round 6, first fix) still read
+///    the literal `#[cfg(test)]`, so it could not see
+///    `#[cfg(all(test, not(windows)))]` at `agents/spawn.rs:1273` — the crate's
+///    only compound predicate, and one of the five modules attempt 1 named. It
+///    also scanned the test-only `debug_env`/`debug_command` at `:1509`/`:1525`,
+///    which sit BEFORE that file's `mod tests`. ~263 lines of test code read as
+///    production (round 6, EYES `cc3f369f`).
 ///
-/// **The safety argument for the old form was narrower than it read.** It said
-/// early truncation can only report a live wire as DEAD, which fails loudly —
-/// true, and it is why F3 was latent rather than a false green. But it holds for
-/// EXISTENCE guards only. An ABSENCE guard — "nothing may still call X", the
-/// shape `retired_identifier_test.rs` has — inherits the same blindness in the
-/// SILENT direction: unscanned code cannot violate a prohibition. Do not carry
-/// the reassurance across to a guard of the other polarity.
+/// **The tension that makes this oscillate, stated so it stops.** Fixing 3 by
+/// truncating at any cfg-test item recreates 2. Fixing 2 by truncating only at a
+/// module recreates 3. Truncation itself is the bug: a file's test code is not
+/// one contiguous tail. So this **excises each cfg-test-marked ITEM** and keeps
+/// everything else, which is correct for all three shapes and has no ordering
+/// assumption to violate.
+///
+/// The predicate is matched as `#[cfg(` … the word `test` … `)]`, so
+/// `all(test, not(windows))` is caught. The item is then brace-matched to its
+/// close, or to its `;` for `use` / `mod name;`. Brace matching **skips strings,
+/// char literals and comments** — a lone `'{'` in a literal would desynchronize
+/// the scan, and a desynchronized scan swallows or exposes code silently.
+///
+/// **Do not restore the "truncating early is safe" reassurance.** It said early
+/// truncation can only report a live wire as DEAD, which fails loudly. True, and
+/// it is why F3 was latent — but it holds for EXISTENCE guards only. An ABSENCE
+/// guard ("nothing may still call X", the shape `retired_identifier_test.rs`
+/// has) inherits the blindness in the SILENT direction, because unscanned code
+/// cannot violate a prohibition. Reading test code AS production is silent in
+/// BOTH polarities, which is why shape 3 mattered more than shape 2.
 ///
 /// `core/state.rs`'s own in-file guards keep `split("mod tests {")` — that file
 /// has exactly one test module, so it is correct there. It is the walker over
 /// OTHER files that inherited the assumption.
-fn production_half(body: &str) -> &str {
-    const MARKER: &str = "#[cfg(test)]";
-    let mut from = 0;
-    while let Some(i) = body[from..].find(MARKER) {
-        let at = from + i;
-        let rest = body[at + MARKER.len()..].trim_start();
-        let rest = rest.strip_prefix("pub ").unwrap_or(rest).trim_start();
-        if rest.starts_with("mod ") {
-            return &body[..at];
+/// Scanning is done on BYTES, never on `&str` slices at a computed index.
+/// The first version walked `&body[i..]`, and `i` lands mid-character the moment
+/// a doc comment contains a `…` — 220561 bytes into `core/session.rs`, as it
+/// happens. Every delimiter this scan cares about is ASCII, and a UTF-8
+/// continuation byte can never equal one, so byte comparisons are both safe and
+/// exact. Excision removes whole ASCII-delimited items, so what is left is still
+/// valid UTF-8.
+fn production_half(body: &str) -> String {
+    let b = body.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if let Some(j) = opaque_end(b, i) {
+            out.extend_from_slice(&b[i..j]);
+            i = j;
+            continue;
         }
-        from = at + MARKER.len();
+        if b[i..].starts_with(b"#[cfg(") {
+            if let Some((attr_end, names_test)) = cfg_predicate(b, i) {
+                if names_test {
+                    i = item_end(b, attr_end);
+                    continue;
+                }
+            }
+        }
+        out.push(b[i]);
+        i += 1;
     }
-    body
+    String::from_utf8(out).expect("excising ASCII-delimited items preserves UTF-8")
+}
+
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// End of a comment / string / char literal starting at `i`, or `None` if one
+/// does not start there. Brace matching must not see delimiters inside these.
+///
+/// `'a` (a lifetime) is deliberately NOT treated as opaque — only a real char
+/// literal is, which is why the two-and-three-byte forms are checked explicitly.
+fn opaque_end(b: &[u8], i: usize) -> Option<usize> {
+    let s = &b[i..];
+    if s.starts_with(b"//") {
+        return Some(s.iter().position(|c| *c == b'\n').map_or(b.len(), |n| i + n + 1));
+    }
+    if s.starts_with(b"/*") {
+        let mut depth = 0usize;
+        let mut k = 0;
+        while k + 1 < s.len() {
+            if s[k] == b'/' && s[k + 1] == b'*' {
+                depth += 1;
+                k += 2;
+            } else if s[k] == b'*' && s[k + 1] == b'/' {
+                depth -= 1;
+                k += 2;
+                if depth == 0 {
+                    return Some(i + k);
+                }
+            } else {
+                k += 1;
+            }
+        }
+        return Some(b.len());
+    }
+    if s.first() == Some(&b'r') {
+        let hashes = s[1..].iter().take_while(|c| **c == b'#').count();
+        if s.get(1 + hashes) == Some(&b'"') {
+            let mut close = vec![b'"'];
+            close.extend(std::iter::repeat_n(b'#', hashes));
+            let start = 1 + hashes + 1;
+            return Some(
+                find_bytes(&s[start..], &close).map_or(b.len(), |n| i + start + n + close.len()),
+            );
+        }
+    }
+    if s.first() == Some(&b'"') {
+        let mut k = 1;
+        while k < s.len() {
+            match s[k] {
+                b'\\' => k += 2,
+                b'"' => return Some(i + k + 1),
+                _ => k += 1,
+            }
+        }
+        return Some(b.len());
+    }
+    if s.first() == Some(&b'\'') {
+        if s.get(1) == Some(&b'\\') {
+            return s[1..].iter().position(|c| *c == b'\'').map(|n| i + 1 + n + 1);
+        }
+        // A char literal holds exactly one char, which may be several bytes
+        // (`'…'`). A lifetime (`'a` in `&'a str`) has no closing quote and must
+        // NOT be treated as opaque.
+        for len in 1..=4usize {
+            if s.get(1 + len) == Some(&b'\'')
+                && std::str::from_utf8(&s[1..1 + len]).is_ok_and(|t| t.chars().count() == 1)
+            {
+                return Some(i + 1 + len + 1);
+            }
+        }
+        return None;
+    }
+    None
+}
+
+/// Parse `#[cfg(...)]` at `i`. Returns the byte index just past the attribute
+/// and whether its predicate names `test` as a whole word — so bare `test` and
+/// `all(test, not(windows))` both answer true, and `windows` alone does not.
+fn cfg_predicate(b: &[u8], i: usize) -> Option<(usize, bool)> {
+    let open = i + "#[cfg".len();
+    let mut k = open;
+    let mut depth = 0usize;
+    while k < b.len() {
+        match b[k] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    if k >= b.len() {
+        return None;
+    }
+    // The predicate is ASCII by construction (identifiers, parens, commas), so
+    // this slice is always a valid boundary pair.
+    let names_test = std::str::from_utf8(&b[open..=k])
+        .is_ok_and(|p| p.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == "test"));
+    let end = b[k..].iter().position(|c| *c == b']').map(|n| k + n + 1)?;
+    Some((end, names_test))
+}
+
+/// End of the item an attribute decorates: brace-matched for a block item, or
+/// the `;` for `use` / `mod name;`. Further attributes between the two are
+/// skipped for free — they carry no braces at depth 0.
+fn item_end(b: &[u8], from: usize) -> usize {
+    let mut i = from;
+    let mut depth = 0usize;
+    while i < b.len() {
+        if let Some(j) = opaque_end(b, i) {
+            i = j;
+            continue;
+        }
+        match b[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            b';' if depth == 0 => return i + 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
 }
 
 /// **Files that are test code in their entirety, declared as such by a PARENT.**
@@ -385,60 +550,113 @@ fn the_guard_reports_a_wire_that_is_not_there() {
     );
 }
 
-/// **`#[cfg(test)]` on an import or a function is not where the test module
-/// starts.** Round 6, F3 — pinned apart from [`test_only_files`] so a regression
-/// in either mechanism names itself.
+/// **Test code is excised item by item; production code around it survives.**
 ///
-/// The synthetic cases state the rule; the two real files state the cost, and
-/// they are asserted by CONTENT rather than by line count so the test does not
-/// rot as the files grow.
+/// Pinned apart from [`test_only_files`] so a regression in either mechanism
+/// names itself, and asserted by CONTENT rather than line count so it does not
+/// rot as the files grow. Every case here is a shape that shipped: see
+/// [`production_half`]'s doc for which round each one broke in.
 #[test]
-fn a_test_only_import_or_fn_does_not_truncate_the_production_half() {
-    assert_eq!(
-        production_half("fn a() {}\n#[cfg(test)]\nuse std::time::Duration;\nfn b() {}\n"),
-        "fn a() {}\n#[cfg(test)]\nuse std::time::Duration;\nfn b() {}\n",
-        "an import carrying the attribute must not end the production half"
+fn cfg_test_items_are_excised_without_truncating_what_follows() {
+    // Shape 2 (round 5): an import must not take the rest of the file with it.
+    let p = production_half("fn a() {}\n#[cfg(test)]\nuse std::time::Duration;\nfn b() {}\n");
+    assert!(p.contains("fn a()") && p.contains("fn b()"), "got: {p:?}");
+    assert!(!p.contains("use std::time::Duration"), "got: {p:?}");
+
+    // Shape 2 again, on a fn rather than a use.
+    let p = production_half("fn a() {}\n#[cfg(test)]\nfn helper() { let x = 1; }\nfn b() {}\n");
+    assert!(p.contains("fn a()") && p.contains("fn b()"), "got: {p:?}");
+    assert!(!p.contains("fn helper"), "got: {p:?}");
+
+    // A module still goes, and so does anything after it inside its braces.
+    let p = production_half("fn a() {}\n#[cfg(test)]\nmod t {\n fn x() {} \n}\nfn c() {}\n");
+    assert!(p.contains("fn a()") && p.contains("fn c()"), "got: {p:?}");
+    assert!(!p.contains("fn x()"), "got: {p:?}");
+    assert!(!production_half("#[cfg(test)]\npub mod t {}\nfn a() {}\n").contains("mod t"));
+
+    // Shape 3 (round 6, EYES): a COMPOUND predicate is still a test predicate.
+    let p = production_half(
+        "fn a() {}\n#[cfg(all(test, not(windows)))]\nmod m {\n fn x() {} \n}\nfn b() {}\n",
     );
-    assert_eq!(
-        production_half("fn a() {}\n#[cfg(test)]\nfn helper() {}\nfn b() {}\n"),
-        "fn a() {}\n#[cfg(test)]\nfn helper() {}\nfn b() {}\n",
-        "a test-only fn must not end it either"
+    assert!(p.contains("fn a()") && p.contains("fn b()"), "got: {p:?}");
+    assert!(
+        !p.contains("fn x()"),
+        "`all(test, not(windows))` names `test` and must be excised — this is \
+         `agents/spawn.rs:1273`, the crate's only compound form. got: {p:?}"
     );
-    assert_eq!(
-        production_half("fn a() {}\n#[cfg(test)]\nmod t {\n fn x() {} \n}\n"),
-        "fn a() {}\n",
-        "a test MODULE must still end it"
+    // ...but a cfg that does NOT name test must survive untouched.
+    let p = production_half("#[cfg(unix)]\nfn only_on_unix() {}\n");
+    assert!(
+        p.contains("fn only_on_unix"),
+        "a non-test cfg must not be excised, or this guard starts hiding real \
+         production code from itself. got: {p:?}"
     );
-    assert_eq!(
-        production_half("fn a() {}\n#[cfg(test)]\npub mod t {}\n"),
-        "fn a() {}\n",
-        "`pub mod` is still a module"
+
+    // A brace inside a literal must not desynchronize the match. The assertion
+    // has to be that test code AFTER the literal is still excised: an early
+    // termination excises LESS, so checking only that the opening line is gone
+    // passes either way. That vacuous form was caught by its own kill test —
+    // the string-skipping could be disabled with the suite still green.
+    let p = production_half(
+        "#[cfg(test)]\nmod t {\n fn a() { let s = \"}\"; }\n \
+         fn b() { x.cast_phase_vote(); }\n}\nfn after() {}\n",
     );
+    assert!(p.contains("fn after()"), "got: {p:?}");
+    assert!(
+        !p.contains("cast_phase_vote"),
+        "a `}}` inside a string literal ended the item early, so the REST of the \
+         test module survived into the production half — a call site in it would \
+         read as a live wire. This is the silent direction. got: {p:?}"
+    );
+    // Same for a line comment and a char literal.
+    let p = production_half(
+        "#[cfg(test)]\nmod t {\n // }\n fn b() { x.cast_phase_vote(); }\n}\nfn after() {}\n",
+    );
+    assert!(p.contains("fn after()") && !p.contains("cast_phase_vote"), "got: {p:?}");
+    let p = production_half(
+        "#[cfg(test)]\nmod t {\n fn a() -> char { '}' }\n \
+         fn b() { x.cast_phase_vote(); }\n}\nfn after() {}\n",
+    );
+    assert!(p.contains("fn after()") && !p.contains("cast_phase_vote"), "got: {p:?}");
 
     let root = repo_root();
 
-    // `pump.rs:13` is `#[cfg(test)] use std::time::Duration;`, and its real test
-    // module is ~1000 lines later. Under the old bare-literal split the guard
-    // saw twelve lines of this file.
-    let pump = fs::read_to_string(root.join("src/core/pump.rs")).expect("core/pump.rs");
-    let half = production_half(&pump);
-    assert!(
-        half.contains("#[cfg(test)]\nuse std::time::Duration;"),
-        "the test-only import must sit INSIDE the production half — if it does \
-         not, the split truncated at the attribute again and ~1000 lines of \
-         `pump.rs` are invisible to this guard"
-    );
-    assert!(
-        !half.contains("#[cfg(test)]\nmod tests"),
-        "`pump.rs`'s real test module must still be excluded"
-    );
+    // The three real files, by content. `pump.rs:13` is a test-only import whose
+    // real test module is ~1000 lines later; `sequencer.rs:3539` a test-only fn;
+    // `spawn.rs` carries the compound module AND two test-only fns before its
+    // own `mod tests`.
+    for (path, must_keep, must_drop) in [
+        ("src/core/pump.rs", "struct ToolUseRow", "async fn buffers_until_the_phase"),
+        ("src/core/sequencer.rs", "fn jaccard_from_sets", "fn jaccard_similarity"),
+        ("src/agents/spawn.rs", "pub struct SpawnConfig", "mod ensure_claude_runnable_tests"),
+    ] {
+        let body = fs::read_to_string(root.join(path)).unwrap_or_else(|_| panic!("{path}"));
+        let half = production_half(&body);
+        if body.contains(must_keep) {
+            assert!(
+                half.contains(must_keep),
+                "{path}: production item `{must_keep}` was excised — the scan \
+                 desynchronized and this guard is now blind to real code"
+            );
+        }
+        assert!(
+            !half.contains(must_drop),
+            "{path}: test item `{must_drop}` survived into the production half, \
+             so a dead wire in it would read as LIVE — the silent direction"
+        );
+    }
 
-    // `sequencer.rs:3539` is a test-only `fn jaccard_similarity`.
-    let seq = fs::read_to_string(root.join("src/core/sequencer.rs")).expect("core/sequencer.rs");
-    assert!(
-        production_half(&seq).contains("fn jaccard_similarity"),
-        "the test-only fn must sit inside the production half of `sequencer.rs`"
-    );
+    // spawn.rs's test-only helpers sit BEFORE its `mod tests`, which is what
+    // made truncation wrong there specifically.
+    let spawn = fs::read_to_string(root.join("src/agents/spawn.rs")).expect("agents/spawn.rs");
+    let half = production_half(&spawn);
+    for helper in ["fn debug_env", "fn debug_command"] {
+        assert!(
+            !half.contains(helper),
+            "`{helper}` is `#[cfg(test)]` and must be excised even though it \
+             precedes the file's test module"
+        );
+    }
 }
 
 /// **A file can be test-only with no marker in it at all.** Round 6, E4.
