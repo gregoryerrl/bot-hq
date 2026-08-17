@@ -678,7 +678,7 @@ mod tests {
     /// consent-frozen grant cache, the way boot/install do), enabled per
     /// flag.
     fn registry_with(tmp: &TempDir, id: &str, caps: &[&str], enabled: bool) -> PluginRegistry {
-        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
+        let reg = PluginRegistry::new(tmp.path().to_path_buf());
         reg.set_granted_caps(id, Some(caps.iter().map(|c| c.to_string()).collect()));
         reg.set_enabled(id, enabled);
         reg
@@ -880,7 +880,7 @@ mod tests {
     async fn full_flow_example_plugin_install_then_proxy() {
         let tmp = TempDir::new().unwrap();
         let storage = Storage::memory().await.unwrap();
-        let registry = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
+        let registry = PluginRegistry::new(tmp.path().to_path_buf());
         let bridge = test_bridge(&tmp, &storage).await;
 
         let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello-plugin");

@@ -253,7 +253,7 @@ fn main() -> Result<()> {
     // + enabled-cache state. Constructed eagerly so we can pass it to
     // Tauri's `.manage()` AND share it with the `bhq-plugin://` scheme
     // handler and the setup-time sweep loop.
-    let registry = Arc::new(PluginRegistry::new(paths.data_dir.clone())?);
+    let registry = Arc::new(PluginRegistry::new(paths.data_dir.clone()));
 
     // Seed the enabled-plugin cache + re-register enabled plugins with the
     // heartbeat. Both otherwise only happen on install/enable, so a restart

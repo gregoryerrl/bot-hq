@@ -2,9 +2,8 @@
 //!
 //! Consent-gated install (preview → confirm) / list / enable / disable /
 //! uninstall / heartbeat feed, backed by [`Storage`] for persistence and
-//! [`PluginRegistry`] (disk [`Loader`](crate::plugins::Loader) +
-//! [`Heartbeat`] liveness + the enabled cache the serve/proxy layers
-//! read). Each command is a thin shim over an `_inner` helper so the
+//! [`PluginRegistry`] ([`Heartbeat`] liveness + the enabled / CSP /
+//! serve-root / grant caches the serve/proxy layers read). Each command is a thin shim over an `_inner` helper so the
 //! logic is testable without a Tauri `State` wrapper.
 
 use crate::core::AppState as CoreAppState;
@@ -415,7 +414,6 @@ pub(crate) async fn install_plugin_inner(
         .await
         .map_err(anyhow_to_app)?;
 
-    registry.reload().map_err(anyhow_to_app)?;
     registry.heartbeat.register(&manifest.id);
     registry.set_enabled(&manifest.id, true);
     registry.set_serve_root(&manifest.id, Some(serve_root));
@@ -637,7 +635,6 @@ pub(crate) async fn reinstall_plugin_inner(
         .await
         .map_err(anyhow_to_app)?;
 
-    registry.reload().map_err(anyhow_to_app)?;
     registry.heartbeat.register(plugin_id);
     registry.set_enabled(plugin_id, true);
     registry.set_serve_root(plugin_id, Some(serve_root));
@@ -715,7 +712,6 @@ pub(crate) async fn update_plugin_from_source_inner(
         std::fs::remove_dir_all(&plugin_dir).map_err(io_to_app)?;
     }
     copy_dir_all(Path::new(&source), &plugin_dir).map_err(io_to_app)?;
-    registry.reload().map_err(anyhow_to_app)?;
 
     let row = storage
         .list_plugins()
@@ -799,7 +795,6 @@ async fn uninstall_plugin_inner(
     registry.set_csp_header(plugin_id, None);
     registry.set_serve_root(plugin_id, None);
     registry.set_granted_caps(plugin_id, None);
-    registry.reload().map_err(anyhow_to_app)?;
     Ok(())
 }
 
@@ -949,7 +944,7 @@ mod tests {
 
     async fn fresh(tmp: &TempDir) -> (Arc<Storage>, Arc<PluginRegistry>) {
         let data_dir = tmp.path().to_path_buf();
-        let registry = Arc::new(PluginRegistry::new(data_dir).unwrap());
+        let registry = Arc::new(PluginRegistry::new(data_dir));
         let storage = Storage::memory().await.unwrap();
         (Arc::new(storage), registry)
     }
@@ -1221,7 +1216,7 @@ mod tests {
         std::fs::write(plugin_dir.join("stray.txt"), "x").unwrap();
 
         // Orphans block linked installs too (they'd shadow a later copy
-        // install and confuse the loader scan).
+        // install).
         let err = install_plugin_inner(&storage, &registry, &src.display().to_string(), true, false)
             .await
             .unwrap_err();

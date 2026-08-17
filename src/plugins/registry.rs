@@ -1,21 +1,23 @@
 //! Plugin runtime registry — the long-lived disk/heartbeat state shared
 //! across the plugin Tauri commands.
 
-use super::{Heartbeat, Loader};
-use anyhow::Result;
+use super::Heartbeat;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// Tauri-managed plugin runtime state. Wraps the disk Loader (re-scanned
-/// after every mutation), the long-lived Heartbeat (survives reloads), and
-/// the enabled-id cache (the sync source of truth for the `bhq-plugin://`
-/// scheme handler, which can't await the DB).
+/// Tauri-managed plugin runtime state: the long-lived Heartbeat, the
+/// enabled-id cache (the sync source of truth for the `bhq-plugin://` scheme
+/// handler, which can't await the DB), the per-plugin CSP headers, serve
+/// roots and consent-frozen grants. **No disk loader** (round 9): the
+/// registry used to wrap a `Loader` re-scanned after every mutation — a full
+/// walk + JSON parse of every manifest inside each async plugin command — and
+/// nothing in production ever read it; the read path is `storage.list_plugins()`
+/// and the caches below.
 ///
 /// Has no Tauri dependency itself — the command layer wraps it in
 /// `tauri::State` at registration time.
 pub struct PluginRegistry {
-    pub loader: Mutex<Loader>,
     pub heartbeat: Arc<Heartbeat>,
     pub data_dir: PathBuf,
     /// Ids of ENABLED plugins. Seeded from storage at boot; kept in sync by
@@ -32,7 +34,7 @@ pub struct PluginRegistry {
     /// linked installs → the user's source directory (`plugins.dir_path`).
     /// The scheme handler resolves assets against THIS map (absent id =
     /// unknown plugin). Seeded at boot, set on install, cleared on
-    /// uninstall; never touched by `reload()`.
+    /// uninstall.
     serve_roots: Mutex<HashMap<String, PathBuf>>,
     /// CONSENT-FROZEN capability grants per plugin, parsed from the
     /// DB-stored manifest_json (what the user approved at install) — the
@@ -43,25 +45,15 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
-    pub fn new(data_dir: PathBuf) -> Result<Self> {
-        let loader = Loader::scan(&data_dir)?;
-        Ok(Self {
-            loader: Mutex::new(loader),
+    pub fn new(data_dir: PathBuf) -> Self {
+        Self {
             heartbeat: Arc::new(Heartbeat::new()),
             data_dir,
             enabled: Mutex::new(HashSet::new()),
             csp_headers: Mutex::new(HashMap::new()),
             serve_roots: Mutex::new(HashMap::new()),
             granted_caps: Mutex::new(HashMap::new()),
-        })
-    }
-
-    /// Re-scan disk into the loader. Call after any mutation (install,
-    /// uninstall, enable, disable) so subsequent reads see the new state.
-    pub fn reload(&self) -> Result<()> {
-        let mut g = self.loader.lock().unwrap_or_else(|p| p.into_inner());
-        *g = Loader::scan(&self.data_dir)?;
-        Ok(())
+        }
     }
 
     /// Replace the whole enabled set (boot seed from storage).
@@ -160,43 +152,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn new_on_empty_dir_yields_empty_loader() {
-        let tmp = TempDir::new().unwrap();
-        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
-        let loaded = reg.loader.lock().unwrap();
-        assert!(loaded.loaded().is_empty());
-    }
-
-    #[test]
-    fn reload_picks_up_new_plugin_on_disk() {
-        let tmp = TempDir::new().unwrap();
-        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
-        assert!(reg.loader.lock().unwrap().loaded().is_empty());
-
-        let plugin_dir = tmp.path().join("plugins").join("notes");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("manifest.json"),
-            r#"{
-                "id": "notes",
-                "name": "Notes",
-                "version": "0.1.0",
-                "entry": "index.html",
-                "requested_capabilities": []
-            }"#,
-        )
-        .unwrap();
-
-        reg.reload().unwrap();
-        let loaded = reg.loader.lock().unwrap();
-        assert_eq!(loaded.loaded().len(), 1);
-        assert_eq!(loaded.loaded()[0].manifest.id, "notes");
-    }
-
-    #[test]
     fn enabled_cache_flips_and_snapshots() {
         let tmp = TempDir::new().unwrap();
-        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
+        let reg = PluginRegistry::new(tmp.path().to_path_buf());
         assert!(!reg.is_enabled("notes"));
 
         reg.set_enabled("notes", true);
@@ -214,7 +172,7 @@ mod tests {
     #[test]
     fn serve_root_and_granted_caps_caches_roundtrip() {
         let tmp = TempDir::new().unwrap();
-        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
+        let reg = PluginRegistry::new(tmp.path().to_path_buf());
         assert_eq!(reg.serve_root_for("dev"), None);
         assert_eq!(reg.granted_caps_for("dev"), None);
 
@@ -229,11 +187,6 @@ mod tests {
             Some(vec!["list_projects".to_string()])
         );
 
-        // reload() must NOT wipe the consent-frozen caches.
-        reg.reload().unwrap();
-        assert!(reg.serve_root_for("dev").is_some());
-        assert!(reg.granted_caps_for("dev").is_some());
-
         reg.set_serve_root("dev", None);
         reg.set_granted_caps("dev", None);
         assert_eq!(reg.serve_root_for("dev"), None);
@@ -243,7 +196,7 @@ mod tests {
     #[test]
     fn csp_header_cache_sets_clears_and_misses() {
         let tmp = TempDir::new().unwrap();
-        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
+        let reg = PluginRegistry::new(tmp.path().to_path_buf());
         assert_eq!(reg.csp_header_for("notes"), None);
 
         reg.set_csp_header("notes", Some("default-src 'self'".to_string()));
@@ -253,14 +206,5 @@ mod tests {
 
         reg.set_csp_header("notes", None);
         assert_eq!(reg.csp_header_for("notes"), None);
-    }
-
-    #[test]
-    fn heartbeat_outlives_reload() {
-        let tmp = TempDir::new().unwrap();
-        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
-        reg.heartbeat.register("notes");
-        reg.reload().unwrap();
-        assert!(reg.heartbeat.status_of("notes").is_some());
     }
 }

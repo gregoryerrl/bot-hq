@@ -1,4 +1,4 @@
-//! Plugin module — manifest, catalog, loader, serving, registry, heartbeat.
+//! Plugin module — manifest, catalog, serving, registry, heartbeat.
 //!
 //! Plugin runtime v1 (`api_version: 1`):
 //!
@@ -25,12 +25,10 @@
 
 pub mod catalog;
 pub mod heartbeat;
-pub mod loader;
 pub mod manifest;
 pub mod registry;
 pub mod serve;
 
 pub use heartbeat::{Heartbeat, PluginStatus};
-pub use loader::{LoadedPlugin, Loader};
 pub use manifest::{CspExtraOrigins, PluginManifest, PluginSlot};
 pub use registry::PluginRegistry;

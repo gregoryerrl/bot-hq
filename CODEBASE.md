@@ -552,9 +552,8 @@ heartbeat crash recovery, panel tabs, per-plugin CSP extras (shipped).
 | `src/plugins/mod.rs` | architecture summary (accurate) | S |
 | `src/plugins/catalog.rs` | `CATALOG` + `required_capability`/`is_dispatchable` bundling rules | M |
 | `src/plugins/heartbeat.rs` | ping/pong Healthy/Slow/Crashed (5 s / 1 s / 3 misses) | M |
-| `src/plugins/loader.rs` | disk scan of `<data_dir>/plugins/*/manifest.json` | S |
 | `src/plugins/manifest.rs` | manifest schema/validate, CSP-extra-origins; `iframe_origin()` documents a scheme the app never serves (dead) | M |
-| `src/plugins/registry.rs` | `PluginRegistry`: loader + heartbeat + 4 sync caches the URI handler reads without awaiting the DB | M |
+| `src/plugins/registry.rs` | `PluginRegistry`: heartbeat + 4 sync caches the URI handler reads without awaiting the DB (the disk loader nothing read was deleted in round 9) | M |
 | `src/plugins/serve.rs` | asset resolution with traversal/symlink guards (managed + linked), CSP builder | M |
 | `src/tauri_cmd/plugins.rs` | install/reapprove/reinstall/update/list/enable/disable/uninstall/preview/heartbeat feed (`_inner` helpers testable without Tauri) | XL |
 | `src/tauri_cmd/plugin_api.rs` | `plugin_invoke_proxy` → `check_plugin_grant` → `dispatch` (one arm per catalog command; `spawn_session`, `plugin_session_*` ownership-fenced) | L |
