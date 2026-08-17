@@ -1471,11 +1471,23 @@ impl Storage {
 
     /// Advance the epoch and drop every vote that came before it.
     ///
-    /// **Both halves, in one call, because either alone is a defect.** Bumping
-    /// without deleting leaves rows that can never match again — dead weight
-    /// that grows per transition. Deleting without bumping loses the only thing
-    /// that distinguishes a vote cast before a phase round trip from one cast
-    /// after it, which is the axis a content fingerprint cannot see.
+    /// **The two halves do different jobs, and confusing them is a trap.**
+    ///
+    /// The BUMP is what makes the vote correct: it is the only thing separating
+    /// a vote cast before a phase round trip from one cast after it, an axis a
+    /// content fingerprint cannot see. Correctness lives entirely in the epoch
+    /// filter on the tally query, which
+    /// `a_stale_epoch_vote_is_ignored_even_when_the_row_survives` pins on its
+    /// own precisely so this is checkable without the delete.
+    ///
+    /// The DELETE is HYGIENE, not correctness: a surviving row can never match a
+    /// bumped epoch, so keeping it would change no answer — it would just
+    /// accumulate a row per participant per transition, forever. Read as
+    /// correctness it is the redundant second mechanism that made the first
+    /// mutation check come back green.
+    ///
+    /// Both run in ONE transaction: a bump without its delete leaks rows, and a
+    /// delete without its bump throws away votes the session still needs.
     pub async fn bump_phase_epoch(&self, session_id: &str) -> Result<i64> {
         let mut tx = self.pool.begin().await.context("begin bump_phase_epoch")?;
         sqlx::query("UPDATE sessions SET phase_epoch = phase_epoch + 1 WHERE id = ?")
@@ -2867,6 +2879,71 @@ mod tests {
             "clearing the session instead would make a pass behave like the \
              substantive turn it explicitly is not"
         );
+    }
+
+    /// **Session scoping, which nothing tested until review said so.** Every
+    /// vote test above uses `"s1"` and only `"s1"`, so none of them could tell a
+    /// scoped query from an unscoped one.
+    ///
+    /// The two scopes are not equally serious, and saying which is which matters
+    /// more than covering both:
+    ///
+    /// - The tally's `AND session_id = ?` is DEFENSIVE. Drop it and foreign
+    ///   participant ids join the voted set, but `electorate.all(...)` cannot be
+    ///   satisfied by extras — no tally can falsely complete. A gap, not a bug.
+    /// - `bump_phase_epoch`'s `DELETE ... WHERE session_id = ?` is LOAD-BEARING.
+    ///   Drop it and one session's phase transition wipes every other session's
+    ///   votes — measured: the whole lib suite stays green. `phase_epoch` starts
+    ///   at 0 everywhere and targets and fingerprints collide across sessions
+    ///   trivially, so `session_id` is the only separator there is.
+    #[tokio::test]
+    async fn one_sessions_transition_does_not_touch_anothers_votes() {
+        let s = storage_with_0044().await;
+        for id in ["s1", "s2"] {
+            s.create_session(id, "t", None).await.unwrap();
+            s.ensure_session_roster(id, 1).await.unwrap();
+        }
+        let a = s.participants_for_session("s1").await.unwrap()[0].id;
+        let b = s.participants_for_session("s2").await.unwrap()[0].id;
+        assert_ne!(a, b, "precondition: two rosters, two participants");
+
+        // Deliberately identical target and fingerprint at the same epoch: if
+        // the scope is what separates them, nothing else here does.
+        s.cast_phase_vote("s1", a, "plan", "fp1", 0).await.unwrap();
+        s.cast_phase_vote("s2", b, "plan", "fp1", 0).await.unwrap();
+        assert!(s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap());
+        assert!(s.all_active_voted_to_advance("s2", "plan", "fp1", 0).await.unwrap());
+
+        s.bump_phase_epoch("s1").await.unwrap();
+
+        let survivors: Vec<(i64,)> =
+            sqlx::query_as("SELECT participant_id FROM phase_votes ORDER BY participant_id")
+                .fetch_all(s.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            survivors,
+            vec![(b,)],
+            "s1's transition must take s1's votes and NOTHING else — an unscoped \
+             DELETE here wipes every session in the database and the suite stays green"
+        );
+        assert!(
+            s.all_active_voted_to_advance("s2", "plan", "fp1", 0).await.unwrap(),
+            "the untouched session must still be arrived"
+        );
+
+        assert!(
+            !s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap(),
+            "s1's own tally reopened after its transition"
+        );
+        // **This does NOT pin the tally's session scope, and saying so is the
+        // point.** Dropping `AND session_id = ?` from the tally query leaves this
+        // green, measured — because s2's participant is not in s1's electorate,
+        // so `all()` fails on MEMBERSHIP, not on scope. The scope there is
+        // defence in depth and is unpinnable by construction: extras can never
+        // satisfy an all-of check, so no test can distinguish it. An assertion
+        // claiming otherwise would be pinning a falsehood, which is worse than
+        // the gap it pretends to close.
     }
 
     /// Voting twice for one question is one vote — the tally is a COUNT, so a
