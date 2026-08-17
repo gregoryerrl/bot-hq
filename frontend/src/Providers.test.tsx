@@ -111,6 +111,28 @@ describe("Providers — the slot-shaped runtime wire", () => {
     localStorage.removeItem("bothq:draft:s1");
   });
 
+  it("purges a closed session's chat store and draft for ANY session (round 8)", async () => {
+    const { useChatStore } = await import("./stores/chat");
+    const msg = (id: number, session_id: string) =>
+      ({ id, session_id, author: "hands", kind: "text", content: "x", created_at: "2026-08-17T00:00:00Z" }) as never;
+    useChatStore.getState().setMessages("s-closed", [msg(1, "s-closed")]);
+    useChatStore.getState().setMessages("s-open", [msg(2, "s-open")]);
+    localStorage.setItem("bothq:draft:s-closed", "never sent");
+    localStorage.setItem("bothq:draft:s-open", "still typing");
+    renderProviders();
+    await waitFor(() => expect(handlers.has("session:closed")).toBe(true));
+    emit("session:closed", { session_id: "s-closed" });
+    // Only the mounted SessionView used to do this — a session closed while
+    // the user was elsewhere kept its messages resident and its draft key forever.
+    expect(useChatStore.getState().messages["s-closed"]).toBeUndefined();
+    expect(localStorage.getItem("bothq:draft:s-closed")).toBeNull();
+    // Keyed on the payload: the other session is untouched.
+    expect(useChatStore.getState().messages["s-open"]).toHaveLength(1);
+    expect(localStorage.getItem("bothq:draft:s-open")).toBe("still typing");
+    localStorage.removeItem("bothq:draft:s-open");
+    useChatStore.getState().clear("s-open");
+  });
+
   it("lands a live session:activity busy pair under SLOT keys, not agent names", async () => {
     renderProviders();
     await waitFor(() => expect(handlers.has("session:activity")).toBe(true));

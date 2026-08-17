@@ -15,6 +15,7 @@ import { useTauriEvent } from "./hooks/useTauriEvent";
 import { draftKeyFor } from "./components/ChatInput";
 import { useHealthStore, type AgentHealth } from "./stores/health";
 import { useContextStore } from "./stores/context";
+import { useChatStore } from "./stores/chat";
 import { useActivityStore, type SessionActivity } from "./stores/activity";
 import {
   busyBySlot,
@@ -153,14 +154,22 @@ function GlobalEventSync() {
   const clearActivity = useActivityStore((s) => s.clearSession);
   const setContext = useContextStore((s) => s.setContext);
   const clearContext = useContextStore((s) => s.clearSession);
+  const clearChat = useChatStore((s) => s.clear);
   const onClose = useCallback(
     (p: { session_id: string }) => {
       invalidate(CLOSE_KEYS);
       clearHealth(p.session_id);
       clearActivity(p.session_id);
       clearContext(p.session_id);
+      // The chat store and the composer draft too — for ANY session (round
+      // 8). Only the mounted SessionView cleared them, so a session closed
+      // while the user was elsewhere (an agent's `close_session`, another
+      // view) kept its whole message array resident for the app's lifetime
+      // and left an orphan `bothq:draft:<sid>` key forever.
+      clearChat(p.session_id);
+      localStorage.removeItem(draftKeyFor(p.session_id));
     },
-    [invalidate, clearHealth, clearActivity, clearContext],
+    [invalidate, clearHealth, clearActivity, clearContext, clearChat],
   );
   const onAgentContext = useCallback(
     (p: {
