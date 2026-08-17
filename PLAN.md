@@ -381,6 +381,31 @@ loading for the icon font.
 
 ## Architectural ideas (no commit yet)
 
+- **A guard that pins a doc against another DOC.** Raised in review 2026-08-17,
+  after the third instance in one session of a claim outliving its truth: F8's
+  never-executed merge instructions, a bench README describing a tool whose
+  transport had been deleted, and ARCHITECTURE.md still describing the pre-vote
+  two-server product.
+
+  The shape of the gap is precise. Four guards already exist and **every one pins
+  a doc against the CODE** — `codebase_map_test` → CODEBASE.md,
+  `every_registered_tool_is_documented` → the tool table, `retired_identifier_test`
+  → `src/` identifiers, `framing.ts` → user-visible strings. Nothing in `src/` or
+  `tests/` reads `ARCHITECTURE.md`, `CLAUDE.md`, `README.md` or `PLAN.md` at all.
+
+  So CLAUDE.md and README can quote ARCHITECTURE's self-description indefinitely
+  and no gate notices when it changes underneath them — which is exactly what
+  happened: the driver sweep updated ARCHITECTURE because that is the file it was
+  editing, and left the two files that quote it. The failure is not carelessness
+  about docs; it is that **each fix updates the artifact in hand and not the one
+  quoting it**, and no edge exists between them.
+
+  Cheapest useful version: a test asserting that a small set of cross-quoted
+  claims (the MCP-server count, the canonical-docs list, the storage-schema
+  summary) appear identically wherever they are restated. Not attempted here —
+  the arc that found it was already closing, and a guard written to catch one's
+  own last mistake is the worst time to design it.
+
 - **Move CL writes to a transaction model.** Partially shipped: CL writes
   are now atomic (adjacent temp file → rename, `a040c08`), which hardens
   against partial-write failures. What remains is folding the write + the
