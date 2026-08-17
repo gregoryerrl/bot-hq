@@ -151,7 +151,7 @@ async listClosedSessions() : Promise<Result<SessionInfo[], AppError>> {
  * Idempotent — `core::AppState::ensure_session_started` is a no-op if the
  * session is already live. Mirrors the click-to-respawn flow:
  * frontend SessionView calls this on mount so a reopened bot-hq window
- * brings Brian + Rain back via `claude --resume <uuid>`.
+ * brings the roster back via `claude --resume <uuid>`.
  */
 async respawnSession(sessionId: string) : Promise<Result<null, AppError>> {
     try {
@@ -212,9 +212,9 @@ async restartSession(sessionId: string) : Promise<Result<null, AppError>> {
  * what makes it a real answer to `request_phase_advance` rather than a second
  * way to set a chip.
  * 
- * It is NOT yet the D36 override. When the phase-advance vote lands, a stalled
- * vote's escape valve is a user gate, and this command grows a flag to force
- * past a tally rather than being replaced.
+ * Since the phase-advance vote landed (D37) it is also the D36 escape valve: a
+ * user pick here goes through the same `AppState::advance_phase`, which
+ * clears the stuck votes with the transition — no separate force flag.
  */
 async advanceSessionPhase(sessionId: string, target: string) : Promise<Result<null, AppError>> {
     try {
@@ -278,7 +278,7 @@ async getSessionPhase(sessionId: string) : Promise<Result<string | null, AppErro
 /**
  * Close a session from the UI. Delegates to `core.close_session`, which is
  * the single source of truth for closing: it removes the live handle, KILLS
- * the brian/rain subprocesses, and marks the row closed/archived in storage.
+ * the participants' subprocesses, and marks the row closed/archived in storage.
  * The previous version called `storage.close_session` directly, so it set
  * `closed_at` but left the subprocesses running — a session that "closed" in
  * the DB yet kept taking turns. Routing through core fixes that.
@@ -291,17 +291,26 @@ async closeSession(sessionId: string, archive: boolean) : Promise<Result<null, A
     else return { status: "error", error: e  as any };
 }
 },
-async getSessionMessages(sessionId: string, sinceId: number | null) : Promise<Result<AgentMessage[], AppError>> {
+/**
+ * The chat's history read. Three shapes (round 8, N2):
+ * - `since_id: Some(n)` — everything after `n` (a resync / catch-up read);
+ * - `limit: Some(k)` — the newest `k` rows, chronological, optionally those
+ * before `before_id` (the mount read and its "load older" page — the chat
+ * only renders the tail, and the largest session held 3,412 rows / 6.5 MB,
+ * all pulled across IPC on every mount before this);
+ * - neither — the whole history (kept for the two callers that mean it).
+ */
+async getSessionMessages(sessionId: string, sinceId: number | null, beforeId: number | null, limit: number | null) : Promise<Result<AgentMessage[], AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_session_messages", { sessionId, sinceId }) };
+    return { status: "ok", data: await TAURI_INVOKE("get_session_messages", { sessionId, sinceId, beforeId, limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
 /**
- * Send a user message to a session. For the duo session this fans out to
- * both Brian and Rain (with phase envelope). Persists the raw text + notifies the bridge.
+ * Send a user message to a session: one row every participant reads off its
+ * cursor (with phase envelope). Persists the raw text + notifies the bridge.
  */
 async broadcastMessage(sessionId: string, text: string) : Promise<Result<null, AppError>> {
     try {
@@ -1060,9 +1069,8 @@ async computeApplyDiff(sessionId: string) : Promise<Result<ComputeApplyDiffResul
 /**
  * Summarize a session document via a one-shot, headless `claude -p` call —
  * a TL;DR for users who don't want to read the full I/P/A/V doc. The model is
- * resolved from `default_model_id` (app settings), falling back to the
- * session's Brian model, then Brian's agent config (same chain the live agents
- * use, via [`resolve_spawn_config`]). Bounded by a 60s timeout; the child is
+ * the session's slot-0 participant's, then that agent's config (same chain the
+ * live agents use, via [`resolve_spawn_config`]). Bounded by a 60s timeout; the child is
  * killed on drop. Runs `--max-turns 1 --strict-mcp-config` so it cannot loop,
  * use tools, or touch MCP — a pure text response.
  */
@@ -1513,7 +1521,7 @@ keyword: string; mode: GateMode }
  * which don't. Drives the per-surface inheritance badges in the UI. This is
  * the canonical mapping derived from `spawn.rs::build_command` behavior: both
  * agents run full claude-code and inherit skills/plugins/hooks/CLAUDE.md
- * (Rain's tool access is gated server-side, not by skipping inheritance);
+ * (a read-only participant's tool access is gated server-side, not by skipping inheritance);
  * model/permissions are overridden per-agent by bot-hq.
  */
 export type Inheritance = { 
@@ -1862,8 +1870,6 @@ commit_style?: string;
  */
 round_cap?: number | null }
 /**
- * Shared spawn logic for both fresh and existing sessions: spawn Brian + Rain,
- * kick the duo pumps, return the handle.
  * Resolve a session's project from its repo paths. A registered project
  * whose `working_repo_path` matches wins (matched against the BASE repo
  * first — a worktree session's path ends in the repo basename, not
@@ -1996,8 +2002,8 @@ useWorktree: boolean | null;
  * 
  * `None` is the pre-rc3 path and behaves EXACTLY as before — no roster is
  * written at create and `ensure_session_roster` seeds the default pair at
- * spawn. Every non-dialog caller (the external driver's `open_session`,
- * the plugin proxy) is on that path and is untouched.
+ * spawn. Every non-dialog caller (the plugin proxy; the external driver's
+ * `open_session` until 2026-08-17) is on that path and is untouched.
  */
 participants: ParticipantPick[] | null }
 /**
