@@ -429,15 +429,22 @@ pub async fn get_participant_system_prompt(
     session_id: String,
     slug: String,
 ) -> Result<ParticipantSystemPrompt, AppError> {
-    let sessions = core.sessions.lock().await;
-    let view = match sessions.get(&session_id) {
-        None => prompt_view(PromptSource::SessionNotLive, &slug),
-        Some(handle) => match handle.by_slug(&slug) {
-            None => prompt_view(PromptSource::NotSpawned, &slug),
-            Some(agent) => prompt_view(PromptSource::File(&agent.system_prompt_path), &slug),
-        },
+    // Resolve the path under the lock, read the file (~48 KB) off it and off
+    // the reactor (round 9: the read ran on the 2-worker reactor while holding
+    // `sessions`).
+    let path = {
+        let sessions = core.sessions.lock().await;
+        match sessions.get(&session_id) {
+            None => return Ok(prompt_view(PromptSource::SessionNotLive, &slug)),
+            Some(handle) => match handle.by_slug(&slug) {
+                None => return Ok(prompt_view(PromptSource::NotSpawned, &slug)),
+                Some(agent) => agent.system_prompt_path.clone(),
+            },
+        }
     };
-    Ok(view)
+    tokio::task::spawn_blocking(move || prompt_view(PromptSource::File(&path), &slug))
+        .await
+        .map_err(|e| AppError::Internal(format!("prompt read task failed: {e}")))
 }
 
 /// How many readings the history view asks for. The tail is what a

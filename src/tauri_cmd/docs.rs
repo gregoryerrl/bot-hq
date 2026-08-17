@@ -265,9 +265,8 @@ pub(crate) async fn compute_apply_diff_inner(
 
 /// Summarize a session document via a one-shot, headless `claude -p` call —
 /// a TL;DR for users who don't want to read the full I/P/A/V doc. The model is
-/// resolved from `default_model_id` (app settings), falling back to the
-/// session's slot-0 model, then that agent's config (same chain the live agents
-/// use, via [`resolve_spawn_config`]). Bounded by a 60s timeout; the child is
+/// the session's slot-0 participant's, then that agent's config (same chain the
+/// live agents use, via [`resolve_spawn_config`]). Bounded by a 60s timeout; the child is
 /// killed on drop. Runs `--max-turns 1 --strict-mcp-config` so it cannot loop,
 /// use tools, or touch MCP — a pure text response.
 #[tauri::command]
@@ -284,20 +283,16 @@ pub async fn summarize_session_doc(
         )));
     };
 
-    // App-wide default model wins; else the model the session's FIRST
-    // participant runs on; else `resolve_spawn_config` falls through to the
-    // hardcoded default.
+    // The model the session's FIRST participant runs on; else
+    // `resolve_spawn_config` falls through to the hardcoded default.
     //
     // rc3 D10: this read `sessions.slot0_model_id`, which the create paths no
     // longer write — it would have silently degraded to the app default on every
     // session. The roster is where a participant's model lives now, and slot 0
-    // is the same participant the old column named.
-    let default_model_id = storage
-        .get_setting("default_model_id")
-        .await
-        .ok()
-        .flatten()
-        .filter(|s| !s.is_empty());
+    // is the same participant the old column named. Round 9: it also read the
+    // `default_model_id` app setting first — a key nothing has WRITTEN since
+    // rc3 D8 retired the Agents tab (a role owns its default model), so that
+    // branch was dead; dropped rather than kept as a promise.
     let session_model = storage
         .participants_for_session(&session_id)
         .await
@@ -305,7 +300,7 @@ pub async fn summarize_session_doc(
         .and_then(|roster| roster.into_iter().next())
         .and_then(|p| p.model_id)
         .filter(|m| !m.is_empty());
-    let model_id = default_model_id.or(session_model);
+    let model_id = session_model;
     // The summarizer is a one-off subprocess, not a session participant; the
     // name is only the label `resolve_spawn_config` puts on the config it
     // returns and the `agent_configs` key it may fall back to.

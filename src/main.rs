@@ -597,8 +597,9 @@ fn plugin_asset_error(status: u16) -> tauri::http::Response<Vec<u8>> {
 }
 
 /// How many daily log files to keep. Bounded from the start: this data home
-/// already carries one append-only, unrotated sink (`native-accounting.jsonl`)
-/// and a second unbounded one is not worth the diagnostics.
+/// used to carry one append-only, unrotated sink (`native-accounting.jsonl`,
+/// written by the loop rc3 D9 deleted) and a second unbounded one was not
+/// worth the diagnostics — a rule that outlived its example.
 const LOG_FILES_KEPT: usize = 14;
 
 /// Install the tracing subscriber: stdout (unchanged) PLUS a rolling daily file
@@ -651,7 +652,6 @@ fn init_logging(paths: &Paths) -> tracing_appender::non_blocking::WorkerGuard {
 /// `bot-hq policy-check <subcommand>` — used by git hooks installed in
 /// working repos. Exits with the appropriate status code (0 = clean, 1 = block).
 fn run_policy_check_cli(args: &[String]) -> Result<()> {
-    use std::process::ExitCode;
     let exit_code = hooks::run_cli(args).unwrap_or_else(|e| {
         eprintln!("bot-hq policy-check: {e}");
         // Soft-fail: don't break the user's git workflow on internal errors.
@@ -660,7 +660,6 @@ fn run_policy_check_cli(args: &[String]) -> Result<()> {
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
-    let _ = ExitCode::SUCCESS;
     Ok(())
 }
 

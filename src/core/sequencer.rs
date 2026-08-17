@@ -9755,11 +9755,12 @@ mod tests {
     /// it is not worth discovering that on the file the app is using.
     ///
     /// **Why it exists.** Every other test in this file builds a two-row session
-    /// in memory. Task 14 deletes `router.rs` — the batch's only irreversible
-    /// step — on the strength of those. This runs the ring against a real
-    /// roster, real cursors and a real channel, which is the cheapest thing that
-    /// can say the loop survives contact with production shapes before that
-    /// deletion, rather than after.
+    /// in memory. Task 14 deleted `router.rs` (2026-08-13) — the batch's only
+    /// irreversible step — on the strength of those, and this ran the ring
+    /// against a real roster, real cursors and a real channel first: the
+    /// cheapest thing that could say the loop survives contact with production
+    /// shapes before that deletion rather than after. It is kept as the same
+    /// smoke for the next change to the ring's read path.
     ///
     /// It asserts SHAPES, not counts: the data moves. What it pins is that a
     /// cold cursor drains, the cursor lands exactly on the last row handed over,

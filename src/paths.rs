@@ -121,9 +121,10 @@ pub struct Paths {
     ///
     /// Until this existed there was no log sink at all — `tracing_subscriber::fmt()`
     /// wrote to a stdout nobody captured when the app launches from Finder. Two
-    /// migrations (`0040_cancel_events`, `0041_forward_events`) exist *because* of
-    /// that: each records to sqlite what a `warn!` already said, only to have it
-    /// survive. See `init_logging`.
+    /// migrations (`0040_cancel_events`, `0041_forward_events`) existed *because*
+    /// of that: each recorded to sqlite what a `warn!` already said, only to have
+    /// it survive (`forward_events` went with the router — dropped by 0064;
+    /// `cancel_events` still records). See `init_logging`.
     pub logs_dir: PathBuf,
     /// The internal signaling server's bound address (e.g. `127.0.0.1:54321`),
     /// written at startup so the git pre-push hook — a separate subprocess that

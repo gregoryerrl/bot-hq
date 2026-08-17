@@ -122,6 +122,16 @@ pub async fn read_workspace_file(
         .ok()
         .flatten()
         .and_then(|s| s.working_repo_path);
+    // Everything below is filesystem work — canonicalize, stat, and a read of
+    // up to `MAX_VIEWABLE_BYTES` — so it runs off the reactor, like its
+    // sibling `cl_read_file_inner` (round 9: it ran on the 2-worker reactor).
+    tokio::task::spawn_blocking(move || read_workspace_file_blocking(repo, &path))
+        .await
+        .map_err(|e| AppError::Internal(format!("read task failed: {e}")))?
+}
+
+fn read_workspace_file_blocking(repo: Option<String>, path: &str) -> Result<WorkspaceFile, AppError> {
+    let path = path.to_string();
     let roots = allowed_roots(repo.as_deref());
 
     // Canonicalize FIRST — this both resolves `..`/symlinks and proves the file
