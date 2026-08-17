@@ -249,12 +249,37 @@ fn pack_blocks(blocks: Vec<String>) -> Vec<String> {
     chunks
 }
 
-/// Map a picked option string to an outcome enum. Anything that starts with
-/// "approve" (case-insensitive) counts as Approved; everything else Denied.
-/// Abandoned isn't reachable via resolve_choice (that path requires a pick).
+/// Map a picked option string to an outcome enum for a `request_approval`
+/// row with CUSTOM option labels. Anything that starts with "approve"
+/// (case-insensitive) counts as Approved; everything else Denied. Abandoned
+/// isn't reachable via resolve_choice (that path requires a pick).
+///
+/// NOT the verdict for an Approve/Reject GATE — see [`gate_verdict`]. (A
+/// custom-labelled approval whose approving option reads "Yes, deploy" maps
+/// to Denied here; recorded round 8, unchanged.)
 pub(super) fn outcome_from_picked(picked: &str) -> ViolationOutcome {
     let lower = picked.to_lowercase();
     if lower.starts_with("approve") || lower == "ok" || lower == "yes" {
+        ViolationOutcome::Approved
+    } else {
+        ViolationOutcome::Denied
+    }
+}
+
+/// The verdict of an Approve/Reject GATE — a parked `action_gate` command, a
+/// push gate, a reviewer-down override request: rows whose menu is exactly
+/// `["Approve","Reject"]`. **Only the LISTED `Approve` approves.** Anything
+/// else — `Reject`, or the user typing in their own words — is Denied, and a
+/// parked command does not run.
+///
+/// Until round 8 these rows shared [`outcome_from_picked`], so a typed
+/// `"approve but dry-run first"` (or a bare `ok` / `yes`) EXECUTED the
+/// original command while the tray-answer body told the agent to "honor the
+/// words, not the menu" — the host had already overridden the words. A gate
+/// is a yes/no on one exact command; the words go to the agent, the menu
+/// decides the run. Fail-closed on the verdict.
+pub(super) fn gate_verdict(picked: &str) -> ViolationOutcome {
+    if picked == "Approve" {
         ViolationOutcome::Approved
     } else {
         ViolationOutcome::Denied
@@ -392,7 +417,7 @@ pub(super) fn oob_resolution_body(
         // A gate: the prompt IS the command, so print the verdict and the
         // command's first line once; the executed output (appended by the
         // caller on Approve) carries the rest and the exit code.
-        let verdict = match outcome_from_picked(picked) {
+        let verdict = match gate_verdict(picked) {
             crate::policy::ViolationOutcome::Approved => "approved".to_string(),
             _ => format!("rejected ({picked})"),
         };
@@ -403,8 +428,10 @@ pub(super) fn oob_resolution_body(
             first.to_string()
         };
         // The gate's menu is exactly Approve/Reject; anything else is the user
-        // typing — the command stays refused (fail-closed on the verdict), and
-        // the agent is told to act on the words, as for a question.
+        // typing — `gate_verdict` refuses it (the command does NOT run: fail-
+        // closed on the verdict), and the agent is told to act on the words,
+        // as for a question. So the "honor the words" line below never
+        // accompanies an execution.
         let typed = if options.iter().any(|o| o == picked) {
             String::new()
         } else {
@@ -432,6 +459,24 @@ pub(super) fn oob_resolution_body(
 
 #[cfg(test)]
 mod tests {
+    /// The two mappers are different on purpose (round 8, R3): a GATE approves
+    /// only on the listed `Approve`; a custom-labelled `request_approval` row
+    /// keeps the prefix map. Kill-tested: make `gate_verdict` delegate to
+    /// `outcome_from_picked` and the typed rows below flip to Approved.
+    #[test]
+    fn a_gate_approves_only_on_the_listed_approve() {
+        use super::{gate_verdict, outcome_from_picked};
+        use crate::policy::ViolationOutcome::{Approved, Denied};
+        assert!(matches!(gate_verdict("Approve"), Approved));
+        for typed in ["approve but dry-run first", "approved", "approved?", "ok", "yes", "Reject", "sure", ""] {
+            assert!(matches!(gate_verdict(typed), Denied), "{typed:?} is not the listed Approve");
+        }
+        // The custom-label map is unchanged.
+        assert!(matches!(outcome_from_picked("approved"), Approved));
+        assert!(matches!(outcome_from_picked("Approve — proceed"), Approved));
+        assert!(matches!(outcome_from_picked("sure"), Denied));
+    }
+
     use super::{split_into_atoms, walk_cl_dir, WalkedFile};
     use std::collections::HashMap;
     use std::fs;

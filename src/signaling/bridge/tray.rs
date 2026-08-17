@@ -6,7 +6,7 @@
 //! biggest slice of the bridge — everything that parks a oneshot, mirrors a
 //! tray row, or sets the session's awaiting-halt flag.
 
-use super::util::{oob_resolution_body, outcome_from_picked, parse_tray_ts};
+use super::util::{gate_verdict, oob_resolution_body, outcome_from_picked, parse_tray_ts};
 use super::*;
 use crate::storage::MessageKind;
 use uuid::Uuid;
@@ -605,10 +605,7 @@ impl SignalingBridge {
         // of a command that was live <1ms ago — current context — so it's
         // acceptable. The real target is long-stale / post-restart commands.)
         if !confirm_stale
-            && matches!(
-                outcome_from_picked(&picked),
-                crate::policy::ViolationOutcome::Approved
-            )
+            && matches!(gate_verdict(&picked), crate::policy::ViolationOutcome::Approved)
         {
             if let Some((command, asked_at)) = self.stale_gated_command(choice_id).await {
                 return Ok(ResolveOutcome::StaleGateNeedsConfirm { command, asked_at });
@@ -684,10 +681,8 @@ impl SignalingBridge {
                 .unwrap_or_else(|p| p.into_inner())
                 .remove(choice_id);
             if let Some((session_id, reason)) = pending_override {
-                if matches!(
-                    outcome_from_picked(&picked),
-                    crate::policy::ViolationOutcome::Approved
-                ) {
+                // An Approve/Reject gate: only the listed Approve lifts a block.
+                if matches!(gate_verdict(&picked), crate::policy::ViolationOutcome::Approved) {
                     tracing::warn!(
                         session = %session_id,
                         reason = %reason,
@@ -711,7 +706,11 @@ impl SignalingBridge {
                 // Write violation record FIRST (before unblocking the agent)
                 // so the audit trail captures the decision even if the agent
                 // crashes immediately after receiving the result.
-                let outcome = outcome_from_picked(&picked);
+                let outcome = if p.choice.options.iter().map(String::as_str).eq(["Approve", "Reject"]) {
+                    gate_verdict(&picked)
+                } else {
+                    outcome_from_picked(&picked)
+                };
                 if let (Some(log), Some(ctx)) = (self.violations.as_ref(), &p.choice.approval) {
                     let _ = log
                         .record(
@@ -965,7 +964,7 @@ impl SignalingBridge {
             .filter(|row| row.choice_id != resolving_choice_id)
             .filter(|row| {
                 matches!(
-                    outcome_from_picked(row.picked_option.as_deref().unwrap_or("")),
+                    gate_verdict(row.picked_option.as_deref().unwrap_or("")),
                     crate::policy::ViolationOutcome::Approved
                 )
             })
@@ -995,10 +994,9 @@ impl SignalingBridge {
         body: &mut String,
     ) {
         let Some(command) = command else { return };
-        if !matches!(
-            outcome_from_picked(picked),
-            crate::policy::ViolationOutcome::Approved
-        ) {
+        // Only the LISTED Approve runs a parked command (`gate_verdict`): the
+        // user's own words are carried to the agent, never executed as a yes.
+        if !matches!(gate_verdict(picked), crate::policy::ViolationOutcome::Approved) {
             return;
         }
         // The verdict line above already says "approved" and names the command;

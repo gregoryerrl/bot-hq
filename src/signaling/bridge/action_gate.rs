@@ -11,7 +11,7 @@
 //! the agent — it's an ACTION request, not a permission request. The agent does
 //! NOT re-run the command; the returned output IS the result.
 
-use super::util::outcome_from_picked;
+use super::util::gate_verdict;
 use super::*;
 use crate::policy::tool_gate::{self, GateMode};
 use crate::policy::ViolationOutcome;
@@ -136,7 +136,7 @@ impl SignalingBridge {
             ),
             "answered" => {
                 let picked = row.picked_option.as_deref().unwrap_or("");
-                if matches!(outcome_from_picked(picked), ViolationOutcome::Approved) {
+                if matches!(gate_verdict(picked), ViolationOutcome::Approved) {
                     format!(
                         "approved — bot-hq executed `{command}` at approval time; the \
                          output was delivered as an out-of-band message (check your \
@@ -364,6 +364,73 @@ mod tests {
         assert!(!marker.exists(), "rejected command must NOT have run");
         let status = bridge.gate_status(&cid).await.unwrap();
         assert!(status.starts_with("rejected"), "got: {status}");
+    }
+
+    /// **Only the LISTED Approve runs a parked command** (round 8, R3). The
+    /// menu is exactly Approve/Reject; a typed answer — even one that starts
+    /// with "approve" — is the user saying something ELSE, and it is carried to
+    /// the agent as words, never executed as a yes. Before this the shared
+    /// prefix map ran the original command on `"approve but dry-run first"`
+    /// while the tray-answer body told the agent to honor the words.
+    /// Kill-tested: route the gate back through `outcome_from_picked` and the
+    /// first row below runs the command.
+    #[tokio::test]
+    async fn a_typed_approval_on_a_gate_is_carried_as_words_and_never_executes() {
+        for typed in [
+            "approve but dry-run first",
+            "approved",
+            "approved?",
+            "ok",
+            "yes",
+            "ok, but use --dry-run",
+            "sure",
+        ] {
+            let data = tempdir().unwrap();
+            let repo = tempdir().unwrap();
+            let marker = repo.path().join("ran.txt");
+            let cmd = format!("touch {}", marker.display());
+            let bridge = bridge_with(
+                data.path(),
+                &[gk("touch", GateMode::Gate)],
+                "s1",
+                repo.path(),
+            )
+            .await;
+            let parked = bridge
+                .action_gate("s1".into(), "hands".into(), cmd)
+                .await
+                .unwrap();
+            let cid = parked
+                .split("gate_id: ")
+                .nth(1)
+                .and_then(|s| s.split(')').next())
+                .unwrap()
+                .to_string();
+            let outcome = bridge.resolve_choice(&cid, typed.into()).await.unwrap();
+            assert!(
+                !marker.exists(),
+                "typed pick {typed:?} must NOT run the parked command"
+            );
+            match outcome {
+                ResolveOutcome::DeliveredOutOfBand { body, .. } => {
+                    assert!(
+                        body.contains(&format!("rejected ({typed})")),
+                        "the verdict names the words as a rejection: {body}"
+                    );
+                    assert!(
+                        body.contains("honor the words, not the menu"),
+                        "and the words are carried to the agent: {body}"
+                    );
+                    assert!(!body.contains("Output:"), "nothing ran, so no output block: {body}");
+                }
+                other => panic!("expected OOB delivery, got {other:?}"),
+            }
+            let status = bridge.gate_status(&cid).await.unwrap();
+            assert!(
+                status.starts_with("rejected"),
+                "gate_status agrees nothing ran for {typed:?}: {status}"
+            );
+        }
     }
 
     #[tokio::test]
