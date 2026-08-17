@@ -96,9 +96,9 @@ struct Inner {
     last: SessionActivity,
     /// Last per-participant flags we emitted. Tracked separately from `last`
     /// because the derived `state` collapses every participant into a single
-    /// `Busy`: a broadcast (Brian-busy → Rain-busy) or a peer hand-off
-    /// (Rain-busy → Brian-idle) leaves `state == Busy` throughout, so without
-    /// this the per-participant transition would be suppressed and the UI would
+    /// `Busy`: a turn handover (one participant's `busy` clears, the next's is
+    /// set by the ring) leaves `state == Busy` throughout, so without this the
+    /// per-participant transition would be suppressed and the UI would
     /// mislabel who's working.
     last_busy: HashMap<String, bool>,
 }
