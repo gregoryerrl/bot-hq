@@ -68,7 +68,7 @@ mod tests {
     use crate::storage::{MessageKind};
 
     #[tokio::test]
-    async fn get_session_messages_returns_in_order() {
+    async fn messages_for_session_returns_in_order_and_maps_authors() {
         let storage = Arc::new(Storage::memory().await.unwrap());
         storage.create_session("s1", "t", None).await.unwrap();
         storage
@@ -89,7 +89,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_session_messages_respects_since_id() {
+    async fn messages_for_session_respects_since_id() {
         let storage = Arc::new(Storage::memory().await.unwrap());
         storage.create_session("s1", "t", None).await.unwrap();
         let id1 = storage

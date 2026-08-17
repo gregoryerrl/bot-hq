@@ -141,9 +141,11 @@ impl Storage {
 
     // ---- cl_reads (audit) ------------------------------------------------
 
-    /// Record that an agent read a CL file. Fire-and-forget; failures are
-    /// logged but don't bubble up so a flaky audit write can't break the
-    /// agent's read flow.
+    /// Record that an agent read a CL file. A single awaited insert whose error
+    /// PROPAGATES (the bridge maps an unknown path to a no-op before calling
+    /// this; a real DB failure reaches the tool as an error). The old doc here
+    /// said "fire-and-forget; failures are logged but don't bubble up" — the
+    /// `?` two lines down says otherwise (round 9).
     pub async fn record_cl_read(
         &self,
         cl_index_id: i64,

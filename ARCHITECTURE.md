@@ -1192,7 +1192,7 @@ removal above.
   gate.
 - **Session policy snapshot:** the resolved general → project → session
   policy frozen per-session at spawn (`session_policy.rs`), editable in
-  the gear tab. Push/force-push are pure toggles — no agent-side grants.
+  the Session Settings panel (the gear button in the session header). Push/force-push are pure toggles — no agent-side grants.
 - **Awaiting flag:** per-session `Arc<AtomicBool>` set by the halt-declaring
   tools (`mark_awaiting_user` / `halt`, `request_phase_advance`) and by
   approvals (`request_approval`, `action_gate`, the pre-push gate) — NOT by

@@ -276,7 +276,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | Tool | Purpose |
 |---|---|
 | `ask_user_choice(question, options)` | Park a structured question for the user. Returns a parked ack; the pick arrives out-of-band. |
-| `mark_awaiting_user(reason)` | Flag the session's `[Need User Input]` badge. Non-blocking. |
+| `mark_awaiting_user(reason)` | Declare the session's HALT (D35): the ring stops where it stands, the single halt slot carries the reason, the declarer's own in-flight generation is interrupted, and the user gets the floor. Refused when the reason names a peer (use `halt` for a legitimate user-wait that must mention a role). |
 | `peer_ack(final?)` | Say you have converged and end the round instead of bouncing another acknowledgment. A content-free ack (or `final: true`) ends the turn as a DONE vote toward consensus; a substantive turn stays an ordinary turn with the ack recorded as overridden, so a review is never silently downgraded to agreement. |
 | `halt(reason?)` | Yield to the user and unlock the chat input (sets awaiting, which outranks busy). Like `mark_awaiting_user` framed as a yield. HANDS only. |
 | `request_approval(kind, action, …)` | Per-action approval gate. Used by push gate, force-push, per-action approval. |

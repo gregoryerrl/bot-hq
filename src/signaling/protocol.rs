@@ -177,7 +177,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "mark_awaiting_user",
-            description: gated_by("mark_awaiting_user", "Declare the session's HALT: the ring stops where it stands, the session's single halt slot is filled with your reason (a later declaration replaces it), your own in-flight generation is interrupted so the declaration is true, and the user gets the floor. `reason` is the recap the user reads above their input box — say where things stand and what resumes it (a wake time, a command pasted verbatim, a tray answer). Cleared by the user's next message. Use it when the next move is genuinely the user's; a question that blocks nothing is `ask_user_choice`."),
+            description: gated_by("mark_awaiting_user", "Declare the session's HALT: the ring stops where it stands, the session's single halt slot is filled with your reason (a later declaration replaces it), your own in-flight generation is interrupted so the declaration is true, and the user gets the floor. `reason` is the recap the user reads above their input box — say where things stand and what resumes it (a wake time, a command pasted verbatim, a tray answer). Cleared by the user's next message. Use it when the next move is genuinely the user's; a question that blocks nothing is `ask_user_choice`. REFUSED (no halt declared, an error returned) when `reason` names a peer — the words `peer`, `eyes`, `hands` or a legacy agent name, word-boundary matched — because waiting on a peer is not waiting on the user; when a legitimate user-wait reason must mention a role, declare it through `halt`, which carries no such filter."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -201,7 +201,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "pass_turn",
-            description: "Decline this turn. Use it when the turn has come round to you and you genuinely have nothing to add — no finding, no correction, no next step of your own. Your pass is recorded in the chat so the user can see you were asked and chose to stay quiet; the turn then moves on.\n\nThis is NOT the same as saying you are finished. Being finished (peer_ack, or simply having nothing left to do) counts toward the session settling; a pass counts toward nothing and deliberately cannot end the session on its own. Reach for it when the work is someone else's this round — the reviewer with nothing yet to review, the executor waiting on a decision — and reach for the finished verbs instead when you actually believe the work is done.\n\nCalling it costs nothing and no argument is needed. If you write substantive text in the same turn, that text wins: the turn counts as a real turn and the pass is ignored, because a pass has to mean silence to mean anything. So do not use it as a preface to a point you are about to make.",
+            description: "Decline this turn. Use it when the turn has come round to you and you genuinely have nothing to add — no finding, no correction, no next step of your own. Your pass is recorded in the chat so the user can see you were asked and chose to stay quiet; the turn then moves on.\n\nThis is NOT the same as saying you are finished. Being finished (peer_ack, or simply having nothing left to do) counts toward the session settling; a pass counts toward nothing and deliberately cannot end the session on its own. Reach for it when the work is someone else's this round — the reviewer with nothing yet to review, the executor waiting on a decision — and reach for the finished verbs instead when you actually believe the work is done.\n\nCalling it costs nothing and no argument is needed. If you write substantive text in the same turn (more than ~200 characters), that text wins: the turn counts as a real turn and the pass is ignored, because a pass has to mean silence to mean anything. So do not use it as a preface to a point you are about to make.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {}
@@ -209,17 +209,17 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "halt",
-            description: gated_by("halt", "Yield control back to the user and unlock the chat input. Use when the participants have converged or you've finished the current slice and the next move is genuinely the user's — it ends the agent-to-agent loop cleanly. Sets the session to awaiting-user (the input unlocks even mid-turn, since awaiting outranks busy) and stops the ring until the user's next message. Like mark_awaiting_user but framed as a yield rather than a specific pending question; pass an optional reason shown in the tray."),
+            description: gated_by("halt", "Yield control back to the user and unlock the chat input. Use when the participants have converged or you've finished the current slice and the next move is genuinely the user's — it ends the agent-to-agent loop cleanly. Sets the session to awaiting-user (the input unlocks even mid-turn, since awaiting outranks busy) and stops the ring until the user's next message. Like mark_awaiting_user but framed as a yield rather than a specific pending question — and without its peer-word filter; pass an optional reason, shown in the halt banner above the input (not the tray)."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "reason": { "type": "string", "description": "Optional short note on why you're yielding (shown in the tray)." }
+                    "reason": { "type": "string", "description": "Optional short note on why you're yielding — it fills the session's halt slot and shows in the halt banner above the input (a halt is not a tray row)." }
                 }
             }),
         },
         ToolDescriptor {
             name: "advance_phase",
-            description: "Cast your VOTE to move the IPAV phase (rc3 D37 — no user gate; with more than one active participant it is not a solo move either): the phase advances only when every active participant has voted for the same target at the same state of the work — a solo roster's own vote IS that consensus and moves the chip at once; until then the tool answers NOT ADVANCED with the tally, and you are still in the current phase. Call it whenever your work crosses a boundary — investigation done -> Plan, plan stated -> Apply, mutation done -> Verify — and expect your peers to vote on their turns. The state of the work is fingerprinted over the session's phase documents, so WRITE your phase doc first, then vote (a doc write after your vote orphans it, and everyone re-votes on changed work); a pass retracts your vote. On consensus the chip moves and every participant reads a [PHASE: X] transition notice. Use exact phase names: Investigate, Plan, Apply, Verify.",
+            description: "Cast your VOTE to move the IPAV phase (rc3 D37 — no user gate; with more than one active participant it is not a solo move either): the phase advances only when every active participant has voted for the same target at the same state of the work — a solo roster's own vote IS that consensus and moves the chip at once; until then the tool answers NOT ADVANCED with the tally, and you are still in the current phase. Call it whenever your work crosses a boundary — investigation done -> Plan, plan stated -> Apply, mutation done -> Verify — and expect your peers to vote on their turns. The state of the work is fingerprinted over the session's phase-TAGGED documents (untagged scratch docs do not count), so WRITE your phase doc first, then vote (a doc write after your vote orphans it, and everyone re-votes on changed work); a pass retracts your vote. On consensus the chip moves and every participant reads a [PHASE: X] transition notice. Use exact phase names: Investigate, Plan, Apply, Verify.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -289,7 +289,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "request_approval",
-            description: gated_by("request_approval", "Request user approval for a policy-gated action (push_gate, force_push, per_action). PARKS and returns IMMEDIATELY with a parked acknowledgment carrying a choice_id — it does NOT block waiting for the answer. The user's pick arrives later as an out-of-band message, so do not re-issue on no answer yet; call `gate_status` with the choice_id if you need to know whether it resolved. The outcome is written to violations.jsonl. Call this BEFORE running the action (e.g., before a prod query). For a Tool-Gate-blocked Bash command, use `action_gate` instead."),
+            description: gated_by("request_approval", "Request user approval for a policy-gated action (push_gate, force_push, per_action). PARKS and returns IMMEDIATELY with a parked acknowledgment carrying a choice_id — it does NOT block waiting for the answer, but the park LATCHES the ring: finish your turn normally, then nobody is dealt another until the user answers. The user's pick arrives later as an out-of-band message, so do not re-issue on no answer yet; call `gate_status` with the choice_id if you need to know whether it resolved. The outcome is written to violations.jsonl. Call this BEFORE running the action (e.g., before a prod query). For a Tool-Gate-blocked Bash command, use `action_gate` instead."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -327,7 +327,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "action_gate",
-            description: gated_by("action_gate", "Route a Bash command that the bot-hq Tool Gate blocked (the PreToolUse hook told you to call this). An `auto_allow`/unmatched command runs immediately and you get its output back. A `gate` command PARKS for the user's approval and this call returns AT ONCE with `gate_id` — it does not block, so there is nothing to time out. On approve bot-hq executes the command in your working repo and the stdout/stderr/exit code arrives as an out-of-band message; on reject you get a rejection notice (any text beyond 'Reject' is the user's reasoning — read it). NEVER re-issue a parked command or assume it ran; call gate_status(gate_id) to check. Re-parking an identical command while one is pending returns the existing gate instead of stacking a duplicate prompt. Prefer `--body-file /tmp/x.md` over inline heredocs for long bodies."),
+            description: gated_by("action_gate", "Route a Bash command that the bot-hq Tool Gate blocked (the PreToolUse hook told you to call this). An `auto_allow`/unmatched command runs immediately and you get its output back. A `gate` command PARKS for the user's approval and this call returns AT ONCE with `gate_id` — it does not block, so there is nothing to time out — but the park LATCHES the ring: finish your turn, then nobody is dealt another until the user answers. On approve bot-hq executes the command in your working repo and the stdout/stderr/exit code arrives as an out-of-band message; on reject you get a rejection notice (any text beyond 'Reject' is the user's reasoning — read it). NEVER re-issue a parked command or assume it ran; call gate_status(gate_id) to check. Re-parking an identical command while one is pending returns the existing gate instead of stacking a duplicate prompt. Prefer `--body-file /tmp/x.md` over inline heredocs for long bodies."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -341,7 +341,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "gate_status",
-            description: "Current state of a parked action_gate command by its gate_id: pending (still awaiting the user — do not re-issue), approved (executed; output was delivered as an out-of-band message), or rejected (not run; includes the user's answer text). Read-only, callable by any participant. Use this instead of guessing whether a gated command ran.",
+            description: "Current state of a parked action_gate command by its gate_id: pending (still awaiting the user — do not re-issue), approved (executed; output was delivered as an out-of-band message), or rejected (not run; includes the user's answer text). A `request_approval` choice_id works too — those rows carry no command, so the answer is the user's pick and nothing ran on bot-hq's side. Read-only, callable by any participant. Use this instead of guessing whether a gated command ran.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -369,7 +369,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "eyes_flag",
-            description: gated_by("eyes_flag", "File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until a participant holding `disposition_finding` resolves it (the mechanical sign-off gate, mirroring the commit-message gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id. Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains the executor to ignore the gate). This is how a finding STICKS instead of relying on someone reading chat."),
+            description: gated_by("eyes_flag", "File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until a participant holding `disposition_finding` resolves it (the mechanical sign-off gate, mirroring the commit-message gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id — an OPEN finding with an identical `summary` is a re-raise: its existing id comes back, no duplicate row is filed, and its raise count grows only if another participant has spoken since (change the summary to file a genuinely new finding). Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains the executor to ignore the gate). This is how a finding STICKS instead of relying on someone reading chat."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -386,7 +386,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "disposition_finding",
-            description: gated_by("disposition_finding", "Resolve a `blocking` review finding so it stops gating `git commit`. `status='fixed'` (you fixed it — `reason` should reference the fix: commit/line/test) or `status='rebutted'` (you disagree — `reason` must justify why). A rebuttal does NOT need the finder's agreement (so it can't deadlock) but IS surfaced to the user. `reason` is REQUIRED for both. Call this for each open blocking finding before committing; see what's open with `check_open_findings`."),
+            description: gated_by("disposition_finding", "Resolve a `blocking` review finding so it stops gating `git commit`. `status='fixed'` (you fixed it — `reason` should reference the fix: commit/line/test) or `status='rebutted'` (you disagree — `reason` must justify why). A rebuttal does NOT need the finder's agreement (so it can't deadlock); it is recorded on the finding with your reason and clears the banner — the user sees it as your tool call in the transcript, so write the reason for them. `reason` is REQUIRED for both. Call this for each open blocking finding before committing; see what's open with `check_open_findings`."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -434,7 +434,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "close_session",
-            description: gated_by("close_session", "Close the session this agent is running in. Kills every participant's subprocess and marks the session row closed (or archived). Use this when the user asks you to close the session and the conversation has reached a natural stopping point. The FIRST call may answer with a close-out learnings nudge or a Context-Library staleness report instead of closing — act on it (write the delta, or decide there is none), then call again; the call that closes is fire-and-forget — your subprocess is terminated shortly after it returns."),
+            description: gated_by("close_session", "Close the session this agent is running in. Kills every participant's subprocess and marks the session row closed (or archived). Use this when the user asks you to close the session and the conversation has reached a natural stopping point. The FIRST call may answer with a Context-Library staleness report, and the next with a close-out learnings nudge (when adherence nudges are on and this session wrote no CL delta) instead of closing — up to two pre-answers; act on each (write the delta, or decide there is none), then call again; the call that closes is fire-and-forget — your subprocess is terminated shortly after it returns."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -472,7 +472,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "supersede_question",
-            description: gated_by("supersede_question", "Replace a stale question you parked for the user with a rephrased version. The old row gets status='superseded' (drops from the tray); the new row links to it via `supersedes_id` so the history is traceable. Same non-blocking semantics as `ask_user_choice` — parks the new question and returns a parked acknowledgment immediately; the user's pick on it arrives out-of-band.\n\nNote: `ask_user_choice` and `request_approval` already auto-supersede the MOST RECENT pending question from this agent in this session. Use `supersede_question` when you need to explicitly target a SPECIFIC stale row that isn't the most recent (e.g. multiple pending choices from different topics, and you want to rephrase a particular one without disturbing others)."),
+            description: gated_by("supersede_question", "Replace a stale question you parked for the user with a rephrased version. The old row gets status='superseded' (drops from the tray); the new row links to it via `supersedes_id` so the history is traceable. Same non-blocking semantics as `ask_user_choice` — parks the new question and returns a parked acknowledgment immediately; the user's pick on it arrives out-of-band.\n\nNote: `ask_user_choice` and `request_approval` auto-supersede only a pending row from this agent with the IDENTICAL prompt (a re-ask after a timeout — distinct questions accumulate in the tray). Use `supersede_question` to replace a SPECIFIC stale row with different wording without disturbing the others."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -616,7 +616,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_write_file",
-            description: gated_by("cl_write_file", "Write a project-scoped Context Library file. Default mode replaces the ENTIRE file; mode:\"append\" adds content to the end instead (no read-modify-write needed). Direct write: missing parent folders are created, the write is atomic, the index rescans automatically, and every write is snapshotted into the library's local git history. Replacing a file with empty or >50%-smaller content is refused unless confirm_shrink:true (accidental-truncation guard — pass it when a prune is intentional). Also lifts the session's close-out learnings gate. bot-hq-owned _globals system files (custom-instructions.md, custom-general-rules.md) are refused."),
+            description: gated_by("cl_write_file", "Write a project-scoped Context Library file. Default mode replaces the ENTIRE file; mode:\"append\" adds content to the end instead (no read-modify-write needed). Direct write: missing parent folders are created, the write is atomic, the index rescans automatically, and every write is snapshotted into the library's local git history. Replacing a file with empty or >50%-smaller content is refused unless confirm_shrink:true (accidental-truncation guard — pass it when a prune is intentional). Also lifts the session's close-out learnings gate. bot-hq-owned _globals system files (custom-instructions.md, custom-general-rules.md, anything under _globals/agents/) are refused; so is a file the library marks agent-invisible; bodies over 1 MiB are refused. A successful write also pushes the library to its private remote, detached and fail-open."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -647,7 +647,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_register_read",
-            description: "Record that this agent read a CL file (a row in cl_reads). An audit trail only — nothing in the UI reads it back yet, so it changes nothing you see. Optional; fire-and-forget; failures are silently logged.",
+            description: "Record that this agent read a CL file (a row in cl_reads). An audit trail only — nothing in the UI reads it back yet, so it changes nothing you see. Optional; a single awaited row insert (an unknown path is a no-op; only a real DB failure surfaces as an error).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
