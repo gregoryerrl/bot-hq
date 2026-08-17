@@ -1569,12 +1569,19 @@ impl Storage {
     /// timestamp ties, and `SUM(LENGTH(body))` is cheap insurance against a
     /// same-millisecond same-length rewrite.
     ///
-    /// **Deliberately spans ALL of the session's docs rather than the current
-    /// phase's**, and that is what keeps this a storage-only question: the live
-    /// phase is in-memory `AppState` and unreachable from here. Spanning them is
-    /// also stricter — editing the Investigate doc while voting to leave Plan
-    /// still invalidates, which is correct, because the votes were cast on a
-    /// body of work that has since moved.
+    /// **Deliberately spans ALL of the session's phase-tagged docs rather than
+    /// the current phase's**, and that is what keeps this a storage-only
+    /// question: the live phase is in-memory `AppState` and unreachable from
+    /// here. Spanning them is also stricter — editing the Investigate doc while
+    /// voting to leave Plan still invalidates, which is correct, because the
+    /// votes were cast on a body of work that has since moved. The reviewer's
+    /// co-located `<phase>-eyes` doc is phase-tagged, so it counts.
+    ///
+    /// **Untagged scratch docs do NOT count** (round 9). They used to: the
+    /// digest ran over every `session_documents` row, so a private scratch note
+    /// — or the untagged `<slug>@<n>` archive a phase replace leaves behind —
+    /// orphaned everyone's votes while the descriptor promised "phase
+    /// documents". The work the vote is about is the phase-tagged record.
     ///
     /// A session with no documents yet has a stable digest of its empty state.
     /// That is deliberate: it lets a phase with nothing written still be voted
@@ -1584,7 +1591,7 @@ impl Storage {
     pub async fn phase_artifact_fingerprint(&self, session_id: &str) -> Result<String> {
         let (n, latest, bytes): (i64, String, i64) = sqlx::query_as(
             "SELECT COUNT(*), COALESCE(MAX(updated_at), ''), COALESCE(SUM(LENGTH(body)), 0) \
-             FROM session_documents WHERE session_id = ?",
+             FROM session_documents WHERE session_id = ? AND phase IS NOT NULL",
         )
         .bind(session_id)
         .fetch_one(&self.pool)
@@ -3150,6 +3157,34 @@ mod tests {
              open question to report — reporting the stale one would name a \
              tally nobody is being asked about"
         );
+    }
+
+    /// **The digest is over phase-TAGGED docs** (round 9). Untagged scratch used
+    /// to move it — a private note orphaned every vote — while `advance_phase`
+    /// promised "phase documents". Three assertions, because the round-8 lesson
+    /// is that a test can pin a falsehood: (a) scratch does not move it, (b) an
+    /// executor phase write does, (c) the reviewer's `<phase>-eyes` write does
+    /// too — that one is what keeps reviewer-vote invalidation intact.
+    #[tokio::test]
+    async fn the_fingerprint_moves_on_phase_docs_and_ignores_scratch() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let fp0 = s.phase_artifact_fingerprint("s1").await.unwrap();
+
+        // (a) untagged scratch — and a second one — leave the digest alone.
+        s.upsert_session_document("s1", "scratch", "private notes", None).await.unwrap();
+        s.upsert_session_document("s1", "plan@1", "an archive row", None).await.unwrap();
+        assert_eq!(s.phase_artifact_fingerprint("s1").await.unwrap(), fp0, "scratch moved the digest");
+
+        // (b) the executor's phase doc moves it.
+        s.upsert_session_document("s1", "plan", "the plan", Some("plan")).await.unwrap();
+        let fp1 = s.phase_artifact_fingerprint("s1").await.unwrap();
+        assert_ne!(fp1, fp0, "a phase write must move the digest");
+
+        // (c) the reviewer's co-located doc moves it too.
+        s.upsert_session_document("s1", "plan-eyes", "the review", Some("plan")).await.unwrap();
+        let fp2 = s.phase_artifact_fingerprint("s1").await.unwrap();
+        assert_ne!(fp2, fp1, "a <phase>-eyes write must move the digest");
     }
 
     /// Voting twice for one question is one vote — the tally is a COUNT, so a
