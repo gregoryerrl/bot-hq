@@ -359,8 +359,6 @@ Calls the SAME `core::AppState` fns the UI does — no second lifecycle path.
 | path | role | size |
 |---|---|---|
 
-**Entry points.** `start_external_server` (env `BOT_HQ_EXTERNAL_MCP_DISABLED`,
-`BOT_HQ_EXTERNAL_MCP_PORT` default 7892; token `<data_dir>/.local/mcp-token`) ·
 `dispatch_external` · `call_external_tool`.
 
 **Seams.** Shares `response.rs`/`tool_args.rs`/`webview_js.rs` with C1;

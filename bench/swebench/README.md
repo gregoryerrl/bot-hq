@@ -1,7 +1,17 @@
-# SWE-bench Verified harness for the bot-hq duo
+# SWE-bench Verified harness for a bot-hq session
 
-Evaluates the **bot-hq duo** — Brian (HANDS, Opus 4.8) + Rain (EYES,
-DeepSeek-V4-Pro) — on [SWE-bench Verified](https://www.swebench.com/) (500
+> ⚠️ **NON-FUNCTIONAL as of 2026-08-17.** This harness drives bot-hq through its
+> **external MCP server, which has been REMOVED** — the user demoted the external
+> driver to a future plugin (see `ARCHITECTURE.md` § "The external driver —
+> REMOVED"). `bothq_client.py` talks to an endpoint that no longer exists and
+> every rollout will fail at connect.
+>
+> It is kept in-repo rather than deleted: the rollout, prompt and scoring logic is
+> independent of the transport, so re-pointing it at the driver plugin (or any
+> other surface) is a client change, not a rewrite. Nothing below has been updated
+> for the removal — read it as a description of how it worked.
+
+Evaluates a bot-hq session — an executing role plus a reviewing role — on [SWE-bench Verified](https://www.swebench.com/) (500
 human-validated GitHub-issue→patch tasks).
 
 SWE-bench is two phases. This harness **replaces Phase 1** (produce a patch per

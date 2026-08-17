@@ -1,5 +1,16 @@
 # CL-poison eval — does the duo obey a wrong CL atom, or verify?
 
+> ⚠️ **NON-FUNCTIONAL as of 2026-08-17.** This harness reuses `../swebench/bothq_client.py`, which drives bot-hq through its
+> **external MCP server, which has been REMOVED** — the user demoted the external
+> driver to a future plugin (see `ARCHITECTURE.md` § "The external driver —
+> REMOVED"). `bothq_client.py` talks to an endpoint that no longer exists and
+> every rollout will fail at connect.
+>
+> It is kept in-repo rather than deleted: the rollout, prompt and scoring logic is
+> independent of the transport, so re-pointing it at the driver plugin (or any
+> other surface) is a client change, not a rewrite. Nothing below has been updated
+> for the removal — read it as a description of how it worked.
+
 The Context Library v2 brief's **failure-mode #2** is "trusting memory over
 reality": a stale or wrong CL atom biases the whole generation, so a wrong atom
 is worse than a missing one. The passive `retrieval_events` telemetry (Stage-4b,

@@ -252,8 +252,8 @@ apart — otherwise they share one Context Library, sqlite DB, and instance lock
   `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` — which is how a non-Anthropic
   model runs through the same CLI. (A second, in-process Rust agent loop existed
   as an opt-in until rc3 D9 removed it; the CLI is the only connector.)
-- **Two MCP servers:** an **internal** one (UI-signaling tools served to the
-  agents) on an ephemeral localhost port, and an **external** one on `127.0.0.1:7892`
+- **One MCP server:** an **internal** one (UI-signaling tools served to the
+  agents) on an ephemeral localhost port
 - **Storage:** sqlite via sqlx — messages, sessions, agent/model configs, the
   durable awaiting-input tray, IPAV session documents, plugins, and the searchable CL
   index.
@@ -353,67 +353,13 @@ context drifts. Hooks are idempotent and respect foreign hooks (write a `.bot-hq
 sidecar instead of clobbering). The audit trail lives at
 `<data_dir>/.local/violations.jsonl` (viewer in Settings → Violations).
 
-## Driving bot-hq from another MCP client
+## Driving bot-hq from another MCP client — REMOVED
 
-bot-hq exposes a second MCP HTTP server so an external agent (another claude-code
-session, a test driver, a custom tool) can manage sessions without the GUI.
-
-**Endpoint:** `http://127.0.0.1:7892/mcp` (POST, JSON-RPC body).
-**Auth:** `Authorization: Bearer <token>`, where the token lives at
-`<data_dir>/.local/mcp-token` (UUIDv4, `0600` perms, auto-generated on first run).
-
-Add it to another claude-code session's MCP config:
-
-```json
-{
-  "mcpServers": {
-    "bot-hq": {
-      "type": "http",
-      "url": "http://127.0.0.1:7892/mcp",
-      "headers": {
-        "Authorization": "Bearer <paste contents of ~/.bot-hq/.local/mcp-token>"
-      }
-    }
-  }
-}
-```
-
-Restart that claude-code; the bot-hq tools appear as `mcp__bot-hq__*`.
-
-### Available external tools
-
-<details>
-<summary><b>Full external (driver) tool list</b></summary>
-
-| Tool | Purpose |
-|---|---|
-| `list_sessions` | Read active sessions (id, title, phase, models). |
-| `list_models` | Saved models with their ids, provider, gateway and context window (tokens redacted). |
-| `create_session(title, working_repo_path?, brian_model_id?, rain_model_id?)` | Spawn a session. Model ids come from `list_models`; omit them to use each role's default. The `brian_`/`rain_` parameter names are retained deliberately so existing driver clients keep working — they map to turn slots, not to agent identities. |
-| `send_message(session_id, text)` | Broadcast to a session. |
-| `get_session_messages(session_id, since_id?)` | Read chat in order. |
-| `advance_phase(session_id, phase)` | Move through I/P/A/V. |
-| `resolve_choice(choice_id, picked)` | Answer a parked `ask_user_choice`. |
-| `get_pending_choices` | List parked choices with their choice_ids. |
-| `close_session(session_id, archive?)` | Kill the session's agents and mark it closed. |
-| `get_status` | Version, addresses, session count, uptime. |
-| `get_agent_configs` | Read agent configs (auth_token redacted to last 4 chars). |
-| `set_agent_config(agent_name, …)` | Upsert a row; empty string clears a field. |
-| `get_violations(limit?)` | Read recent `violations.jsonl` entries. |
-| `wait_for_change(session_id, since_id?, timeout_ms?)` | Long-poll: blocks server-side until new messages arrive or timeout. |
-| `get_session_snapshot(session_id, msg_limit?)` | One-shot aggregate: session meta + last N messages + phase + awaiting + pending choices. |
-| `webview_screenshot(session_id?)` | Capture the bot-hq webview as a base64 PNG. |
-| `webview_click(selector)` | Click a DOM element in the webview. |
-| `webview_type(selector, text)` | Type into a webview element. |
-| `webview_scroll(selector?, y)` | Scroll an element or the page in the webview. |
-| `webview_press_key(key)` | Dispatch a keypress in the webview. |
-
-</details>
-
-**Security model:** localhost-only bind (`127.0.0.1`, refuses remote connections at
-the bind layer); bearer token with constant-time comparison; `auth_token` redaction
-in `get_agent_configs`; soft-fail on port conflict (internal MCP keeps working).
-Rotate the token by editing `<data_dir>/.local/mcp-token` and restarting bot-hq.
+bot-hq used to expose a second MCP HTTP server so an external agent could manage
+sessions without the GUI. **It was removed on 2026-08-17** and demoted to a future
+plugin; the endpoint, its bearer token and the `BOT_HQ_EXTERNAL_MCP_*` env vars
+are gone. See `ARCHITECTURE.md` § "The external driver — REMOVED" for what was
+deleted and where the design record lives.
 
 ## Security caveats (v1)
 

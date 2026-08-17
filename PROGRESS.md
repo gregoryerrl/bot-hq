@@ -44,7 +44,21 @@ caller. What the deletion refunded is the part worth recording: the driver's
 `no_tool_description_an_agent_reads_names_an_agent` now runs with **no exempt
 strings at all** and the identifier guard's carve-outs went from two files to one.
 Two things deliberately NOT deleted — an existing install's `mcp-token` (dead, but
-a user's file), and `bench/swebench/`, now non-functional and bannered as such.
+a user's file), and the benches, which are now non-functional.
+
+> **Correction, same day.** The line above originally read *"`bench/swebench/`,
+> now non-functional and bannered as such"* and **both halves were wrong**: no
+> commit in this arc touched `bench/`, so the harness carried no banner (the one
+> I wrote went into `ARCHITECTURE.md`), and there were **two** casualties, not
+> one — `bench/cl_poison/` imports `../swebench/bothq_client.py` and breaks
+> identically. Caught in review. Both READMEs are bannered now, and the doc sweep
+> that missed them also missed `README.md`'s endpoint section, `CODEBASE.md`'s
+> entry points and `.env.example`'s env block, all since corrected.
+>
+> **This is F8's lesson recurring inside the arc that found it**: the instance
+> was named and the CLASS was never enumerated. `grep -rl` over the non-Rust tree
+> answers "what drives through the driver?" in one command, and I did not run it
+> until review made me.
 
 **Migration 0061 + `SpawnBadge`** (`2833949`) — what a participant was actually
 spawned with. `effort`/`ultracode` are the user's CHOICE and 94 of 94 live rows
