@@ -93,10 +93,9 @@ describe("user-facing framing", () => {
    *   fixtures that quote the old wording on purpose. (This one was a silent
    *   filter in the predicate below until the reviewer named it.)
    * - `bindings.ts` — GENERATED from Rust at app launch and `@ts-nocheck`. Its
-   *   content is the wire, which keeps the retired names deliberately (the
-   *   external driver's fields), and no human can author a regression into it:
-   *   an edit here is overwritten on next launch. The exemption cannot become
-   *   a hiding place.
+   *   content is generated from the Rust command surface, and no human can
+   *   author a regression into it: an edit here is overwritten on next launch.
+   *   The exemption cannot become a hiding place.
    * - `framing.ts` — DEFINES the pattern, so it necessarily spells the words it
    *   searches for. Building the regex from fragments to slip past its own
    *   check would be rewording around the gate — the exact move the general

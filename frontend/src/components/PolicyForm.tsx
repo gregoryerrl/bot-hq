@@ -31,7 +31,7 @@ export function PolicyForm({
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
         <Field
           label="Push gate"
-          hint="auto: pushes go through · ask: the pre-push hook blocks until set to auto"
+          hint="auto: pushes go through · ask: each git push waits for your Approve/Reject (the pre-push hook parks a gate)"
         >
           <SegToggle<PushGateMode>
             value={value.push_gate ?? "auto"}

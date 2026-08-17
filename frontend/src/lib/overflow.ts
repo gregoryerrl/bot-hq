@@ -25,9 +25,31 @@ export const SCROLL_AXIS_CLASSES = [
   "overflow-y-auto",
   "overflow-y-scroll",
   "overflow-auto",
+  "overflow-scroll",
   "overflow-x-auto",
   "overflow-x-scroll",
+  // Arbitrary-value forms of the same axis property — a `[overflow-y:auto]`
+  // or `overflow-y-[auto]` is the same container in a different spelling
+  // (round 7; both had zero uses when added, listed for the same reason as the
+  // three above).
+  "[overflow-y:auto]",
+  "[overflow-y:scroll]",
+  "[overflow:auto]",
+  "[overflow:scroll]",
+  "overflow-y-[auto]",
+  "overflow-y-[scroll]",
 ] as const;
+
+/**
+ * What this guard structurally cannot see (round 7's frontend sweep, recorded
+ * so nobody reads "0 violations" as "0 possible"): `.css`/`index.html`/the
+ * plugin iframe's own stylesheet (the glob is `src/**\/*.{ts,tsx}`); inline
+ * `style={{ overflowY: "auto" }}`; a class string built by concatenation; a
+ * line holding two elements where only one is clipped; a variant-prefixed
+ * clip (`md:overflow-x-hidden`) satisfying `includes` without unconditional
+ * clipping; native scrollers with no class (`<textarea>`, xterm's viewport).
+ * Each of those was measured at 0 on 2026-08-17; none is guarded here.
+ */
 
 /** The class that must accompany any of the above. */
 export const HORIZONTAL_CLIP = "overflow-x-hidden";

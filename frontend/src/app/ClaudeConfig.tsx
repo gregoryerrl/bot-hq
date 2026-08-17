@@ -35,8 +35,9 @@ import type {
 // 2-pane: left = surface nav (reuses the Context Library shell's visual idiom);
 // right = structured detail with an INHERITANCE LENS (which agents pick up the
 // surface) + override controls that write `<data_dir>/claude-overrides.json`.
-// Global ~/.claude editing (Phase 3) is read-only here for now; the override
-// layer (agent-scoped) is fully wired.
+// Both layers write back: global `~/.claude` edits go through
+// `claude_config_set_string/_bool/_plugin_enabled` (`claude_config/writer.rs`),
+// and the override layer is per ROLE (`ClaudeOverrides { all, per_role }`).
 // ============================================================================
 
 type SurfaceId =

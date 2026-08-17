@@ -83,8 +83,9 @@ const CL_KEYS = [
 // file changes inside a live session's repo, so the Apply-tab diff re-runs live
 // (not just on a phase/doc write).
 const WORKTREE_KEYS = ["compute_apply_diff"] as const;
-// Project registry (register/unregister) and external-driver session creation are
-// DB-only changes nothing else refetches, so explicit `app.emit` events drive them.
+// Project registry (register/unregister) and session creation (the dialog and
+// plugin-created sessions alike, `session:created`) are DB-only changes nothing
+// else refetches, so explicit `app.emit` events drive them.
 const PROJECT_KEYS = ["list_projects"] as const;
 const SESSION_LIST_KEYS = ["list_sessions"] as const;
 // Saved-model registry (upsert/delete) — DB-only, watcher-invisible; the Dashboard

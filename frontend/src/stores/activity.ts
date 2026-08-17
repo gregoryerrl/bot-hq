@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-/** Session-level duo activity from the backend `session:activity` event
+/** Session-level activity from the backend `session:activity` event
  *  (mirrors Rust `SessionActivity::as_str`). Drives the chat-input lock +
  *  Stop button (interrupt redesign, Batch 4). `paused` = Stop landed: agents
  *  interrupted + all auto-wakes held; the ChatInput shows the paused bar
@@ -66,11 +66,18 @@ export function anyBusy(busy?: AgentBusy): boolean {
 }
 
 /**
- * **Should the chat input lock? — the one rule the whole interrupt model rests
- * on (rc3 D33).**
+ * **Should a SEND go through now? — the one rule the whole interrupt model
+ * rests on (rc3 D33).**
  *
  * > *"users are never allowed to type while agents are working, no halt = no
  * > type (except for pause button which is the real interrupt)"*
+ *
+ * D33's rule was about messages LANDING mid-turn. Since the Stage toggle
+ * (2026-08-15) the box itself stays writable while agents work: `locked`
+ * turns the submit slot into **Stage** — the message is queued and delivered
+ * at the next turn boundary — and Pause remains the only interrupt. The
+ * paragraphs below describe the lock as it was first shipped (a read-only
+ * box); the *reason* still stands, the affordance changed.
  *
  * So: **locked ⟺ somebody is working.** Not "the session says busy" — the
  * per-participant map, because `SessionActivity::derive` ranks `awaiting` ABOVE

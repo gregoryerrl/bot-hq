@@ -48,9 +48,11 @@ function SessionTileImpl({
   const attention = useHealthStore((s) => s.attentionBySession[session.id]);
   // Slot 8 Quickview: first line of the latest text message (null until one exists).
   const quickview = firstLine(session.last_message);
-  // …and who wrote it, as `ROLE · Model` (rc3 D10). The label is both what the
-  // tag prints and what tints it, so this session's byline matches the colour
-  // the same participant gets inside the session view.
+  // …and who wrote it, as `ROLE · Model` (rc3 D10). The tint here is
+  // `authorColorClass(label)` WITHOUT the roster hues (`useParticipantLabels`
+  // returns them; `Dashboard` does not thread them to the tile), i.e. the hash
+  // fallback — so a user-picked participant colour (D20) shows inside the
+  // session view but not on this byline. Threading `hues` is the fix (T2).
   const quickviewAuthor = authorLabel(session.last_author, authorLabels);
 
   const open = () => navigate(`/sessions/${session.id}`);

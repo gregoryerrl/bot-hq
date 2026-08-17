@@ -26,19 +26,19 @@ import {
 } from "../lib/participants";
 
 /**
- * How many participants this dialog offers to add.
+ * How many participants this dialog offers to add: **4** (CLAUDE.md: "dialog
+ * default 1, cap 4").
  *
- * **It no longer mirrors the backend.** `MAX_SESSION_PARTICIPANTS`
- * (`src/tauri_cmd/sessions.rs`), which is where the limit is ENFORCED, is 8:
- * this was 2 because `spawn_session_handle` started two literally-named agents,
- * and rc3 D10 made spawn iterate the roster instead, so a third row now has a
- * process behind it.
- *
- * Left at 2 deliberately rather than raised silently — every participant is a
- * claude-code subprocess with its own context window and its own bill, so how
- * many the dialog should offer is a product call, not a consequence of this
- * change. Nothing here refuses a wider roster: a session seeded through
- * `seed_session_roster` already runs at whatever size its creator chose.
+ * **Deliberately NOT the backend's ceiling.** `MAX_SESSION_PARTICIPANTS`
+ * (`src/storage/participants.rs`, re-exported by `src/tauri_cmd/sessions.rs`),
+ * where the limit is ENFORCED, is 8 — the storage/seeder cap that stops a
+ * plugin or a wide roster from spawning without bound. This is the PRODUCT
+ * cap: every participant is a claude-code subprocess with its own context
+ * window and its own bill, so how many the dialog offers is a product call,
+ * and it was raised from 2 (the two literally-named agents rc3 D10 retired) to
+ * 4 on purpose. Do not "harmonise" the two numbers; a session seeded through
+ * `seed_session_roster` already runs at whatever size its creator chose, up to
+ * the backend's 8.
  */
 export const MAX_PARTICIPANTS = 4;
 
@@ -397,9 +397,9 @@ export function Dashboard() {
         title: title.trim(),
         repoPath,
         project,
-        // The roster is the source: the backend derives the solo/duo flag and
-        // both model columns from `participants`, so sending them here too
-        // would be a second source that can disagree with it.
+        // The roster is the source: the backend derives the multi-participant
+        // flag and the per-slot model columns from `participants`, so sending
+        // them here too would be a second source that can disagree with it.
         multiParticipant: null,
         slot0ModelId: null,
         slot1ModelId: null,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "./ui/Button";
 import { Textarea } from "./ui/Textarea";
 import { ErrorBanner } from "./ErrorBanner";
@@ -87,10 +87,11 @@ interface ChatInputProps {
    */
   mentionables?: Mentionable[];
   /**
-   * The session's activity. While `busy`/`cancelling` the textarea is
-   * REPLACED by a turn-status line (which participants are working) + Stop —
-   * the user stops the turn to reclaim the input, then types. `idle` /
-   * `awaiting_user` show the normal textarea + Send.
+   * The session's activity. While `busy`/`cancelling` the textarea stays
+   * writable but the submit slot becomes **Stage** (queued for the next turn
+   * boundary) beside a turn-status line (which participants are working) and
+   * Pause — the one interrupt. `idle` / `awaiting_user` show the textarea +
+   * Send.
    */
   activity?: SessionActivity;
   /** Per-participant busy flags, for the turn-status line. The collapsed
@@ -348,7 +349,9 @@ export function ChatInput({
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [value]);
 
-  const handleSubmit = async (e: FormEvent) => {
+  // Typed to what it uses (`preventDefault`) rather than `FormEvent`, so the
+  // keyboard path can call it with its own event and no cast.
+  const handleSubmit = async (e: { preventDefault(): void }) => {
     e.preventDefault();
     // While the ring runs, submit means STAGE — nothing ever sends mid-turn.
     if (locked) {
@@ -537,7 +540,7 @@ export function ChatInput({
                     !e.nativeEvent.isComposing
                   ) {
                     e.preventDefault();
-                    handleSubmit(e as unknown as FormEvent);
+                    handleSubmit(e);
                   }
                 }}
                 disabled={disabled || sending || activity === "cancelling"}

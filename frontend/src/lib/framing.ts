@@ -5,8 +5,8 @@
 // House rule: bot-hq is an agent harness, never framed by agent count. A session
 // runs N participants (dialog default 1, cap 4) and roles are the user's own
 // configuration, so naming a pair describes a session shape most rosters do not
-// have. The retired names Brian and Rain survive only in pre-rc3 history and in
-// the external driver's wire fields, both deliberately.
+// have. The retired names Brian and Rain survive only in pre-rc3 history (and
+// the frozen `paths.rs` legacy-seed constants), deliberately.
 
 /**
  * Word-boundary matched with `_` counted as a word character — the same rule as

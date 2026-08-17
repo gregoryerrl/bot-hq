@@ -6,9 +6,9 @@ import { BellIcon } from "./icons";
 import { isTrayItem } from "./HaltBanner";
 
 // `list_pending_tray` returns durable pending session_tray rows for open
-// sessions. Typed locally rather than via the generated `SessionTrayView`
-// binding: the binding only regenerates at app launch, and the notifier just
-// needs the session id to group by. Raw invoke works without a bindings entry.
+// sessions. Typed locally as the subset this notifier reads (it only groups by
+// session id); `Dashboard`/`DocumentPane` type the same command with the
+// generated `SessionTrayView` — either works, and this file needs two fields.
 interface PendingTrayRow {
   session_id: string;
   kind: string;
