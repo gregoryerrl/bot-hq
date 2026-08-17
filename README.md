@@ -37,7 +37,7 @@ didn't want touched. bot-hq is built around three ideas that fix that:
 
 ---
 
-## The duo you orchestrate
+## The roles you orchestrate
 
 A session spawns participants from roles you configure. Two roles ship seeded, and
 they are a starting point rather than the product:
@@ -107,9 +107,11 @@ agents are disciplined to consult it *first* — so a perfectly correct fix does
 ship in the wrong house style.
 
 You curate it in the **Context Library tab**: a file tree plus an editor, with
-folders, search, and per-project organization. The agents read it on demand and, by
-design, only ever write to it in one narrow, audited way — a short "what I learned"
-note at the end of a session, which you can keep or prune. The knowledge base stays
+folders, search, and per-project organization. The agents read it on demand and
+write to it through one guarded path — `cl_write_file`, capability-gated,
+confined to the project's library folder, versioned on every write (the library
+is a git repo) and re-indexed at once — typically a short "what I learned" delta
+at the end of a session, which you can keep or prune. The knowledge base stays
 yours.
 
 Why it matters: the difference between an assistant that re-asks the same questions
@@ -207,11 +209,11 @@ bot-hq/
 │   ├── main.rs            entry point — tokio runtime, Tauri builder, CLI dispatch
 │   ├── paths.rs           data-dir resolution + first-run init + single-instance lock
 │   ├── agents/            claude-code subprocess + stream-json I/O + hardcoded role prompts
-│   ├── core/              sessions, IPAV cache, duo coordination, broadcast
+│   ├── core/              sessions, the turn ring + per-participant pumps, activity, broadcast, worktrees, terminal
 │   ├── signaling/         in-process MCP HTTP server (UI tools) + SignalingBridge
-│   ├── storage/           sqlite (messages, sessions, agent_configs, questions, cl_index)
-│   ├── policy/            policy resolution, git-hook installer, session-permission grants, violations log
-│   ├── plugins/           plugin manifest parser, loader, capability gen, heartbeat watcher
+│   ├── storage/           sqlite (messages, sessions, participants, session_tray, roles, models, cl_index, …)
+│   ├── policy/            policy resolution, git-hook installer, session policy snapshots, tool gate, secret scan, violations log
+│   ├── plugins/           plugin manifest parser, registry, catalog, asset serving, heartbeat watcher
 │   ├── tauri_cmd/         #[tauri::command] wrappers over bridge/storage methods
 │   ├── tauri_events/      bridge subscriber → BatchEmitter → typed app.emit
 │   └── tauri_specta_gen.rs  TypeScript binding generation (tauri-specta)
@@ -233,7 +235,6 @@ Env vars read at startup:
 | Var                            | Default             | Purpose                                        |
 | ------------------------------ | ------------------- | ---------------------------------------------- |
 | `BOT_HQ_DATA_DIR`              | `~/.bot-hq/`        | Context Library + sqlite DB location           |
-| `RUN_LIVE_TESTS`               | unset               | Set to `1` to include subprocess tests         |
 | `RUST_LOG`                     | `info,bot_hq=debug` | tracing-subscriber EnvFilter                   |
 
 A source build uses the same `~/.bot-hq/` as an installed release. Set
@@ -319,7 +320,8 @@ Role boundary (enforced server-side, from the role's capability ticks): a review
 HANDS-only tools — `ask_user_choice`, `mark_awaiting_user`, `halt`, `request_approval`,
 `action_gate`, `supersede_question`, `disposition_finding`, `override_reviewer_block`,
 `terminal_exec` (EYES reads the terminal via `terminal_read`, never types into it),
-and `cl_register_folder_description` (a reviewer converges via `peer_ack`, which is not gated).
+and `cl_register_folder_description` (a reviewer converges via `peer_ack`, which is not gated);
+`cl_write_file` needs `write_context_library` and `close_session` needs `close_session` (D16).
 A role without `file_finding` is blocked from the reviewer tools — `eyes_flag` and `approve_finding`
 (HANDS can't file or sign off on findings against its own work).
 
@@ -363,7 +365,7 @@ deleted and where the design record lives.
 
 ## Security caveats (v1)
 
-- **Plaintext auth tokens.** `agent_configs.auth_token` is stored as plaintext
+- **Plaintext auth tokens.** `models.auth_token` (and the legacy `agent_configs.auth_token`) is stored as plaintext
   sqlite at `<data_dir>/.local/bot-hq.db` (default user-only mode bits). Any backup
   of `<data_dir>` (Time Machine, cloud sync, rsync) captures these. v2 will move to
   the OS keychain — see [`PLAN.md`](PLAN.md).
@@ -374,12 +376,12 @@ deleted and where the design record lives.
 
 ```bash
 cargo test                          # Rust unit + integration suites
-RUN_LIVE_TESTS=1 cargo test         # includes claude-code subprocess smoke
 cargo build --release               # production binary
 ```
 
-The suite covers the lib units plus signaling, storage, and external-MCP integration
-tests, plus the frontend Vitest suite. Live pass counts are tracked in
+The suite covers the lib units plus the signaling and storage integration tests,
+the repo guards (`tests/codebase_map_test.rs`, `tests/retired_identifier_test.rs`,
+`tests/phase_vote_wiring_test.rs`), and the frontend Vitest suite. Live pass counts are tracked in
 [`PROGRESS.md`](PROGRESS.md) (they drift each commit).
 
 ---

@@ -1,7 +1,9 @@
 # Installing bot-hq
 
-bot-hq ships for **macOS** and **Linux**. (Windows is in progress — see
-[PLAN.md](PLAN.md).) Builds are on the
+bot-hq ships for **macOS**, **Linux** and **Windows** (the release workflow
+builds a `.dmg`, `.deb`/`.AppImage` and an NSIS `.exe`; on Windows expect a
+SmartScreen prompt for an unsigned build — see `docs/WINDOWS-TESTING.md`).
+Builds are on the
 [Releases page](https://github.com/gregoryerrl/bot-hq/releases).
 
 ## Prerequisite (all platforms)
@@ -65,6 +67,14 @@ sudo apt install ./bot-hq_<version>_amd64.deb
 
 The `.deb` declares its `libwebkit2gtk-4.1` dependency. For the AppImage, make
 sure a WebKitGTK 4.1 runtime is present (it is on most desktops).
+
+## Windows
+
+Run the NSIS installer (`bot-hq_<version>_x64-setup.exe`). The build is
+unsigned, so SmartScreen shows "Windows protected your PC" — *More info →
+Run anyway*. The git hooks bot-hq installs are bash scripts, so they need Git
+for Windows (its bundled bash) on `PATH`; see `docs/WINDOWS-TESTING.md` for
+the tester notes.
 
 ## Data location
 

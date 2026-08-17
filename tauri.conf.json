@@ -33,7 +33,7 @@
     ],
     "category": "DeveloperTool",
     "shortDescription": "Desktop GUI for AI-assisted coding sessions",
-    "longDescription": "bot-hq drives AI-assisted coding sessions through a bilateral-duo agent model (Brian = HANDS, Rain = EYES) with policy enforcement. Each agent runs as a claude-code subprocess.",
+    "longDescription": "bot-hq drives AI-assisted coding sessions through an agent harness — role-playing participants you configure (the seeded pair executes and reviews) — with policy enforcement. Each participant runs as a claude-code subprocess coordinated by a turn ring, with an in-process MCP server for signaling, a Context Library for project knowledge, and git hooks that enforce commit and push policy.",
     "copyright": "Copyright © 2026 Gregory Errl Babela",
     "publisher": "Gregory Errl Babela",
     "macOS": {

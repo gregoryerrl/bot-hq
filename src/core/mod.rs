@@ -1,4 +1,4 @@
-//! Session lifecycle, IPAV cache, duo coordination.
+//! Session lifecycle, IPAV state, the turn ring and its per-participant pumps.
 //!
 //! `AppState` is the top-level handle the UI holds. It owns:
 //! - persistent storage (sqlite)

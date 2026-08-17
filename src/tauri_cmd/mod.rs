@@ -6,12 +6,12 @@
 //! Commands are domain-grouped:
 //! - [`sessions`] — session CRUD + lifecycle
 //! - [`messages`] — chronological chat fetch
-//! - [`agent_configs`] — Settings page per-agent provider/model/token rows
 //! - [`roles`] — Roles tab: role templates + their default model (rc3 D8)
 //! - [`models`] — saved-model registry + default-model app setting
 //! - [`cl`] — Context Library index + folder search, audit, rescan
-//! - [`claude_config`] — Claude Config surface (global + per-agent overrides)
-//! - [`questions`] — pending choices + resolve
+//! - [`claude_config`] — Claude Config surface (global + per-role overrides)
+//! - [`tray`] — the pending tray: questions, approvals, resolve, staged responses
+//! - [`files`] — the viewer's contained file read (`read_workspace_file`)
 //! - [`docs`] — session documents (IPAV tabs)
 //! - [`policy`] — session/global/project policy get + set
 //! - [`tool_gate`] — global + per-session Tool Gate keyword lists

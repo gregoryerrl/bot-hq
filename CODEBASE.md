@@ -43,11 +43,11 @@ listed. `PINNED`/`UNPINNED` verdicts are as of HEAD `f8127b0` (2026-08-15).
 | area | purpose | where | read-first behaviour doc |
 |---|---|---|---|
 | **A** Agent runtime | build/launch/feed/read one claude-code subprocess per participant; capabilities; hardcoded prompt layers | `src/agents/` | ARCHITECTURE §Process model, §Role prompts; D3 D4 D9 D10 |
-| **B1** Core — the ring | the turn engine: deal turns, deliver backlogs, yield (consensus / halt / gate / all-pass / cap / spin / Stage); the per-participant pump; activity; user send | `src/core/` (sequencer, duo, activity, broadcast, state, mentions, ipav) | ARCHITECTURE §Turn coordination; D17 D19 D21–D35 |
+| **B1** Core — the ring | the turn engine: deal turns, deliver backlogs, yield (consensus / halt / gate / all-pass / cap / spin / Stage); the per-participant pump; activity; user send | `src/core/` (sequencer, pump, activity, broadcast, state, mentions, ipav) | ARCHITECTURE §Turn coordination; D17 D19 D21–D35 |
 | **B2** Core — lifecycle | open → compose prompts → spawn → ring start; close → epilogue; watchdog; worktrees; terminals; updates | `src/core/` (session, close_learnings, watchdog, worktree, terminal, updates) | ARCHITECTURE §Process model, §Session worktrees; D8 D15 D21 |
 | **C1** Internal MCP dispatch | the 40-tool agent↔UI signaling server: routing, capability gate, tool descriptors | `src/signaling/` (server, jsonrpc, protocol, …) | ARCHITECTURE §Internal MCP server; D10 D16 |
 | **C2** Signaling bridge | the process-wide hub the tools call into: tray, halt slot, ring gates, SignalingEvent fan-out, findings, session docs, CL facade/write/push | `src/signaling/bridge/` | ARCHITECTURE §Internal MCP server, §Context Library; D22 D34 D35 |
-| **D** External MCP | bearer-token driver server (20 tools) | `src/signaling/external_*.rs` | ARCHITECTURE §External MCP server; D13 |
+| **D** External MCP | REMOVED 2026-08-17 (`d0661b4`) — the driver is a future plugin | — | ARCHITECTURE §The external driver — REMOVED |
 | **E** Policy | git hooks + PreToolUse tool gate + session policy snapshots + violations + secret scan | `src/policy/` | ARCHITECTURE §Policy enforcement, §Tool Gate, §Session policy |
 | **F** Storage | sqlx sqlite: every table, the immutable migrations | `src/storage/`, `migrations/` | ARCHITECTURE §Storage (sqlite) |
 | **G** Host shell | `main.rs` boot, data dir, Tauri commands + events, batch emitter, fs watcher | `src/main.rs`, `src/paths.rs`, `src/tauri_cmd/`, `src/tauri_events/` | ARCHITECTURE §Tauri + React UI, §Data locations |
@@ -100,7 +100,7 @@ UNPINNED at the producer; PreToolUse hook), 9 (deal → stdin), 10 (pump), 11
 
 **Gotchas → pointers.** Prompt stack order is documented identically in
 `src/agents/prompts.rs` and `src/agents/general_rules.rs` headers. Posture is
-capability-driven; `build_rain_disallowed_tools` is a legacy NAME only. Do not
+capability-driven; `build_read_only_disallowed_tools` (renamed 2026-08-17). Do not
 add a second unrecorded stdin write (see `docs/plans/2026-08-13-next-queue.md`
 "What NOT to do").
 
@@ -126,7 +126,7 @@ session owns holder/epoch, deals turns (`hand_turn_to` = `set_current_turn` +
 busy mark), delivers a participant's unread backlog as one stdin write per page
 (`deliver_backlog` → `deliver_batch` → `commit_delivery`), and yields
 (`halt()` = holder None, epoch+1) on consensus, declared halt, open gate,
-all-pass lap, round cap, spin, or a Stage boundary. `duo.rs` (legacy NAME) is the
+all-pass lap, round cap, spin, or a Stage boundary. `pump.rs` (renamed from `duo.rs`, `90bec09`) is the
 per-participant PUMP: stream-json → `messages` rows → one `TurnComplete{epoch}`
 per turn. `activity.rs` derives `SessionActivity` for the UI input lock.
 `state.rs` is `AppState`: user send → row + `UserMessage`, cancel/resume, close +
@@ -134,7 +134,7 @@ D15 epilogue, phase advance, tray answers, Stage.
 
 | path | role | size |
 |---|---|---|
-| `src/core/mod.rs` | module list (doc still says "duo coordination") | S |
+| `src/core/mod.rs` | module list + `post_system_notice` re-export | S |
 | `src/core/sequencer.rs` | the ring: `run_sequencer`, `SequencerCommand`, `advance_turn`, `start_turn`/`hand_turn_to`, `deliver_backlog`, consensus/spin/cap/all-pass/Stage yields, `TurnEnding` — the 600-line module doc is a design diary, not current behaviour | XL |
 | `src/core/pump.rs` | `pump_agent` + `PumpConfig`: rows, boot rows, provider-limit/error-streak halts, pass row, epoch bind + `TurnComplete` mint | XL |
 | `src/core/activity.rs` | `ActivityTracker` (per-slug busy map + latches) → `SessionActivity` + `session:activity` emit | L |
@@ -145,7 +145,7 @@ D15 epilogue, phase advance, tray answers, Stage.
 
 **Entry points.** `run_sequencer` · `SequencerCommand` (TurnComplete, UserMessage,
 MessageStaged/Unstaged, ParticipantJoined, HaltDeclared, GateOpened/Resolved,
-Pause/Resume — the last two have NO production producer) · `pump_agent` ·
+Pause/Resume — Pause is minted by `cancel_session_turn`; Resume still has NO production producer) · `pump_agent` ·
 `SessionActivity::derive` · `AppState::{broadcast,user_responded,close_session,
 resolve_choice,stage_user_response,deliver_staged}`.
 
@@ -157,15 +157,17 @@ UNPINNED join), 12–14 (tray/halt/gate ↔ ring), 18 (Stage — main.rs hop UNP
 **Gotchas → pointers.** Halt = the session row's slot (D35), gates latch the ring
 via `notify_ring_gate`; a parked QUESTION stops nothing (D34). Ring in-memory
 state (deferred/held/summons/staged/laps) is lost on restart; only `open_gates`
-reseeds. Gate detection is by the literal options `["Approve","Reject"]` at four
-sites (audit C2-2 / B1-F16). Staged text lives only in `AppState` memory
+reseeds. Gate rows are recognised by `is_gate_options`/`GATE_OPTIONS_JSON`
+(`storage/tray.rs`; the frontend mirrors it in `HaltBanner.tsx::isApproval`) —
+`session_tray.kind` is `'choice'` for questions AND approvals (round 7 A8, T2).
+Staged text lives in `AppState` memory AND `sessions.staged_message`
 (B1-F11). CL `notes.md` "Session runtime" for the interrupt model.
 
 **Tests pin.** epoch guard / stale completions discarded, consensus + pass tally,
 declared halt stops where it stands, one-write pages, summons order, all-pass,
 round cap from policy, spin fills the halt slot, gate latch seeding, Stage
 boundary, busy-mark ⇔ input lock (`sequencer.rs`); TurnComplete carries the bound
-epoch, boot readiness, provider-limit row+halt (`duo.rs`); pure decision tables +
+epoch, boot readiness, provider-limit row+halt (`pump.rs`); pure decision tables +
 source-grep pins (`state.rs`); derive priority (`activity.rs`). Not pinned: a
 closed-stdin deal, an empty-page deal, pump+ring end to end.
 
@@ -238,8 +240,9 @@ column (D8).
 **What it does.** The in-process HTTP JSON-RPC MCP endpoint
 (`/sessions/<id>/<agent>/mcp`) every spawned agent's `--mcp-config` points at.
 Defines the 40-tool signaling surface, gates each tool by the caller's
-`CapabilitySet` (resolved from `session_participants` by the URL's session+slug —
-no token), dispatches into the bridge (C2). Two extra localhost routes let the
+`CapabilitySet` (resolved from `session_participants` by the URL's session+slug;
+the URL also carries a per-spawn secret, checked in `server.rs` — C1-1 closed
+`a4e5c00`), dispatches into the bridge (C2). Two extra localhost routes let the
 git-hook subprocesses park approvals (`/hooks/pre-push`, `/hooks/tool-gate`).
 
 | path | role | size |
@@ -248,10 +251,10 @@ git-hook subprocesses park approvals (`/hooks/pre-push`, `/hooks/tool-gate`).
 | `src/signaling/server.rs` | hyper server: bind/route (3 shapes), `CallerIdentity` from the URL, mcp-config render, hook routes | L |
 | `src/signaling/jsonrpc.rs` | `dispatch` (initialize/ping/tools/list/tools/call) + `call_tool` (one flat match over 40 tools), capability gate, refusal rows, `PARITY_HOLD` (empty) | XL |
 | `src/signaling/protocol.rs` | wire types + the 40 `ToolDescriptor`s; `gated_by()` derives the gate sentence from `required_for` | L |
-| `src/signaling/response.rs` | shared HTTP/JSON-RPC response builders (internal + external) | S |
+| `src/signaling/response.rs` | shared HTTP/JSON-RPC response builders | S |
 | `src/signaling/tool_args.rs` | shared string-arg helpers | S |
 | `src/signaling/parity.rs` | TEST-ONLY oracle: pre-rc3 name gate vs the capability gate, every (tool, agent) pair | L |
-| `src/signaling/webview_js.rs` | JS builders for `webview_*` tools (shared internal+external, deliberate) | S |
+| `src/signaling/webview_js.rs` | JS builders for `webview_*` tools | S |
 | `src/signaling/web_search.rs` | `web_search` via a hidden Tauri webview; one process-global permit | M |
 | `tests/signaling_test.rs` | raw-TCP end-to-end HTTP contract (routing, parse errors, notifications, `ask_user_choice` parks) | S |
 
@@ -262,14 +265,13 @@ git-hook subprocesses park approvals (`/hooks/pre-push`, `/hooks/tool-gate`).
 duplicated, join UNPINNED), 12 (ask_user_choice trace), 16–17 (findings gate,
 commit-message check), 29 (capability ↔ tool gate: DERIVED, PINNED).
 
-**Gotchas → pointers.** Caller identity is self-asserted from the URL (audit
-C1-1). Tool descriptions are prompt text every agent reads — the D10 sweep test
-only greps "brian/rain", not "duo/peer" (audit C1-2). `wire::MODEL_ARGS` /
-`SPAWN_MODEL_FIELDS` / `LEGACY_CONFIG_KEYS` are the ONLY sanctioned `brian_*` /
-`rain_*` survivors in live code; a sweep rewrote `MODEL_ARGS` during the hard
-retirement and their test now spells the literals out so it cannot happen
-silently. `VALID_PHASES` lowercase vs
-`IpavPhase::parse` (N5, tracked). Change what a tool requires ONLY in
+**Gotchas → pointers.** Caller identity is the URL's session+slug PLUS a
+per-spawn secret (`server.rs::mcp_token_matches`; audit C1-1, closed). Tool
+descriptions are prompt text every agent reads — `no_tool_description_an_agent_
+reads_names_an_agent` sweeps names AND two-of-them phrasing, and
+`stop_and_phase_tool_descriptions_match_the_shipped_semantics` (round 7) pins
+the halt/question/vote descriptions to D35/D37; the driver's `wire` module and
+its exemptions are gone. Change what a tool requires ONLY in
 `required_for`.
 
 **Tests pin.** `every_gated_tool_names_the_capability_its_gate_reads` (derived),
@@ -291,13 +293,13 @@ tool handlers call into: parks tray items (question / approval gate) with an
 in-memory oneshot + a durable `session_tray` row; flips the awaiting flag /
 halts or latches the ring via per-session registries; fans out `SignalingEvent`s
 over one broadcast (UI via `src/tauri_events/bridge_subscriber.rs`, the main.rs
-control handler, external `wait_for_change`); fronts storage for findings,
+control handler, the plugin proxy's `wait_for_change`); fronts storage for findings,
 session docs, CL index/write/push, feedback, terminals. Everything per-session
 lives in 16 `HashMap<String,…>` registries on one struct.
 
 | path | role | size |
 |---|---|---|
-| `src/signaling/bridge/mod.rs` | struct + 16 registries, `SignalingEvent` (17 variants), register/`unregister_session` (clears 10 of 16), `notify_*` emitters, close-gate + retired-terms, policy resolution, reviewer-override request | XL |
+| `src/signaling/bridge/mod.rs` | struct + 14 registries, `SignalingEvent` (16 variants), register/`unregister_session`, `notify_*` emitters, close-gate + retired-terms, policy resolution, reviewer-override request | XL |
 | `src/signaling/bridge/tray.rs` | `ask_user_choice_inner`, `request_approval(_parked)`, supersede/withdraw, `resolve_choice_confirmable`, `deliver_oob`, `emit_halt_row`/`mark_awaiting_user`, `request_phase_advance` | XL |
 | `src/signaling/bridge/action_gate.rs` | `park_gated_command` (dedupe) / `execute_gated` (`tool_gate::run_in_repo`), `gate_status` | L |
 | `src/signaling/bridge/findings.rs` | `eyes_flag`/`approve`/`disposition`/`check_open_findings` + reviewer-down gate + override | M |
@@ -347,27 +349,13 @@ options exactly `["Approve","Reject"]` if it is a gate.
 
 ---
 
-## D. External MCP server — `src/signaling/external_*.rs`
+## D. External MCP server — REMOVED
 
-**What it does.** A second in-process HTTP MCP server (bearer token, constant-time
-compare, `127.0.0.1`) so an OUTSIDE client (another Claude session, a test
-driver, a plugin) can list/create/close sessions, send messages, resolve parked
-choices, read violations, drive the webview, and long-poll `wait_for_change`.
-Calls the SAME `core::AppState` fns the UI does — no second lifecycle path.
-`create_session` is frozen to one participant (D13).
-
-| path | role | size |
-|---|---|---|
-
-`dispatch_external` · `call_external_tool`.
-
-**Seams.** Shares `response.rs`/`tool_args.rs`/`webview_js.rs` with C1;
-`resolve_choice`/`list_pending_choices`/`subscribe` on the bridge (C2);
-`open_session` emits `session:created` (G/J).
-
-**Where to add X.** New driver tool → descriptor → arm → `core::AppState`/storage
-fn → HTTP test. · Roster support → mirror `SessionCreateOptions.participants`
-from `src/tauri_cmd/sessions.rs` and stop forcing `solo` in `open_session`.
+The bearer-token driver server (`src/signaling/external_*.rs`, 20 tools) was
+deleted on 2026-08-17 (`d0661b4`) when the external driver was demoted to a
+future plugin (ARCHITECTURE §The external driver — REMOVED). `wait_for_change`
+survives in `src/tauri_cmd/plugin_api.rs` for the plugin proxy; the round-7
+`session:created` wiring is in `AppState::notify_session_created`.
 
 ---
 
@@ -426,7 +414,7 @@ session present (`ask` → HTTP → exit code).
 **What it does.** The sole persistence layer: `Storage` owns one `SqlitePool`
 (8 connections, foreign keys on, default rollback journal — no WAL); every other
 area reads/writes through it. `Storage::open` runs `sqlx::migrate!`; migrations
-are immutable once applied (hook-guarded), highest `0057`, `0056` reverted by
+are immutable once applied (hook-guarded), highest `0064`, `0056` reverted by
 re-stamp. One timestamp helper (`now_utc()`, RFC3339-Z) is meant to be bound by
 every write.
 
@@ -438,7 +426,7 @@ every write.
 | `src/storage/sessions.rs` | `sessions` CRUD, spawn-model/effort columns, halt slot (`declare_session_halt`/`clear_session_halt`), boot orphan sweep | M |
 | `src/storage/participants.rs` | roles · session_participants (roster seed/invite, labels, colours) · turn cycle (`next_active_participant`, `set_current_turn`, done votes, `round_number`) · cursors + deliveries (`commit_delivery`, `unread_for_participant`/`channel_page`, `UNREAD_BATCH_LIMIT`) · channel wire (`post_to_channel`, envelope) — six clean extraction seams | XL |
 | `src/storage/messages.rs` | `messages` insert/read, since-id watermark (`messages_for_session` unbounded) | M |
-| `src/storage/tray.rs` | `session_tray` (questions/approvals/gated commands), `count_pending_gates`, purge, closed/orphan withdraw | M |
+| `src/storage/tray.rs` | `session_tray` (questions/approvals/gated commands), `pending_gate_ids`, purge, closed/orphan withdraw | M |
 | `src/storage/findings.rs` | EYES findings CRUD + `count_open_blocking_findings` | M |
 | `src/storage/session_docs.rs` | per-session IPAV docs + archives | M |
 | `src/storage/activity_events.rs` | activity transition ledger (read only by tests + boot sweep) | S |
@@ -451,12 +439,12 @@ every write.
 | `src/storage/projects.rs` | `projects` registry, CL path resolution | M |
 | `src/storage/plugins.rs`, `src/storage/plugin_kv.rs` | plugin registry + per-plugin kv | M / S |
 | `src/storage/cl_index.rs`, `src/storage/cl_atoms.rs` | CL index/folders/reads; FTS5 atoms + `cl_retrieve` | M / M |
-| `migrations/` | 0001…0057 (0056 absent) — append-only | — |
+| `migrations/` | 0001…0064 (0056 absent) — append-only | — |
 | `tests/storage_test.rs` | cross-cutting smoke: empty-DB migration, tray scoping, message since-id, session close/list, config round-trips | M |
 
 **Entry points.** `Storage::open` · `now_utc` · `next_active_participant` ·
 `commit_delivery` · `channel_page` · `post_to_channel` · `insert_message` ·
-`declare_session_halt` · `count_pending_gates` · `cl_retrieve`.
+`declare_session_halt` · `pending_gate_ids` · `cl_retrieve`.
 
 **Seams (§14):** 8 (ring ↔ roster, PINNED), 9 (`commit_delivery`), 16 (open-
 blocking predicate ↔ hook query), 21 (CL index after write), 30 (boot sweeps).
@@ -490,7 +478,7 @@ dir → logging → single-instance lock → tokio → `Storage` + boot sweeps �
 bridge + internal MCP + llm proxy → `CoreAppState` → signal
 reapers → bindings export → plugin registry seed → Tauri builder (`.setup`:
 subscriber, fs watcher, control-event consumer, heartbeat sweep). `src/tauri_cmd/*`
-are thin `#[tauri::command]` wrappers (85 commands, all listed in
+are thin `#[tauri::command]` wrappers (101 commands on 2026-08-17, all listed in
 `src/tauri_specta_gen.rs`); `src/tauri_events/*` turn `SignalingEvent`s into typed
 Tauri events (`BatchEmitter` coalesces messages, 50 ms / N=20, since_id) plus the
 fs watcher (`cl:changed`, `session:worktree_changed`, `plugin:assets_changed`).
@@ -503,7 +491,7 @@ fs watcher (`cl:changed`, `session:worktree_changed`, `plugin:assets_changed`).
 | `src/tauri_specta_gen.rs` | `collect_commands!` (the ONLY registration; an omitted command compiles but is unreachable) + TS export | S |
 | `build.rs`, `tauri.conf.json`, `capabilities/` | Tauri build/config; main-window ACL (unrelated to plugin gating) | — |
 | `src/tauri_cmd/mod.rs`, `src/tauri_cmd/error.rs` | module list; `AppError` | S |
-| `src/tauri_cmd/sessions.rs` | session CRUD/lifecycle, `resolve_participant_picks`, `list_session_participants`, `get_participant_system_prompt`, `get_session_runtime` (8-field snapshot the FE seeds from), respawn/cancel/resume, `close_session` | XL |
+| `src/tauri_cmd/sessions.rs` | session CRUD/lifecycle, `resolve_participant_picks`, `list_session_participants`, `get_participant_system_prompt`, `get_session_runtime` (7-field snapshot the FE seeds from), respawn/cancel/resume, `close_session` | XL |
 | `src/tauri_cmd/messages.rs` | `get_session_messages` / `broadcast_message` | S |
 | `src/tauri_cmd/tray.rs` | choices/approvals/halts/staged responses (`stage_user_response`, `send_user_response`, `resolve_choice`, `discard_choice`) | M |
 | `src/tauri_cmd/docs.rs` | session docs search, `compute_apply_diff` (git in `spawn_blocking`), `summarize_session_doc` (headless `claude -p`), `validate_model` | L |
@@ -513,7 +501,7 @@ fs watcher (`cl:changed`, `session:worktree_changed`, `plugin:assets_changed`).
 | `src/tauri_cmd/policy.rs` | 3-tier policy get/set + `read_violations` (no limit) | M |
 | `src/tauri_cmd/screenshot.rs` | NOT a command: `capture_main_window` helper for the `webview_screenshot` MCP tool | S |
 | `src/tauri_cmd/cl.rs` | 20 CL commands (index/folder search, file/project CRUD, `cl_write_file` UI twin) — duplicates bridge helpers (tracked CL v2 consolidation) | L |
-| `src/tauri_events/mod.rs`, `src/tauri_events/types.rs` | event-name consts + payload structs (3 names are still bare literals in the subscriber) | S / M |
+| `src/tauri_events/mod.rs`, `src/tauri_events/types.rs` | event-name consts + payload structs (2 names are still bare literals in the subscriber: `session:resync`, `session:halt_cleared`) | S / M |
 | `src/tauri_events/bridge_subscriber.rs` | `route()` SignalingEvent → emit; `Lagged` → `session:resync` | M |
 | `src/tauri_events/batch_emitter.rs` | message coalescing + per-session watermark | M |
 | `src/tauri_events/fs_watcher.rs` | notify watcher: CL dir + dynamic repo/plugin dirs, 500 ms debounce, one rescan per project | M |
@@ -625,7 +613,7 @@ without polling.
 | path | role | size |
 |---|---|---|
 | `frontend/src/main.tsx`, `frontend/src/App.tsx`, `frontend/src/Router.tsx` | root, Providers→Router, route table | S |
-| `frontend/src/Providers.tsx` | QueryClient + `GlobalEventSync` (19 listeners → key invalidation + stores) + `onResync` fan-out + runtime backfill | M |
+| `frontend/src/Providers.tsx` | QueryClient + `GlobalEventSync` (19 listeners on 2026-08-17 → key invalidation + stores + the round-7 `session:stage_delivered` draft clear) + `onResync` fan-out + runtime backfill | M |
 | `frontend/src/app/SessionView.tsx` | session container: header/roster, phase, halt/approval/chat/input orchestration, Stage delivery + tray-pick sync | L |
 | `frontend/src/app/SessionContextTab.tsx` | session-scoped CL tree + lean editor | M |
 | `frontend/src/app/SessionTerminalTab.tsx` | xterm.js over the session PTY | S |
@@ -653,10 +641,10 @@ without polling.
 **Gotchas → pointers.** NO horizontal scrolling, ever: every scroll container
 pairs `overflow-y-auto overflow-x-hidden` (CL `conventions.md` §Design system).
 Design tokens only (`frontend/tailwind.config.ts`). The `session:activity` payload
-uses frozen `brian_busy`/`rain_busy` slot names (deliberate). Rust enums wire out
+uses `slot0_busy`/`slot1_busy` slot names (renamed from the frozen agent names, `95a9124`). Rust enums wire out
 as bare strings, so unions like `SessionActivity` are unavoidable mirrors.
 
-**Tests pin.** slot wire (`Providers.test.tsx`, only 2 of 19 listeners); header
+**Tests pin.** slot wire (`Providers.test.tsx`, 3 of the listeners); header
 roster, subtab mount-once, prompt/context dialogs (`SessionView.test.tsx`, no
 Stage coverage); Stage/Send/Pause state machine, mention picker, lock gating
 (`ChatInput.test.tsx`); byline + live-batch filtering (`ChatPane.test.tsx`);
@@ -674,8 +662,8 @@ wiring + runtime backfill + `clearX` on `onClose`. · New command consumer →
 
 **What it does.** App shell/nav/footer health, the Dashboard (session list +
 tiles + New Session dialog with the roster editor), all of Settings (Roles /
-Models / Policy / Violations / Feedback / Archive / Updates / Claude Config /
-Plugins tabs), and the shared presentational atoms + roster/colour/time libs
+Models / Policy / Tool Gate / Violations / Feedback / Archive / Updates / Claude Config
+tabs — Plugins is its own `/plugins` route), and the shared presentational atoms + roster/colour/time libs
 every other FE area imports.
 
 | path | role | size |
@@ -748,10 +736,10 @@ to `isPolicyFile` → branch in `EditorAreaImpl`.
 |---|---|
 | `ARCHITECTURE.md` | what bot-hq IS (20 H2s; the audit's drift table lists what to refresh) |
 | `PLAN.md`, `PROGRESS.md`, `CLAUDE.md`, `README.md`, `INSTALL.md` | forward plan · newest-first changelog · session instructions · public doc · install |
-| `docs/plans/` | 22 planning docs; BINDING: `docs/plans/2026-08-11-rc3-decisions.md`, `docs/plans/2026-08-12-rc3-reframe-contract.md`; the rest are dated handoffs (stale by construction) or queues |
+| `docs/plans/` | 26 planning docs (2026-08-17); BINDING: `docs/plans/2026-08-11-rc3-decisions.md`, `docs/plans/2026-08-12-rc3-reframe-contract.md`; the rest are dated handoffs (stale by construction) or queues |
 | `docs/PLUGINS.md`, `docs/SIGNING.md`, `docs/WINDOWS-TESTING.md`, `docs/stream-json-events.md`, `docs/design/`, `docs/rebuild-archive/` | contracts, release notes, schema notes, mocks, frozen history |
 | `tests/codebase_map_test.rs` | pins THIS map to the tree both ways (every source file placed; every named path exists) — the map's anti-staleness device |
-| `tests/retired_identifier_test.rs` | no source IDENTIFIER names a D10-retired agent: splits on `_` and compares SEGMENTS, which is what `-w` could not do (`_` is a word char, so three audit rounds could not see `has_rain`). Comments and bare words exempt by design; two files carved out with reasons |
+| `tests/retired_identifier_test.rs` | no source IDENTIFIER names a D10-retired agent: splits on `_` and compares SEGMENTS, which is what `-w` could not do (`_` is a word char, so three audit rounds could not see `has_rain`). Comments and bare words exempt by design; one file carved out with a reason (`src/paths.rs`) |
 | `frontend/src/lib/fonts.ts` | the `@font-face` sources `index.css` declares and where each must live — `fonts.test.ts` reads the REAL `index.css` + `public/` and pins root-absolute `/fonts/…` URLs to existing files. Exists because all three Industrial Terminal fonts 404'd in every built app until 2026-08-17 (CSS-relative `./fonts/…` against files in `public/fonts/`), and no gate could see it |
 | `frontend/src/lib/overflow.ts` | pure detection for containers that can scroll HORIZONTALLY — the user's absolute no-horizontal-scroll rule, mechanically enforced for the first time by `overflow.test.ts`, which is its only caller (same shape as `framing.ts`). Line-scoped, comment-exempt, exemption-free |
 | `tests/phase_vote_wiring_test.rs` | every storage method the D37 phase-advance vote needs has a caller OUTSIDE its defining file — round 5's E1, where `bump_phase_epoch` was defined, tested seven times and called by nothing, leaving the epoch at 0 through 114 live transitions. A `pub` method on a `pub struct` is never `dead_code`, and a test that calls it does not pin its mount |

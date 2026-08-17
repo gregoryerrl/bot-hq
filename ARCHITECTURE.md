@@ -16,7 +16,7 @@ says where).
 ## Overview
 
 bot-hq is a desktop GUI app for driving AI-assisted coding sessions
-through a bilateral-duo agent model with policy enforcement. Each
+through an agent harness — N role-playing participants — with policy enforcement. Each
 session spawns participants the user picks from their ROLES:
 
 - A role holds a set of **capabilities** (ticked in Settings → Roles) and its own
@@ -46,8 +46,8 @@ session runs N participants (dialog default 1, dialog cap 4, backend cap 8),
 each playing a role the user defined. The roles that ship seeded are the user's
 own two; a different user configures different ones.
 
-A former helper agent, **Emma**, was removed from the core and is slated to
-return as the first plugin — TBD.
+A former helper agent, **Emma**, was removed from the core; a return as a
+plugin is possible but unplanned (it is not on the plugin ideas list below).
 
 The user directs the work and owns the decisions; the app is the bridge
 between user and agents. Policy enforcement runs at two layers (MCP tool calls + git
@@ -85,7 +85,7 @@ Every agent is a subprocess.
 
 ### One agent backend
 
-`spawn_agent_for` has no branch: every participant goes through
+`spawn_session_handle`'s per-participant loop has no branch: every participant goes through
 `spawn_supervised_agent`, whatever model row it carries. A model whose
 gateway does not speak the Anthropic Messages API therefore fails at spawn —
 `validate_model`'s pre-flight (the **Test** button in Settings → Models) is
@@ -106,7 +106,8 @@ Each agent subprocess is spawned with:
 ```
 claude -p \
   --input-format stream-json --output-format stream-json --verbose \
-  --append-system-prompt <inline-text> \
+  --append-system-prompt-file <path> \
+  --settings <per-role overrides json> \
   --mcp-config <per-agent-config.json> \
   --strict-mcp-config \
   --dangerously-skip-permissions
@@ -171,8 +172,9 @@ instructions.
 
 This inverts the old rule. The prompts used to be hardcoded *specifically* so a
 CL edit could not break a role boundary; that protection now comes from
-**layering order** instead: the generated capability section (layer 2, below)
-is emitted after every editable input, so free text cannot grant itself
+**layering order** instead: the generated capability section (spawn layer 6
+below; layer 2 of the three-layer design) is emitted after every editable
+input, so free text cannot grant itself
 something the gate does not enforce. Migration 0044's schema comment states the
 invariant — *"a role must not be able to author rules that contradict its own
 capability set."*
@@ -192,9 +194,12 @@ System-prompt layering at session spawn (`src/core/session.rs::read_system_promp
 5. `<data_dir>/library/custom-instructions.md` (user tweaks, loaded for
    EVERY agent — consolidated from the old per-agent
    `agents/<name>/custom-instruction.md` files)
-6. Resolved policy directive block (forbidden words list, push-gate
+6. Generated capability rules + the live roster
+   (`agents::capability_prompt`, produced from the participant's grants —
+   rc3 D3; nothing editable comes after it)
+7. Resolved policy directive block (forbidden words list, push-gate
    mode, etc.)
-Every step is additive. There used to be a step 7 that took something
+Every step is additive. There used to be a step that took something
 away — for native agents only, `strip_claude_code_tool_inventory` removed
 the CLI tool inventory from the role prompt and `NATIVE_TOOL_ADDENDUM`
 appended the loop's own tools in its place. It went with the loop (rc3 D9);
@@ -206,7 +211,8 @@ What *is* injected (layer 2b) is the lightweight CL **index** for the
 project: filenames + descriptions, so an agent that skips
 `cl_index_search` on a cold start still knows what context exists to
 pull. The index is fetched once in `spawn_session_handle`
-(`storage.cl_index_search`) and threaded into `read_system_prompt`;
+(`storage.cl_index_search_agent`, the agent-visibility-filtered read) and
+threaded into `read_system_prompt`;
 `policy.yaml` is omitted from the primer (it's already rendered as the
 policy block in layer 6).
 
@@ -280,17 +286,20 @@ the round cap ends it.
 1. **Consensus** — every active participant holds a done vote
    (`all_active_voted_done`, which filters on `enabled && participation_mode ==
    "active"`, so an `on_mention` participant never blocks a halt).
-2. **A parked question** — `ask_user_choice` or `mark_awaiting_user` both set the
-   awaiting flag through `set_session_awaiting`, which sends
-   `SequencerCommand::QuestionParked` carrying the ASKER's participant id. No
-   vote is cast, and **the ring finishes its lap before the cycle halts** (rc3
-   D22): the asker's turn ends, every participant waiting on nothing still gets
-   one, and the halt fires when the rotation comes back to somebody blocked.
-   Bounded at N-1 extra turns. Halting at the park instead — which is what this
-   did — made a participant that asks the user something every turn into a
-   participant its peers could never speak after: `s-e8a20797` ran seven minutes
-   with four deliveries to slot 0 and zero to slots 1 and 2. Without this the ring keeps dealing
-   turns to participants that have no legal move (fixed 2026-08-13).
+2. **A halt** — `mark_awaiting_user` / `halt` (and `request_phase_advance`)
+   declare the session's halt: the bridge sends `SequencerCommand::HaltDeclared`
+   carrying the DECLARER's participant id, and **the ring stops where it
+   stands** (rc3 D35, 2026-08-14 — the user overruled D22's courtesy lap: *"a
+   halt is a halt"*). If the declarer holds the turn, that turn ends; a
+   non-holder's declaration latches the next deal. The declarer's own
+   generation is interrupted so the declaration is true. An **approval gate**
+   (`request_approval`, `action_gate`, the pre-push hook) latches the ring the
+   same way through `GateOpened`/`GateResolved`. An ordinary **question**
+   (`ask_user_choice`) touches NONE of this: it parks in the tray, the session
+   keeps working, and the answer arrives as a user row at the next boundary.
+   (D22's lap existed because halting at a first-turn park made a participant
+   that asks every turn unreachable to its peers — `s-e8a20797`; a question no
+   longer reaches the ring at all, so that failure cannot come back this way.)
 3. **Spin detection** — token-set Jaccard at `SPIN_SIMILARITY_THRESHOLD` (0.85)
    over ONE participant's output across rounds, for `SPIN_BREAK_STREAK` (2)
    running. Cross-agent echo is impossible in a ring; self-repetition is not.
@@ -408,8 +417,8 @@ and [`docs/PLUGINS.md`](docs/PLUGINS.md) for the author contract.
 **Settings tab:** subtabs led by **Roles** (create/edit roles, their capability
 ticks, instruction prose, participation mode and default model), then the
 saved-model registry (Models), the global Tool Gate keyword list, the global
-Claude Config surface (one block per role), Policy, Violations, Feedback, and a
-closed-session Archive. The **Agents** subtab was retired by rc3 D8 — a role owns
+Claude Config surface (one block per role), Policy, Violations, Feedback, a
+closed-session Archive, and Updates. The **Agents** subtab was retired by rc3 D8 — a role owns
 its default model and the New Session dialog overrides it per participant.
 
 **Per-participant model selection:** the user maintains a registry of saved
@@ -454,10 +463,11 @@ surfaces the user's `~/.claude` config that leaks into the headless
 agent subprocesses — skills, plugins, hooks, CLAUDE.md/memory, MCP
 servers, reasoning effort. The user controls it two ways: globally
 (write-back to the real `~/.claude` via `claude_config/writer.rs`) and
-per-agent via an override layer (`<data_dir>/config/claude-overrides.json`,
-`claude_config/overrides.rs`) merged into the spawn-time `--settings`
-JSON + env injection — so an inherited skill/plugin/MCP/effort can be
-disabled for one agent without touching the user's own `~/.claude`.
+per-role via an override layer (`<data_dir>/config/claude-overrides.json`,
+`claude_config/overrides.rs`, `ClaudeOverrides { all, per_role }`) merged
+into the spawn-time `--settings` JSON + env injection — so an inherited
+skill/plugin/MCP/effort can be disabled for one role without touching the
+user's own `~/.claude`.
 Design: `docs/plans/2026-06-02-claude-config-surface-design.md`.
 
 **Plugin runtime (v1, shipped 2026-07-04):** plugins are static
@@ -471,8 +481,9 @@ postMessage the shell (per-mount nonce + source/origin checks in
 `frontend/src/lib/pluginBridge.ts`), which forwards to the single Rust
 enforcement point `plugin_invoke_proxy` (`tauri_cmd/plugin_api.rs`) —
 re-checking enabled ∧ granted ∧ catalog-listed per call and
-dispatching through an explicit match over `plugins::catalog` (12
-read-first commands + plugin-scoped KV writes; `api_version: 1`). The
+dispatching through an explicit match over `plugins::catalog` (14
+commands: 10 read-first, `spawn_session`, `plugin_sessions`, and the
+plugin-scoped KV get/set; `api_version: 1`). The
 heartbeat state machine (`plugins::heartbeat`) is fed by the
 PluginHost's 5s ping loop (`plugin_note_ping`/`plugin_note_pong`); the
 sweep loop in `main.rs` emits `plugin:crashed` after 3 misses and the
@@ -491,9 +502,12 @@ in `src/signaling/` (`jsonrpc`, `protocol`, `server`, and the `bridge/`
 submodule tree). Surface:
 
 - **Bind:** `127.0.0.1:<ephemeral>` (chosen at startup; ephemeral port).
-- **URL per agent:** `http://127.0.0.1:<port>/sessions/<id>/<agent>/mcp`.
-  Each agent's `--mcp-config` file points at its own URL so the bridge
-  knows which agent is calling. The HTTP dispatch is where role
+- **URL per agent:** `http://127.0.0.1:<port>/sessions/<id>/<agent>/<token>/mcp`.
+  Each agent's `--mcp-config` file points at its own URL — with a per-spawn
+  secret minted in `core/session.rs` and checked in `server.rs`
+  (`mcp_token_matches`, C1-1, `a4e5c00`) — so the bridge knows which agent
+  is calling and a wrong or missing token is refused. The HTTP dispatch is
+  where role
   enforcement lives, which is why the deleted native loop spoke the same
   HTTP JSON-RPC rather than calling `SignalingBridge` in-process: an
   in-process path would have been a second, unenforced route to the same
@@ -553,17 +567,18 @@ requirement from `required_for` itself, so a description and its gate cannot
 disagree. A parity oracle walks every gated tool against a frozen transcription
 of the old name gate, so the reframe is proven equivalent rather than asserted.
 
-One deliberate exception: **`close_session` sits on `PARITY_HOLD`** and is not
-capability-gated, preserving pre-rc3 behaviour. Decision **D16** closes this —
-see the rc3 decisions doc.
+`close_session` gates on `Capability::CloseSession` (D16, shipped 2026-08-13,
+`6cc2b9a`); `PARITY_HOLD` is EMPTY and test-asserted so — the parity oracle
+fails on any divergence between the capability model and the name gate it
+replaced, and says in its own message that such a divergence is the user's
+call.
 
 **Bridge (`src/signaling/bridge/`)** owns:
 - Storage handle (writes question rows, message rows, violations).
 - Policy resolver (loads `general-policy.yaml` + `projects/<p>/policy.yaml`).
 - Session → project mapping.
-- Per-session `awaiting` halt flag (shared `Arc<AtomicBool>` with duo
-  pump).
-- Session permissions cache (mirrored to disk for hooks).
+- Per-session `awaiting` halt flag (shared `Arc<AtomicBool>` with each
+  participant's pump; it drives the input-lock activity state).
 - Tray storage (`session_tray` table — persists awaiting-input items
   (`ask_user_choice` / `request_approval` / gated commands) so they
   survive app restart).
@@ -648,7 +663,7 @@ forgets to call the MCP tool.
 1. **MCP tools** (`request_approval`, `action_gate`, …) are
    the primary path. Agents are instructed in their system prompt to
    call them before the corresponding bash op. Skipping logs a
-   `Denied` violation to `<data_dir>/violations.jsonl`.
+   `Denied` violation to `<data_dir>/.local/violations.jsonl`.
 2. **Git hooks** are the deterministic backstop. `bot-hq install-hooks`
    writes `commit-msg`, `pre-commit`, `post-commit`, `pre-push` into
    `.git/hooks/` of the working repo. Each hook execs
@@ -662,14 +677,14 @@ forgets to call the MCP tool.
 - `<data_dir>/library/projects/<project>/policy.yaml` — per-project overlay
   (lists are replaced, not merged).
 
-Fields: `push_gate` (scalar `auto`|`ask`),
+Fields (`policy/mod.rs::Policy`): `push_gate` (scalar `auto`|`ask`),
 `force_push` (scalar `blocked`|`allowed`), `per_action_approval`,
-`branch_pattern`. (push_gate/force_push are per-tier
-toggles inherited general→project→session; there are no per-branch
-"remembered approvals" or agent-side grants.)
-(`tool_blocklist` is RETIRED — superseded by the global Tool Gate
-below; the field still parses for backward-compat but is no longer
-enforced.)
+`branch_pattern`, `forbidden_in_commits`, `commit_style`, `round_cap`.
+(push_gate/force_push are per-tier toggles inherited
+general→project→session; there are no per-branch "remembered approvals"
+or agent-side grants.) `tool_blocklist` is RETIRED — superseded by the
+global Tool Gate below; the key is TOLERATED (listed among the known keys
+so it does not warn) but parses into nothing and is not enforced.
 
 **Hook details:**
 - `commit-msg`: receives commit message file path as `$1`. Scans for
@@ -727,8 +742,9 @@ hold a reviewer more strictly belonged to the native loop and went with it (D9).
   Approve/Reject via the existing `request_approval` machinery, and on approve
   runs the command itself in the session's `working_repo_path` (from storage),
   returning combined output to the agent — an action request, not a permission
-  request. A gate-run `git push` first records a session push grant for the
-  repo's current branch so the pre-push hook doesn't double-gate.
+  request. (There are no session push grants: a gate-run `git push` meets the
+  pre-push hook like any other push, and under `push_gate=ask` that hook is the
+  gate.)
 
 The global list defaults EMPTY (no gating until configured in Settings).
 
@@ -807,10 +823,19 @@ session and instruct it.
 Schema at `migrations/0001_init.sql` + subsequent migration files.
 
 **Tables:**
-- `messages` (id PK, session_id, author, kind, content, created_at) —
-  full chat history. Index on `(session_id, created_at)`.
+- `messages` (id PK, session_id, participant_id → session_participants,
+  origin `participant`|`user`|`system`, kind, content, envelope JSON,
+  created_at, plus the legacy `author` mirror — still read by four sites) —
+  every row of every session: agent text and tool rows, the user's rows, and
+  the host's injections. Indexes on `(session_id, created_at)`,
+  `(session_id, id)`, `(session_id, author, created_at)`,
+  `(session_id, participant_id, created_at)`. Delivered per participant
+  through `participant_deliveries`.
 - `sessions` (id PK, title, working_repo_path, base_repo_path,
-  created_at, closed_at, archived, slot0/slot1_model_at_spawn) —
+  created_at, closed_at, archived, slot0/slot1_model_at_spawn,
+  created_by_plugin, current_turn_participant_id, round_number,
+  halt_declared_by/halt_reason/halt_declared_at, staged_message,
+  phase_epoch, ipav_phase) —
   per-participant model, effort, ultracode and resume id live on
   `session_participants` (rc3 D10), which also carries **`effort_at_spawn` /
   `ultracode_at_spawn` / `spawn_knobs_recorded`** (0061) — what a participant was
@@ -828,10 +853,33 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   `base_repo_path` is set for
   worktree-isolated sessions (see "Session worktrees"). There is NO
   `project` column — the project is derived at spawn from
-  `working_repo_path.file_name()` — and no `phase` column: the CURRENT phase is
-  in-memory (see "IPAV state"). It does carry **`phase_epoch`** (0062), a
+  `working_repo_path.file_name()`. The CURRENT phase is persisted in
+  **`ipav_phase`** (0063; see "IPAV state") beside **`phase_epoch`** (0062), a
   monotonic counter bumped on every transition, which is what stops a stale
   phase vote matching again after the phase runs backward and returns.
+  `halt_*` (0054) is the single halt slot; `staged_message` (0058) the
+  durable half of the Stage toggle; `current_turn_participant_id` and
+  `round_number` (0044) are written by the ring and read by nothing in
+  production (tests only) — cleared on close since round 7.
+- `roles` (id PK, slug, name, description_prompt, capabilities, participation
+  mode, default model, colour, …) — the user's roles, edited in Settings →
+  Roles; the seeded HANDS/EYES prose lives here as user data.
+- `session_participants` (id PK, session_id, slug, display_name, role_id,
+  model_id, capabilities snapshot, participation_mode, turn_position,
+  done_vote, effort, ultracode, claude_session_id, enabled, joined_at,
+  color, label, effort_at_spawn, ultracode_at_spawn, spawn_knobs_recorded)
+  — the roster; capabilities are the invite-time snapshot the runtime
+  enforces.
+- `participant_cursors` (participant → last read message id) and
+  `participant_deliveries` (participant, message_id, delivered_at,
+  withheld_reason) — the ring's per-participant read position and its
+  delivery record; the latter is write-only audit in production.
+- `phase_votes` (participant, target_phase, artifact_fingerprint,
+  phase_epoch; 0062) — the D37 vote rows; cleared on every transition.
+- `activity_events` (session, recorded_at, state, slot0/slot1_busy; purged
+  at 90 days), `cancel_events` (write-only telemetry), `context_readings`
+  (per-turn context-window readings behind the meter, 0051),
+  `agent_feedback` (the Feedback panel's rows).
 - `agent_configs` (agent_name PK, provider, model_name, base_url,
   auth_token, `native` — unread, `context_window` — unread). **Seeds nothing,
   and any key is legal.** Until migration 0060 it carried
@@ -843,17 +891,17 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   still the fallback for the `models` registry below (see "Per-participant model
   selection"), and `native`/`context_window` were mirrored here by migration
   0038.
-- `models` (id PK, label, provider, model_name, base_url, auth_token,
+- `models` (id PK, display_name, provider, model_name, base_url, auth_token,
   `native` — unread, `context_window` — unread) — saved-model registry
   the per-session pickers reference by id. `native` (0036) opted the
   model into bot-hq's own agent loop and `context_window` (0037,
   nullable) fed that loop's context meter; rc3 D9 deleted the loop, and
   neither column is read now. Both are still in the table.
 - `app_settings` (key PK, value) — key/value app settings
-  (`default_model_id`, `rain_disabled_default`, …).
-- `session_tray` (choice_id PK, session_id, agent, kind, prompt,
+  (`default_model_id`, `worktree_default`, `adherence_nudges`).
+- `session_tray` (id PK, choice_id UNIQUE, session_id, agent, kind, prompt,
   options_json, command_text, status, supersedes_id, asked_at,
-  answered_at, picked) — durable awaiting-input tray
+  answered_at, picked_option) — durable awaiting-input tray
   (choices/approvals/gated commands). Survives app restart. Renamed from
   `session_questions`/`questions` in migration 0010.
 - `session_documents` (id PK, session_id, slug, body, phase, …) —
@@ -871,8 +919,9 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   updated_at; PK (plugin_id, key); migration 0029) — per-plugin
   key/value store behind the `plugin_kv_get`/`plugin_kv_set` catalog
   commands; namespaced server-side.
-- `cl_index` (file_path PK, project, description, tags, size,
-  modified_at, indexed_at) — SQLite-backed CL search index.
+- `cl_index` (id PK, project_id → projects, file_path, description, tags,
+  created_at, updated_at, agent_visible; UNIQUE (project_id, file_path)) —
+  SQLite-backed CL search index.
 - `cl_folders` (id PK, project_id → projects, folder_path, description,
   tags, …) — folder-level CL descriptions (parallel to `cl_index`).
 - `cl_reads` (id PK, cl_index_id → cl_index, session_id, agent, read_at)
@@ -893,9 +942,11 @@ participant slug (`hands`, `eyes`, `eyes-2`, `advisor`). The two-variant
 `Author` enum that used to bound it was deleted in the D10 hard retirement —
 it could name `user`/`brian`/`rain` and therefore no participant this app
 creates. `messages.author`'s own CHECK was dropped earlier for the same reason.
-NO `system` author — phase changes synthesize as `author=user`
-("phase advanced to PLAN") so chat history reads coherently and agents
-see them as natural switch prompts.
+`origin` is the attribution that matters: host rows (phase notices, the idle
+nudge, injected instructions) are `origin='system'` and reach agents tagged
+`[system]`; `author` mirrors them as `'user'` for legacy readers only.
+(Until round 7 the phase-change notice and the watchdog's chat notice were
+written with `origin='user'` and read as the user's words.)
 
 ---
 
@@ -1005,8 +1056,9 @@ Context Library tab.)
 start (no `version.txt` in the data dir), bot-hq seeds the templates
 under `<data_dir>/library/`. A pre-`library/` install (root-level CL, no
 `version.txt`) is migrated once into the new layout by `Paths::init`.
-Missing individual files trigger an "initialize default" button in the UI
-for that slot.
+(There is no "initialize default" button for a missing file — that sentence
+described a rebuild-era plan that was never built; the seeds are written by
+`Paths::init` and a deleted file stays deleted until the user recreates it.)
 
 ---
 
@@ -1110,10 +1162,10 @@ removal above.
   bot-hq's furniture.
 - **IPAV:** Investigate → Plan → Apply → Verify. Discipline framework
   agents follow within a session.
-- **CL (Context Library):** filesystem space at `<BOT_HQ_DATA_DIR>`
+- **CL (Context Library):** filesystem space at `<data_dir>/library/`
   holding agent custom instructions, rules, per-project conventions/
   notes. Indexed in SQLite for description-aware search.
-- **Session:** a scope-keyed work container, holding a duo of agents +
+- **Session:** a scope-keyed work container, holding N participants +
   chat history.
 - **Emma:** removed (former solo helper agent; planned to return as the
   first bot-hq plugin — TBD).
@@ -1140,13 +1192,15 @@ removal above.
 - **Session policy snapshot:** the resolved general → project → session
   policy frozen per-session at spawn (`session_policy.rs`), editable in
   the gear tab. Push/force-push are pure toggles — no agent-side grants.
-- **Awaiting flag:** per-session `Arc<AtomicBool>` set by user-blocking
-  tools (`mark_awaiting_user`, `ask_user_choice`, `request_approval`).
-  When set, the turn ring halts: `set_session_awaiting` sends
-  `SequencerCommand::QuestionParked`, so no further turns are handed out until
-  the user acts. It also stops cursors advancing.
-- **Violations log:** append-only `violations.jsonl` at the data-dir
-  root recording policy enforcement events (denied tool calls, post-
+- **Awaiting flag:** per-session `Arc<AtomicBool>` set by the halt-declaring
+  tools (`mark_awaiting_user` / `halt`, `request_phase_advance`) and by
+  approvals (`request_approval`, `action_gate`, the pre-push gate) — NOT by
+  `ask_user_choice`, which parks a question and stops nothing (rc3 D35). It
+  drives the input-lock activity state; the ring stop itself is
+  `SequencerCommand::HaltDeclared` / `GateOpened`, and a halt stops the ring
+  where it stands.
+- **Violations log:** append-only `.local/violations.jsonl` under the data
+  dir recording policy enforcement events (denied tool calls, post-
   commit greps that fired, policy file mutations).
 - **Tray (`session_tray`):** durable per-session record of awaiting-input
   items — `ask_user_choice` / `request_approval` / gated commands — so

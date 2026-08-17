@@ -11,8 +11,8 @@ seeded pair is HANDS (executes) and EYES (reviews adversarially) — that is
 the user's configuration, not bot-hq's furniture, and rc3 D10 retired the
 agent names that used to stand in for them.
 
-A former helper agent, Emma, was removed from the core (planned to return
-as the first bot-hq plugin — TBD). House framing: describe bot-hq as an
+A former helper agent, Emma, was removed from the core (a return as a
+plugin is possible but unplanned). House framing: describe bot-hq as an
 **agent harness/system** — never by agent count (no "single-agent" /
 "duo"-centric identity language).
 
@@ -58,9 +58,7 @@ the plugin id rides the URL host on macOS/Linux and the first path segment under
 the Windows `https://bhq-plugin.localhost` fold. Plugins never call Tauri: they
 postMessage the shell, which forwards to the single Rust enforcement point
 `plugin_invoke_proxy`, re-checking enabled ∧ granted ∧ catalog-listed per call.
-See ARCHITECTURE.md §Plugin runtime — this paragraph was wrong on all three
-counts (it called a live runtime scaffolding, named a scheme that never
-shipped, and credited Tauri-JSON capability gating that the proxy replaced).
+See ARCHITECTURE.md §Plugin runtime.
 
 ---
 
@@ -114,15 +112,17 @@ data dir.
 - `.local/lock` — single-instance lock
 - `.local/session-policies/<sid>.yaml` — per-session policy snapshots
 - `.local/violations.jsonl` — policy audit trail
-- `custom-instructions.md` (all agents), `general-rules.md`,
-  `projects/<p>/{conventions,notes,policy.yaml,…}.md` — CL content
+- `library/custom-instructions.md` (all agents),
+  `library/custom-general-rules.md` (optional additions — the universal rules
+  are compiled into the binary, `agents::general_rules`),
+  `library/projects/<p>/{conventions,notes,decisions,policy.yaml,…}` — CL content
 
 ---
 
 ## How a typical session looks
 
 1. Read ARCHITECTURE.md, PLAN.md, PROGRESS.md (in that order) to
-   refresh context.
+   refresh context, and CODEBASE.md before touching code.
 2. Identify the task. If it's in-flight per PROGRESS.md / PLAN.md,
    pick up where it left off. Otherwise scope it.
 3. Write code in small chunks. Run `cargo test` + `cargo build` after

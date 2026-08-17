@@ -642,7 +642,7 @@ async fn spawn_session_handle(
     //
     // Everything the two branches read off `sessions.brian_*` / `rain_*` now
     // comes off the participant row: `effort`, `ultracode` (rc3 D12) and
-    // `claude_session_id`. Those columns are left in place and UNREAD.
+    // `claude_session_id`. Those columns were dropped by migration 0060.
     // Resolves WHO SPAWNS and registers WHO THE COMMIT GATE WATCHES off the same
     // rows — see `resolve_spawn_roster` for why those are one call.
     let live = resolve_spawn_roster(&bridge, &session.id, &roster);

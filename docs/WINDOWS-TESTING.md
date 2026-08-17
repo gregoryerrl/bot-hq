@@ -5,8 +5,9 @@ Thanks for helping test bot-hq on Windows! This is a **pre-release** build
 runtime testing on the platform, so expect a rough edge or two.
 Your feedback is exactly what we need.
 
-bot-hq drives AI-assisted coding sessions through two agents — **Brian**
-(HANDS, executes) and **Rain** (EYES, reviews) — with policy enforcement.
+bot-hq drives AI-assisted coding sessions through role-playing participants
+you configure — the seeded pair are **HANDS** (executes) and **EYES**
+(reviews) — with policy enforcement.
 
 ---
 

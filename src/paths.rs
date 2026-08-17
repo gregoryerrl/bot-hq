@@ -29,7 +29,7 @@
 //!     violations.jsonl             (policy audit trail)
 //!     .policy-hashes.json          (policy-file hash cache)
 //!     screenshots/<ts>.png
-//!     session-permissions/<sid>.json  (per-session grant mirrors)
+//!     session-policies/<sid>.yaml     (per-session policy snapshots)
 //! ```
 //!
 //! Older installs are migrated once into this shape by [`Paths::init`] via

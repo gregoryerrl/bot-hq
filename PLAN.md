@@ -25,7 +25,7 @@ freshness), and — most recently — **rc3, which is now essentially complete**
 roles as user-owned data with editable prose, capability enforcement wired to
 the runtime, participants identified by role rather than by name, N-participant
 sessions, the turn ring as the only turn engine, and the bilateral router
-deleted. Decisions D1–D35+ are recorded in
+deleted. Decisions D1–D37 are recorded in
 [`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md).
 
 Test + build status (live counts) lives in PROGRESS.md, not here — it
@@ -49,13 +49,15 @@ plugin only". What remains for an actual plugin migration is packaging and the
 plugin runtime tiers, not core surgery.
 
 Vision wording: project CL `vision.md` ("The harness, not the crew"); decision
-record: CL `decisions.md` (2026-08-05) and rc3 D1–D35+.
+record: CL `decisions.md` (2026-08-05) and rc3 D1–D37.
 
 **Explicitly DEFERRED behind this migration** (user call, 2026-08-05,
 after the Aug-5 session study — CL `issues.md` #26–#31): the
-duo-pump-shaped fixes ride the teardown instead of patching it —
-`#26` held-forward flush audit (`held_late` ×12/day), `#30` duplicate
-spawn warmup, and the peer-wait watchdog classification (the false
+pump-shaped fixes ride the teardown instead of patching it —
+`#26` held-forward flush audit (MOOT since the router's deletion on
+2026-08-13: there is no hold queue to flush — see the router behaviour
+inventory), `#30` duplicate spawn warmup, and the peer-wait watchdog
+classification (the false
 NEEDS DIRECTION on review handoffs, #25-family). **Not deferred:**
 `#27` (tray answers don't preempt a running turn) is user↔agent
 plumbing that survives any composition — it stays an open standalone
@@ -132,21 +134,23 @@ Read those before starting; this section is the map, not the territory.
    mining pass (method: CL `session-study-method.md`); three-store
    rule (CL canonical, auto-memory mirrors it, repo docs get pointers).
 
-**Deferred behind the reviewer-plugin migration** (recorded above): #26
-held-forward flush, #30 duplicate spawn warmup, peer-wait watchdog
-classification.
+**Deferred behind the reviewer-plugin migration** (recorded above): #30
+duplicate spawn warmup, peer-wait watchdog classification (#26 is moot —
+router deleted).
 
 ---
 
 ## In flight
 
-**Nothing blocking.** The **rc3** arc closed 2026-08-13 — decisions D1–D35+ in
+**Nothing blocking.** The **rc3** arc closed 2026-08-13 — decisions D1–D37 in
 [`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md).
 D17 (summon by `@mention`), D18 (two participation modes), D19/D19a/D19b (the
 ring is the only delivery path) all shipped that day.
 
 Also shipped that day: **D16** (`close_session` gates on the role's tick),
-**D22** (a parked question finishes the lap before it halts), **D23** (a
+**D22** (a parked question finished the lap before halting — superseded by
+**D35** on 2026-08-14: a halt stops the ring where it stands, and a question
+no longer reaches the ring at all), **D23** (a
 delivered row says who wrote it) and **D24** (a straggler cannot bind the next
 turn's epoch).
 
@@ -174,8 +178,9 @@ Also open: the proposals in the project CL's
 `improvements-2026-08-12-visibility-and-verification.md` that were not taken —
 P3 (the reviewer should REPRODUCE, not read), P5 (post-merge re-verification of
 cross-branch claims) and P6 (the CL remote goes stale; a push path needs a
-pre-push secret check). P8 is substantially closed by D22 plus the awaiting-flag
-wiring: the pass volley it describes is now bounded at N-1.
+pre-push secret check). P8's pass volley is closed by D35 (a question parks
+without touching the ring, a halt stops it at once) rather than by D22's
+bounded lap.
 
 The arc before it was the **native agent loop** (2026-07-26/27): an agent
 could run on bot-hq's own Rust loop instead of a claude-code subprocess,
@@ -194,7 +199,6 @@ UI-freshness work all landed (see PROGRESS.md). Remaining follow-ups:
   runtime v1** (serving + catalog proxy + PluginHost + consent +
   hello-plugin; see PROGRESS.md and `docs/PLUGINS.md`). Follow-up tiers
   now live under "Plugin runtime tiers" below.
-- Replace the placeholder `icons/icon.png` with the real bot-hq mark.
 - ~~Host-mediated reroute~~ — MOOT. Option (a) (centralize-only) shipped as
   `core/router.rs` in 2026-06-26 and that file was deleted by task 14
   (2026-08-13). The explicit-handoff (b) / hybrid (c) forward-policy variants
@@ -373,10 +377,13 @@ extension points in `docs/PLUGINS.md`):
 
 ### Cross-platform builds
 
-Tauri covers macOS, Linux, Windows. Initial focus is macOS. Linux + Windows
-builds need: per-platform CI, install paths (`directories` crate likely
-already handles this), keychain backends (see auth-token v2), font
-loading for the icon font.
+Tauri covers macOS, Linux, Windows, and `.github/workflows/release.yml`
+builds all three (universal `.dmg`, `.deb` + AppImage, NSIS `.exe`) on tag
+pushes. What remains is runtime, not build: the Windows PID lock and the
+bash git hooks (see the workflow's own notes and `docs/WINDOWS-TESTING.md`),
+keychain backends (auth-token v2), and signing (`docs/SIGNING.md`). The icon
+font this line used to name was the Slint UI's; the web UI ships its own
+fonts under `frontend/public/fonts`.
 
 ---
 
@@ -415,7 +422,7 @@ loading for the icon font.
   prompt is fixed at session spawn. Editing `policy.yaml` mid-session
   requires session restart for the agent to see new rules (though hooks
   + MCP tools always re-resolve on call). Consider a "policy reload"
-  banner that re-spawns the duo.
+  banner that re-spawns the session's participants.
 - **Persistent IPAV phase log.** Phase transitions ARE already persisted
   — `advance_phase` writes a `messages` row with `kind='phase_change'`
   (`core/state.rs`), so the per-session phase history survives in storage.
@@ -476,7 +483,7 @@ the plugin is built rather than rediscovering:
   designed against measurement rather than defaulted into. The measurement
   input was `<data_dir>/.local/native-accounting.jsonl` — kept unrotated for
   exactly that, and no longer written.
-- **`BRIAN_ROLE` assumes the CLI.** It promises `terminal_exec`, the visible
+- **`HANDS_ROLE` assumes the CLI.** It promises `terminal_exec`, the visible
   PTY and ordinary `Bash`. A connector that does not implement those makes the
   prompt wrong with no test failing. That was true of the native loop and will
   be true of the plugin.
