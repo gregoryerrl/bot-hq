@@ -88,3 +88,23 @@ describe("PolicyForm", () => {
     );
   });
 });
+
+describe("PolicyForm — the two load-bearing fields that had no UI (round 8)", () => {
+  it("edits forbidden_in_commits and commit_style via onChange", () => {
+    const onChange = vi.fn();
+    render(
+      <PolicyForm
+        value={{ forbidden_in_commits: ["Foo-Bar-Baz"], commit_style: "imperative" }}
+        onChange={onChange}
+      />,
+    );
+    // The list renders its existing entry and can take another.
+    expect(screen.getByDisplayValue("Foo-Bar-Baz")).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("e.g. imperative-mood, lowercase, conventional prefixes"), {
+      target: { value: "imperative, lowercase" },
+    });
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commit_style: "imperative, lowercase" }),
+    );
+  });
+});

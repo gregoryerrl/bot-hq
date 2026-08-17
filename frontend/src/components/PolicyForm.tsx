@@ -86,6 +86,32 @@ export function PolicyForm({
       </Field>
 
       <Field
+        label="Forbidden words in commits"
+        hint="Words no commit may carry: the commit-msg and pre-commit hooks block them, the post-commit verifier logs a slip, and check_commit_message pre-checks the agent's message. Whole-word, case-insensitive. A non-empty project list REPLACES the global one. Enforced (round 8: this field had no UI — the only way to set it was editing the yaml)."
+      >
+        <StringList
+          items={value.forbidden_in_commits ?? []}
+          disabled={disabled}
+          placeholder="e.g. a trailer no commit may carry"
+          onChange={(forbidden_in_commits) => patch({ forbidden_in_commits })}
+        />
+      </Field>
+
+      <Field
+        label="Commit style"
+        hint="Rendered into every participant's prompt as the house commit style (subject mood, prefixes, footers) — described to the agent, not mechanically enforced. Empty = none."
+      >
+        <textarea
+          value={value.commit_style ?? ""}
+          disabled={disabled}
+          rows={3}
+          onChange={(e) => patch({ commit_style: e.target.value })}
+          placeholder="e.g. imperative-mood, lowercase, conventional prefixes"
+          className={cn(terminalInputClass, "min-h-[3.5rem] resize-y")}
+        />
+      </Field>
+
+      <Field
         label="Round cap (laps)"
         hint="Safety net, not a checkpoint: the turn cycle halts and yields to you after this many full passes over the participants. Empty = inherit (500 laps). 0 = off."
       >
