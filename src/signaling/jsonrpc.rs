@@ -1909,6 +1909,61 @@ mod tests {
         );
     }
 
+    /// **The peer-word refusal lives on `mark_awaiting_user` and NOT on `halt`
+    /// — pinned at the wire** (round 9, review advisory 60b84947). Both
+    /// descriptors now state it: `mark_awaiting_user` refuses a reason naming a
+    /// peer and names `halt` as the path when a legitimate user-wait must
+    /// mention a role. `peer_shaped_reason` was tested in isolation and neither
+    /// dispatch test reached the branch, so the refusal could be deleted — or
+    /// added to `halt`, which round 9 nearly did (a refused halt parks nothing:
+    /// an undeclared stall) — with a green suite while two descriptors said
+    /// otherwise. Same class as E1: helper pinned, wire not.
+    #[tokio::test]
+    async fn the_peer_word_refusal_guards_mark_awaiting_user_and_not_halt() {
+        let bridge = SignalingBridge::new();
+        let mut sub = bridge.subscribe();
+        let reason = "waiting on the user to approve the override of EYES' blocking finding";
+        // mark_awaiting_user: an error, no halt declared.
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "mark_awaiting_user", "arguments": {"reason": reason}}),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["result"]["isError"], json!(true), "must be refused: {v}");
+        assert!(
+            v["result"]["content"][0]["text"].as_str().unwrap_or("").contains("names your peer"),
+            "the refusal names the reason: {v}"
+        );
+        assert!(
+            sub.try_recv().is_err(),
+            "a refused mark_awaiting_user must not declare a halt"
+        );
+        // halt: the same reason declares the halt.
+        let res = dispatch(
+            req("tools/call", json!({"name": "halt", "arguments": {"reason": reason}}), 2),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert!(
+            v["result"]["content"][0]["text"].as_str().unwrap_or("").contains("halted"),
+            "halt carries no peer-word filter: {v}"
+        );
+        let ev = sub.recv().await.unwrap();
+        assert!(matches!(ev, SignalingEvent::AwaitingUser { reason: r, .. } if r == reason));
+    }
+
     /// rc3 **P4**: the staleness report is reachable as a tool, and it reports
     /// rather than edits.
     ///
