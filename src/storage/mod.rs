@@ -48,7 +48,7 @@ pub use participants::{
     PARTICIPATION_MODES, UNREAD_BATCH_LIMIT, WIRE_BODY_CLAMP_BYTES, WIRE_JOIN,
 };
 pub use feedback::{FEEDBACK_KINDS, FEEDBACK_STATUSES};
-pub use tray::{is_gate_options, GATE_OPTIONS_JSON};
+pub use tray::{is_gate_options, is_gate_row, GATE_OPTIONS_JSON};
 pub use row_types::{
     AgentConfig, AgentFeedback, CancelEvent, ClFolder, ClIndexEntry, ClRead,
     Finding, FindingSeverity, FindingStatus, Message, MessageKind, Model, Plugin, Project,

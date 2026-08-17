@@ -355,11 +355,21 @@ impl SignalingBridge {
         // survives restart even though the parked oneshot in `pending` does
         // not. Best-effort: if storage isn't wired yet (test bridges built
         // via ::new), continue without persisting.
+        // The row says what it is: a policy-initiated ask with the exact gate
+        // menu is an `approval` (answered in the gate slot, latching the ring);
+        // anything else — a question, or a custom-labelled request_approval —
+        // is a `choice`. Readers still accept the pre-round-8 shape
+        // (`choice` + gate menu) through `is_gate_row`.
+        let kind = if is_approval && options.iter().map(String::as_str).eq(["Approve", "Reject"]) {
+            crate::storage::QuestionKind::Approval
+        } else {
+            crate::storage::QuestionKind::Choice
+        };
         self.persist_question(
             &session_id,
             &choice_id,
             &agent,
-            crate::storage::QuestionKind::Choice,
+            kind,
             &question,
             Some(&options),
             supersedes_id,
@@ -514,7 +524,7 @@ impl SignalingBridge {
                     .flatten()
                     .filter(|row| {
                         row.status == "pending"
-                            && crate::storage::is_gate_options(row.options_json.as_deref())
+                            && crate::storage::is_gate_row(&row.kind, row.options_json.as_deref())
                     })
                     .map(|row| row.session_id),
                 None => None,
@@ -624,7 +634,7 @@ impl SignalingBridge {
                     Ok(row) => row
                         .filter(|row| {
                             row.status == "pending"
-                                && crate::storage::is_gate_options(row.options_json.as_deref())
+                                && crate::storage::is_gate_row(&row.kind, row.options_json.as_deref())
                         })
                         .map(|row| row.session_id),
                     Err(e) => {

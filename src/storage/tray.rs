@@ -23,9 +23,24 @@ pub const GATE_OPTIONS_JSON: &str = r#"["Approve","Reject"]"#;
 /// Is this row's `options_json` a gate's?
 ///
 /// Takes the column as stored (`Option<&str>`) so every caller asks the same
-/// question of the same shape.
+/// question of the same shape. Prefer [`is_gate_row`], which also reads the
+/// `kind` written at insert since round 8; this is its fallback half.
 pub fn is_gate_options(options_json: Option<&str>) -> bool {
     options_json == Some(GATE_OPTIONS_JSON)
+}
+
+/// Is this tray row a GATE (answered in the gate slot, latching the ring)?
+///
+/// `kind = 'approval'` since round 8 — the backend knows at insert whether a
+/// row is policy-initiated and menu-exact, so it says so instead of leaving
+/// every reader to re-derive it from the options string. The options check
+/// stays as the fallback for rows parked before that (`kind = 'choice'` with
+/// the gate menu). Every reader — the ring's gate reseed, the resolve path's
+/// latch release, the app layer's tray-answer classification, the frontend's
+/// slot choice — goes through this pair, so a gate cannot be recognised on one
+/// path and missed on another (which reads as a stuck latch).
+pub fn is_gate_row(kind: &str, options_json: Option<&str>) -> bool {
+    kind == QuestionKind::Approval.as_str() || is_gate_options(options_json)
 }
 
 impl Storage {
@@ -46,7 +61,7 @@ impl Storage {
         command_text: Option<&str>,
     ) -> Result<i64> {
         let options_json = options
-            .filter(|_| matches!(kind, QuestionKind::Choice))
+            .filter(|_| matches!(kind, QuestionKind::Choice | QuestionKind::Approval))
             .map(|opts| serde_json::to_string(opts).unwrap_or_else(|_| "[]".into()));
         let res = sqlx::query(
             "INSERT INTO session_tray \
@@ -138,7 +153,7 @@ impl Storage {
         let ids: Vec<String> = sqlx::query_scalar(&format!(
             "SELECT choice_id FROM session_tray \
              WHERE session_id = ? AND status = 'pending' \
-               AND options_json = '{GATE_OPTIONS_JSON}'"
+               AND (kind = 'approval' OR options_json = '{GATE_OPTIONS_JSON}')"
         ))
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -375,6 +390,54 @@ mod tests {
         assert_eq!(
             rows[0].command_text.as_deref(),
             Some("git push origin staging")
+        );
+    }
+
+    /// **A gate is a gate on both shapes** (round 8). `kind = 'approval'` is
+    /// written at insert now; the rows parked before that carry `choice` with
+    /// the gate menu. `is_gate_row` and the ring's reseed query accept both,
+    /// and a plain question with the same kind but another menu is neither.
+    /// Kill-tested: drop the `kind = 'approval'` disjunct from
+    /// `pending_gate_ids` and the approval-kind row below vanishes from it.
+    #[tokio::test]
+    async fn a_gate_is_recognised_by_kind_or_by_menu() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-1", "S", None).await.unwrap();
+        let gate = vec!["Approve".to_string(), "Reject".to_string()];
+        let other = vec!["A".to_string(), "B".to_string()];
+        // The round-8 shape: kind says it, menu agrees.
+        s.insert_tray_entry("s-1", "c-kind", "hands", QuestionKind::Approval, "run?", Some(&gate), None, Some("git push"))
+            .await
+            .unwrap();
+        // The pre-round-8 shape: kind is choice, only the menu says gate.
+        s.insert_tray_entry("s-1", "c-menu", "hands", QuestionKind::Choice, "run?", Some(&gate), None, Some("git push"))
+            .await
+            .unwrap();
+        // A question: same kind as the legacy shape, another menu.
+        s.insert_tray_entry("s-1", "c-question", "hands", QuestionKind::Choice, "which?", Some(&other), None, None)
+            .await
+            .unwrap();
+        // The kind ALONE (no menu stored) — not a shape the insert path
+        // produces, but the one that proves the reader keys on the kind and
+        // not only on the menu.
+        s.insert_tray_entry("s-1", "c-kind-only", "hands", QuestionKind::Approval, "run?", None, None, None)
+            .await
+            .unwrap();
+        // And an approval-kind row must keep its options (the insert used to
+        // store options for Choice only).
+        let kind_row = s.get_tray_entry("c-kind").await.unwrap().unwrap();
+        assert_eq!(kind_row.kind, "approval");
+        assert_eq!(kind_row.options_json.as_deref(), Some(GATE_OPTIONS_JSON));
+
+        assert!(is_gate_row("approval", None), "the kind alone is enough");
+        assert!(is_gate_row("choice", Some(GATE_OPTIONS_JSON)), "the legacy menu alone is enough");
+        assert!(!is_gate_row("choice", Some(r#"["A","B"]"#)), "a question is neither");
+
+        let mut ids = s.pending_gate_ids("s-1").await.unwrap();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["c-kind".to_string(), "c-kind-only".to_string(), "c-menu".to_string()]
         );
     }
 

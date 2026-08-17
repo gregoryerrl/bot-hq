@@ -178,10 +178,19 @@ pub struct Model {
 pub enum QuestionKind {
     /// `ask_user_choice` — has a fixed set of options.
     Choice,
+    /// An Approve/Reject GATE — a parked `action_gate` command, a push gate,
+    /// a reviewer-down override request: policy-initiated, menu exactly
+    /// `["Approve","Reject"]`, answered on the spot in the gate slot rather
+    /// than the tray. Written at insert since round 8; rows parked before
+    /// that carry `choice` with the gate menu, which is why every reader goes
+    /// through [`is_gate_row`](crate::storage::is_gate_row) (kind OR menu),
+    /// not the kind alone.
+    Approval,
     /// Free-text open question — user types a reply via normal chat input.
     OpenAsk,
-    /// `mark_awaiting_user` — informational halt; no user input needed,
-    /// the next chat message implicitly resumes.
+    /// `mark_awaiting_user` — informational halt. **Nothing writes this since
+    /// rc3 D35** (the halt is a session-state slot, `sessions.halt_*`); kept so
+    /// the rows parked before D35 still parse.
     Halt,
 }
 
@@ -189,6 +198,7 @@ impl QuestionKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             QuestionKind::Choice => "choice",
+            QuestionKind::Approval => "approval",
             QuestionKind::OpenAsk => "open_ask",
             QuestionKind::Halt => "halt",
         }
@@ -197,6 +207,7 @@ impl QuestionKind {
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "choice" => QuestionKind::Choice,
+            "approval" => QuestionKind::Approval,
             "open_ask" => QuestionKind::OpenAsk,
             "halt" => QuestionKind::Halt,
             _ => return None,
@@ -215,7 +226,7 @@ pub struct SessionTrayEntry {
     pub agent: String,
     pub kind: String,
     pub prompt: String,
-    /// JSON-encoded `Vec<String>` for kind=choice; NULL for open_ask / halt.
+    /// JSON-encoded `Vec<String>` for kind=choice / approval; NULL for open_ask / halt.
     pub options_json: Option<String>,
     pub status: String,
     pub picked_option: Option<String>,

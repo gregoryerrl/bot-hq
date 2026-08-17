@@ -112,6 +112,17 @@ describe("HaltBanner", () => {
     expect(isApproval({ options: [] })).toBe(false);
   });
 
+  it("reads the backend's kind first, and the exact menu as the fallback (round 8)", () => {
+    // Since round 8 the backend writes `kind = "approval"` at insert; rows
+    // parked before that carry `kind = "choice"` with the gate menu, and both
+    // shapes must land in the gate slot — a gate recognised on one path and
+    // missed on another reads as a stuck latch.
+    expect(isApproval({ kind: "approval", options: ["Approve", "Reject"] })).toBe(true);
+    expect(isApproval({ kind: "choice", options: ["Approve", "Reject"] })).toBe(true);
+    expect(isApproval({ kind: "approval", options: [] })).toBe(true);
+    expect(isApproval({ kind: "choice", options: ["a", "b"] })).toBe(false);
+  });
+
   it("sorts rows into exactly one surface each (rc3 D35)", () => {
     // A halt is the banner (session state), an approval is the gate, a
     // question is the tray — and every tray count goes through isTrayItem, so

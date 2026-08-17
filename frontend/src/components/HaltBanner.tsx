@@ -31,14 +31,22 @@ export type TrayRow = {
  * blocked on it.
  *
  * Both gate kinds ask exactly `Approve`/`Reject`; an `ask_user_choice` question
- * carries free-form options. Across every tray row ever recorded that
- * separation is exact — 31 matches, all gates, no false positives.
+ * carries free-form options. Since round 8 the backend also says so at insert
+ * (`kind = "approval"`, `storage::is_gate_row`), so the kind is the primary
+ * signal here and the exact-menu check is the fallback for rows parked before
+ * that (`kind = "choice"` with the gate menu). Across every tray row recorded
+ * before the kind existed that separation was exact — 31 matches, all gates,
+ * no false positives.
  */
-export function isApproval(r: { options: readonly string[] }): boolean {
+export function isApproval(r: {
+  kind?: string;
+  options: readonly string[];
+}): boolean {
   return (
-    r.options.length === 2 &&
-    r.options[0] === "Approve" &&
-    r.options[1] === "Reject"
+    r.kind === "approval" ||
+    (r.options.length === 2 &&
+      r.options[0] === "Approve" &&
+      r.options[1] === "Reject")
   );
 }
 

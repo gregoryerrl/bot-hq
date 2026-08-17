@@ -433,6 +433,41 @@ mod tests {
         }
     }
 
+    /// **The row says what it is at insert** (round 8, T2-2): a parked
+    /// action_gate command lands as `kind = 'approval'`, so readers no longer
+    /// re-derive gate-ness from the options string. Kill-tested: park with
+    /// `QuestionKind::Choice` again and this reads "choice".
+    #[tokio::test]
+    async fn a_parked_gate_is_written_as_an_approval_row() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(
+            data.path(),
+            &[gk("touch", GateMode::Gate)],
+            "s1",
+            repo.path(),
+        )
+        .await;
+        let parked = bridge
+            .action_gate("s1".into(), "hands".into(), "touch nothing".into())
+            .await
+            .unwrap();
+        let cid = parked
+            .split("gate_id: ")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .unwrap()
+            .to_string();
+        let storage = bridge.storage.lock().await.clone().expect("test bridge has storage");
+        let row = storage.get_tray_entry(&cid).await.unwrap().unwrap();
+        assert_eq!(row.kind, "approval", "a gate row names itself");
+        assert_eq!(
+            row.options_json.as_deref(),
+            Some(crate::storage::GATE_OPTIONS_JSON),
+            "and still carries the menu (the fallback readers key on it)"
+        );
+    }
+
     #[tokio::test]
     async fn gate_approve_executes_the_command() {
         let data = tempdir().unwrap();
