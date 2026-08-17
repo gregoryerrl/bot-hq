@@ -6,6 +6,20 @@ use super::*;
 /// query branches so the projection can't drift between them.
 const MESSAGE_COLUMNS: &str = "id, session_id, author, kind, content, created_at";
 
+/// The watermark read (`messages_for_session`) — one statement for both the
+/// "everything" and the "since id" shapes. NOT the `?2 IS NULL OR id > ?2`
+/// idiom `channel_page` uses for its optional filter: SQLite cannot push a
+/// disjunction into an index range, so that form dropped the `id > ?` seek and
+/// walked the session's whole history on every emitter flush (review, round
+/// 8). `COALESCE(?2, -1)` keeps the seek — `-1` is below every id (`INTEGER
+/// PRIMARY KEY`, positive). A test EXPLAINs this exact string.
+fn messages_since_sql() -> String {
+    format!(
+        "SELECT {MESSAGE_COLUMNS} FROM messages \
+         WHERE session_id = ?1 AND id > COALESCE(?2, -1) ORDER BY id ASC"
+    )
+}
+
 impl Storage {
     /// The user-row write path — a `MessageKind` + content shape — expressed as
     /// a thin wrapper over
@@ -128,13 +142,7 @@ impl Storage {
         session_id: &str,
         since_id: Option<i64>,
     ) -> Result<Vec<Message>> {
-        // One statement: `?2 IS NULL OR id > ?2` is the house idiom for an
-        // optional filter (see `channel_page`), instead of two query strings
-        // that could drift.
-        let rows = sqlx::query_as::<_, Message>(&format!(
-            "SELECT {MESSAGE_COLUMNS} FROM messages \
-             WHERE session_id = ?1 AND (?2 IS NULL OR id > ?2) ORDER BY id ASC"
-        ))
+        let rows = sqlx::query_as::<_, Message>(&messages_since_sql())
         .bind(session_id)
         .bind(since_id)
         .fetch_all(&self.pool)
@@ -203,6 +211,31 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use crate::storage::{MessageKind, Storage};
+
+    /// **The watermark read SEEKS** (round 8, review). `messages_for_session`
+    /// is the emitter's per-flush read (50 ms / N=20 cadence) and the plugin
+    /// polling read; a refactor to `(?2 IS NULL OR id > ?2)` kept one query
+    /// string and silently dropped the `id > ?` range from the index seek —
+    /// SQLite cannot push a disjunction into a range — so every flush walked
+    /// the session's whole history. This pins the PLAN, not the rows: the
+    /// query must use the session index with BOTH the equality and the range.
+    #[tokio::test]
+    async fn the_watermark_read_seeks_past_the_watermark() {
+        let s = Storage::memory().await.unwrap();
+        // The production string itself, not a copy of it.
+        let sql = format!("EXPLAIN QUERY PLAN {}", super::messages_since_sql());
+        let rows: Vec<(i64, i64, i64, String)> = sqlx::query_as(&sql)
+            .bind("s1")
+            .bind(Some(10_i64))
+            .fetch_all(s.pool())
+            .await
+            .unwrap();
+        let plan = rows.iter().map(|r| r.3.as_str()).collect::<Vec<_>>().join(" | ");
+        assert!(
+            plan.contains("session_id=?") && plan.contains("id>?"),
+            "the read must seek on (session_id, id), got: {plan}"
+        );
+    }
 
     /// Pins the three decisions in [`Storage::participant_text_since`] that the
     /// sequencer's own spin tests cannot fail: the `kind` filter, the watermark
