@@ -2,8 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `Default` is `Investigate`, and it is derived here rather than written into
+/// `IpavState::default` so that "a session with no phase yet is Investigating" is
+/// one fact in one place. Migration 0063 added a second reader of it — a NULL
+/// `sessions.ipav_phase`, and an unparseable one — and a duplicated default is
+/// how those three drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum IpavPhase {
+    #[default]
     Investigate,
     Plan,
     Apply,
@@ -79,18 +85,26 @@ impl IpavPhase {
     }
 }
 
-/// Per-session IPAV runtime state. Held in `AppState` as `HashMap<SessionId, _>`.
-#[derive(Debug, Clone)]
+/// Per-session IPAV runtime state.
+///
+/// Held as `SessionHandle.ipav: Arc<Mutex<IpavState>>` — one per live handle, not
+/// a map on `AppState`. `signaling/bridge` keeps a parallel `Weak` registry
+/// (`session_phase`) so a tool call can read the phase without reaching through
+/// the session map.
+///
+/// This is not persisted: `sessions` has no phase column, and a restart rebuilds
+/// the handle with `Default` (Investigate). The description above said
+/// `HashMap<SessionId, _>` with a `phase_log` field — neither has ever existed
+/// here, and the same sentence was in ARCHITECTURE.md, so correcting one left the
+/// other to re-seed it (round 5, N2).
+/// `Default` is DERIVED, so the default phase is stated once — on `IpavPhase`
+/// itself — and read from there. It used to be a hand-written impl naming
+/// `Investigate` a second time; migration 0063 added a third reader (a NULL or
+/// unparseable `sessions.ipav_phase`), which is one restatement too many for a
+/// fact that must never disagree with itself.
+#[derive(Debug, Clone, Default)]
 pub struct IpavState {
     pub current_phase: IpavPhase,
-}
-
-impl Default for IpavState {
-    fn default() -> Self {
-        Self {
-            current_phase: IpavPhase::Investigate,
-        }
-    }
 }
 
 impl IpavState {

@@ -1457,6 +1457,46 @@ impl Storage {
             .all(|p| p.done_vote))
     }
 
+    // ---- the persisted IPAV phase (migration 0063) -----------------------
+
+    /// The session's last transitioned-to phase, as `IpavPhase::tag()`, or `None`
+    /// for a session that has never transitioned.
+    ///
+    /// Returns the raw tag rather than an `IpavPhase` because `storage` has no
+    /// dependency on `core` and adding one to carry a four-variant enum across
+    /// the boundary is not worth it — the same reasoning the roster read states a
+    /// few hundred lines up. `core` parses it with `IpavPhase::parse`, which is
+    /// case-insensitive and accepts chips, so a hand-edited row still loads.
+    pub async fn persisted_ipav_phase(&self, session_id: &str) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT ipav_phase FROM sessions WHERE id = ?")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await
+                .context("reading the persisted IPAV phase")?;
+        Ok(row.and_then(|r| r.0))
+    }
+
+    /// Record the phase a session has just moved to.
+    ///
+    /// Separate from `bump_phase_epoch` rather than folded into its transaction,
+    /// and the failure modes are why that is acceptable: if this write fails and
+    /// the bump succeeds, the votes are cleared and a restart shows Investigate —
+    /// exactly the behaviour that shipped before 0063. If the bump fails and this
+    /// succeeds, the phase is right and the votes are stale — exactly the
+    /// behaviour that shipped before the E1 fix. Both degrade to a previously
+    /// shipped state rather than to a novel one, and neither can block a
+    /// transition, which is the property a bookkeeping write must not take away.
+    pub async fn set_persisted_ipav_phase(&self, session_id: &str, tag: &str) -> Result<()> {
+        sqlx::query("UPDATE sessions SET ipav_phase = ? WHERE id = ?")
+            .bind(tag)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("persisting the IPAV phase for {session_id}"))?;
+        Ok(())
+    }
+
     // ---- the phase-advance vote (migration 0062) -------------------------
 
     /// The session's phase epoch — monotonic, bumped on every transition.

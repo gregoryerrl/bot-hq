@@ -222,6 +222,70 @@ impl PhaseAdvanceSource {
     }
 }
 
+/// **The phase write: the in-memory move and the epoch bump, as one unit.**
+///
+/// ## Why this is a function and not two lines in `advance_phase`
+///
+/// Migration 0062 gave the phase-advance vote an epoch to close its TIME axis,
+/// and justified the design by its call-site count — *"exactly ONE production
+/// call site, `AppState`'s phase writer"*. That call site was never written.
+/// `bump_phase_epoch` shipped with a definition, seven tests that call it
+/// directly, and nothing else, so the column sat at 0, no vote was ever
+/// invalidated by a transition, and no vote row was ever cleared (round 5, E1).
+///
+/// Nothing in this crate can construct an `AppState`, so a guard on
+/// `advance_phase` itself could only read source text. Extracting the join gives
+/// a function a test can actually call with a real `Storage` — conventions.md's
+/// remedy for exactly this shape.
+///
+/// **The visibility is load-bearing.** This is deliberately not `pub`: 0062's
+/// claim is frozen in an applied migration and can never be corrected, so the
+/// code has to keep it true instead. One caller, `advance_phase`, which is the
+/// phase writer 0062 names — the seam IS that writer, factored out so it can be
+/// tested. Making this `pub` so an integration test can reach it would let a
+/// second caller in and silently falsify an immutable artifact.
+///
+/// ## Ordering
+///
+/// The bump precedes the caller's `?`-fallible `insert_message`, and that is
+/// deliberate for one specific path: if the message insert fails, `advance_phase`
+/// returns `Err` with the in-memory phase already moved, and a bump placed after
+/// it would leave the votes standing at the old epoch — the exact stale-vote
+/// state this closes. Bumping first costs a re-vote there and never a phantom
+/// advance.
+///
+/// That claim is scoped to the `insert_message` path and no further. A bump that
+/// fails on its own is swallowed with a warning below, so the phase still moves
+/// with stale votes — fail-open to precisely the behaviour that shipped before
+/// this function existed, which is the right direction for a transition that
+/// must not be blocked by a bookkeeping write.
+///
+/// Safe against eating the tally that authorized this very transition: that
+/// tally is read and consumed in `signaling/bridge` before the event which
+/// reaches `advance_phase` is sent. An ordering constraint, not an accident.
+async fn commit_phase_transition(
+    storage: &Storage,
+    session_id: &str,
+    ipav: &Mutex<crate::core::ipav::IpavState>,
+    target: IpavPhase,
+) {
+    ipav.lock().await.advance(target);
+    // Survives a restart (migration 0063). Before this, a session resumed at
+    // Investigate whatever it had been doing, and every participant was handed
+    // "Gather facts only. No Edit, Write, or mutating Bash" mid-Apply.
+    if let Err(e) = storage
+        .set_persisted_ipav_phase(session_id, target.tag())
+        .await
+    {
+        tracing::warn!(?e, session_id, "persisting the IPAV phase");
+    }
+    // Clears every vote for this session as well as moving the epoch — both
+    // halves of what a transition owes the tally. See bump_phase_epoch.
+    if let Err(e) = storage.bump_phase_epoch(session_id).await {
+        tracing::warn!(?e, session_id, "bumping the phase epoch");
+    }
+}
+
 impl AppState {
     pub async fn new(paths: Paths, storage: Storage, server: SignalingServer) -> Self {
         let bridge = Arc::clone(&server.bridge);
@@ -1530,7 +1594,14 @@ impl AppState {
         self.user_responded(session_id, Vec::new(), source.releases_ring(), true)
             .await;
 
-        handle.ipav.lock().await.advance(target);
+        // The in-memory move AND the epoch bump, together. Both callers of this
+        // function reach it — main.rs's agent path and the user's phase picker —
+        // and they are the only two, so one seam here is complete rather than
+        // one-of-N. That matters: "reset on the right set of events" is the
+        // predicate shape 0062's own text says this repo has shipped wrong five
+        // times, and here the set is provably one. See commit_phase_transition
+        // for the ordering and the visibility argument.
+        commit_phase_transition(&self.storage, session_id, &handle.ipav, target).await;
 
         // Synthetic phase-change message in storage. No envelope: the wire is
         // the notice byte for byte, because `transition_notice()` already
@@ -2534,6 +2605,173 @@ mod tests {
         assert!(
             body.contains("resolve_mentions("),
             "the parse belongs to the user's own message path"
+        );
+    }
+
+    /// **A transition invalidates the votes cast about the phase it leaves.**
+    ///
+    /// The behaviour half of round 5's E1. Migration 0062 built the epoch to
+    /// close the vote's TIME axis and justified it by having exactly one
+    /// production call site; that call site did not exist, so the column stayed
+    /// at 0 through 114 live phase changes and no tally was ever invalidated.
+    ///
+    /// This drives the seam directly with a real `Storage` — the reason the seam
+    /// exists, since nothing in the crate can build an `AppState`. Asserted on
+    /// BOTH halves the bump owes: the epoch moves, and the session's votes are
+    /// cleared. Mutation-checked by deleting the bump from the seam.
+    #[tokio::test]
+    async fn a_phase_transition_invalidates_the_votes_cast_before_it() {
+        let storage = Storage::memory().await.unwrap();
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage.ensure_session_roster("s1", 2).await.unwrap();
+        let roster = storage.participants_for_session("s1").await.unwrap();
+        let ipav = Mutex::new(crate::core::ipav::IpavState::default());
+
+        // A complete tally: every active participant has voted for Apply.
+        let epoch = storage.phase_epoch("s1").await.unwrap();
+        for p in &roster {
+            storage
+                .cast_phase_vote("s1", p.id, "Apply", "fp1", epoch)
+                .await
+                .unwrap();
+        }
+        assert!(
+            storage
+                .all_active_voted_to_advance("s1", "Apply", "fp1", epoch)
+                .await
+                .unwrap(),
+            "precondition: the tally that authorizes this transition is complete"
+        );
+
+        commit_phase_transition(&storage, "s1", &ipav, IpavPhase::Apply).await;
+
+        assert_eq!(
+            ipav.lock().await.current_phase,
+            IpavPhase::Apply,
+            "the in-memory phase moved"
+        );
+        assert_eq!(
+            storage.phase_epoch("s1").await.unwrap(),
+            epoch + 1,
+            "the epoch moved with the phase — without this every vote stays \
+             valid forever and a Plan-era tally completes a later Plan (E1)"
+        );
+        assert!(
+            !storage
+                .all_active_voted_to_advance("s1", "Apply", "fp1", epoch)
+                .await
+                .unwrap(),
+            "the tally that authorized this transition can no longer authorize \
+             another one"
+        );
+        let left: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM phase_votes WHERE session_id = 's1'")
+                .fetch_one(storage.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            left.0, 0,
+            "the session's votes are cleared too — 0062's 'deletion, not \
+             accumulation' half, which was equally inert while nothing called \
+             the bump"
+        );
+        // 0063: the same transition is what makes the phase survive a restart.
+        assert_eq!(
+            storage.persisted_ipav_phase("s1").await.unwrap().as_deref(),
+            Some("apply"),
+            "the transition recorded the phase for the next session start — \
+             without this a restart resumes at Investigate and hands a mid-Apply \
+             executor 'No Edit, Write, or mutating Bash'"
+        );
+    }
+
+    /// **A session with no recorded phase reads as Investigate, not as broken.**
+    ///
+    /// NULL is the state of every session that predates 0063 and of every session
+    /// that has never transitioned, so it is the common case rather than an edge
+    /// one. Pinned separately because the restore turns three different inputs
+    /// into the same answer — NULL, an unparseable tag, and a read error — and a
+    /// test of only the happy path would let any of the three become a panic.
+    #[tokio::test]
+    async fn a_session_that_never_transitioned_restores_to_investigate() {
+        let storage = Storage::memory().await.unwrap();
+        storage.create_session("s1", "t", None).await.unwrap();
+
+        assert_eq!(
+            storage.persisted_ipav_phase("s1").await.unwrap(),
+            None,
+            "a fresh session has recorded no phase"
+        );
+        assert_eq!(
+            IpavPhase::parse("nonsense").unwrap_or_default(),
+            IpavPhase::Investigate,
+            "an unparseable tag falls back rather than failing the spawn"
+        );
+
+        // And the round trip the restore depends on, for every phase — the tag
+        // written is the tag that parses back.
+        for phase in [
+            IpavPhase::Investigate,
+            IpavPhase::Plan,
+            IpavPhase::Apply,
+            IpavPhase::Verify,
+        ] {
+            storage
+                .set_persisted_ipav_phase("s1", phase.tag())
+                .await
+                .unwrap();
+            let back = storage.persisted_ipav_phase("s1").await.unwrap().unwrap();
+            assert_eq!(
+                IpavPhase::parse(&back),
+                Some(phase),
+                "{} must survive the write/read round trip",
+                phase.name()
+            );
+        }
+    }
+
+    /// **The seam stays mounted, and the bump stays inside it.**
+    ///
+    /// The test above never pins its own mount — it calls the seam directly, so
+    /// deleting the call from `advance_phase` leaves it green and the epoch dead
+    /// again. That is E1 moved up one level, and it is the failure this guard
+    /// exists to make impossible.
+    ///
+    /// rustc does not cover it: a non-`pub` single-caller free fn would raise
+    /// `dead_code`, but the test above is a same-file use, so the warning is
+    /// silent under `cargo test` and `cargo clippy --all-targets` and appears
+    /// only at `cargo build --release` — as a warning, exit 0. Detection at the
+    /// last gate is not enforcement.
+    ///
+    /// Counts the DOTTED / CALL forms on the production half for the reason the
+    /// sibling guard above records: a bare-name count measures the prose that
+    /// explains the code. Both functions are therefore named BARE in every
+    /// comment in this file — see the failure messages.
+    #[test]
+    fn the_phase_epoch_moves_with_the_phase_and_the_seam_stays_mounted() {
+        let src = include_str!("state.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+
+        assert_eq!(
+            prod.matches("commit_phase_transition(").count(),
+            2,
+            "exactly one definition and one call. Zero call sites is round 5's \
+             E1 one level up: the seam's own test would stay green while the \
+             epoch went dead again. If this reads 3, a COMMENT wrote the name \
+             with a trailing `(` — name it bare in prose"
+        );
+        assert_eq!(
+            prod.matches(".bump_phase_epoch(").count(),
+            1,
+            "the epoch bump lives inside the seam and nowhere else. Kept as an \
+             exact count, not a floor: migration 0062 is applied and immutable \
+             and says the epoch has 'exactly ONE production call site', so a \
+             second caller would falsify a claim the tree can never correct. If \
+             this reads 2, a COMMENT wrote the name with a leading `.` — name \
+             it bare in prose"
         );
     }
 }

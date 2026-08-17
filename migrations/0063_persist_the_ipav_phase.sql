@@ -1,0 +1,50 @@
+-- The IPAV phase survives a restart.
+--
+-- Round 5, N1. `core/ipav.rs` had no persistence and `IpavState::default()` is
+-- Investigate, so `core/session.rs`'s unconditional construction meant every
+-- session start began at Investigate regardless of where the work actually was.
+-- `restart_session` drops the handle and re-runs that path, and so does opening a
+-- session after an app restart — which in this repo is routine, because a rebuild
+-- respawns live sessions under the new binary.
+--
+-- ## Why this is worth a column
+--
+-- Two costs, and the second is the one that matters.
+--
+-- The chip reads `I` while the work is mid-Apply — a lie on the dashboard.
+--
+-- And every participant is handed `transition_notice()` for the restored phase:
+-- "[PHASE: Investigate] Gather facts only. No Edit, Write, or mutating Bash." A
+-- session that was mid-Apply resumes with its executor instructed not to edit.
+-- The phase is documented as a self-discipline signal rather than a permission
+-- gate, which is exactly why a WRONG one is expensive: nothing mechanical stops
+-- the participants, so the only thing keeping the phase honest is that it is
+-- true, and after a restart it was not.
+--
+-- ## Why a column and not a re-derivation
+--
+-- The phase COULD be recovered from the newest `phase_change` row in `messages`
+-- — 114 of them exist. That was rejected: `phase_change` rows are synthetic
+-- `author=user` host rows whose BODY is `transition_notice()`, so recovering the
+-- phase means parsing prose back into an enum, and the prose is guard-tested to
+-- change wording. A column stores the answer instead of reconstructing it.
+--
+-- ## Shape
+--
+-- Nullable with no default, so every existing INSERT keeps working untouched —
+-- 0044's lesson, where a NOT NULL column with no default stopped the app booting
+-- entirely. NULL is meaningful rather than a gap: it reads "this session has never
+-- transitioned", and `IpavState::default()` (Investigate) is the correct answer
+-- for it, which is also what every pre-0063 row will read forever.
+--
+-- Stores the canonical lowercase tag from `IpavPhase::tag()` — the same vocabulary
+-- `session_documents.phase` already uses, so there is one phase spelling in the
+-- database rather than two. `IpavPhase::parse` is case-insensitive and accepts
+-- both chips and full names, so a hand-edited value still round-trips.
+--
+-- Deliberately NOT added to the `Session` row struct: that type derives `FromRow`
+-- and is built by exactly three `query_as::<_, Session>` sites, so a new field
+-- must appear in all three SELECTs or `query_as` fails at RUNTIME. `phase_epoch`
+-- (0062) settled this shape already — a dedicated one-column query, no blast
+-- radius. This follows it.
+ALTER TABLE sessions ADD COLUMN ipav_phase TEXT;

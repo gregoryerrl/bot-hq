@@ -857,7 +857,29 @@ async fn spawn_session_handle(
         info!(session_id = %session.id, "solo session (one spawnable participant)");
     }
 
-    let ipav = Arc::new(Mutex::new(IpavState::default()));
+    // **Restored, not defaulted** (migration 0063, round 5's N1). This line was
+    // `IpavState::default()` — Investigate — for every session start, and it runs
+    // on `restart_session` (a config change) and on opening a session after an
+    // app restart, both routine. So a session mid-Apply resumed with the chip
+    // reading `I` and every participant handed "Gather facts only. No Edit,
+    // Write, or mutating Bash".
+    //
+    // NULL means the session has never transitioned, and Default is the right
+    // answer for it. An unparseable value falls back the same way rather than
+    // failing the spawn: a bad phase string must not be the reason a session
+    // cannot start.
+    let ipav = Arc::new(Mutex::new(
+        match storage.persisted_ipav_phase(&session.id).await {
+            Ok(Some(tag)) => IpavState {
+                current_phase: IpavPhase::parse(&tag).unwrap_or_default(),
+            },
+            Ok(None) => IpavState::default(),
+            Err(e) => {
+                warn!(?e, session_id = %session.id, "reading the persisted IPAV phase");
+                IpavState::default()
+            }
+        },
+    ));
     let awaiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Register the flag with the bridge so user-blocking MCP tools can set it
     // synchronously (before the agent's next chunk volleys). The duo pumps
@@ -2389,6 +2411,32 @@ pub(crate) async fn resolve_spawn_config(
 
 #[cfg(test)]
 mod tests {
+    /// **The restore stays mounted.** The third wire round 5 added, guarded the
+    /// same way as the other two.
+    ///
+    /// `persisted_ipav_phase` is `pub` on `pub struct Storage` in a lib crate, so
+    /// rustc's `dead_code` can never fire on it, and a storage-level round-trip
+    /// test calls it directly and so does not pin this call site. Deleting the
+    /// restore here would silently return every session to starting at
+    /// Investigate — round 5's N1 restored, with 0063 shipped and inert, which is
+    /// precisely the shape E1 shipped in.
+    ///
+    /// Counts the dotted CALL form on the production half, and the name is
+    /// therefore written BARE in every comment in this file.
+    #[test]
+    fn the_persisted_phase_is_actually_read_at_session_start() {
+        let src = include_str!("session.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        assert_eq!(
+            prod.matches(".persisted_ipav_phase(").count(),
+            1,
+            "the session start reads the persisted phase exactly once. Zero              means 0063 ships as a column nothing loads and every session              resumes at Investigate again. If this reads 2, a COMMENT wrote the              name with a leading `.` — name it bare in prose"
+        );
+    }
+
     use super::*;
     use tempfile::TempDir;
 

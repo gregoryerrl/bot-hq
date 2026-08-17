@@ -901,10 +901,21 @@ see them as natural switch prompts.
 
 ## IPAV state
 
-In-memory cache: `HashMap<SessionId, IpavState>` where `IpavState {
-current_phase, phase_log }`. The CURRENT phase is not persisted — but the
-machinery that decides when it may CHANGE is (see "The phase-advance vote"), so
-"IPAV lives only in memory" is no longer the whole picture.
+`SessionHandle.ipav: Arc<Mutex<IpavState>>` — one per live handle, plus a `Weak`
+registry in `signaling/bridge` (`session_phase`) so a tool call can read the phase
+without reaching through the session map. `IpavState` holds exactly one field,
+`current_phase`.
+
+(This paragraph described a `HashMap<SessionId, IpavState>` with a `phase_log`
+field until round 5. Neither has existed; `core/ipav.rs` carried the same wrong
+sentence in its own doc comment, so correcting either one alone left the other to
+re-seed it.)
+
+The CURRENT phase is not persisted — but the machinery that decides when it may
+CHANGE is (see "The phase-advance vote"), so "IPAV lives only in memory" is no
+longer the whole picture. Consequences of that split, both real: a restart resets
+the chip to Investigate while the work continues wherever it was, and the
+durable vote rows outlive the volatile phase they were cast about.
 
 Agents die with the app, so a restart gives fresh sessions; they resume
 their own transcript via `--resume` off each participant's own
