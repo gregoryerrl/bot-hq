@@ -613,7 +613,7 @@ impl AppState {
             // this session has no non-mutating peer.
             let mut eyes_queued: Option<bool> = None;
             for agent in handle.agents().filter(|a| !a.edits_files()) {
-                let queued = agent.handle.interrupt("cancel");
+                let queued = agent.interrupt("cancel");
                 if !queued {
                     tracing::warn!(session_id, slug = %agent.slug, "cancel: peer interrupt was NOT queued");
                 }
@@ -621,7 +621,7 @@ impl AppState {
             }
             let hands_queued = handle
                 .hands()
-                .is_some_and(|h| h.handle.interrupt("cancel"));
+                .is_some_and(|h| h.interrupt("cancel"));
             if !hands_queued {
                 tracing::warn!(session_id, "cancel: HANDS interrupt was NOT queued");
             }
@@ -1356,7 +1356,7 @@ impl AppState {
         // the turn it waited for. See [`UserSend`].
         if send.preempts() {
             for agent in handle.agents() {
-                agent.handle.interrupt("user-preempt");
+                agent.interrupt("user-preempt");
             }
         }
         // No recipient list: the row IS the delivery (rc3 D19). The ring hands
@@ -1982,12 +1982,23 @@ impl AppState {
     /// and this makes its own declaration true. Pause remains the only USER
     /// interrupt; peers are untouched (the ring latch already stops the next
     /// deal, and a non-declarer holding a live turn keeps it).
+    ///
+    /// Known cost, documented rather than fixed: this interrupt reaches the
+    /// subprocess off the serial event worker (`main.rs`), on a different path
+    /// from the tool's JSON-RPC ack, and it usually wins — so the declarer's own
+    /// transcript shows its `halt` answered with claude-code's cancellation text
+    /// ("The user doesn't want to proceed with this tool use…"). That text is
+    /// claude-code's, not ours; what made it harmful was the pump counting the
+    /// aborted turn as an error (fixed via `SessionAgent::interrupt`'s epoch
+    /// stamp). The deterministic fix — interrupting on the dispatch path AFTER
+    /// the response is written — is a separate change; a delay here would only
+    /// bet on which of two unrelated paths runs first.
     pub async fn halt_declared(&self, session_id: &str, agent_slug: &str) {
         let sessions = self.sessions.lock().await;
         if let Some(handle) = sessions.get(session_id) {
             for agent in handle.agents() {
                 if agent.slug == agent_slug {
-                    agent.handle.interrupt("halt-self-declared");
+                    agent.interrupt("halt-self-declared");
                 }
             }
         }

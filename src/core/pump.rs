@@ -125,6 +125,17 @@ pub struct PumpConfig {
     /// increases at every handover, so "unchanged" is an exact test rather than a
     /// heuristic.
     pub turn_epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// The epoch bot-hq last INTERRUPTED this participant in — the handle's
+    /// [`AgentHandle::interrupted_epoch`](crate::agents::AgentHandle::interrupted_epoch)
+    /// cell, stamped by `core::session::SessionAgent::interrupt` for a Pause,
+    /// a typed-Send preempt or the agent's own halt (D35). claude-code reports
+    /// an aborted turn as `is_error:true`; when that completion's epoch equals
+    /// this cell the pump knows the failure is bot-hq's doing and keeps it out
+    /// of the back-to-back-error streak. Not optional: a fresh cell (never
+    /// interrupted) is what a pump gets when nothing wires the handle's, so the
+    /// construction site cannot compile with the wiring line missing — the one
+    /// deletion that would silently make every interrupt an error again.
+    pub interrupted_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// True while this participant is ORIENTING rather than holding a turn
     /// (rc3 **D21**). Set before the primer goes out, cleared before the ring
     /// hands out turn one.
@@ -168,6 +179,9 @@ impl PumpConfig {
             liveness: None,
             sequencer_tx: None,
             turn_epoch: None,
+            interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(
+                crate::agents::NO_INTERRUPT_EPOCH,
+            )),
             booting: None,
             boot_done: None,
         }
@@ -360,7 +374,9 @@ pub async fn pump_agent(
     // keep dealing turned a context-blown pair into an error volley: 11
     // "Prompt is too long" turns in 5 minutes before the text-repeat net
     // halted the cycle — silently. Two in a row → host-declared halt with the
-    // error as the visible reason, the provider-limit stall's route.
+    // error as the visible reason, the provider-limit stall's route. A turn
+    // bot-hq interrupted itself (Pause, preempt, the agent's own halt) is NOT
+    // an errored turn and does not count — see `cfg.interrupted_epoch`.
     let mut consecutive_errored_turns: usize = 0;
     // B5: the epoch of the turn in flight, snapshotted from `cfg.turn_epoch` on
     // this turn's FIRST event and cleared when it completes. See the field's doc
@@ -758,14 +774,44 @@ pub async fn pump_agent(
                     )
                 };
                 if is_error {
-                    // Failed turn (API/permission error). The error text is already
-                    // persisted per-chunk above for UI visibility, but must NOT be
-                    // peer-forwarded: forwarding it bounces the error to the peer,
-                    // the peer replies, and that re-triggers this failing agent — an
-                    // unbounded error-spam loop (Rain on the DeepSeek gateway,
-                    // 2026-05-29). Drain silently.
-                    debug!(agent = %cfg.slug, "errored turn; draining buffer without router-forward");
-                    consecutive_errored_turns += 1;
+                    // Failed turn. The error text is already persisted per-chunk
+                    // above for UI visibility; the buffer is drained rather than
+                    // handed anywhere, because bouncing an error line to a peer
+                    // was an unbounded error-spam loop (2026-05-29).
+                    //
+                    // **A turn bot-hq itself aborted is not a failed turn.**
+                    // claude-code ends an interrupted turn `is_error:true` (a
+                    // `result` with `terminal_reason:"aborted_streaming"`), so a
+                    // user Pause, a typed-Send preempt or the agent's OWN halt
+                    // (D35 interrupts the declarer) all arrive here looking like
+                    // an API error. Counting them turned steering a session into
+                    // "back-to-back errors": the banner below fired 3× on
+                    // 2026-08-17, every one over ordinary prose, and each time it
+                    // REPLACED the reason the agent had just declared. The stamp
+                    // is compared to THIS turn's epoch — an interrupt with no
+                    // turn in flight stamps the epoch last completed with, which
+                    // the next completion cannot carry, so a stale stamp cannot
+                    // hide a genuine error (a bare flag could).
+                    let this_turn = turn_epoch.or_else(|| {
+                        cfg.turn_epoch
+                            .as_ref()
+                            .map(|c| c.load(std::sync::atomic::Ordering::Acquire))
+                    });
+                    let stamp = cfg
+                        .interrupted_epoch
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let host_interrupted =
+                        stamp != crate::agents::NO_INTERRUPT_EPOCH && Some(stamp) == this_turn;
+                    if host_interrupted {
+                        debug!(
+                            agent = %cfg.slug,
+                            epoch = ?this_turn,
+                            "interrupted turn (bot-hq's own interrupt); not counted as an error"
+                        );
+                    } else {
+                        debug!(agent = %cfg.slug, "errored turn; draining buffer, nothing handed on");
+                        consecutive_errored_turns += 1;
+                    }
                     if consecutive_errored_turns >= 2 {
                         // Read before the buffer is cleared below: the error
                         // line is the turn's tail, and it is what the banner
@@ -1093,6 +1139,9 @@ mod tests {
             liveness: None,
             sequencer_tx: None,
             turn_epoch: None,
+            interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(
+                crate::agents::NO_INTERRUPT_EPOCH,
+            )),
             booting: None,
             boot_done: None,
         }
@@ -1158,6 +1207,20 @@ mod tests {
             }
             _ => None,
         }
+    }
+
+    /// [`next_turn_end`], polled for up to ~2 s (the pump runs on the same
+    /// current-thread runtime, so the wait must yield).
+    async fn wait_turn_end(
+        rx: &mut mpsc::Receiver<crate::core::sequencer::SequencerCommand>,
+    ) -> Option<crate::core::sequencer::TurnEnding> {
+        for _ in 0..200 {
+            if let Some(ending) = next_turn_end(rx) {
+                return Some(ending);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        None
     }
 
     /// The agent-authored text rows this pump persisted, in order.
@@ -1652,6 +1715,97 @@ mod tests {
         assert!(
             !tray.iter().any(|q| q.kind == "halt"),
             "the error halt writes no tray rows: {tray:?}"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn interrupted_turns_do_not_count_toward_the_errored_streak() {
+        // 2026-08-17: a user Pause and the agent's own `halt` (D35 interrupts
+        // the declarer) both end the turn `is_error:true`, exactly like an API
+        // failure — and the streak above fired its "failing back-to-back …
+        // close the session" halt three times that day, every one over ordinary
+        // prose, each time REPLACING the reason the agent had just declared.
+        // The complement of the test above: two host-interrupted completions
+        // in a row must NOT fill the halt slot, and a genuine streak after them
+        // still must.
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        // The ring's epoch cell for this participant, and the interrupt stamp
+        // `SessionAgent::interrupt` writes into the handle's cell — both wired
+        // exactly as `spawn_session_handle` wires them.
+        let epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let interrupted = Arc::new(std::sync::atomic::AtomicU64::new(
+            crate::agents::NO_INTERRUPT_EPOCH,
+        ));
+        cfg.turn_epoch = Some(Arc::clone(&epoch));
+        cfg.interrupted_epoch = Arc::clone(&interrupted);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        // A turn: the ring hands epoch N out (cell moves), the agent speaks
+        // (the pump binds N on that first event), then the turn ends
+        // `is_error:true`. `interrupt_at` is `Some(N)` when bot-hq interrupted
+        // it mid-turn — the stamp `SessionAgent::interrupt` writes.
+        let aborted_turn = |ev_tx: mpsc::Sender<AgentEvent>,
+                            epoch: Arc<std::sync::atomic::AtomicU64>,
+                            interrupted: Arc<std::sync::atomic::AtomicU64>,
+                            n: u64,
+                            interrupt_at: Option<u64>| async move {
+            epoch.store(n, std::sync::atomic::Ordering::Release);
+            ev_tx
+                .send(AgentEvent::Text(format!("ordinary prose of turn {n}")))
+                .await
+                .unwrap();
+            // Let the pump bind the epoch on the text before the interrupt lands.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if let Some(at) = interrupt_at {
+                interrupted.store(at, std::sync::atomic::Ordering::Release);
+            }
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: Some("error_during_execution".into()),
+                    is_error: true,
+                    api_error_status: None,
+                    context: ContextReport::none(ContextVerdict::NoWindow),
+                })
+                .await
+                .unwrap();
+        };
+        // Turn 5: Pause. Turn 6: the agent's own halt. Both interrupted by
+        // bot-hq, both `is_error`, back to back.
+        aborted_turn(ev_tx.clone(), Arc::clone(&epoch), Arc::clone(&interrupted), 5, Some(5)).await;
+        assert!(wait_turn_end(&mut ring_rx).await.is_some(), "an interrupted turn still reports its end");
+        aborted_turn(ev_tx.clone(), Arc::clone(&epoch), Arc::clone(&interrupted), 6, Some(6)).await;
+        assert!(wait_turn_end(&mut ring_rx).await.is_some());
+        assert!(
+            storage.session_halt("s1").await.unwrap().is_none(),
+            "two turns bot-hq interrupted itself are not a streak of failures — the \
+             halt slot must stay empty (this is the false banner of 2026-08-17)"
+        );
+
+        // A stale stamp cannot hide a real error: turns 7 and 8 fail for real
+        // (nobody interrupted them; the stamp still reads 6) — the streak
+        // trips exactly as before this change.
+        aborted_turn(ev_tx.clone(), Arc::clone(&epoch), Arc::clone(&interrupted), 7, None).await;
+        assert!(wait_turn_end(&mut ring_rx).await.is_some());
+        assert!(
+            storage.session_halt("s1").await.unwrap().is_none(),
+            "one genuine error is survivable"
+        );
+        aborted_turn(ev_tx.clone(), Arc::clone(&epoch), Arc::clone(&interrupted), 8, None).await;
+        assert!(wait_turn_end(&mut ring_rx).await.is_some());
+        let halt = storage.session_halt("s1").await.unwrap();
+        assert!(
+            halt.as_ref()
+                .is_some_and(|(_, reason, _)| reason.contains("failing back-to-back")),
+            "two GENUINE errors in a row still fill the halt slot: {halt:?}"
         );
 
         drop(ev_tx);

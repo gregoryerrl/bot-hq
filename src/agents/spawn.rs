@@ -615,7 +615,26 @@ pub struct AgentHandle {
     /// messages, exactly as the binary's control protocol expects.
     pub control_tx: mpsc::Sender<ControlRequest>,
     kill_tx: Option<oneshot::Sender<()>>,
+    /// The turn epoch that was live the last time bot-hq ITSELF interrupted this
+    /// agent (`NO_INTERRUPT_EPOCH` = never). Shared with the agent's pump, which
+    /// reads it when a turn completes `is_error:true`: claude-code reports an
+    /// aborted turn as an error (`result` with `terminal_reason:
+    /// "aborted_streaming"`, `is_error:true` — `signaling/protocol.rs`), so
+    /// without this a user Pause or the agent's own `halt` was indistinguishable
+    /// from an API failure, and two of them in a row fired the pump's
+    /// "turns are failing back-to-back … close the session" halt over the reason
+    /// the agent had just declared (measured 3× on 2026-08-17, every one false).
+    ///
+    /// Keyed on the EPOCH rather than a bare flag on purpose: an interrupt to an
+    /// idle agent is a documented harmless no-op (the typed-Send preempt fires
+    /// it at every agent), and a flag set with no turn in flight would survive to
+    /// swallow the NEXT turn's genuine error. The epoch stamped while idle is the
+    /// one this agent last completed with, which no future completion can carry.
+    interrupted_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
+
+/// [`AgentHandle::interrupted_epoch`]'s "never interrupted" value.
+pub const NO_INTERRUPT_EPOCH: u64 = u64::MAX;
 
 impl AgentHandle {
     /// Assemble a handle from channels a caller owns, rather than from a spawn.
@@ -645,6 +664,7 @@ impl AgentHandle {
             input_tx: ParticipantInput::new(session_id, input_tx),
             control_tx,
             kill_tx: Some(kill_tx),
+            interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(NO_INTERRUPT_EPOCH)),
         }
     }
 
@@ -669,10 +689,32 @@ impl AgentHandle {
     /// whether it was queued; a full or closed control channel returns `false`
     /// and the caller escalates to [`kill`](Self::kill). `request_id` correlates
     /// the `control_response` ACK.
-    pub fn interrupt(&self, request_id: impl Into<String>) -> bool {
+    ///
+    /// Private on purpose: the only way to interrupt from outside is
+    /// [`interrupt_at`](Self::interrupt_at), which records the epoch — so a
+    /// caller cannot compile the version that forgets to. Core reaches it via
+    /// `core::session::SessionAgent::interrupt`.
+    fn interrupt(&self, request_id: impl Into<String>) -> bool {
         self.control_tx
             .try_send(ControlRequest::interrupt(request_id))
             .is_ok()
+    }
+
+    /// [`interrupt`](Self::interrupt), recording the turn epoch that is live for
+    /// this agent as it happens, so the pump can tell the aborted turn's
+    /// `is_error` completion from a real failure. Every host-side interrupt of a
+    /// participant goes through `core::session::SessionAgent::interrupt`, which
+    /// supplies the epoch off the participant's own cell.
+    pub fn interrupt_at(&self, request_id: impl Into<String>, epoch: u64) -> bool {
+        self.interrupted_epoch
+            .store(epoch, std::sync::atomic::Ordering::Release);
+        self.interrupt(request_id)
+    }
+
+    /// The cell [`interrupt_at`](Self::interrupt_at) writes — handed to this
+    /// agent's pump at spawn.
+    pub fn interrupted_epoch(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        Arc::clone(&self.interrupted_epoch)
     }
 }
 
@@ -787,6 +829,7 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         input_tx: ParticipantInput::new(cfg.session_id, input_tx),
         control_tx,
         kill_tx: Some(kill_tx),
+        interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(NO_INTERRUPT_EPOCH)),
     })
 }
 
@@ -865,6 +908,7 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
         input_tx: ParticipantInput::new(session_id, out_input_tx),
         control_tx: out_control_tx,
         kill_tx: Some(kill_tx),
+        interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(NO_INTERRUPT_EPOCH)),
     })
 }
 
@@ -2038,6 +2082,7 @@ mod tests {
             input_tx: ParticipantInput::new("test-session", in_tx),
             control_tx,
             kill_tx: Some(kill_tx),
+            interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(NO_INTERRUPT_EPOCH)),
         };
         (handle, ev_tx, in_rx)
     }

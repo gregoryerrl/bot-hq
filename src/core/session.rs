@@ -105,6 +105,12 @@ pub struct SessionAgent {
     /// because the handle it hangs off is rebuilt with it.
     pub system_prompt_path: PathBuf,
     pub handle: AgentHandle,
+    /// This participant's turn-epoch cell — the same `Arc` the ring writes at
+    /// each handover and its pump snapshots on a turn's first event
+    /// (`PumpConfig::turn_epoch`). Carried here so a host-side interrupt can
+    /// stamp the epoch it lands in ([`Self::interrupt`]). `None` only for a
+    /// session with no ring (no sequencer), where no turn can be misclassified.
+    pub turn_epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl SessionAgent {
@@ -112,6 +118,20 @@ impl SessionAgent {
     /// replaced `slug == "brian"`.
     pub fn edits_files(&self) -> bool {
         self.capabilities.grants(crate::agents::Capability::EditFiles)
+    }
+
+    /// Interrupt this participant's in-flight generation, recording the turn
+    /// epoch it happens in so the pump does not count the aborted turn as a
+    /// failure. **The one way core interrupts a participant** — `cancel`
+    /// (Pause), `user-preempt` and `halt-self-declared` all come through here;
+    /// see [`AgentHandle::interrupted_epoch`] for why the epoch, not a flag.
+    pub fn interrupt(&self, request_id: impl Into<String>) -> bool {
+        let epoch = self
+            .turn_epoch
+            .as_ref()
+            .map(|c| c.load(std::sync::atomic::Ordering::Acquire))
+            .unwrap_or(crate::agents::NO_INTERRUPT_EPOCH);
+        self.handle.interrupt_at(request_id, epoch)
     }
 }
 
@@ -1041,6 +1061,10 @@ async fn spawn_session_handle(
         let cfg = PumpConfig {
             sequencer_tx: sequencer_tx.clone(),
             turn_epoch: turn_epochs[slot].clone(),
+            // The cell `SessionAgent::interrupt` stamps — same `Arc` as the
+            // handle's, so a host interrupt and the pump's completion read one
+            // number.
+            interrupted_epoch: handles[slot].interrupted_epoch(),
             bridge: Some(Arc::clone(&bridge)),
             activity: Some(Arc::clone(&activity)),
             in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
@@ -1271,13 +1295,15 @@ async fn spawn_session_handle(
             .iter()
             .zip(handles)
             .zip(prompt_paths)
-            .map(|((p, handle), system_prompt_path)| SessionAgent {
+            .zip(turn_epochs)
+            .map(|(((p, handle), system_prompt_path), turn_epoch)| SessionAgent {
                 participant_id: Some(p.id),
                 slug: p.slug.clone(),
                 turn_position: p.turn_position,
                 capabilities: participant_capabilities(p),
                 system_prompt_path,
                 handle,
+                turn_epoch,
             })
             .collect(),
         awaiting,
@@ -2480,6 +2506,7 @@ mod tests {
                     let (ktx, _krx) = tokio::sync::oneshot::channel();
                     AgentHandle::from_parts("hands".to_string(), id, erx, itx, ctx, ktx)
                 },
+                turn_epoch: None,
             }],
             awaiting: Arc::clone(&awaiting),
             user_broadcasts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2586,6 +2613,7 @@ mod tests {
                 let (ktx, _krx) = tokio::sync::oneshot::channel();
                 AgentHandle::from_parts("hands".to_string(), "s1", erx, itx, ctx, ktx)
             },
+            turn_epoch: None,
         };
 
         // The only thing `deliver` may be handed: a receipt for a row that
@@ -2909,6 +2937,7 @@ mod tests {
                     capabilities: participant_capabilities(p),
                     system_prompt_path: PathBuf::from("/nonexistent/system-prompt.txt"),
                     handle: stub_handle(&p.slug),
+                    turn_epoch: None,
                 })
                 .collect();
             assert_eq!(
@@ -2990,7 +3019,45 @@ mod tests {
             ),
             system_prompt_path: PathBuf::from(format!("/nonexistent/{slug}-system-prompt.txt")),
             handle: stub_handle(slug),
+            turn_epoch: None,
         }
+    }
+
+    /// The half of the A1 fix a pump test cannot reach: the pump excludes an
+    /// `is_error` completion whose epoch equals the handle's stamp, and THIS is
+    /// what writes the stamp. Gutting `SessionAgent::interrupt` to a bare
+    /// `handle.interrupt` compiled and left the suite green until this pinned
+    /// it (round-7 review); the other two ways to revert the fix silently — an
+    /// `Option` cell the construction site could omit, and a still-`pub`
+    /// `AgentHandle::interrupt` a call site could fall back to — no longer
+    /// compile.
+    #[test]
+    fn a_session_agent_interrupt_stamps_the_live_epoch_into_its_handle() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let cell = Arc::new(AtomicU64::new(41));
+        let mut agent = stub_agent("hands", 0, &["edit_files"]);
+        agent.turn_epoch = Some(Arc::clone(&cell));
+        assert_eq!(
+            agent.handle.interrupted_epoch().load(Ordering::Acquire),
+            crate::agents::NO_INTERRUPT_EPOCH,
+            "never interrupted reads as the sentinel"
+        );
+        // The stub's control receiver is dropped, so the queue itself fails —
+        // the stamp must land regardless: it is written BEFORE the send.
+        agent.interrupt("cancel");
+        assert_eq!(agent.handle.interrupted_epoch().load(Ordering::Acquire), 41);
+        // The ring moves the cell; a later interrupt stamps the newer epoch.
+        cell.store(42, Ordering::Release);
+        agent.interrupt("halt-self-declared");
+        assert_eq!(agent.handle.interrupted_epoch().load(Ordering::Acquire), 42);
+        // No epoch cell (a session with no ring): the sentinel, so the pump can
+        // never match it against a turn.
+        let ringless = stub_agent("eyes", 1, &[]);
+        ringless.interrupt("cancel");
+        assert_eq!(
+            ringless.handle.interrupted_epoch().load(Ordering::Acquire),
+            crate::agents::NO_INTERRUPT_EPOCH
+        );
     }
 
     /// The fallback path, minus the runtime question rc3 D9 deleted.

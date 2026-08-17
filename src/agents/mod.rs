@@ -20,5 +20,5 @@ pub use prompts::builtin_prose_for_role;
 pub use protocol::{OutgoingUserMessage, StreamEvent};
 pub use spawn::{
     reconcile_spawn_knobs, spawn_agent, spawn_supervised_agent, AgentEvent, AgentHandle,
-    AgentHealth, ParticipantInput, RetryPolicy, SpawnConfig,
+    AgentHealth, ParticipantInput, RetryPolicy, SpawnConfig, NO_INTERRUPT_EPOCH,
 };
