@@ -2016,8 +2016,8 @@ async fn boot_then_start(
     // the participants are handed it directly, here, and must not also read it
     // back as unread history on turn one.
     let receipt = match crate::core::post_system_notice(
-        &storage,
-        Some(&bridge),
+        storage,
+        Some(bridge),
         session_id,
         crate::storage::MessageKind::Boot,
         boot_primer(),
@@ -2074,8 +2074,8 @@ async fn boot_then_start(
                     timeout.as_secs()
                 );
                 crate::core::post_system_notice(
-                    &storage,
-                    Some(&bridge),
+                    storage,
+                    Some(bridge),
                     session_id,
                     crate::storage::MessageKind::SystemNotice,
                     notice,
@@ -2145,8 +2145,8 @@ async fn boot_then_start(
     // session that looks stopped for no reason is the report this whole arc
     // began with (the helper warns).
     crate::core::post_system_notice(
-        &storage,
-        Some(&bridge),
+        storage,
+        Some(bridge),
         session_id,
         crate::storage::MessageKind::SystemNotice,
         notice,

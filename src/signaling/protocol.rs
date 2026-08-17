@@ -914,7 +914,7 @@ mod tests {
     #[test]
     fn request_approval_kind_enum_is_the_requestable_kinds() {
         let d = tool_descriptors()
-            .into_iter()
+            .iter()
             .find(|d| d.name == "request_approval")
             .expect("request_approval is registered");
         let listed: Vec<String> = d.input_schema["properties"]["kind"]["enum"]
