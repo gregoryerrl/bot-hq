@@ -2419,6 +2419,19 @@ mod tests {
             !user_cmd.contains("PhaseAdvanceSource::Agent"),
             "nothing the USER invokes may advance as Agent"
         );
+        // **The link that closes the chain.** Knowing the two call sites pass
+        // the right variant, and that `releases_ring` maps them correctly, still
+        // leaves `advance_phase` free to ignore both and pass a literal —
+        // measured, not reasoned: replacing this call's third argument with
+        // `false` restores the silent stall verbatim and passes all 1178 lib
+        // tests. Three green links around a cut fourth is precisely the shape
+        // this guard exists to refuse.
+        assert!(
+            prod.contains("source.releases_ring()"),
+            "advance_phase must derive the ring release from `source` — a \
+             literal there re-creates the silent stall with every other link \
+             still green"
+        );
         let agent_path = include_str!("../main.rs");
         assert!(
             agent_path.contains("PhaseAdvanceSource::Agent"),
