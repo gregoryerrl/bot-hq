@@ -2,7 +2,6 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -19,6 +18,7 @@ import type { AgentMessage } from "../lib/bindings";
 // Stable reference so the zustand selector doesn't return a fresh array per
 // call (would trigger infinite re-renders via Object.is).
 const EMPTY_MESSAGES: AgentMessage[] = [];
+const EMPTY_RESOLVED: ReadonlySet<string> = new Set();
 /** Rows per history page — the mount read and each "load older" step. */
 export const CHAT_PAGE = 300;
 
@@ -181,24 +181,13 @@ export function ChatPane({
   // Which tool calls have already come back. A `tool_use` whose id isn't in
   // here is STILL RUNNING — without this a five-minute `cargo build --release`
   // and a 20ms `Read` render identically and nothing on screen moves while the
-  // build runs. Computed over the whole list (not just the virtual window) so
-  // scrolling can't turn a finished call back into a running one, and memoized
-  // so it isn't re-parsed on every scroll frame.
-  const resolvedToolIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const m of messages) {
-      if (m.kind !== "tool_result") continue;
-      try {
-        const id = (JSON.parse(m.content) as { tool_use_id?: unknown })
-          .tool_use_id;
-        if (typeof id === "string") ids.add(id);
-      } catch {
-        // Unparseable result row — skip it; the worst case is a call that
-        // keeps showing as running, never a finished one showing as done.
-      }
-    }
-    return ids;
-  }, [messages]);
+  // build runs. Covers the whole retained list (not just the virtual window) so
+  // scrolling can't turn a finished call back into a running one, and lives in
+  // the store, maintained incrementally as rows arrive (round 9: a memo here
+  // re-parsed every result row on every 50 ms batch).
+  const resolvedToolIds = useChatStore(
+    (s) => s.resolvedToolIds[sessionId] ?? EMPTY_RESOLVED,
+  );
 
   return (
     <div
