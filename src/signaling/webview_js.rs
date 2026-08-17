@@ -1,8 +1,7 @@
-//! Shared JavaScript snippet builders for the `webview_*` MCP tools. The
-//! internal (jsonrpc.rs) and external (external_jsonrpc.rs) dispatch surfaces
-//! build byte-identical JS; only their `eval_in_webview` wrapper (handle
-//! source) differs. These builders are the single source of truth for the
-//! snippets. Selectors / text / keys are JSON-encoded so user input can't
+//! JavaScript snippet builders for the `webview_*` MCP tools, and the single
+//! source of truth for those snippets. They were shared by two dispatch
+//! surfaces building byte-identical JS until `external_jsonrpc.rs` was deleted
+//! with the external driver (2026-08-17); `jsonrpc.rs` is the remaining one. Selectors / text / keys are JSON-encoded so user input can't
 //! break out of the string literal.
 
 /// Click the first element matching `selector`.

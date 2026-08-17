@@ -151,11 +151,26 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 // Records each subscribed handler by event name so a test can DELIVER an
 // event. The old mock resolved to a no-op unlisten and captured nothing, which
-// made every event-driven path in this view unreachable from here.
+// made every event-driven path in this view — 19 distinct event names across
+// the frontend — unreachable from here.
+//
+// Keyed by NAME, which is only sound because each name has exactly one
+// subscriber today. A second subscriber would silently replace the first and a
+// test asserting "the handler exists" would then be exercising the wrong one —
+// so that assumption throws instead of degrading. React runs an effect's
+// cleanup before re-running it, so a legitimate re-subscribe unlistens first
+// and does not trip this.
 vi.mock("@tauri-apps/api/event", () => {
   const listeners = new Map<string, (e: { payload: unknown }) => void>();
   return {
     listen: vi.fn((name: string, handler: (e: { payload: unknown }) => void) => {
+      if (listeners.has(name)) {
+        throw new Error(
+          `two live subscribers to "${name}" — this mock keys handlers by name, ` +
+            `so the second would hide the first and any "the handler exists" ` +
+            `assertion would silently exercise the wrong one`,
+        );
+      }
       listeners.set(name, handler);
       return Promise.resolve(() => listeners.delete(name));
     }),

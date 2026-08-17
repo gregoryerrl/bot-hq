@@ -761,7 +761,8 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         // Webview automation — agents test the bot-hq UI on their own.
-        // Mirror of the external-MCP equivalents in external_jsonrpc.rs.
+        // These mirrored external_jsonrpc.rs's equivalents until the external
+        // driver was deleted (2026-08-17); this is the only copy now.
         ToolDescriptor {
             name: "webview_screenshot",
             description: "Capture the bot-hq main window to a PNG under `<data_dir>/screenshots/<ts>.png`. Returns `{path}`. Open the file with your built-in Read tool (which supports PNG). Use this AS YOUR EYES on what the user sees. macOS Screen Recording permission required.",

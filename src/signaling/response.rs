@@ -14,8 +14,9 @@ use tracing::warn;
 
 /// Wrap a serializable value as `ToolCallResult::text` with a JSON-string body.
 /// `fallback` is the literal returned if serialization fails ("[]" for arrays,
-/// "{}" for objects). Single source of truth shared between
-/// `signaling::jsonrpc` and `signaling::external_jsonrpc`.
+/// "{}" for objects). It was the single source of truth shared with
+/// `signaling::external_jsonrpc` until that was deleted with the external
+/// driver (2026-08-17); `signaling::jsonrpc` is the remaining caller.
 pub(super) fn result_json<T: serde::Serialize>(value: &T, fallback: &str) -> ToolCallResult {
     ToolCallResult::text(serde_json::to_string(value).unwrap_or_else(|_| fallback.into()))
 }
@@ -58,8 +59,9 @@ pub(super) fn json_response<T: serde::Serialize>(
 /// `Response` ready to bubble out of the handler — either a 400 for body-read
 /// errors or a 200 wrapping a JSON-RPC PARSE_ERROR (-32700) envelope.
 ///
-/// Shared by `signaling::server` and `signaling::external_server`; their
-/// `handle_request` functions had identical copies of this logic before F4.
+/// Extracted at F4 because `signaling::server` and `signaling::external_server`
+/// held identical copies. `external_server` was deleted with the external
+/// driver (2026-08-17), so `signaling::server` is the only caller now.
 pub(super) async fn decode_jsonrpc_body(
     body: Incoming,
 ) -> Result<JsonRpcRequest, Response<Full<Bytes>>> {

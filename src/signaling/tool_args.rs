@@ -1,6 +1,7 @@
-//! Shared JSON-RPC argument-extraction helpers used by both dispatch tables
-//! (`jsonrpc::call_tool` for in-process agents and
-//! `external_jsonrpc::call_external_tool` for external drivers).
+//! Shared JSON-RPC argument-extraction helpers for the `jsonrpc::call_tool`
+//! dispatch table. "Shared" is now historical: the second caller was
+//! `external_jsonrpc::call_external_tool`, deleted with the external driver
+//! (2026-08-17).
 
 use crate::signaling::protocol::JsonRpcError;
 use serde_json::Value;

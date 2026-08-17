@@ -104,10 +104,14 @@ pub struct Paths {
     /// the first-run signal; an old install missing it but carrying root-level
     /// CL triggers the one-time `library/` migration in [`Paths::init`].
     pub version_path: PathBuf,
-    /// Bearer token for the external MCP server. Generated on first run as a
-    /// UUIDv4 with 0o600 perms (unix). Lives under `.local/` (host-only secret,
-    /// never synced). User can rotate by editing the file and restarting.
     /// Policy audit trail: `<data_dir>/.local/violations.jsonl`.
+    ///
+    /// This doc used to open with four lines describing `mcp_token_path` — the
+    /// external driver's bearer token — left attached to THIS field when that
+    /// one was deleted with the driver (2026-08-17). The struct documented a
+    /// secret that no longer exists, on a field it does not describe. Found
+    /// round 6, B7: a doc comment has no compiler to notice it outlived its
+    /// subject, only the next reader.
     pub violations_path: PathBuf,
     /// Policy-file hash cache: `<data_dir>/.local/.policy-hashes.json`.
     pub policy_hashes_path: PathBuf,

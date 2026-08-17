@@ -6,8 +6,9 @@
 //! clients). The internal tool surface — `ask_user_choice`, `advance_phase`,
 //! `request_approval`, `check_commit_message`, `cl_index_search`,
 //! `session_doc_*`, `action_gate`, `webview_*`, and more — is defined by the
-//! descriptors in `protocol.rs` (internal) and `external_jsonrpc.rs`
-//! (external); see ARCHITECTURE.md and README.md for the full list. Counts
+//! descriptors in `protocol.rs`; see ARCHITECTURE.md and README.md for the
+//! full list. (`external_jsonrpc.rs` held the second list until the external
+//! driver was removed, 2026-08-17.) Counts
 //! drift on every tool add — read them from the descriptor lists, not here.
 //!
 //! Transport: streamable HTTP, one server in the GUI process. Each spawned

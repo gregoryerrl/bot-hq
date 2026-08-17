@@ -347,7 +347,14 @@ impl AppState {
         }
     }
 
-    /// Open a session from the external driver.
+    /// Open a session with a full roster, bypassing the create dialog.
+    ///
+    /// **No caller since 2026-08-17.** The external driver was its only one, and
+    /// that was removed and demoted to a planned plugin (PLAN.md). Kept rather
+    /// than deleted because it is the entry point that plugin would reuse, and
+    /// because the roster note below is the hard-won part — audited round 6, B7,
+    /// same call as `set_project_working_repo_path_if_unset`. The Tauri create
+    /// path does NOT come through here; it builds its own `OpenSessionRequest`.
     ///
     /// `slot0_model_id` / `slot1_model_id` are saved-model ids; `None` falls back
     /// to the per-agent config, which is the historical behaviour. Pass them when

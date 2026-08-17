@@ -115,9 +115,10 @@ pub enum SignalingEvent {
         picked: String,
     },
     /// A new message row was persisted to storage. Fired by the per-agent
-    /// pumps (duo) after `storage.insert_message` returns. Lets the
-    /// external MCP's `wait_for_change` tool block server-side instead of
-    /// asking clients to poll.
+    /// pumps (duo) after `storage.insert_message` returns. Lets a
+    /// `wait_for_change` caller block server-side instead of polling — the
+    /// external driver's tool originally, and since its removal (2026-08-17)
+    /// the plugin proxy's (`tauri_cmd/plugin_api.rs`).
     MessagePersisted {
         session_id: Arc<str>,
         message_id: i64,
@@ -1193,8 +1194,9 @@ impl SignalingBridge {
 
     /// Fire a `MessagePersisted` event. Called by the per-agent pumps + the
     /// user-broadcast helper after `storage.insert_message` returns the new
-    /// row id. The external MCP's `wait_for_change` tool subscribes for these
-    /// so clients don't need to poll.
+    /// row id. `wait_for_change` subscribes to these so callers need not poll —
+    /// the plugin proxy's copy (`tauri_cmd/plugin_api.rs`) since the external
+    /// driver was removed (2026-08-17).
     pub fn notify_message_persisted(&self, session_id: Arc<str>, message_id: i64) {
         let _ = self.event_tx.send(SignalingEvent::MessagePersisted {
             session_id,

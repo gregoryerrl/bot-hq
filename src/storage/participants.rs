@@ -1250,8 +1250,15 @@ impl Storage {
     /// Record how many laps of the ring this uninterrupted stretch has
     /// completed.
     ///
-    /// `sessions.round_number` has existed since 0044 with **no writer at all** —
-    /// `MAX(round_number)` was 0 across every session ever recorded. Exactly the
+    /// `sessions.round_number` existed since 0044 with **no writer at all**, and
+    /// `MAX(round_number)` was 0 across every session ever recorded — **as of
+    /// 2026-08-13, before `1984e61` added the writer below.** It reads 14 now.
+    /// The date is the load-bearing part: undated, this sentence is a
+    /// present-tense claim that the column is dead, and it read that way to two
+    /// separate auditors in one session on 2026-08-17, both of whom reported a
+    /// live column as unwired. (`core/sequencer.rs`'s copy carried its date and
+    /// misled nobody.) A measurement is safe only when it says when it was
+    /// taken. Exactly the
     /// shape [`set_current_turn`](Self::set_current_turn) found and closed for
     /// `current_turn_participant_id`, and closed the same way rather than by
     /// dropping the column: 0044 is applied and immutable, so removing it costs
