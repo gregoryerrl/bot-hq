@@ -1555,6 +1555,13 @@ impl Storage {
     /// Session-wide for the participant rather than keyed to one question: it is
     /// called when someone declines to carry the turn, and that declines every
     /// open question, not the one that happens to be current.
+    ///
+    /// **So it filters on `participant_id` ALONE** — every target and every
+    /// epoch, not just the live one. Safe today because one target is live at a
+    /// time (a session votes on the phase it is leaving, and the epoch bump
+    /// clears the rest anyway), and stated rather than left to be re-derived:
+    /// if concurrent targets ever become reachable, this is the line that
+    /// silently withdraws votes for a question nobody asked about.
     pub async fn retract_phase_votes(&self, participant_id: i64) -> Result<()> {
         sqlx::query("DELETE FROM phase_votes WHERE participant_id = ?")
             .bind(participant_id)
