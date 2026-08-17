@@ -3482,6 +3482,67 @@ mod tests {
         )
     }
 
+    /// `0065_role_prose_leaves_the_hub.sql`'s two UPDATEs.
+    fn leaves_the_hub_statement(section: &str) -> String {
+        reseed_statement(
+            include_str!("../../migrations/0065_role_prose_leaves_the_hub.sql"),
+            "0065",
+            section,
+        )
+    }
+
+    /// **The guard on migration 0065, both directions, both roles** (round 8).
+    /// The prose being moved is the router's vocabulary — "the hub", "does NOT
+    /// forward", "the volley-breaker" — plus the D37 vote sentence neither role
+    /// carried, and EYES's "`halt`, which is HANDS'". HANDS is guarded on
+    /// 0055's seed, EYES on 0049's (its last reseed). A user's edit survives on
+    /// either row.
+    #[tokio::test]
+    async fn the_0065_prose_reseed_overwrites_the_previous_seeds_but_not_a_user_edit() {
+        let s = storage_with_0044().await;
+
+        // Half 1 — a stock migrated database is on the NEW constants, for both.
+        for (slug, expected) in [
+            ("hands", crate::agents::prompts::HANDS_ROLE),
+            ("eyes", crate::agents::prompts::EYES_ROLE),
+        ] {
+            let role = s.role_by_slug(slug).await.unwrap().unwrap();
+            let prose = role.description_prompt.expect("prose seeded");
+            assert_eq!(prose, expected, "0065 did not overwrite the previous seed for {slug}");
+            assert!(!prose.contains("the hub"), "{slug} still says 'the hub'");
+            assert!(!prose.contains("hub feed"), "{slug} still says 'hub feed'");
+            assert!(!prose.contains("volley-breaker"), "{slug} still names the volley-breaker");
+            assert!(prose.contains("advance_phase"), "{slug} does not mention the vote");
+        }
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap().description_prompt.unwrap();
+        assert!(hands.contains("Phase boundaries are a vote"));
+        assert!(!hands.contains("batched with their next message"));
+        let eyes = s.role_by_slug("eyes").await.unwrap().unwrap().description_prompt.unwrap();
+        assert!(eyes.contains("The phase moves by VOTE"));
+        assert!(!eyes.contains("which is HANDS'"), "halt is the roster's, not a role name's");
+
+        // Half 2 — each statement, replayed against a row the user has edited,
+        // leaves it alone.
+        for (slug, section) in [("hands", "-- 1. HANDS"), ("eyes", "-- 2. EYES")] {
+            let edit = format!("You are {slug}. Edited by the user.");
+            sqlx::query("UPDATE roles SET description_prompt = ? WHERE slug = ?")
+                .bind(&edit)
+                .bind(slug)
+                .execute(s.pool())
+                .await
+                .unwrap();
+            sqlx::query(&leaves_the_hub_statement(section))
+                .execute(s.pool())
+                .await
+                .unwrap();
+            assert_eq!(
+                s.role_by_slug(slug).await.unwrap().unwrap().description_prompt.as_deref(),
+                Some(edit.as_str()),
+                "0065 clobbered a user-edited prompt for {slug}"
+            );
+        }
+    }
+
     /// **The guard on migration 0055, both directions** — the same two-sided
     /// proof 0049 and 0050 carry: overwrite the previous seed, never a user's
     /// edit. The prose being moved is the yield discipline that taught HANDS
