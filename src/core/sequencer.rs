@@ -2376,6 +2376,16 @@ async fn advance_turn(
                         // necessarily `None`. Measured, not reasoned: a version
                         // of this that consulted it found zero votes remaining.
                         //
+                        // The two sets coincide EXACTLY, which is what makes
+                        // this "by construction" rather than "in practice":
+                        // `:1423` sets `spoke_this_lap` for anything that is not
+                        // `Passed` — `Done` included — so `!spoke_this_lap` holds
+                        // if and only if every participant ended `Passed`, and
+                        // `:2845` retracts on exactly `Passed`. A mixed lap
+                        // (one `Done`, one `Passed`) would leave a vote standing
+                        // and is the obvious counterexample; it cannot produce a
+                        // silent lap, because the `Done` marks it spoken.
+                        //
                         // Which is coherent — nobody who passed is asserting the
                         // phase should move — and it puts the escape valve on the
                         // ROUND CAP instead, where a deadlock that keeps talking
@@ -8568,7 +8578,13 @@ mod tests {
 
         // A voted to advance; B never did, and both keep SPEAKING — nothing
         // retracts, so the tally stands while the laps burn.
-        storage.cast_phase_vote("s1", a, "Plan", "fp1", 0).await.unwrap();
+        //
+        // Cast against the LIVE fingerprint, not a literal: `open_phase_vote`
+        // filters on the current one, so a made-up value would be an orphaned
+        // vote and correctly invisible. (It was `"fp1"` and this test failed the
+        // moment that filter landed — the fixture was unrealistic, not the fix.)
+        let fp = storage.phase_artifact_fingerprint("s1").await.unwrap();
+        storage.cast_phase_vote("s1", a, "Plan", &fp, 0).await.unwrap();
         post(&storage, "user", None, "go").await;
 
         let (tx, rx) = mpsc::channel(8);

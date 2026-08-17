@@ -1591,16 +1591,34 @@ impl Storage {
     /// ordinary case.
     pub async fn open_phase_vote(&self, session_id: &str) -> Result<Option<(String, usize, usize)>> {
         let epoch = self.phase_epoch(session_id).await?;
-        let targets: Vec<(String, String)> = sqlx::query_as(
-            "SELECT DISTINCT target_phase, artifact_fingerprint FROM phase_votes \
-             WHERE session_id = ? AND phase_epoch = ?",
+        // **Filtered on the LIVE fingerprint, not just the epoch.** The epoch
+        // only moves on a phase transition, while the fingerprint moves on every
+        // phase-doc write — and nothing deletes rows when it moves, because a
+        // vote is invalidated by no longer MATCHING rather than by being swept.
+        //
+        // So without this bind, every doc edit orphans the votes before it and
+        // the rows pile up until the next transition: the cap would report
+        // "stuck at 1 of 2 for Plan" from a question nobody is being asked any
+        // more, while the live state is 0 of 2 on the current work — and
+        // `DISTINCT` has no ordering, so which dead question got reported was
+        // arbitrary, possibly an old TARGET and not merely an old fingerprint.
+        //
+        // This value is informational, which is exactly why it has to be right:
+        // it is read at the moment the user is working out why a session burned
+        // to the cap, and a confidently wrong answer there is worse than none —
+        // the same standard applied to the `VoteRecorded` wording.
+        let fingerprint = self.phase_artifact_fingerprint(session_id).await?;
+        let targets: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT target_phase FROM phase_votes \
+             WHERE session_id = ? AND phase_epoch = ? AND artifact_fingerprint = ?",
         )
         .bind(session_id)
         .bind(epoch)
+        .bind(&fingerprint)
         .fetch_all(&self.pool)
         .await
         .context("looking for an open phase vote")?;
-        for (target, fingerprint) in targets {
+        for (target,) in targets {
             let (voted, of) = self
                 .phase_vote_tally(session_id, &target, &fingerprint, epoch)
                 .await?;
@@ -3055,6 +3073,55 @@ mod tests {
         // satisfy an all-of check, so no test can distinguish it. An assertion
         // claiming otherwise would be pinning a falsehood, which is worse than
         // the gap it pretends to close.
+    }
+
+    /// **A vote orphaned by a doc edit is not an open vote** — the advisory
+    /// this filter closes.
+    ///
+    /// The epoch moves only on a phase transition; the fingerprint moves on
+    /// every phase-doc write, and nothing deletes rows when it does — a vote is
+    /// invalidated by no longer matching, not by being swept. So the orphaned
+    /// rows sit there at the same epoch, and an epoch-only read reports a
+    /// question nobody is being asked, at the exact moment the user is working
+    /// out why a session burned to the round cap.
+    #[tokio::test]
+    async fn a_vote_orphaned_by_an_edit_is_not_reported_as_open() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let hands = s.participant_by_slug("s1", "hands").await.unwrap().unwrap();
+
+        let fp1 = s.phase_artifact_fingerprint("s1").await.unwrap();
+        s.cast_phase_vote("s1", hands.id, "Plan", &fp1, 0).await.unwrap();
+        assert_eq!(
+            s.open_phase_vote("s1").await.unwrap(),
+            Some(("Plan".to_string(), 1, 2)),
+            "one of two on the CURRENT work is a genuinely open vote"
+        );
+
+        // Somebody writes a phase doc. The vote is now about work that moved.
+        s.upsert_session_document("s1", "investigate", "findings", Some("investigate"))
+            .await
+            .unwrap();
+        assert_ne!(
+            s.phase_artifact_fingerprint("s1").await.unwrap(),
+            fp1,
+            "precondition: the edit moved the fingerprint"
+        );
+        let orphaned: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM phase_votes WHERE session_id = 's1'")
+                .fetch_one(s.pool())
+                .await
+                .unwrap();
+        assert_eq!(orphaned.0, 1, "precondition: the stale ROW survives — nothing sweeps it");
+
+        assert_eq!(
+            s.open_phase_vote("s1").await.unwrap(),
+            None,
+            "nobody has voted on the current state of the work, so there is no \
+             open question to report — reporting the stale one would name a \
+             tally nobody is being asked about"
+        );
     }
 
     /// Voting twice for one question is one vote — the tally is a COUNT, so a
