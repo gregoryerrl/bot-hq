@@ -857,12 +857,17 @@ async fn call_tool(
         }
         "withdraw_question" => {
             let choice_id = arg_required_str(&args, "choice_id")?;
-            let was_pending = bridge.withdraw_question(&choice_id, Some(&caller.agent)).await;
-            Ok(ToolCallResult::text(if was_pending {
-                "withdrawn"
-            } else {
-                "no-op: choice_id was not pending"
-            }))
+            use crate::signaling::bridge::Withdrawal;
+            let text = match bridge.withdraw_question_for(&choice_id, Some(&caller.agent)).await {
+                Withdrawal::Withdrawn => "withdrawn",
+                Withdrawal::NotPending => "no-op: choice_id was not pending",
+                // Round 9: this used to read "not pending" — the row IS pending,
+                // it is just not this caller's to clear.
+                Withdrawal::NotYours => {
+                    "no-op: that question was parked by another participant — it is                      still pending and not yours to withdraw"
+                }
+            };
+            Ok(ToolCallResult::text(text))
         }
         "supersede_question" => {
             let stale_choice_id = arg_required_str(&args, "stale_choice_id")?;

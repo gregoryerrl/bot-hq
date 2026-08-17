@@ -30,6 +30,18 @@ pub fn gate_age_secs(asked_at: &str) -> Option<i64> {
     Some((chrono::Utc::now() - parse_tray_ts(asked_at)?).num_seconds())
 }
 
+/// What [`SignalingBridge::withdraw_question_for`] did — the three states an
+/// agent's `withdraw_question` answer must keep apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Withdrawal {
+    /// A pending row (in-memory park or the durable tray row) was withdrawn.
+    Withdrawn,
+    /// Nothing pending under that id (unknown, or already resolved/withdrawn).
+    NotPending,
+    /// The row is pending but was parked by another participant — untouched.
+    NotYours,
+}
+
 impl SignalingBridge {
     /// Flag the session as awaiting the user, and — for a park that YIELDS the
     /// session — tell the ring who is now blocked.
@@ -479,6 +491,17 @@ impl SignalingBridge {
     /// asked for a state that already holds — that row is not theirs to worry
     /// about.
     pub async fn withdraw_question(&self, choice_id: &str, asker: Option<&str>) -> bool {
+        matches!(
+            self.withdraw_question_for(choice_id, asker).await,
+            Withdrawal::Withdrawn
+        )
+    }
+
+    /// [`Self::withdraw_question`] with the reason a `false` would have hidden:
+    /// the tool's answer must not call another participant's still-pending row
+    /// "not pending" (round 9) — that told the caller a state that does not
+    /// hold, when the bridge knew exactly why it refused.
+    pub async fn withdraw_question_for(&self, choice_id: &str, asker: Option<&str>) -> Withdrawal {
         if let Some(asker) = asker {
             let owner = {
                 let storage_guard = self.storage.lock().await;
@@ -500,7 +523,7 @@ impl SignalingBridge {
                         owner,
                         "refusing to withdraw a question parked by another participant"
                     );
-                    return false;
+                    return Withdrawal::NotYours;
                 }
             }
         }
@@ -557,7 +580,11 @@ impl SignalingBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(choice_id);
-        was_parked || withdrew_row
+        if was_parked || withdrew_row {
+            Withdrawal::Withdrawn
+        } else {
+            Withdrawal::NotPending
+        }
     }
 
     /// Snapshot the `session_tray` table for a session. Convenience for the UI
@@ -1755,6 +1782,16 @@ mod tests {
         );
         let still_there = storage.get_tray_entry("q-1").await.unwrap().unwrap();
         assert_eq!(still_there.status, "pending", "and the row survived");
+        // Round 9: the refusal is reported as WHAT it is — the row is pending
+        // and someone else's — not as "not pending".
+        assert_eq!(
+            bridge.withdraw_question_for("q-1", Some("eyes")).await,
+            Withdrawal::NotYours
+        );
+        assert_eq!(
+            bridge.withdraw_question_for("nope", Some("eyes")).await,
+            Withdrawal::NotPending
+        );
 
         assert!(
             bridge.withdraw_question("q-1", Some("hands")).await,
