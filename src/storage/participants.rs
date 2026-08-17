@@ -36,7 +36,7 @@ pub struct Role {
     pub participation_mode: String,
     /// The role's default model, overridable per participant at invite
     /// (`session_participants.model_id`). Both columns ship in 0044; rc3
-    /// decision D8 makes THIS one the Roles tab's model control and deletes the
+    /// decision D8 made THIS one the Roles tab's model control and deleted the
     /// Agents tab rather than renaming it.
     pub default_model_id: Option<String>,
     pub builtin: bool,
@@ -117,8 +117,8 @@ pub const MODE_ON_MENTION: &str = "on_mention";
 /// enforced in `resolve_participant_picks` — the create DIALOG's path, one of
 /// three. The other two seed instead of picking, through
 /// [`Storage::ensure_session_roster`], and that path had no ceiling: a plugin
-/// or the external driver got every active non-`on_mention` role, however many
-/// existed. A limit enforced on one path of three is a limit on none of them.
+/// (or, until 2026-08-17, the external driver) got every active non-`on_mention`
+/// role, however many existed. A limit enforced on one path of three is a limit on none of them.
 ///
 /// Not the runtime limit — rc3 D10 made spawn iterate the roster, so this is a
 /// sanity bound on what one session can usefully run. Every participant is a
@@ -768,8 +768,8 @@ impl Storage {
     /// participation mode. Passing them explicitly (rather than reading the
     /// role here) keeps the snapshot honest: the caller composes what this
     /// participant actually runs with, including any session-policy ceiling.
-    #[allow(clippy::too_many_arguments)]
     /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[allow(clippy::too_many_arguments)]
     #[cfg(test)]
     pub async fn insert_participant(
         &self,
@@ -936,8 +936,8 @@ impl Storage {
     ///
     /// Every creation path funnels through `ensure_session_started` → spawn, so
     /// this is what keeps a session created WITHOUT the New Session dialog — the
-    /// external driver's `open_session`, the plugin proxy's
-    /// `dispatch_session_inner` — from starting life with an empty roster.
+    /// plugin proxy's `dispatch_session_inner` (and, until 2026-08-17, the
+    /// external driver's `open_session`) — from starting life with an empty roster.
     /// Without a roster every message it writes resolves `participant_id` to
     /// NULL forever, because `insert_user_message`'s dual-write looks the roster up
     /// by slug.
@@ -956,9 +956,9 @@ impl Storage {
     /// dialog, and it has no UI behind it (rc3 D13).** The
     /// `rain_disabled_default` setting that used to answer this is deleted — the
     /// user's words: *"there is no 'disable the reviewer by default'; just don't
-    /// add the role to your session creation"* — so the external driver
-    /// (`CoreAppState::open_session`) and the plugin create arm
-    /// (`dispatch_session_inner`) now pass `true` and this seeds **exactly one
+    /// add the role to your session creation"* — so the plugin create arm
+    /// (`dispatch_session_inner`; the external driver's `open_session` did too,
+    /// until its removal) passes `true` and this seeds **exactly one
     /// participant: the first active role by `roles.id`**, per design §1 ("how
     /// many agents, **default 1**"). Anything that wants more picks a roster,
     /// through the New Session dialog or `seed_session_roster`.
@@ -1319,8 +1319,9 @@ impl Storage {
         Ok(next_in_ring(&ring, current).cloned())
     }
 
-    /// Point one participant at a different model. The external driver's
-    /// per-slot model override lands here.
+    /// Point one participant at a different model (the New-session dialog's
+    /// per-row model pick lands here; the external driver's per-slot override
+    /// did too, until its removal).
     pub async fn set_participant_model(
         &self,
         participant_id: i64,
@@ -1966,7 +1967,7 @@ impl Storage {
 ///
 /// Nor is an `Envelope` a permission. Attached to a row it is recorded and
 /// re-renderable; handed straight to [`render_wire`] it is plain string
-/// building, which is what `core::broadcast::peer_forward_message` still does.
+/// building (which is what the deleted `core::broadcast::peer_forward_message` did).
 /// The permission is the receipt below, and only [`Storage::post_to_channel`]
 /// mints one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2267,12 +2268,12 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 /// read is a UI that reads the column — tracked separately — not something this
 /// type already delivers.
 ///
-/// One string wire survives Task 2: the peer forward in
-/// `core::broadcast::peer_forward_message`. The TEXT it carries is on record —
-/// an agent's own output, persisted chunk by chunk, or for the host-authored
-/// provider-limit notice its own `system` row, posted beside the forward. What
-/// is not is the decoration the router wraps it in at forward time. See that
-/// function for why gating it is the turn sequencer's job, not this one's.
+/// One string wire survived Task 2 at the time: the peer forward in
+/// `core::broadcast::peer_forward_message` (deleted with the router,
+/// 2026-08-13). The TEXT it carried was on record — an agent's own output,
+/// persisted chunk by chunk, or for the host-authored provider-limit notice its
+/// own `system` row. What was not was the decoration the router wrapped it in
+/// at forward time; today every wire is rendered from a receipt by the ring.
 ///
 /// The value cannot be forged from outside. There are exactly TWO construction
 /// sites — immediately downstream of that INSERT, and
@@ -2287,8 +2288,8 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 /// compiler checks: a helper added here later could mint a receipt with no row
 /// behind it. The claim now
 /// covers every write to `messages`, not just this method: B5 Task 1b made
-/// [`Storage::insert_user_message`] — the second live insert path, and the one the
-/// duo pump uses on every chunk — a thin wrapper over `post_to_channel`, so
+/// [`Storage::insert_user_message`] — the second live insert path — a thin
+/// wrapper over `post_to_channel` (the pumps post through it directly), so
 /// there is one INSERT and every row that reaches the table has a receipt
 /// behind it.
 ///
@@ -2434,7 +2435,7 @@ impl PersistedMessage {
     /// What stops it is the private `_from_table` field on `ChannelMessage`: a
     /// struct literal outside `participants.rs` is `E0451`, so the only rows
     /// that exist came off a `SELECT`. `pub(crate)` on this method keeps it in
-    /// the crate besides, matching `ParticipantInput::send_unrouted`. Callers in
+    /// the crate besides. Callers in
     /// `core` can pass a row they were HANDED and cannot invent one.
     ///
     /// That gates PROVENANCE, not immutability, and the difference is worth
@@ -2450,8 +2451,9 @@ impl PersistedMessage {
     /// [`Storage::unread_for_participant`], which returns [`ChannelMessage`]s,
     /// and every row written before a restart is only ever available that way.
     /// With `deliver` taking a receipt and receipts minted only by the INSERT,
-    /// the sequencer's only exits would have been `send_unrouted` — dissolving
-    /// the gate this batch built — or widening `deliver` back to strings.
+    /// the sequencer's only exits would have been a raw stdin write (the
+    /// since-deleted `send_unrouted`) — dissolving the gate this batch built —
+    /// or widening `deliver` back to strings.
     ///
     /// This is also what cashes the struct-over-string choice above. The
     /// sequencer reads a `ChannelMessage`, and [`render_wire`] rebuilds the wire

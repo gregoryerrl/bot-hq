@@ -29,8 +29,7 @@
 //!
 //! | | enforced where |
 //! |---|---|
-//! | the twelve in [`capability::required_for`] minus `close_session` | the tool gate, per call |
-//! | `close_session` | nowhere yet — held at its pre-rc3 behaviour by `jsonrpc::PARITY_HOLD`, so an agent WITHOUT it can still close |
+//! | every tool in [`capability::required_for`], `close_session` included (rc3 D16; `jsonrpc::PARITY_HOLD` is empty) | the tool gate, per call |
 //! | `edit_files` | spawn: the child's permission posture + which MCP servers it inherits |
 //! | `read_channel`, `post_channel`, `run_bash` | nowhere — described here only |
 //!

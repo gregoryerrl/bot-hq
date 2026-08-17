@@ -1,7 +1,7 @@
 //! Webview-driven web search — a model-agnostic `web_search` MCP tool.
 //!
-//! Runs INSIDE bot-hq's process, so it works for any agent model (Rain on a
-//! third-party gateway included): a hidden Tauri webview navigates a search
+//! Runs INSIDE bot-hq's process, so it works for any agent model (a reviewer
+//! on a third-party gateway included): a hidden Tauri webview navigates a search
 //! engine, and Rust polls the rendered DOM via `Webview::eval_with_callback`
 //! (a RUST-initiated eval whose JSON result returns through a callback).
 //!
@@ -101,8 +101,9 @@ const ENGINES: &[Engine] = &[
     },
 ];
 
-/// Engine names the caller may select (kept in sync with [`ENGINES`]).
-/// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+/// The engine names (kept in sync with [`ENGINES`]). Test-only since round 7
+/// (2026-08-17): no production caller — the handler validates `engine` against
+/// [`ENGINES`] directly — kept as a test seam, not shipped.
 #[cfg(test)]
 pub const ENGINE_NAMES: &[&str] = &["google", "startpage", "bing"];
 

@@ -171,8 +171,8 @@ pub enum AgentEvent {
     Init { session_id: Option<String> },
     /// Process exited. Carries exit-status string for log/observability.
     Exited(String),
-    /// Retry-supervisor liveness transition (B2), relayed by the duo pump to
-    /// the UI as a health dot. Not produced by the stream-json translator —
+    /// Retry-supervisor liveness transition (B2), relayed by the participant's
+    /// pump to the UI as a health dot. Not produced by the stream-json translator —
     /// emitted directly by `supervise` at running/retrying/dead transitions.
     Health(AgentHealth),
 }
@@ -402,8 +402,8 @@ pub struct ParticipantInput {
     /// The session whose rows this stdin accepts — see [`deliver`](Self::deliver).
     ///
     /// `Arc<str>` to match [`PersistedMessage::session_id`], so the compare is
-    /// against the same representation and a clone of this input (the router,
-    /// the watchdog and the turn sequencer each hold one) is a refcount bump.
+    /// against the same representation and a clone of this input (the watchdog
+    /// and the turn sequencer each hold one) is a refcount bump.
     session_id: Arc<str>,
     tx: mpsc::Sender<OutgoingUserMessage>,
 }
@@ -445,16 +445,14 @@ impl ParticipantInput {
     /// with one copy of the comparison. (`send_to_all` and `SessionAgent::deliver`
     /// were deleted in round 7 as callerless; every remaining route is this one.)
     ///
-    /// Be exact about the size of the claim. Within this type there are four
-    /// writes to `tx` — this one, [`deliver_batch`](Self::deliver_batch),
-    /// [`send_unrouted`](Self::send_unrouted) and the private
-    /// [`relay`](Self::relay) — so what holds is: **every write to a
-    /// participant's stdin that carries a receipt is scope-checked.**
-    /// `deliver_batch` is the other receipt-carrying one and runs this same
-    /// comparison per row. The remaining two carry no receipt and put no row on
-    /// record: `send_unrouted` takes a bare `String` and has no session to check
-    /// it against (the peer-forward hole B5 already tracks), and `relay` has one
-    /// call site that authors its own text — see `relay`'s doc. **Two unrecorded
+    /// Be exact about the size of the claim. Within this type there are three
+    /// writes to `tx` — this one, [`deliver_batch`](Self::deliver_batch) and
+    /// the private [`relay`](Self::relay) (`send_unrouted`, the fourth, went
+    /// with the router) — so what holds is: **every write to a participant's
+    /// stdin that carries a receipt is scope-checked.** `deliver_batch` is the
+    /// other receipt-carrying one and runs this same comparison per row. `relay`
+    /// carries no receipt and puts no row on record: it has one call site that
+    /// authors its own text — see `relay`'s doc. **One unrecorded
     /// stdin writes, not one.** Neither is touched here.
     ///
     /// And this is a check on the receipt, not on the channel. Two capabilities
@@ -592,9 +590,9 @@ impl ParticipantInput {
     ///   holds no `Storage` at all. So the resumed child reads a `[bot-hq]`
     ///   instruction that appears in no channel and no transcript.
     ///
-    /// That makes the nudge the SECOND ungated, unrecorded write to a
-    /// participant's stdin, alongside [`send_unrouted`](Self::send_unrouted) —
-    /// see the size-of-the-claim paragraph on [`deliver`](Self::deliver).
+    /// That makes the nudge the one ungated, unrecorded write to a
+    /// participant's stdin (`send_unrouted`, once the other, went with the
+    /// router) — see the size-of-the-claim paragraph on [`deliver`](Self::deliver).
     /// Recording it means giving `supervise` a way to write a row, which it has
     /// no dependency on today; it is noted here rather than fixed.
     async fn relay(
@@ -645,7 +643,7 @@ impl AgentHandle {
     /// still uses it is `core::session`'s test scaffolding, and it stays `pub`
     /// for the same reason it was written: an alternative agent implementation
     /// needs a way in, and the handle is a pure channel struct so anything that
-    /// produces one plugs into `supervise` and the duo pump unchanged.
+    /// produces one plugs into `supervise` and the participant's pump unchanged.
     /// `kill_tx` stays private, hence this constructor.
     ///
     /// `session_id` is the session this agent belongs to, and it is what
@@ -672,8 +670,8 @@ impl AgentHandle {
         }
     }
 
-    /// This agent's stdin. Clone it to hand a long-lived task (the router, the
-    /// idle watchdog, the turn sequencer) its own way in — every clone carries
+    /// This agent's stdin. Clone it to hand a long-lived task (the idle
+    /// watchdog, the turn sequencer) its own way in — every clone carries
     /// the session id with it, so a clone is still scope-checked as well as
     /// receipt-gated. Those are two different guarantees: see
     /// [`ParticipantInput::deliver`].
@@ -1397,15 +1395,15 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     // role now lands somewhere deliberate instead of silently getting bypass
     // mode for not being called "rain".
     if !cfg.capabilities.grants(crate::agents::Capability::EditFiles) {
-        // Rain reaches her model through a third-party Anthropic-compatible
-        // gateway (DeepSeek, via ANTHROPIC_BASE_URL). claude-code >= 2.1.156
+        // A read-only participant may reach its model through a third-party
+        // Anthropic-compatible gateway (DeepSeek, via ANTHROPIC_BASE_URL). claude-code >= 2.1.156
         // serializes a SessionStart hook's `additionalContext` (a plugin's
         // SessionStart hook injects one) as a `role:"system"` entry inside
         // the request's `messages` array. The real Anthropic API tolerates
         // that; DeepSeek's gateway only accepts user/assistant roles and
         // rejects it ("unknown variant `system`, expected user or assistant"
         // → API Error 400). The LOAD-BEARING fix is the local normalizing
-        // proxy (`agents::llm_proxy`): Rain's ANTHROPIC_BASE_URL routes
+        // proxy (`agents::llm_proxy`): such a participant's ANTHROPIC_BASE_URL routes
         // through it and EVERY role:"system" entry in `messages[]` is hoisted
         // into the top-level `system` field before it reaches DeepSeek —
         // source-agnostic, so it also catches the plugin-sync injection that
@@ -1414,9 +1412,9 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // We deliberately do NOT pass `--bare`. `--bare` (minimal mode,
         // CLAUDE_CODE_SIMPLE=1) was once kept as belt-and-suspenders against
         // that injection, but it ALSO disables claude-code's deferred-tool
-        // loader (`ToolSearch`) — which left Rain with Grep/Glob/WebFetch/
+        // loader (`ToolSearch`) — which left the reviewer with Grep/Glob/WebFetch/
         // ToolSearch/TodoWrite all inert ("exists but is not enabled in this
-        // context"), i.e. her whole read-investigation surface beyond Read/
+        // context"), i.e. its whole read-investigation surface beyond Read/
         // Bash. Since the proxy already neutralizes the role:"system"
         // injection --bare was guarding against, dropping --bare restores the
         // tool loader at no safety cost. Auth + routing are unaffected:
@@ -1504,7 +1502,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     // session-scoped approvals onto the resolved policy.
     cmd.env("BOT_HQ_SESSION_ID", &cfg.session_id);
     // BOT_HQ_AGENT lets the pre-push hook attribute the push-approval prompt to
-    // the pushing agent (only HANDS/Brian pushes; Rain can't push).
+    // the pushing agent (a read-only participant cannot push).
     // All agents route through build_command, so this lands for every participant.
     cmd.env("BOT_HQ_AGENT", &cfg.agent_name);
     if let Some(token) = &cfg.config.auth_token {
@@ -1515,10 +1513,10 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     // Route a custom (non-Anthropic) gateway through the local normalizing
     // proxy so any `role:"system"` message claude-code injects at request-
     // build time is hoisted out before it reaches a stricter gateway that
-    // would 400 on it (Rain → DeepSeek). See `agents::llm_proxy` for the full
-    // rationale. Falls back to the raw base_url if the proxy didn't start.
-    // Agents with no base_url (Brian → real first-party API) get no override
-    // and never touch the proxy.
+    // would 400 on it (a DeepSeek-backed participant). See `agents::llm_proxy`
+    // for the full rationale. Falls back to the raw base_url if the proxy
+    // didn't start. Agents with no base_url (the first-party API) get no
+    // override and never touch the proxy.
     if let Some(base) = crate::agents::llm_proxy::resolve_anthropic_base_url(
         cfg.config.base_url.as_deref(),
         crate::agents::llm_proxy::proxy_addr(),
@@ -1528,8 +1526,8 @@ fn build_command(cfg: &SpawnConfig) -> Command {
 
     // Per-agent override env (effort / auto-memory / CLAUDE.md suppression).
     // Applied to ALL agents. The skill/plugin `--settings` fragments above are
-    // Brian-only (Rain gets no --settings), but these ENV overrides are the
-    // lever to keep Rain lean now that she no longer runs --bare.
+    // editing-participant-only (a read-only one gets no --settings), but these
+    // ENV overrides are the lever to keep it lean now that nothing runs --bare.
     for (k, v) in crate::claude_config::overrides::env_vars(&agent_override) {
         cmd.env(k, v);
     }

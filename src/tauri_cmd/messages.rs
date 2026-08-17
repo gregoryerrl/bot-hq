@@ -33,8 +33,8 @@ pub async fn get_session_messages(
     Ok(msgs.into_iter().map(AgentMessage::from).collect())
 }
 
-/// Send a user message to a session. For the duo session this fans out to
-/// both Brian and Rain (with phase envelope). Persists the raw text + notifies the bridge.
+/// Send a user message to a session: one row every participant reads off its
+/// cursor (with phase envelope). Persists the raw text + notifies the bridge.
 #[tauri::command]
 #[specta::specta]
 pub async fn broadcast_message(

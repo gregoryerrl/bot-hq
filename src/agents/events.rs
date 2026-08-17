@@ -382,8 +382,8 @@ mod tests {
     fn error_result_translates_to_errored_turn_complete() {
         // The real Rain/DeepSeek 400: a failed turn arrives as a `result`
         // with is_error:true + a populated api_error_status. translate() must
-        // set TurnComplete.is_error so the duo pump suppresses peer-forwarding
-        // (otherwise the error text volleys into an unbounded loop).
+        // set TurnComplete.is_error so the pump counts the errored turn (and,
+        // router-era, suppressed the peer forward that otherwise volleyed).
         let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"api_error_status":400,"stop_reason":null}"#;
         let ev: StreamEvent = serde_json::from_str(line).unwrap();
         match translate(ev, &mut None).as_slice() {

@@ -85,8 +85,9 @@ impl Storage {
     }
 
     /// Convenience wrapper: all docs tagged with `phase` for `session_id`,
-    /// newest-first. Used by the session view's IPAV document tabs.
-    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    /// newest-first (the session view's tabs read `session_documents_for`
+    /// with a phase filter directly). Test-only since round 7 (2026-08-17):
+    /// no production caller — kept as a test seam, not shipped.
     #[cfg(test)]
     pub async fn session_documents_for_phase(
         &self,

@@ -1,9 +1,10 @@
 //! Bridge surface for `file_feedback` — an agent's issue or idea about bot-hq
 //! ITSELF, filed from whatever project it happened to be working on.
 //!
-//! Available to BOTH agents (unlike the user-facing tray tools, which are
-//! HANDS-only): filing is not a repo mutation and not a user interruption, and
-//! EYES hits bot-hq friction as often as HANDS does. It writes a row and
+//! Available to EVERY participant (unlike the user-facing tray tools, which
+//! are capability-gated): filing is not a repo mutation and not a user
+//! interruption, and a reviewer hits bot-hq friction as often as an executor
+//! does. It writes a row and
 //! returns — nothing is surfaced to the user mid-session, so it cannot become
 //! another way to interrupt them.
 

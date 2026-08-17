@@ -35,7 +35,7 @@ use specta::Type;
 /// which don't. Drives the per-surface inheritance badges in the UI. This is
 /// the canonical mapping derived from `spawn.rs::build_command` behavior: both
 /// agents run full claude-code and inherit skills/plugins/hooks/CLAUDE.md
-/// (Rain's tool access is gated server-side, not by skipping inheritance);
+/// (a read-only participant's tool access is gated server-side, not by skipping inheritance);
 /// model/permissions are overridden per-agent by bot-hq.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct Inheritance {

@@ -197,8 +197,8 @@ fn render_open_findings(open: &[Finding]) -> String {
 /// makes a call at least this often, while a genuinely dead one never does.
 const REVIEWER_LIVENESS_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Pure: the reviewer-down gate verdict (Batch 7). `Some(gate_string)` when a duo
-/// reviewer is down — either `blocked: …` or, with a HANDS override,
+/// Pure: the reviewer-down gate verdict (Batch 7). `Some(gate_string)` when a
+/// registered reviewer is down — either `blocked: …` or, with an approved override,
 /// `ok (reviewer-down overridden: …)`. `None` when the gate should fall through to
 /// plain "ok" (solo session, or the reviewer is healthy).
 ///

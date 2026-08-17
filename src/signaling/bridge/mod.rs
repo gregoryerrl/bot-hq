@@ -113,8 +113,8 @@ pub enum SignalingEvent {
         choice_id: String,
         picked: String,
     },
-    /// A new message row was persisted to storage. Fired by the per-agent
-    /// pumps (duo) after `storage.insert_message` returns. Lets a
+    /// A new message row was persisted to storage. Fired by every writer
+    /// (the per-participant pumps, the host notices) after the row lands. Lets a
     /// `wait_for_change` caller block server-side instead of polling — the
     /// external driver's tool originally, and since its removal (2026-08-17)
     /// the plugin proxy's (`tauri_cmd/plugin_api.rs`).
@@ -216,7 +216,7 @@ pub enum SignalingEvent {
         used_tokens: u64,
         context_window: u64,
     },
-    /// A session's duo activity changed (idle / busy / awaiting-user /
+    /// A session's activity changed (idle / busy / awaiting-user /
     /// cancelling). Drives the chat-input lock + Cancel button: the UI disables
     /// input while `busy`/`cancelling`, re-enables on `idle`/`awaiting_user`.
     /// `state` is the `SessionActivity::as_str` string — carried as a String so
@@ -299,11 +299,12 @@ pub struct SignalingBridge {
     /// session_id → optional project slug. Sessions register themselves at
     /// spawn time so policy-aware MCP tools can look up the right policy.
     session_projects: Mutex<HashMap<String, Option<String>>>,
-    /// session_id → "duo is waiting for user input" flag, shared with the
-    /// duo pump so it can halt peer-forwarding while flag is set. When any
-    /// user-blocking tool (mark_awaiting_user / ask_user_choice / request_approval)
-    /// fires, the bridge sets the flag synchronously BEFORE returning so
-    /// Brian's next chunk doesn't volley to Rain before the halt takes effect.
+    /// session_id → "the session is waiting for user input" flag, shared with
+    /// the session's `ActivityTracker` (it derives `AwaitingUser` from it) and
+    /// the ring's D35 halt gate. When a halting tool (mark_awaiting_user /
+    /// request_approval / a parked gate) fires, the bridge sets the flag
+    /// synchronously BEFORE returning so the state is true before the caller's
+    /// next chunk lands.
     session_awaiting: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Per-session turn-ring control channel, so parking a question can HALT the
     /// ring and not merely set a flag. See [`Self::register_session_sequencer`].
@@ -375,7 +376,7 @@ pub struct SignalingBridge {
     /// Batch 7: latest health per (session_id, agent) — the wire string from
     /// `AgentHealth::as_str` ("running"/"retrying"/"stalled"/"dead"). Written by
     /// `notify_agent_health`; read by the fail-closed commit gate to block when a
-    /// duo reviewer is Stalled/Dead. `std::sync::Mutex` (not tokio) because
+    /// registered reviewer is Stalled/Dead. `std::sync::Mutex` (not tokio) because
     /// `notify_agent_health` is sync — mirrors ActivityTracker's pattern.
     agent_health: std::sync::Mutex<HashMap<(String, String), String>>,
     /// (session_id, agent) → last time this agent made ANY bridge RPC call.
@@ -566,9 +567,9 @@ impl SignalingBridge {
     }
 
     /// Hand the bridge a shared awaiting-flag pointer owned by the SessionHandle.
-    /// The duo pump reads this same flag to decide whether to forward chunks
-    /// to the peer. Setting it from inside the bridge (in mark_awaiting_user /
-    /// ask_user_choice) is what gives us a race-free halt.
+    /// The session's `ActivityTracker` derives `AwaitingUser` from this same
+    /// flag. Setting it from inside the bridge (in mark_awaiting_user /
+    /// request_approval) is what gives us a race-free halt.
     pub async fn register_session_awaiting(&self, session_id: String, flag: Arc<AtomicBool>) {
         self.session_awaiting.lock().await.insert(session_id, flag);
     }
@@ -858,7 +859,8 @@ impl SignalingBridge {
     }
 
     /// Register a session's open-blocking-findings count cache and return the
-    /// shared `Arc` the router reads LOCK-FREE per forward. Seeds from storage so a
+    /// shared `Arc` (the deleted router read it per forward; the ring reads the
+    /// count from storage when it builds a user row's envelope). Seeds from storage so a
     /// re-spawned session with pre-existing findings starts at the right value (not
     /// 0). Mirrors `register_session_awaiting`.
     /// Record which participants of a session can file findings — the reviewers
@@ -890,7 +892,7 @@ impl SignalingBridge {
     }
 
     /// Clear the awaiting flag for a session — called by core.broadcast when
-    /// the user sends a message (which resumes the duo).
+    /// the user sends a message (which resumes the session).
     pub async fn clear_session_awaiting(&self, session_id: &str) {
         if let Some(flag) = self.session_awaiting.lock().await.get(session_id) {
             flag.store(false, Ordering::Release);
@@ -1407,7 +1409,7 @@ impl SignalingBridge {
     /// the `AgentHealth::as_str` string ("running" / "retrying" / "dead").
     pub fn notify_agent_health(self: &Arc<Self>, session_id: String, agent: &str, health: &str) {
         // Batch 7: cache the latest health so the fail-closed commit gate can read
-        // it (a Stalled/Dead duo reviewer blocks commit). Write BEFORE the move.
+        // it (a Stalled/Dead reviewer blocks commit). Write BEFORE the move.
         self.agent_health
             .lock()
             .unwrap_or_else(|p| p.into_inner())

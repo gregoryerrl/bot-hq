@@ -1,4 +1,4 @@
-//! `activity_events` queries — one durable row per duo-activity transition.
+//! `activity_events` queries — one durable row per session-activity transition.
 //!
 //! Exists because `SessionActivity` was broadcast-only: the UI consumed it and
 //! it was gone. `messages` records what the agents said and did; this records

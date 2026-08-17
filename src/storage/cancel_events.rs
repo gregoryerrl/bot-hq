@@ -19,7 +19,7 @@ pub struct CancelEventRecord {
     pub settled_at: String,
     pub deferred_ms: i64,
     pub deferral_capped: bool,
-    /// `None` when the session has no such agent (e.g. Rain disabled).
+    /// `None` when the session has no such slot (a solo roster).
     pub slot0_interrupt_queued: Option<bool>,
     pub slot1_interrupt_queued: Option<bool>,
     pub both_idle: bool,

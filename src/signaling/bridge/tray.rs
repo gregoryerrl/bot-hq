@@ -585,7 +585,7 @@ impl SignalingBridge {
         storage.pending_tray_open_sessions().await
     }
 
-    /// Convenience entry (`confirm_stale = false`): the external driver + tests
+    /// Convenience entry (`confirm_stale = false`): the plugin proxy + tests
     /// for fresh gates, rejects, and non-command asks. A STALE gated-command
     /// Approve through this path returns `StaleGateNeedsConfirm` rather than
     /// executing — see [`resolve_choice_confirmable`].
@@ -1056,7 +1056,7 @@ impl SignalingBridge {
     /// the per-session tray, dashboard tile counter, and header bell reflect the
     /// wait via `list_pending_tray` — NOT the in-memory pending map, which halts
     /// don't populate — and it survives a restart), then emit `AwaitingUser` so
-    /// the duo's peer-forward halts until the user acts.
+    /// the UI shows the halt; the ring latches on `HaltDeclared` until the user acts.
     /// `halt_ring` is false when the RING ITSELF is the declarer: it has already
     /// stopped where it stands, and telling it again is the phantom-participant
     /// round-trip — `participant_by_slug("system")` finds nobody, warns, and
@@ -1213,7 +1213,7 @@ impl SignalingBridge {
     /// authored by the requesting agent (so the scroll shows the ask inline)
     /// and a halt question (so the tray + dashboard counter reflect it via the
     /// durable `list_pending_tray`, not the in-memory map), then sets the
-    /// awaiting flag so the duo's peer-forward halts until the user acts.
+    /// awaiting flag so the ring holds until the user acts.
     ///
     /// The user has two response paths, both clear the halt:
     ///   1. Pick a phase in the session header → the `advance_session_phase`

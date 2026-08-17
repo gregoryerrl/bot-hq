@@ -161,8 +161,8 @@ async fn handle_request(
     // **Who you say you are is not who you are** (C1-1). Identity used to be the
     // URL path alone: any process that could reach this port — every agent, since
     // they all hold Bash — could POST to a PEER's URL and call tools its own
-    // capabilities refuse. The sibling external server has done bearer +
-    // constant-time compare since it shipped; this one had nothing.
+    // capabilities refuse. The (since-deleted) sibling external server had done
+    // bearer + constant-time compare since it shipped; this one had nothing.
     //
     // The secret is minted per (session, agent) at spawn and written only into
     // that agent's own mcp-config, so possessing it IS being that agent.

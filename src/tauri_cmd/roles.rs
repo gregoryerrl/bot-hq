@@ -237,8 +237,8 @@ fn validated_draft(input: &RoleDraftInput) -> Result<(), AppError> {
 /// testable.
 ///
 /// `tauri::State` cannot be constructed in a unit test, so a `#[tauri::command]`
-/// body is unreachable from `cargo test`. That is why `models.rs` and
-/// `agent_configs.rs` test their view conversions and the storage calls beneath
+/// body is unreachable from `cargo test`. That is why `models.rs` (and, until
+/// D8, `agent_configs.rs`) test their view conversions and the storage calls beneath
 /// them and never the bodies — a convention, not a rule. The branch this holds
 /// is worth stepping outside it for: read the flag backwards and the role picker
 /// offers roles the user removed, which looks like the archive silently failing.

@@ -165,9 +165,10 @@ impl Storage {
     /// Read back the CL-read audit trail for a session, most-recent first — the
     /// reader half of [`Self::record_cl_read`]. Each row carries the
     /// `cl_index_id` of the file read; callers join to `cl_index` for the path.
-    /// Powers the deferred "what context did this agent see?" view promised by
-    /// the `cl_register_read` tool descriptor.
-    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    /// Test-only since round 7 (2026-08-17): no production caller — the "what
+    /// context did this agent see?" view it would power was never built (the
+    /// `cl_register_read` descriptor no longer promises it) — kept as a test
+    /// seam, not shipped.
     #[cfg(test)]
     pub async fn cl_reads_for_session(&self, session_id: &str) -> Result<Vec<ClRead>> {
         let rows = sqlx::query_as::<_, ClRead>(

@@ -266,7 +266,7 @@ pub(crate) async fn compute_apply_diff_inner(
 /// Summarize a session document via a one-shot, headless `claude -p` call —
 /// a TL;DR for users who don't want to read the full I/P/A/V doc. The model is
 /// resolved from `default_model_id` (app settings), falling back to the
-/// session's Brian model, then Brian's agent config (same chain the live agents
+/// session's slot-0 model, then that agent's config (same chain the live agents
 /// use, via [`resolve_spawn_config`]). Bounded by a 60s timeout; the child is
 /// killed on drop. Runs `--max-turns 1 --strict-mcp-config` so it cannot loop,
 /// use tools, or touch MCP — a pure text response.

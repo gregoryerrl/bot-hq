@@ -490,7 +490,7 @@ async fn call_tool(
             ))
         }
         "pass_turn" => {
-            // Realized in the duo pump, exactly like `peer_ack` above: the pump
+            // Realized in the participant's pump, exactly like `peer_ack` above: the pump
             // observes THIS ToolUse and `sequencer::turn_ending` turns it into a
             // `TurnEnding::Passed` at the flush (pump.rs::pump_agent). Whether the
             // pass STANDS depends on text the agent may not have written yet, so

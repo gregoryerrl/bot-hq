@@ -261,7 +261,7 @@ impl SignalingBridge {
     }
 
     /// Write-side for agents: upsert a folder description. The jsonrpc layer
-    /// gates this to HANDS (brian); Rain is denied.
+    /// gates this on the `write_context_library` capability.
     pub async fn cl_register_folder_description(
         &self,
         project: &str,

@@ -397,9 +397,10 @@ fn main() -> Result<()> {
             let _rt_guard = rt_for_setup.enter();
             // Stash the AppHandle on CoreAppState AND on the bridge so MCP
             // tools (screenshot, webview automation) can reach the webview.
-            // CoreAppState is for the external MCP path; the bridge copy is
-            // for the internal MCP (per-agent jsonrpc.rs), which doesn't see
-            // CoreAppState. Set-once — ignore the Err on duplicate.
+            // CoreAppState's copy serves the app layer (`session:created`,
+            // the close path); the bridge copy is for the MCP tools (per-agent
+            // jsonrpc.rs), which don't see CoreAppState. Set-once — ignore the
+            // Err on duplicate.
             let handle = app.handle().clone();
             let _ = core_for_setup.app_handle.set(handle.clone());
             bridge_for_subscriber.set_app_handle(handle);

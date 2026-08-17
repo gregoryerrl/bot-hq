@@ -3,7 +3,7 @@
 //!
 //! Wraps macOS `screencapture -R` with the window's logical geometry from
 //! Tauri (physical pixels divided by scale factor — Retina-safe). The PNG
-//! lands under `<data_dir>/screenshots/<timestamp>.png`; the caller reads
+//! lands under `<data_dir>/.local/screenshots/<timestamp>.png`; the caller reads
 //! the file back as an image.
 
 use anyhow::Context;
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tauri::Manager;
 
-/// Capture the main bot-hq window to a PNG under `<data_dir>/screenshots/`.
+/// Capture the main bot-hq window to a PNG under `<data_dir>/.local/screenshots/`.
 /// Used by the `webview_screenshot` MCP tool (agent-triggered) — returns the
 /// path; the agent reads the PNG back as an image.
 pub(crate) fn capture_main_window(

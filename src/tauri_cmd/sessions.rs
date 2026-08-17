@@ -115,8 +115,8 @@ pub struct SessionCreateOptions {
     ///
     /// `None` is the pre-rc3 path and behaves EXACTLY as before — no roster is
     /// written at create and `ensure_session_roster` seeds the default pair at
-    /// spawn. Every non-dialog caller (the external driver's `open_session`,
-    /// the plugin proxy) is on that path and is untouched.
+    /// spawn. Every non-dialog caller (the plugin proxy; the external driver's
+    /// `open_session` until 2026-08-17) is on that path and is untouched.
     pub participants: Option<Vec<ParticipantPick>>,
 }
 
@@ -157,8 +157,9 @@ pub struct ParticipantPick {
 /// in this module and was enforced in `resolve_participant_picks` alone — the
 /// path the create DIALOG takes. The other two creation paths seed a roster
 /// instead of picking one (`Storage::ensure_session_roster`), and that function
-/// had no ceiling at all: a plugin's `duo:true` or a driver's `solo:false` took
-/// every active non-`on_mention` role, however many that was. A cap enforced on
+/// had no ceiling at all: a plugin's `duo:true` (or, until 2026-08-17, a
+/// driver's `solo:false`) took every active non-`on_mention` role, however many
+/// that was. A cap enforced on
 /// one of three paths is a cap on none of them, so it now lives beside the
 /// invariant it protects.
 pub use crate::storage::MAX_SESSION_PARTICIPANTS;
@@ -621,7 +622,7 @@ pub async fn create_session(
         Some(picks) => Some(resolve_participant_picks(storage, picks, &options).await?),
         None => None,
     };
-    // With a roster, the solo/duo flag is DERIVED from it. The two model
+    // With a roster, the solo/multi flag is DERIVED from it. The two model
     // arguments now reach the participant ROWS (spawn reads those), so they are
     // only written to `sessions` on the legacy path, where they are the caller's
     // only way to say which model a slot runs — and `ensure_session_roster`'s
@@ -685,7 +686,7 @@ pub async fn create_session(
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?
         .ok_or_else(|| AppError::DbError("session vanished after create".into()))?;
-    // Spawn the duo in the background so the session primes (CL-opener nudge)
+    // Spawn the roster in the background so the session primes (CL-opener nudge)
     // without the user having to open it. Not awaited: worktree
     // materialization can take seconds and the create dialog shouldn't block
     // on it. `ensure_session_started` is idempotent + spawn-gate-serialized,
@@ -1031,7 +1032,7 @@ pub async fn list_closed_sessions(
 /// Idempotent — `core::AppState::ensure_session_started` is a no-op if the
 /// session is already live. Mirrors the click-to-respawn flow:
 /// frontend SessionView calls this on mount so a reopened bot-hq window
-/// brings Brian + Rain back via `claude --resume <uuid>`.
+/// brings the roster back via `claude --resume <uuid>`.
 #[tauri::command]
 #[specta::specta]
 pub async fn respawn_session(
@@ -1078,9 +1079,9 @@ pub async fn respawn_session(
 /// what makes it a real answer to `request_phase_advance` rather than a second
 /// way to set a chip.
 ///
-/// It is NOT yet the D36 override. When the phase-advance vote lands, a stalled
-/// vote's escape valve is a user gate, and this command grows a flag to force
-/// past a tally rather than being replaced.
+/// Since the phase-advance vote landed (D37) it is also the D36 escape valve: a
+/// user pick here goes through the same `AppState::advance_phase`, which
+/// clears the stuck votes with the transition — no separate force flag.
 #[tauri::command]
 #[specta::specta]
 pub async fn advance_session_phase(
@@ -1109,7 +1110,7 @@ pub async fn cancel_session_turn(
     match core.cancel_session_turn(&session_id).await? {
         CancelOutcome::Done => {}
         CancelOutcome::Interrupting => {
-            // The common path: interrupt both agents and drive the ~2s SIGKILL
+            // The common path: interrupt every agent and drive the ~2s SIGKILL
             // escalation off-thread. Detached so the command returns immediately
             // and the UI shows "Cancelling…" for the window. We own an
             // `Arc<CoreAppState>` (not the `&self` core method) so the task can
@@ -1222,7 +1223,7 @@ pub async fn get_session_phase(
 
 /// Close a session from the UI. Delegates to `core.close_session`, which is
 /// the single source of truth for closing: it removes the live handle, KILLS
-/// the brian/rain subprocesses, and marks the row closed/archived in storage.
+/// the participants' subprocesses, and marks the row closed/archived in storage.
 /// The previous version called `storage.close_session` directly, so it set
 /// `closed_at` but left the subprocesses running — a session that "closed" in
 /// the DB yet kept taking turns. Routing through core fixes that.

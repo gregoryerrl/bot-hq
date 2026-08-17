@@ -65,9 +65,10 @@ mod tests {
     /// round-trip lived in `tauri_cmd/agent_configs.rs`, whose three
     /// `#[tauri::command]`s had no caller in the frontend or anywhere else. The
     /// STORAGE methods it exercises are not dead — `core::session` resolves a
-    /// spawn's model through `get_agent_config`, and the external MCP server
-    /// exposes `get_agent_configs`/`set_agent_config` to driver clients — so
-    /// deleting the wrappers would have taken their only coverage with them.
+    /// spawn's model through `get_agent_config` (and the since-deleted external
+    /// MCP server exposed `get_agent_configs`/`set_agent_config` to driver
+    /// clients) — so deleting the wrappers would have taken their only coverage
+    /// with them.
     #[tokio::test]
     async fn upsert_and_get_round_trip() {
         let storage = Storage::memory().await.unwrap();

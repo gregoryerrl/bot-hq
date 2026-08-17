@@ -1092,7 +1092,7 @@ mod tests {
     ///
     /// 1. an ENFORCED gated tool states its capability;
     /// 2. no descriptor names a capability that is not its gate;
-    /// 3. a tool the gate does not enforce (`jsonrpc::PARITY_HOLD`) claims
+    /// 3. a tool the gate does not enforce (none today — `jsonrpc::PARITY_HOLD` is empty) claims
     ///    nothing — reframe-contract rule 2: nothing ships an enforcement that
     ///    is not wired.
     #[test]

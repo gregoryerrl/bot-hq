@@ -115,7 +115,7 @@ impl SignalingBridge {
         Ok(output)
     }
 
-    /// Both agents. Tail of the terminal scrollback as lossy UTF-8 —
+    /// Every participant (ungated). Tail of the terminal scrollback as lossy UTF-8 —
     /// evidence-grade text agents can paste into chat or IPAV docs. Reads a
     /// dead (exited) terminal's retained scrollback too.
     pub async fn terminal_read(&self, session_id: String, lines: Option<u64>) -> Result<String> {

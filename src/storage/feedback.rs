@@ -86,8 +86,8 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
-    /// How many rows are still open — powers a badge without shipping bodies.
-    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    /// How many rows are still open. Test-only since round 7 (2026-08-17): no
+    /// production caller (no badge reads it) — kept as a test seam, not shipped.
     #[cfg(test)]
     pub async fn open_feedback_count(&self) -> Result<i64> {
         let (n,): (i64,) =

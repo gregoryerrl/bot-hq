@@ -18,9 +18,9 @@ use tracing::warn;
 ///
 /// `agent` is purely for diagnostics: a write error here means the
 /// subprocess's stdin is gone and this agent can no longer receive ANY input
-/// — user broadcasts OR peer forwards — even while its process may still be
-/// alive and emitting. That asymmetric, silent death is the #4 user→HANDS
-/// routing-desync failure mode (Brian goes deaf while Rain keeps receiving).
+/// — the ring's deliveries — even while its process may still be alive and
+/// emitting. That asymmetric, silent death is the #4 user→HANDS routing-desync
+/// failure mode (one participant goes deaf while its peer keeps receiving).
 /// The old code `break`d with no log, so it was invisible. Now it's loud.
 pub async fn pump_inputs<W: AsyncWrite + Unpin>(
     mut stdin: W,
