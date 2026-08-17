@@ -463,7 +463,7 @@ async fn call_tool(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            // A peer-shaped reason is a category error that deadlocks the duo:
+            // A peer-shaped reason is a category error that stalls the session:
             // in the archive study both agents marked themselves awaiting-user
             // over work each thought was the OTHER's, and the session sat dead
             // 100 minutes until the user shouted. Waiting on a peer is not
@@ -472,11 +472,12 @@ async fn call_tool(
             if let Some(hit) = peer_shaped_reason(&reason) {
                 return Ok(ToolCallResult::error(format!(
                     "reason names your peer ('{hit}') — mark_awaiting_user is for \
-                     waiting on the USER, and parking on a peer deadlocks the duo. \
-                     If the work needs your peer, message them (your turn output is \
-                     forwarded automatically); if they aren't responding, do the \
-                     work yourself or ask the user a concrete question via \
-                     ask_user_choice."
+                     waiting on the USER, and halting on a peer stalls the session: \
+                     a halt stops the ring, so the peer you are waiting for never \
+                     gets the turn to answer. If the work needs your peer, post it \
+                     in the channel — they read it when the ring hands them their \
+                     next turn; if they aren't responding, do the work yourself or \
+                     ask the user a concrete question via ask_user_choice."
                 )));
             }
             let prior = bridge
@@ -492,14 +493,15 @@ async fn call_tool(
             // sees a whole turn: it observes THIS ToolUse and, at turn end,
             // `sequencer::turn_ending` turns it into the turn's ending — `Done`
             // (a consensus vote) when the turn is content-free or `final`, and a
-            // plain `Spoke` with the ack marked overridden when it is not.
+            // plain `Spoke` when it is not — the ack simply does not count, and
+            // no row records that (the tool text used to promise one).
             // Nothing to do bridge-side; the call just needs to succeed.
             Ok(ToolCallResult::text(
                 "peer_ack noted — it becomes a DONE vote only if this turn is \
                  content-free (or you passed `final: true`). A turn carrying \
-                 substantive text (>200 chars) still ends as an ordinary turn, \
-                 with the ack recorded as overridden: reviews and corrections \
-                 must never be silently downgraded to agreement.",
+                 substantive text (>200 chars) still ends as an ordinary turn and \
+                 the ack does not count: reviews and corrections must never be \
+                 silently downgraded to agreement.",
             ))
         }
         "pass_turn" => {

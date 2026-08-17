@@ -160,7 +160,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         vec![
         ToolDescriptor {
             name: "ask_user_choice",
-            description: gated_by("ask_user_choice", "Ask the user to pick one option from a list. Returns IMMEDIATELY with a parked acknowledgment (status=parked plus a choice_id) — it does NOT block; the user's pick is delivered later as an out-of-band user message and the session stays halted until then. After calling it, stop and wait — don't guess, poll, or re-ask. Use this whenever a decision belongs to the user."),
+            description: gated_by("ask_user_choice", "Ask the user to pick one option from a list. Returns IMMEDIATELY with a parked acknowledgment (status=parked plus a choice_id) — it does NOT block and it halts NOTHING: the question sits in the user's tray while the session keeps working, and the pick arrives later as a user message batched with the user's next send. After calling it, carry on with whatever else is workable (or pass if nothing is) — don't guess the answer, poll, or re-ask; if you must rephrase, withdraw the old question first. Use this whenever a decision belongs to the user."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -177,7 +177,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "mark_awaiting_user",
-            description: gated_by("mark_awaiting_user", "Flag this session as awaiting user input (non-blocking). The session's [Need User Input] badge is set; it clears the next time the user sends a message."),
+            description: gated_by("mark_awaiting_user", "Declare the session's HALT: the ring stops where it stands, the session's single halt slot is filled with your reason (a later declaration replaces it), your own in-flight generation is interrupted so the declaration is true, and the user gets the floor. `reason` is the recap the user reads above their input box — say where things stand and what resumes it (a wake time, a command pasted verbatim, a tray answer). Cleared by the user's next message. Use it when the next move is genuinely the user's; a question that blocks nothing is `ask_user_choice`."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -219,7 +219,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "advance_phase",
-            description: "Move the IPAV phase chip yourself (no user gate). Use this whenever your work crosses a phase boundary during a substantive task — investigation done -> Plan, plan stated -> Apply, mutation done -> Verify. The dashboard chip updates; every participant receives a [PHASE: X] transition notice. Phase is a self-discipline signal, not a permission gate. Use exact phase names: Investigate, Plan, Apply, Verify.",
+            description: "Cast your VOTE to move the IPAV phase (rc3 D37 — no user gate, but not a solo move either): the phase advances only when every active participant has voted for the same target at the same state of the work; until then the tool answers NOT ADVANCED with the tally, and you are still in the current phase. Call it whenever your work crosses a boundary — investigation done -> Plan, plan stated -> Apply, mutation done -> Verify — and expect your peers to vote on their turns. The state of the work is fingerprinted over the session's phase documents, so WRITE your phase doc first, then vote (a doc write after your vote orphans it, and everyone re-votes on changed work); a pass retracts your vote. On consensus the chip moves and every participant reads a [PHASE: X] transition notice. Use exact phase names: Investigate, Plan, Apply, Verify.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -247,7 +247,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "request_phase_advance",
-            description: "OPT-IN gated phase advance — use ONLY when you want to pause for explicit user acknowledgment before crossing a boundary. Most phase transitions should use `advance_phase` (self-advance, no gate). Reserve this for irreversible / destructive Apply work (force-push, prod writes, large rewrites). Adds a chat message and fills the session's halt slot; the ring stops until the user picks a phase in the session header OR replies in chat (implicit decline).",
+            description: "OPT-IN gated phase advance — use ONLY when you want to pause for explicit user acknowledgment before crossing a boundary. Most phase transitions go through `advance_phase` (the participants' vote, no user gate). Reserve this for irreversible / destructive Apply work (force-push, prod writes, large rewrites). Adds a chat message and fills the session's halt slot; the ring stops until the user picks a phase in the session header OR replies in chat (implicit decline).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -649,7 +649,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_register_read",
-            description: "Record that this agent read a CL file. Powers the audit trail (cl_reads) — answers 'what context did this agent see before making a decision?'. Optional but encouraged on important reads. Fire-and-forget; failures are silently logged.",
+            description: "Record that this agent read a CL file (a row in cl_reads). An audit trail only — nothing in the UI reads it back yet, so it changes nothing you see. Optional; fire-and-forget; failures are silently logged.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -765,7 +765,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         // driver was deleted (2026-08-17); this is the only copy now.
         ToolDescriptor {
             name: "webview_screenshot",
-            description: "Capture the bot-hq main window to a PNG under `<data_dir>/screenshots/<ts>.png`. Returns `{path}`. Open the file with your built-in Read tool (which supports PNG). Use this AS YOUR EYES on what the user sees. macOS Screen Recording permission required.",
+            description: "Capture the bot-hq main window to a PNG under `<data_dir>/.local/screenshots/<ts>.png`. Returns `{path}`. Open the file with your built-in Read tool (which supports PNG). Use this AS YOUR EYES on what the user sees. macOS Screen Recording permission required; in a headless/agent environment the capture may not render.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
         },
         ToolDescriptor {
@@ -907,6 +907,42 @@ mod tests {
             "ARCHITECTURE.md's tool count is not {n} — the registry moved and \
              the heading did not"
         );
+    }
+
+    /// The three descriptions an agent's stop discipline turns on must say what
+    /// the tools DO (rc3 D35 / D37). Round 7 found `ask_user_choice` telling the
+    /// agent "the session stays halted until then… stop and wait" — the exact
+    /// opposite of the prompt layer, and an instruction that manufactures the
+    /// silent stall the idle watchdog exists to catch — while `mark_awaiting_user`
+    /// called itself "non-blocking… badge is set" and `advance_phase` promised to
+    /// move the chip a vote had gated since that morning. Two answers in one
+    /// context window is a defect whichever one the model picks.
+    #[test]
+    fn stop_and_phase_tool_descriptions_match_the_shipped_semantics() {
+        let desc = |name: &str| {
+            tool_descriptors()
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered"))
+                .description
+                .to_string()
+        };
+        let ask = desc("ask_user_choice");
+        assert!(ask.contains("halts NOTHING"), "a question stops nothing: {ask}");
+        assert!(ask.contains("carry on"), "the agent keeps working: {ask}");
+        assert!(!ask.contains("stays halted"), "the pre-D35 claim must not come back: {ask}");
+        assert!(!ask.contains("stop and wait"), "no stop-and-wait: {ask}");
+        let halt = desc("mark_awaiting_user");
+        assert!(halt.contains("HALT"), "it is the halt: {halt}");
+        assert!(halt.contains("ring stops"), "and says the ring stops: {halt}");
+        assert!(!halt.contains("non-blocking"), "a halt is not a badge: {halt}");
+        let adv = desc("advance_phase");
+        assert!(adv.contains("VOTE"), "advance_phase is a vote (D37): {adv}");
+        assert!(adv.contains("NOT ADVANCED"), "and names the answer it gives: {adv}");
+        assert!(adv.contains("phase doc first, then vote"), "doc-then-vote ordering: {adv}");
+        assert!(!adv.contains("chip yourself"), "the self-move claim must not come back: {adv}");
+        let req = desc("request_phase_advance");
+        assert!(!req.contains("self-advance"), "no self-advance framing: {req}");
     }
 
     /// **Nothing an agent reads names a person (rc3 D10).**

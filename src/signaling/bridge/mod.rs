@@ -454,8 +454,9 @@ impl PhaseAdvanceOutcome {
                  Your vote to advance to {target} is recorded ({voted} of {of} participants).\n\
                  The phase moves only when every active participant has voted for this same \
                  state of the work. Do NOT act as though you are in {target}: no {target}-phase \
-                 edits, no work that belongs to it. Your turn output is forwarded to the others \
-                 automatically. If a peer posts findings, address them — changing the work \
+                 edits, no work that belongs to it. Your peers read this turn's output when the \
+                 ring hands them their next turn; expect their votes then. If a peer posts \
+                 findings, address them — changing the work (including a phase-doc write) \
                  invalidates the votes cast on the old state, including your own, and everyone \
                  re-votes."
             ),

@@ -180,7 +180,7 @@ Each substantive task walks through four phases. The current phase appears as `[
 3. **Apply** — produce the deliverable, implementing against the `plan` doc (read it first). **The `apply` doc IS the deliverable**, shaped to the task: for code, a tight changelog beside the diff; for a deploy, the merge + smoke output; for an investigation or review, the synthesized findings themselves. The participant holding the edit capability executes any mutations (Edit/Write/Bash); a review-only participant does not write — so it can pull the deliverable in Verify via `session_doc_search(phase=\"apply\")` without re-deriving from the diff. The session view's A tab auto-renders your working repo's `git diff` color-coded (GitHub-style: green adds, red removes, blue hunks, yellow file headers); point the user there for visual review instead of pasting diffs into chat. Apply-phase docs render below the diff in the same tab.
 4. **Verify** — confirm the deliverable against the `apply` doc (read it first). Check the *thing you produced*: tests / type-check for code, the smoke output for a deploy, an adversarial proof-read for an investigation or review. Cite the output. Output: chat summary + a `phase=\"verify\"` doc capturing commands run, output observed, manual checks, and any flakes / known limits.
 
-**Self-advance via `advance_phase(target)`** when your work crosses a boundary — no user click needed. Phase is a self-discipline signal, not a permission gate. The dashboard chip moves and every participant receives a `[PHASE: X]` transition notice. Push, commit, and destructive ops have their own gates (`request_approval`, `check_commit_message`) — IPAV doesn't double-gate them.
+**The phase moves by VOTE — `advance_phase(target)` casts yours** (rc3 D37). No user click is needed, but no single participant moves it either: the phase advances only when every active participant has voted for the same target at the same state of the work, so each participant genuinely gets a turn on the boundary. Until then the tool answers `NOT ADVANCED` with the tally and you are still in the current phase — do not act as though you are in the next one. Two mechanics to respect: **write your phase doc first, then vote** — the vote is fingerprinted over the session's phase documents, so a doc write after your vote orphans it (and any change to the work orphans everyone's, which is the point: everyone re-votes on changed work); and **a pass retracts your vote**. On consensus the dashboard chip moves and every participant receives a `[PHASE: X]` transition notice. Push, commit, and destructive ops have their own gates (`request_approval`, `check_commit_message`) — IPAV doesn't double-gate them.
 
 Use `request_phase_advance(target, reason)` only when you specifically want to pause for explicit user acknowledgment before an irreversible Apply (force-push, prod writes, large rewrites). Most transitions don't need it.
 
@@ -245,6 +245,31 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("A pending gate halts the session"),
             "action_gate must say the session waits at the gate"
+        );
+    }
+
+    /// rc3 D37 made the phase a VOTE; this layer said "self-advance … no user
+    /// click needed" for the whole first day of it, so an agent primed here
+    /// expected the chip to move and read `NOT ADVANCED` as a fault. And the
+    /// two mechanics agents actually tripped on live (round 7, B5): a phase-doc
+    /// write after the vote orphans it; a pass retracts it.
+    #[test]
+    fn phase_advance_is_described_as_the_vote_it_is() {
+        assert!(
+            GENERAL_RULES.contains("The phase moves by VOTE"),
+            "the IPAV paragraph must say the phase moves by vote"
+        );
+        assert!(
+            GENERAL_RULES.contains("write your phase doc first, then vote"),
+            "and the doc-then-vote ordering the fingerprint demands"
+        );
+        assert!(
+            GENERAL_RULES.contains("a pass retracts your vote"),
+            "and that a pass retracts"
+        );
+        assert!(
+            !GENERAL_RULES.contains("Self-advance via"),
+            "the pre-D37 self-advance framing must not come back"
         );
     }
 

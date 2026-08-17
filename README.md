@@ -297,7 +297,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `cl_register_folder_description(project, folder_path, …)` | Write a CL folder description (HANDS only). |
 | `cl_write_file(project, file_path, content)` | Create or replace a CL file directly (HANDS only; auto-rescans). |
 | `cl_rescan(project)` | Re-stat a project's CL directory after creating new files. |
-| `advance_phase(target)` | Move the IPAV phase chip yourself — no user gate. |
+| `advance_phase(target)` | Cast your vote to advance the IPAV phase; it moves when every active participant has voted at the same state of the work (D37). |
 | `request_phase_advance(target, reason)` | Request a user-acknowledged phase advance before an irreversible step. |
 | `session_doc_write(slug, body, phase?)` | Upsert a per-session scratch doc; `phase` surfaces it in the IPAV tabs. |
 | `session_doc_search(query?, phase?)` | List this session's scratch docs; `phase` filter for cross-phase retrieval. |

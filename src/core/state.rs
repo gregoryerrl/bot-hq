@@ -28,11 +28,15 @@ const RECONCILE_DIRECTIVE: &str = "[System: your previous turn was force-interru
 
 /// The host-authored notice `resume_session` broadcasts when the user clicks
 /// Resume on a paused session. Travels the normal `broadcast` path, so the
-/// reconcile directive (if the pause came from a Stop) is prepended wire-only,
-/// and any held peer-forwards / OOB answers flush in behind it.
+/// reconcile directive (if the pause came from a Stop) is prepended wire-only.
+/// Nothing is "held" during a pause any more (rc3 D19 — every message is a
+/// row, delivered off each participant's cursor): rows posted while paused
+/// simply precede this notice in the participant's next batch, which is what
+/// the text now says instead of promising a flush that does not exist.
 const RESUME_NOTICE: &str = "▶ Resumed. Continue exactly where you left off — \
-     finish your in-flight task. Any peer messages or question answers held \
-     during the pause follow this notice; fold them in before proceeding.";
+     finish your in-flight task. Anything posted while the session was paused \
+     (peer messages, question answers) is in this same batch, above this line; \
+     fold it in before proceeding.";
 
 /// How long to wait for an interrupted agent to honor a `control_request` and go
 /// idle before escalating to a SIGKILL. The interrupt keeps the process alive
@@ -558,11 +562,12 @@ impl AppState {
 
     /// Resume a paused session (the Paused bar's Resume button). Releases the
     /// latch by broadcasting a host-authored resume notice through the normal
-    /// [`broadcast`](Self::broadcast) path — which clears `paused`, consumes
-    /// any pending post-cancel reconciliation directive, delivers OOB wakes
-    /// held during the pause, and flushes the router's held forwards behind
-    /// the notice. Auto-heals a SIGKILLed (stale) duo via broadcast's respawn
-    /// loop. No-op when the session isn't live or isn't paused (stale click).
+    /// [`broadcast`](Self::broadcast) path — which clears `paused` and consumes
+    /// any pending post-cancel reconciliation directive; rows posted during the
+    /// pause are already on the channel and precede the notice in each
+    /// participant's next batch (nothing is held or flushed since rc3 D19).
+    /// Auto-heals a SIGKILLed (stale) session via broadcast's respawn loop.
+    /// No-op when the session isn't live or isn't paused (stale click).
     pub async fn resume_session(&self, session_id: &str) -> Result<()> {
         {
             let sessions = self.sessions.lock().await;
@@ -1779,15 +1784,17 @@ impl AppState {
     /// rejects, and the rejection text then told the agent to do the opposite.
     /// Observed live three times in one session before it was reconciled.
     ///
-    /// Waiting on a peer is not waiting on the user: a turn's output forwards to
-    /// the peer automatically, so SAYING SO is the wake mechanism. Pinned by
+    /// Waiting on a peer is not waiting on the user: what you post is a row the
+    /// ring hands your peer on their next turn, so SAYING SO in the channel is
+    /// the wake mechanism (the text used to promise router-style forwarding,
+    /// deleted 2026-08-13). Pinned by
     /// `apply_nudge_never_tells_hands_to_park_on_the_user`.
     const APPLY_ENTRY_NUDGE: &'static str =
         "🔔 Entering Apply. Before you mutate: confirm your reviewer reviewed the plan — \
          pull session_doc_search(phase=\"plan\") and check their pushback landed. If it \
-         hasn't, say so in chat (your turn output is forwarded to them automatically, \
-         which wakes them) and do non-mutating prep meanwhile. Don't park on the USER \
-         for a peer wait.";
+         hasn't, say so in the channel (your peers read it on their next turn — the \
+         ring, not you, wakes them) and do non-mutating prep meanwhile. Don't park on \
+         the USER for a peer wait.";
 
     /// A2 (adherence): whether a Plan→Apply boundary warrants the peer-ack
     /// nudge to the participant crossing it. Pure for testing; the caller
@@ -2073,9 +2080,13 @@ mod tests {
         // …while still carrying its actual job.
         assert!(nudge.contains("session_doc_search(phase=\"plan\")"));
         assert!(
-            nudge.contains("forwarded"),
-            "must name the real wake mechanism: turn output forwards to the peer"
+            nudge.contains("read it on their next turn"),
+            "must name the real wake mechanism: the ring hands the peer the row on \
+             their next turn"
         );
+        // The router-era promise must not come back: nothing forwards a turn's
+        // output anywhere; the row is the delivery (rc3 D19).
+        assert!(!nudge.contains("forwarded"), "no forwarding exists to promise");
     }
 
     #[test]
