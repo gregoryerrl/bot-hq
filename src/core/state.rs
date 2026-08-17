@@ -61,10 +61,10 @@ pub enum CancelOutcome {
 
 /// Outcome of a cancel's interrupt→SIGKILL escalation, decided AFTER the
 /// interrupt window. Pure (see [`AppState::escalation_outcome`]) so the
-/// honored > superseded > sigkill precedence is unit-tested without a live duo.
+/// honored > superseded > sigkill precedence is unit-tested without a live session.
 #[derive(Debug, PartialEq, Eq)]
 enum EscalationOutcome {
-    /// Both agents went idle in time — the interrupt was honored, process kept.
+    /// Every agent went idle in time — the interrupt was honored, process kept.
     InterruptHonored,
     /// A user message arrived during the window — it already aborted the stuck
     /// turn, so skip the SIGKILL (don't kill the user's fresh turn + warm cache).
@@ -192,18 +192,16 @@ pub struct AppState {
     pub signaling_addr: SocketAddr,
     pub signaling_server: Mutex<Option<SignalingServer>>,
     pub sessions: Mutex<HashMap<String, SessionHandle>>,
-    /// Serializes the duo-spawn path in `ensure_session_started` so two
+    /// Serializes the spawn path in `ensure_session_started` so two
     /// concurrent calls for the same session (e.g. a double-mount of the
     /// session view firing `respawn_session` twice) can't both pass the
-    /// contains_key check and spawn two Brian+Rain pairs — the second insert
+    /// contains_key check and spawn two rosters — the second insert
     /// would overwrite the first handle and orphan its subprocesses (untracked,
     /// so close_session can't reap them). Only the spawn path takes this; the
     /// fast already-running check short-circuits before acquiring it.
     spawn_gate: Mutex<()>,
-    /// External MCP server handle. None when disabled or port-busy at startup;
-    /// the binary stays usable in that case (internal MCP keeps working).
     /// Populated from Tauri's `setup()` once the AppHandle exists. The
-    /// external MCP starts BEFORE Tauri setup (see main.rs ordering), so
+    /// signaling MCP server starts BEFORE Tauri setup (see main.rs ordering), so
     /// any MCP tool that needs the webview (screenshot, click, scroll, etc.)
     /// has to wait for this to be filled. `OnceCell` because it's write-once
     /// at startup; no contention.
@@ -281,9 +279,11 @@ pub enum PhaseAdvanceSource {
     /// session is halted because nobody is mid-turn, and this is the response
     /// that resumes it.
     ///
-    /// When the phase-advance vote lands, its D36 escape valve — the user
-    /// forcing past a stalled tally — becomes a third variant here rather than a
-    /// flag beside this one, so "who advanced" stays a single question.
+    /// Since the phase-advance vote landed (D37), its D36 escape valve — the user
+    /// forcing past a stalled tally — is this same variant, not a third one: the
+    /// round cap names the deadlock and points at the header control, and the
+    /// transition it commits clears the stuck votes, so "who advanced" stays a
+    /// single question.
     User,
 }
 
@@ -444,7 +444,7 @@ impl AppState {
         // Slow path: take the spawn gate so concurrent callers serialize, then
         // re-check under the gate — a racing call may have spawned while we
         // waited. Without this double-check two callers both pass the fast
-        // check and spawn duplicate duos (one gets orphaned).
+        // check and spawn duplicate rosters (one gets orphaned).
         let _gate = self.spawn_gate.lock().await;
         {
             let mut sessions = self.sessions.lock().await;
@@ -472,8 +472,8 @@ impl AppState {
             }
         }
         // The roster seed moved into `spawn_session_handle` (B4b.2) — it is the
-        // choke point BOTH creation paths share, and this one is not: the
-        // external driver's `open_session` never reaches here.
+        // choke point every creation path shares, and this one was not: the
+        // external driver's `open_session` (deleted 2026-08-17) never reached here.
         let mut handle = spawn_existing_session(
             session_id,
             &self.paths,
@@ -504,8 +504,8 @@ impl AppState {
         Ok(())
     }
 
-    /// Force-restart a session's duo: evict the live handle (killing both
-    /// agents) and re-spawn from the CURRENT config. Agent overrides + the
+    /// Force-restart a session's roster: evict the live handle (killing every
+    /// agent) and re-spawn from the CURRENT config. Agent overrides + the
     /// inherited Claude config are read at spawn, so this is how a running
     /// session picks up a Claude-config change made in Settings. Each agent
     /// resumes its prior claude-code conversation via `--resume`, so context
@@ -530,7 +530,7 @@ impl AppState {
     /// redesign, Batch 3 + 3.1 Part 1). Sets `Cancelling` (the UI shows
     /// "Cancelling…" + keeps the input locked for the whole kill window), then
     /// decides:
-    /// - **immediate** kill of both agents' current incarnation (today's path)
+    /// - **immediate** kill of every agent's current incarnation (today's path)
     ///   when HANDS is not mid an atomic op, returning [`CancelOutcome::Done`];
     /// - **deferred** kill ([`CancelOutcome::Deferred`]) when HANDS is mid a
     ///   `git commit`/`git push`/migration — the caller polls the returned flag
@@ -554,9 +554,9 @@ impl AppState {
             // Mark Cancelling FIRST → the UI shows "Cancelling…" + keeps the
             // input locked for the whole kill window (immediate or deferred).
             // Then latch the pause (that order — see set_paused's ORDERING
-            // note): once both pumps go idle the tracker auto-clears
+            // note): once every pump goes idle the tracker auto-clears
             // cancelling and the session lands in Paused, not Idle — input
-            // enabled, duo held until the user steers, resumes, or closes.
+            // enabled, session held until the user steers, resumes, or closes.
             handle.activity.set_cancelling(true);
             handle.activity.set_paused(true);
             // **And the RING, which until now was never told** (B1-F8, the
@@ -612,7 +612,7 @@ impl AppState {
                 return Ok(()); // not live → nothing to resume
             };
             if !handle.activity.is_paused() {
-                return Ok(()); // not paused → stale click; don't nudge the duo
+                return Ok(()); // not paused → stale click; don't nudge the session
             }
         }
         self.broadcast(session_id, RESUME_NOTICE).await
@@ -724,7 +724,7 @@ impl AppState {
                 // already aborted the stuck turn — a SIGKILL would needlessly kill
                 // the fresh turn + warm cache. Skip it; clear any lingering
                 // Cancelling AND the pause latch (the user already steered —
-                // landing in Paused after their message would re-halt the duo
+                // landing in Paused after their message would re-halt the session
                 // they just woke). `broadcast` also clears it; this covers the
                 // escalation racing ahead of that clear.
                 activity.set_cancelling(false);
@@ -746,7 +746,7 @@ impl AppState {
         }
     }
 
-    /// The kill half of a cancel: tear down both agents NOW and queue the
+    /// The kill half of a cancel: tear down every agent NOW and queue the
     /// post-cancel reconciliation nudge. The SIGKILL fallback for
     /// [`interrupt_then_escalate`](Self::interrupt_then_escalate) when an agent
     /// doesn't honor the interrupt in time. Re-acquires `sessions`; a no-op if the
@@ -1262,7 +1262,7 @@ impl AppState {
     /// **An `@word` that names nobody is ordinary prose, never an error** (D1).
     /// The `@` picker in the composer makes the case rare by construction — it
     /// offers this session's participants and nothing else — but text also
-    /// arrives from the external driver, and a message REFUSED for naming a
+    /// arrives from the plugin proxy, and a message REFUSED for naming a
     /// participant that has since left the roster would be a far worse failure
     /// than a word that did nothing. Same for a read error: the summons is
     /// dropped and the ring carries on, because the user's message landing one
@@ -1347,7 +1347,7 @@ impl AppState {
         if let Some(refusal) = Self::oversized_message_refusal(text.len()) {
             anyhow::bail!(refusal);
         }
-        // Auto-heal: if the duo went stale (e.g. an agent's stdin pump died,
+        // Auto-heal: if the session went stale (e.g. an agent's stdin pump died,
         // closing the public input channel — a now-deaf agent that would silently
         // drop this message), evict + respawn it before delivering so the user's
         // message isn't lost. The check and the respawn can't be atomic
@@ -1389,8 +1389,8 @@ impl AppState {
         let handle = sessions
             .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("no live session {session_id}"))?;
-        // Clear the awaiting halt BEFORE forwarding the user's reply so the
-        // pumps see chunks again.
+        // Clear the awaiting flag BEFORE posting the user's reply so the
+        // activity state leaves `AwaitingUser`.
         self.clear_awaiting(handle, session_id).await;
         // The ring's RELEASE is not here — it rides the notify below, AFTER the
         // row is posted. `clear_awaiting` only lowers a flag; the sequencer
@@ -1409,7 +1409,7 @@ impl AppState {
             .store(true, std::sync::atomic::Ordering::Release);
         handle.activity.set_cancelling(false);
         // A user message is the steer: release the pause latch so the dispatch
-        // below runs the duo normally (a Send while Paused = clarify/steer; the
+        // below runs the session normally (a Send while Paused = clarify/steer; the
         // Resume button routes here too, as a resume-notice broadcast).
         handle.activity.set_paused(false);
         let phase = handle.ipav.lock().await.current_phase;
@@ -1424,8 +1424,8 @@ impl AppState {
             .then_some(RECONCILE_DIRECTIVE);
         // Human preemption (the always-typeable unblock's spine): the user's
         // message must take effect NOW, not queue behind a turn-in-flight (or an
-        // idle agent-to-agent volley). Fire a warm control_request interrupt at
-        // both agents BEFORE delivering. Verified harmless when idle
+        // idle agent-to-agent lap). Fire a warm control_request interrupt at
+        // every agent BEFORE delivering. Verified harmless when idle
         // (control_response{success}, process survives, next message still
         // processed), and it aborts the in-flight turn when busy — so we don't
         // gate on the flaky activity `busy` signal. The pump's biased control
@@ -1758,10 +1758,10 @@ impl AppState {
         }
     }
 
-    /// Set IPAV phase + emit a synthetic user "phase advanced to X" message so
-    /// both agents see the transition naturally. Also clears any awaiting-user
+    /// Set IPAV phase + post a host "phase advanced to X" row so every
+    /// participant sees the transition naturally. Also clears any awaiting-user
     /// halt — an agent that fired `request_phase_advance` has effectively been
-    /// answered by the chip click, so the duo should resume.
+    /// answered by the chip click, so the session should resume.
     pub async fn advance_phase(
         &self,
         session_id: &str,
@@ -1828,21 +1828,21 @@ impl AppState {
             None,
         )
         .await;
-        // Fed to HANDS's stdin so it lands as a natural prompt.
+        // Posted as a row the executor reads at its next dealt turn.
         //
-        // NOT to EYES (issues.md #8). Waking the reviewer on a phase transition
-        // buys nothing and costs a turn: she has no new content to review, so
-        // the turn is a "holding for Brian's plan" acknowledgment — and each one
-        // burns a slot of the `VOLLEY_HARD_CAP` budget that #24 showed was being
-        // exhausted before substantive reviews could get through. Measured in
-        // this very session: filler turns landing 7-45 s after each phase
-        // change, 40-116 chars apiece.
+        // The reviewer is not WOKEN for it (issues.md #8). Waking the reviewer
+        // on a phase transition bought nothing and cost a turn: it had no new
+        // content to review, so the turn was a "holding for the executor's
+        // plan" acknowledgment — and each one burned a slot of the router-era
+        // `VOLLEY_HARD_CAP` budget that #24 showed was being exhausted before
+        // substantive reviews could get through. Measured in this very session:
+        // filler turns landing 7-45 s after each phase change, 40-116 chars
+        // apiece.
         //
-        // She loses no information. Every peer forward carries the current phase
-        // in its envelope (`peer_forward_message(from, body, phase, …)`), so she
-        // reads the new phase on the next message that actually has something in
-        // it. Provider-limit peer notices still wake her deliberately — that is a
-        // different path and stays.
+        // It loses no information: the phase-change row sits on the channel and
+        // it reads it off its own cursor at its next dealt turn, alongside the
+        // next message that actually has something in it. Provider-limit peer
+        // notices are a different path (a host row plus a halt) and stay.
         // **No direct write.** The row is persisted, so every participant reads
         // it off its own cursor when the ring next deals it a turn — which is
         // also when it can act on it. Writing into a stdin here did something
@@ -1855,9 +1855,9 @@ impl AppState {
         // contradicting it.
 
         // A2 (adherence): the peer-ack the prompts don't mechanically enforce.
-        // On the Plan→Apply boundary in a duo session, remind Brian (HANDS) to
-        // confirm Rain's plan review before mutating. Brian-only; no-op solo;
-        // gated by the adherence_nudges setting.
+        // On the Plan→Apply boundary in a session with a peer, remind the executor
+        // (HANDS) to confirm its reviewer's plan review before mutating.
+        // Executor-only; no-op solo; gated by the adherence_nudges setting.
         if Self::should_peer_ack_nudge(prev_phase, target, handle.agent_count() > 1)
             && self.storage.adherence_nudges_enabled().await
         {
@@ -2033,11 +2033,11 @@ impl AppState {
                 }
             }
         }
-        // Only the timed-out fallback needs us to wake the duo subprocess. The
+        // Only the timed-out fallback needs us to wake the session. The
         // OOB message is already in storage (bridge wrote it, envelope and all).
-        // To actually wake the duo so they read + act on it, also: (1) clear the
-        // awaiting-user halt so the duo pump resumes peer-forwarding, (2) deliver
-        // the receipt so their stdin receives a wake message. We deliberately do
+        // To actually wake the participants so they read + act on it, also: (1)
+        // clear the awaiting-user halt, (2) release the ring (an IDLE ring only)
+        // so the next dealt turn drains the row. We deliberately do
         // NOT call broadcast_user_message (which re-inserts) — the storage row
         // already exists. Delivered + StaleGateNeedsConfirm need no wake (the
         // agent is live, or nothing ran).
@@ -2211,13 +2211,13 @@ mod tests {
 
     #[test]
     fn peer_ack_nudge_only_on_plan_to_apply_duo() {
-        // A2: fires only when crossing Plan→Apply in a duo session.
+        // A2: fires only when crossing Plan→Apply in a session with a peer.
         assert!(AppState::should_peer_ack_nudge(
             IpavPhase::Plan,
             IpavPhase::Apply,
             true
         ));
-        // Solo (no Rain) → no peer to ack.
+        // Solo (no peer) → no peer to ack.
         assert!(!AppState::should_peer_ack_nudge(
             IpavPhase::Plan,
             IpavPhase::Apply,

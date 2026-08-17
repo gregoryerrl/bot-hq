@@ -66,8 +66,9 @@ impl IpavPhase {
     }
 
     /// Canonical hint for INVALID_PARAMS error messages when `parse` rejects
-    /// a target. Single source of truth so internal + external MCP dispatch
-    /// can't drift apart on what they tell agents is acceptable.
+    /// a target. Single source of truth so the two parse sites (the tool
+    /// handlers and the Tauri command) can't drift apart on what they tell
+    /// agents is acceptable.
     pub fn error_hint() -> &'static str {
         "I/P/A/V or Investigate/Plan/Apply/Verify"
     }

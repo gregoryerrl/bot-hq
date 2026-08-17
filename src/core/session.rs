@@ -1,8 +1,9 @@
 //! Session lifecycle: open + close.
 //!
-//! `open_session` is the load-bearing entry: persists the row, reads the
-//! system prompt from CL, spawns Brian + Rain, kicks off the duo event pumps,
-//! and registers the session in `AppState`.
+//! `spawn_existing_session` is the load-bearing entry: reads the session row,
+//! composes each participant's system prompt from CL, spawns every enabled
+//! roster participant, starts the turn ring and the event pumps, and returns
+//! the handle `AppState` registers.
 
 use crate::agents::{spawn_supervised_agent, AgentHandle, RetryPolicy, SpawnConfig};
 use crate::core::pump::{pump_agent, PumpConfig};
@@ -97,7 +98,7 @@ pub struct SessionHandle {
     pub working_repo_path: Option<PathBuf>,
     /// HEAD of `working_repo_path` captured at session spawn. The session
     /// view's Apply tab diffs the current working tree against this anchor
-    /// (`git diff <session_start_sha>`) so the user sees everything Brian
+    /// (`git diff <session_start_sha>`) so the user sees everything the executor
     /// applied this session — committed, staged, and unstaged — even right
     /// after a commit lands (`git diff HEAD` would show empty in that case).
     /// None when no working repo, no `.git/`, or the spawn-time `git rev-parse`
@@ -111,9 +112,9 @@ pub struct SessionHandle {
     /// needs deterministic order and a map has none — it would need a parallel
     /// ordering anyway. N ≤ 5 makes linear lookup free.
     pub participants: Vec<SessionAgent>,
-    /// Shared "duo is awaiting user input" flag. Set by the bridge when any
-    /// user-blocking MCP tool fires; checked by `router::route_forward`
-    /// before it forwards Brian↔Rain chunks; cleared by
+    /// Shared "session is awaiting user input" flag. Set by the bridge when any
+    /// user-blocking MCP tool fires (which also halts the ring, rc3 D35); read
+    /// by the `ActivityTracker` for its `AwaitingUser` state; cleared by
     /// `core::AppState::broadcast` when the user replies.
     pub awaiting: Arc<std::sync::atomic::AtomicBool>,
     /// Count of user prompts broadcast to this session, bumped by
@@ -122,16 +123,16 @@ pub struct SessionHandle {
     /// once-per-window nudge. In-memory on purpose — a storage count races
     /// the watchdog's first poll at session start.
     pub user_broadcasts: Arc<std::sync::atomic::AtomicU64>,
-    /// Per-session duo-activity tracker (interrupt redesign, Batch 2) — drives
-    /// the chat-input lock. Shared with both pumps (which clear `busy` on
-    /// `TurnComplete`) and the dispatch paths in `AppState` (set `busy` on send,
-    /// `cancelling` on cancel). Reads the same `awaiting` Arc above for the
+    /// Per-session activity tracker (interrupt redesign, Batch 2) — drives
+    /// the chat-input lock. Shared with every pump (which clears its own `busy`
+    /// on `TurnComplete`), the ring (which sets `busy` at handover) and the
+    /// dispatch paths in `AppState` (`cancelling` on cancel). Reads the same `awaiting` Arc above for the
     /// `AwaitingUser` state.
     pub activity: Arc<crate::core::ActivityTracker>,
     /// Shared "HANDS is mid-atomic-tool" flag (interrupt redesign, Batch 3.1
     /// Part 1) — read by `cancel_session_turn` to DEFER the kill until a
     /// `git commit`/`git push`/migration finishes, so a cancel never leaves the
-    /// working tree half-written. Session-level (both pumps hold the Arc; only
+    /// working tree half-written. Session-level (every pump holds the Arc; only
     /// HANDS sets it).
     pub in_atomic_tool: Arc<std::sync::atomic::AtomicBool>,
     /// Set by `broadcast` when a user message arrives, so an in-flight cancel
@@ -182,7 +183,7 @@ impl SessionHandle {
     /// True once either agent's retry supervisor has terminated — a permanent
     /// API error (e.g. `400`) or an exhausted retry budget drops the
     /// supervisor's input receiver, which closes this sender. The handle then
-    /// lingers in the session map but can no longer drive the duo, so callers
+    /// lingers in the session map but can no longer drive the session, so callers
     /// (`ensure_session_started`) evict + re-spawn it instead of treating it as
     /// live. Stays `false` during a healthy run AND during a transient-retry
     /// backoff (the supervisor still holds the receiver then), so a recovering
@@ -351,8 +352,6 @@ pub async fn spawn_existing_session(
     .await
 }
 
-/// Shared spawn logic for both fresh and existing sessions: spawn Brian + Rain,
-/// kick the duo pumps, return the handle.
 /// Resolve a session's project from its repo paths. A registered project
 /// whose `working_repo_path` matches wins (matched against the BASE repo
 /// first — a worktree session's path ends in the repo basename, not
@@ -610,11 +609,11 @@ async fn spawn_session_handle(
 
     let mcp_temp = TempDir::new().context("creating mcp-config temp dir")?;
 
-    // Seed the roster before anything is spawned. THIS is the choke point both
-    // creation paths share — `open_session` (external driver) and
-    // `spawn_existing_session` (everything else) — whereas
-    // `ensure_session_started`, where B4a.1 first put this, is only on the
-    // second. Idempotent, so the common path is two no-op inserts. A failure
+    // Seed the roster before anything is spawned. THIS is the choke point every
+    // creation path shares — `spawn_existing_session` today, and the external
+    // driver's `open_session` until 2026-08-17 — whereas
+    // `ensure_session_started`, where B4a.1 first put this, is only one of its
+    // callers. Idempotent, so the common path is two no-op inserts. A failure
     // must not block the spawn: `author` still carries attribution and the
     // agents still run.
     if let Err(e) = storage
@@ -661,8 +660,8 @@ async fn spawn_session_handle(
         // D8's model chain: the participant's own pick (create dialog) wins,
         // then the ROLE's default, then the per-agent row. The middle step is
         // what makes the Roles tab the owner of "which model does this role run
-        // on" — without it every create path with no dialog (the Maintain-CL
-        // button, a plugin-created session) resolved straight to `agent_configs`,
+        // on" — without it every create path with no dialog (the since-retired
+        // Maintain-CL button, a plugin-created session) resolved straight to `agent_configs`,
         // whose only editor was the Agents tab, retired by D8.
         let cfg = resolve_participant_config(&storage, p).await;
         // Composed per participant from the database — see
@@ -760,9 +759,9 @@ async fn spawn_session_handle(
     ));
     let awaiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Register the flag with the bridge so user-blocking MCP tools can set it
-    // synchronously (before the agent's next chunk volleys). The duo pumps
-    // read the same Arc, so updates propagate to both pumps with no
-    // additional plumbing.
+    // synchronously (before the agent's next event lands). The activity
+    // tracker below reads the same Arc, so updates reach the chat-input lock
+    // with no additional plumbing.
     bridge
         .register_session_awaiting(session.id.clone(), Arc::clone(&awaiting))
         .await;
@@ -770,7 +769,7 @@ async fn spawn_session_handle(
 
     // Shared "HANDS mid-atomic-tool" flag (interrupt redesign, Batch 3.1 Part
     // 1) — lets a cancel defer the kill until a git commit/push/migration
-    // finishes. Session-level: both pumps hold the Arc, only HANDS sets it.
+    // finishes. Session-level: every pump holds the Arc, only HANDS sets it.
     let in_atomic_tool = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // A user message sent during a cancel's interrupt→SIGKILL escalation window
     // supersedes the cancel: `broadcast` sets this, and `interrupt_then_escalate`
@@ -781,7 +780,8 @@ async fn spawn_session_handle(
 
     // Per-session activity tracker (interrupt redesign, Batch 2) — drives the
     // chat-input lock. Shares the `awaiting` Arc (for the AwaitingUser state);
-    // both pumps flip per-agent `busy`, the dispatch paths set busy on send.
+    // the ring sets a participant's `busy` at handover, each pump clears its
+    // own at turn end.
     let activity = crate::core::ActivityTracker::new(
         session.id.clone(),
         Arc::clone(&awaiting),
@@ -830,13 +830,10 @@ async fn spawn_session_handle(
             .zip(&livenesses)
             .map(|(p, l)| (p.slug.clone(), Arc::downgrade(l)))
             .collect();
-    // Central peer-forward router (duo only). The single forward decision point +
-    // the interleaved convergence stream; both pumps emit RouterCommand to it.
-    // Lifecycle: when both pumps drop their router_tx clones (session end) the
-    // command channel closes and run_router returns (like the watchdog — no
-    // explicit teardown). The shared `awaiting` Arc is
-    // cloned in, so the bridge's awaiting set + broadcast's counter reset are
-    // visible here with no extra plumbing.
+    // The turn ring (`core::sequencer`): the single turn-dealing point + the
+    // spin detector; every pump sends `SequencerCommand` to it. Lifecycle:
+    // `run_sequencer` returns when the last `sequencer_tx` clone drops
+    // (session end) — like the watchdog, no explicit teardown.
     // **The turn ring drives every session** (task 14, 2026-08-12). The
     // bilateral router it replaced forwarded `Author::Brian ↔ Author::Rain` and
     // had no third case, so it could not serve a roster — which is what made it
@@ -1032,7 +1029,7 @@ async fn spawn_session_handle(
         booting.store(false, std::sync::atomic::Ordering::Release);
     }
 
-    // Batch 7: spawn the per-session stall watchdog (solo + duo). It holds Weak
+    // Batch 7: spawn the per-session stall watchdog (any roster size). It holds Weak
     // liveness refs, so it self-terminates once the pumps drop their Arcs.
     // Also carries the idle-unflagged watch (chip + HANDS nudge when the
     // session sits bare-Idle past grace with no tray flag).
@@ -1100,7 +1097,7 @@ async fn spawn_session_handle(
     // from there feeds the next.
     if !booted && is_first_spawn && storage.adherence_nudges_enabled().await {
         if let Some(nudge) = cl_opener_nudge(project.as_deref()) {
-            // One row, both agents. `Investigate` is the same constant this
+            // One row, every participant. `Investigate` is the same constant this
             // site always wrapped the nudge in — it runs only on a first spawn,
             // which is a session's first phase by definition — so the wire is
             // unchanged; what is new is that the tag is part of the row the
@@ -1614,11 +1611,12 @@ pub fn user_mcp_servers_for_agent(
 /// synchronously testable, and the database round-trip happens once per spawn in
 /// `spawn_session_handle` instead of inside prompt assembly.
 ///
-/// `spawn_session_handle` — not `open_session` — is where it is resolved because
-/// that is the shared body BOTH creation paths funnel through (`open_session`
-/// for the external driver, `spawn_existing_session` for everything else), the
-/// same choke point the roster seeding above it relies on. Resolving in either
-/// caller alone would give one of the two paths the built-in prose forever.
+/// `spawn_session_handle` — not its caller — is where it is resolved because
+/// that is the shared body every creation path funnels through
+/// (`spawn_existing_session` today; the external driver's `open_session` until
+/// 2026-08-17), the same choke point the roster seeding above it relies on.
+/// Resolving in a caller instead would give any other path the built-in prose
+/// forever.
 ///
 /// `roster` is the participant's own capability snapshot plus the other live
 /// participants ([`resolve_roster_facts`]). `None` — a roster read that failed,
@@ -1869,7 +1867,7 @@ fn push_section(out: &mut String, s: &str) {
 /// migration 0001). Intentionally Anthropic for EVERY agent: at this tier we
 /// hold no gateway credentials (`base_url`/`auth_token`), and Anthropic's
 /// ambient auth is the only provider that works without them. Labeling a
-/// non-Anthropic agent here (e.g. Rain on her DeepSeek gateway) would ship a
+/// non-Anthropic agent here (e.g. a reviewer on a DeepSeek gateway) would ship a
 /// dead, unreachable config, so the universal Anthropic default is deliberate.
 fn default_agent_config(name: &str) -> AgentConfig {
     AgentConfig {
@@ -2935,7 +2933,7 @@ mod tests {
     /// not fall straight through to the per-agent row.
     ///
     /// This is the gap retiring the Agents tab opened: `dispatch_session_inner`
-    /// ("Maintain CL", the plugin-proxy create arm) writes NULL model ids, and
+    /// (the plugin-proxy create arm; "Maintain CL" until D15) writes NULL model ids, and
     /// `agent_configs` no longer has an editor anywhere in the app. Without the
     /// role step those sessions are pinned to whatever that row happened to
     /// hold, and after the database reset that is the seeded default forever.
@@ -3006,10 +3004,10 @@ mod tests {
 
     /// **The dialogless create paths land on one participant (rc3 D13).**
     ///
-    /// `seed_default_roster` is the funnel both of them share —
-    /// `CoreAppState::open_session` (the external driver) reaches it directly,
-    /// and `dispatch_session_inner` (the plugin arm) reaches it through the
-    /// pre-spawn `ensure_session_roster`. Neither has a dialog and the setting
+    /// `seed_default_roster` is the funnel they share —
+    /// `dispatch_session_inner` (the plugin arm) reaches it through the
+    /// pre-spawn `ensure_session_roster`, as `CoreAppState::open_session` (the
+    /// external driver, deleted 2026-08-17) did directly. Neither has a dialog and the setting
     /// that used to answer for them is deleted, so this shape IS the product
     /// default.
     ///
@@ -3029,7 +3027,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Exactly what `CoreAppState::open_session` passes: solo, two model ids
+        // Exactly what `CoreAppState::open_session` passed (until 2026-08-17): solo, two model ids
         // positional over the default roster's turn order.
         seed_default_roster(
             &s,
@@ -3756,7 +3754,7 @@ mod tests {
     /// claude-code tool name out of layer 2 — correctly, though for a reason rc3
     /// D9 has since retired (a `Capability` is runtime-independent and `Edit` was
     /// a spelling the second runtime did not implement). Neither branch could see
-    /// the other, and the merge left EYES refused a tool nothing in her briefing
+    /// the other, and the merge left EYES refused a tool nothing in its briefing
     /// named. This test failed on `main` and the bullet went back into the
     /// constant, which is why it is no longer in the table below. The remaining
     /// entries name MCP tools, which bot-hq itself defines, so layer 2 keeps
@@ -4322,7 +4320,7 @@ mod tests {
     /// away one frame before it mattered.
     ///
     /// Each role gets its OWN sentinel so the cross-checks below can tell "the
-    /// join works" apart from "every agent gets brian's prose", which is what a
+    /// join works" apart from "every agent gets the executor's prose", which is what a
     /// hardcoded slug at the resolve site would produce.
     #[tokio::test]
     async fn an_edited_role_row_reaches_the_prompt_the_agent_is_spawned_with() {

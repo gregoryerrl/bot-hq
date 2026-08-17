@@ -1,7 +1,7 @@
-//! Per-session duo activity — the source of truth for the chat-input lock +
+//! Per-session activity — the source of truth for the chat-input lock +
 //! Cancel button (interrupt redesign, Batch 2). Mirrors the `awaiting`
 //! `Arc<AtomicBool>` pattern: created per session in `spawn_session_handle`,
-//! shared with the duo pump (which clears `busy` on `TurnComplete`) and the
+//! shared with each participant's pump (which clears its own `busy` on `TurnComplete`) and the
 //! dispatch sites (which set `busy` when input is sent to an agent), and emits a
 //! `SessionActivity` SignalingEvent whenever the derived state changes.
 
@@ -10,10 +10,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Session-level duo activity, as surfaced to the UI.
+/// Session-level activity, as surfaced to the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionActivity {
-    /// Both agents idle, not awaiting the user — input ENABLED.
+    /// Every participant idle, not awaiting the user — input ENABLED.
     Idle,
     /// At least one agent mid-turn — input DISABLED, Cancel shown.
     Busy,
@@ -25,8 +25,9 @@ pub enum SessionActivity {
     Cancelling,
     /// The user clicked Stop — agents interrupted and HELD. Input ENABLED (the
     /// user steers by typing, resumes, or closes). Distinct from `Idle`: while
-    /// paused the router holds peer-forwards and out-of-band deliveries, so the
-    /// duo cannot wake itself; only a user action (Send / Resume) clears it.
+    /// paused nothing releases the ring — a tray answer's wake and the idle
+    /// watchdog both check `holds_wakes` first — so the session cannot wake
+    /// itself; only a user action (Send / Resume) clears it.
     Paused,
 }
 
@@ -72,9 +73,9 @@ impl SessionActivity {
 }
 
 /// Guarded mutable state. Kept behind one `Mutex` so concurrent set/clear from
-/// both pumps + the dispatch sites serialize — no interleave can emit a
-/// spurious intermediate (e.g. a momentary `Idle` between `Busy{brian}` and
-/// `Busy{rain}` during a peer hand-off).
+/// every pump + the dispatch sites serialize — no interleave can emit a
+/// spurious intermediate (e.g. a momentary `Idle` between one participant's
+/// `Busy` and the next's during a hand-off).
 struct Inner {
     /// Per-participant busy, keyed by participant **slug**. B4b: was
     /// `brian_busy` / `rain_busy` — the names of the day, now `slot0_busy` /
@@ -138,10 +139,11 @@ pub struct ActivityTracker {
     awaiting: Arc<AtomicBool>,
     /// The Stop/pause latch (interrupt lands the session in `Paused`, not
     /// `Idle`). Unlike `awaiting` it is tracker-owned — no MCP tool flips it;
-    /// only core paths do, via [`set_paused`](Self::set_paused). The router
-    /// reads it (with `cancelling`) to gate forwards/deliveries.
+    /// only core paths do, via [`set_paused`](Self::set_paused). The wake paths
+    /// read it (with `cancelling`, via `holds_wakes`): a tray answer's release
+    /// and the idle watchdog; the sequencer reads `is_paused` at its D35 gate.
     paused: AtomicBool,
-    /// Did BOTH agents reach idle at any point since the current cancel began?
+    /// Did EVERY participant reach idle at any point since the current cancel began?
     ///
     /// This is the difference between "the interrupt was honored and the agent
     /// has since started the user's new turn" and "the agent never stopped".
@@ -156,9 +158,8 @@ pub struct ActivityTracker {
     ///
     /// Two jobs, both of which used to be done by the literal strings `"brian"`
     /// and `"rain"` (rc3 D10):
-    ///   * translating the legacy `Author` two-party discriminant — which the
-    ///     peer-forward router still speaks — onto the slug this tracker keys
-    ///     `busy` by,
+    ///   * translating the legacy `Author` two-party discriminant (the deleted
+    ///     router's vocabulary) onto the slug this tracker keys `busy` by,
     ///   * filling the frozen two-boolean wire payload, whose fields name slots
     ///     0 and 1 and no longer name agents.
     ///
@@ -222,7 +223,7 @@ impl ActivityTracker {
         self.recompute_locked(&mut g);
     }
 
-    /// Whether both agents have been idle at any point since the current cancel
+    /// Whether every participant has been idle at any point since the current cancel
     /// started. `escalation_outcome` uses it to tell an honored-then-resumed
     /// turn from one that never stopped.
     pub fn idled_since_cancel(&self) -> bool {
@@ -245,16 +246,16 @@ impl ActivityTracker {
         self.recompute_locked(&mut g);
     }
 
-    /// Whether the pause latch is set. The router's forward/delivery gate reads
-    /// this (alongside the cancelling flag) — see [`holds_wakes`](Self::holds_wakes).
+    /// Whether the pause latch is set. The sequencer reads it at its D35 gate;
+    /// the wake paths read it through [`holds_wakes`](Self::holds_wakes).
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Acquire)
     }
 
-    /// The router's wake gate: while a cancel is settling OR the pause latch is
-    /// set, peer-forwards must be HELD, not delivered — a stopped session must
-    /// not wake itself (the Exited best-effort forward after a SIGKILL fallback
-    /// was exactly that bug). Read at dispatch time inside the router task.
+    /// The wake gate: while a cancel is settling OR the pause latch is set,
+    /// nothing releases the ring — a stopped session must not wake itself
+    /// (the router-era Exited best-effort forward after a SIGKILL fallback was
+    /// exactly that bug). Read by `AppState::tray_wake` and the idle watchdog.
     pub fn holds_wakes(&self) -> bool {
         let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.cancelling || self.paused.load(Ordering::Acquire)
@@ -382,7 +383,7 @@ impl ActivityTracker {
     }
 
     fn recompute_locked(&self, g: &mut Inner) {
-        // A cancel auto-completes once BOTH agents have gone idle (the kill
+        // A cancel auto-completes once EVERY participant has gone idle (the kill
         // settled) — clear `cancelling` so the state transitions
         // Cancelling → Paused (Stop sets the pause latch) or → Idle, instead
         // of sticking. Done BEFORE derive so the emitted state reflects it.

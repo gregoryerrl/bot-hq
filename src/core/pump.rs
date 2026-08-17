@@ -86,15 +86,11 @@ pub struct PumpConfig {
     /// every event and tracks tools-in-flight. `None` in tests / solo configs
     /// that don't run the watchdog.
     pub liveness: Option<Arc<crate::core::watchdog::AgentLiveness>>,
-    /// Sender to the turn sequencer (`core::sequencer`), the B5 replacement for
-    /// `router_tx`. The pump emits one `TurnComplete` per finished turn, carrying
-    /// the consensus vote `turn_ending()` derives from the same `peer_ack` signals
-    /// the Forward above carries.
-    ///
-    /// **Both may be set during the changeover**, and that is deliberate: it lets
-    /// one session run the ring while the router still drives the rest, which is
-    /// how the sequencer earns the right to task 14's deletion. `None` = this
-    /// pump does not feed a ring.
+    /// Sender to the turn sequencer (`core::sequencer`). The pump emits one
+    /// `TurnComplete` per finished turn, carrying the ending `turn_ending()`
+    /// derives from the turn's `peer_ack` / `pass_turn` signals. `None` = this
+    /// pump does not feed a ring (test shapes). It replaced the deleted router's
+    /// `router_tx` (task 14, 2026-08-13).
     pub sequencer_tx: Option<mpsc::Sender<crate::core::sequencer::SequencerCommand>>,
     /// The epoch of the turn this participant currently holds, written by the
     /// sequencer at handover.
@@ -215,8 +211,8 @@ impl PumpConfig {
 /// repo isn't left half-written (interrupt redesign, Batch 3.1 Part 1). Matches
 /// HANDS's two atomic-op surfaces: a direct `Bash` command, or an `action_gate`
 /// (a gated command — surfaced MCP-prefixed as
-/// `mcp__bot-hq-signaling__action_gate`, so match by suffix). Rain is read-only
-/// and never trips this. The `migrate` match is deliberately broad (sqlx /
+/// `mcp__bot-hq-signaling__action_gate`, so match by suffix). A read-only
+/// participant never trips this. The `migrate` match is deliberately broad (sqlx /
 /// artisan / rails / npm): a false positive only defers a kill briefly (8s-
 /// capped, self-clears on the ToolResult); a false negative is the exact bug
 /// this prevents.
@@ -234,10 +230,11 @@ fn is_atomic_command(name: &str, input: &serde_json::Value) -> bool {
 
 /// True for the `peer_ack` MCP tool call — the bare alias (tests) or the
 /// MCP-prefixed wire name (`mcp__bot-hq-signaling__peer_ack`). When the pump
-/// sees this ToolUse, it suppresses the turn's peer-forward: the agent
-/// explicitly acknowledged its peer without wanting to wake it for a full turn.
-/// Behavioral happy-path layer ON TOP of the L2 volley-breaker, never a
-/// replacement (weak models that never call it still hit L2).
+/// sees this ToolUse it marks the turn as an ACK: the agent explicitly
+/// acknowledged its peer, and the ring counts that as a done vote toward
+/// consensus instead of dealing another lap. A behavioural layer ON TOP of the
+/// ring's own spin detection, never a replacement (weak models that never call
+/// it still hit the detector).
 fn is_peer_ack_tool(name: &str) -> bool {
     name == "peer_ack" || name.ends_with("__peer_ack")
 }
@@ -254,11 +251,12 @@ fn is_halt_tool(name: &str) -> bool {
 /// True for a `peer_ack` call that passed `final: true` — the agent asserting
 /// "this turn is my closing statement; record it, don't wake my peer".
 ///
-/// Without it the router can only INFER substance from length
+/// Without it the ring can only INFER substance from length
 /// (`PEER_ACK_MAX_SUPPRESSED_LEN`), and that proxy misfires on the exact turn
-/// shape that ENDS a volley: "I agree, and here is the one reason why" runs past
-/// 200 chars, so it forwards, so the peer wakes and replies. Filed from a live
-/// session as feedback #6 with worked examples.
+/// shape that ENDS an exchange: "I agree, and here is the one reason why" runs
+/// past 200 chars, so it counts as substantive, so the peer is dealt another
+/// turn and replies. Filed from a live session as feedback #6 with worked
+/// examples.
 ///
 /// Suppression is safe to make explicit because it has never destroyed content —
 /// the turn's text is persisted by the `AgentEvent::Text` arm as it arrives,
@@ -369,8 +367,8 @@ pub async fn pump_agent(
     // turn would make a participant that DID speak look like it had passed, and
     // the pass is the one ending that leaves the tally standing.
     let mut pass_pending = false;
-    // A3a: one-shot guard so Brian gets at most one "you're mutating before
-    // Apply" nudge per session (delivered to his own stdin via self_input_tx).
+    // A3a: one-shot guard so the executor gets at most one "you're mutating
+    // before Apply" nudge per session (posted as a host row it reads next turn).
     let mut mutate_nudged = false;
     // Batch 3.1 Part 1: the tool_use_id of an in-flight atomic op (git commit/
     // push/migration), so a cancel can defer the kill until it completes. We
@@ -512,11 +510,11 @@ pub async fn pump_agent(
             }
             AgentEvent::ToolUse { id, name, input } => {
                 // peer_ack: the agent explicitly acked its peer this turn — flag it
-                // so this turn's Forward tells the router to suppress the wake.
+                // so this turn's ending is reported to the ring as an ack.
                 if is_peer_ack_tool(&name) {
                     peer_ack_pending = true;
                     // `final: true` = the agent ASSERTS this is its closing turn,
-                    // so the router suppresses regardless of length instead of
+                    // so the ring counts the ack regardless of length instead of
                     // inferring substance from a byte count.
                     if peer_ack_is_final(&name, &input) {
                         peer_ack_final_pending = true;
@@ -540,16 +538,16 @@ pub async fn pump_agent(
                 }
                 // Batch 3.1 Part 1: flag an atomic op (git commit/push/
                 // migration) so a cancel defers the kill until it completes.
-                // Shared session flag; only HANDS trips it (Rain is read-only).
+                // Shared session flag; only an editing participant trips it.
                 if let Some(flag) = cfg.in_atomic_tool.as_ref() {
                     if is_atomic_command(&name, &input) {
                         flag.store(true, Ordering::Release);
                         atomic_tool_id = Some(id.clone());
                     }
                 }
-                // A3a (adherence): catch Brian mutating before the Apply phase —
-                // a one-time self-nudge to advance first. Brian-only (Rain can't
-                // mutate), gated by adherence_nudges, fired at most once.
+                // A3a (adherence): catch the executor mutating before the Apply
+                // phase — a one-time nudge to advance first. Editing participants
+                // only, gated by adherence_nudges, fired at most once.
                 if !mutate_nudged
                     && cfg.edits_files
                     && matches!(name.as_str(), "Edit" | "Write" | "NotebookEdit")
@@ -563,8 +561,8 @@ pub async fn pump_agent(
                             && storage.adherence_nudges_enabled().await
                         {
                             // Host-authored, so it posts as `system` with a NULL
-                            // participant: it is not Brian's turn output even
-                            // though it lands on Brian's stdin. No envelope —
+                            // participant: it is not the executor's turn output
+                            // even though it is addressed to it. No envelope —
                             // this site never wrapped the text, and B5 Task 2 is
                             // a plumbing change, not a prompt change.
                             // Persisted only. The direct write went into the
@@ -768,10 +766,9 @@ pub async fn pump_agent(
                         }
                     }
                 }
-                // The router owns self-idle on the forward path (it sequences
-                // peer-busy BEFORE this agent's idle → no momentary Idle flicker).
-                // The pump owns self-idle only when it does NOT hand a Forward to
-                // the router: an errored turn, an empty buffer, or a solo session.
+                // Self-idle: the pump clears its own `busy` below once the turn
+                // has ended, and the ring sets the next participant's `busy` at
+                // handover (D19b) — no momentary all-idle unlock in between.
                 // B5: what this ending MEANS, derived before the buffer is taken
                 // below. An errored turn ends `Spoke` — it produced nothing, but
                 // the ring has to step or the cycle stalls on a participant that
@@ -975,13 +972,13 @@ pub async fn pump_agent(
                 // microseconds of this completion.
                 turn_opened_at = std::time::Instant::now();
                 // peer_ack is per-turn — reset after BOTH branches so an errored
-                // turn (which skips the router) can't leak the flag into the next.
+                // turn can't leak the flag into the next.
                 peer_ack_pending = false;
                 peer_ack_final_pending = false;
                 pass_pending = false;
-                // Turn ended → this agent is idle, UNLESS we handed off to the
-                // router (which clears it after setting the peer busy, avoiding the
-                // momentary `Idle` flicker that would unlock the input mid-handoff).
+                // Turn ended → this agent is idle. The ring marks the next
+                // participant busy at handover, so the input does not unlock
+                // for the sub-second gap between two turns.
                 {
                     if let Some(activity) = &cfg.activity {
                         activity.set_busy_slug(&cfg.slug, false);
@@ -996,8 +993,8 @@ pub async fn pump_agent(
                 // turn end (an atomic ToolUse with no matching ToolResult
                 // shouldn't happen, but never strand the flag → never wedge a
                 // future cancel). Guarded by our own id so this pump can't clear
-                // a flag it didn't set (the flag is HANDS-only; Rain's pump
-                // never holds an id).
+                // a flag it didn't set (a read-only participant's pump never
+                // holds an id).
                 if atomic_tool_id.is_some() {
                     if let Some(flag) = cfg.in_atomic_tool.as_ref() {
                         flag.store(false, Ordering::Release);
@@ -1062,7 +1059,7 @@ pub async fn pump_agent(
     }
     // Batch 3.1 Part 1: crashed/stopped mid-atomic-tool → clear the flag so a
     // pending deferred cancel can proceed (the agent's already dead) and a
-    // respawn isn't blocked. Guarded by our own id (Rain's pump never sets it).
+    // respawn isn't blocked. Guarded by our own id (a read-only pump never sets it).
     if atomic_tool_id.is_some() {
         if let Some(flag) = cfg.in_atomic_tool.as_ref() {
             flag.store(false, Ordering::Release);

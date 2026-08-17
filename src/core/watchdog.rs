@@ -5,7 +5,7 @@
 //! that is mid-turn (busy) but has emitted no token/tool event for
 //! `STALL_THRESHOLD`, with no tool in flight, is flagged `Stalled`; when it
 //! resumes it returns to `Running`. It only manages Running↔Stalled — the
-//! supervisor owns Retrying/Dead. Runs in solo too (catches a hung Brian).
+//! supervisor owns Retrying/Dead. Runs in solo too (catches a hung executor).
 
 use crate::core::activity::{ActivityTracker, SessionActivity};
 use crate::core::ipav::IpavState;
@@ -121,7 +121,7 @@ pub(crate) struct IdleDecision {
 /// - `idle_for` — how long the session has been continuously `Idle`; `None`
 ///   when it isn't idle.
 /// - `user_broadcasts` — count of user prompts broadcast this session. 0 =
-///   pre-first-task (the duo legitimately waits; never fire).
+///   pre-first-task (the roster legitimately waits; never fire).
 /// - `pending_tray` — a question/halt/gate is parked: legitimately waiting on
 ///   the user; never fire.
 /// - `nudged_at` — the broadcast count when the last nudge was sent. A nudge

@@ -1,5 +1,6 @@
-//! Turn sequencer — the single loop that will replace today's reactive
-//! per-agent tasks and `core::router`'s bilateral peer-forwarding.
+//! Turn sequencer — the single loop that drives every session (it replaced
+//! the reactive per-agent tasks and `core::router`'s bilateral peer-forwarding,
+//! deleted 2026-08-13).
 //!
 //! Exactly one participant holds the turn. When that turn ends the sequencer
 //! picks the next active participant ([`Storage::next_active_participant`]),
@@ -60,14 +61,14 @@
 //! [`SessionHandle`](crate::core::SessionHandle). Handles live in
 //! `AppState::sessions` behind a mutex and the sequencer's control side is
 //! expected to sit ON a handle, so the task cannot own the thing that owns it.
-//! Cloned stdin is what the router and the idle watchdog already hold for the
-//! same reason.
+//! Cloned stdin is what the idle watchdog already holds for the same reason
+//! (and what the deleted router held).
 //!
 //! ## The forward ladder does not survive onto the turn path
 //!
-//! `router::route_forward` can drop a forward (convergence) or hold one (the
-//! hard cap) AFTER its row is written, so today's chat can show a row that no
-//! peer ever read. **This loop does not inherit that ladder.** Every row past a
+//! The deleted router's `route_forward` could drop a forward (convergence) or
+//! hold one (the hard cap) AFTER its row was written, so a chat could show a
+//! row that no peer ever read. **This loop does not inherit that ladder.** Every row past a
 //! participant's cursor is offered to it when its turn comes, and
 //! [`Storage::commit_delivery`] records each one with no withheld reason.
 //!
@@ -540,9 +541,9 @@
 //! [`UserMessage`](SequencerCommand::UserMessage) and nothing mints
 //! [`Resume`](SequencerCommand::Resume) at all: hold the user message and the
 //! pause is unreleasable, with the bar that offers the only way out gone from
-//! the UI the moment `ActivityTracker` reads unpaused. Both role prompts also
-//! tell the agents that "the bridge halts the duo until the next user message";
-//! holding it would make that promise false.
+//! the UI the moment `ActivityTracker` reads unpaused. The role prompts also
+//! tell the agents that a hold keeps the session halted until the next user
+//! message; holding it would make that promise false.
 //!
 //! That is not a hole in inventory #19 either. The router's pause held PEER
 //! FORWARDS, and a user Send was always its release — "a paused session must not
@@ -709,11 +710,11 @@ use tracing::{debug, warn};
 /// termination does not cover: a writer appending rows faster than the drain
 /// consumes them would otherwise hold the turn open indefinitely.
 ///
-/// 32 × 200 = 6,400 rows. **Measured 2026-08-07** against the live database:
-/// the largest single channel holds 4,719 rows, which is 74% of this cap — not
-/// the comfortable margin the figure this doc carried first (3,585, measured
-/// some weeks earlier) implied. Re-measure before treating the headroom as
-/// real; the number moves, and four later tasks read this file as spec:
+/// 32 × 200 = 6,400 rows. **Measured 2026-08-17 (round 8)** against the live
+/// database: the largest single channel holds 3,412 rows, 53% of this cap
+/// (2026-08-07 read 4,719 / 74%; the first figure here was 3,585). Re-measure
+/// before treating the headroom as real; the number moves, and four later
+/// tasks read this file as spec:
 ///
 /// ```sql
 /// SELECT MAX(c) FROM (SELECT COUNT(*) c FROM messages GROUP BY session_id);
@@ -1112,8 +1113,8 @@ pub enum SequencerCommand {
     ///
     /// **A command rather than a flag read.** The bridge already keeps a
     /// per-session `Arc<AtomicBool>`
-    /// (`SignalingBridge::register_session_awaiting`), and `core::router` reads
-    /// exactly that, lock-free, per forward — so a flag in [`SequencerDeps`]
+    /// (`SignalingBridge::register_session_awaiting`), and the deleted
+    /// `core::router` read exactly that, lock-free, per forward — so a flag in [`SequencerDeps`]
     /// would need no sender at all. It was not taken, because a flag is a LEVEL
     /// and this loop needs an EDGE: it sits in `recv().await` between turns, so
     /// a flag is only ever seen wherever the loop happens to look, and it has no
@@ -1594,8 +1595,8 @@ impl RingState {
 /// Run the turn sequencer for one session.
 ///
 /// Returns when `rx` closes — i.e. when the last sender is dropped, which is
-/// session end. That is the same exit `run_router` has, and it is how
-/// router-inventory behaviour #20 survives the handover: a session teardown
+/// session end. That is the same exit the deleted `run_router` had, and it is
+/// how router-inventory behaviour #20 survives the handover: a session teardown
 /// must end the task, not leave it holding a session's state alive.
 ///
 /// #20's other half — `RouterControl::drop` aborting the task outright — has no
@@ -1664,9 +1665,9 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // IS a broadcast of `RESUME_NOTICE`, so on today's wiring the
                 // button arrives here as a `UserMessage` and nothing mints
                 // `Resume` at all. Holding this command would make the pause
-                // unreleasable by the only affordance the UI offers. Both role
-                // prompts also promise the agents that "the bridge halts the duo
-                // until the next user message"; holding it would make that false.
+                // unreleasable by the only affordance the UI offers. The role
+                // prompts also promise the agents that a hold keeps the session
+                // halted until the next user message; holding it would make that false.
                 //
                 // **At READ time, not at dispatch time** — the same rule the
                 // drain's pause deferral follows. A `UserMessage` reaching this
@@ -3487,11 +3488,11 @@ async fn deliver_backlog(
 // ---------------------------------------------------------------------------
 // Jaccard helpers — moved VERBATIM from `core::router` (2026-08-10).
 //
-// The router inventory marks these PRESERVED: spin detection (a later task in
-// this file) reuses them unchanged, so they land here ahead of the caller
-// rather than being rewritten next to it. `core::router` still owns the
-// convergence breaker that calls them and imports them from here until that
-// path is deleted; nothing about their behaviour changed in the move.
+// The router inventory marks these PRESERVED: spin detection (below in this
+// file) reuses them unchanged, so they landed here ahead of the caller rather
+// than being rewritten next to it. `core::router` — the convergence breaker
+// that also called them — was deleted 2026-08-13; nothing about their behaviour
+// changed in the move.
 // ---------------------------------------------------------------------------
 
 /// Tokenize a forward body for convergence comparison: split on whitespace, trim

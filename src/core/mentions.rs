@@ -32,7 +32,7 @@
 //! An unknown slug is ordinary prose, never an error — the caller resolves what
 //! it can and drops the rest. The UI makes the case rare by construction (the
 //! `@` picker offers this session's participants and nothing else), but text can
-//! arrive from the external driver too, and a message refused for naming a
+//! arrive from the plugin proxy too, and a message refused for naming a
 //! participant that left the roster would be a worse failure than a word that
 //! did nothing.
 
