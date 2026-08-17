@@ -2793,6 +2793,31 @@ async fn halted_on_consensus(
         // two bad endings the design names.
         TurnEnding::Passed => deps.storage.set_done_vote(participant_id, false).await,
     };
+    // **A pass retracts the passer's PHASE vote too, for the same reason and
+    // with the same scope** (migration 0062). A phase vote outlives rounds
+    // exactly as a done vote does, so a participant that voted to advance and
+    // then passes would still be counted, and the phase could move on a turn
+    // whose whole meaning was "not me".
+    //
+    // The reviewer's case for why this is not optional: the phase-doc AUTHOR can
+    // withdraw by editing the doc — the fingerprint moves and every vote falls
+    // away — but a reviewer never moves the fingerprint, since one participant
+    // authors a phase chain. Without an explicit retraction a reviewer's vote
+    // could be undone only by somebody else's edit, and the tally could complete
+    // over a live objection.
+    //
+    // Its own only, exactly as above: clearing the session would let a
+    // participant with nothing to say wipe everyone else's converged votes.
+    if matches!(ending, TurnEnding::Passed) {
+        if let Err(e) = deps.storage.retract_phase_votes(participant_id).await {
+            warn!(
+                session = %deps.session_id,
+                participant_id,
+                error = %e,
+                "sequencer: phase vote not retracted on pass; the tally may be stale"
+            );
+        }
+    }
     if let Err(e) = recorded {
         warn!(
             session = %deps.session_id,
@@ -6006,6 +6031,63 @@ mod tests {
     ///
     /// Drop the retraction and the last row reads A=1 B=1, so the cycle halts
     /// on epoch 4 and the final wake never arrives.
+    /// **A pass retracts the passer's PHASE vote too — through the SEQUENCER.**
+    ///
+    /// `a_retraction_takes_only_the_retractors_own_vote` covers the storage
+    /// function; it says nothing about whether the ring ever calls it. My own
+    /// wire check proved the difference: stubbing out the call in
+    /// `record_turn_ending` left that storage test green, because it never
+    /// touches this path. Pin the wire, not the halves.
+    #[tokio::test]
+    async fn a_pass_retracts_the_passers_own_phase_vote() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        // Both vote to advance: the tally is complete before anybody passes.
+        for id in [a, b] {
+            storage.cast_phase_vote("s1", id, "Plan", "fp1", 0).await.unwrap();
+        }
+        assert!(
+            storage.all_active_voted_to_advance("s1", "Plan", "fp1", 0).await.unwrap(),
+            "precondition: the phase would advance right now"
+        );
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        post(&storage, "participant", Some("a"), "a passes").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: PASSED },
+        )
+        .await;
+        // B's backlog carries both rows: it had not been dealt a turn yet, so
+        // "go" is still unread for it when A's pass arrives.
+        assert_eq!(seats[1].expect(2).await, vec!["go", "a passes"]);
+
+        assert!(
+            !storage.all_active_voted_to_advance("s1", "Plan", "fp1", 0).await.unwrap(),
+            "A passed, so A's vote is withdrawn and the phase must not advance"
+        );
+        let left: Vec<(i64,)> =
+            sqlx::query_as("SELECT participant_id FROM phase_votes WHERE session_id = 's1'")
+                .fetch_all(storage.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            left,
+            vec![(b,)],
+            "its OWN only — clearing the session would let a participant with \
+             nothing to say wipe everyone else's converged votes"
+        );
+
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
     #[tokio::test]
     async fn a_pass_retracts_the_passers_own_stale_done_vote() {
         let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;

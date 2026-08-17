@@ -419,6 +419,62 @@ pub struct SignalingBridge {
     session_open_blocking: std::sync::Mutex<HashMap<String, Arc<AtomicUsize>>>,
 }
 
+/// What an `advance_phase` call actually did — **the tool's honest answer**.
+///
+/// It used to be the literal `"phase advanced"`, unconditionally, which was true
+/// only while an advance always happened. Once a vote gates the phase, the
+/// common answer is "not yet", and the agent ACTS on this string: told it
+/// advanced, it writes the next phase's document and starts mutating while the
+/// session is still in the previous phase and the reviewer has not voted. The
+/// vote would gate the phase while behaviour followed the tool's word, which
+/// defeats the feature exactly.
+///
+/// So all three variants are distinguishable by their FIRST TOKEN, because a
+/// model skimming a tool result reads the opening and moves on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhaseAdvanceOutcome {
+    /// Every active participant voted; the phase moved. The only variant that
+    /// reads like success.
+    Advanced { target: String },
+    /// The vote is recorded and **the phase has not moved**.
+    VoteRecorded { target: String, voted: usize, of: usize },
+    /// The caller is outside the electorate, so its vote would count toward
+    /// nothing while appearing to advance the phase.
+    Refused { reason: String },
+}
+
+impl PhaseAdvanceOutcome {
+    /// The text handed to the agent.
+    ///
+    /// Four properties, each answering a way the previous wording failed:
+    /// refusal is the first token (every other tool here returns a terse success
+    /// token, so the SHAPE alone read as done); the CURRENT phase is named, not
+    /// just the target (reading the target as current is the exact failure); the
+    /// prohibition is concrete rather than abstract; and the invalidation rule is
+    /// stated so re-voting is expected rather than surprising.
+    pub fn message(&self, current_phase: &str) -> String {
+        match self {
+            Self::Advanced { target } => format!("ADVANCED — the session is now in {target}."),
+            Self::VoteRecorded { target, voted, of } => format!(
+                "NOT ADVANCED — the session is still in {current_phase}.\n\
+                 Your vote to advance to {target} is recorded ({voted} of {of} participants).\n\
+                 The phase moves only when every active participant has voted for this same \
+                 state of the work. Do NOT act as though you are in {target}: no {target}-phase \
+                 edits, no work that belongs to it. Your turn output is forwarded to the others \
+                 automatically. If a peer posts findings, address them — changing the work \
+                 invalidates the votes cast on the old state, including your own, and everyone \
+                 re-votes."
+            ),
+            Self::Refused { reason } => format!(
+                "REFUSED — your vote was not recorded, and the session is still in \
+                 {current_phase}. Reason: {reason}. Participants outside the voting roster \
+                 cannot move the phase; ask an active participant to call `advance_phase`, or \
+                 raise it in the channel."
+            ),
+        }
+    }
+}
+
 impl SignalingBridge {
     pub(crate) fn new_with(violations: Option<ViolationsLog>, data_dir: Option<PathBuf>) -> Arc<Self> {
         // Sized generously: every stream chunk fires MessagePersisted and several
@@ -1215,18 +1271,120 @@ impl SignalingBridge {
         });
     }
 
-    /// Called by the MCP `tools/call` handler for `advance_phase`. Broadcasts
-    /// the request; AppState's subscriber routes to `core.advance_phase`
-    /// which updates IpavState, fires transition_notice into both agents,
-    /// and clears any awaiting halt. Fire-and-forget — the agent's tool
-    /// call returns immediately; the phase update lands on the next event
-    /// loop tick.
-    pub fn agent_advance_phase(&self, session_id: String, agent: String, target: String) {
-        let _ = self.event_tx.send(SignalingEvent::AgentAdvancePhase {
-            session_id,
-            agent,
-            target,
-        });
+    /// Cast a participant's vote to advance the phase, and say what happened.
+    ///
+    /// **The phase moves only when every active participant has voted for the
+    /// same state of the work** (migration 0062, the user's design). So this is
+    /// a vote first and a transition second, and the caller has to be told which
+    /// of the two it just did — the tool used to answer the literal string
+    /// `"phase advanced"` unconditionally, which was true while the advance
+    /// always happened and becomes false in the COMMON case now.
+    ///
+    /// ## Why this resolves synchronously instead of awaiting AppState
+    ///
+    /// Every input is in STORAGE, which this bridge already holds: the epoch and
+    /// the electorate (0062), the fingerprint (`session_documents`), the target
+    /// (the caller's argument). The live phase is in-memory `AppState` and is
+    /// needed only to PERFORM an advance — which the agent does not wait on.
+    ///
+    /// The alternative was a `oneshot` on the event, and it is wrong for a
+    /// reason recorded three lines from the handler it would attach to:
+    /// `main.rs` says *"the slow work (close kills subprocesses) runs on a
+    /// SEPARATE serial worker fed by an unbounded queue"*, and that worker takes
+    /// `AgentAdvancePhase` and `SessionCloseRequest` off one FIFO. An agent
+    /// awaiting there waits behind whatever is queued, including a close killing
+    /// subprocesses. The rule in `tray.rs` is not "never block on a human" — it
+    /// is **never block a tool call on something whose completion time you do
+    /// not control**, and a serial worker carrying the slow work is exactly
+    /// that.
+    ///
+    /// ## The one consequence, owned
+    ///
+    /// A crash between the vote landing and the event firing leaves a complete
+    /// tally with the phase unmoved. It self-heals: the next `advance_phase`
+    /// re-reads the same complete tally and re-fires. That is strictly better
+    /// than the failure it replaces, which was telling an agent "advanced" when
+    /// nothing had happened at all.
+    pub async fn agent_advance_phase(
+        &self,
+        session_id: String,
+        agent: String,
+        target: String,
+    ) -> PhaseAdvanceOutcome {
+        let storage = { self.storage.lock().await.clone() };
+        let Some(storage) = storage else {
+            // No storage wired (tests, early boot): preserve the old
+            // fire-and-forget behaviour rather than refusing an advance.
+            let _ = self.event_tx.send(SignalingEvent::AgentAdvancePhase {
+                session_id,
+                agent,
+                target: target.clone(),
+            });
+            return PhaseAdvanceOutcome::Advanced { target };
+        };
+
+        let me = match storage.participant_by_slug(&session_id, &agent).await {
+            Ok(Some(p)) => p,
+            _ => {
+                // An unknown caller cannot be in the electorate, so it cannot
+                // vote — but refusing outright would wedge a session whose
+                // roster read failed. Fall back to the old behaviour.
+                let _ = self.event_tx.send(SignalingEvent::AgentAdvancePhase {
+                    session_id,
+                    agent,
+                    target: target.clone(),
+                });
+                return PhaseAdvanceOutcome::Advanced { target };
+            }
+        };
+
+        // **`on_mention` holds the tool but sits outside the electorate.** Its
+        // vote would count toward nothing while the tool said the phase moved,
+        // and the actives would never vote because the advance looked done — a
+        // dead phase with no signal. Refusing names the reason instead.
+        if me.participation_mode != crate::storage::MODE_ACTIVE || !me.enabled {
+            return PhaseAdvanceOutcome::Refused {
+                reason: format!(
+                    "you are `{}` in this session, which is outside the voting roster",
+                    me.participation_mode
+                ),
+            };
+        }
+
+        let epoch = storage.phase_epoch(&session_id).await.unwrap_or(0);
+        let fingerprint = storage
+            .phase_artifact_fingerprint(&session_id)
+            .await
+            .unwrap_or_default();
+        if let Err(e) = storage
+            .cast_phase_vote(&session_id, me.id, &target, &fingerprint, epoch)
+            .await
+        {
+            tracing::warn!(?e, %session_id, %agent, "casting a phase vote failed");
+        }
+        let (voted, of) = storage
+            .phase_vote_tally(&session_id, &target, &fingerprint, epoch)
+            .await
+            .unwrap_or((0, 0));
+
+        match storage
+            .all_active_voted_to_advance(&session_id, &target, &fingerprint, epoch)
+            .await
+        {
+            Ok(true) => {
+                let _ = self.event_tx.send(SignalingEvent::AgentAdvancePhase {
+                    session_id,
+                    agent,
+                    target: target.clone(),
+                });
+                PhaseAdvanceOutcome::Advanced { target }
+            }
+            Ok(false) => PhaseAdvanceOutcome::VoteRecorded { target, voted, of },
+            Err(e) => {
+                tracing::warn!(?e, %session_id, "reading the phase tally failed");
+                PhaseAdvanceOutcome::VoteRecorded { target, voted, of }
+            }
+        }
     }
 
     /// Publish an agent's context-window occupancy after a completed turn.
@@ -1562,6 +1720,117 @@ impl SignalingBridge {
                 tracing::warn!(?e, %session_id, %state, "persisting activity event failed");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod phase_vote_tests {
+    use super::*;
+    use crate::storage::Storage;
+
+    async fn seeded(n: usize) -> (std::sync::Arc<SignalingBridge>, Storage) {
+        let bridge = SignalingBridge::new();
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage.ensure_session_roster("s1", n).await.unwrap();
+        (bridge, storage)
+    }
+
+    /// **The feature, as one assertion.** The executor voting does NOT move the
+    /// phase, and the tool says so — this is the turn the reviewer gets, and
+    /// the string is what stops the agent acting as though it already advanced.
+    #[tokio::test]
+    async fn one_vote_of_two_records_without_advancing() {
+        let (bridge, _s) = seeded(crate::storage::MAX_SESSION_PARTICIPANTS).await;
+        let out = bridge
+            .agent_advance_phase("s1".into(), "hands".into(), "Plan".into())
+            .await;
+        assert_eq!(
+            out,
+            PhaseAdvanceOutcome::VoteRecorded { target: "Plan".into(), voted: 1, of: 2 }
+        );
+        let msg = out.message("Investigate");
+        assert!(msg.starts_with("NOT ADVANCED"), "the refusal must be the first token: {msg}");
+        assert!(msg.contains("still in Investigate"), "it must name the CURRENT phase: {msg}");
+        assert!(msg.contains("Do NOT act as though you are in Plan"), "{msg}");
+    }
+
+    /// The second vote completes it, and only then does the phase move.
+    #[tokio::test]
+    async fn the_last_vote_advances() {
+        let (bridge, _s) = seeded(crate::storage::MAX_SESSION_PARTICIPANTS).await;
+        let mut sub = bridge.subscribe();
+        bridge.agent_advance_phase("s1".into(), "hands".into(), "Plan".into()).await;
+        assert!(
+            sub.try_recv().is_err(),
+            "an incomplete tally must NOT fire the advance event"
+        );
+        let out = bridge
+            .agent_advance_phase("s1".into(), "eyes".into(), "Plan".into())
+            .await;
+        assert_eq!(out, PhaseAdvanceOutcome::Advanced { target: "Plan".into() });
+        assert!(
+            matches!(sub.try_recv(), Ok(SignalingEvent::AgentAdvancePhase { .. })),
+            "a complete tally is what fires the advance"
+        );
+        assert!(out.message("Investigate").starts_with("ADVANCED"));
+    }
+
+    /// **`on_mention` holds the tool and is outside the electorate.** Accepting
+    /// its vote would count it toward nothing while the tool reported an
+    /// advance, and the actives would never vote because the phase looked moved
+    /// — a dead phase with no signal anywhere.
+    #[tokio::test]
+    async fn an_on_mention_participant_is_refused_not_silently_counted() {
+        let (bridge, storage) = seeded(crate::storage::MAX_SESSION_PARTICIPANTS).await;
+        sqlx::query("UPDATE session_participants SET participation_mode = 'on_mention' WHERE slug = 'eyes'")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let out = bridge
+            .agent_advance_phase("s1".into(), "eyes".into(), "Plan".into())
+            .await;
+        assert!(matches!(out, PhaseAdvanceOutcome::Refused { .. }), "{out:?}");
+        assert!(out.message("Investigate").starts_with("REFUSED"));
+        let n: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM phase_votes")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+        assert_eq!(n.0, 0, "a refused vote must not be recorded");
+    }
+
+    /// Solo: the one active participant IS the electorate, so its vote advances
+    /// immediately. Without this the feature would deadlock every solo session.
+    #[tokio::test]
+    async fn a_solo_session_advances_on_the_first_vote() {
+        let (bridge, _s) = seeded(1).await;
+        let out = bridge
+            .agent_advance_phase("s1".into(), "hands".into(), "Plan".into())
+            .await;
+        assert_eq!(out, PhaseAdvanceOutcome::Advanced { target: "Plan".into() });
+    }
+
+    /// **Editing the work invalidates the votes cast on it** — end to end, not
+    /// at the storage layer. The reviewer votes, the author rewrites the doc,
+    /// and the tally reopens because the fingerprint moved.
+    #[tokio::test]
+    async fn rewriting_the_work_reopens_a_completed_tally() {
+        let (bridge, storage) = seeded(crate::storage::MAX_SESSION_PARTICIPANTS).await;
+        bridge.agent_advance_phase("s1".into(), "eyes".into(), "Plan".into()).await;
+        storage
+            .upsert_session_document("s1", "investigate", "findings", Some("investigate"))
+            .await
+            .unwrap();
+        let out = bridge
+            .agent_advance_phase("s1".into(), "hands".into(), "Plan".into())
+            .await;
+        assert_eq!(
+            out,
+            PhaseAdvanceOutcome::VoteRecorded { target: "Plan".into(), voted: 1, of: 2 },
+            "the reviewer's vote was cast on work that has since changed, so only \
+             the fresh vote counts and the tally reopens"
+        );
     }
 }
 

@@ -1509,6 +1509,74 @@ impl Storage {
         Ok(epoch)
     }
 
+    /// A digest of the session's WORK, as the vote's `artifact_fingerprint`.
+    ///
+    /// Any phase document written, added or edited moves it — `session_doc_write`
+    /// stamps `updated_at` on every write — so a vote stops counting the moment
+    /// the thing it was cast about changes. `COUNT` catches a new doc whose
+    /// timestamp ties, and `SUM(LENGTH(body))` is cheap insurance against a
+    /// same-millisecond same-length rewrite.
+    ///
+    /// **Deliberately spans ALL of the session's docs rather than the current
+    /// phase's**, and that is what keeps this a storage-only question: the live
+    /// phase is in-memory `AppState` and unreachable from here. Spanning them is
+    /// also stricter — editing the Investigate doc while voting to leave Plan
+    /// still invalidates, which is correct, because the votes were cast on a
+    /// body of work that has since moved.
+    ///
+    /// A session with no documents yet has a stable digest of its empty state.
+    /// That is deliberate: it lets a phase with nothing written still be voted
+    /// through, which is right for phases that legitimately produce no doc, and
+    /// the guard against voting through empty work is the reviewer's vote — not
+    /// an artificial sentinel.
+    pub async fn phase_artifact_fingerprint(&self, session_id: &str) -> Result<String> {
+        let (n, latest, bytes): (i64, String, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(MAX(updated_at), ''), COALESCE(SUM(LENGTH(body)), 0) \
+             FROM session_documents WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("fingerprinting the session's phase documents")?;
+        Ok(format!("{n}:{latest}:{bytes}"))
+    }
+
+    /// How many of the electorate have voted, and how many there are — the
+    /// operands the tool reports back so an agent knows where the tally stands.
+    ///
+    /// Returns `(voted, of)`. `of == 0` is the empty electorate, which
+    /// [`Storage::all_active_voted_to_advance`] answers `true` for.
+    pub async fn phase_vote_tally(
+        &self,
+        session_id: &str,
+        target_phase: &str,
+        fingerprint: &str,
+        epoch: i64,
+    ) -> Result<(usize, usize)> {
+        let roster = self.participants_for_session(session_id).await?;
+        let electorate: std::collections::HashSet<i64> = roster
+            .iter()
+            .filter(|p| p.enabled && p.participation_mode == MODE_ACTIVE)
+            .map(|p| p.id)
+            .collect();
+        let voters: Vec<(i64,)> = sqlx::query_as(
+            "SELECT participant_id FROM phase_votes \
+             WHERE session_id = ? AND target_phase = ? AND artifact_fingerprint = ? \
+               AND phase_epoch = ?",
+        )
+        .bind(session_id)
+        .bind(target_phase)
+        .bind(fingerprint)
+        .bind(epoch)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the phase-vote tally")?;
+        // Counted against the ELECTORATE, so a vote from a participant since
+        // disabled cannot inflate the numerator past the denominator.
+        let voted = voters.into_iter().filter(|r| electorate.contains(&r.0)).count();
+        Ok((voted, electorate.len()))
+    }
+
     /// Record one participant's vote to advance.
     ///
     /// Idempotent by primary key: voting twice for the same question is one

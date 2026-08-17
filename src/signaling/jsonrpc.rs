@@ -562,9 +562,34 @@ async fn call_tool(
         }
         "advance_phase" => {
             let target = arg_required_str(&args, "target")?;
-            parse_phase_arg("target", &target)?;
-            bridge.agent_advance_phase(caller.session_id.clone(), caller.agent.clone(), target);
-            Ok(ToolCallResult::text("phase advanced"))
+            // Canonicalised before it reaches the message: the tool accepts chip
+            // forms, and "the session is now in A" is not a sentence an agent
+            // should have to decode. `parse_phase_arg` already rejects anything
+            // unparseable, so the unwrap cannot fire.
+            let target = parse_phase_arg("target", &target)?.name().to_string();
+            // **The phase is a VOTE now**, so the answer is whatever actually
+            // happened — not the literal "phase advanced" this returned
+            // unconditionally. An agent told it advanced writes the next phase's
+            // document and starts mutating; if the tally was not complete, it is
+            // doing that while the session is still in the previous phase and
+            // the reviewer has not voted.
+            // The CURRENT phase, so the refusal can name where the session
+            // actually is. `deliver_oob` already reads it through the same
+            // accessor; a dead or headless session answers `None`, and naming
+            // the phase "unknown" is honest there rather than guessing.
+            let current = bridge
+                .current_session_phase(&caller.session_id)
+                .await
+                .map(|p| p.name().to_string())
+                .unwrap_or_else(|| "its current phase".to_string());
+            let outcome = bridge
+                .agent_advance_phase(
+                    caller.session_id.clone(),
+                    caller.agent.clone(),
+                    target,
+                )
+                .await;
+            Ok(ToolCallResult::text(outcome.message(&current)))
         }
         "web_search" => {
             let query = arg_required_str(&args, "query")?;
@@ -2292,7 +2317,13 @@ mod tests {
         .unwrap()
         .unwrap();
         let v = serde_json::to_value(&res).unwrap();
-        assert_eq!(v["result"]["content"][0]["text"], "phase advanced");
+        // The contract changed with the vote: an unconditional "phase advanced"
+        // was true only while an advance always happened. Here the bridge has no
+        // storage, so it keeps the old fire-and-forget path and DOES advance.
+        assert_eq!(
+            v["result"]["content"][0]["text"],
+            "ADVANCED — the session is now in Apply."
+        );
         let ev = sub.recv().await.unwrap();
         match ev {
             SignalingEvent::AgentAdvancePhase { target, agent, .. } => {
@@ -2482,7 +2513,13 @@ mod tests {
         .unwrap()
         .unwrap();
         let v = serde_json::to_value(&res).unwrap();
-        assert_eq!(v["result"]["content"][0]["text"], "phase advanced");
+        // The contract changed with the vote: an unconditional "phase advanced"
+        // was true only while an advance always happened. Here the bridge has no
+        // storage, so it keeps the old fire-and-forget path and DOES advance.
+        assert_eq!(
+            v["result"]["content"][0]["text"],
+            "ADVANCED — the session is now in Apply."
+        );
     }
 
     #[tokio::test]

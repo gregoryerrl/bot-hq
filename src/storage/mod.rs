@@ -43,7 +43,7 @@ pub(crate) use cl_atoms::estimate_tokens;
 pub use models::WORKTREE_DEFAULT_KEY;
 pub use cancel_events::CancelEventRecord;
 pub use participants::{
-    participant_display_name, participant_slug, render_wire, speaker_of, ChannelPage, Envelope,
+    participant_display_name, participant_slug, MODE_ACTIVE, render_wire, speaker_of, ChannelPage, Envelope,
     Participant,
     ParticipantDraft, PersistedMessage, Role, RoleDraft, MAX_SESSION_PARTICIPANTS,
     PARTICIPATION_MODES, UNREAD_BATCH_LIMIT, WIRE_BODY_CLAMP_BYTES, WIRE_JOIN,
