@@ -1,6 +1,6 @@
 # bot-hq — Codebase Map
 
-**What this is.** The repository split into thirteen self-contained AREAS so that
+**What this is.** The repository split into fifteen self-contained AREAS so that
 exploring, studying, auditing or fixing bot-hq can happen one area at a time
 instead of hopping across the tree. For each area: what it does, its files and
 their roles, its entry points, its SEAMS (the joins that cross into other areas —
@@ -238,7 +238,7 @@ column (D8).
 ## C1. Internal MCP server — dispatch — `src/signaling/`
 
 **What it does.** The in-process HTTP JSON-RPC MCP endpoint
-(`/sessions/<id>/<agent>/mcp`) every spawned agent's `--mcp-config` points at.
+(`/sessions/<id>/<agent>/<token>/mcp`) every spawned agent's `--mcp-config` points at.
 Defines the 40-tool signaling surface, gates each tool by the caller's
 `CapabilitySet` (resolved from `session_participants` by the URL's session+slug;
 the URL also carries a per-spawn secret, checked in `server.rs` — C1-1 closed
@@ -295,11 +295,11 @@ halts or latches the ring via per-session registries; fans out `SignalingEvent`s
 over one broadcast (UI via `src/tauri_events/bridge_subscriber.rs`, the main.rs
 control handler, the plugin proxy's `wait_for_change`); fronts storage for findings,
 session docs, CL index/write/push, feedback, terminals. Everything per-session
-lives in 16 `HashMap<String,…>` registries on one struct.
+lives in 14 registries on one struct (12 keyed by session id, 2 by `(session, agent)`).
 
 | path | role | size |
 |---|---|---|
-| `src/signaling/bridge/mod.rs` | struct + 14 registries, `SignalingEvent` (16 variants), register/`unregister_session`, `notify_*` emitters, close-gate + retired-terms, policy resolution, reviewer-override request | XL |
+| `src/signaling/bridge/mod.rs` | struct + 14 registries, `SignalingEvent` (17 variants), register/`unregister_session`, `notify_*` emitters, close-gate + retired-terms, policy resolution, reviewer-override request | XL |
 | `src/signaling/bridge/tray.rs` | `ask_user_choice_inner`, `request_approval(_parked)`, supersede/withdraw, `resolve_choice_confirmable`, `deliver_oob`, `emit_halt_row`/`mark_awaiting_user`, `request_phase_advance` | XL |
 | `src/signaling/bridge/action_gate.rs` | `park_gated_command` (dedupe) / `execute_gated` (`tool_gate::run_in_repo`), `gate_status` | L |
 | `src/signaling/bridge/findings.rs` | `eyes_flag`/`approve`/`disposition`/`check_open_findings` + reviewer-down gate + override | M |
@@ -412,7 +412,7 @@ session present (`ask` → HTTP → exit code).
 ## F. Storage — `src/storage/`, `migrations/`
 
 **What it does.** The sole persistence layer: `Storage` owns one `SqlitePool`
-(8 connections, foreign keys on, default rollback journal — no WAL); every other
+(8 connections, foreign keys on, WAL journal — readers never block writers); every other
 area reads/writes through it. `Storage::open` runs `sqlx::migrate!`; migrations
 are immutable once applied (hook-guarded), highest `0066`, `0056` reverted by
 re-stamp. One timestamp helper (`now_utc()`, RFC3339-Z) is meant to be bound by
@@ -425,7 +425,7 @@ every write.
 | `src/storage/time.rs` | `now_utc()` | S |
 | `src/storage/sessions.rs` | `sessions` CRUD, spawn-model/effort columns, halt slot (`declare_session_halt`/`clear_session_halt`), boot orphan sweep | M |
 | `src/storage/participants.rs` | roles · session_participants (roster seed/invite, labels, colours) · turn cycle (`next_active_participant`, `set_current_turn`, done votes, `round_number`) · cursors + deliveries (`commit_delivery`, `unread_for_participant`/`channel_page`, `UNREAD_BATCH_LIMIT`) · channel wire (`post_to_channel`, envelope) — six clean extraction seams | XL |
-| `src/storage/messages.rs` | `messages` insert/read, since-id watermark (`messages_for_session` unbounded) | M |
+| `src/storage/messages.rs` | `messages` insert/read: since-id watermark (`messages_for_session`, unbounded), the chat's tail page (`messages_tail`), the spin-detection read (`participant_text_since`); the three production SQL strings are fns (`messages_since_sql`, `messages_tail_sql`, `participant_text_since_sql`) EXPLAINed by tests | M |
 | `src/storage/tray.rs` | `session_tray` (questions/approvals/gated commands), `pending_gate_ids`, purge, closed/orphan withdraw | M |
 | `src/storage/findings.rs` | EYES findings CRUD + `count_open_blocking_findings` | M |
 | `src/storage/session_docs.rs` | per-session IPAV docs + archives | M |
@@ -502,7 +502,7 @@ fs watcher (`cl:changed`, `session:worktree_changed`, `plugin:assets_changed`).
 | `src/tauri_cmd/policy.rs` | 3-tier policy get/set + `read_violations` (no limit) | M |
 | `src/tauri_cmd/screenshot.rs` | NOT a command: `capture_main_window` helper for the `webview_screenshot` MCP tool | S |
 | `src/tauri_cmd/cl.rs` | 20 CL commands (index/folder search, file/project CRUD, `cl_write_file` UI twin) — duplicates bridge helpers (tracked CL v2 consolidation) | L |
-| `src/tauri_events/mod.rs`, `src/tauri_events/types.rs` | event-name consts + payload structs (2 names are still bare literals in the subscriber: `session:resync`, `session:halt_cleared`) | S / M |
+| `src/tauri_events/mod.rs`, `src/tauri_events/types.rs` | event-name consts + payload structs (every emitted name has a const, incl. the subscriber's `SESSION_RESYNC` / `SESSION_HALT_CLEARED` / `SESSION_STAGE_DELIVERED`) | S / M |
 | `src/tauri_events/bridge_subscriber.rs` | `route()` SignalingEvent → emit; `Lagged` → `session:resync` | M |
 | `src/tauri_events/batch_emitter.rs` | message coalescing + per-session watermark | M |
 | `src/tauri_events/fs_watcher.rs` | notify watcher: CL dir + dynamic repo/plugin dirs, 500 ms debounce, one rescan per project | M |
@@ -552,7 +552,7 @@ heartbeat crash recovery, panel tabs, per-plugin CSP extras (shipped).
 | `src/plugins/mod.rs` | architecture summary (accurate) | S |
 | `src/plugins/catalog.rs` | `CATALOG` + `required_capability`/`is_dispatchable` bundling rules | M |
 | `src/plugins/heartbeat.rs` | ping/pong Healthy/Slow/Crashed (5 s / 1 s / 3 misses) | M |
-| `src/plugins/manifest.rs` | manifest schema/validate, CSP-extra-origins; `iframe_origin()` documents a scheme the app never serves (dead) | M |
+| `src/plugins/manifest.rs` | manifest schema/validate, CSP-extra-origins (`validate_csp_extra_origins`) | M |
 | `src/plugins/registry.rs` | `PluginRegistry`: heartbeat + 4 sync caches the URI handler reads without awaiting the DB (the disk loader nothing read was deleted in round 9) | M |
 | `src/plugins/serve.rs` | asset resolution with traversal/symlink guards (managed + linked), CSP builder | M |
 | `src/tauri_cmd/plugins.rs` | install/reapprove/reinstall/update/list/enable/disable/uninstall/preview/heartbeat feed (`_inner` helpers testable without Tauri) | XL |
@@ -613,7 +613,7 @@ without polling.
 | path | role | size |
 |---|---|---|
 | `frontend/src/main.tsx`, `frontend/src/App.tsx`, `frontend/src/Router.tsx` | root, Providers→Router, route table | S |
-| `frontend/src/Providers.tsx` | QueryClient + `GlobalEventSync` (19 listeners on 2026-08-17 → key invalidation + stores + the round-7 `session:stage_delivered` draft clear) + `onResync` fan-out + runtime backfill | M |
+| `frontend/src/Providers.tsx` | QueryClient + `GlobalEventSync` (22 listeners on 2026-08-18 → key invalidation + stores + the round-7 `session:stage_delivered` draft clear) + `onResync` fan-out + runtime backfill | M |
 | `frontend/src/app/SessionView.tsx` | session container: header/roster, phase, halt/approval/chat/input orchestration, Stage delivery + tray-pick sync | L |
 | `frontend/src/app/SessionContextTab.tsx` | session-scoped CL tree + lean editor | M |
 | `frontend/src/app/SessionTerminalTab.tsx` | xterm.js over the session PTY | S |
@@ -821,7 +821,7 @@ half does not count. Details, evidence and the cheapest pins are in
 | 11 | epoch cell shared by pump and ring (B2 wiring) | `deps.epochs[p.id]` vs `PumpConfig.turn_epoch` per slot | **UNPINNED join** — a mis-pairing wedges the ring after turn 1 |
 | 12 | `ask_user_choice` park → answer → OOB row → ring (C1 → C2 → F → J → B1) | `ask_user_choice_inner`, `resolve_choice_confirmable`, `deliver_oob`, `user_responded` | PINNED at the bridge; core hop pinned by source-grep only |
 | 13 | halt declare/clear (C2 → F → G → J; clear in B1) | `emit_halt_row`, `declare_session_halt`, `halt_declared` (main.rs), `user_responded` | bridge→ring PINNED; main.rs interrupt hop UNPINNED; clear pinned by grep only |
-| 14 | approval gate latch/lift (C2 ↔ B1) | `notify_ring_gate(true/false)`, `count_pending_gates` seed | open PINNED; **LIFT UNPINNED** — cut ⇒ ring deals nothing after the first approval |
+| 14 | approval gate latch/lift (C2 ↔ B1) | `notify_ring_gate(true/false)`, `Storage::pending_gate_ids` seed | open PINNED; **LIFT UNPINNED** — cut ⇒ ring deals nothing after the first approval |
 | 15 | tool-gate hook ↔ `/hooks/tool-gate` (E ↔ C1 ↔ C2) | `park_gate` ↔ `handle_tool_gate` (inline literals both sides) | halves PINNED; HTTP join UNPINNED |
 | 16 | `eyes_flag` → pre-commit gate (C2 → F → E) | `insert_finding` ↔ `query_open_blocking` (predicate restated 3×) | PINNED at the row; reviewer-down branch exists only in the MCP tool |
 | 17 | `check_commit_message` ↔ commit-msg hook (C1 ↔ E) | one fn `first_forbidden_word` | PINNED (compile-time) |

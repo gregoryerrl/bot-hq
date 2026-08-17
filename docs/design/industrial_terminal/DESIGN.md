@@ -95,7 +95,7 @@ spacing:
 
 This design system is engineered for high-density bot orchestration and developer operations. The aesthetic is **Industrial Minimalism**—prioritizing information density, mechanical precision, and immediate visual hierarchy. The UI should evoke the feeling of a sophisticated command center: cold, efficient, and uncompromisingly functional.
 
-The target audience consists of developers and system architects who require high-speed monitoring and granular control. By utilizing a dark, low-fatigue palette punctuated by high-chroma status indicators, the system ensures that "phases" and "actors" (Brian, Rain, User) are instantly identifiable in a sea of data.
+The target audience consists of developers and system architects who require high-speed monitoring and granular control. By utilizing a dark, low-fatigue palette punctuated by high-chroma status indicators, the system ensures that "phases" and "actors" (the executing role, the reviewing role, the user) are instantly identifiable in a sea of data.
 
 Key visual principles:
 - **High Density:** Minimal whitespace between functional modules to maximize data throughput.
@@ -106,8 +106,8 @@ Key visual principles:
 
 The palette is anchored by a "Nearly Black" slate background to reduce eye strain during long-form monitoring. Role-based color coding is the primary driver of the interface's information architecture.
 
-- **Primary (Brian/Orange):** Used for execution, hands-on tasks, and active bot processes. High energy, high visibility.
-- **Secondary (Rain/Purple):** Used for review, vision, and observation states. Sophisticated and distinct from execution.
+- **Primary (Orange):** the executing role — hands-on tasks and active bot processes. High energy, high visibility. (Since rc3 D20 a participant's colour is one of an 8-hue palette hashed on its `ROLE · Model` label, with a per-participant override; orange/purple are the palette's first two hues, no longer bound to a slot or a name.)
+- **Secondary (Purple):** the reviewing role — review, vision, and observation states. Sophisticated and distinct from execution.
 - **Tertiary (User/Blue):** Reserved for human input and user-originated actions.
 - **System (Muted Grey):** Used for phase changes, background logs, and passive infrastructure updates.
 - **Surface:** Surfaces are layered using slightly lighter slate tones (`#0F172A` to `#1E293B`) to create structural separation without relying on heavy shadows.
@@ -129,7 +129,7 @@ The layout follows a **Fixed Dashboard Grid** model for the main workspace, ensu
 1.  **Topbar:** Fixed height (48px), containing global system status and search.
 2.  **Dashboard Grid:** A multi-column responsive grid using 0.75rem gutters for "Session Tiles."
 3.  **Session View:** A central wide column for chronological chat flow.
-4.  **Right-Pane Overlay:** A slide-out "Emma Overlay" (320px fixed width) for secondary intelligence and metadata.
+4.  **Right-Pane Overlay:** a slide-out panel (320px fixed width) for secondary metadata — the Session Settings panel is the shipped instance. (The original spec called this the "Emma Overlay"; that agent was removed from the core.)
 
 Padding is intentionally tight to facilitate high information density. Internal module spacing should default to 0.5rem (8px).
 
@@ -140,7 +140,7 @@ Depth is achieved through **Tonal Layering** and **Low-Contrast Outlines** rathe
 - **Level 0 (Canvas):** Darkest slate (`#020617`).
 - **Level 1 (Panels/Tiles):** Mid-slate (`#0F172A`) with a 1px solid border (`#1E293B`).
 - **Level 2 (Active/Hover):** Border color shifts to the accent color associated with the role (Orange/Purple/Blue).
-- **Emma Overlay:** Uses a subtle backdrop blur (12px) and a slightly more prominent 1px border to indicate its "floating" status over the main dashboard.
+- **Right-Pane Overlay:** Uses a subtle backdrop blur (12px) and a slightly more prominent 1px border to indicate its "floating" status over the main dashboard.
 
 ## Shapes
 
@@ -162,7 +162,7 @@ The primary dashboard element. Tiles must contain a header with the session ID, 
 Status banners appear at the top of the Session View. Use the **System Muted** grey for passive logs and the **Primary/Secondary** colors for urgent state changes.
 
 ### Chat Chronology
-A single vertical stream. User messages are right-aligned with Blue accents; Agent messages (Brian/Rain) are left-aligned with their respective Orange/Purple accents. Use monospaced font for all message content to emphasize the "data" nature of the bot interaction.
+A single vertical stream. User messages are right-aligned with Blue accents; Agent messages are left-aligned with their participant's accent hue. Use monospaced font for all message content to emphasize the "data" nature of the bot interaction.
 
 ### Inputs
 Command-line style inputs. No background, just a bottom border that illuminates with the active role color when focused. Use a block cursor character `█` to reinforce the terminal aesthetic.

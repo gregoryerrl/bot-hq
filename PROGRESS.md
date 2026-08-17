@@ -11,9 +11,13 @@ planned next see [`PLAN.md`](PLAN.md).
 > describe the tree **as it was on their date**. Anything before 2026-08-13 may
 > reference subsystems since deleted — the native agent loop (rc3 D9), the
 > bilateral router `core/router.rs` (task 14), the Agents settings tab (D8), the
-> Maintain-CL button (D15) — and the retired agent names Brian/Rain (D10). That
-> is the record, not staleness, and it is deliberately not rewritten. For current
-> reality read `ARCHITECTURE.md`; for the decisions that changed it, read
+> Maintain-CL button (D15) — and the retired agent names Brian/Rain (D10); and
+> entries between 2026-08-13 and 2026-08-17 may still describe as live the
+> external driver MCP server (removed 2026-08-17), the `forward_events` table
+> (dropped by 0064), `declare_working` (retired by 0057) and a non-empty
+> `PARITY_HOLD` (emptied by D16). That is the record, not staleness, and it is
+> deliberately not rewritten. For current reality read `ARCHITECTURE.md`; for
+> the decisions that changed it, read
 > [`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md).
 
 ---

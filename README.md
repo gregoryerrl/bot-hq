@@ -208,7 +208,7 @@ bot-hq/
 ├── src/
 │   ├── main.rs            entry point — tokio runtime, Tauri builder, CLI dispatch
 │   ├── paths.rs           data-dir resolution + first-run init + single-instance lock
-│   ├── agents/            claude-code subprocess + stream-json I/O + hardcoded role prompts
+│   ├── agents/            claude-code subprocess + stream-json I/O + prompt composition (role prose seeds; the live prose is the roles row)
 │   ├── core/              sessions, the turn ring + per-participant pumps, activity, broadcast, worktrees, terminal
 │   ├── signaling/         in-process MCP HTTP server (UI tools) + SignalingBridge
 │   ├── storage/           sqlite (messages, sessions, participants, session_tray, roles, models, cl_index, …)
@@ -340,6 +340,15 @@ Each project can carry a `policy.yaml` under
 - `per_action_approval: [prefix]` — bash commands that always ask, with no
   remembered approval.
 - `branch_pattern: regex` — branch names must match. Empty = no constraint.
+- `forbidden_in_commits: [word]` — words the `commit-msg` and `pre-commit` hooks
+  block (whole-word, case-insensitive; a project list REPLACES the general one).
+- `commit_style: text` — described to the agent, not mechanically enforced.
+- `round_cap: N` — laps of the turn ring before the session halts itself
+  (empty = inherit, default 500; `0` = off).
+
+`per_action_approval`, `branch_pattern` and `commit_style` are prompt-facing
+guidance; `push_gate`, `force_push`, `forbidden_in_commits` and `round_cap`
+are enforced.
 
 **Tool Gate.** Beyond `policy.yaml`, a global keyword list (Settings → "Gated Bash
 Keywords") gates agent Bash commands: a `gate` keyword blocks the command and routes

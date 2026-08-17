@@ -350,25 +350,33 @@ builds don't thrash the A-tab diff. (Shipped 2026-06-15; see PROGRESS.md.)
 **Topbar:** `Dashboard | Context Library | Plugins | Settings`.
 
 **Dashboard:** grid of session tiles. Each tile shows title, last
-activity, `[Needs Input]` badge tinting the border red. Click tile →
-opens session view. Inline `+ New session` form creates rows + registers
-the session with the bridge.
+activity, and a `[Need User Input · N]` pill (primary-tinted border) when
+questions, gates or approvals await the user — the tile INDICATES only; the
+answer surface is the session's Tray tab. Click tile → opens session view.
+`+ New session` opens a modal dialog (roster editor) that creates the row +
+registers the session with the bridge.
 
-**Session view:** 60/40 split — chat (left) + DocumentPane (right).
-Header: title + back link, plus the live roster rendered `ROLE · Model` so the
-session's composition is legible while it runs. Chronological chat: all messages
-(user, each participant, phase_change) interleaved by `created_at` with colour
-keyed to turn slot (slot 0 = orange, slot 1 = purple, user = blue, system =
-muted).
-Pending-choice banner (purple) renders above the input with inline
-choice buttons.
+**Session view:** three subtabs — **Workspace** (chat + DocumentPane, a
+drag-resizable split defaulting to 60/40, clamped 25–75), **Context** (the
+Context Library scoped to this session's project — tree + a lean editor —
+without leaving the session), **Terminal** (the session PTY). Header: title + back link, the
+live roster rendered `ROLE · Model`, the phase picker, and the gear button
+that opens the Session Settings panel (the per-session policy snapshot).
+Chronological chat: all messages (user, each participant, phase_change)
+interleaved by `created_at`; each participant's colour is one of an 8-hue
+palette hashed on its `ROLE · Model` label, with a per-participant override
+chosen in the New Session dialog (rc3 D20, migration 0052); user = blue,
+system = muted. Questions and gates are answered on the DocumentPane's Tray
+tab; a declared halt renders as the banner above the input.
 
-**DocumentPane:** IPAV tab selector (I/P/A/V chips) drives
-`session_doc_search(session_id, phase=<x>)`. Each tab renders matching
-`session_documents` rows; counts surface on the chips. The A tab also
-renders the live color-coded `git diff` for the session's working repo
-via the `compute_apply_diff` Tauri command (`src/tauri_cmd/docs.rs`,
-parser `parse_diff_lines`), consumed by `DocumentPane.tsx`.
+**DocumentPane:** a **Tray** tab (pending questions, approvals and gated
+commands for this session — the single answer surface) followed by the IPAV
+tabs (I/P/A/V chips), which drive `session_doc_search(session_id,
+phase=<x>)`. Each IPAV tab renders matching `session_documents` rows; counts
+surface on the chips. The A tab also renders the live color-coded `git diff`
+for the session's working repo via the `compute_apply_diff` Tauri command
+(`src/tauri_cmd/docs.rs`, parser `parse_diff_lines`), consumed by
+`DocumentPane.tsx`.
 
 **Context Library tab:** two Settings-style subtabs — **Library Tree** |
 **Context Manager** — whose pill row is the page header (no panel repeats
@@ -829,8 +837,8 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   created_at, plus the legacy `author` mirror — still read by four sites) —
   every row of every session: agent text and tool rows, the user's rows, and
   the host's injections. Indexes on `(session_id, created_at)`,
-  `(session_id, id)`, `(session_id, author, created_at)`,
-  `(session_id, participant_id, created_at)`. Delivered per participant
+  `(session_id, id)` and `(participant_id, kind, id)` — the spin-detection
+  seek; migration 0066 dropped two unearned ones. Delivered per participant
   through `participant_deliveries`.
 - `sessions` (id PK, title, working_repo_path, base_repo_path,
   created_at, closed_at, archived, slot0/slot1_model_at_spawn,

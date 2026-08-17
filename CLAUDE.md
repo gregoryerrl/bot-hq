@@ -73,9 +73,9 @@ done; work is now incremental.
   parallel work on independent sub-tasks. Brief each sub-agent with:
   goal, files, interface, tests, definition of done.
 - **Don't litigate decisions already shipped** in `ARCHITECTURE.md`
-  (e.g., HTTP MCP not stdio+UDS, hand-rolled JSON-RPC, hardcoded role
-  prompts, two-layer policy enforcement). Reopen only with a clear
-  reason.
+  (e.g., HTTP MCP not stdio+UDS, hand-rolled JSON-RPC, role prose as
+  user-editable roles rows seeded from `agents/prompts.rs` (rc3 D8/D10),
+  two-layer policy enforcement). Reopen only with a clear reason.
 - **When unsure about scope or direction,** ask the user via the
   bot-hq `ask_user_choice` MCP tool (don't write prose questions —
   they don't surface cleanly in the UI).

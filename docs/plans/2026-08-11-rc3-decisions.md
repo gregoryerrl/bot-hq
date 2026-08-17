@@ -42,7 +42,7 @@ carries an optional target; `advance_turn`'s reset passes that participant
 instead of `None`. An addressed `on_demand` participant takes exactly one turn —
 `next_active_participant` already skips it afterwards, so nothing puts it back to
 sleep. Unknown slug = ordinary prose, never an error. Works on `active`
-participants too (`@brian look at this` jumps the queue).
+participants too (`@eyes look at this` jumps the queue — slugs are role-derived since D10; this example predates it).
 
 **Consequences:**
 - An `on_demand` participant's cursor never advances while dormant, so a

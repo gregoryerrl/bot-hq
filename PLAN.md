@@ -168,7 +168,7 @@ Found by live sessions, not yet decided:
 - ~~**The backlog is N stdin writes, not one.**~~ **FIXED `7060d97`** — a page is
   one write, so rows 2..N no longer land inside the turn row 1 opened.
 - **The tail of the ring starves.** Every user message resets to the front, so at
-  N=3 with an active driver slot 2 gets roughly half the turns of slot 0 —
+  N=3 with an actively-sending user slot 2 gets roughly half the turns of slot 0 —
   2-vs-6 in `s-534b8761`, 2-vs-6 in `s-206e8921`.
 - ~~**`sessions.round_number` has no writer**~~ **FIXED `1984e61`** — written
   beside the lap counter it measures. (`current_turn_participant_id`, the column
@@ -398,8 +398,9 @@ fonts under `frontend/public/fonts`.
   The shape of the gap is precise. Four guards already exist and **every one pins
   a doc against the CODE** — `codebase_map_test` → CODEBASE.md,
   `every_registered_tool_is_documented` → the tool table, `retired_identifier_test`
-  → `src/` identifiers, `framing.ts` → user-visible strings. Nothing in `src/` or
-  `tests/` reads `ARCHITECTURE.md`, `CLAUDE.md`, `README.md` or `PLAN.md` at all.
+  → `src/` identifiers, `framing.ts` → user-visible strings. Only the tool-table
+  test reads `ARCHITECTURE.md` and `README.md` (`include_str!`); nothing reads
+  `CLAUDE.md` or `PLAN.md`.
 
   So CLAUDE.md and README can quote ARCHITECTURE's self-description indefinitely
   and no gate notices when it changes underneath them — which is exactly what

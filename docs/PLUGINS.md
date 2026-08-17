@@ -322,8 +322,8 @@ to run its own helper agent sessions end to end: `plugin_session_create`
 → `plugin_session_send` / `plugin_session_wait` /
 `plugin_session_messages` → `plugin_session_close`. It exists so a panel
 can hold a conversation with an agent (a tutor, an assistant) without
-ever handling a driver token or opening a port — the host owns the
-machinery; the plugin never sees a credential.
+ever handling a token or opening a port — the host owns the machinery;
+the plugin never sees a credential.
 
 **Ownership fence — the safety property.** Every command except `create`
 requires the target session's `created_by_plugin` to equal YOUR plugin
@@ -398,16 +398,15 @@ leftovers are only removed on your approval.
 
 ## What plugins can't do yet (designed extension points)
 
-- **Agent surface** — plugins can't contribute MCP tools to Brian/Rain
-  or inject anything into agent context. (Cognotify's
+- **Agent surface** — plugins can't contribute MCP tools to the session's
+  participants or inject anything into agent context. (Cognotify's
   "zero agent pollution" is v1's default and only mode.) A
   plugin-declared tool tier is future work.
-- **New agents** — a plugin can't add an agent to sessions. Interim
-  lever: the **external MCP driver server** (port 7892, bearer-token)
-  already lets any process you run create and drive sessions — a
-  "backend-style" plugin is an ordinary program using it. (For plain
-  session CREATION from a panel, `spawn_session` is the grantable,
-  double-consented path.)
+- **New agents** — a plugin can't add an agent to sessions. The former
+  interim lever (the external MCP driver server) was removed on 2026-08-17
+  and demoted to a future plugin; what remains is `spawn_session` for plain
+  session CREATION from a panel (grantable, double-consented) and
+  `plugin_sessions` for driving your own helper sessions.
 - **Real browser surface** — arbitrary sites refuse iframing
   (`X-Frame-Options`); an agent-drivable Browser tab needs a
   child-webview tier.
