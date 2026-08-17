@@ -21,6 +21,65 @@ pub mod overrides;
 pub mod reader;
 pub mod writer;
 
+/// Replace `path` atomically: the body goes to a sibling temp file created
+/// with `mode` (unix) from its first byte, then `rename` moves it over the
+/// destination. `rename` replaces the INODE, so the destination ends up with
+/// the temp's mode — which is why the mode is a parameter and set at create,
+/// not chmodded after (round 9, review 4a90f9ed: a plain-`std::fs::write` temp
+/// silently turned a 0600 `settings.json` into 0644 on rename, and a chmod
+/// after the write leaves the full body world-readable in between).
+pub(crate) fn replace_file_atomically(
+    path: &std::path::Path,
+    body: &[u8],
+    mode: u32,
+) -> std::io::Result<()> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!("{name}.tmp"));
+    write_with_mode(&tmp, body, mode)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// The mode of an existing file at `path`, or `fallback` when it does not
+/// exist yet (or on non-unix, where modes are not a thing).
+pub(crate) fn existing_mode_or(path: &std::path::Path, fallback: u32) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or(fallback)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        fallback
+    }
+}
+
+/// Create-or-truncate `path` with `mode` from the first byte (unix); a plain
+/// write elsewhere. An existing temp keeps its old mode past `create`, so the
+/// mode is set explicitly as well.
+#[cfg(unix)]
+fn write_with_mode(path: &std::path::Path, body: &[u8], mode: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(path)?;
+    f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    f.write_all(body)
+}
+#[cfg(not(unix))]
+fn write_with_mode(path: &std::path::Path, body: &[u8], _mode: u32) -> std::io::Result<()> {
+    std::fs::write(path, body)
+}
+
 pub use overrides::{
     load_overrides, resolve_agent_overrides, save_overrides, AgentOverride, ClaudeOverrides,
     SkillVisibility,

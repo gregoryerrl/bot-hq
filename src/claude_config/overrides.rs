@@ -133,46 +133,11 @@ pub fn save_overrides(data_dir: &Path, store: &ClaudeOverrides) -> Result<()> {
             .with_context(|| format!("creating data dir {}", parent.display()))?;
     }
     let body = serde_json::to_string_pretty(store).context("serializing claude-overrides")?;
-    let tmp = path.with_extension("json.tmp");
-    write_owner_only(&tmp, body.as_bytes())
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("renaming {} into {}", tmp.display(), path.display()))?;
-    // Belt and braces: an existing file's mode survives a rename, so re-assert.
-    set_owner_only(&path);
+    // Always 0600 — this store is bot-hq's own and may carry per-role env.
+    super::replace_file_atomically(&path, body.as_bytes(), 0o600)
+        .with_context(|| format!("writing {} atomically", path.display()))?;
     Ok(())
 }
-
-/// Create-or-truncate `path` with mode 0600 from the first byte (unix); a
-/// plain write elsewhere.
-#[cfg(unix)]
-fn write_owner_only(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(body)?;
-    // The mode on `create` is masked by the umask only downwards, but an
-    // existing temp file keeps its old mode — set it explicitly too.
-    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-#[cfg(not(unix))]
-fn write_owner_only(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, body)
-}
-
-#[cfg(unix)]
-fn set_owner_only(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-}
-#[cfg(not(unix))]
-fn set_owner_only(_path: &Path) {}
 
 /// Resolve the effective override for a participant playing `role_slug`: the
 /// `_all` default with that role's entry layered on top (per-key, the role

@@ -35,6 +35,11 @@ fn read_object(path: &Path) -> Result<Map<String, Value>> {
 /// real `~/.claude/settings.json` — the file this module promises never to
 /// clobber — empty or half-written. `policy/audit.rs` and `tauri_cmd/cl.rs`
 /// already wrote this way; this one did not.
+///
+/// The temp is created with the destination's EXISTING mode (0600 for a file
+/// that does not exist yet): `rename` replaces the inode, so a temp written at
+/// umask default would have turned the user's 0600 settings.json into 0644
+/// (review 4a90f9ed).
 fn write_object(path: &Path, root: &Map<String, Value>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -42,10 +47,9 @@ fn write_object(path: &Path, root: &Map<String, Value>) -> Result<()> {
     }
     let mut body = serde_json::to_string_pretty(root).context("serializing settings.json")?;
     body.push('\n');
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, body).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming {} into {}", tmp.display(), path.display()))?;
+    let mode = super::existing_mode_or(path, 0o600);
+    super::replace_file_atomically(path, body.as_bytes(), mode)
+        .with_context(|| format!("writing {} atomically", path.display()))?;
     Ok(())
 }
 
@@ -155,6 +159,27 @@ mod tests {
         );
         // Round 9: written via a sibling temp + rename — no temp left behind.
         assert!(!dir.path().join("settings.json.tmp").exists(), "temp file must be renamed away");
+    }
+
+    /// `rename` replaces the inode, so the destination takes the TEMP's mode:
+    /// a user's 0600 settings.json must come out 0600, not umask-default 0644
+    /// (review 4a90f9ed).
+    #[cfg(unix)]
+    #[test]
+    fn an_atomic_rewrite_keeps_the_existing_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{ "voiceEnabled": true }"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        set_string(dir.path(), "effortLevel", Some("high".into())).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the rewrite widened the mode to {mode:o}");
+        // And a file that did not exist is created owner-only.
+        let fresh = TempDir::new().unwrap();
+        set_string(fresh.path(), "effortLevel", Some("high".into())).unwrap();
+        let mode = std::fs::metadata(fresh.path().join("settings.json")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a fresh settings.json must be owner-only, got {mode:o}");
     }
 
     #[test]
