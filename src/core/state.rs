@@ -141,6 +141,10 @@ type StagedPick = (String, String);
 /// names do, and `staged_responses`' type is readable in one line.
 type StagedResponse = (String, Vec<StagedPick>);
 
+/// Boundaries in a row a stage may fail to deliver before the ring stops being
+/// re-armed for it (see `AppState::staged_attempts`).
+pub const STAGED_DELIVERY_MAX_ATTEMPTS: u8 = 3;
+
 /// **How a user message arrived — the one axis that decides whether it aborts an
 /// in-flight turn.**
 ///
@@ -214,6 +218,13 @@ pub struct AppState {
     /// it, prepending a wire-only directive so the resumed agent verifies the
     /// workspace (lock files / partial writes) before acting on the new message.
     pending_reconcile: Mutex<HashSet<String>>,
+    /// How many boundaries in a row `deliver_staged` has FAILED to deliver a
+    /// session's stage. Reset by a delivery or an unstage. At
+    /// [`STAGED_DELIVERY_MAX_ATTEMPTS`] the stage stays (content + row) but the
+    /// ring is no longer re-armed for it and a system row says so — a
+    /// persistent send failure otherwise re-fires at every idle boundary
+    /// forever (round 8, T2-4; never observed live, closed on principle).
+    staged_attempts: std::sync::Mutex<HashMap<String, u8>>,
     /// The Stage toggle's content (2026-08-15): session_id → (text, staged
     /// tray picks), written when the user toggles Stage while the ring runs,
     /// taken by [`deliver_staged`](Self::deliver_staged) when the ring
@@ -363,6 +374,7 @@ impl AppState {
             fs_watcher: std::sync::OnceLock::new(),
             pending_reconcile: Mutex::new(HashSet::new()),
             staged_responses: Mutex::new(std::collections::HashMap::new()),
+            staged_attempts: std::sync::Mutex::new(HashMap::new()),
             terminals: Arc::new(crate::core::TerminalRegistry::new()),
             epilogue_in_flight: Mutex::new(HashSet::new()),
             closing: std::sync::Mutex::new(HashSet::new()),
@@ -1618,6 +1630,10 @@ impl AppState {
             .lock()
             .await
             .insert(session_id.to_string(), (text.to_string(), picks));
+        // A fresh stage is a fresh set of delivery attempts.
+        if let Ok(mut a) = self.staged_attempts.lock() {
+            a.remove(session_id);
+        }
         // **And durably.** The slot used to be process memory only, so a
         // relaunch mid-stage dropped what the user had typed — silently, while
         // the composer rehydrated to "Staged ✓" from the same empty map. The
@@ -1641,6 +1657,9 @@ impl AppState {
     /// exactly what an editing user wants.
     pub async fn unstage_user_response(&self, session_id: &str) {
         self.staged_responses.lock().await.remove(session_id);
+        if let Ok(mut a) = self.staged_attempts.lock() {
+            a.remove(session_id);
+        }
         if let Err(e) = self.storage.set_staged_message(session_id, None).await {
             tracing::warn!(?e, session_id, "the staged message was not cleared");
         }
@@ -1682,19 +1701,59 @@ impl AppState {
                         "the delivered stage was not cleared; a restart would re-stage it"
                     );
                 }
+                if let Ok(mut a) = self.staged_attempts.lock() {
+                    a.remove(session_id);
+                }
                 self.bridge.notify_stage_delivered(session_id);
             }
             Err(e) => {
-                tracing::warn!(
-                    ?e,
-                    session_id,
-                    "staged delivery failed; restoring the stage for the next boundary"
-                );
+                let attempts = match self.staged_attempts.lock() {
+                    Ok(mut a) => {
+                        let n = a.entry(session_id.to_string()).or_insert(0);
+                        *n = n.saturating_add(1);
+                        *n
+                    }
+                    Err(_) => 1,
+                };
+                // The content survives either way — the user's message must not
+                // vanish on a send failure — so the next boundary can retry…
                 self.staged_responses
                     .lock()
                     .await
                     .insert(session_id.to_string(), (text, picks));
-                self.bridge.notify_ring_stage(session_id, true).await;
+                if attempts < STAGED_DELIVERY_MAX_ATTEMPTS {
+                    tracing::warn!(
+                        ?e,
+                        session_id,
+                        attempts,
+                        "staged delivery failed; restoring the stage for the next boundary"
+                    );
+                    self.bridge.notify_ring_stage(session_id, true).await;
+                } else {
+                    // …but not forever: an idle ring re-fires the boundary at
+                    // once, so a persistent failure would spin. Stop re-arming,
+                    // say so in the channel; an unstage or a resend re-arms.
+                    tracing::warn!(
+                        ?e,
+                        session_id,
+                        attempts,
+                        "staged delivery failed repeatedly; the stage stays but the ring is \
+                         no longer re-armed for it"
+                    );
+                    crate::core::post_system_notice(
+                        &self.storage,
+                        Some(&self.bridge),
+                        session_id,
+                        MessageKind::SystemNotice,
+                        format!(
+                            "[System: your staged message could not be delivered \
+                             ({attempts} tries; last error: {e}). It is still staged — \
+                             unstage and send it again to retry.]"
+                        ),
+                        None,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -2619,6 +2678,47 @@ mod tests {
             "`deliver_staged` must deliver as Staged — without it the queued \
              message reaches `broadcast` as a typed Send and preempts, which is \
              exactly the bug this test exists for"
+        );
+    }
+
+    /// **A stage that cannot deliver stops re-arming the ring** (round 8,
+    /// T2-4). On a send failure `deliver_staged` restored the content and
+    /// re-flagged the ring with no cap; an idle ring re-fires the boundary at
+    /// once, so a persistent failure spins. The re-arm is now conditional on
+    /// the attempt count and the capped path posts a system row. Source-pinned
+    /// (no `AppState` in tests): the re-arm sits under the attempts check, and
+    /// the capped arm posts through the helper. Kill-tested: make the re-arm
+    /// unconditional → red.
+    #[test]
+    fn deliver_staged_stops_rearming_after_the_attempt_cap() {
+        let code = include_str!("state.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ds = code
+            .find("pub async fn deliver_staged")
+            .expect("deliver_staged must exist");
+        let body = &code[ds..];
+        let end = body[1..]
+            .find("\n    pub async fn ")
+            .map_or(body.len(), |n| n + 1);
+        let body = &body[..end];
+        let check = body
+            .find("if attempts < STAGED_DELIVERY_MAX_ATTEMPTS")
+            .expect("the re-arm is gated on the attempt count");
+        let rearm = body
+            .find("notify_ring_stage(session_id, true)")
+            .expect("the failure path re-arms the ring");
+        assert!(check < rearm, "the re-arm must sit under the attempts check");
+        let capped = body[check..]
+            .find("post_system_notice(")
+            .expect("the capped arm tells the user in the channel");
+        assert!(rearm < check + capped, "the notice belongs to the capped arm, after the re-arm");
+        assert_eq!(
+            body.matches("notify_ring_stage(session_id, true)").count(),
+            1,
+            "exactly one re-arm, the gated one"
         );
     }
 
