@@ -34,10 +34,12 @@ pub struct SessionPolicy {
 /// Path for one session's policy snapshot. Lives under `.local/` alongside
 /// other runtime state (the SQLite db), NOT in a working repo.
 pub fn session_policy_path(data_dir: &Path, session_id: &str) -> PathBuf {
-    data_dir
-        .join(".local")
-        .join("session-policies")
-        .join(format!("{session_id}.yaml"))
+    session_policies_dir(data_dir).join(format!("{session_id}.yaml"))
+}
+
+/// The snapshot directory itself: `<data_dir>/.local/session-policies/`.
+fn session_policies_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(".local").join("session-policies")
 }
 
 /// Write the session's policy snapshot to disk (YAML). Overwrites any prior
@@ -96,7 +98,7 @@ pub fn delete_session_policy(data_dir: &Path, session_id: &str) -> Result<()> {
 /// file would leak one session's resolved policy into a fresh session that
 /// should re-seed from the current blueprints.
 pub fn purge_all_session_policies(data_dir: &Path) -> Result<()> {
-    let dir = data_dir.join(".local").join("session-policies");
+    let dir = session_policies_dir(data_dir);
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }

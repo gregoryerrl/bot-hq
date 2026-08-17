@@ -384,7 +384,7 @@ pub(crate) async fn install_plugin_inner(
     // No registry row but the managed dir exists: leftovers from a previous
     // install (out-of-band writes, restores). Removal needs the user's
     // consent — the install dialog offers it; never delete silently.
-    let plugin_dir = registry.data_dir.join("plugins").join(&manifest.id);
+    let plugin_dir = registry.plugin_dir(&manifest.id);
     if plugin_dir.exists() {
         if !cleanup_orphan {
             return Err(AppError::Conflict(format!(
@@ -454,12 +454,7 @@ pub(crate) async fn preview_plugin_manifest_inner(
         .map_err(anyhow_to_app)?
         .iter()
         .any(|r| r.id == manifest.id);
-    let orphan_dir = !registered
-        && registry
-            .data_dir
-            .join("plugins")
-            .join(&manifest.id)
-            .exists();
+    let orphan_dir = !registered && registry.plugin_dir(&manifest.id).exists();
     let capabilities = manifest
         .requested_capabilities
         .iter()
@@ -599,7 +594,7 @@ pub(crate) async fn reinstall_plugin_inner(
     // stale copy left behind by an older mode. Never the reinstall SOURCE:
     // refuse when the source IS the managed dir (remove-then-copy would
     // destroy it).
-    let plugin_dir = registry.data_dir.join("plugins").join(plugin_id);
+    let plugin_dir = registry.plugin_dir(plugin_id);
     if plugin_dir.exists() {
         if !linked && !is_url(source) {
             let src = Path::new(source)
@@ -695,7 +690,7 @@ pub(crate) async fn update_plugin_from_source_inner(
         ));
     }
 
-    let plugin_dir = registry.data_dir.join("plugins").join(plugin_id);
+    let plugin_dir = registry.plugin_dir(plugin_id);
     if plugin_dir.exists() {
         // Same remove-then-copy hazard as reinstall: never delete the source.
         let src = Path::new(&source)

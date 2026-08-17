@@ -112,10 +112,10 @@ fn main() -> Result<()> {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(?e, "startup tray sweep failed"),
             }
-            // GC: drop resolved tray rows older than 90 days so session_tray
+            // GC: drop resolved tray rows older than GC_RETENTION_DAYS so session_tray
             // stays bounded — resolved rows are never read again (the in-chat
             // tray + counters only surface pending).
-            match storage.purge_resolved_tray(90).await {
+            match storage.purge_resolved_tray(GC_RETENTION_DAYS).await {
                 Ok(n) if n > 0 => {
                     tracing::info!(purged = n, "purged old resolved tray rows at startup")
                 }
@@ -124,7 +124,7 @@ fn main() -> Result<()> {
             }
             // Same GC posture for the activity timeline: small per session, but
             // unbounded over time without this.
-            match storage.purge_activity_events(90).await {
+            match storage.purge_activity_events(GC_RETENTION_DAYS).await {
                 Ok(n) if n > 0 => {
                     tracing::info!(purged = n, "purged old activity events at startup")
                 }
@@ -271,7 +271,7 @@ fn main() -> Result<()> {
                     let root = if row.linked {
                         std::path::PathBuf::from(&row.dir_path)
                     } else {
-                        registry.data_dir.join("plugins").join(&row.id)
+                        registry.plugin_dir(&row.id)
                     };
                     registry.set_serve_root(&row.id, Some(root));
                     match bot_hq::plugins::PluginManifest::parse(&row.manifest_json) {
@@ -595,6 +595,11 @@ fn plugin_asset_error(status: u16) -> tauri::http::Response<Vec<u8>> {
         .body(Vec::new())
         .expect("static status-only response")
 }
+
+/// Boot-time GC horizon for the two append-only runtime tables (`session_tray`
+/// resolved rows, `activity_events`): rows older than this many days are
+/// purged at startup. One number, spelled once (round 9).
+const GC_RETENTION_DAYS: i64 = 90;
 
 /// How many daily log files to keep. Bounded from the start: this data home
 /// used to carry one append-only, unrotated sink (`native-accounting.jsonl`,

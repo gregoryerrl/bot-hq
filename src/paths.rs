@@ -444,8 +444,9 @@ impl Paths {
 
 /// Resolve the user's home directory via `directories::BaseDirs`. Single
 /// source of truth — every path helper below routes through this so the
-/// `.context()` message stays identical.
-fn home_dir() -> Result<PathBuf> {
+/// `.context()` message stays identical, and `claude_config` resolves
+/// `~/.claude` through it too (round 9: it had its own `$HOME`-only copy).
+pub(crate) fn home_dir() -> Result<PathBuf> {
     Ok(directories::BaseDirs::new()
         .context("locating user home dir")?
         .home_dir()

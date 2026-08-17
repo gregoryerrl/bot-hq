@@ -27,7 +27,7 @@ const SECRET_KEY_HINTS: &[&str] = &[
 /// environment. Never fails — unreadable/malformed files become warnings.
 pub fn read_claude_config() -> ClaudeConfigView {
     let (config_dir, source) = resolve_config_dir();
-    let home = home_dir().unwrap_or_else(|| config_dir.clone());
+    let home = crate::paths::home_dir().unwrap_or_else(|_| config_dir.clone());
     read_at(&config_dir, &home, source, managed_present())
 }
 
@@ -45,12 +45,8 @@ fn resolve_config_dir() -> (PathBuf, &'static str) {
             return (PathBuf::from(v), "CLAUDE_CONFIG_DIR");
         }
     }
-    let home = home_dir().unwrap_or_default();
+    let home = crate::paths::home_dir().unwrap_or_default();
     (home.join(".claude"), "default (~/.claude)")
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 /// Whether an enterprise/managed policy file exists (it beats everything,

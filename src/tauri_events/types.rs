@@ -268,6 +268,21 @@ pub const PLUGIN_STATE_CHANGED: &str = "plugin:state-changed";
 pub const PLUGIN_UNINSTALLED: &str = "plugin:uninstalled";
 pub const PLUGIN_CRASHED: &str = "plugin:crashed";
 
+/// The three payload-less (or near-payload-less) session events the bridge
+/// subscriber emits — named here like every other event so `Providers.tsx`'s
+/// listener strings have one Rust counterpart to drift against (round 9: they
+/// were the only three bare literals in `bridge_subscriber.rs`).
+///
+/// `session:resync` — the subscriber lagged its broadcast channel and may have
+/// dropped `session:*` events; the frontend refetches every event-backed query.
+pub const SESSION_RESYNC: &str = "session:resync";
+/// `session:halt_cleared` — the session's halt slot was cleared (the user's
+/// next message); the tray/bell refetch. Null payload.
+pub const SESSION_HALT_CLEARED: &str = "session:halt_cleared";
+/// `session:stage_delivered` — a staged user message landed at the turn
+/// boundary; `{ session_id }`.
+pub const SESSION_STAGE_DELIVERED: &str = "session:stage_delivered";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +325,15 @@ mod tests {
         assert_eq!(am.kind, m.kind);
         assert_eq!(am.content, m.content);
         assert_eq!(am.created_at, m.created_at);
+    }
+
+    /// The three subscriber-emitted names the frontend subscribes to by string
+    /// (`Providers.tsx`) — pinned like their typed siblings.
+    #[test]
+    fn subscriber_event_names_match_the_frontend_listeners() {
+        assert_eq!(SESSION_RESYNC, "session:resync");
+        assert_eq!(SESSION_HALT_CLEARED, "session:halt_cleared");
+        assert_eq!(SESSION_STAGE_DELIVERED, "session:stage_delivered");
     }
 
     #[test]

@@ -33,7 +33,6 @@ tempfile = "3"
 # Both already present transitively (via sqlx/hyper), so declaring them direct
 # adds no compilation cost.
 regex = "1"
-glob = "0.3"
 subtle = "2"
 # Content hashing for the policy-mutation audit (policy/audit.rs): a stable,
 # collision-resistant hash (vs the non-cryptographic, toolchain-unstable

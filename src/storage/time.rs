@@ -17,6 +17,14 @@ pub(crate) fn now_utc() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+/// `now - days`, in the same RFC3339-Z shape as [`now_utc`] — the retention
+/// cutoff every GC compares stored timestamps against (a lexicographic compare
+/// between two RFC3339-Z strings is a time compare; between this and a
+/// zone-less string it silently is not, which is why the shape is shared).
+pub(crate) fn cutoff_days_ago(days: i64) -> String {
+    (Utc::now() - chrono::Duration::days(days)).to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

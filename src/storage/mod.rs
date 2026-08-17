@@ -54,7 +54,7 @@ pub use row_types::{
     Finding, FindingSeverity, FindingStatus, Message, MessageKind, Model, Plugin, Project,
     QuestionKind, RetrievalStats, Session, SessionDocument, SessionTrayEntry, SessionWithPreview,
 };
-pub(crate) use time::now_utc;
+pub(crate) use time::{cutoff_days_ago, now_utc};
 pub use messages::{messages_tail_sql, participant_text_since_sql};
 
 /// A user's search text as a `LIKE` pattern: `%…%`, lower-cased, with the

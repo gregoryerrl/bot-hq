@@ -56,6 +56,12 @@ impl PluginRegistry {
         }
     }
 
+    /// The copy-install directory for a plugin: `<data_dir>/plugins/<id>`
+    /// (round 9: five call sites hand-built the same two joins).
+    pub fn plugin_dir(&self, plugin_id: &str) -> PathBuf {
+        self.data_dir.join("plugins").join(plugin_id)
+    }
+
     /// Replace the whole enabled set (boot seed from storage).
     pub fn set_enabled_ids(&self, ids: HashSet<String>) {
         let mut g = self.enabled.lock().unwrap_or_else(|p| p.into_inner());

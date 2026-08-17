@@ -1856,6 +1856,9 @@ impl Storage {
             .begin()
             .await
             .context("opening the delivery transaction")?;
+        // One stamp for the page: the rows are one delivery, not up to 200
+        // instants a few microseconds apart (round 9).
+        let delivered_at = crate::storage::now_utc();
         for (message_id, withheld_reason) in deliveries {
             // `OR IGNORE` on `UNIQUE (participant_id, message_id)`: re-recording
             // a delivery is idempotent, not an error, so a retried turn does not
@@ -1873,7 +1876,7 @@ impl Storage {
             // RFC3339-Z — and this file already records, twice, what that
             // mismatch costs: a lexicographic compare between the two shapes
             // silently broke a guard once.
-            .bind(crate::storage::now_utc())
+            .bind(&delivered_at)
             .execute(&mut *tx)
             .await
             .context("recording delivery")?;

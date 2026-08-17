@@ -323,7 +323,6 @@ dependencies = [
  "chrono",
  "directories",
  "futures",
- "glob",
  "http-body-util",
  "hyper",
  "hyper-util",

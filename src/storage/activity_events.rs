@@ -84,8 +84,7 @@ impl Storage {
     /// data home used to carry one (`native-accounting.jsonl`, written by the
     /// loop rc3 D9 deleted); it now carries none.
     pub async fn purge_activity_events(&self, retention_days: i64) -> Result<u64> {
-        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let cutoff = crate::storage::cutoff_days_ago(retention_days);
         let res = sqlx::query("DELETE FROM activity_events WHERE recorded_at < ?")
             .bind(cutoff)
             .execute(&self.pool)

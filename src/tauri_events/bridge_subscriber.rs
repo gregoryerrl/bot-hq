@@ -22,7 +22,8 @@ use crate::tauri_events::batch_emitter::BatchEmitter;
 use crate::tauri_events::types::{
     AgentContextEvent, AgentHealthEvent, AwaitingUser, ChoiceResolvedEvent, DocChangedEvent,
     FindingsChangedEvent, PendingChoiceEvent, PhaseChangedEvent,
-    SessionActivityEvent, SessionAttentionEvent, SessionClosedEvent,
+    SessionActivityEvent, SessionAttentionEvent, SessionClosedEvent, SESSION_HALT_CLEARED,
+    SESSION_RESYNC, SESSION_STAGE_DELIVERED,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -59,7 +60,7 @@ pub fn spawn_subscriber<EM, EB>(
                     // a resync so the frontend refetches its event-backed queries
                     // and a lagged burst can't leave the UI stale — this is what
                     // lets us drop the redundant safety-net refetch polls.
-                    emit_event.as_ref()("session:resync", Value::Null);
+                    emit_event.as_ref()(SESSION_RESYNC, Value::Null);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -137,7 +138,7 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             // Pending awaiting-halts were answered; invalidate the tray so the
             // "needs input" bell clears. Null payload — the frontend just
             // refetches list_pending_tray (it isn't per-session data).
-            emit_event("session:halt_cleared", Value::Null);
+            emit_event(SESSION_HALT_CLEARED, Value::Null);
         }
         SignalingEvent::StagedDeliveryDue { .. } => {
             // Internal plumbing: main.rs routes this to AppState::deliver_staged.
@@ -152,7 +153,7 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             // The staged response landed: the composer clears its Stage
             // toggle + draft and the staged tray picks are consumed.
             emit_event(
-                "session:stage_delivered",
+                SESSION_STAGE_DELIVERED,
                 serde_json::json!({ "session_id": session_id }),
             );
         }
