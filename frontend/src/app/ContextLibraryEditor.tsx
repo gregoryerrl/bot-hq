@@ -11,16 +11,8 @@ import type {
   Policy,
   ProjectView,
 } from "../lib/bindings";
-import {
-  CloseIcon,
-  FileIcon,
-  FolderIcon,
-  type OpenTab,
-  SaveIcon,
-  tabKey,
-  tabLabel,
-  terminalInputClass,
-} from "./contextLibraryShared";
+import { type OpenTab, tabKey, tabLabel, terminalInputClass } from "./contextLibraryShared";
+import { CloseIcon, FileIcon, FolderIcon, SaveIcon } from "../components/icons";
 import { FolderView } from "./ContextLibraryFolderView";
 import { PolicyForm } from "../components/PolicyForm";
 import { SegToggle } from "../components/ui/SegToggle";

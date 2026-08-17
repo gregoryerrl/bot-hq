@@ -9,22 +9,25 @@ import type {
 import {
   baseName,
   buildTree,
-  CollapseAllIcon,
   collapseKey,
   type CtxTarget,
-  EyeIcon,
-  EyeOffIcon,
-  FileIcon,
-  FolderIcon,
   type OpenTab,
-  PlusIcon,
-  RefreshIcon,
   splitGlobals,
   terminalInputClass,
   treeProjectIds,
   type TreeNode,
 } from "./contextLibraryShared";
-import { RescanIcon, WarnIcon } from "../components/icons";
+import {
+  CollapseAllIcon,
+  EyeIcon,
+  EyeOffIcon,
+  FileIcon,
+  FolderIcon,
+  PlusIcon,
+  RefreshIcon,
+  RescanIcon,
+  WarnIcon,
+} from "../components/icons";
 
 const INDENT_PX = 12;
 
@@ -215,7 +218,7 @@ export function WorkspaceSidebar({
               "text-on-surface-variant hover:text-on-surface",
             )}
           >
-            <PlusIcon className="size-3.5" />
+            <PlusIcon />
           </button>
         </div>
       </header>

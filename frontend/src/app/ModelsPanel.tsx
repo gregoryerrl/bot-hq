@@ -6,7 +6,8 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
-import { terminalInputClass, SaveIcon, FieldLabel } from "./contextLibraryShared";
+import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
+import { SaveIcon } from "../components/icons";
 import type { ModelView, ValidateResult } from "../lib/bindings";
 import { invoke } from "@tauri-apps/api/core";
 

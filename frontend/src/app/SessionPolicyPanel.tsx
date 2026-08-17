@@ -8,7 +8,7 @@ import type {
 } from "../lib/bindings";
 import { PolicyForm } from "../components/PolicyForm";
 import { GatedKeywordList } from "../components/GatedKeywordList";
-import { CloseIcon, SaveIcon } from "./contextLibraryShared";
+import { CloseIcon, SaveIcon } from "../components/icons";
 import { cn } from "../lib/cn";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";

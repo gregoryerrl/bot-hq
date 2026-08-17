@@ -3,7 +3,8 @@ import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { cn } from "../lib/cn";
-import { terminalInputClass, FieldLabel, SaveIcon } from "./contextLibraryShared";
+import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
+import { SaveIcon } from "../components/icons";
 import type {
   AppError,
   CapabilityView,

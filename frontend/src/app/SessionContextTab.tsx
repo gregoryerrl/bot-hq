@@ -9,12 +9,8 @@ import type {
   ClIndexEntryView,
   SessionProjectInfo,
 } from "../lib/bindings";
-import {
-  buildTree,
-  FileIcon,
-  FolderIcon,
-  type TreeNode,
-} from "./contextLibraryShared";
+import { buildTree, type TreeNode } from "./contextLibraryShared";
+import { FileIcon, FolderIcon } from "../components/icons";
 
 // ============================================================================
 // SessionContextTab — the session container's "Context" subtab: the Context

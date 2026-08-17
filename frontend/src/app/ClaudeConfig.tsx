@@ -3,15 +3,15 @@ import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvok
 import { useServerDraft } from "../hooks/useServerDraft";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
-import { SaveIcon } from "./contextLibraryShared";
 import {
   GearIcon,
-  OverviewIcon,
-  SkillsIcon,
-  PluginsIcon,
   McpIcon,
   MemoryIcon,
+  OverviewIcon,
   PermissionsIcon,
+  PluginsIcon,
+  SaveIcon,
+  SkillsIcon,
   type IconProps,
 } from "../components/icons";
 import type {

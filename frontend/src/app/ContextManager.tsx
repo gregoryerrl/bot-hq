@@ -5,7 +5,7 @@ import { cn } from "../lib/cn";
 import type { ClRescanReportView, ProjectView } from "../lib/bindings";
 import { MeasurementView } from "./MeasurementView";
 import { RegisterProjectModal } from "./ContextLibraryRegisterModal";
-import { RefreshIcon } from "./contextLibraryShared";
+import { RefreshIcon } from "../components/icons";
 
 // ============================================================================
 // ContextManager — the management half of the Context Library: a per-project

@@ -2,12 +2,8 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { errorMessage } from "../hooks/useInvoke";
 import type { ClFolderView, ProjectView } from "../lib/bindings";
-import {
-  FolderIcon,
-  type OpenTab,
-  pickFolder,
-  terminalInputClass,
-} from "./contextLibraryShared";
+import { type OpenTab, pickFolder, terminalInputClass } from "./contextLibraryShared";
+import { FolderIcon } from "../components/icons";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
 // ============================================================================

@@ -678,7 +678,7 @@ every other FE area imports.
 | `frontend/src/app/ViolationsPanel.tsx`, `frontend/src/app/FeedbackPanel.tsx`, `frontend/src/app/MeasurementView.tsx` | violations viewer; feedback triage; CL retrieval stats | M / S / S |
 | `frontend/src/components/UpdateBanner.tsx` | dismissible update banner | S |
 | `frontend/src/components/ui/Button.tsx`, `frontend/src/components/ui/Card.tsx`, `frontend/src/components/ui/Input.tsx`, `frontend/src/components/ui/SegToggle.tsx`, `frontend/src/components/ui/Textarea.tsx` | base atoms (no `Select` yet) | S |
-| `frontend/src/components/icons.tsx` | hand-rolled SVG icon set | S |
+| `frontend/src/components/icons.tsx` | THE hand-rolled SVG icon set — two bases kept deliberately (attribute-sized stroke 1.75 `Svg`; class-sized stroke 2 `ClassSvg`, the family moved in from the CL module in round 9); the near-twins `MemoryIcon`/`FileIcon` and `RescanIcon`/`RefreshIcon` await a visual decision | S |
 | `frontend/src/components/Markdown.tsx`, `frontend/src/components/ErrorBanner.tsx`, `frontend/src/components/ConfirmDialog.tsx`, `frontend/src/components/SubTabButton.tsx` | shared atoms | S |
 | `frontend/src/components/authorColor.ts` | label → hue class; D20 8-hue palette named by colour | S |
 | `frontend/src/lib/participants.ts` | `ParticipantView`, label/slug/slot-key resolution, `isSpawnable` (stale mirror), runtime keys | M |
@@ -716,7 +716,7 @@ ContextManager (measurement + rescan) and the session-side FileViewerDialog.
 | `frontend/src/app/ContextLibraryEditor.tsx` | `EditorArea`/`TabStrip`/`EditorPane`/policy.yaml editor; only the active tab is mounted; dirty-vs-`cl:changed` sync | L |
 | `frontend/src/app/ContextLibraryFolderView.tsx` | folder tab: description editor + project register/rename/unbind/delete (with confirms) | M |
 | `frontend/src/app/ContextLibraryContextMenu.tsx`, `frontend/src/app/ContextLibraryRegisterModal.tsx` | menu + action modal; register-project dialog | S / M |
-| `frontend/src/app/contextLibraryShared.tsx` | tree types, `buildTree`, `splitGlobals`, tab helpers (+ misplaced generic icons/atoms) | M |
+| `frontend/src/app/contextLibraryShared.tsx` | tree types, `buildTree`, `splitGlobals`, tab helpers, `terminalInputClass`/`FieldLabel` (its icons moved to `components/icons.tsx` in round 9) | M |
 | `frontend/src/app/ContextManager.tsx` | per-project measurement + rescan | S |
 | `frontend/src/components/FileViewerDialog.tsx` | full-screen file viewer used from tray cards | M |
 
