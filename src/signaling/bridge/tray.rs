@@ -1248,7 +1248,7 @@ impl SignalingBridge {
                     Ok(m) => self
                         .notify_message_persisted(Arc::from(session_id.as_str()), m.message_id()),
                     Err(e) => {
-                        tracing::warn!(?e, "request_phase_advance insert_message failed")
+                        tracing::warn!(?e, "request_phase_advance receipt row failed to persist")
                     }
                 }
             }

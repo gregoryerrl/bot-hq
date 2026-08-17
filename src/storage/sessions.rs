@@ -481,7 +481,7 @@ mod tests {
 
         // Activity on the older session bumps it to the top.
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        s.insert_message("s-old", MessageKind::Text, "hi")
+        s.insert_user_message("s-old", MessageKind::Text, "hi")
             .await
             .unwrap();
         let ids: Vec<String> = s
@@ -506,7 +506,7 @@ mod tests {
             .unwrap();
 
         // Newest TEXT message wins; a later tool_use must NOT shadow it.
-        s.insert_message("s-msg", MessageKind::Text, "first prompt")
+        s.insert_user_message("s-msg", MessageKind::Text, "first prompt")
             .await
             .unwrap();
         s.post_to_channel("s-msg", "participant", Some("hands"), MessageKind::Text.as_str(), "brian reply", None)

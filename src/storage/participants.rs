@@ -935,7 +935,7 @@ impl Storage {
     /// external driver's `open_session`, the plugin proxy's
     /// `dispatch_session_inner` — from starting life with an empty roster.
     /// Without a roster every message it writes resolves `participant_id` to
-    /// NULL forever, because `insert_message`'s dual-write looks the roster up
+    /// NULL forever, because `insert_user_message`'s dual-write looks the roster up
     /// by slug.
     ///
     /// **rc3 D10: the roster is derived from the user's ROLES, not from two
@@ -2308,7 +2308,7 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 /// compiler checks: a helper added here later could mint a receipt with no row
 /// behind it. The claim now
 /// covers every write to `messages`, not just this method: B5 Task 1b made
-/// [`Storage::insert_message`] — the second live insert path, and the one the
+/// [`Storage::insert_user_message`] — the second live insert path, and the one the
 /// duo pump uses on every chunk — a thin wrapper over `post_to_channel`, so
 /// there is one INSERT and every row that reaches the table has a receipt
 /// behind it.
@@ -2571,7 +2571,7 @@ impl Storage {
             _ => "user",
         };
         // The participant is resolved INLINE by subquery rather than by a prior
-        // awaited SELECT. `insert_message` delegates here and fires on every
+        // awaited SELECT. `insert_user_message` delegates here and fires on every
         // text/tool_use/tool_result chunk, so a separate round trip per post is
         // a cost worth not paying — and one that would be near-impossible to
         // attribute once the send path starts routing through this method.
@@ -2603,7 +2603,7 @@ impl Storage {
         .bind(envelope_json.as_deref())
         .bind(legacy_author)
         // `now_utc()` (RFC3339-Z), NOT SQLite's `datetime('now')`, which this
-        // method used until `insert_message` began delegating here. That is the
+        // method used until `insert_user_message` began delegating here. That is the
         // project baseline every other write already keeps — see `storage::time`
         // — and the difference is not cosmetic. `datetime('now')` emits a
         // zone-less `2026-08-06 11:22:33`, which sorts BEFORE the same instant
@@ -5028,7 +5028,7 @@ mod tests {
         // query that no longer matches the table.
         //
         // It caught a real defect: `origin` was NOT NULL with no default, so
-        // every legacy `insert_message` — which knows nothing about `origin` —
+        // every legacy `insert_user_message` — which knows nothing about `origin` —
         // would have failed on insert and the app would not have started. The
         // column is transitional-nullable because of this test.
         let s = storage_with_0044().await;
@@ -5041,7 +5041,7 @@ mod tests {
             .unwrap()
             .message_id();
         assert!(id > 0, "legacy insert_message must still work post-0044");
-        s.insert_message("s1", MessageKind::Text, "hi back")
+        s.insert_user_message("s1", MessageKind::Text, "hi back")
             .await
             .unwrap();
 
@@ -5349,7 +5349,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_legacy_write_path_now_populates_the_new_columns() {
-        // B4a dual-write: `insert_message` keeps its signature and its `author`
+        // B4a dual-write: `insert_user_message` keeps its signature and its `author`
         // column, and ALSO fills participant_id/origin. That means the channel
         // is correct from the moment 0044 applies — no backfill pass later, and
         // no flag day where attribution is half-migrated.
@@ -5368,7 +5368,7 @@ mod tests {
         s.post_to_channel("s1", "participant", Some("hands"), "text", "work", None)
             .await
             .unwrap();
-        s.insert_message("s1", MessageKind::Text, "reply").await.unwrap();
+        s.insert_user_message("s1", MessageKind::Text, "reply").await.unwrap();
 
         let rows = all_rows(&s, "s1").await;
         assert_eq!(rows.len(), 2);
@@ -6105,7 +6105,7 @@ mod tests {
         s.post_to_channel("s1", "participant", Some("eyes"), "text", "review", None)
             .await
             .unwrap();
-        s.insert_message("s1", MessageKind::Text, "reply").await.unwrap();
+        s.insert_user_message("s1", MessageKind::Text, "reply").await.unwrap();
         let before = all_rows(&s, "s1").await;
         assert!(before.iter().all(|m| m.participant_id.is_none()), "precondition: unmapped");
 

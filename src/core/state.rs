@@ -1678,20 +1678,27 @@ impl AppState {
         // Synthetic phase-change message in storage. No envelope: the wire is
         // the notice byte for byte, because `transition_notice()` already
         // carries its own `[PHASE: X]` and a phase envelope would double-tag it.
-        // The one host-authored site where the row needed no reordering to
-        // become the wire — the receipt goes straight to HANDS below.
+        //
+        // Host-authored (`origin = "system"`), so participants read it as
+        // `[system] [PHASE: X] …`. It went through the user-row writer until
+        // round 7 and every participant read the transition as the USER's words
+        // — the notice text is bot-hq's, and the transition may be an agent
+        // vote's doing (D37); the user typed none of it.
         //
         // The `&'static str` goes in directly; it used to be pre-`to_string`d
         // because the wire moved the owned copy, and that consumer is gone.
-        let persisted = self
-            .storage
-            .insert_message(session_id,
-                MessageKind::PhaseChange,
-                target.transition_notice(),
-            )
-            .await?;
-        self.bridge
-            .notify_message_persisted(Arc::from(session_id), persisted.message_id());
+        // A failed insert is not fatal here: the phase HAS moved (committed
+        // above) and the participants learn it from the envelope of the next
+        // row they read.
+        crate::core::post_system_notice(
+            &self.storage,
+            &self.bridge,
+            session_id,
+            MessageKind::PhaseChange,
+            target.transition_notice(),
+            None,
+        )
+        .await;
         // Fed to HANDS's stdin so it lands as a natural prompt.
         //
         // NOT to EYES (issues.md #8). Waking the reviewer on a phase transition
@@ -2272,6 +2279,43 @@ mod tests {
     /// notification is async, the turn it cut was usually the NEXT one, freshly
     /// dealt. Waiting made it worse rather than better.
     ///
+    /// The phase-change notice is HOST-authored (round 7). Nothing in this
+    /// crate can build an `AppState` to drive `advance_phase` end to end (the
+    /// `sessions` map is only populated by a real spawn), so the wire cannot be
+    /// asserted here — this pins the source instead: the notice must go through
+    /// `post_system_notice`, and the user-row writer must not appear anywhere
+    /// in this file. Before the fix every participant read the transition as
+    /// `[user] [PHASE: X] …` — the user "saying" the phase moved, when an
+    /// agent's vote may have moved it (rc3 D37).
+    #[test]
+    fn the_phase_change_notice_is_a_system_row_not_a_user_row() {
+        let code = include_str!("state.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ap = code
+            .find("pub async fn advance_phase(")
+            .expect("advance_phase must exist");
+        let body = &code[ap..];
+        let end = body[1..]
+            .find("\n    pub async fn ")
+            .map_or(body.len(), |n| n + 1);
+        let body = &body[..end];
+        assert!(
+            body.contains("post_system_notice(") && body.contains("MessageKind::PhaseChange"),
+            "advance_phase must post its transition notice through post_system_notice \
+             (origin = system): {body}"
+        );
+        // Assembled so the assertion cannot match its own text.
+        let user_writer = format!("insert_{}_message(", "user");
+        assert!(
+            !code.contains(&user_writer),
+            "core::state must not write any row through the user-row writer; a host \
+             row that goes through it reaches every participant as [user]"
+        );
+    }
+
     /// Three assertions, because restoring the bug needs only one of them back:
     /// the decision, the GUARD that consults it, and the variant the staged path
     /// picks. The third is the one that was missing entirely.

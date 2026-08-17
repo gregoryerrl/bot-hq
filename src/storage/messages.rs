@@ -24,7 +24,20 @@ impl Storage {
     /// table.
     ///
     /// **It writes `origin = "user"` unconditionally, and that is the whole
-    /// contract now.** It used to take an `Author` and map it to
+    /// contract now — which is why the name says USER.** Two host rows (the
+    /// idle watchdog's chat notice, every phase-change notice) once came
+    /// through here under the old name `insert_message` and reached every
+    /// participant tagged `[user]`; host rows go through
+    /// `core::post_system_notice`, and this writer is for text the user typed
+    /// (or answered — the out-of-band tray replay is the user's own words).
+    ///
+    /// **No production caller today, on purpose** — the user's typed rows and
+    /// the tray replay both go through `post_to_channel` directly because they
+    /// carry an envelope. It stays as the NAMED user-row writer so a host row
+    /// cannot borrow it by picking the obvious-looking helper (which is exactly
+    /// how the two rows above went wrong); a dead-code sweep that reads
+    /// "zero production callers" as "delete" would remove the rail, not the
+    /// dead weight. It used to take an `Author` and map it to
     /// `(origin, participant_slug)`; every production caller passed
     /// `Author::User`, so the participant arm was reachable only from tests, and
     /// the enum could not name a single participant this app creates. Deleted in
@@ -53,7 +66,7 @@ impl Storage {
     /// generics rather than narrowing them: this fires per chunk, the layer
     /// below can take ownership, and a narrower wrapper would force a body copy
     /// and a session-id allocation at a boundary where both sides could move.
-    pub async fn insert_message(
+    pub async fn insert_user_message(
         &self,
         session_id: impl Into<std::sync::Arc<str>>,
         kind: MessageKind,
@@ -154,7 +167,7 @@ impl Storage {
     /// reads as repetition on a participant that is working normally. The
     /// router's breaker compared forwarded prose; this is that same material.
     ///
-    /// **Newest-capped, returned oldest-first.** `insert_message` fires per
+    /// **Newest-capped, returned oldest-first.** `insert_user_message` fires per
     /// chunk, so one turn is many rows and an unbounded read would grow with the
     /// session. Taking the newest `limit` rather than the oldest keeps the
     /// returned id the participant's true high-water mark, so a turn longer than
@@ -278,24 +291,25 @@ mod tests {
         s.create_session("s-2", "Other", None).await.unwrap();
 
         // Two real user prompts (incl. an OOB answer, stored the same way)…
-        s.insert_message("s-1", MessageKind::Text, "task")
+        s.insert_user_message("s-1", MessageKind::Text, "task")
             .await
             .unwrap();
-        s.insert_message("s-1", MessageKind::Text, "oob answer")
+        s.insert_user_message("s-1", MessageKind::Text, "oob answer")
             .await
             .unwrap();
-        // …plus synthetic author=user host rows that must NOT count…
-        s.insert_message("s-1", MessageKind::PhaseChange, "Plan")
+        // …plus host rows (`origin = "system"`, kind phase_change /
+        // system_notice) that must NOT count…
+        s.post_to_channel("s-1", "system", None, MessageKind::PhaseChange.as_str(), "Plan", None)
             .await
             .unwrap();
-        s.insert_message("s-1", MessageKind::SystemNotice, "nudged")
+        s.post_to_channel("s-1", "system", None, MessageKind::SystemNotice.as_str(), "nudged", None)
             .await
             .unwrap();
         // …plus agent text and another session's user text (both excluded).
         s.post_to_channel("s-1", "participant", Some("hands"), MessageKind::Text.as_str(), "ack", None)
             .await
             .unwrap();
-        s.insert_message("s-2", MessageKind::Text, "elsewhere")
+        s.insert_user_message("s-2", MessageKind::Text, "elsewhere")
             .await
             .unwrap();
 
@@ -360,14 +374,14 @@ mod tests {
         assert_eq!(pm.body(), rows[0].content);
         assert_eq!(pm.envelope(), None, "the legacy shape carries no envelope");
 
-        // A user row is the only arm now — `insert_message` writes
+        // A user row is the only arm now — `insert_user_message` writes
         // `origin = "user"` unconditionally — and it still returns
         // a receipt for its own row — there is no receipt-less variant to fall
         // through to, which is the point of deleting the id-only shim: it took
         // the same argument list, so swapping it in would have compiled
         // silently and dropped the receipt with no diagnostic.
         let user = s
-            .insert_message("s1", MessageKind::Text, "reply")
+            .insert_user_message("s1", MessageKind::Text, "reply")
             .await
             .unwrap();
         let rows = s.messages_for_session("s1", None).await.unwrap();

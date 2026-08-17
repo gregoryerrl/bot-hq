@@ -379,44 +379,39 @@ async fn deliver_idle_nudge(
         direction exists, the right response IS the question: ask which direction.]";
     // TWO rows, because this site says two different things. NOTICE is the
     // one-line summary the user reads in the chat; NUDGE is the instruction
-    // Brian reads. Before B5 Task 2 only NOTICE was recorded and NUDGE went
-    // straight to stdin, so the chat's account of what the watchdog sent was
-    // short by the entire instruction — the widest of the divergences.
-    match idle_watch
-        .storage
-        .insert_message(session_id, MessageKind::SystemNotice, NOTICE)
-        .await
-    {
-        Ok(m) => bridge.notify_message_persisted(Arc::from(session_id), m.message_id()),
-        Err(e) => warn!(session_id = %session_id, error = %e,
-                        "idle watchdog: failed to persist system notice"),
-    }
+    // the executor reads. Before B5 Task 2 only NOTICE was recorded and NUDGE
+    // went straight to stdin, so the chat's account of what the watchdog sent
+    // was short by the entire instruction — the widest of the divergences.
+    //
+    // Both are host-authored — `origin = 'system'`, NULL participant (0044):
+    // neither is anybody's turn output and there is no `system` roster row to
+    // attribute them to. NOTICE used to go through the user-row writer and
+    // reached every participant as `[user] Session idled…` — bot-hq in the
+    // user's voice, the exact misattribution `speaker_of`'s doc forbids.
+    crate::core::post_system_notice(
+        &idle_watch.storage,
+        bridge,
+        session_id,
+        MessageKind::SystemNotice,
+        NOTICE,
+        None,
+    )
+    .await;
     let phase = idle_watch.ipav.lock().await.current_phase;
-    // Host-authored, so `origin = 'system'` with a NULL participant (0044): the
-    // nudge is nobody's turn output and there is no `system` roster row to
-    // attribute it to.
-    let nudge = match idle_watch
-        .storage
-        .post_to_channel(
-            session_id,
-            "system",
-            None,
-            MessageKind::SystemNotice.as_str(),
-            NUDGE,
-            Some(Envelope::phase(phase.name())),
-        )
-        .await
-    {
-        Ok(m) => m,
-        // No row, no wire. The chip is already up and NOTICE may already be in
-        // the chat, so the user still sees that the session stalled.
-        Err(e) => {
-            warn!(session_id = %session_id, error = %e,
-                  "idle watchdog: nudge not persisted; not delivered");
-            return;
-        }
+    // No row, no wire. The chip is already up and NOTICE may already be in the
+    // chat, so the user still sees that the session stalled.
+    let Some(_nudge) = crate::core::post_system_notice(
+        &idle_watch.storage,
+        bridge,
+        session_id,
+        MessageKind::SystemNotice,
+        NUDGE,
+        Some(Envelope::phase(phase.name())),
+    )
+    .await
+    else {
+        return;
     };
-    bridge.notify_message_persisted(Arc::from(session_id), nudge.message_id());
     // **The wake is a ring release, not a stdin write.** The nudge fires exactly
     // when no turn is coming — idle, nothing parked — so the row alone would sit
     // unread until the user typed, which is the one event this exists to spare
@@ -595,7 +590,11 @@ mod tests {
 
         let rows = storage.channel_after("s1", 0, 100).await.unwrap().rows;
         assert_eq!(rows.len(), 2, "NOTICE and NUDGE are separate messages");
-        assert_eq!(rows[0].origin, "user", "the notice reads as a chat message");
+        // Host-authored too (round 7): the notice is bot-hq's one-line summary,
+        // and until it posted as `system` every participant read it as
+        // `[user] Session idled…` — the user "saying" a thing bot-hq did.
+        assert_eq!(rows[0].origin, "system", "the notice is bot-hq talking, not the user");
+        assert!(rows[0].participant_id.is_none());
         assert!(rows[0].content.starts_with("Session idled"));
         // The nudge is host-authored: `system` origin, no participant (0044).
         // rc3 D23: it renders `[system]` on the wire, and that matters here more

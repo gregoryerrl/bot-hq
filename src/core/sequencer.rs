@@ -273,8 +273,8 @@
 //! - `mark_awaiting_user` parks with no `messages` row at all (`emit_halt_row`
 //!   writes only `session_tray`, and halts never populate the pending map), but
 //!   its releases still post one: a user broadcast, or `advance_phase`, which
-//!   writes its transition notice through `insert_message`, which posts with
-//!   `origin = "user"`.
+//!   writes its transition notice through `core::post_system_notice`
+//!   (`origin = "system"` since round 7 — it used to post as the user).
 //!
 //! So a second command for "the user answered" would fire on exactly the
 //! occasions `UserMessage` already does, and would be handled identically —
@@ -323,26 +323,27 @@
 //! too, but they decay LOUDLY — a reader greps and finds nothing.
 //!
 //! **`watchdog`'s idle nudge is not one of them, and an earlier draft listed it
-//! as one.** `deliver_idle_nudge` writes TWO rows for the two things it says.
-//! NOTICE — the one-line summary the user reads in the chat — goes through
-//! `insert_message` (`watchdog::deliver_idle_nudge`), which posts with
-//! `origin = "user"`. Only NUDGE, the
-//! instruction the executor reads, is posted as `"system"` — same function,
-//! the second of its two rows.
+//! as one.** `deliver_idle_nudge` writes TWO rows for the two things it says —
+//! NOTICE, the one-line summary the user reads in the chat, and NUDGE, the
+//! instruction the executor reads — both host-authored (`origin = "system"`),
+//! both through `core::post_system_notice`. **Until round 7 NOTICE posted as
+//! the user** (through the user-row writer, then named `insert_message`), and
+//! so did `AppState::advance_phase`'s transition notice — so rows landed on
+//! this path under the user's origin with no human behind them, and every
+//! participant read them as `[user] …` (rc3 D23 puts the origin on the wire).
+//! Both now say `[system]`. What has NOT changed is the release: those rows
+//! still reach the ring through an explicit command minted by their writer,
+//! never inferred from the origin — see "what releases a pause" below for the
+//! obligation that puts on whoever mints
+//! [`UserMessage`](SequencerCommand::UserMessage).
 //!
-//! It is not alone: `AppState::advance_phase` writes its transition notice with
-//! `origin = "user"` too. So **rows land on this path under the user's origin
-//! with no human behind them**, which matters more for the pause than it does
-//! here — see "what releases a pause" below for the obligation that puts on
-//! whoever mints [`UserMessage`](SequencerCommand::UserMessage).
-//!
-//! **`request_phase_advance` used to be a third, and was a BUG rather than a
-//! design** (round-3 F13, fixed): its receipt read
+//! **`request_phase_advance` was a third, and a BUG rather than a design**
+//! (round-3 F13, fixed): its receipt read
 //! `Author::parse(&agent).unwrap_or(Author::User)`, and that parser knew only
 //! `user`/`brian`/`rain` — so every rc3 role slug fell back, and an agent's
 //! phase request was stored AND rendered as something the user said. It now
-//! posts as the requesting participant. The remaining two rows above are
-//! deliberate host attribution; that one was a parser failing open.
+//! posts as the requesting participant. Same class as the two above, one layer
+//! down: a parser failing open rather than a writer choosing wrong.
 //!
 //! (`broadcast` and `tray` write `origin = "user"` too — that is the one origin
 //! a command already covers, and theirs really is the user, so they are not on

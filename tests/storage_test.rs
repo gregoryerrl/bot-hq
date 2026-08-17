@@ -97,7 +97,7 @@ async fn message_round_trip() {
         .await
         .unwrap();
     let id1 = s
-        .insert_message("sess1", MessageKind::Text, "hello")
+        .insert_user_message("sess1", MessageKind::Text, "hello")
         .await
         .unwrap()
         .message_id();
@@ -125,7 +125,7 @@ async fn messages_since_id_filter() {
     let s = Storage::memory().await.unwrap();
     s.create_session("sess1", "test", None).await.unwrap();
     let id1 = s
-        .insert_message("sess1", MessageKind::Text, "a")
+        .insert_user_message("sess1", MessageKind::Text, "a")
         .await
         .unwrap()
         .message_id();

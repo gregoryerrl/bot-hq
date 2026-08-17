@@ -7,8 +7,53 @@
 //! Lives separately so it can be mocked in tests.
 
 use crate::core::ipav::IpavPhase;
-use crate::storage::{Envelope, MessageKind, Storage};
+use crate::signaling::SignalingBridge;
+use crate::storage::{Envelope, MessageKind, PersistedMessage, Storage};
 use anyhow::Result;
+
+/// Persist a HOST-authored row — a notice, a phase transition, an injected
+/// instruction — and tell the UI. `origin = "system"`, no participant: the
+/// wire's speaker tag is derived from the origin (`storage::speaker_of`), so
+/// this is what makes the row read `[system] …` to every participant rather
+/// than `[user] …`.
+///
+/// Why this exists: two host rows (the idle watchdog's chat NOTICE and every
+/// phase-change notice) went through `Storage::insert_user_message` — which
+/// writes `origin = "user"` unconditionally — and reached every participant
+/// as the user speaking (measured in `s-a4e6da79`, rows 27710/27811). The
+/// helper makes the choice by name: a host row cannot come out of it in the
+/// user's voice. On a storage error it warns and returns `None`, matching the
+/// hand-rolled blocks it replaces (a failed notice must not fail its caller).
+pub async fn post_system_notice(
+    storage: &Storage,
+    bridge: &SignalingBridge,
+    session_id: &str,
+    kind: MessageKind,
+    body: impl Into<String>,
+    envelope: Option<Envelope>,
+) -> Option<PersistedMessage> {
+    match storage
+        .post_to_channel(session_id, "system", None, kind.as_str(), body, envelope)
+        .await
+    {
+        Ok(persisted) => {
+            bridge.notify_message_persisted(
+                std::sync::Arc::from(session_id),
+                persisted.message_id(),
+            );
+            Some(persisted)
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id,
+                kind = kind.as_str(),
+                error = %e,
+                "host notice not persisted; not delivered"
+            );
+            None
+        }
+    }
+}
 
 /// Persist a user-originated message. The ring delivers it; see the module doc.
 pub async fn broadcast_user_message(

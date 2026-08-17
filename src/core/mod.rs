@@ -8,6 +8,7 @@
 
 pub mod activity;
 mod broadcast;
+pub use broadcast::post_system_notice;
 pub mod mentions;
 pub mod close_learnings;
 pub mod pump;
