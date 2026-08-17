@@ -17,6 +17,7 @@ import { ApprovalGate } from "../components/ApprovalGate";
 import { ChatPane } from "../components/ChatPane";
 import { DocumentPane } from "../components/DocumentPane";
 import { type Phase } from "../components/PhasePill";
+import { PHASE_NAMES } from "../lib/phase";
 import { SessionFindingsBanner } from "../components/SessionFindingsBanner";
 import { SessionPolicyPanel } from "./SessionPolicyPanel";
 import { cn } from "../lib/cn";
@@ -43,7 +44,6 @@ import { SessionContextTab } from "./SessionContextTab";
 import { SessionTerminalTab } from "./SessionTerminalTab";
 import { invoke } from "@tauri-apps/api/core";
 
-const PHASE_NAMES: Phase[] = ["investigate", "plan", "apply", "verify"];
 
 /** Session-container subtabs. Workspace = chat + IPAV documents (the
  * original session view); Context and Terminal land with this arc. */

@@ -1,8 +1,10 @@
 import { cn } from "../lib/cn";
-import { phaseBucket, type PhaseBucket } from "../lib/phase";
+import { phaseBucket, PHASE_NAMES, type PhaseBucket, type PhaseName } from "../lib/phase";
 
-export type Phase = "investigate" | "plan" | "apply" | "verify";
-const PHASES: Phase[] = ["investigate", "plan", "apply", "verify"];
+// The IPAV set lives in `lib/phase.ts` (round 8) — one copy for the type,
+// the select, and the tints.
+export type Phase = PhaseName;
+const PHASES: readonly Phase[] = PHASE_NAMES;
 
 // Bucket -> pill accent classes. The phase->bucket mapping itself lives in
 // `lib/phase.ts`, shared with SessionPhaseChip so the two widgets can't drift.
