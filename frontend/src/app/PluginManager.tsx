@@ -89,6 +89,12 @@ export function PluginManager() {
     wasLinked: boolean;
   } | null>(null);
 
+  // The 10 s refetch is deliberate and is the ONLY fixed-interval backend poll
+  // left in the app: install / enable / disable / uninstall / crash all
+  // invalidate through events (`PLUGIN_KEYS` in Providers.tsx), but the
+  // heartbeat dot's `Slow { miss_count }` steps and its recovery to `Healthy`
+  // fire no event — the sweep only emits `plugin:crashed` — so without this
+  // the dot would freeze between crashes (checked, round 9).
   const list = useTauriQuery<InstalledPluginView[]>(
     "list_installed_plugins",
     {},

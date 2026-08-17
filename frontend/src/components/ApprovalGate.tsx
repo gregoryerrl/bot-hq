@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Button } from "./ui/Button";
+import { errorMessage } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import { authorColorClass } from "./authorColor";
 import { formatRelative } from "../lib/time";
@@ -100,7 +101,9 @@ export function ApprovalGate({
     } catch (e) {
       // Answering IS the action here. A silent failure would leave the gate up
       // with no signal, and the user pressing Approve again.
-      setError(e instanceof Error ? e.message : String(e));
+      // `errorMessage` — a Tauri rejection is a plain `AppError` object, not an
+      // `Error`, and `String(e)` rendered it as "[object Object]" (round 9).
+      setError(errorMessage(e));
     } finally {
       setBusy(null);
     }

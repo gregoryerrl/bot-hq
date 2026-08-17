@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useState } from "react";
 import { Markdown } from "./Markdown";
 import { authorColorClass } from "./authorColor";
 import { cn } from "../lib/cn";
-import { formatRelative } from "../lib/time";
+import { formatRelative, parseUtcMs } from "../lib/time";
 import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import type { AgentMessage } from "../lib/bindings";
 import { fileArgInCommand } from "./FileViewerDialog";
@@ -273,7 +273,10 @@ const PREVIEW_MAX = 200;
  * restarts, which nothing can observe.
  */
 function Elapsed({ since }: { since: string }) {
-  const start = useMemo(() => new Date(since).getTime(), [since]);
+  // `parseUtcMs`, not `new Date(since)`: a zone-less stored timestamp would
+  // otherwise read as LOCAL and inflate the counter by the viewer's offset —
+  // the same "stale 8h" class `lib/time.ts` exists to close (round 9).
+  const start = useMemo(() => parseUtcMs(since), [since]);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -318,7 +321,7 @@ function formatPreview(value: unknown, fallback: string): string {
  * already understands, plus the command's file argument via `fileArgInCommand`.
  * Exported for the test; the button above is its only render site.
  */
-export function toolFilePath(input: unknown): string | null {
+function toolFilePath(input: unknown): string | null {
   if (typeof input !== "object" || input === null) return null;
   const v = input as Record<string, unknown>;
   for (const key of ["file_path", "path", "notebook_path"] as const) {
