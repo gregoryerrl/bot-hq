@@ -1038,17 +1038,6 @@ impl SignalingBridge {
     // gate ever has a live-waiting receiver — staleness is age-based now, via
     // `gate_age_secs` / `STALE_GATE_MAX_AGE_SECS`.)
 
-    /// Snapshot the currently-parked choices. Used by the external MCP driver
-    /// so it can see what's waiting for user input + the choice_ids needed to
-    /// resolve them.
-    pub async fn list_pending_choices(&self) -> Vec<PendingChoice> {
-        self.pending
-            .lock()
-            .await
-            .values()
-            .map(|p| p.choice.clone())
-            .collect()
-    }
 
     /// Shared tail of `mark_awaiting_user` + `request_phase_advance`: flag the
     /// session awaiting, write a durable `kind=halt` row to `session_tray` (so

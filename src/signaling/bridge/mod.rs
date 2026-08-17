@@ -511,6 +511,8 @@ impl SignalingBridge {
 
     /// Construct a bridge with a violations log attached. Approval-class
     /// resolutions write a record after the user picks an option.
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub fn with_violations_log(violations: ViolationsLog) -> Arc<Self> {
         Self::new_with(Some(violations), None)
     }
@@ -794,6 +796,8 @@ impl SignalingBridge {
     /// Whether a turn ring is reachable for this session — the observable half
     /// of [`Self::register_session_sequencer`], so the spawn-time join can be
     /// pinned by a test.
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub async fn session_sequencer_registered(&self, session_id: &str) -> bool {
         self.session_sequencer.lock().await.contains_key(session_id)
     }

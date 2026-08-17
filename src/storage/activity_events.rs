@@ -6,6 +6,7 @@
 //! See the migration for why the per-agent flags are not redundant with `state`.
 
 use super::Storage;
+#[cfg(test)]
 use crate::storage::row_types::ActivityEvent;
 use crate::storage::time::now_utc;
 use anyhow::{Context, Result};
@@ -40,6 +41,8 @@ impl Storage {
     /// Activity transitions newest-first. `session_id = None` returns every
     /// session's — the cross-session view is the point when hunting a pattern
     /// rather than diagnosing one session.
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub async fn list_activity_events(
         &self,
         session_id: Option<&str>,

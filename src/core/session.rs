@@ -11,9 +11,7 @@ use crate::paths::Paths;
 use crate::signaling::{
     default_user_settings_paths, load_user_mcp_servers, mcp_config_json, SignalingBridge,
 };
-use crate::storage::{
-    AgentConfig, ClIndexEntry, Envelope, MessageKind, PersistedMessage, Session, Storage,
-};
+use crate::storage::{AgentConfig, ClIndexEntry, Envelope, MessageKind, Session, Storage};
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -91,25 +89,6 @@ impl SessionAgent {
     }
 }
 
-impl SessionAgent {
-    /// Write a persisted row to this participant's stdin; `false` if the receipt
-    /// is for another session or the input pump is gone.
-    ///
-    /// Taking a `&PersistedMessage` is the point of B5 Task 2: the bytes are
-    /// [`PersistedMessage::wire`], so an agent cannot read anything the user
-    /// cannot. A caller that wants to decorate the text decorates the ROW —
-    /// `post_to_channel` takes the envelope — and the decoration is recorded
-    /// with the body it belongs to.
-    ///
-    /// This used to be a documented way AROUND the session-scope compare, which
-    /// lived on [`SessionHandle::send_to_all`]. It is not one any more: the
-    /// compare sits on
-    /// [`ParticipantInput::deliver`](crate::agents::ParticipantInput::deliver),
-    /// one hop below, so this method inherits it rather than skipping it.
-    pub async fn deliver(&self, msg: &PersistedMessage) -> bool {
-        self.handle.input().deliver(msg).await
-    }
-}
 
 /// A live session — the handles owned by `AppState`.
 pub struct SessionHandle {
@@ -164,35 +143,6 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    /// Fan one persisted row out to every agent's stdin. Send failures are
-    /// ignored: a closed input channel means the subprocess is already gone,
-    /// which this caller can't remediate.
-    ///
-    /// One row, N deliveries — the receipt is borrowed, so fan-out never means
-    /// re-posting the same text once per recipient.
-    ///
-    /// **The receipt's session scope is enforced, but no longer here.** This
-    /// method held the system's only receipt-session compare for one batch, and
-    /// that placement left two receipt-carrying routes past it —
-    /// [`SessionAgent::deliver`] and the three-hop
-    /// `agent.handle.input().deliver(&receipt)`. Both END at
-    /// [`ParticipantInput::deliver`](crate::agents::ParticipantInput::deliver),
-    /// so the compare moved down to that one narrow point and this call is now
-    /// one of its callers rather than a second copy of it.
-    ///
-    /// The consequence here is the busy flag. `deliver` returns `false` for a
-    /// receipt from another session exactly as it does for a dead stdin, and
-    /// marking an agent busy in either case wedges the chat-input lock: nothing
-    /// was written, so no `TurnComplete` will arrive to clear it. Busy is
-    /// therefore set only for a delivery that landed. That is a behaviour change
-    /// for the dead-stdin case, which used to be marked busy and never cleared.
-    pub async fn send_to_all(&self, msg: &PersistedMessage) {
-        for agent in &self.participants {
-            if agent.deliver(msg).await {
-                self.activity.set_busy_slug(&agent.slug, true);
-            }
-        }
-    }
 
     /// Agents in turn order.
     pub fn agents(&self) -> impl Iterator<Item = &SessionAgent> {
@@ -974,12 +924,10 @@ async fn spawn_session_handle(
             liveness: Some(Arc::clone(&livenesses[slot])),
             participant_id: Some(p.id),
             // A3a: the pump self-nudges a participant that mutates before the
-            // Apply phase, so it needs that participant's OWN stdin. Set only
-            // for a participant that can actually mutate — the capability
-            // predicate that replaced "only Brian's pump gets one".
-            self_input_tx: caps
-                .grants(crate::agents::Capability::EditFiles)
-                .then(|| handles[slot].input().clone()),
+            // Apply phase — only one that can actually mutate (the capability
+            // predicate that replaced "only Brian's pump gets one"). The nudge
+            // is a persisted row, so the pump needs no stdin for it.
+            self_nudges: caps.grants(crate::agents::Capability::EditFiles),
             edits_files: caps.grants(crate::agents::Capability::EditFiles),
             // rc3 D21 — orientation is not a turn. See `PumpConfig::booting`.
             booting: Some(Arc::clone(&booting)),
@@ -2452,7 +2400,9 @@ mod tests {
             )
             .await
             .unwrap();
-        a.send_to_all(&from_b).await;
+        for agent in a.agents() {
+            agent.handle.input().deliver(&from_b).await;
+        }
         assert!(
             a_rx.try_recv().is_err(),
             "session A's agent must not read session B's row"
@@ -2484,7 +2434,9 @@ mod tests {
             )
             .await
             .unwrap();
-        a.send_to_all(&from_a).await;
+        for agent in a.agents() {
+            agent.handle.input().deliver(&from_a).await;
+        }
         assert_eq!(
             a_rx.try_recv().unwrap().message.content,
             // rc3 D23: the wire says who wrote it. `[user]` here, and that is
@@ -2537,7 +2489,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(agent.deliver(&receipt).await, "stdin is open");
+        assert!(agent.handle.input().deliver(&receipt).await, "stdin is open");
 
         let wire = irx.recv().await.unwrap().message.content;
         assert_eq!(

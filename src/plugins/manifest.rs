@@ -17,8 +17,10 @@
 //! }
 //! ```
 //!
-//! The `id` field doubles as the URL host (`plugin-<id>.localhost`) so it
-//! must be a valid hostname segment: lowercase ASCII, digits, and `-`.
+//! The `id` field doubles as the URL host (`bhq-plugin://<id>` on macOS/Linux,
+//! the first path segment under `https://bhq-plugin.localhost` on Windows —
+//! see `plugins::serve`) so it must be a valid hostname segment: lowercase
+//! ASCII, digits, and `-`.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -142,11 +144,6 @@ impl PluginManifest {
         }
         Ok(())
     }
-
-    /// The expected iframe origin for this plugin.
-    pub fn iframe_origin(&self) -> String {
-        format!("https://plugin-{}.localhost", self.id)
-    }
 }
 
 fn is_valid_id(s: &str) -> bool {
@@ -269,7 +266,6 @@ mod tests {
         }"#;
         let m = PluginManifest::parse(json).unwrap();
         assert_eq!(m.id, "discord");
-        assert_eq!(m.iframe_origin(), "https://plugin-discord.localhost");
     }
 
     #[test]
@@ -495,20 +491,5 @@ mod tests {
         assert!(!json.contains("style-src"), "empty vecs skipped: {json}");
         let back: CspExtraOrigins = serde_json::from_str(&json).unwrap();
         assert_eq!(back, csp);
-    }
-
-    #[test]
-    fn iframe_origin_uses_plugin_prefix() {
-        let m = PluginManifest {
-            id: "clive".to_string(),
-            name: "Clive".to_string(),
-            version: "0.1.0".to_string(),
-            entry: "main.html".to_string(),
-            api_version: 1,
-            requested_capabilities: vec![],
-            slots: vec![],
-            csp_extra_origins: None,
-        };
-        assert_eq!(m.iframe_origin(), "https://plugin-clive.localhost");
     }
 }

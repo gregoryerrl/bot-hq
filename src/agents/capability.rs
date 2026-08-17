@@ -274,6 +274,8 @@ impl CapabilitySet {
         ))
     }
 
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub fn to_slugs(&self) -> Vec<&'static str> {
         self.0.iter().map(|c| c.slug()).collect()
     }
@@ -342,6 +344,8 @@ impl CapabilitySet {
 
     /// Session policy is the ceiling: a role may be MORE restricted than the
     /// session allows, never less.
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub fn intersect(&self, ceiling: &CapabilitySet) -> Self {
         Self(self.0.intersection(&ceiling.0).copied().collect())
     }

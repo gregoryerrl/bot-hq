@@ -59,11 +59,17 @@ pub struct PumpConfig {
     /// successful storage.insert_message. None in tests that don't need
     /// event-driven readers.
     pub bridge: Option<Arc<SignalingBridge>>,
-    /// The agent's OWN stdin sender (distinct from the router-owned peer-forward
-    /// path), for A3a self-nudges — e.g. nudging Brian when he mutates during
-    /// Investigate/Plan. `None` disables self-nudging (Rain; tests that don't
-    /// need it). Set only for Brian's pump at spawn.
-    pub self_input_tx: Option<crate::agents::ParticipantInput>,
+    /// Whether this pump posts the A3a self-nudge when its participant mutates
+    /// before Apply. Set at spawn for a participant that can mutate (the
+    /// `edit_files` predicate); `false` in tests that don't want the nudge.
+    ///
+    /// **Was `self_input_tx: Option<ParticipantInput>`** — the participant's
+    /// own stdin, cloned into every mutating pump and then read only as
+    /// `.is_some()`: the nudge stopped writing to it when it became a persisted
+    /// row (rc3 D19), so the pump held a stdin it could not use. Holding none
+    /// is what makes "the reminder must not open a generation outside the
+    /// ring" structurally true rather than asserted.
+    pub self_nudges: bool,
     /// Per-session activity tracker (interrupt redesign, Batch 2). The pump
     /// clears this agent's `busy` on `TurnComplete`/`Exited`, and sets the
     /// PEER's `busy` when it forwards a chunk. `None` in tests / solo configs
@@ -173,7 +179,7 @@ impl PumpConfig {
             edits_files: false,
             participant_id: None,
             bridge: None,
-            self_input_tx: None,
+            self_nudges: false,
             activity: None,
             in_atomic_tool: None,
             liveness: None,
@@ -526,12 +532,10 @@ pub async fn pump_agent(
                     && cfg.edits_files
                     && matches!(name.as_str(), "Edit" | "Write" | "NotebookEdit")
                 {
-                    // The guard stays on `self_input_tx`: it is what says this
-                    // pump belongs to a participant that HAS a stdin — a live
-                    // agent rather than a test harness — and the nudge is only
-                    // meaningful for one. The reminder itself no longer writes
-                    // to it (see the persist below).
-                    if cfg.self_input_tx.is_some() {
+                    // `self_nudges` says this pump belongs to a live mutating
+                    // participant rather than a test harness; the reminder is a
+                    // persisted row (see below), never a stdin write.
+                    if cfg.self_nudges {
                         let phase = ipav_state.lock().await.current_phase;
                         if matches!(phase, IpavPhase::Investigate | IpavPhase::Plan)
                             && storage.adherence_nudges_enabled().await
@@ -1133,7 +1137,7 @@ mod tests {
             edits_files: slug == "hands",
             participant_id: None,
             bridge: None,
-            self_input_tx: None,
+            self_nudges: false,
             activity: None,
             in_atomic_tool: None,
             liveness: None,
@@ -2593,9 +2597,8 @@ mod tests {
         // or say why the edit was intended).
         let (storage, state) = setup().await; // default phase = Investigate
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
-        let (self_tx, mut self_rx) = mpsc::channel(8);
         let cfg = PumpConfig {
-            self_input_tx: Some(crate::agents::ParticipantInput::new("s1", self_tx)),
+            self_nudges: true,
             ..fast_cfg("hands")
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
@@ -2621,11 +2624,9 @@ mod tests {
             .collect();
         assert_eq!(nudges.len(), 1, "the reminder is persisted once: {nudges:?}");
         assert!(nudges[0].contains("Apply"));
-        assert!(
-            self_rx.try_recv().is_err(),
-            "the reminder must not open a generation outside the ring — it rides \
-             the cursor like every other row"
-        );
+        // The reminder cannot open a generation outside the ring: the pump holds
+        // no stdin at all any more (see `PumpConfig::self_nudges`) — it rides
+        // the cursor like every other row.
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2634,9 +2635,8 @@ mod tests {
         let (storage, state) = setup().await;
         state.lock().await.current_phase = IpavPhase::Apply;
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
-        let (self_tx, mut self_rx) = mpsc::channel(8);
         let cfg = PumpConfig {
-            self_input_tx: Some(crate::agents::ParticipantInput::new("s1", self_tx)),
+            self_nudges: true,
             ..fast_cfg("hands")
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
@@ -2651,7 +2651,18 @@ mod tests {
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(self_rx.try_recv().is_err(), "no nudge in Apply");
+        // Same collection as the positive test above — the nudge is a
+        // `system_notice` row, which `turn_bodies` (text rows only) would not
+        // see, so filtering that would pass vacuously.
+        let nudges: Vec<String> = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.content)
+            .filter(|c| c.contains("editing files before the Apply phase"))
+            .collect();
+        assert!(nudges.is_empty(), "no nudge in Apply: {nudges:?}");
 
         drop(ev_tx);
         task.await.unwrap();

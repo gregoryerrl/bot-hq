@@ -385,13 +385,6 @@ mod tests {
         assert!(!bridge.withdraw_question("nope", None).await);
     }
 
-    #[tokio::test]
-    async fn list_pending_choices_empty_initially() {
-        let bridge = SignalingBridge::new();
-        let v = bridge.list_pending_choices().await;
-        assert!(v.is_empty());
-    }
-
     #[test]
     fn tray_view_decodes_options_and_keeps_command() {
         let entry = crate::storage::SessionTrayEntry {

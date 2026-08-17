@@ -580,6 +580,8 @@ impl Storage {
     /// key, and 0047 left the slug reserved while a role is archived precisely
     /// so the row stays reachable — hiding it here would make an archived role
     /// both unresolvable and un-recreatable under its own name.
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub async fn role_by_slug(&self, slug: &str) -> Result<Option<Role>> {
         let row = sqlx::query(&format!("SELECT {ROLE_COLUMNS} FROM roles WHERE slug = ?"))
             .bind(slug)
@@ -767,6 +769,8 @@ impl Storage {
     /// role here) keeps the snapshot honest: the caller composes what this
     /// participant actually runs with, including any session-policy ceiling.
     #[allow(clippy::too_many_arguments)]
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub async fn insert_participant(
         &self,
         session_id: &str,
@@ -1909,6 +1913,8 @@ impl Storage {
 
     /// What a participant was NOT shown, and why. The query that makes
     /// "what did participant X actually receive?" answerable.
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub async fn withheld_for_participant(
         &self,
         participant_id: i64,
@@ -2352,15 +2358,16 @@ pub struct PersistedMessage {
     message_id: i64,
     /// The channel this receipt is valid for. A receipt without a scope is
     /// forgeable ACROSS sessions:
-    /// `session_a_handle.send_to_all(receipt_from_session_b)` would wire another
+    /// delivering `receipt_from_session_b` to session A's agents would wire another
     /// session's text into these agents, with the row sitting in the wrong
     /// channel — the exact class of bug this type exists to rule out.
     ///
     /// Carrying the id is only half of it, and for one batch it was the only
     /// half: nothing compared it, so the call above still compiled and ran.
-    /// `SessionHandle::send_to_all` now rejects a mismatch, which is the earliest
-    /// point that knows both ids. The field buys detection; that check is what
-    /// makes it prevention.
+    /// `ParticipantInput::deliver` (`agents::spawn`) rejects a mismatch — the
+    /// one narrow point every receipt-carrying write goes through (the fan-out
+    /// helper that used to sit above it is deleted). The field buys detection;
+    /// that check is what makes it prevention.
     ///
     /// `Arc<str>` rather than `String` to match `PumpConfig::session_id` and the
     /// `MessagePersisted` / `BatchEmitter` threading this will flow into.
@@ -2646,6 +2653,8 @@ impl Storage {
     /// the reader can hold. What a participant WAKING on its turn reads is
     /// [`Storage::unread_for_participant`], not this — that one starts at the
     /// participant's cursor and leaves out its own rows.
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub async fn channel_after(
         &self,
         session_id: &str,

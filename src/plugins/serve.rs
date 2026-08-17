@@ -19,6 +19,7 @@
 //! - percent-encoded paths are rejected outright — bundle filenames must be
 //!   URL-safe ASCII, which sidesteps decode-then-check bypasses
 
+#[cfg(test)]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -110,10 +111,13 @@ pub fn resolve_with_root(
     Ok((candidate.clone(), mime_for(&candidate)))
 }
 
-/// Normal-mode convenience used by the scheme handler until the serve-root
-/// cache lands (and by tests as the copied-bundle path): root is
-/// `<plugins_root>/<id>` when that directory exists — preserving the
-/// Disabled-vs-Unknown distinction (dir present but not enabled = Disabled).
+/// Test-only convenience over [`resolve_with_root`] for the copied-bundle
+/// layout: root is `<plugins_root>/<id>` when that directory exists —
+/// preserving the Disabled-vs-Unknown distinction (dir present but not
+/// enabled = Disabled). The scheme handler itself resolves through the
+/// registry's serve root (`main.rs`, `registry.serve_root_for(id)`), which is
+/// the cache this used to say it was waiting for.
+#[cfg(test)]
 pub fn resolve_plugin_asset(
     plugins_root: &Path,
     enabled_ids: &HashSet<String>,

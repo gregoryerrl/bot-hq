@@ -5296,7 +5296,7 @@ mod tests {
     /// **The ring marks the participant it hands the turn to.**
     ///
     /// Until this existed the ring could not say a turn had started: busy was
-    /// set only by `AppState::broadcast` and `SessionHandle::send_to_all`, and
+    /// set only by `AppState::broadcast` and a since-deleted fan-out helper, and
     /// cleared by each pump at its own turn end. `SequencerDeps` had no tracker
     /// at all, so the one component that knows a turn began had no way to
     /// report it.

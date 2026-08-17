@@ -102,6 +102,8 @@ const ENGINES: &[Engine] = &[
 ];
 
 /// Engine names the caller may select (kept in sync with [`ENGINES`]).
+/// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+#[cfg(test)]
 pub const ENGINE_NAMES: &[&str] = &["google", "startpage", "bing"];
 
 /// Percent-encode a query per RFC 3986 unreserved set (ALPHA / DIGIT / -._~);

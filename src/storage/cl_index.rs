@@ -167,6 +167,8 @@ impl Storage {
     /// `cl_index_id` of the file read; callers join to `cl_index` for the path.
     /// Powers the deferred "what context did this agent see?" view promised by
     /// the `cl_register_read` tool descriptor.
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub async fn cl_reads_for_session(&self, session_id: &str) -> Result<Vec<ClRead>> {
         let rows = sqlx::query_as::<_, ClRead>(
             "SELECT id, cl_index_id, session_id, agent, read_at FROM cl_reads \

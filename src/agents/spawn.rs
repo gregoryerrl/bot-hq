@@ -208,6 +208,8 @@ pub struct ContextUsage {
 impl ContextUsage {
     /// Occupancy in the range 0.0..=1.0 (values >1.0 are possible in principle
     /// and are the caller's problem to clamp for display).
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub fn fraction(&self) -> f64 {
         self.used_tokens as f64 / self.context_window as f64
     }
@@ -440,8 +442,8 @@ impl ParticipantInput {
     ///
     /// Both of those routes END here, so this is the narrow point: give the
     /// stdin its own session id and every receipt-carrying write is compared,
-    /// with one copy of the comparison. `send_to_all` now delegates rather than
-    /// pre-checking.
+    /// with one copy of the comparison. (`send_to_all` and `SessionAgent::deliver`
+    /// were deleted in round 7 as callerless; every remaining route is this one.)
     ///
     /// Be exact about the size of the claim. Within this type there are four
     /// writes to `tx` — this one, [`deliver_batch`](Self::deliver_batch),
@@ -650,6 +652,8 @@ impl AgentHandle {
     /// [`ParticipantInput::deliver`] compares a receipt against. It is a
     /// parameter rather than something read off the channels because the
     /// channels carry no identity — the caller is the last place that knows.
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub fn from_parts(
         name: String,
         session_id: impl Into<Arc<str>>,

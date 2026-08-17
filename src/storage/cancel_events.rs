@@ -5,6 +5,7 @@
 //! for what each field discriminates.
 
 use super::Storage;
+#[cfg(test)]
 use crate::storage::row_types::CancelEvent;
 use anyhow::{Context, Result};
 
@@ -57,6 +58,8 @@ impl Storage {
 
     /// Cancel events newest-first. `session_id = None` returns every session's —
     /// the cross-session view is the point when hunting a recurring failure.
+    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
     pub async fn list_cancel_events(&self, session_id: Option<&str>) -> Result<Vec<CancelEvent>> {
         const COLS: &str = "id, session_id, pressed_at, settled_at, deferred_ms, \
                             deferral_capped, slot0_interrupt_queued, slot1_interrupt_queued, \
