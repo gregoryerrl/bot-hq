@@ -187,7 +187,7 @@ access; storage is sqlite; policy is enforced by MCP tools plus git hooks.
 The canonical docs go deeper than this README:
 
 - **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — what bot-hq is, in depth: process
-  model, both MCP servers, storage schema, policy layer, glossary.
+  model, the in-process MCP server, storage schema, policy layer, glossary.
 - **[`PLAN.md`](PLAN.md)** — what's planned next.
 - **[`PROGRESS.md`](PROGRESS.md)** — recent change log, newest-first.
 

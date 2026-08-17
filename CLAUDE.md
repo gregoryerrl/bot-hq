@@ -24,8 +24,8 @@ maintenance + feature-extension on the existing system.
 ## Read these files FIRST, in order:
 
 1. **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — what bot-hq IS right now
-   (process model, both MCP servers, policy layer, session permissions,
-   storage schema, glossary).
+   (process model, the in-process MCP server, policy layer, session
+   permissions, storage schema, glossary).
 2. **[`PLAN.md`](PLAN.md)** — what's planned next (in-flight work,
    backlog, deferred plugins).
 3. **[`PROGRESS.md`](PROGRESS.md)** — recent change log,

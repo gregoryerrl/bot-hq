@@ -251,7 +251,8 @@ policies gate delivery, never persistence.
   the done-tally for the whole session.
 - `Done` — the consensus vote. Recorded per participant.
 - `Passed` — declines the turn without voting done. Casts no vote and retracts
-  its own, so a participant that is blocked rather than finished cannot complete
+  its own — **both the done vote and the participant's phase vote** (D37) — so a
+  participant that is blocked rather than finished cannot complete
   a tally by accident.
 
 **Two participation modes, and both of them do something** (rc3 D18):
@@ -501,7 +502,8 @@ submodule tree). Surface:
 
 **Internal tools (40)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
-`mark_awaiting_user`, `peer_ack`, `pass_turn`, `halt`, `advance_phase`,
+`mark_awaiting_user`, `peer_ack`, `pass_turn`, `halt`, `advance_phase` (a VOTE
+since D37 — see "The phase-advance vote"),
 `web_search`, `request_phase_advance`, `file_feedback`, `request_approval`,
 `action_gate`, `gate_status`, `check_commit_message`, `eyes_flag`,
 `disposition_finding`, `check_open_findings`, `override_reviewer_block`,
@@ -593,6 +595,45 @@ costs something to keep; deleting it refunded that.
 The design record is the code itself: `git show 2833949:src/signaling/external_jsonrpc.rs`
 holds the 20 tool descriptors, the bearer-auth handshake and the CORS handling a
 plugin rebuild would want.
+
+---
+
+## The phase-advance vote (rc3 **D37**, migration 0062)
+
+**The phase moves only when every active participant has voted for the same
+state of the work.** `advance_phase` records a vote; consensus performs the
+transition. The user's reason: a full IPAV pass had gone by in which the reviewer
+was never dealt a turn, and the boundary is where that costs the most.
+
+- **A vote is a ROW**, keyed `(participant_id, target_phase,
+  artifact_fingerprint, phase_epoch)`. Not a column: `done_vote` is cleared
+  session-wide on `TurnEnding::Spoke`, and this feature exists to make
+  participants speak between votes, so reusing it livelocks by construction.
+- **`artifact_fingerprint`** digests the session's phase documents (count, latest
+  `updated_at`, total body length). Talking never invalidates a vote; changing
+  the work always does.
+- **`sessions.phase_epoch`** is monotonic and bumps on every transition. It
+  closes the axis a content digest cannot see: phases run backward, so without
+  it a Plan-era vote would match again after Plan → Investigate → Plan whenever
+  the work came back unchanged.
+- **The electorate** is `enabled && participation_mode == "active"` — the same
+  filter `all_active_voted_done` uses. A solo session advances on its own vote;
+  an empty electorate is vacuously arrived.
+- **`on_mention` callers are refused**, since a vote counting toward nothing
+  while the tool reported an advance is a dead phase with no signal.
+- **A pass retracts the passer's own vote** (see "Turn endings").
+- **The tool reports what happened** — advanced / vote-recorded / refused — because
+  an agent told "advanced" writes the next phase's document and begins mutating.
+
+**D36's escape valve** fires on the ROUND CAP, not the all-pass yield: a pass
+retracts, so a silent lap has no votes left to report. It names the deadlock and
+points at the phase control; it does not force the advance, because D36 is
+explicit that the gate stays blocking and never times out.
+
+**The user's own phase control** is `advance_session_phase` → the header picker in
+the session view. It routes to the same `AppState::advance_phase` the agent tool
+reaches, with `PhaseAdvanceSource::User`, which additionally releases the ring —
+an agent self-advancing is mid-turn, a user acting on a halted session is not.
 
 ---
 
@@ -771,7 +812,13 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
 - `sessions` (id PK, title, working_repo_path, base_repo_path,
   created_at, closed_at, archived, slot0/slot1_model_at_spawn) —
   per-participant model, effort, ultracode and resume id live on
-  `session_participants` (rc3 D10). **Migration 0060 dropped the nine columns
+  `session_participants` (rc3 D10), which also carries **`effort_at_spawn` /
+  `ultracode_at_spawn` / `spawn_knobs_recorded`** (0061) — what a participant was
+  ACTUALLY spawned with, recorded because the effective value cannot be recovered
+  from the user's `effort`/`ultracode` CHOICE (usually "inherit") and must not be
+  re-derived later, which would answer "what it would be spawned with now".
+  `spawn_knobs_recorded` separates "no override in force" from "predates 0061",
+  which are otherwise the same two nulls. **Migration 0060 dropped the nine columns
   that used to shadow them** (`rain_enabled`, `brian/rain_model_id`,
   `brian/rain_claude_session_id`, `brian/rain_effort`,
   `brian/rain_ultracode`) — every one had no reader and no writer — and renamed
@@ -781,8 +828,10 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   `base_repo_path` is set for
   worktree-isolated sessions (see "Session worktrees"). There is NO
   `project` column — the project is derived at spawn from
-  `working_repo_path.file_name()` — and no `phase` column (IPAV phase is
-  in-memory; see "IPAV state").
+  `working_repo_path.file_name()` — and no `phase` column: the CURRENT phase is
+  in-memory (see "IPAV state"). It does carry **`phase_epoch`** (0062), a
+  monotonic counter bumped on every transition, which is what stops a stale
+  phase vote matching again after the phase runs backward and returns.
 - `agent_configs` (agent_name PK, provider, model_name, base_url,
   auth_token, `native` — unread, `context_window` — unread). **Seeds nothing,
   and any key is legal.** Until migration 0060 it carried
@@ -853,7 +902,9 @@ see them as natural switch prompts.
 ## IPAV state
 
 In-memory cache: `HashMap<SessionId, IpavState>` where `IpavState {
-current_phase, phase_log }`. Not persisted.
+current_phase, phase_log }`. The CURRENT phase is not persisted — but the
+machinery that decides when it may CHANGE is (see "The phase-advance vote"), so
+"IPAV lives only in memory" is no longer the whole picture.
 
 Agents die with the app, so a restart gives fresh sessions; they resume
 their own transcript via `--resume` off each participant's own
@@ -1059,7 +1110,9 @@ See
   One JSON event per line on stdout. See
   [`docs/stream-json-events.md`](docs/stream-json-events.md).
 - **MCP (Model Context Protocol):** the protocol claude-code uses for
-  external tool servers. Bot-hq runs two MCP servers in-process.
+  external tool servers. Bot-hq runs ONE in-process — the internal
+  agent↔UI signaling server. The second, the external driver, was removed
+  on 2026-08-17 and demoted to a future plugin.
 - **Policy:** machine-readable subset of CL rules — `general-policy.yaml`
   + project overlay. Drives forbidden-word grep, push gate, force-push
   gate.
