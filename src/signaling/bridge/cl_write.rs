@@ -20,7 +20,7 @@ impl SignalingBridge {
     /// close-out gate is marked, so persisting a learnings delta through this
     /// tool suppresses the close nudge exactly like `cl_rescan` does.
     pub async fn cl_write_file(
-        &self,
+        self: &Arc<Self>,
         session_id: String,
         agent: String,
         project: String,
@@ -139,7 +139,9 @@ impl SignalingBridge {
         // onward — a snapshot, not a backup. Detached, because a network round
         // trip must not sit inside the tool call an agent is waiting on, and
         // fail-open, because a library that cannot push is merely un-backed-up.
-        self.push_library_after_write(&session_id).await;
+        // (Round 9: this line said "detached" while `.await`ing the push —
+        // off the reactor thread, but still inside the call. It spawns now.)
+        self.push_library_after_write(&session_id);
         let mut msg = format!(
             "{} '{file_path}' in project '{project}'",
             if replaced {
@@ -164,42 +166,60 @@ impl SignalingBridge {
     /// non-fast-forward from a concurrent session, is not the user's problem to
     /// fix mid-turn. Nothing here is auto-merged; a rejected push stays
     /// rejected rather than pulling someone else's library on top of this one.
-    async fn push_library_after_write(&self, session_id: &str) {
+    fn push_library_after_write(self: &Arc<Self>, session_id: &str) {
         let Some(dir) = self.data_dir.clone() else {
             return;
         };
-        let root = crate::paths::Paths::for_data_dir(dir).cl_dir;
-        let outcome = match tokio::task::spawn_blocking(move || {
-            crate::signaling::bridge::scan_then_push(&root)
-        })
-        .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::warn!(%e, "library push task panicked");
-                return;
-            }
-        };
-        match &outcome {
-            crate::signaling::bridge::PushOutcome::RefusedSecrets(_) => {
-                let body = format!("[System: {}]", outcome.summary());
-                tracing::warn!(%body, "library push refused by the secret scan");
-                if let Some(storage) = self.storage.lock().await.clone() {
-                    crate::core::post_system_notice(
-                        &storage,
-                        Some(self),
-                        session_id,
-                        crate::storage::MessageKind::SystemNotice,
-                        body,
-                        None,
-                    )
-                    .await;
+        let bridge = Arc::clone(self);
+        let session_id = session_id.to_string();
+        let handle = tokio::spawn(async move {
+            let root = crate::paths::Paths::for_data_dir(dir).cl_dir;
+            let outcome = match tokio::task::spawn_blocking(move || {
+                crate::signaling::bridge::scan_then_push(&root)
+            })
+            .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!(%e, "library push task panicked");
+                    return;
                 }
+            };
+            match &outcome {
+                crate::signaling::bridge::PushOutcome::RefusedSecrets(_) => {
+                    let body = format!("[System: {}]", outcome.summary());
+                    tracing::warn!(%body, "library push refused by the secret scan");
+                    if let Some(storage) = bridge.storage.lock().await.clone() {
+                        crate::core::post_system_notice(
+                            &storage,
+                            Some(&bridge),
+                            &session_id,
+                            crate::storage::MessageKind::SystemNotice,
+                            body,
+                            None,
+                        )
+                        .await;
+                    }
+                }
+                crate::signaling::bridge::PushOutcome::Failed(_) => {
+                    tracing::warn!(summary = %outcome.summary(), "library push")
+                }
+                _ => tracing::info!(summary = %outcome.summary(), "library push"),
             }
-            crate::signaling::bridge::PushOutcome::Failed(_) => {
-                tracing::warn!(summary = %outcome.summary(), "library push")
-            }
-            _ => tracing::info!(summary = %outcome.summary(), "library push"),
+        });
+        // Keep the newest handle for the tests; a superseded one is simply
+        // dropped — the task it names keeps running to completion (detached).
+        *self.library_push.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+    }
+
+    /// Await the most recent detached library push, if one was spawned. Tests
+    /// that assert on the remote call this after `cl_write_file`; production
+    /// never does — the point of the detachment is that the call returns first.
+    #[cfg(test)]
+    pub(crate) async fn await_library_push(&self) {
+        let handle = self.library_push.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(h) = handle {
+            let _ = h.await;
         }
     }
 }
@@ -714,6 +734,9 @@ mod tests {
             )
             .await
             .unwrap();
+        // Round 9: the push is DETACHED — the call returns before the network
+        // round trip; the test drains the spawned task before it looks.
+        bridge.await_library_push().await;
         let after_write = remote_head();
         assert_ne!(before, after_write, "the CL write never reached the remote");
 
@@ -733,6 +756,7 @@ mod tests {
             )
             .await
             .unwrap();
+        bridge.await_library_push().await;
         assert_eq!(
             remote_head(),
             after_write,

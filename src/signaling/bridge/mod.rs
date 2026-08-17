@@ -425,6 +425,11 @@ pub struct SignalingBridge {
     /// as "the secret is wrong" — see [`SignalingBridge::mcp_token_matches`] for
     /// why that distinction is what keeps a mid-upgrade session working.
     mcp_tokens: std::sync::Mutex<HashMap<String, String>>,
+    /// The most recent detached library push (rc3 P6, detached for real in
+    /// round 9). Production never awaits it — a CL write returns before the
+    /// network round trip — but the tests that assert on the remote need to,
+    /// so the handle is kept: `await_library_push` (test-only) drains it.
+    library_push: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// What an `advance_phase` call actually did — **the tool's honest answer**.
@@ -516,6 +521,7 @@ impl SignalingBridge {
             session_attention: std::sync::Mutex::new(HashMap::new()),
             turn_passes: std::sync::Mutex::new(HashMap::new()),
             mcp_tokens: std::sync::Mutex::new(HashMap::new()),
+            library_push: std::sync::Mutex::new(None),
         })
     }
 
