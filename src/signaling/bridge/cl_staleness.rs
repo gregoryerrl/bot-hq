@@ -164,8 +164,16 @@ fn is_symbol_shaped(span: &str) -> bool {
 }
 
 /// Every tracked source file's text, concatenated — the corpus a symbol is
-/// searched in. `git ls-files` so the walk inherits `.gitignore` (no
-/// `target/`, no `node_modules/`).
+/// searched in — plus every tracked path, one per line.
+/// `git ls-files` so the walk inherits `.gitignore` (no `target/`, no
+/// `node_modules/`).
+///
+/// The stems are load-bearing: a CL claim naming a test FILE by its stem
+/// (`codebase_map_test`, for `tests/codebase_map_test.rs`) is a symbol-shaped
+/// span, and integration tests are never named inside any other file — so a
+/// contents-only corpus reported three real files as "no occurrence in the
+/// tracked source" (round 7: 3 of the 30 hits). A file's own path is the
+/// evidence it exists (and its stem is a substring of it).
 fn source_corpus(repo_root: &Path) -> Result<(String, Vec<String>), String> {
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -181,6 +189,10 @@ fn source_corpus(repo_root: &Path) -> Result<(String, Vec<String>), String> {
     let mut tracked = Vec::new();
     for rel in listing.split('\0').filter(|p| !p.is_empty()) {
         tracked.push(rel.to_string());
+        // The path counts as an occurrence of itself — and, by substring, of
+        // its stem, which is what a CL claim usually names.
+        corpus.push_str(rel);
+        corpus.push('\n');
         let is_code = Path::new(rel)
             .extension()
             .and_then(|e| e.to_str())
@@ -414,6 +426,49 @@ The tap formula is `Casks/bot-hq.rb`.
         assert!(!refs.contains(&"Casks/bot-hq.rb"), "got: {refs:?}");
 
         assert_eq!(claims[0].line, 1, "claims carry the line to jump to");
+    }
+
+    /// A claim naming a FILE by its stem is a symbol-shaped span, and an
+    /// integration test file is never named inside any other file — so a
+    /// contents-only corpus called `codebase_map_test` absent while
+    /// `tests/codebase_map_test.rs` sat in the tree (round 7: three of the
+    /// thirty live hits). The corpus carries every tracked path (the stem is
+    /// a substring of it).
+    #[test]
+    fn a_tracked_files_stem_counts_as_present() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        std::fs::create_dir_all(repo.path().join("tests")).unwrap();
+        // The file's body never says its own name.
+        std::fs::write(
+            repo.path().join("tests/codebase_map_test.rs"),
+            "#[test] fn the_map_is_complete() {}\n",
+        )
+        .unwrap();
+        git(&["add", "tests/codebase_map_test.rs"]);
+        let (corpus, tracked) = source_corpus(repo.path()).expect("corpus");
+        assert!(tracked.iter().any(|t| t == "tests/codebase_map_test.rs"));
+        assert!(corpus.contains("codebase_map_test"), "the stem is in the corpus");
+        assert!(corpus.contains("the_map_is_complete"), "and so is the body");
+        let claims = stale_in_body(
+            "learnings.md",
+            "`codebase_map_test` folds `X.test.ts` onto `X.ts`; `an_absent_symbol` does not.",
+            repo.path(),
+            &corpus,
+            &tracked,
+        );
+        let refs: Vec<&str> = claims.iter().map(|c| c.reference.as_str()).collect();
+        assert!(!refs.contains(&"codebase_map_test"), "a tracked file's stem is present: {refs:?}");
+        assert!(refs.contains(&"an_absent_symbol"), "a genuinely absent symbol still reports: {refs:?}");
     }
 
     /// The extraction floor. Without it the report is unreadable: every `Some`,
