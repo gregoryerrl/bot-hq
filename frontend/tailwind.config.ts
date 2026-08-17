@@ -1,17 +1,18 @@
 import type { Config } from "tailwindcss";
 
 /**
- * Design tokens. 4-tier background hierarchy (canvas →
- * surface → elevated → overlay) so layered components read visually distinct
- * without ad-hoc neutral-XXX choices. Author color tokens (brian/rain/user)
- * keep chat author dots + accent rings consistent.
+ * Design tokens — the Industrial Terminal palette (`docs/design/industrial_
+ * terminal/DESIGN.md`) plus the participant palette. Author colour tokens are
+ * named by COLOUR (rc3 D20) and keep chat author dots + accent rings consistent.
  *
- * 2026-05 Industrial Terminal migration — additive only. New tokens added
- * alongside the legacy palette; screen batches migrate one surface at a time
- * before the legacy tokens get swept in the cleanup batch. The only
- * intentional value collisions are `surface` (#141414 → #0b1326), `outline`
- * (Tailwind default → #a78b7c), and `borderRadius.DEFAULT` (0.25rem →
- * 0.125rem) — all three lean into the new design.
+ * The 2026-05 migration's legacy 4-tier palette (`canvas`/`elevated`/`overlay`,
+ * `accent`, `stack-md`) is gone (round 7, 2026-08-17): the screen batches it
+ * was kept for finished, and no class used it. Of the Industrial Terminal
+ * tokens below, roughly half have no consumer yet — they stay as the design
+ * system's contract for screens not built, deliberately, not as leftovers.
+ * The only intentional value collisions with Tailwind's defaults are
+ * `outline` (→ #a78b7c) and `borderRadius.DEFAULT` (0.25rem → 0.125rem) —
+ * both lean into the design.
  */
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
@@ -68,14 +69,9 @@ export default {
       spacing: {
         "grid-margin": "1rem",
         gutter: "0.75rem",
-        "stack-md": "0.5rem",
       },
       colors: {
-        // Legacy (kept through screen migration)
-        canvas: "#0a0a0a",
-        surface: "#0b1326", // intentional shift to design value
-        elevated: "#1d1d1d",
-        overlay: "#262626",
+        surface: "#0b1326",
         author: {
           // **The participant palette** (rc3 D20). Eight hues the ring rotates
           // through by turn slot, and the set a user picks from per participant.
@@ -100,11 +96,6 @@ export default {
           pink: "#f472b6",
           user: "#3b82f6",
         },
-        accent: {
-          DEFAULT: "#3b82f6",
-          subtle: "#3b82f622",
-        },
-
         // Industrial Terminal — surface hierarchy
         background: "#0b1326",
         "on-background": "#dae2fd",
@@ -124,7 +115,7 @@ export default {
         outline: "#a78b7c",
         "outline-variant": "#584235",
 
-        // Primary (Brian / execution / orange)
+        // Primary (the executing role / orange)
         primary: "#ffb68b",
         "on-primary": "#522300",
         "primary-container": "#ff7a00",
@@ -135,7 +126,7 @@ export default {
         "on-primary-fixed-variant": "#753400",
         "inverse-primary": "#994700",
 
-        // Secondary (Rain / review / purple)
+        // Secondary (the reviewing role / purple)
         secondary: "#ddb7ff",
         "on-secondary": "#490080",
         "secondary-container": "#6f00be",

@@ -276,27 +276,6 @@ export function RefreshIcon({ className }: { className?: string }) {
   );
 }
 
-export function MeasurementIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={cn("size-3.5", className)}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M4 20V4" />
-      <path d="M4 20h16" />
-      <rect x="7" y="12" width="3" height="5" />
-      <rect x="12" y="8" width="3" height="9" />
-      <rect x="17" y="14" width="3" height="3" />
-    </svg>
-  );
-}
-
 export function FileIcon({ className }: { className?: string }) {
   return (
     <svg
