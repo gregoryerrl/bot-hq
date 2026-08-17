@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useChatStore } from "../stores/chat";
@@ -18,6 +19,8 @@ import type { AgentMessage } from "../lib/bindings";
 // Stable reference so the zustand selector doesn't return a fresh array per
 // call (would trigger infinite re-renders via Object.is).
 const EMPTY_MESSAGES: AgentMessage[] = [];
+/** Rows per history page — the mount read and each "load older" step. */
+export const CHAT_PAGE = 300;
 
 /** How close to the bottom (px) still counts as "at the bottom" for
  * auto-follow — same threshold the old useStickyScroll hook used. */
@@ -46,11 +49,16 @@ export function ChatPane({
   /** Opens a file named by a tool call in the session's file viewer (round 8). */
   onViewFile?: (path: string) => void;
 }) {
+  // The mount read is the TAIL, not the whole history (round 8, N2): the
+  // largest session held 3,412 rows / 6.5 MB, all of it pulled into one Vec
+  // and across the IPC boundary on every mount, and the pane only ever shows
+  // the bottom. Older pages arrive on demand via "Load older" below; a full
+  // page (`length === CHAT_PAGE`) is what says there may be more.
   const { data: initialMsgs = [], isLoading: messagesLoading } = useTauriQuery<
     AgentMessage[]
   >(
     "get_session_messages",
-    { sessionId, sinceId: null },
+    { sessionId, sinceId: null, limit: CHAT_PAGE },
     { enabled: !!sessionId },
   );
 
@@ -64,11 +72,36 @@ export function ChatPane({
   const setMessages = useChatStore((s) => s.setMessages);
   const applyBatch = useChatStore((s) => s.applyBatch);
 
+  // "There may be more above": true until a page comes back short. Reset
+  // when the mount read lands (a refetch on resync re-seeds the store).
+  const [mayHaveOlder, setMayHaveOlder] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   useEffect(() => {
     if (initialMsgs.length > 0) {
       setMessages(sessionId, initialMsgs);
+      setMayHaveOlder(initialMsgs.length >= CHAT_PAGE);
     }
   }, [initialMsgs, sessionId, setMessages]);
+  const prependOlder = useChatStore((s) => s.prependOlder);
+  const loadOlder = useCallback(async () => {
+    const first = useChatStore.getState().messages[sessionId]?.[0];
+    if (!first || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const page = await invoke<AgentMessage[]>("get_session_messages", {
+        sessionId,
+        sinceId: null,
+        beforeId: first.id,
+        limit: CHAT_PAGE,
+      });
+      prependOlder(sessionId, page);
+      setMayHaveOlder(page.length >= CHAT_PAGE);
+    } catch {
+      // Leave the button; the next click retries.
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [sessionId, loadingOlder, prependOlder]);
 
   useTauriEvent<AgentMessage[]>(
     "agent:messages:batch",
@@ -170,6 +203,19 @@ export function ChatPane({
           No messages yet…
         </p>
       ) : (
+        <>
+        {mayHaveOlder && (
+          <div className="mb-2 flex justify-center">
+            <button
+              type="button"
+              onClick={() => void loadOlder()}
+              disabled={loadingOlder}
+              className="rounded border border-outline-variant px-2.5 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface disabled:opacity-60"
+            >
+              {loadingOlder ? "Loading older…" : `Load older (${CHAT_PAGE} more)`}
+            </button>
+          </div>
+        )}
         <div
           className="relative w-full"
           style={{ height: `${totalSize}px` }}
@@ -204,6 +250,7 @@ export function ChatPane({
             );
           })}
         </div>
+        </>
       )}
       {!stuck && messages.length > 0 && (
         <div className="pointer-events-none sticky bottom-0 flex justify-end pr-1 pt-2">

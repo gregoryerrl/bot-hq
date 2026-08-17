@@ -8,17 +8,28 @@ use crate::tauri_cmd::error::AppError;
 use crate::tauri_events::types::AgentMessage;
 use std::sync::Arc;
 
+/// The chat's history read. Three shapes (round 8, N2):
+/// - `since_id: Some(n)` — everything after `n` (a resync / catch-up read);
+/// - `limit: Some(k)` — the newest `k` rows, chronological, optionally those
+///   before `before_id` (the mount read and its "load older" page — the chat
+///   only renders the tail, and the largest session held 3,412 rows / 6.5 MB,
+///   all pulled across IPC on every mount before this);
+/// - neither — the whole history (kept for the two callers that mean it).
 #[tauri::command]
 #[specta::specta]
 pub async fn get_session_messages(
     storage: tauri::State<'_, Arc<Storage>>,
     session_id: String,
     since_id: Option<i64>,
+    before_id: Option<i64>,
+    limit: Option<i64>,
 ) -> Result<Vec<AgentMessage>, AppError> {
-    let msgs = storage
-        .messages_for_session(&session_id, since_id)
-        .await
-        .map_err(|e| AppError::DbError(e.to_string()))?;
+    let msgs = match (since_id, limit) {
+        (Some(_), _) => storage.messages_for_session(&session_id, since_id).await,
+        (None, Some(k)) => storage.messages_tail(&session_id, before_id, k).await,
+        (None, None) => storage.messages_for_session(&session_id, None).await,
+    }
+    .map_err(|e| AppError::DbError(e.to_string()))?;
     Ok(msgs.into_iter().map(AgentMessage::from).collect())
 }
 

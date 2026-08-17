@@ -136,6 +136,37 @@ impl Storage {
     }
 
     /// All messages for the session, oldest first.
+    /// The NEWEST `limit` rows of a session, oldest-first, optionally those
+    /// before `before_id` (exclusive) — the chat's mount read and its "load
+    /// older" page (round 8, N2). `messages_for_session(sid, None)` has no
+    /// bound and the largest session held 3,412 rows / 6.5 MB, all of it
+    /// pulled into one Vec and across the IPC boundary on every mount; the
+    /// chat only ever renders the tail. `limit` is clamped to at least 1. A
+    /// caller learns "there may be more" from a full page (`len == limit`).
+    pub async fn messages_tail(
+        &self,
+        session_id: &str,
+        before_id: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<Message>> {
+        let limit = limit.max(1);
+        // Newest first from the (session_id, id) index, then reversed in
+        // memory so callers get chronological order. `COALESCE` keeps the
+        // seek (see `messages_since_sql`); i64::MAX is above every id.
+        let mut rows = sqlx::query_as::<_, Message>(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages \
+             WHERE session_id = ?1 AND id < COALESCE(?2, ?3) ORDER BY id DESC LIMIT ?4"
+        ))
+        .bind(session_id)
+        .bind(before_id)
+        .bind(i64::MAX)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.reverse();
+        Ok(rows)
+    }
+
     /// If `since_id` is provided, returns only messages with id > since_id.
     pub async fn messages_for_session(
         &self,
@@ -211,6 +242,30 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use crate::storage::{MessageKind, Storage};
+
+    /// The chat's page read: newest N, chronological, and a page before an id
+    /// (round 8, N2). Kill-tested: drop the `.reverse()` and the order flips.
+    #[tokio::test]
+    async fn messages_tail_pages_newest_first_but_returns_chronological() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        let mut ids = Vec::new();
+        for body in ["a", "b", "c", "d", "e"] {
+            let m = s
+                .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), body, None)
+                .await
+                .unwrap();
+            ids.push(m.message_id());
+        }
+        let tail = s.messages_tail("s1", None, 2).await.unwrap();
+        assert_eq!(tail.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), vec!["d", "e"]);
+        let older = s.messages_tail("s1", Some(tail[0].id), 2).await.unwrap();
+        assert_eq!(older.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), vec!["b", "c"]);
+        let oldest = s.messages_tail("s1", Some(older[0].id), 2).await.unwrap();
+        assert_eq!(oldest.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        assert!(s.messages_tail("s1", Some(ids[0]), 2).await.unwrap().is_empty());
+        assert_eq!(s.messages_tail("s1", None, 0).await.unwrap().len(), 1, "limit clamps to 1");
+    }
 
     /// **The watermark read SEEKS** (round 8, review). `messages_for_session`
     /// is the emitter's per-flush read (50 ms / N=20 cadence) and the plugin

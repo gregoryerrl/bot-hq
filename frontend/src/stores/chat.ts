@@ -10,6 +10,10 @@ interface ChatState {
   setMessages: (sessionId: string, msgs: AgentMessage[]) => void;
   /** Apply a batch of new messages, advancing the watermark. */
   applyBatch: (msgs: AgentMessage[]) => void;
+  /** Prepend an OLDER page (chronological, all ids below the current first)
+   *  — the "load older" read (round 8). Leaves the watermark alone: the
+   *  watermark is the newest id, and older rows never advance it. */
+  prependOlder: (sessionId: string, msgs: AgentMessage[]) => void;
   /** Clear a session (close). */
   clear: (sessionId: string) => void;
 }
@@ -47,6 +51,17 @@ export const useChatStore = create<ChatState>((set) => ({
         messages[sessionId] = current.concat(appends[sessionId]);
       }
       return { messages, watermarks };
+    }),
+  prependOlder: (sessionId, msgs) =>
+    set((s) => {
+      if (msgs.length === 0) return s;
+      const current = s.messages[sessionId] ?? [];
+      const firstId = current.length > 0 ? current[0].id : Number.MAX_SAFE_INTEGER;
+      // Only rows genuinely older than what is held; a page that overlaps
+      // (a double click, a race with the mount read) must not duplicate.
+      const older = msgs.filter((m) => m.id < firstId);
+      if (older.length === 0) return s;
+      return { messages: { ...s.messages, [sessionId]: older.concat(current) } };
     }),
   clear: (sessionId) =>
     set((s) => {
