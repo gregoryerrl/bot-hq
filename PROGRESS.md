@@ -97,8 +97,9 @@ in-code comments catch up (`ead9d00`, `43362e7`).
 (compiled consts; a respawn from the old binary re-injects the old text), the
 A1 exclusion, and migration 0064 all wait for the user's next rebuild + relaunch
 — never done over live sessions. `cl_stale_refs`: the "30 → 27" measured
-mid-round with a temporary test does NOT discriminate — the fix's own test
-fixture put `codebase_map_test` into the code corpus, so the old logic drops
+mid-round with a temporary test does NOT discriminate — the fix's own doc
+comment and test put `codebase_map_test` into the code corpus (`cl_staleness.rs`
+reads every tracked `.rs` body, including its own), so the old logic drops
 those three hits too (round 4's F7, reproduced by the hand fixing it); the
 running binary reports 30 at HEAD because the round's deletion of the D9
 spikes created three NEW stale references in the CL (`learnings-2026-07-26-*`),
