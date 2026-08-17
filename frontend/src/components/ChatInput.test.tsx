@@ -143,6 +143,57 @@ describe("ChatInput turn-status + Stop", () => {
     await waitFor(() => expect(onUnstage).toHaveBeenCalledTimes(1));
   });
 
+  // issues.md #3, the "sometimes": a delivery that lands while THIS session's
+  // view is unmounted (the dashboard, another session) reaches no
+  // `session:stage_delivered` handler, so a persisted draft outlives the
+  // message it was and refills the box on return. Staging moves the text's home
+  // to the backend, so the draft key goes with it — nothing left to resurrect.
+  it("drops the persisted draft at stage time and writes it back on unstage", async () => {
+    const onStage = vi.fn().mockResolvedValue(undefined);
+    const onUnstage = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <ChatInput
+        draftKey="bothq:draft:s-stage"
+        activity="busy"
+        busy={{ hands: true }}
+        busyLabel={LABEL}
+        onSend={() => {}}
+        onStage={onStage}
+        onUnstage={onUnstage}
+        onCancel={() => {}}
+      />,
+    );
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "queued while they work" },
+    });
+    expect(localStorage.getItem("bothq:draft:s-stage")).toBe("queued while they work");
+    fireEvent.click(screen.getByRole("button", { name: "Stage" }));
+    await waitFor(() => expect(onStage).toHaveBeenCalledTimes(1));
+    // Staged: the backend owns the text now; the key is gone.
+    expect(localStorage.getItem("bothq:draft:s-stage")).toBeNull();
+    expect(screen.getByRole("textbox")).toHaveValue("queued while they work");
+
+    rerender(
+      <ChatInput
+        draftKey="bothq:draft:s-stage"
+        activity="busy"
+        busy={{ hands: true }}
+        busyLabel={LABEL}
+        onSend={() => {}}
+        onStage={onStage}
+        onUnstage={onUnstage}
+        onCancel={() => {}}
+        staged
+        stagedText="queued while they work"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Staged ✓" }));
+    await waitFor(() => expect(onUnstage).toHaveBeenCalledTimes(1));
+    // Editing again: the text is a draft again, persisted again.
+    expect(localStorage.getItem("bothq:draft:s-stage")).toBe("queued while they work");
+    localStorage.removeItem("bothq:draft:s-stage");
+  });
+
   it("clears the draft when the staged delivery lands", () => {
     const { rerender } = render(
       <ChatInput

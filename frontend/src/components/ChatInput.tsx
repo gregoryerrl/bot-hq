@@ -253,6 +253,14 @@ export function ChatInput({
     try {
       await onStage(text);
       // The text stays in the (now read-only) box — it IS the staged message.
+      // But the DRAFT key is dropped: from here the backend holds the text
+      // (`stagedText` rehydrates the box after a reload), and the key was what
+      // put a delivered message back in the box when the delivery happened
+      // with this session's view unmounted — on the dashboard, or in another
+      // session — where no `session:stage_delivered` handler could clear it
+      // (issues.md #3, the "sometimes"). Nothing to persist means nothing to
+      // resurrect; `handleUnstage` writes the draft back when editing resumes.
+      if (draftKey) localStorage.removeItem(draftKey);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -265,6 +273,8 @@ export function ChatInput({
     setError(null);
     try {
       await onUnstage();
+      // Editing resumes: the text is a draft again, so it persists again.
+      if (draftKey && value) localStorage.setItem(draftKey, value);
     } catch (err) {
       setError(errorMessage(err));
     }

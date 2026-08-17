@@ -81,6 +81,22 @@ describe("Providers — the slot-shaped runtime wire", () => {
     });
   });
 
+  // issues.md #3: the composer's persisted draft is cleared by SessionView's
+  // handler ONLY for the session on screen. A staged message delivered to any
+  // other session left `bothq:draft:<sid>` holding the sent text, and the box
+  // refilled on return. This is the global half: any session, no view needed.
+  it("clears a delivered session's persisted draft even when no view for it is mounted", async () => {
+    localStorage.setItem("bothq:draft:s2", "queued while they work");
+    localStorage.setItem("bothq:draft:s1", "still being typed");
+    renderProviders();
+    await waitFor(() => expect(handlers.has("session:stage_delivered")).toBe(true));
+    emit("session:stage_delivered", { session_id: "s2" });
+    expect(localStorage.getItem("bothq:draft:s2")).toBeNull();
+    // Keyed on the payload: another session's draft is untouched.
+    expect(localStorage.getItem("bothq:draft:s1")).toBe("still being typed");
+    localStorage.removeItem("bothq:draft:s1");
+  });
+
   it("lands a live session:activity busy pair under SLOT keys, not agent names", async () => {
     renderProviders();
     await waitFor(() => expect(handlers.has("session:activity")).toBe(true));

@@ -12,6 +12,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriEvent } from "./hooks/useTauriEvent";
+import { draftKeyFor } from "./components/ChatInput";
 import { useHealthStore, type AgentHealth } from "./stores/health";
 import { useContextStore } from "./stores/context";
 import { useActivityStore, type SessionActivity } from "./stores/activity";
@@ -206,6 +207,18 @@ function GlobalEventSync() {
     [invalidate],
   );
 
+  // A staged message DELIVERED clears that session's persisted composer draft
+  // — for ANY session, mounted or not. `SessionView` clears the live box and
+  // the key for the session on screen; a delivery to a session the user is not
+  // looking at (the dashboard, another session — they run several) reached no
+  // handler, the key kept the sent text, and the box refilled on return
+  // (issues.md #3). The composer also drops the key at stage time; this is the
+  // half that catches a stage made before that shipped, or from another view.
+  const onStageDelivered = useCallback((p: { session_id: string }) => {
+    localStorage.removeItem(draftKeyFor(p.session_id));
+  }, []);
+
+  useTauriEvent("session:stage_delivered", onStageDelivered, [onStageDelivered]);
   useTauriEvent("session:pending_choice", onTray, [onTray]);
   useTauriEvent("session:choice_resolved", onTray, [onTray]);
   useTauriEvent("session:awaiting_user", onTray, [onTray]);
