@@ -18,6 +18,93 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-17/18 (round 8) — the round the fixes were reviewed, s-a3f03bd9
+
+Mandate: continue round 7's T2 handoff, audit again (messes, staleness,
+redundancies, mis/missed implementations, refactors/optimizations), and use
+the round-7 binary as live evidence. The user widened the scope to "T1 + T2":
+every handoff item plus the round's own finds. Commits `f7a50eb..` (see the
+session's I/P/A/V docs for per-batch kill tests; CL learnings in
+`learnings-2026-08-18-round8.md`). Not pushed.
+
+**Live evidence, both ways.** Round 7's fixes held on this build: 0064 applied
+at the 12:53Z relaunch (`forward_events` gone); a Pause logged `interrupted
+turn (bot-hq's own interrupt); not counted as an error` (A1); the READY notice
+and every phase transition arrived `[system] …` in both participants' contexts
+(A2); the descriptors served by this binary say "halts NOTHING" / "Declare the
+session's HALT" / "Cast your VOTE" (A6/C1); every tray answer arrived in the
+compact shape, gate variant included (A5); `cl_stale_refs` read **27**; the
+0063 restore ran on a reopened session (now logs a line). And the round's own
+gates fired live: the pre-commit forbidden-word hook blocked a commit whose
+placeholder carried the real trailer, and the Tool Gate parked a heredoc that
+quoted a gated command form (round 7's lesson, repeated once, then not).
+
+**Round 7 reviewed adversarially (S1).** Its narrowed `teardown_session` lock
+had opened a respawn-during-teardown window (`respawn_session` on every
+SessionView mount, no closing marker) — closed with `AppState.closing`, set and
+read under the same `sessions` guard, idempotent across overlapping closes
+(`f7a50eb`). The BatchEmitter seeded its watermark from the FIRST-arriving id;
+concurrent writers notify out of order, so a lower row was never emitted —
+now the lowest id touched before the first flush (`f9a1638`). A typed
+"approve but dry-run first" / "ok" / "yes" on a GATE executed the original
+command while the answer body told the agent to honor the words — `gate_verdict`
+approves only the listed `Approve`, at every gate site (`9befcc5`). Four
+descriptors overstated or understated their handlers again (`4311d6a`,
+`a33558f`).
+
+**Promised, not built (S5).** The session PTY carried no `BOT_HQ_SESSION_ID`,
+so a `git commit` typed through `terminal_exec` skipped the blocking-findings
+gate and a push there failed closed — CODEBASE.md seam 6 had recorded the
+producer as unpinned; the PTY sets it, `run_cli` resolves the context once and
+hands it to every hook as a parameter (an agent-run `cargo test` INHERITS a
+real session id, and one pre-push test had passed on the wrong branch), and
+the gate's block arm is reached by a test for the first time (`11eac15`).
+`override_reviewer_block` said "Override"; it parks a request. `close_session`
+takes two calls. `list_my_pending_questions` promised halt rows nothing has
+written since D35. PolicyForm sold two prompt-only fields as enforcement and
+had no UI for the two enforced ones (`d95ffed`, `bf0da91`); `adherence_nudges`
+was settable nowhere (`f3b8068`).
+
+**The T2 handoff, all of it.** `session_tray.kind = 'approval'` written at
+insert, readers keyed on kind with the menu fallback (`f5e15ea`); every host
+row through `post_system_notice`, guarded (`f0e0642`); one phase parser, one
+message query, one kind list, one clock (`85a52e6`; the merged query lost its
+index seek to a disjunction and got it back with `COALESCE`, plan-pinned,
+`89e3c7d`); the staged-delivery retry capped at three (`ca3c938`); the
+screenshot and the CL walk off the reactor (`d4ca4e9`); chat linkify of
+tool_use args (`04569fa`); migration 0065 re-seeds the role prose without the
+router's vocabulary and with a vote sentence per role, guarded so a user's
+edit survives (`5b80721`); migration 0066 drops three measured-unearned
+`messages`/`session_documents` indexes and adds the spin-detection seek
+(`b899dc6`); the D35 halt interrupt fires when the declarer's own tool
+RESULT lands, and host-declared halts go through `mark_awaiting_user_for` so
+they interrupt at once (`d63d8e5`); the chat mounts on a 300-row page with
+"Load older" (`32e52a3`); plugin events invalidate from the global map and
+roster hues reach every byline (`b90ef07`).
+
+**Frontend.** A refused phase advance says why; a session closed off-view
+frees its chat store and draft; an added participant defaults to the next
+unused role and a reviewer-less or duplicated roster hears it (a `hands` +
+`hands-2` session had been created that morning with no push-back); one IPAV
+set for the select, the type and the tints; `session:resync` refetches the
+chat; the feedback panel refreshes; searches escape `%`/`_`.
+
+**Comment sweep + docs.** The T2-9 sweep ran off a fresh full-class grep
+(names, participant pronouns, router/duo/driver/hub vocabulary, PARITY_HOLD,
+"when the vote lands"), per line, LIVE-WRONG reworded and history left:
+`src/core` (`3a52e4d`, 86 lines across 8 files, incl. the re-measured
+channel cap — 3,412 rows, 53 %), the signaling/storage/agents/command area
+(`22df771`, 28 files), the canonical docs (`d8dc4d2`). Coarse word counts
+over `src/` before → after: `duo` 118 → 69, `both agents|pumps` 32 → 10,
+`router` 116 → 106, participant pronouns 33 → 23, `brian|rain` 487 → 446 —
+the residue is test-fixture slug literals, tombstones and test-module
+comments, not live claims; the sweep is a lower bound, never "class closed".
+
+**Not done this round, stated:** the two-icon-system consolidation and the
+~250 test-fixture `"brian"`/`"rain"` slug renames (the provider limit
+mid-session consumed the sweep agents; both are the first items of the next
+round), and the parked ModalShell / retention / CI decisions.
+
 ## 2026-08-17 (round 7) — the live-evidence round, s-926b3c59
 
 Mandate: audit again (messes, staleness, redundancies, mis/missed
