@@ -34,6 +34,7 @@
 //! reachable only from a Tauri command or an MCP dispatcher, and the noise would
 //! retire it. Widen it when a second feature earns the same treatment.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -71,6 +72,11 @@ const REQUIRED_WIRES: &[(&str, &str)] = &[
         "phase_epoch",
         "reading the current epoch to key a vote against",
     ),
+    (
+        "set_persisted_ipav_phase",
+        "the transition's other durable write (0063) — without it a restart \
+         resumes at Investigate while the votes it cleared stay cleared",
+    ),
 ];
 
 fn repo_root() -> PathBuf {
@@ -105,7 +111,7 @@ fn code_of(line: &str) -> &str {
     }
 }
 
-/// **A file's PRODUCTION half — everything before its `#[cfg(test)]` module.**
+/// **A file's PRODUCTION half — everything before its `#[cfg(test)]` MODULE.**
 ///
 /// This is not tidiness, it is the whole guard. Written without it, and caught by
 /// its own mutation check: deleting the epoch bump from `core/state.rs` left this
@@ -119,30 +125,112 @@ fn code_of(line: &str) -> &str {
 /// guard whose only job is to refuse false reassurance, is the reason this
 /// function exists and is documented rather than inlined.
 ///
-/// **The split is on `#[cfg(test)]`, NOT on `mod tests {`** — and that
-/// distinction is itself a round-5 finding (E2), caught in review one turn after
-/// the bug above. Five modules in `src/` are not called `tests`:
-/// `phase_vote_tests`, `plugin_kv_tests`, `plugin_tests`,
-/// `ensure_claude_runnable_tests`, `session_doc_tests`. `bridge/mod.rs` holds
-/// `phase_vote_tests` at 1727 *and* a later `mod tests {` at 1838, so a
-/// `mod tests {` split cut at the wrong one and handed 112 lines of the phase
-/// vote's own tests to the guard as production — in the very file carrying five
-/// of the seven wires. `sequencer.rs` leaked 264 lines the same way, and two
-/// files with no `mod tests {` at all leaked their whole test module.
+/// **Splitting on `mod tests {` was wrong (round 5, E2), and splitting on a bare
+/// `#[cfg(test)]` was also wrong (round 6, F3).** Both failures are the same
+/// mistake in different clothes: matching a proxy for "the test module starts
+/// here" instead of the thing itself.
 ///
-/// Verified safe against this tree: every production call site precedes its
-/// file's first `#[cfg(test)]` (state.rs 275 vs 1949, bridge/mod.rs 1354-1375 vs
-/// 1726, sequencer.rs 2856 vs 3539), so all seven wires stay visible. The
-/// failure directions are not symmetric, which is why the stricter form wins:
-/// truncating too early can only report a live wire as DEAD, which fails loudly
-/// and gets read; truncating too late reports a dead wire as LIVE, which is
-/// silent and is the entire failure this file exists to prevent.
+/// - `mod tests {` misses the five modules in `src/` that are named something
+///   else — `phase_vote_tests`, `plugin_kv_tests`, `plugin_tests`,
+///   `ensure_claude_runnable_tests`, `session_doc_tests`. `bridge/mod.rs` holds
+///   `phase_vote_tests` at 1727 *and* a later `mod tests {`, so the split cut at
+///   the wrong one and handed 112 lines of the phase vote's own tests to the
+///   guard as production — in the very file carrying five of the seven wires.
+/// - A bare `#[cfg(test)]` matches the attribute on ANY item, not just a module.
+///   `core/pump.rs:13` is `#[cfg(test)] use std::time::Duration;` — an import —
+///   so the production half was **12 lines of 1046**. `core/sequencer.rs:3539` is
+///   a test-only `fn jaccard_similarity`, hiding 263 more. 1297 production lines
+///   invisible, in the two largest files in the crate.
+///
+/// So the split is on `#[cfg(test)]` **followed by `mod`**, which is what was
+/// meant both times.
+///
+/// **The safety argument for the old form was narrower than it read.** It said
+/// early truncation can only report a live wire as DEAD, which fails loudly —
+/// true, and it is why F3 was latent rather than a false green. But it holds for
+/// EXISTENCE guards only. An ABSENCE guard — "nothing may still call X", the
+/// shape `retired_identifier_test.rs` has — inherits the same blindness in the
+/// SILENT direction: unscanned code cannot violate a prohibition. Do not carry
+/// the reassurance across to a guard of the other polarity.
 ///
 /// `core/state.rs`'s own in-file guards keep `split("mod tests {")` — that file
 /// has exactly one test module, so it is correct there. It is the walker over
 /// OTHER files that inherited the assumption.
 fn production_half(body: &str) -> &str {
-    body.split("#[cfg(test)]").next().unwrap_or(body)
+    const MARKER: &str = "#[cfg(test)]";
+    let mut from = 0;
+    while let Some(i) = body[from..].find(MARKER) {
+        let at = from + i;
+        let rest = body[at + MARKER.len()..].trim_start();
+        let rest = rest.strip_prefix("pub ").unwrap_or(rest).trim_start();
+        if rest.starts_with("mod ") {
+            return &body[..at];
+        }
+        from = at + MARKER.len();
+    }
+    body
+}
+
+/// **Files that are test code in their entirety, declared as such by a PARENT.**
+///
+/// Round 6, E4 — and the reason `production_half` alone is not enough. A module
+/// can be test-only without carrying a single `#[cfg(test)]` of its own, because
+/// the attribute sits on the `mod` line in the parent:
+///
+/// ```text
+/// src/signaling/mod.rs:28   #[cfg(test)]
+/// src/signaling/mod.rs:29   mod parity;
+/// ```
+///
+/// `src/signaling/parity.rs` is 643 lines of test-only code with no marker in it.
+/// `walk()` visits it and `production_half` finds nothing to split on, so every
+/// one of those lines reads as production. **No refinement of the split can fix
+/// this** — the evidence is in a different file. It has to be resolved by
+/// resolving the declaration.
+///
+/// Latent when found: all seven call-forms grep to zero hits inside `parity.rs`.
+/// It is fixed anyway because the next symbol added to `REQUIRED_WIRES` gets no
+/// such luck, and because the inverse was checked — 15 files in `src/` carry no
+/// `#[cfg(test)]` at all, and `parity.rs` is the only one of them that is test
+/// code.
+///
+/// Only the `mod name;` form (semicolon — a FILE module) is collected. An inline
+/// `#[cfg(test)] mod name { … }` has no separate file to exclude and is already
+/// handled by [`production_half`].
+fn test_only_files(files: &[PathBuf]) -> BTreeSet<PathBuf> {
+    const MARKER: &str = "#[cfg(test)]";
+    let mut out = BTreeSet::new();
+    for f in files {
+        let Ok(body) = fs::read_to_string(f) else {
+            continue;
+        };
+        let Some(dir) = f.parent() else { continue };
+        let mut from = 0;
+        while let Some(i) = body[from..].find(MARKER) {
+            let at = from + i;
+            from = at + MARKER.len();
+            let rest = body[from..].trim_start();
+            let rest = rest.strip_prefix("pub ").unwrap_or(rest).trim_start();
+            let Some(rest) = rest.strip_prefix("mod ") else {
+                continue;
+            };
+            let name: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            // `mod name;` only — an inline `mod name {` declares no file.
+            if !rest[name.len()..].trim_start().starts_with(';') {
+                continue;
+            }
+            out.insert(dir.join(format!("{name}.rs")));
+            out.insert(dir.join(&name).join("mod.rs"));
+        }
+    }
+    out
 }
 
 #[test]
@@ -157,9 +245,17 @@ fn every_phase_vote_storage_method_has_a_production_caller() {
     );
 
     let defining = root.join(DEFINING_FILE);
+    let test_only = test_only_files(&files);
+    let mut skipped_defining = 0;
     let mut sources = Vec::new();
     for f in &files {
         if *f == defining {
+            skipped_defining += 1;
+            continue;
+        }
+        // E4: a file the parent declares under `#[cfg(test)] mod name;` is test
+        // code in full, with nothing in it to split on.
+        if test_only.contains(f) {
             continue;
         }
         let Ok(body) = fs::read_to_string(f) else {
@@ -167,10 +263,17 @@ fn every_phase_vote_storage_method_has_a_production_caller() {
         };
         sources.push((f.clone(), body));
     }
-    assert!(
-        sources.len() + 1 == files.len(),
+    assert_eq!(
+        skipped_defining, 1,
         "{DEFINING_FILE} must exist and be excluded exactly once — it is the \
          file whose own references prove nothing"
+    );
+    assert!(
+        test_only.iter().any(|p| p.ends_with("signaling/parity.rs")),
+        "`src/signaling/parity.rs` is declared `#[cfg(test)] mod parity;` in \
+         `signaling/mod.rs` and must be recognised as test-only — if this fails, \
+         either it was renamed or the declaration scan stopped working, and 643 \
+         lines of test code are being read as production again (round 6, E4)"
     );
 
     let mut dead = Vec::new();
@@ -279,5 +382,110 @@ fn the_guard_reports_a_wire_that_is_not_there() {
         !production_half(&bridge).contains("mod phase_vote_tests"),
         "`phase_vote_tests` must fall outside the production half of the file \
          that defines the vote's call sites"
+    );
+}
+
+/// **`#[cfg(test)]` on an import or a function is not where the test module
+/// starts.** Round 6, F3 — pinned apart from [`test_only_files`] so a regression
+/// in either mechanism names itself.
+///
+/// The synthetic cases state the rule; the two real files state the cost, and
+/// they are asserted by CONTENT rather than by line count so the test does not
+/// rot as the files grow.
+#[test]
+fn a_test_only_import_or_fn_does_not_truncate_the_production_half() {
+    assert_eq!(
+        production_half("fn a() {}\n#[cfg(test)]\nuse std::time::Duration;\nfn b() {}\n"),
+        "fn a() {}\n#[cfg(test)]\nuse std::time::Duration;\nfn b() {}\n",
+        "an import carrying the attribute must not end the production half"
+    );
+    assert_eq!(
+        production_half("fn a() {}\n#[cfg(test)]\nfn helper() {}\nfn b() {}\n"),
+        "fn a() {}\n#[cfg(test)]\nfn helper() {}\nfn b() {}\n",
+        "a test-only fn must not end it either"
+    );
+    assert_eq!(
+        production_half("fn a() {}\n#[cfg(test)]\nmod t {\n fn x() {} \n}\n"),
+        "fn a() {}\n",
+        "a test MODULE must still end it"
+    );
+    assert_eq!(
+        production_half("fn a() {}\n#[cfg(test)]\npub mod t {}\n"),
+        "fn a() {}\n",
+        "`pub mod` is still a module"
+    );
+
+    let root = repo_root();
+
+    // `pump.rs:13` is `#[cfg(test)] use std::time::Duration;`, and its real test
+    // module is ~1000 lines later. Under the old bare-literal split the guard
+    // saw twelve lines of this file.
+    let pump = fs::read_to_string(root.join("src/core/pump.rs")).expect("core/pump.rs");
+    let half = production_half(&pump);
+    assert!(
+        half.contains("#[cfg(test)]\nuse std::time::Duration;"),
+        "the test-only import must sit INSIDE the production half — if it does \
+         not, the split truncated at the attribute again and ~1000 lines of \
+         `pump.rs` are invisible to this guard"
+    );
+    assert!(
+        !half.contains("#[cfg(test)]\nmod tests"),
+        "`pump.rs`'s real test module must still be excluded"
+    );
+
+    // `sequencer.rs:3539` is a test-only `fn jaccard_similarity`.
+    let seq = fs::read_to_string(root.join("src/core/sequencer.rs")).expect("core/sequencer.rs");
+    assert!(
+        production_half(&seq).contains("fn jaccard_similarity"),
+        "the test-only fn must sit inside the production half of `sequencer.rs`"
+    );
+}
+
+/// **A file can be test-only with no marker in it at all.** Round 6, E4.
+///
+/// The declaration lives in the parent, so this is the one hole no refinement of
+/// [`production_half`] could close. Both directions are pinned: the real
+/// test-only file must be FOUND, and an ordinary marker-free module must NOT be
+/// swept up with it — without the second half, `test_only_files` returning every
+/// path would pass.
+#[test]
+fn a_file_module_declared_under_cfg_test_is_found_without_a_marker_of_its_own() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    walk(&root.join("src"), &mut files);
+    let test_only = test_only_files(&files);
+
+    let parity = root.join("src/signaling/parity.rs");
+    assert!(
+        parity.is_file(),
+        "src/signaling/parity.rs must exist for this test to mean anything"
+    );
+    assert!(
+        !fs::read_to_string(&parity).unwrap().contains("#[cfg(test)]"),
+        "`parity.rs` carries no marker of its own — that is the whole point. If \
+         one was added, this test is no longer exercising E4 and needs a new \
+         subject"
+    );
+    assert!(
+        test_only.contains(&parity),
+        "`#[cfg(test)] mod parity;` in signaling/mod.rs must make parity.rs \
+         test-only"
+    );
+
+    // The other direction. `core/ipav.rs` is a plain `mod ipav;` — marker-free
+    // production code — and must survive.
+    let ipav = root.join("src/core/ipav.rs");
+    assert!(
+        !test_only.contains(&ipav),
+        "a normally-declared module must not be swept up as test-only, or this \
+         filter silently hides production code from the guard — the exact \
+         failure direction the split's safety argument does NOT cover"
+    );
+    assert!(
+        test_only.len() < files.len() / 4,
+        "test_only_files matched {} of {} files — that is a scan gone wrong, \
+         not a tree full of test-only modules",
+        test_only.len(),
+        files.len()
     );
 }
