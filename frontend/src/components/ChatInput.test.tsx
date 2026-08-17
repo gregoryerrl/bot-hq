@@ -172,15 +172,18 @@ describe("ChatInput turn-status + Stop", () => {
     expect(screen.getByRole("textbox")).toHaveValue("");
   });
 
-  // The remount case: a staged message delivered while an approval gate holds
-  // the input slot bumps `deliveredTick` with no ChatInput mounted to see it.
-  // On remount the tick looks unchanged, so the box must come back EMPTY — and
-  // the only thing that can make it so is the persisted draft having been
-  // cleared at delivery, which `SessionView` now does.
-  it("comes back empty after a delivery it was unmounted for", () => {
+  // These two pin ChatInput's HALF of the remount case: the box seeds from the
+  // persisted draft, so what it comes back holding is decided entirely by
+  // whether that key survived. Neither executes the line that removes it —
+  // that is `SessionView`'s handler, pinned by
+  // `SessionView.test.tsx`'s "clears the persisted draft even with the composer
+  // unmounted". An earlier version of this comment claimed the removal was
+  // done "by the SessionView handler" while the test did it inline, which is a
+  // doc claim about a line the test never runs.
+  it("seeds empty when the draft was cleared while it was unmounted", () => {
+    // SETUP, not the behaviour under test: stand the world up as it is AFTER
+    // SessionView's handler ran and the composer was unmounted for it.
     localStorage.setItem("bothq:draft:s1", "queued while they work");
-    // Delivery happens while unmounted: the draft key is removed by the
-    // SessionView handler, and the tick moves from 0 to 1 unobserved.
     localStorage.removeItem("bothq:draft:s1");
     render(
       <ChatInput
@@ -197,9 +200,10 @@ describe("ChatInput turn-status + Stop", () => {
     expect(screen.getByRole("textbox")).toHaveValue("");
   });
 
-  // Without the draft removal, the same remount restores the delivered text —
-  // which is the bug, stated as a test so the two halves cannot be confused.
-  it("would restore the delivered text on remount if the draft survived", () => {
+  // The inverse, so the pair states the whole rule: a surviving draft comes
+  // back in the box. This is the symptom the user reported, reproduced at the
+  // component level.
+  it("seeds the delivered text back if the draft survived", () => {
     localStorage.setItem("bothq:draft:s2", "queued while they work");
     render(
       <ChatInput

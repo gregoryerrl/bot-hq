@@ -10,7 +10,7 @@ import { ContextMeter } from "../components/ContextMeter";
 import { useContextStore } from "../stores/context";
 import { useDragResize } from "../hooks/useDragResize";
 import { useChatStore } from "../stores/chat";
-import { ChatInput } from "../components/ChatInput";
+import { ChatInput, draftKeyFor } from "../components/ChatInput";
 import { HaltBanner, isApproval, type SessionHalt, type TrayRow } from "../components/HaltBanner";
 import { useTrayStaging, stagedFor } from "../stores/trayStaging";
 import { ApprovalGate } from "../components/ApprovalGate";
@@ -381,7 +381,7 @@ export function SessionView() {
       // durable state rather than an event nobody heard. The tick still does
       // the in-memory clear for the common mounted case; this is the half that
       // cannot be missed.
-      localStorage.removeItem(`bothq:draft:${sessionId}`);
+      localStorage.removeItem(draftKeyFor(sessionId));
       clearStaged(sessionId);
       // Drop the delivered content NOW rather than waiting for the refetch.
       // The refetch is async, so until it lands `stagedResp` still describes a
@@ -816,7 +816,7 @@ export function SessionView() {
                 carry session A's text into session B. */
             <ChatInput
               key={sessionId}
-              draftKey={`bothq:draft:${sessionId}`}
+              draftKey={draftKeyFor(sessionId)}
               placeholder="Broadcast to every participant…"
               activity={activity}
               busy={busy}

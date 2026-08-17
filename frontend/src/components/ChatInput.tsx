@@ -143,6 +143,21 @@ interface ChatInputProps {
   onUnstage?: () => Promise<void> | void;
 }
 
+/**
+ * The localStorage key a session's composer draft persists under.
+ *
+ * One function because two production sites need the SAME string and nothing
+ * kept them equal: `SessionView` both passes it as `draftKey` and removes it
+ * when a staged delivery lands. Changing the format at one site would leave the
+ * other reading a key nobody writes, and the delivered-draft clear would stop
+ * silently — the failure has no symptom until a user notices their message came
+ * back. One restatement too many for a fact that must never disagree with
+ * itself.
+ */
+export function draftKeyFor(sessionId: string): string {
+  return `bothq:draft:${sessionId}`;
+}
+
 export function ChatInput({
   placeholder,
   onSend,

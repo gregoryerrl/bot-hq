@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -7,6 +7,7 @@ import { useActivityStore } from "../stores/activity";
 import { useHealthStore } from "../stores/health";
 import { useContextStore } from "../stores/context";
 import { slotKey } from "../lib/participants";
+import { draftKeyFor } from "../components/ChatInput";
 
 // The Terminal panel mounts the real SessionTerminalTab on pill click — mock
 // xterm out (jsdom has no matchMedia/canvas); panel-switching is what's under
@@ -91,6 +92,22 @@ const readingsCall = vi.hoisted(() => ({
 
 // Keyed invoke mock: `get_session` must return a session row or the view
 // renders its not-found state; everything else gets an empty default.
+const tray: { rows: unknown[] } = { rows: [] };
+
+/** A pending APPROVAL row — `isApproval` is options === ["Approve","Reject"].
+ *  rc3 D33 gives an approval the input slot, which UNMOUNTS ChatInput. */
+const APPROVAL_ROW = {
+  choice_id: "gate-1",
+  session_id: "s1",
+  agent: "hands",
+  prompt: "Run gated command?",
+  options: ["Approve", "Reject"],
+  status: "pending",
+  asked_at: "2026-08-17T00:00:00Z",
+  answered_at: null,
+  picked: null,
+};
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn((cmd: string, args?: Record<string, unknown>) => {
     switch (cmd) {
@@ -122,6 +139,8 @@ vi.mock("@tauri-apps/api/core", () => ({
         return Promise.resolve(null);
       case "list_session_participants":
         return Promise.resolve(roster.rows);
+      case "list_session_tray":
+        return Promise.resolve(tray.rows);
       case "compute_apply_diff":
         return Promise.resolve({ files: [], truncated: false });
       default:
@@ -130,9 +149,19 @@ vi.mock("@tauri-apps/api/core", () => ({
   }),
 }));
 
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn().mockResolvedValue(() => {}),
-}));
+// Records each subscribed handler by event name so a test can DELIVER an
+// event. The old mock resolved to a no-op unlisten and captured nothing, which
+// made every event-driven path in this view unreachable from here.
+vi.mock("@tauri-apps/api/event", () => {
+  const listeners = new Map<string, (e: { payload: unknown }) => void>();
+  return {
+    listen: vi.fn((name: string, handler: (e: { payload: unknown }) => void) => {
+      listeners.set(name, handler);
+      return Promise.resolve(() => listeners.delete(name));
+    }),
+    __listeners: listeners,
+  };
+});
 
 function renderSessionView() {
   const qc = new QueryClient({
@@ -168,6 +197,8 @@ beforeEach(() => {
   readingsCall.lastArgs = null;
   phaseFixture.value = null;
   advanceCall.args = null;
+  tray.rows = [];
+  localStorage.clear();
 });
 
 /** The worker's own line in the turn-status row: `<label> is working`. */
@@ -534,5 +565,59 @@ describe("SessionView context readings (rc3 P7)", () => {
       name: "EYES · Claude Opus 5 — context readings",
     });
     expect(dialog).toHaveTextContent("No readings recorded");
+  });
+
+  /// **The wire: a staged delivery clears the PERSISTED draft.**
+  ///
+  /// Lives here rather than in `ChatInput.test.tsx` because the production line
+  /// is in `SessionView`'s `session:stage_delivered` handler, and that file
+  /// imports only `ChatInput`. Two tests written there first could not execute
+  /// it — one performed the `removeItem` itself and asserted the result — so
+  /// deleting the production call left both green (round 6, EYES `98391847`).
+  ///
+  /// **And a first attempt HERE was green too**, for a different reason worth
+  /// recording: with `ChatInput` mounted, its own `deliveredTick` effect calls
+  /// `updateValue("")`, which removes the same key. Two mechanisms, one
+  /// observation — round 4's lesson verbatim. The only state that isolates the
+  /// `SessionView` line is the one the bug actually needs: an approval holding
+  /// the input slot, so `ChatInput` is UNMOUNTED and cannot do the clearing.
+  it("clears the persisted draft even with the composer unmounted", async () => {
+    tray.rows = [APPROVAL_ROW];
+    localStorage.setItem(draftKeyFor("s1"), "queued while they work");
+    renderSessionView();
+    await screen.findByRole("button", { name: "Workspace" });
+    // The gate has the slot, so there is no composer to hear the tick.
+    await waitFor(() =>
+      expect(screen.queryByRole("textbox")).not.toBeInTheDocument(),
+    );
+
+    const events = (await import("@tauri-apps/api/event")) as unknown as {
+      __listeners: Map<string, (e: { payload: unknown }) => void>;
+    };
+    const deliver = events.__listeners.get("session:stage_delivered");
+    expect(deliver, "SessionView must subscribe to session:stage_delivered").toBeTruthy();
+    act(() => deliver!({ payload: { session_id: "s1" } }));
+
+    expect(
+      localStorage.getItem(draftKeyFor("s1")),
+      "with the composer unmounted, nothing else can clear this key — the sent \
+       message stays in localStorage and the box re-seeds from it on remount",
+    ).toBeNull();
+  });
+
+  it("leaves another session's draft alone", async () => {
+    tray.rows = [APPROVAL_ROW];
+    localStorage.setItem(draftKeyFor("s2"), "someone else's draft");
+    renderSessionView();
+    await screen.findByRole("button", { name: "Workspace" });
+    const events = (await import("@tauri-apps/api/event")) as unknown as {
+      __listeners: Map<string, (e: { payload: unknown }) => void>;
+    };
+    act(() =>
+      events.__listeners.get("session:stage_delivered")!({
+        payload: { session_id: "s2" },
+      }),
+    );
+    expect(localStorage.getItem(draftKeyFor("s2"))).toBe("someone else's draft");
   });
 });
