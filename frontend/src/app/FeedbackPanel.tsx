@@ -8,6 +8,7 @@ import { Markdown } from "../components/Markdown";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/time";
+import { shortSessionId } from "../lib/sessionId";
 
 /** Mirror of the Rust `AgentFeedbackView` — raw invoke, no binding needed. */
 interface AgentFeedbackView {
@@ -153,7 +154,7 @@ export function FeedbackPanel() {
                         to={`/sessions/${f.session_id}`}
                         className="text-primary hover:underline"
                       >
-                        {f.session_id.slice(0, 8)}
+                        {shortSessionId(f.session_id)}
                       </Link>
                       {f.project ? ` · ${f.project}` : ""}
                     </span>

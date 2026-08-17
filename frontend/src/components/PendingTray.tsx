@@ -4,6 +4,7 @@ import { useTauriQuery } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import { BellIcon } from "./icons";
 import { isTrayItem } from "./HaltBanner";
+import { shortSessionId } from "../lib/sessionId";
 
 // `list_pending_tray` returns durable pending session_tray rows for open
 // sessions. Typed locally as the subset this notifier reads (it only groups by
@@ -118,7 +119,7 @@ export function PendingTray() {
                 className="block border-b border-outline-variant px-3 py-3 last:border-b-0 hover:bg-surface-container-high"
               >
                 <div className="mb-1 flex items-center justify-between font-label-caps text-label-caps text-on-surface-variant">
-                  <span>Session {sid.slice(0, 8)}</span>
+                  <span>Session {shortSessionId(sid)}</span>
                   <span className="text-primary">Open →</span>
                 </div>
                 <p className="font-body-md text-body-md text-on-surface">

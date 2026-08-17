@@ -49,7 +49,7 @@ export function Providers({ children }: { children: ReactNode }) {
 // (useInvoke.ts), and `invalidateQueries({ queryKey: [command] })` prefix-
 // matches every args variant — so naming the command alone covers all sessions.
 // A bare `invalidateQueries()` (no key) refetches EVERY mounted query, which on
-// a single choice-resolve during a live duo meant 10-20+ Tauri round-trips
+// a single choice-resolve during a live multi-participant session meant 10-20+ Tauri round-trips
 // (incl. `compute_apply_diff` spawning a `git` subprocess). Scope each event to
 // only what it can actually change.
 const TRAY_KEYS = [

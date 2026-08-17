@@ -135,7 +135,7 @@ export function ViolationsPanel() {
         </p>
       ) : (
         <div className="rounded-lg border border-outline-variant">
-          <table className="w-full border-collapse font-code-sm text-code-sm">
+          <table className="w-full table-fixed border-collapse font-code-sm text-code-sm">
             <thead>
               <tr className="border-b border-outline-variant bg-surface-container text-left text-on-surface-variant">
                 <th className="px-3 py-2 font-label-caps text-label-caps">
@@ -158,7 +158,7 @@ export function ViolationsPanel() {
             <tbody>
               {rows.map((r, i) => (
                 <tr
-                  key={i}
+                  key={`${r.ts}:${r.session_id}:${i}`}
                   className="border-b border-outline-variant/40 align-top last:border-0"
                 >
                   <td className="break-words px-3 py-2 text-on-surface-variant">

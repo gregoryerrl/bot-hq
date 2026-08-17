@@ -76,7 +76,7 @@ function emptyAll(): AgentOverride {
  * participant → role. Reading and writing by any other key would store settings
  * spawn never looks up, which is the exact failure rc3 D10 closed.
  */
-export function roleOverride(
+function roleOverride(
   store: ClaudeOverrides,
   roleSlug: string,
 ): AgentOverride {
@@ -91,7 +91,7 @@ export function roleOverride(
  * panel's whole job is putting a value where spawn will find it, and an editor
  * that writes the wrong key looks identical on screen.
  */
-export function patchRoleOverride(
+function patchRoleOverride(
   store: ClaudeOverrides,
   roleSlug: string,
   patch: Partial<AgentOverride>,
@@ -745,7 +745,7 @@ function CorePane({
 /** One agent's effort + ultracode override. Narrow write-coupling keeps `max`
  *  and ultracode mutually exclusive while preserving the valid `xhigh`+ultracode
  *  pair (ultracode IS xhigh + dynamic workflows). */
-export function AgentEffortOverride({
+function AgentEffortOverride({
   title,
   subtitle,
   ov,

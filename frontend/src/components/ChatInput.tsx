@@ -9,7 +9,7 @@ import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import { anyBusy, isLocked, type AgentBusy, type SessionActivity } from "../stores/activity";
 
 /** One participant the `@` picker can insert (rc3 D17). */
-export type Mentionable = {
+type Mentionable = {
   /** What goes in the text, after the `@`. The backend parses this. */
   slug: string;
   /** What the user reads — the display rule's `ROLE · Model`. */
@@ -28,7 +28,7 @@ export type Mentionable = {
  * address, not a mention, and offering a picker there would suggest bot-hq is
  * about to do something it will not.
  */
-export function activeMention(
+function activeMention(
   text: string,
   caret: number,
 ): { start: number; query: string } | null {
@@ -57,7 +57,7 @@ export function activeMention(
  * the label at all is still worth it, because the user reads `EYES` and
  * `DeepSeek`, never the slug.
  */
-export function matchMentionables(
+function matchMentionables(
   all: Mentionable[],
   query: string,
 ): Mentionable[] {

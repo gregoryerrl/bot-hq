@@ -55,7 +55,7 @@ export const SCROLL_AXIS_CLASSES = [
 export const HORIZONTAL_CLIP = "overflow-x-hidden";
 
 /** A container that can scroll sideways: its 1-based line and the text. */
-export interface BareScrollContainer {
+interface BareScrollContainer {
   line: number;
   text: string;
 }

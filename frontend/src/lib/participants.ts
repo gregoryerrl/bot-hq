@@ -67,7 +67,7 @@ export type ParticipantView = {
 };
 
 /** The roster read (`src/tauri_cmd/sessions.rs`). Named once, here. */
-export const LIST_PARTICIPANTS_CMD = "list_session_participants";
+const LIST_PARTICIPANTS_CMD = "list_session_participants";
 
 /**
  * The contract's display rule, in one function:
@@ -202,7 +202,7 @@ export function slotKey(spawnSlot: number): string {
  * slot-shaped payloads describe. Observers ARE spawned; they read the channel
  * and may post, they simply never take a scheduled turn.
  */
-export function isSpawnable(
+function isSpawnable(
   p: Pick<ParticipantView, "enabled" | "participation_mode">,
 ): boolean {
   return p.enabled && p.participation_mode !== "on_demand";
@@ -267,7 +267,7 @@ export function spawnSlotOf(
  * spawnable one, since the fixed pair reports slots 0 and 1 only. Either way its
  * slug still resolves whatever the live events supply.
  */
-export function participantRuntimeKeys(
+function participantRuntimeKeys(
   roster: readonly ParticipantView[],
   p: ParticipantView,
 ): string[] {
@@ -450,7 +450,7 @@ export function capabilityGapWarning(
  * Capability slug for filing review findings — the reviewer's box. Mirrors
  * `Capability::FileFinding` in `src/agents/capability.rs`.
  */
-export const FILE_FINDING = "file_finding";
+const FILE_FINDING = "file_finding";
 
 /**
  * What the picked roster, taken together, should hear before Create (round 8).

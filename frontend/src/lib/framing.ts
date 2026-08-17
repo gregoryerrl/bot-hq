@@ -17,7 +17,7 @@
  * for a retired agent — that column is gone as of migration 0060, so the
  * example moved but the rule did not.
  */
-export const RETIRED_FRAMING =
+const RETIRED_FRAMING =
   /(?<![A-Za-z0-9_])(brian|rain|duo)(?![A-Za-z0-9_])/gi;
 
 /**
@@ -49,7 +49,7 @@ export function stripComments(source: string): string {
 }
 
 /** One offending line: its 1-based number, the words matched, and the text. */
-export interface FramingHit {
+interface FramingHit {
   line: number;
   words: string[];
   text: string;

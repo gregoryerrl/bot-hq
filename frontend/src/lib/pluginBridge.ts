@@ -15,10 +15,10 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { commands } from "./bindings";
 
-export const PING_INTERVAL_MS = 5_000;
+const PING_INTERVAL_MS = 5_000;
 
 /** How this platform's webview surfaces the custom scheme. */
-export type SchemeForm = "unix" | "windows";
+type SchemeForm = "unix" | "windows";
 
 /**
  * Decide the scheme form from a `convertFileSrc` sample. macOS/Linux
@@ -63,7 +63,7 @@ export function expectedOrigins(form: SchemeForm, pluginId: string): string[] {
     : ["https://bhq-plugin.localhost", "null"];
 }
 
-export interface BhqInvokeMsg {
+interface BhqInvokeMsg {
   type: "bhq:invoke";
   /** Correlation id, echoed on the reply. */
   id: string;
@@ -93,7 +93,7 @@ export function parseSpawnRequest(args: unknown): SpawnRequest {
 }
 
 /** The two host→plugin push topics (v1 — hardcoded, no general pub/sub). */
-export type PluginEventTopic = "plugin_assets_changed" | "sessions_changed";
+type PluginEventTopic = "plugin_assets_changed" | "sessions_changed";
 
 /**
  * Push a `bhq:event` into a plugin iframe. Same "*" targetOrigin rationale
@@ -107,7 +107,7 @@ export function postPluginEvent(
   iframe.contentWindow?.postMessage({ type: "bhq:event", topic }, "*");
 }
 
-export type SpawnRouting =
+type SpawnRouting =
   | { action: "forward" }
   | { action: "confirm"; req: SpawnRequest }
   | { action: "reject"; error: string };
@@ -139,7 +139,7 @@ export function routeSpawnInvoke(
   return { action: "confirm", req: parseSpawnRequest(args) };
 }
 
-export type Classified =
+type Classified =
   | { kind: "invoke"; msg: BhqInvokeMsg }
   | { kind: "pong" }
   | { kind: "reject"; reason: string };
