@@ -36,6 +36,34 @@ describe("framing detection", () => {
     // on the same line stops being scanned.
     expect(stripComments('const u = "https://x/duo";')).toContain("duo");
   });
+
+  /**
+   * **A stripped block comment must not move the lines under it** — round 5's
+   * N5. Block comments were replaced with `""`, newlines included, and every
+   * caller splits the STRIPPED text and reports `i + 1`, so each multi-line
+   * block shifted every later report upward by its own height. Detection was
+   * never wrong; the line number printed beside it was, and it pointed the
+   * reader at innocent code.
+   *
+   * Measured before the fix: an offender on line 5, under a three-line block,
+   * was reported as line 3. Blanking to spaces preserves both the line count and
+   * the column offsets.
+   */
+  it("does not shift line numbers when a block comment is stripped", () => {
+    const src = [
+      "const a = 1;",
+      "/* a block",
+      "   spanning",
+      "   three lines */",
+      'const t = "the duo was nudged";',
+    ].join("\n");
+
+    expect(stripComments(src).split("\n")).toHaveLength(5);
+
+    const hits = findRetiredFraming(src);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(5);
+  });
 });
 
 describe("user-facing framing", () => {

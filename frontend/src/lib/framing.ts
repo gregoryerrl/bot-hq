@@ -29,10 +29,20 @@ export const RETIRED_FRAMING =
  * What ships to a user's screen is what gets guarded.
  *
  * The `[^:]` guard before `//` keeps `https://` out of the line-comment rule.
+ *
+ * **Block comments are blanked, not deleted** (round 5, N5). They used to be
+ * replaced with `""` — newlines and all — and every caller here splits the
+ * STRIPPED text and reports `i + 1` as the line number, so each multi-line block
+ * comment shifted every subsequent report upward by its own height. Measured: an
+ * offender on line 5, preceded by a three-line block, was reported as line 3.
+ * Detection was never affected — the guard failed the build either way — but the
+ * number it printed sent the reader to the wrong line, and the drift grows with
+ * every doc comment above the hit. Replacing each non-newline character with a
+ * space keeps line count AND column offsets intact.
  */
 export function stripComments(source: string): string {
   return source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, " "))
     .split("\n")
     .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
     .join("\n");
