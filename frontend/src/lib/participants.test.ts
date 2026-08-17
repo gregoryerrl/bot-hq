@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   authorLabel,
   capabilityGapWarning,
+  rosterAdvisory,
   participantLabelIndex,
   participantLabel,
   participantHueIndex,
@@ -485,5 +486,35 @@ describe("participantHueIndex", () => {
     // Without it the hash still answers — a surface showing one author at a
     // time (a dashboard tile) has no roster and must still get a colour.
     expect(authorColorClass(first)).toMatch(/^text-author-/);
+  });
+});
+
+describe("rosterAdvisory — round 8", () => {
+  const HANDS = { id: 1, display_name: "HANDS", capabilities: ["read_channel", "edit_files"] };
+  const EYES = { id: 2, display_name: "EYES", capabilities: ["read_channel", "file_finding"] };
+  const READ_ONLY = { id: 3, display_name: "ADVISOR", capabilities: ["read_channel"] };
+
+  it("keeps the D11 gap as the first word", () => {
+    expect(rosterAdvisory([READ_ONLY])).toMatch(/no participant can edit files/i);
+  });
+
+  it("says nothing about a solo executor — the product default", () => {
+    expect(rosterAdvisory([HANDS])).toBeNull();
+  });
+
+  it("warns a roster of two with no reviewer, and names a duplicated role", () => {
+    // The `hands` + `hands-2` session: two executors, nobody to file findings.
+    const msg = rosterAdvisory([HANDS, HANDS])!;
+    expect(msg).toMatch(/no participant can file findings/i);
+    expect(msg).toMatch(/HANDS picked more than once/);
+    expect(msg).toMatch(/HANDS-2/);
+  });
+
+  it("is silent for the executor + reviewer pair", () => {
+    expect(rosterAdvisory([HANDS, EYES])).toBeNull();
+  });
+
+  it("notes a duplicate even when a reviewer is present", () => {
+    expect(rosterAdvisory([HANDS, EYES, EYES])).toMatch(/EYES picked more than once/);
   });
 });

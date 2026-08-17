@@ -420,6 +420,31 @@ describe("New session dialog — capability warning (D11)", () => {
     expect(warning.textContent).not.toMatch(/reviewer|EYES|HANDS/i);
   });
 
+  it("opens an added slot on the first role not yet on the roster, and warns a reviewer-less pair (round 8)", async () => {
+    // The `hands` + `hands-2` session: the second slot used to open on
+    // "(choose a role)" and the roster shipped with two executors and nobody
+    // able to file findings; the ordinal placeholder read as endorsement.
+    const HANDS_ONLY = role({ id: 1, slug: "hands", display_name: "HANDS", capabilities: ["read_channel", "edit_files"] });
+    const REVIEWER = role({ id: 2, slug: "eyes", display_name: "EYES", capabilities: ["read_channel", "file_finding"] });
+    mockBackend([HANDS_ONLY, REVIEWER]);
+    await openDialog();
+    fireEvent.change(screen.getByPlaceholderText(/refactor auth flow/i), {
+      target: { value: "a task" },
+    });
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: /add participant/i }));
+    // Slot 2 defaults to the next unused role — the reviewer.
+    expect(roleSelect(2)).toHaveValue("2");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    // Picking HANDS again is allowed — and now says so.
+    fireEvent.change(roleSelect(2), { target: { value: "1" } });
+    const warning = screen.getByRole("status");
+    expect(warning).toHaveTextContent(/no participant can file findings/i);
+    expect(warning).toHaveTextContent(/HANDS picked more than once/);
+    expect(createButton()).not.toBeDisabled();
+  });
+
   it("does not block Create", async () => {
     mockBackend([READ_ONLY]);
     await openDialog();
@@ -450,7 +475,11 @@ describe("New session dialog — capability warning (D11)", () => {
     // The union is what is checked, so one editing participant is enough.
     fireEvent.click(screen.getByRole("button", { name: /add participant/i }));
     fireEvent.change(roleSelect(2), { target: { value: "1" } });
-    expect(screen.queryByRole("status")).toBeNull();
+    // (Round 8: this pair still hears that nobody can file findings — the
+    // read-only role ticks no `file_finding` box — but the edit gap is gone.)
+    expect(screen.queryByRole("status")?.textContent ?? "").not.toMatch(
+      /edit files/i,
+    );
   });
 
   it("says nothing while a row still has no role", async () => {

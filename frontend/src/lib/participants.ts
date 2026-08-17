@@ -445,3 +445,52 @@ export function capabilityGapWarning(
   if (union.has(EDIT_FILES)) return null;
   return "No participant can edit files — this session can review, but nothing in it can act.";
 }
+
+/**
+ * Capability slug for filing review findings — the reviewer's box. Mirrors
+ * `Capability::FileFinding` in `src/agents/capability.rs`.
+ */
+export const FILE_FINDING = "file_finding";
+
+/**
+ * What the picked roster, taken together, should hear before Create (round 8).
+ *
+ * The D11 gap above stays the first word. Beyond it, two shapes a session got
+ * created with in the wild and nothing pushed back on: a roster of two or more
+ * with NO reviewer (a `hands` + `hands-2` session was created that way — the
+ * only feedback a duplicate produced was the ordinal placeholder, which reads
+ * as endorsement), and the same role picked more than once. Both are
+ * advisory: duplicates are legitimate (two executors), and a solo roster is
+ * the product default and is not told it lacks a reviewer.
+ *
+ * Returns null while the roster is incomplete or unremarkable.
+ */
+export function rosterAdvisory(
+  picked: readonly { id: number; display_name: string; capabilities: readonly string[] }[],
+): string | null {
+  const gap = capabilityGapWarning(picked);
+  if (gap) return gap;
+  if (picked.length < 2) return null;
+  const notes: string[] = [];
+  const union = new Set<string>();
+  for (const role of picked) for (const c of role.capabilities) union.add(c);
+  if (!union.has(FILE_FINDING)) {
+    notes.push(
+      "No participant can file findings — nothing in this session can review the work.",
+    );
+  }
+  const seen = new Map<number, string>();
+  const dupes: string[] = [];
+  for (const role of picked) {
+    if (seen.has(role.id) && !dupes.includes(role.display_name)) dupes.push(role.display_name);
+    seen.set(role.id, role.display_name);
+  }
+  if (dupes.length > 0) {
+    notes.push(
+      `${dupes.join(", ")} picked more than once — the second is ${dupes
+        .map((d) => `${d}-2`)
+        .join(", ")}; intended?`,
+    );
+  }
+  return notes.length > 0 ? notes.join(" ") : null;
+}

@@ -20,7 +20,7 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { pickFolder } from "./contextLibraryShared";
 import {
-  capabilityGapWarning,
+  rosterAdvisory,
   EDIT_FILES,
   useParticipantLabels,
 } from "../lib/participants";
@@ -378,8 +378,19 @@ export function Dashboard() {
       .map((row) => roles.find((r) => r.id === row.roleId))
       .filter((r): r is RoleView => r !== undefined);
     if (picked.length !== participants.length) return null;
-    return capabilityGapWarning(picked);
+    return rosterAdvisory(picked);
   }, [participants, roles]);
+
+  /**
+   * The next role NOT already on the roster, for a freshly added row (round
+   * 8): a second slot used to open on "(choose a role)", and the roster
+   * shipped as `hands` + `hands-2` when the user picked the same role again.
+   * The user can still change it — this is the default, not a rule.
+   */
+  const nextUnusedRoleId = (rows: readonly ParticipantRow[]): number | null => {
+    const used = new Set(rows.map((r) => r.roleId));
+    return invitableRoles.find((r) => !used.has(r.id))?.id ?? null;
+  };
 
   const handleCreate = async () => {
     if (!title.trim() || !rosterReady) return;
@@ -816,7 +827,10 @@ export function Dashboard() {
                   <button
                     type="button"
                     onClick={() =>
-                      setParticipants((rows) => [...rows, emptyParticipant()])
+                      setParticipants((rows) => [
+                        ...rows,
+                        { ...emptyParticipant(), roleId: nextUnusedRoleId(rows) },
+                      ])
                     }
                     className="mt-2 font-code-sm text-code-sm text-primary transition-colors hover:underline"
                   >
