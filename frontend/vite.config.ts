@@ -22,5 +22,9 @@ export default defineConfig({
     globals: true,
     environment: "jsdom",
     setupFiles: ["./src/test-setup.ts"],
+    // Vitest replaces CSS imports with empty strings unless told otherwise;
+    // `lib/fonts.test.ts` reads the real `index.css` (raw) to check every
+    // `@font-face` source against `public/`, so that one file is let through.
+    css: { include: [/src\/index\.css/] },
   },
 });
