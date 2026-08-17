@@ -227,22 +227,6 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
-    pub async fn get_folder(
-        &self,
-        project: &str,
-        folder_path: &str,
-    ) -> Result<Option<ClFolder>> {
-        let row = sqlx::query_as::<_, ClFolder>(&format!(
-            "SELECT {} FROM cl_folders WHERE project_id = ? AND folder_path = ?",
-            cl_columns("folder_path")
-        ))
-        .bind(project)
-        .bind(folder_path)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row)
-    }
-
     /// Parallel to [`cl_index_search`]. `project=None` searches all projects;
     /// optional `query` is a case-insensitive substring across folder_path /
     /// description / tags.

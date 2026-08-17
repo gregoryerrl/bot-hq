@@ -48,18 +48,6 @@ impl Storage {
         Ok(())
     }
 
-    /// Set or clear `cl_path` on an existing project row. Pass `None` to
-    /// revert to the default convention (`<data_dir>/projects/<name>/`).
-    pub async fn set_project_cl_path(&self, name: &str, cl_path: Option<&str>) -> Result<()> {
-        sqlx::query("UPDATE projects SET cl_path = ? WHERE name = ?")
-            .bind(cl_path)
-            .bind(name)
-            .execute(&self.pool)
-            .await
-            .with_context(|| format!("setting cl_path for {name}"))?;
-        Ok(())
-    }
-
     /// Soft-unregister: clear `cl_path` + `working_repo_path` but KEEP the
     /// projects row and all child rows (cl_index, cl_folders, cl_reads). The
     /// folder reverts to "just a folder" in the tree but its descriptions
@@ -138,9 +126,19 @@ impl Storage {
     }
 
     /// Set `working_repo_path` for a project ONLY if it's currently NULL or
-    /// empty. Used by startup backfill so the convention (`~/Projects/<name>`)
-    /// can populate previously-unset projects without clobbering a value the
-    /// user (or a future UI editor) deliberately set to something else.
+    /// empty, so the convention (`~/Projects/<name>`) can populate an unset
+    /// project without clobbering a value the user deliberately set.
+    ///
+    /// **No caller yet — the startup backfill this was written for was never
+    /// built.** Kept rather than deleted because the intent is the useful part
+    /// and `git rm` buries it; audited 2026-08-17 (round 6, G2). Before wiring
+    /// one, note that a project's `working_repo_path` does NOT feed a session's:
+    /// `create_session` binds the session column from its own `repo_path`
+    /// argument, and the create dialog is what resolves a selected project to a
+    /// path (`Dashboard.tsx`, `adHocRepo || proj?.working_repo_path`). Only
+    /// three project rows are unset (`_globals`, `988`, `test-folder`), none of
+    /// them real repos — so the backfill's practical value is near zero and that
+    /// is the reason it stays unwritten, not an oversight.
     pub async fn set_project_working_repo_path_if_unset(
         &self,
         name: &str,

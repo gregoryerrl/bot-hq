@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct Loader {
-    plugins_root: PathBuf,
     loaded: Vec<LoadedPlugin>,
 }
 
@@ -27,10 +26,7 @@ impl Loader {
         let mut loaded = Vec::new();
 
         if !plugins_root.is_dir() {
-            return Ok(Self {
-                plugins_root,
-                loaded,
-            });
+            return Ok(Self { loaded });
         }
 
         let entries = std::fs::read_dir(&plugins_root)?;
@@ -74,14 +70,7 @@ impl Loader {
         }
         loaded.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
 
-        Ok(Self {
-            plugins_root,
-            loaded,
-        })
-    }
-
-    pub fn plugins_root(&self) -> &Path {
-        &self.plugins_root
+        Ok(Self { loaded })
     }
 
     pub fn loaded(&self) -> &[LoadedPlugin] {

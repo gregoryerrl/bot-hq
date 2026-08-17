@@ -17,14 +17,6 @@ pub enum IpavPhase {
 }
 
 impl IpavPhase {
-    pub fn chip(&self) -> &'static str {
-        match self {
-            IpavPhase::Investigate => "I",
-            IpavPhase::Plan => "P",
-            IpavPhase::Apply => "A",
-            IpavPhase::Verify => "V",
-        }
-    }
     pub fn name(&self) -> &'static str {
         match self {
             IpavPhase::Investigate => "Investigate",
@@ -48,13 +40,21 @@ impl IpavPhase {
     }
 
     /// Accept either single-letter chips (`I`/`P`/`A`/`V`) or full names
-    /// (`Investigate`/`Plan`/`Apply`/`Verify`), case-INSENSITIVELY. Used by
-    /// both the external driver MCP (chips) and the internal agent-callable
-    /// advance_phase (full names — matches what agents see in `[PHASE: …]`
-    /// envelopes). Case-insensitive so a lowercase `"apply"` arg (the form the
-    /// session-doc tools accept) can't be valid for one phase tool and rejected
-    /// by another — `signaling/jsonrpc.rs::parse_optional_phase` routes the
-    /// session-doc phase arg through here too.
+    /// (`Investigate`/`Plan`/`Apply`/`Verify`), case-INSENSITIVELY.
+    ///
+    /// **The chip forms are still live, and this note is why.** Their original
+    /// consumer was the external driver MCP, removed 2026-08-17 — which is what
+    /// left `IpavPhase::chip()` with no callers, deleted in the same commit as
+    /// this edit. The chip BRANCH outlives it: `advance_phase` accepts chip form
+    /// too, pinned by `jsonrpc.rs`'s `advance_phase_self_accepts_chip_form`.
+    /// Deleting these arms because the driver is gone would break a tested,
+    /// reachable input — read that test before touching them.
+    ///
+    /// Full names match what agents see in `[PHASE: …]` envelopes.
+    /// Case-insensitive so a lowercase `"apply"` arg (the form the session-doc
+    /// tools accept) can't be valid for one phase tool and rejected by another —
+    /// `signaling/jsonrpc.rs::parse_optional_phase` routes the session-doc phase
+    /// arg through here too.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.to_ascii_lowercase().as_str() {
             "i" | "investigate" => IpavPhase::Investigate,
@@ -108,11 +108,10 @@ impl IpavPhase {
 /// rule that catches both, and the third copy in `tauri_cmd/sessions.rs` that
 /// pair-tracking could not have caught: **an edit correcting one claim in a block
 /// re-reads the whole block against what shipped that day.**
-/// `Default` is DERIVED, so the default phase is stated once — on `IpavPhase`
-/// itself — and read from there. It used to be a hand-written impl naming
-/// `Investigate` a second time; migration 0063 added a third reader (a NULL or
-/// unparseable `sessions.ipav_phase`), which is one restatement too many for a
-/// fact that must never disagree with itself.
+///
+/// `Default` is DERIVED (see `IpavPhase`), so the default phase is stated once
+/// and read from there — 0063's NULL/unparseable column is its third reader, and
+/// a restated default is how three readers drift apart.
 #[derive(Debug, Clone, Default)]
 pub struct IpavState {
     pub current_phase: IpavPhase,

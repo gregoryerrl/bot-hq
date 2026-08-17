@@ -23,7 +23,6 @@ mod cl_atoms;
 mod cl_index;
 mod context_readings;
 mod feedback;
-mod forward_events;
 mod findings;
 mod messages;
 mod models;
@@ -51,7 +50,7 @@ pub use participants::{
 pub use feedback::{FEEDBACK_KINDS, FEEDBACK_STATUSES};
 pub use tray::{is_gate_options, GATE_OPTIONS_JSON};
 pub use row_types::{
-    AgentConfig, AgentFeedback, CancelEvent, ClFolder, ForwardEvent, ClIndexEntry, ClRead,
+    AgentConfig, AgentFeedback, CancelEvent, ClFolder, ClIndexEntry, ClRead,
     Finding, FindingSeverity, FindingStatus, Message, MessageKind, Model, Plugin, Project,
     QuestionKind, RetrievalStats, Session, SessionDocument, SessionTrayEntry, SessionWithPreview,
 };
@@ -199,8 +198,8 @@ impl Storage {
 
 /// Column projection for `cl_folders` reads (and the shared base of
 /// `cl_index_columns`). The path column differs per table (`file_path` vs
-/// `folder_path`), so `get_folder` and `cl_search_table` build from this and
-/// can't drift. `path_column` is a caller-controlled const, never user input.
+/// `folder_path`), so every folder/file read builds from this and they can't
+/// drift. `path_column` is a caller-controlled const, never user input.
 fn cl_columns(path_column: &str) -> String {
     format!("id, project_id, {path_column}, description, tags, created_at, updated_at")
 }

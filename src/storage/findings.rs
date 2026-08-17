@@ -315,25 +315,56 @@ mod tests {
         assert_eq!(s.get_finding("f1").await.unwrap().unwrap().eyes_approved, 1);
     }
 
+    /// The findings re-raise turn-evidence guard's actual question: has anyone
+    /// OTHER than the filer had a turn since the last raise?
+    ///
+    /// Inherited from `has_message_from_author_since_detects_turn` when that
+    /// name-bearing predecessor was deleted (round 6, F6). The predecessor had
+    /// four test callers and the surviving function had **none** — so deleting
+    /// the dead code without moving its tests would have removed the only
+    /// coverage of this behaviour while leaving the live path bare. The
+    /// `origin = 'participant'` case below was never asserted at all.
     #[tokio::test]
-    async fn has_message_from_author_since_detects_turn() {
+    async fn has_message_from_other_participant_since_detects_a_peer_turn() {
         let s = Storage::memory().await.unwrap();
         seed(&s).await;
         s.post_to_channel("s1", "participant", Some("hands"), crate::storage::MessageKind::Text.as_str(), "looking", None)
         .await
         .unwrap();
         // Fixed-string bounds avoid wall-clock flakiness.
+        let past = "2000-01-01T00:00:00.000Z";
+        let future = "2999-01-01T00:00:00.000Z";
+        // hands spoke, so from EYES' vantage a peer has had a turn.
         assert!(s
-            .has_message_from_author_since("s1", "hands", "2000-01-01T00:00:00.000Z")
+            .has_message_from_other_participant_since("s1", "eyes", past)
             .await
             .unwrap());
+        // ...but not from hands' own: `author <> ?` excludes the filer, which is
+        // the whole point — a participant cannot supply its own turn evidence.
         assert!(!s
-            .has_message_from_author_since("s1", "brian", "2999-01-01T00:00:00.000Z")
+            .has_message_from_other_participant_since("s1", "hands", past)
             .await
             .unwrap());
+        // A bound in the future admits nothing.
         assert!(!s
-            .has_message_from_author_since("s1", "rain", "2000-01-01T00:00:00.000Z")
+            .has_message_from_other_participant_since("s1", "eyes", future)
             .await
             .unwrap());
+
+        // `origin = 'participant'` is load-bearing and was untested: a host
+        // system_notice or the user's own reply must not stand in for a peer
+        // turn. Both are written with `author = 'user'` / origin `user`.
+        let s2 = Storage::memory().await.unwrap();
+        seed(&s2).await;
+        s2.post_to_channel("s1", "user", None, crate::storage::MessageKind::Text.as_str(), "any update?", None)
+            .await
+            .unwrap();
+        assert!(
+            !s2.has_message_from_other_participant_since("s1", "hands", past)
+                .await
+                .unwrap(),
+            "a user message is not a peer turn — without the origin filter the \
+             re-raise guard escalates on the user's own prompt"
+        );
     }
 }

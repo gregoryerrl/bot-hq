@@ -443,7 +443,6 @@ every write.
 | `src/storage/session_docs.rs` | per-session IPAV docs + archives | M |
 | `src/storage/activity_events.rs` | activity transition ledger (read only by tests + boot sweep) | S |
 | `src/storage/cancel_events.rs` | Stop/interrupt escalation ledger | S |
-| `src/storage/forward_events.rs` | dropped peer-forward ledger — write-orphaned since the router deletion | S |
 | `src/storage/retrieval_events.rs` | `cl_retrieve` telemetry | S |
 | `src/storage/context_readings.rs` | per-turn context-window readings (P7) | M |
 | `src/storage/feedback.rs` | agent-filed bot-hq feedback | S |

@@ -63,35 +63,10 @@ impl Storage {
             .await
     }
 
-    /// True if `author` posted any message in `session_id` with `created_at`
-    /// strictly after `since` (an RFC3339-Z timestamp). Powers the findings
-    /// re-raise turn-evidence guard: EYES only escalates a re-raise once HANDS
-    /// has had a turn since the finding's last raise, so buffer/turn latency
-    /// can't false-escalate.
-    pub async fn has_message_from_author_since(
-        &self,
-        session_id: &str,
-        author: &str,
-        since: &str,
-    ) -> Result<bool> {
-        let exists: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM messages \
-             WHERE session_id = ? AND author = ? AND created_at > ?)",
-        )
-        .bind(session_id)
-        .bind(author)
-        .bind(since)
-        .fetch_one(&self.pool)
-        .await
-        .with_context(|| format!("checking {author} messages since {since}"))?;
-        Ok(exists != 0)
-    }
-
     /// True if any participant OTHER than `author` posted in `session_id` after
     /// `since` (an RFC3339-Z timestamp).
     ///
-    /// The name-free form of [`Self::has_message_from_author_since`], and what
-    /// the findings re-raise guard asks: a reviewer only escalates once its peer
+    /// What the findings re-raise guard asks: a reviewer only escalates once its peer
     /// has actually had a turn since the last raise. Scoped to
     /// `origin = 'participant'` so a host `system_notice` or the user's own reply
     /// cannot stand in for a peer turn.
@@ -336,9 +311,9 @@ mod tests {
         // `2026-08-06 11:22:33`. The regression would have been silent in both
         // directions: the frontend parses a zone-less string as LOCAL time (the
         // staleness hallucination `storage::time` exists to prevent), and
-        // `has_message_from_author_since` is a STRING compare against an
-        // RFC3339-Z bound, so it would have gone permanently false for a
-        // same-day bound and quietly disarmed the findings re-raise
+        // `has_message_from_other_participant_since` is a STRING compare
+        // against an RFC3339-Z bound, so it would have gone permanently false
+        // for a same-day bound and quietly disarmed the findings re-raise
         // turn-evidence guard.
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "S", None).await.unwrap();
@@ -357,7 +332,9 @@ mod tests {
         // than midnight of the same day and this goes false.
         let midnight = format!("{}T00:00:00.000Z", &ts[..10]);
         assert!(
-            s.has_message_from_author_since("s1", "hands", &midnight).await.unwrap(),
+            s.has_message_from_other_participant_since("s1", "eyes", &midnight)
+                .await
+                .unwrap(),
             "a row written today must read as after today's midnight ({ts} vs {midnight})"
         );
     }

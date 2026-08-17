@@ -2600,8 +2600,8 @@ impl Storage {
         // project baseline every other write already keeps — see `storage::time`
         // — and the difference is not cosmetic. `datetime('now')` emits a
         // zone-less `2026-08-06 11:22:33`, which sorts BEFORE the same instant
-        // in RFC3339 (space < 'T'), so `has_message_from_author_since` — a
-        // string compare against an RFC3339-Z bound — would have gone
+        // in RFC3339 (space < 'T'), so `has_message_from_other_participant_since`
+        // — a string compare against an RFC3339-Z bound — would have gone
         // permanently false and silently disarmed the findings re-raise
         // turn-evidence guard. The frontend would also have read every new row
         // as local time: the staleness hallucination `now_utc` exists to stop.

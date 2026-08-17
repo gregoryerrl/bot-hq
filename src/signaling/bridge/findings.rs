@@ -35,10 +35,12 @@ impl SignalingBridge {
         // ELSE has had a turn since it was last raised, so a double-flag before
         // the peer's turn (buffer / turn-boundary latency) can't false-escalate.
         //
-        // rc3 D10: was `has_message_from_author_since(.., "brian", ..)`, which
+        // rc3 D10: was an author-NAMED predicate asking for `"brian"`, which
         // under role-derived slugs matches nothing — the escalation would have
         // stopped firing entirely, silently. "Anyone but the filer" is the same
-        // question asked without naming an agent.
+        // question asked without naming an agent. (That predecessor,
+        // `has_message_from_author_since`, was deleted in round 6 once this was
+        // its only remaining reader; do not grep for it.)
         if let Some(existing) = storage
             .latest_open_finding_by_summary(&session_id, &summary)
             .await?
@@ -61,9 +63,6 @@ impl SignalingBridge {
         storage
             .insert_finding(&session_id, &uid, &agent, severity, &summary, code_ref.as_deref())
             .await?;
-        // A new blocking finding changes the open-blocking count → recompute the
-        // router's lock-free cache (cold path), then refresh the UI banner.
-        self.refresh_open_blocking(&session_id).await;
         let _ = self
             .event_tx
             .send(SignalingEvent::FindingsChanged { session_id });
@@ -114,9 +113,6 @@ impl SignalingBridge {
         // Refresh the banner — the disposed finding stops gating, so the count
         // drops. Look up its session_id from the (still-present) row.
         if let Ok(Some(f)) = storage.get_finding(&finding_uid).await {
-            // A disposed finding stops gating → the open-blocking count drops;
-            // recompute the router's cache (cold path) before the banner event.
-            self.refresh_open_blocking(&f.session_id).await;
             let _ = self
                 .event_tx
                 .send(SignalingEvent::FindingsChanged { session_id: f.session_id });
@@ -161,19 +157,6 @@ impl SignalingBridge {
             self.reviewer_override_reason(session_id).as_deref(),
         );
         Ok(verdict.unwrap_or_else(|| "ok".to_string()))
-    }
-
-    /// Open-blocking-findings count for the per-turn banner. FAIL-SAFE: returns
-    /// 0 when storage isn't wired or the query errors — the banner is salience,
-    /// not a gate, so it must never break the message pump.
-    pub async fn open_blocking_count(&self, session_id: &str) -> usize {
-        let Some(storage) = self.storage.lock().await.clone() else {
-            return 0;
-        };
-        storage
-            .count_open_blocking_findings(session_id)
-            .await
-            .unwrap_or(0) as usize
     }
 
     /// All findings for a session — backs the `list_session_findings` Tauri

@@ -29,7 +29,7 @@ use crate::storage::{PersistedMessage, Storage};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
@@ -410,13 +410,6 @@ pub struct SignalingBridge {
     /// as "the secret is wrong" — see [`SignalingBridge::mcp_token_matches`] for
     /// why that distinction is what keeps a mid-upgrade session working.
     mcp_tokens: std::sync::Mutex<HashMap<String, String>>,
-    /// session_id → shared open-blocking-findings count. The router reads the
-    /// `Arc<AtomicUsize>` LOCK-FREE per peer-forward (for the wire banner) instead
-    /// of a per-forward `SELECT COUNT(*)` + storage-`Mutex` acquire; the findings
-    /// mutators recompute it after any change via `refresh_open_blocking`.
-    /// `std::sync::Mutex` over the MAP (brief, never held across `await`); the
-    /// per-session `Arc` is the lock-free read surface the router holds a clone of.
-    session_open_blocking: std::sync::Mutex<HashMap<String, Arc<AtomicUsize>>>,
 }
 
 /// What an `advance_phase` call actually did — **the tool's honest answer**.
@@ -507,7 +500,6 @@ impl SignalingBridge {
             session_attention: std::sync::Mutex::new(HashMap::new()),
             turn_passes: std::sync::Mutex::new(HashMap::new()),
             mcp_tokens: std::sync::Mutex::new(HashMap::new()),
-            session_open_blocking: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -867,33 +859,6 @@ impl SignalingBridge {
             .is_some_and(|slugs| slugs.iter().any(|s| s == agent))
     }
 
-    pub async fn register_open_blocking(&self, session_id: String) -> Arc<AtomicUsize> {
-        let count = self.open_blocking_count(&session_id).await;
-        let arc = Arc::new(AtomicUsize::new(count));
-        self.session_open_blocking
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(session_id, Arc::clone(&arc));
-        arc
-    }
-
-    /// Recompute a session's open-blocking-findings count from storage into its
-    /// cached `Arc` (no-op if the session isn't registered — headless / tests).
-    /// COLD path: called only by the findings mutators after a change, never per
-    /// forward. The map lock is released BEFORE the storage query, so it's never
-    /// held across the `await`.
-    pub async fn refresh_open_blocking(&self, session_id: &str) {
-        let arc = self
-            .session_open_blocking
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(session_id)
-            .cloned();
-        let Some(arc) = arc else { return };
-        let count = self.open_blocking_count(session_id).await;
-        arc.store(count, Ordering::Release);
-    }
-
     /// Clear the awaiting flag for a session — called by core.broadcast when
     /// the user sends a message (which resumes the duo).
     pub async fn clear_session_awaiting(&self, session_id: &str) {
@@ -918,10 +883,6 @@ impl SignalingBridge {
             .unwrap_or_else(|p| p.into_inner())
             .retain(|(s, _), _| s != session_id);
         self.reviewer_override
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(session_id);
-        self.session_open_blocking
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(session_id);
@@ -1933,10 +1894,6 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(s.into(), "why".into());
-            b.session_open_blocking
-                .lock()
-                .unwrap()
-                .insert(s.into(), Arc::new(AtomicUsize::new(1)));
             b.turn_passes.lock().unwrap().insert(format!("{s}:hands"), 1);
             b.pending_override_requests
                 .lock()
@@ -2013,11 +1970,6 @@ mod tests {
             b.reviewer_override.lock().unwrap(),
             |m, s| m.contains_key(s)
         );
-        check!(
-            "session_open_blocking",
-            b.session_open_blocking.lock().unwrap(),
-            |m, s| m.contains_key(s)
-        );
         check!("turn_passes", b.turn_passes.lock().unwrap(), |m, s| {
             m.keys().any(|k| k.starts_with(&format!("{s}:")))
         });
@@ -2040,7 +1992,10 @@ mod tests {
             m.keys().any(|k| k.starts_with(&format!("{s}:")))
         });
 
-        assert_eq!(report.len(), 16, "a map was dropped from this test's sweep");
+        // Tracks THIS test's manual `check!` list, so it moves when a map is
+        // legitimately added or removed — 16 until round 6 deleted
+        // `session_open_blocking` with the rest of the router's orphaned cache.
+        assert_eq!(report.len(), 15, "a map was dropped from this test's sweep");
         let undrained: Vec<&str> = report
             .iter()
             .filter(|(_, doomed, _)| *doomed)
@@ -2151,9 +2106,26 @@ mod tests {
             .filter(|(_, ty)| ty.contains("HashMap"))
             .map(|(n, _)| n.as_str())
             .collect();
-        assert!(
-            maps.len() >= 16,
-            "field parse found only {} maps — the parser broke, not the code: {maps:?}",
+        // The floor exists so a silently-broken field parser cannot make the
+        // sweep below vacuous. It used to be a hardcoded `>= 16`, which is a
+        // tripwire on every legitimate field DELETION rather than a check on
+        // the parser — round 6 removed one map and this fired reading "the
+        // parser broke, not the code" when the code was exactly what changed.
+        // Derived from the struct text instead, by a different rule than the
+        // parser uses, so the two can disagree only if the parser is wrong.
+        let declared = struct_body
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("//") && !t.starts_with('#') && t.contains("HashMap")
+            })
+            .count();
+        assert!(declared >= 8, "the struct text scan found {declared} HashMap lines — both counts broke");
+        assert_eq!(
+            maps.len(),
+            declared,
+            "the field parser found {} maps but {declared} lines declare one — \
+             the parser broke, not the code: {maps:?}",
             maps.len()
         );
 
