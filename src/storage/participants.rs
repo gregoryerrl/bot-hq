@@ -1457,6 +1457,147 @@ impl Storage {
             .all(|p| p.done_vote))
     }
 
+    // ---- the phase-advance vote (migration 0062) -------------------------
+
+    /// The session's phase epoch — monotonic, bumped on every transition.
+    pub async fn phase_epoch(&self, session_id: &str) -> Result<i64> {
+        let row: Option<(i64,)> = sqlx::query_as("SELECT phase_epoch FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await
+            .context("reading phase epoch")?;
+        Ok(row.map(|r| r.0).unwrap_or(0))
+    }
+
+    /// Advance the epoch and drop every vote that came before it.
+    ///
+    /// **Both halves, in one call, because either alone is a defect.** Bumping
+    /// without deleting leaves rows that can never match again — dead weight
+    /// that grows per transition. Deleting without bumping loses the only thing
+    /// that distinguishes a vote cast before a phase round trip from one cast
+    /// after it, which is the axis a content fingerprint cannot see.
+    pub async fn bump_phase_epoch(&self, session_id: &str) -> Result<i64> {
+        let mut tx = self.pool.begin().await.context("begin bump_phase_epoch")?;
+        sqlx::query("UPDATE sessions SET phase_epoch = phase_epoch + 1 WHERE id = ?")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .context("bumping phase epoch")?;
+        sqlx::query("DELETE FROM phase_votes WHERE session_id = ?")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .context("clearing phase votes for the new epoch")?;
+        let (epoch,): (i64,) = sqlx::query_as("SELECT phase_epoch FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_one(&mut *tx)
+            .await
+            .context("reading the bumped epoch")?;
+        tx.commit().await.context("commit bump_phase_epoch")?;
+        Ok(epoch)
+    }
+
+    /// Record one participant's vote to advance.
+    ///
+    /// Idempotent by primary key: voting twice for the same question is one
+    /// vote, not two, which matters because the tally is a count.
+    pub async fn cast_phase_vote(
+        &self,
+        session_id: &str,
+        participant_id: i64,
+        target_phase: &str,
+        fingerprint: &str,
+        epoch: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO phase_votes \
+             (session_id, participant_id, target_phase, artifact_fingerprint, phase_epoch, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(session_id)
+        .bind(participant_id)
+        .bind(target_phase)
+        .bind(fingerprint)
+        .bind(epoch)
+        .bind(now_utc())
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("casting phase vote for participant {participant_id}"))?;
+        Ok(())
+    }
+
+    /// Withdraw one participant's vote — **its own, and only its own.**
+    ///
+    /// Mirrors `TurnEnding::Passed`'s treatment of `done_vote`, and for the
+    /// reason written there: a vote survives across rounds, so a participant
+    /// that voted last round and passes this one would still be counted, and the
+    /// tally would complete on a turn whose whole meaning was "not me".
+    ///
+    /// A reviewer needs this more than the author does, and that asymmetry is
+    /// why it is not optional. The phase-doc author can withdraw by editing the
+    /// doc — the fingerprint moves and every vote falls away. A reviewer never
+    /// moves the fingerprint (one author per phase chain), so without an
+    /// explicit retraction its vote could only be undone by somebody else's
+    /// edit, and the tally could complete over a live objection.
+    ///
+    /// Session-wide for the participant rather than keyed to one question: it is
+    /// called when someone declines to carry the turn, and that declines every
+    /// open question, not the one that happens to be current.
+    pub async fn retract_phase_votes(&self, participant_id: i64) -> Result<()> {
+        sqlx::query("DELETE FROM phase_votes WHERE participant_id = ?")
+            .bind(participant_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("retracting phase votes for participant {participant_id}"))?;
+        Ok(())
+    }
+
+    /// Has every ACTIVE participant voted to advance to `target_phase` for this
+    /// exact artifact and epoch?
+    ///
+    /// **The electorate is `enabled && participation_mode == MODE_ACTIVE`** —
+    /// deliberately the same filter [`Storage::all_active_voted_done`] uses,
+    /// character for character. Two consensus tests over two different rosters
+    /// is how a session ends up able to halt but not advance, or the reverse.
+    ///
+    /// **An empty electorate is vacuously true**, exactly as `all_active_voted_done`
+    /// is, and for the same reason: there is no participant left who has not
+    /// voted. A solo session is NOT this case — its single participant IS the
+    /// electorate, so its own vote completes the tally. The two are pinned
+    /// separately because they fail differently and one test passes over the
+    /// other broken.
+    pub async fn all_active_voted_to_advance(
+        &self,
+        session_id: &str,
+        target_phase: &str,
+        fingerprint: &str,
+        epoch: i64,
+    ) -> Result<bool> {
+        let roster = self.participants_for_session(session_id).await?;
+        let electorate: Vec<i64> = roster
+            .iter()
+            .filter(|p| p.enabled && p.participation_mode == MODE_ACTIVE)
+            .map(|p| p.id)
+            .collect();
+        if electorate.is_empty() {
+            return Ok(true);
+        }
+        let voters: Vec<(i64,)> = sqlx::query_as(
+            "SELECT participant_id FROM phase_votes \
+             WHERE session_id = ? AND target_phase = ? AND artifact_fingerprint = ? \
+               AND phase_epoch = ?",
+        )
+        .bind(session_id)
+        .bind(target_phase)
+        .bind(fingerprint)
+        .bind(epoch)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the phase-vote tally")?;
+        let voted: std::collections::HashSet<i64> = voters.into_iter().map(|r| r.0).collect();
+        Ok(electorate.iter().all(|id| voted.contains(id)))
+    }
+
     // ---- channel cursors + deliveries -----------------------------------
 
     pub async fn cursor_for(&self, participant_id: i64) -> Result<i64> {
@@ -2479,6 +2620,275 @@ mod tests {
     /// "storage that has 0044", which is the property they depend on.
     async fn storage_with_0044() -> Storage {
         Storage::memory().await.unwrap()
+    }
+
+    // ---- 0062: the phase-advance vote ------------------------------------
+
+    /// Two participants, one vote: the phase does NOT advance.
+    ///
+    /// The whole feature in one assertion — the executor voting is not consensus,
+    /// which is what makes the reviewer's turn happen at all.
+    #[tokio::test]
+    async fn one_vote_of_two_is_not_consensus() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let hands = s.participant_by_slug("s1", "hands").await.unwrap().unwrap();
+        let eyes = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap();
+
+        s.cast_phase_vote("s1", hands.id, "plan", "fp1", 0).await.unwrap();
+        assert!(
+            !s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap(),
+            "one of two is not consensus — this is the turn the reviewer gets"
+        );
+        s.cast_phase_vote("s1", eyes.id, "plan", "fp1", 0).await.unwrap();
+        assert!(
+            s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap(),
+            "both voted for the same question — it advances"
+        );
+    }
+
+    /// **Solo: the single participant IS the electorate**, so its own vote
+    /// completes the tally immediately.
+    ///
+    /// Separate from the empty case below on purpose. They fail differently, and
+    /// a single "solo advances" test passes over an implementation that is
+    /// broken for the empty roster — which is the shape that deadlocks a session
+    /// nobody can rescue.
+    #[tokio::test]
+    async fn a_solo_session_advances_on_its_own_vote() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", 1).await.unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+        let active: Vec<_> = roster
+            .iter()
+            .filter(|p| p.enabled && p.participation_mode == MODE_ACTIVE)
+            .collect();
+        assert_eq!(active.len(), 1, "precondition: exactly one active participant");
+
+        assert!(
+            !s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap(),
+            "before voting, a solo session must NOT be treated as arrived"
+        );
+        s.cast_phase_vote("s1", active[0].id, "plan", "fp1", 0).await.unwrap();
+        assert!(s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap());
+    }
+
+    /// **An empty electorate is vacuously true** — the same answer
+    /// `all_active_voted_done` gives, for the same reason: no participant
+    /// remains who has not voted.
+    ///
+    /// Reached by disabling every active row (what disabling the last agent
+    /// produces) and by an all-`on_mention` roster. Returning `false` here is
+    /// what would wedge such a session permanently: nothing can ever vote, so
+    /// nothing could ever move the phase, and the ring has no turn to hand out
+    /// either.
+    #[tokio::test]
+    async fn an_empty_electorate_is_vacuously_arrived() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
+        sqlx::query("UPDATE session_participants SET enabled = 0 WHERE session_id = 's1'")
+            .execute(s.pool())
+            .await
+            .unwrap();
+        assert!(
+            s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap(),
+            "no active participant means nobody left to wait for"
+        );
+
+        // The other route to the same state: every row present, none active.
+        sqlx::query(
+            "UPDATE session_participants SET enabled = 1, participation_mode = 'on_mention' \
+             WHERE session_id = 's1'",
+        )
+        .execute(s.pool())
+        .await
+        .unwrap();
+        assert!(
+            s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap(),
+            "an all-on_mention roster has an empty electorate too"
+        );
+    }
+
+    /// **Speech does not clear the tally — the livelock, as an executable.**
+    ///
+    /// This is why the vote is not `done_vote`: that column is cleared session
+    /// -wide on `TurnEnding::Spoke`, and this feature exists to make
+    /// participants SPEAK between votes. Here a vote survives any amount of
+    /// talking, because nothing about talking is in the key.
+    #[tokio::test]
+    async fn a_vote_survives_speech_because_speech_is_not_in_the_key() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let hands = s.participant_by_slug("s1", "hands").await.unwrap().unwrap();
+        s.cast_phase_vote("s1", hands.id, "plan", "fp1", 0).await.unwrap();
+
+        for _ in 0..3 {
+            s.post_to_channel("s1", "participant", Some("eyes"), "text", "a finding", None)
+                .await
+                .unwrap();
+        }
+        // `done_vote` would be gone by now; the phase vote is untouched.
+        let still: Vec<(i64,)> = sqlx::query_as(
+            "SELECT participant_id FROM phase_votes WHERE session_id = 's1'",
+        )
+        .fetch_all(s.pool())
+        .await
+        .unwrap();
+        assert_eq!(still.len(), 1, "talking must not retract anybody's vote");
+    }
+
+    /// **A changed artifact does clear it** — the other half of the same rule.
+    #[tokio::test]
+    async fn a_vote_does_not_count_for_a_different_artifact() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", 1).await.unwrap();
+        let me = s.participants_for_session("s1").await.unwrap()[0].id;
+        s.cast_phase_vote("s1", me, "plan", "fp1", 0).await.unwrap();
+        assert!(s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap());
+        assert!(
+            !s.all_active_voted_to_advance("s1", "plan", "fp2", 0).await.unwrap(),
+            "the work changed, so the vote about the old work does not carry"
+        );
+        assert!(
+            !s.all_active_voted_to_advance("s1", "apply", "fp1", 0).await.unwrap(),
+            "a vote for one target is not a vote for another"
+        );
+    }
+
+    /// **The epoch closes the TIME axis a fingerprint cannot see** — the defect
+    /// the first design shipped and review caught.
+    ///
+    /// Phases run backward. Vote in Plan, go back to Investigate, come forward
+    /// again with the artifact UNCHANGED — a revert, or simply nobody editing —
+    /// and a content-keyed vote matches, completing a tally about a conversation
+    /// that has since happened. The epoch makes the second Plan a different
+    /// question from the first.
+    #[tokio::test]
+    async fn a_vote_does_not_survive_a_phase_round_trip() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", 1).await.unwrap();
+        let me = s.participants_for_session("s1").await.unwrap()[0].id;
+
+        let e0 = s.phase_epoch("s1").await.unwrap();
+        s.cast_phase_vote("s1", me, "plan", "fp1", e0).await.unwrap();
+        assert!(s.all_active_voted_to_advance("s1", "plan", "fp1", e0).await.unwrap());
+
+        // Plan -> Investigate -> Plan. Same artifact, same target, new epoch.
+        let e1 = s.bump_phase_epoch("s1").await.unwrap();
+        let e2 = s.bump_phase_epoch("s1").await.unwrap();
+        assert!(e2 > e1 && e1 > e0, "the epoch is monotonic");
+        assert!(
+            !s.all_active_voted_to_advance("s1", "plan", "fp1", e2).await.unwrap(),
+            "a vote from before the round trip must not complete the tally after it"
+        );
+    }
+
+    /// **The epoch filter, pinned on its own — with the row still present.**
+    ///
+    /// `a_vote_does_not_survive_a_phase_round_trip` above does NOT prove this,
+    /// and my own mutation check is what said so: deleting `AND phase_epoch = ?`
+    /// from the tally query leaves that test green, because `bump_phase_epoch`
+    /// also DELETES the session's votes, so there is no row left for the filter
+    /// to exclude. Two mechanisms, one observation — the test could not say
+    /// which was doing the work.
+    ///
+    /// The delete is defence in depth and the filter must stand without it: a
+    /// vote cast concurrently with a bump lands after the delete and before the
+    /// read, and only the filter excludes it. So this casts a STALE-epoch vote
+    /// directly and asserts the tally ignores it while the row is right there.
+    #[tokio::test]
+    async fn a_stale_epoch_vote_is_ignored_even_when_the_row_survives() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", 1).await.unwrap();
+        let me = s.participants_for_session("s1").await.unwrap()[0].id;
+
+        s.bump_phase_epoch("s1").await.unwrap();
+        let now = s.bump_phase_epoch("s1").await.unwrap();
+        assert_eq!(now, 2, "precondition: the session has moved on twice");
+
+        // A vote carrying an epoch the session has left behind.
+        s.cast_phase_vote("s1", me, "plan", "fp1", 0).await.unwrap();
+        let rows: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM phase_votes WHERE session_id = 's1'")
+                .fetch_one(s.pool())
+                .await
+                .unwrap();
+        assert_eq!(rows.0, 1, "precondition: the stale row EXISTS — that is the point");
+
+        assert!(
+            !s.all_active_voted_to_advance("s1", "plan", "fp1", now).await.unwrap(),
+            "a vote from a spent epoch must not count, and the query alone must \
+             be what excludes it"
+        );
+        assert!(
+            s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap(),
+            "control: the same row DOES answer the question it was cast for — \
+             without this the assertion above passes on an empty table"
+        );
+    }
+
+    /// **A retraction takes its own vote and nobody else's** — the same rule
+    /// `TurnEnding::Passed` applies to `done_vote`, and the reviewer's case for
+    /// it: the doc author can withdraw by editing (the fingerprint moves), but a
+    /// reviewer never moves the fingerprint, so without this its vote could only
+    /// be undone by someone else's edit and the tally could complete over a live
+    /// objection.
+    #[tokio::test]
+    async fn a_retraction_takes_only_the_retractors_own_vote() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let hands = s.participant_by_slug("s1", "hands").await.unwrap().unwrap();
+        let eyes = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap();
+        s.cast_phase_vote("s1", hands.id, "plan", "fp1", 0).await.unwrap();
+        s.cast_phase_vote("s1", eyes.id, "plan", "fp1", 0).await.unwrap();
+        assert!(s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap());
+
+        s.retract_phase_votes(eyes.id).await.unwrap();
+        assert!(
+            !s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap(),
+            "the reviewer withdrew; the tally must reopen"
+        );
+        let left: Vec<(i64,)> =
+            sqlx::query_as("SELECT participant_id FROM phase_votes WHERE session_id = 's1'")
+                .fetch_all(s.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            left,
+            vec![(hands.id,)],
+            "clearing the session instead would make a pass behave like the \
+             substantive turn it explicitly is not"
+        );
+    }
+
+    /// Voting twice for one question is one vote — the tally is a COUNT, so a
+    /// double-cast that inserted twice would let one participant complete a
+    /// two-participant tally alone.
+    #[tokio::test]
+    async fn casting_twice_is_idempotent() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let hands = s.participant_by_slug("s1", "hands").await.unwrap().unwrap();
+        s.cast_phase_vote("s1", hands.id, "plan", "fp1", 0).await.unwrap();
+        s.cast_phase_vote("s1", hands.id, "plan", "fp1", 0).await.unwrap();
+        let n: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM phase_votes WHERE session_id = 's1'")
+            .fetch_one(s.pool())
+            .await
+            .unwrap();
+        assert_eq!(n.0, 1, "one participant, one question, one vote");
+        assert!(
+            !s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap(),
+            "and it still cannot complete a two-participant tally alone"
+        );
     }
 
     // ---- 0048: the seeded roles are the user's ---------------------------
