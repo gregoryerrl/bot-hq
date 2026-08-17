@@ -85,6 +85,20 @@ describe("Providers — the slot-shaped runtime wire", () => {
   // handler ONLY for the session on screen. A staged message delivered to any
   // other session left `bothq:draft:<sid>` holding the sent text, and the box
   // refilled on return. This is the global half: any session, no view needed.
+  it("resyncs the chat history too, not only the event-backed side queries (round 8)", async () => {
+    // A lagged burst drops MessagePersisted events; the emitter recovers a
+    // skipped row only when a later row in that session arrives, so the tail of
+    // the burst stays missing until a remount unless the resync refetches
+    // get_session_messages (ChatPane re-seeds the store from it).
+    const { RESYNC_KEYS } = await import("./Providers");
+    expect(RESYNC_KEYS).toContain("get_session_messages");
+    expect(RESYNC_KEYS).toContain("get_staged_response");
+    expect(RESYNC_KEYS).toContain("get_session");
+    // And the resync handler is subscribed at all.
+    renderProviders();
+    await waitFor(() => expect(handlers.has("session:resync")).toBe(true));
+  });
+
   it("clears a delivered session's persisted draft even when no view for it is mounted", async () => {
     localStorage.setItem("bothq:draft:s2", "queued while they work");
     localStorage.setItem("bothq:draft:s1", "still being typed");

@@ -94,6 +94,27 @@ const MODEL_KEYS = ["list_models"] as const;
 // EYES-sign-off findings — the session-header banner refetches when the bridge
 // fires `session:findings_changed` (eyes_flag / disposition_finding / approve_finding).
 const FINDINGS_KEYS = ["list_session_findings"] as const;
+// Everything a lagged burst could have left stale. `session:resync` fires when
+// the backend's broadcast receiver skipped events, and the emitter's watermark
+// only recovers a skipped `MessagePersisted` when a LATER row in that session
+// arrives — the tail of the burst (the last message before a session goes idle)
+// never does. So the chat query is refetched too (round 8): ChatPane re-seeds
+// its store from the refetched history. The stage toggle and the session row
+// ride the same list for the same reason.
+export const RESYNC_KEYS = [
+  ...TRAY_KEYS,
+  ...PHASE_KEYS,
+  ...DOC_KEYS,
+  ...CLOSE_KEYS,
+  ...CL_KEYS,
+  ...WORKTREE_KEYS,
+  ...PROJECT_KEYS,
+  ...MODEL_KEYS,
+  ...FINDINGS_KEYS,
+  "get_session_messages",
+  "get_staged_response",
+  "get_session",
+] as const;
 
 /**
  * Event-driven cache invalidation: each backend `session:*` event invalidates
@@ -192,21 +213,7 @@ function GlobalEventSync() {
   // lagged and dropped events — refetch every event-backed query so the UI
   // can't be left stale. This is what lets us drop the fixed-interval safety
   // polls (PendingTray/phase/pending-choices) that previously filled this gap.
-  const onResync = useCallback(
-    () =>
-      invalidate([
-        ...TRAY_KEYS,
-        ...PHASE_KEYS,
-        ...DOC_KEYS,
-        ...CLOSE_KEYS,
-        ...CL_KEYS,
-        ...WORKTREE_KEYS,
-        ...PROJECT_KEYS,
-        ...MODEL_KEYS,
-        ...FINDINGS_KEYS,
-      ]),
-    [invalidate],
-  );
+  const onResync = useCallback(() => invalidate(RESYNC_KEYS), [invalidate]);
 
   // A staged message DELIVERED clears that session's persisted composer draft
   // — for ANY session, mounted or not. `SessionView` clears the live box and
