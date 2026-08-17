@@ -160,6 +160,20 @@ pub struct Participant {
     /// [`participant_display_name`] for what it overrides and what it leaves
     /// alone.
     pub label: Option<String>,
+    /// What this participant was ACTUALLY spawned with — the pair left standing
+    /// after `reconcile_spawn_knobs`, recorded at spawn (migration 0061).
+    ///
+    /// **Not the same question as `effort` / `ultracode` above.** Those are the
+    /// user's CHOICE, and "inherit" was the choice on 94 of 94 rows when this
+    /// shipped; these are the effective values, which cannot be recovered from
+    /// that choice and must not be re-derived later (re-resolving answers "what
+    /// it would be spawned with NOW"). Same call `slot0_model_at_spawn` made.
+    pub effort_at_spawn: Option<String>,
+    pub ultracode_at_spawn: Option<bool>,
+    /// Whether the pair above describes a real spawn. Load-bearing because the
+    /// common path reconciles to `None`: without it, "spawned with no override"
+    /// and "row predates 0061" are the same two NULLs.
+    pub spawn_knobs_recorded: bool,
 }
 
 /// One participant a session is created with: **a role and a model**.
@@ -197,7 +211,8 @@ const ROLE_COLUMNS: &str = "id, slug, display_name, description_prompt, capabili
 
 const PARTICIPANT_COLUMNS: &str = "id, session_id, slug, display_name, role_id, model_id, \
      runtime, capabilities, participation_mode, turn_position, done_vote, enabled, \
-     effort, ultracode, claude_session_id, color, label";
+     effort, ultracode, claude_session_id, color, label, \
+     effort_at_spawn, ultracode_at_spawn, spawn_knobs_recorded";
 
 fn role_from_row(r: &sqlx::sqlite::SqliteRow) -> Role {
     use sqlx::Row;
@@ -241,6 +256,9 @@ fn participant_from_row(r: &sqlx::sqlite::SqliteRow) -> Participant {
         claude_session_id: r.get("claude_session_id"),
         color: r.get("color"),
         label: r.get("label"),
+        effort_at_spawn: r.get("effort_at_spawn"),
+        ultracode_at_spawn: r.get("ultracode_at_spawn"),
+        spawn_knobs_recorded: r.get::<i64, _>("spawn_knobs_recorded") != 0,
     }
 }
 
@@ -1347,6 +1365,43 @@ impl Storage {
             .execute(&self.pool)
             .await
             .with_context(|| format!("recording claude session id for participant {participant_id}"))?;
+        Ok(())
+    }
+
+    /// Record what this participant was ACTUALLY spawned with — the effort and
+    /// ultracode values left standing after `reconcile_spawn_knobs`, i.e. what
+    /// the child process really received (migration 0061).
+    ///
+    /// **Distinct from the `effort` / `ultracode` columns beside them**, which
+    /// are the user's CHOICE and are usually "inherit" — 94 of 94 rows held
+    /// `NULL` when this shipped. A choice of inherit says nothing about the
+    /// effective value, and the effective value cannot be recovered later: the
+    /// chain is per-role → `_all` → the config knob → the per-run pick, plus an
+    /// exclusion rule that can flip either knob, and re-resolving it after the
+    /// fact answers "what it WOULD be spawned with now".
+    ///
+    /// `spawn_knobs_recorded` is set unconditionally, and that is the point of
+    /// the column: the common path resolves to `None`, so `effort_at_spawn IS
+    /// NULL` is what a SUCCESSFUL record looks like. Without the flag it would be
+    /// indistinguishable from a row that predates 0061, and a UI cannot honestly
+    /// render "no override in force" for one and "unknown" for the other.
+    pub async fn set_spawn_knobs(
+        &self,
+        participant_id: i64,
+        effort: Option<&str>,
+        ultracode: Option<bool>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE session_participants \
+             SET effort_at_spawn = ?, ultracode_at_spawn = ?, spawn_knobs_recorded = 1 \
+             WHERE id = ?",
+        )
+        .bind(effort)
+        .bind(ultracode.map(i64::from))
+        .bind(participant_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("recording spawn knobs for participant {participant_id}"))?;
         Ok(())
     }
 
@@ -3580,6 +3635,9 @@ mod tests {
     /// not be constructible in the database.
     fn ring_member(id: i64, slug: &str, turn_position: i64) -> Participant {
         Participant {
+            effort_at_spawn: None,
+            ultracode_at_spawn: None,
+            spawn_knobs_recorded: false,
             id,
             session_id: "s1".into(),
             slug: slug.into(),
@@ -4962,6 +5020,18 @@ mod tests {
                 // exactly the same reason: a default roster that wrote anything
                 // but NULL here would name participants the user never named.
                 "label",
+                // Migration 0061 — what a participant was ACTUALLY spawned with.
+                // **Part of parity, and the reason is the inverse of the two
+                // above**: these are written at SPAWN, not at roster creation, so
+                // both paths must leave them exactly as the migration defaults
+                // them (NULL / NULL / 0). A roster that arrived with any of them
+                // already set would be claiming a spawn that has not happened —
+                // and `spawn_knobs_recorded = 1` is precisely the claim "this row
+                // describes a real child process", so a path that pre-set it
+                // would make the badge assert a configuration nothing ran with.
+                "effort_at_spawn",
+                "ultracode_at_spawn",
+                "spawn_knobs_recorded",
             ],
             "session_participants grew a column; roster parity has to cover it"
         );

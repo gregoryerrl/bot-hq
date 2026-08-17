@@ -33,6 +33,7 @@ import {
   type ParticipantView,
 } from "../lib/participants";
 import { FileViewerDialog } from "../components/FileViewerDialog";
+import { SpawnBadge } from "../components/SpawnBadge";
 import type { AppError, ResolveResult, SessionInfo } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -156,6 +157,13 @@ export function SessionView() {
   const respawn = useTauriMutation<void, { sessionId: string }>(
     "respawn_session",
   );
+  // rc3 round-4: the phase-write path the harness already promised agents.
+  // Same `AppState::advance_phase` the agent-side tool reaches, so the user's
+  // path and the participants' cannot drift.
+  const advancePhase = useTauriMutation<
+    void,
+    { sessionId: string; target: string }
+  >("advance_session_phase");
   const [respawnError, setRespawnError] = useState<AppError | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -467,7 +475,41 @@ export function SessionView() {
               <>
                 <span className="mx-2 text-outline-variant">·</span>
                 <span className="text-on-surface-variant">
-                  Phase: <span className="text-on-surface">{phase}</span>
+                  Phase:{" "}
+                  {/* **The user's own hand on the phase**, and until round 4 it
+                      did not exist: no Tauri command wrote the phase and this
+                      was plain text — while `protocol.rs` told every agent "the
+                      ring stops until the user advances the chip". An agent
+                      calling `request_phase_advance` could only ever be
+                      declined.
+
+                      It lives HERE and not on `SessionPhaseChip`, which is the
+                      obvious-looking home: that chip's only render site is the
+                      dashboard tile, whose whole surface is `onClick={open}` →
+                      navigate, so a button inside it would both advance and
+                      navigate away (and nest interactives). It also puts the
+                      control in the list rather than in the session — and the
+                      escape valve for a stalled phase is needed while you are
+                      IN one. */}
+                  <select
+                    aria-label="Session phase"
+                    className="rounded border border-outline-variant bg-surface-container px-1 py-0.5 text-on-surface"
+                    value={phase}
+                    onChange={(e) => {
+                      void advancePhase
+                        .mutateAsync({
+                          sessionId,
+                          target: e.target.value,
+                        })
+                        .catch(() => {});
+                    }}
+                  >
+                    {PHASE_NAMES.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
                 </span>
               </>
             )}
@@ -512,7 +554,12 @@ export function SessionView() {
                     className="underline decoration-dotted underline-offset-2 transition-colors hover:text-on-surface"
                   >
                     {participantLabel(p)}
-                  </button>{" "}
+                  </button>
+                  {/* CONFIGURATION, so it sits beside the label rather than
+                      inside the runtime pair below: what this participant was
+                      spawned with is a fact about the spawn, while the dot and
+                      the meter are facts about the process. */}
+                  <SpawnBadge participant={p} />{" "}
                   {/* Both stores hold TWO key spaces: the live
                       `session:agent_health` / `session:agent_context` events
                       key by the participant's slug, while the mount backfill

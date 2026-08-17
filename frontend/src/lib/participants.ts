@@ -47,6 +47,22 @@ export type ParticipantView = {
   /** The user's own name for this participant, or null to take the role and
    *  ordinal (rc3 **D20**, migration 0053). See {@link participantLabel}. */
   label: string | null;
+  /** This participant's own effort / ultracode pick (rc3 **D12**), or null to
+   *  inherit. This is the CHOICE, not the effective value — see the pair below,
+   *  and {@link SpawnBadge} for which one is rendered and which one is styled. */
+  effort: string | null;
+  ultracode: boolean | null;
+  /** What this participant was ACTUALLY spawned with (migration 0061): the pair
+   *  left standing after the precedence chain and its exclusion rule, recorded
+   *  at spawn because it cannot be recomputed here — `claude-overrides.json`
+   *  keys by ROLE SLUG, which this view does not carry — and re-resolving it
+   *  would answer "what it would be spawned with NOW". */
+  effort_at_spawn: string | null;
+  ultracode_at_spawn: boolean | null;
+  /** Whether the pair above describes a real spawn. The common path reconciles
+   *  to null, so without this "spawned with no override in force" and "this row
+   *  predates 0061" are the same two nulls. False means say nothing. */
+  spawn_knobs_recorded: boolean;
   enabled: boolean;
 };
 

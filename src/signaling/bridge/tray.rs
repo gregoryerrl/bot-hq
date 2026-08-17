@@ -1193,8 +1193,15 @@ impl SignalingBridge {
     /// awaiting flag so the duo's peer-forward halts until the user acts.
     ///
     /// The user has two response paths, both clear the halt:
-    ///   1. Click the phase chip → `AppState::advance_phase` (which also
-    ///      clears awaiting + answers pending halt rows).
+    ///   1. Pick a phase in the session header → the `advance_session_phase`
+    ///      command → `AppState::advance_phase` (which also clears awaiting +
+    ///      answers pending halt rows).
+    ///
+    ///      **This path did not exist until round 4**, and this comment claimed
+    ///      it did — no Tauri command wrote the phase, and the chip it named was
+    ///      a bare `<span>` on the dashboard tile. So the only reachable answer
+    ///      was path 2, the implicit decline: this tool's stated purpose was
+    ///      unreachable for as long as it has existed.
     ///   2. Type a reply → `AppState::broadcast` (which always clears halt
     ///      on user input). Implicit decline — phase stays put.
     pub async fn request_phase_advance(

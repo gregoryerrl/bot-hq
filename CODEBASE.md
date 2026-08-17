@@ -643,6 +643,7 @@ without polling.
 | `frontend/src/components/ApprovalGate.tsx` | Approve/Reject gate replacing the input | M |
 | `frontend/src/components/PendingTray.tsx`, `frontend/src/components/ChoicePrompt.tsx` | topbar bell; one tray question | S |
 | `frontend/src/components/ContextMeter.tsx`, `frontend/src/components/SessionFindingsBanner.tsx`, `frontend/src/components/SessionPhaseChip.tsx`, `frontend/src/components/PhasePill.tsx`, `frontend/src/components/HealthDot.tsx` | badges/chips (`RouterHealthDot` is dead) | S |
+| `frontend/src/components/SpawnBadge.tsx` | what a participant was ACTUALLY spawned with (migration 0061) — reads the recorded `*_at_spawn` pair, never `effort`/`ultracode`, which are the user's CHOICE and are "inherit" on almost every row. `spawn_knobs_recorded` separates "no override in force" from "predates 0061" | S |
 | `frontend/src/stores/runtime.ts` | `SessionRuntime` hand-mirror + `busyBySlot`/`seedRuntimeStores` | S |
 | `frontend/src/stores/activity.ts` | activity + per-slot busy, `isLocked` (D33) | S |
 | `frontend/src/stores/health.ts`, `frontend/src/stores/context.ts`, `frontend/src/stores/chat.ts`, `frontend/src/stores/trayStaging.ts` | agent health/attention (+dead router); context occupancy; messages + watermarks; staged tray picks (D34) | S |

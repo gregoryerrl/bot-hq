@@ -45,6 +45,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         sessions::list_closed_sessions,
         sessions::respawn_session,
         sessions::restart_session,
+        sessions::advance_session_phase,
         sessions::cancel_session_turn,
         sessions::resume_session,
         sessions::rename_session,

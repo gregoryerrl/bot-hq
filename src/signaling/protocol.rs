@@ -247,7 +247,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "request_phase_advance",
-            description: "OPT-IN gated phase advance — use ONLY when you want to pause for explicit user acknowledgment before crossing a boundary. Most phase transitions should use `advance_phase` (self-advance, no gate). Reserve this for irreversible / destructive Apply work (force-push, prod writes, large rewrites). Adds a chat message and fills the session's halt slot; the ring stops until the user advances the chip OR replies in chat (implicit decline).",
+            description: "OPT-IN gated phase advance — use ONLY when you want to pause for explicit user acknowledgment before crossing a boundary. Most phase transitions should use `advance_phase` (self-advance, no gate). Reserve this for irreversible / destructive Apply work (force-push, prod writes, large rewrites). Adds a chat message and fills the session's halt slot; the ring stops until the user picks a phase in the session header OR replies in chat (implicit decline).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

@@ -19,6 +19,6 @@ pub use general_rules::GENERAL_RULES;
 pub use prompts::builtin_prose_for_role;
 pub use protocol::{OutgoingUserMessage, StreamEvent};
 pub use spawn::{
-    spawn_agent, spawn_supervised_agent, AgentEvent, AgentHandle, AgentHealth, ParticipantInput,
-    RetryPolicy, SpawnConfig,
+    reconcile_spawn_knobs, spawn_agent, spawn_supervised_agent, AgentEvent, AgentHandle,
+    AgentHealth, ParticipantInput, RetryPolicy, SpawnConfig,
 };

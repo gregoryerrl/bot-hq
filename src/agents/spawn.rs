@@ -349,13 +349,13 @@ pub struct SpawnConfig {
     /// bot-hq data dir — the injected PreToolUse hook needs it to resolve the
     /// project's policy at tool-call time.
     pub data_dir: PathBuf,
-    /// Per-session effort override (from the create dialog). When Some, it wins
-    /// over the persistent per-agent override resolved from claude-overrides.json.
-    pub session_effort: Option<String>,
-    /// Per-session ultracode override (from the create dialog). When Some, it
-    /// wins over the persistent per-agent override. Brian-only at runtime (EYES
-    /// gets no --settings).
-    pub session_ultracode: Option<bool>,
+    // `session_effort` / `session_ultracode` lived here and are GONE. They were
+    // the participant's own D12 columns (`p.effort` / `p.ultracode`) carried down
+    // under a name that said "session", and their only production readers were
+    // the precedence overlay + exclusion rule that `build_command` used to run.
+    // `reconcile_spawn_knobs` now runs that at the caller, which holds `Storage`
+    // and can therefore RECORD the result; `overrides` below arrives already
+    // reconciled.
     /// This participant's invite-time capability snapshot, read from
     /// `session_participants` at spawn.
     ///
@@ -1214,6 +1214,62 @@ pub(crate) fn ensure_claude_runnable(_bin: &str) -> Result<()> {
     Ok(())
 }
 
+/// Overlay the participant's own effort/ultracode picks onto the persistent
+/// per-role overrides, then reconcile the pair — **the whole precedence chain,
+/// in one place.**
+///
+/// `persistent` is what `claude-overrides.json` resolved for this participant's
+/// ROLE (per-role → `_all` → the `env.CLAUDE_CODE_EFFORT_LEVEL` knob).
+/// `pick_effort` / `pick_ultracode` are the participant's D12 columns, and they
+/// WIN — a choice made for this run beats a standing default.
+///
+/// ## Why the reconciliation exists
+///
+/// claude-code treats max-effort and ultracode as mutually exclusive (ultracode
+/// implies xhigh + workflow orchestration; `max` is a distinct effort posture,
+/// and emitting BOTH — env `CLAUDE_CODE_EFFORT_LEVEL=max` plus `"ultracode":
+/// true` in `--settings` — is undefined). Each surface's UI already stops a user
+/// picking both, but a **cross-layer** overlay can still resolve to both:
+/// persistent `max` under a per-run ultracode, or the reverse. Whichever knob was
+/// EXPLICITLY picked for this run wins; with neither picked, ultracode wins.
+///
+/// ## Why it is a free function rather than inline in `build_command`
+///
+/// It ran there until round 4, inside a synchronous fn with no `Storage` — so
+/// the resolved value existed only as a local, was emitted to the child process,
+/// and was then unrecoverable. The UI could not say what a participant was
+/// actually spawned with, and re-deriving it later answers a different question
+/// ("what it WOULD be spawned with now"), which diverges the moment Claude Config
+/// is edited mid-session. Hoisting it to the caller that holds `Storage` is what
+/// lets the answer be RECORDED, the same call `slot0_model_at_spawn` already
+/// made for the sibling fact.
+///
+/// Returns the effective pair. The caller persists it and hands `overrides` to
+/// [`SpawnConfig`] already reconciled.
+pub fn reconcile_spawn_knobs(
+    persistent: &mut crate::claude_config::AgentOverride,
+    pick_effort: Option<&str>,
+    pick_ultracode: Option<bool>,
+) {
+    if pick_effort.is_some() {
+        persistent.effort = pick_effort.map(str::to_string);
+    }
+    if pick_ultracode.is_some() {
+        persistent.ultracode = pick_ultracode;
+    }
+    if persistent.ultracode == Some(true) && persistent.effort.as_deref() == Some("max") {
+        // `pick_effort.is_some() && pick_ultracode.is_none()` is "this run chose
+        // max and said nothing about ultracode", so the `max` is the deliberate
+        // one and the inherited ultracode yields. Every other shape leaves
+        // ultracode standing.
+        if pick_effort.is_some() && pick_ultracode.is_none() {
+            persistent.ultracode = None;
+        } else {
+            persistent.effort = None;
+        }
+    }
+}
+
 #[cfg(all(test, not(windows)))]
 mod ensure_claude_runnable_tests {
     use super::ensure_claude_runnable;
@@ -1238,36 +1294,18 @@ fn build_command(cfg: &SpawnConfig) -> Command {
             &cfg.system_prompt_path.display().to_string(),
         ]);
 
-    // Per-role Claude-config overrides (Settings → Claude Config), resolved by
-    // the spawn path against this participant's ROLE and merged into the
-    // `--settings` JSON + env below, so a user can disable an inherited
-    // skill/plugin/MCP/effort for THIS role without touching their own
-    // ~/.claude. Fail-open (an unreadable store resolves to nothing).
-    let mut agent_override = cfg.overrides.clone();
-    // Per-SESSION overrides (create dialog) win over the persistent defaults.
-    if cfg.session_effort.is_some() {
-        agent_override.effort = cfg.session_effort.clone();
-    }
-    if cfg.session_ultracode.is_some() {
-        agent_override.ultracode = cfg.session_ultracode;
-    }
-
-    // claude-code treats max-effort and ultracode as mutually exclusive
-    // (ultracode implies xhigh + workflow orchestration; `max` is a distinct
-    // effort posture, and emitting BOTH — env CLAUDE_CODE_EFFORT_LEVEL=max plus
-    // "ultracode":true in --settings — is undefined). The per-surface UI already
-    // prevents picking both, but a CROSS-LAYER overlay (persistent effort=max +
-    // session ultracode, or the reverse) can still resolve to both. Reconcile
-    // here honoring the same session-wins precedence as the overlay above:
-    // whichever knob the session EXPLICITLY chose wins; otherwise ultracode wins.
-    if agent_override.ultracode == Some(true) && agent_override.effort.as_deref() == Some("max") {
-        let session_chose_max = cfg.session_effort.is_some() && cfg.session_ultracode.is_none();
-        if session_chose_max {
-            agent_override.ultracode = None;
-        } else {
-            agent_override.effort = None;
-        }
-    }
+    // Per-role Claude-config overrides (Settings → Claude Config), already
+    // resolved AND reconciled by the caller — see [`reconcile_spawn_knobs`] and
+    // `core/session.rs`'s `spawn_plan`. This function CONSUMES the effective
+    // set; it does not derive it.
+    //
+    // It used to derive it here, from two `SpawnConfig` fields the caller filled
+    // from the participant row. That put the only implementation of the
+    // precedence chain inside a synchronous fn with no `Storage`, which is why
+    // the resolved value could not be recorded — and recording it is the only
+    // way the UI can say what a participant was actually spawned with, since
+    // re-resolving at read time answers "what it would be spawned with now".
+    let agent_override = cfg.overrides.clone();
 
     if let Some(mcp) = &cfg.mcp_config_path {
         cmd.args(["--mcp-config", &mcp.display().to_string()])
@@ -1623,8 +1661,6 @@ mod tests {
             resume_session_id: None,
             project: Some("acme-app-exporter".into()),
             data_dir: Path::new("/tmp/data").to_path_buf(),
-            session_effort: None,
-            session_ultracode: None,
             capabilities: crate::agents::ResolvedCapabilities::Known(
                 crate::agents::CapabilitySet::preset_hands(),
             ),
@@ -1855,76 +1891,101 @@ mod tests {
             .clone()
     }
 
+    /// The three tests below were written against `SpawnConfig.session_effort` /
+    /// `.session_ultracode` and asserted through `build_command`. Round 4 moved
+    /// the precedence chain out to [`reconcile_spawn_knobs`] so its result could
+    /// be RECORDED, which deleted those two fields — and deleting the fields
+    /// stops these compiling.
+    ///
+    /// **The tempting repair was to delete them, and they are the only coverage
+    /// of the exclusion rule** — a rule that silently flips a user's effort
+    /// setting. Ported onto the pure function instead, which makes them faster
+    /// and more precise; the end-to-end half is kept separately below, because a
+    /// pure-function test cannot see a reconciled value failing to reach the
+    /// child.
     #[test]
-    fn session_overrides_win_over_persistent() {
-        let persistent = persistent_for_hands(|o| o.effort = Some("high".into()));
+    fn a_per_run_pick_wins_over_the_persistent_override() {
+        let mut o = persistent_for_hands(|o| o.effort = Some("high".into()));
+        // Control: with no pick, the persistent effort survives untouched.
+        // Without it the test cannot tell "the pick won" from "the persistent
+        // value was never there" — the failure this test shipped with.
+        reconcile_spawn_knobs(&mut o, None, None);
+        assert_eq!(o.effort.as_deref(), Some("high"), "the persistent override must survive");
 
-        // Control: with no session pick, the persistent effort is what spawns.
-        // Without this the test cannot tell "the session pick won" from "the
-        // persistent pick was never there" — the failure it shipped with.
-        let mut c = cfg();
-        c.overrides = persistent;
-        assert_eq!(
-            effort_env(&c).as_deref(),
-            Some("high"),
-            "the persistent override must reach the spawn on its own"
-        );
-
-        // And the per-session pick beats it.
-        c.session_effort = Some("max".into());
-        assert_eq!(
-            effort_env(&c).as_deref(),
-            Some("max"),
-            "session effort should win over persistent override"
-        );
+        reconcile_spawn_knobs(&mut o, Some("max"), None);
+        assert_eq!(o.effort.as_deref(), Some("max"), "the per-run pick must win");
     }
 
     #[test]
-    fn session_ultracode_clears_inherited_max_effort() {
-        // Cross-layer collision: persistent effort=max + a per-session ultracode
-        // pick (session effort left on Inherit). Session ultracode wins; the
-        // inherited max must NOT also reach env (the documented exclusion).
-        let mut c = cfg();
-        c.overrides = persistent_for_hands(|o| o.effort = Some("max".into()));
-        assert_eq!(
-            effort_env(&c).as_deref(),
-            Some("max"),
-            "control: the inherited max is live before the session picks ultracode"
-        );
+    fn a_per_run_ultracode_clears_inherited_max_effort() {
+        // Cross-layer collision: persistent effort=max under a per-run ultracode
+        // pick (effort left on Inherit). Ultracode wins; the inherited max must
+        // not survive alongside it.
+        let mut o = persistent_for_hands(|o| o.effort = Some("max".into()));
+        reconcile_spawn_knobs(&mut o, None, None);
+        assert_eq!(o.effort.as_deref(), Some("max"), "control: the inherited max is live");
 
-        c.session_ultracode = Some(true); // session pick; session_effort stays None
-        assert_eq!(
-            effort_env(&c),
-            None,
-            "inherited max effort must be cleared when the session enables ultracode"
-        );
-        assert!(
-            settings_fragment(&c).contains("ultracode"),
-            "the session's ultracode is what survives the collision"
-        );
+        let mut o = persistent_for_hands(|o| o.effort = Some("max".into()));
+        reconcile_spawn_knobs(&mut o, None, Some(true));
+        assert_eq!(o.effort, None, "the inherited max must be cleared");
+        assert_eq!(o.ultracode, Some(true), "the per-run ultracode is what survives");
     }
 
     #[test]
-    fn session_max_clears_inherited_ultracode() {
-        // Reverse collision: persistent ultracode + a per-session effort=max pick
-        // (session ultracode left on Inherit). The session's explicit max wins;
-        // ultracode must NOT also reach --settings.
+    fn a_per_run_max_clears_inherited_ultracode() {
+        // The reverse: persistent ultracode under an explicit per-run max.
+        let mut o = persistent_for_hands(|o| o.ultracode = Some(true));
+        reconcile_spawn_knobs(&mut o, None, None);
+        assert_eq!(o.ultracode, Some(true), "control: the inherited ultracode is live");
+
+        let mut o = persistent_for_hands(|o| o.ultracode = Some(true));
+        reconcile_spawn_knobs(&mut o, Some("max"), None);
+        assert_eq!(o.effort.as_deref(), Some("max"), "the explicit max wins");
+        assert_eq!(o.ultracode, None, "ultracode must be cleared by it");
+    }
+
+    /// Both knobs picked in the same run is NOT a collision — the user said both
+    /// explicitly, and `max` yields because ultracode is the stronger posture.
+    /// Pinned because it is the one branch the two collision tests never reach:
+    /// they each leave one pick on Inherit.
+    #[test]
+    fn picking_both_in_one_run_keeps_ultracode() {
+        let mut o = persistent_for_hands(|_| {});
+        reconcile_spawn_knobs(&mut o, Some("max"), Some(true));
+        assert_eq!(o.ultracode, Some(true));
+        assert_eq!(o.effort, None, "ultracode is the stronger posture, so max yields");
+    }
+
+    /// **The equality this whole redesign rests on.** Recording the reconciled
+    /// pair only means something if the row describes the process — so assert the
+    /// reconciled value against what the built `Command` actually carries, in
+    /// both directions of the exclusion.
+    ///
+    /// A test that only checked "something was persisted" would pass while the
+    /// row and the child disagreed, which is the failure at-spawn recording was
+    /// chosen to prevent.
+    #[test]
+    fn the_reconciled_pair_is_what_reaches_the_child() {
+        // Ultracode wins: env carries no effort, --settings carries ultracode.
+        let mut o = persistent_for_hands(|o| o.effort = Some("max".into()));
+        reconcile_spawn_knobs(&mut o, None, Some(true));
         let mut c = cfg();
-        c.overrides = persistent_for_hands(|o| o.ultracode = Some(true));
+        c.overrides = o.clone();
+        assert_eq!(effort_env(&c), None, "a cleared effort must not reach the env");
         assert!(
             settings_fragment(&c).contains("ultracode"),
-            "control: the inherited ultracode is live before the session picks max"
+            "the surviving ultracode must reach --settings"
         );
 
-        c.session_effort = Some("max".into()); // session pick; session_ultracode stays None
-        assert_eq!(
-            effort_env(&c).as_deref(),
-            Some("max"),
-            "session effort=max should reach env"
-        );
+        // Max wins: env carries max, --settings carries no ultracode.
+        let mut o = persistent_for_hands(|o| o.ultracode = Some(true));
+        reconcile_spawn_knobs(&mut o, Some("max"), None);
+        let mut c = cfg();
+        c.overrides = o;
+        assert_eq!(effort_env(&c).as_deref(), Some("max"), "the surviving max must reach the env");
         assert!(
             !settings_fragment(&c).contains("ultracode"),
-            "ultracode must be cleared by the explicit max pick; got {}",
+            "a cleared ultracode must not reach --settings; got {}",
             settings_fragment(&c)
         );
     }

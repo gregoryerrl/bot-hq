@@ -19,6 +19,11 @@ const ROSTER: ParticipantView[] = [
     participation_mode: "active",
     color: null,
     label: null,
+    effort: null,
+    ultracode: null,
+    effort_at_spawn: null,
+    ultracode_at_spawn: null,
+    spawn_knobs_recorded: false,
     enabled: true,
   },
   {
@@ -30,6 +35,11 @@ const ROSTER: ParticipantView[] = [
     participation_mode: "active",
     color: null,
     label: null,
+    effort: null,
+    ultracode: null,
+    effort_at_spawn: null,
+    ultracode_at_spawn: null,
+    spawn_knobs_recorded: false,
     enabled: true,
   },
 ];

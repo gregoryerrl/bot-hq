@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -46,6 +46,10 @@ vi.stubGlobal("ResizeObserver", ResizeObserverStub);
 // configuration the user could not see until the agents said so. Mutable so a
 // test can hand the view a roster whose SPAWNABLE order differs from its turn
 // positions — see the disabled-row test below.
+/** The session's phase, and what `advance_session_phase` was called with. */
+const phaseFixture = vi.hoisted(() => ({ value: null as string | null }));
+const advanceCall = vi.hoisted(() => ({ args: null as Record<string, unknown> | null }));
+
 const roster = vi.hoisted(() => ({
   rows: [] as unknown[],
   default: [
@@ -112,6 +116,9 @@ vi.mock("@tauri-apps/api/core", () => ({
           multi_participant: true,
         });
       case "get_session_phase":
+        return Promise.resolve(phaseFixture.value);
+      case "advance_session_phase":
+        advanceCall.args = args ?? null;
         return Promise.resolve(null);
       case "list_session_participants":
         return Promise.resolve(roster.rows);
@@ -159,12 +166,79 @@ beforeEach(() => {
   promptCall.lastArgs = null;
   readingsCall.rows = [];
   readingsCall.lastArgs = null;
+  phaseFixture.value = null;
+  advanceCall.args = null;
 });
 
 /** The worker's own line in the turn-status row: `<label> is working`. */
 function workerLine(): string {
   return screen.getByText("is working").parentElement!.textContent!;
 }
+
+describe("SessionView phase control (round 4)", () => {
+  /**
+   * **The affordance the harness had already promised.** `bridge/tray.rs`
+   * documented `request_phase_advance`'s first response path as "Click the phase
+   * chip -> AppState::advance_phase", and `protocol.rs` shipped that to every
+   * agent — while no Tauri command wrote the phase and this header rendered
+   * plain text. The tool could only ever be declined.
+   *
+   * Asserted as the WIRE: the control is rendered AND changing it invokes the
+   * command with the picked target. A test that only queried for the control
+   * would pass over a `<select>` wired to nothing, which is the same shape as
+   * the false documentation it replaces.
+   */
+  it("invokes advance_session_phase when the user picks a phase", async () => {
+    roster.rows = roster.default;
+    phaseFixture.value = "investigate";
+    renderSessionView();
+    const control = await screen.findByLabelText("Session phase");
+    fireEvent.change(control, { target: { value: "apply" } });
+    await waitFor(() =>
+      expect(advanceCall.args).toEqual({ sessionId: "s1", target: "apply" }),
+    );
+  });
+});
+
+describe("SessionView roster — what a participant was spawned with (0061)", () => {
+  /**
+   * **The MOUNT, not the component.** `SpawnBadge.test.tsx` pins what the badge
+   * renders for a given row; it says nothing about whether SessionView renders
+   * it at all. Deleting the `<SpawnBadge/>` line left the whole suite green
+   * until this test existed — the reviewer predicted exactly that, on the
+   * grounds that a change which looks like rendering is where the wire check
+   * gets skipped.
+   *
+   * It also has to run through `list_session_participants`, because the fields
+   * only reach the badge if the roster query carries them.
+   */
+  it("renders the recorded spawn knobs on the roster row", async () => {
+    roster.rows = [
+      {
+        ...(roster.default[0] as Record<string, unknown>),
+        effort: "high",
+        ultracode: null,
+        effort_at_spawn: "high",
+        ultracode_at_spawn: null,
+        spawn_knobs_recorded: true,
+      },
+      {
+        ...(roster.default[1] as Record<string, unknown>),
+        effort: null,
+        ultracode: null,
+        effort_at_spawn: null,
+        ultracode_at_spawn: null,
+        spawn_knobs_recorded: false,
+      },
+    ];
+    renderSessionView();
+    // The recorded row shows its value...
+    expect(await screen.findByText("high")).toBeInTheDocument();
+    // ...and the unrecorded one shows nothing rather than guessing "default",
+    // which is the distinction `spawn_knobs_recorded` exists to carry.
+    expect(screen.queryByText("default")).not.toBeInTheDocument();
+  });
+});
 
 describe("SessionView turn-status line (rc3 D10)", () => {
   it("names the working participant as ROLE · Model, resolved through the roster", async () => {

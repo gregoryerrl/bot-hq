@@ -294,6 +294,24 @@ pub struct ParticipantView {
     pub effort: Option<String>,
     /// This participant's ultracode override (rc3 D12), or `null` to inherit.
     pub ultracode: Option<bool>,
+    /// What this participant was ACTUALLY spawned with (migration 0061) — the
+    /// pair left standing after the precedence chain and its exclusion rule.
+    ///
+    /// **This is the field that answers the doc above `effort`.** That one is
+    /// the user's CHOICE, and a choice of "inherit" says nothing about what was
+    /// inherited: the chain runs per-role → `_all` → the config knob → the
+    /// per-run pick, and `effort=max` + `ultracode` are mutually exclusive so
+    /// the reconciliation can clear either. The frontend cannot compute this —
+    /// `claude-overrides.json` keys by ROLE SLUG, which this view does not
+    /// carry — and re-resolving it here would answer "what it WOULD be spawned
+    /// with now", which diverges the moment Claude Config is edited mid-session.
+    pub effort_at_spawn: Option<String>,
+    pub ultracode_at_spawn: Option<bool>,
+    /// Whether the two above describe a real spawn. The common path reconciles
+    /// to `None`, so without this flag "spawned with no override in force" and
+    /// "this row predates 0061" are the same pair of nulls — and a badge would
+    /// have to guess which. `false` means say nothing.
+    pub spawn_knobs_recorded: bool,
 }
 
 /// A session's roster in turn order — the read side of rc3 D10.
@@ -522,6 +540,9 @@ pub(crate) async fn participant_views(
             enabled: p.enabled,
             color: p.color,
             label: p.label,
+            effort_at_spawn: p.effort_at_spawn,
+            ultracode_at_spawn: p.ultracode_at_spawn,
+            spawn_knobs_recorded: p.spawn_knobs_recorded,
             effort: p.effort,
             ultracode: p.ultracode,
         });
@@ -1019,6 +1040,50 @@ pub async fn respawn_session(
 /// DEFERRED until the op completes (≤ ~8s cap) so the working tree isn't left
 /// half-written. The command returns immediately and a detached task drives the
 /// escalation. No-op if the session isn't live.
+/// Move a session's IPAV phase — **the user's own hand on the chip**.
+///
+/// ## Why this did not exist until round 4
+///
+/// It did not, and the harness said it did. `rg 'advance_phase|set_phase|ipav'
+/// src/tauri_cmd/` returned nothing: no Tauri command wrote the phase, and
+/// `SessionPhaseChip` was a bare `<span>`. Meanwhile `bridge/tray.rs` documented
+/// `request_phase_advance`'s first response path as *"Click the phase chip →
+/// `AppState::advance_phase`"*, and `signaling/protocol.rs`'s tool description
+/// shipped the same claim **to every agent**: *"the ring stops until the user
+/// advances the chip OR replies in chat."*
+///
+/// So an agent could ask for acknowledgment before an irreversible Apply, and
+/// the only reachable answer was the implicit decline. The tool's stated purpose
+/// was unreachable, and the participants were told otherwise — the audit's F2
+/// class (a claim the code contradicts) landing in the one surface agents are
+/// handed as authoritative.
+///
+/// ## What it does, and what it deliberately does not
+///
+/// A plain advance, identical to the agent-side `advance_phase`: same
+/// `AppState` entry point, so the phase has exactly one production writer
+/// (`core/state.rs`) and the user's path cannot drift from the agents'. It
+/// clears the awaiting flag and answers a pending halt row for free, which is
+/// what makes it a real answer to `request_phase_advance` rather than a second
+/// way to set a chip.
+///
+/// It is NOT yet the D36 override. When the phase-advance vote lands, a stalled
+/// vote's escape valve is a user gate, and this command grows a flag to force
+/// past a tally rather than being replaced.
+#[tauri::command]
+#[specta::specta]
+pub async fn advance_session_phase(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+    target: String,
+) -> Result<(), AppError> {
+    let phase = crate::core::ipav::IpavPhase::parse(&target)
+        .ok_or_else(|| AppError::Internal(format!("unknown phase {target:?}")))?;
+    core.advance_phase(&session_id, phase)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn cancel_session_turn(

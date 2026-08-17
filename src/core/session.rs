@@ -1578,7 +1578,26 @@ async fn participant_spawn_config(
     // HERE, from the participant, so the set that filters the mcp-config below
     // and the set that reaches `SpawnConfig` are the same one — see
     // `resolve_participant_overrides`.
-    let overrides = resolve_participant_overrides(storage, &paths.data_dir, p).await;
+    let mut overrides = resolve_participant_overrides(storage, &paths.data_dir, p).await;
+    // **The precedence chain ends HERE, not in `build_command`.** This site holds
+    // `storage`, so it is the only one that can RECORD what the reconciliation
+    // decided — and recording it is the whole point: the effective pair is not
+    // recoverable from the participant's own columns (a choice of "inherit" says
+    // nothing about what was inherited) and re-resolving it later answers "what
+    // it would be spawned with now", which diverges the moment Claude Config is
+    // edited mid-session. `slot0_model_at_spawn` made the same call for the
+    // sibling fact.
+    //
+    // A failed write must not fail the spawn: the row is for the UI to read
+    // back, and a session that will not start because a display value could not
+    // be saved is a worse outcome than a badge that says nothing.
+    crate::agents::reconcile_spawn_knobs(&mut overrides, p.effort.as_deref(), p.ultracode);
+    if let Err(e) = storage
+        .set_spawn_knobs(p.id, overrides.effort.as_deref(), overrides.ultracode)
+        .await
+    {
+        warn!(participant = %p.slug, ?e, "recording the spawn knobs failed");
+    }
     // The assembled prompt is multi-KB. Hand it to claude-code via a file
     // (`--append-system-prompt-file`) rather than an inline arg so the command
     // line stays under Windows' 32,767-char `CreateProcessW` limit. Co-located
@@ -1620,8 +1639,6 @@ async fn participant_spawn_config(
         resume_session_id: p.claude_session_id.clone(),
         project: project.clone(),
         data_dir: paths.data_dir.clone(),
-        session_effort: p.effort.clone(),
-        session_ultracode: p.ultracode,
         capabilities,
         overrides,
     })
@@ -2583,6 +2600,9 @@ mod tests {
 
     fn stub_participant(id: i64, slug: &str, turn_position: i64) -> crate::storage::Participant {
         crate::storage::Participant {
+            effort_at_spawn: None,
+            ultracode_at_spawn: None,
+            spawn_knobs_recorded: false,
             id,
             session_id: "s1".into(),
             slug: slug.into(),
@@ -3227,6 +3247,81 @@ mod tests {
             argv.windows(2).any(|w| w[0] == "--append-system-prompt-file"
                 && w[1] == cfg.system_prompt_path.display().to_string()),
             "the CLI was pointed at a different file than the one recorded for the view"
+        );
+    }
+
+    /// Migration 0061: building a spawn config RECORDS the reconciled
+    /// effort/ultracode on the participant row.
+    ///
+    /// **The wire, not the halves.** `reconcile_spawn_knobs` is unit-tested in
+    /// `agents::spawn` and `set_spawn_knobs` is a one-line UPDATE; both can be
+    /// perfect while nothing calls either, which is the defect this codebase has
+    /// shipped five times. Deleting the `set_spawn_knobs` call in
+    /// `participant_spawn_config` must turn this red.
+    ///
+    /// It asserts the FLAG separately from the values, because they answer
+    /// different questions and the common path makes them look alike: a
+    /// participant that inherits everything reconciles to `None`, so
+    /// `effort_at_spawn IS NULL` is what success looks like. Only
+    /// `spawn_knobs_recorded` distinguishes that from a row nothing ever spawned.
+    #[tokio::test]
+    async fn a_spawn_records_the_reconciled_knobs_on_the_participant_row() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let data_dir = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
+        let mcp_temp = TempDir::new().unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+        let me = roster.iter().find(|p| p.slug == "hands").expect("the executor").clone();
+
+        // Precondition: nothing recorded yet. Without it a passing assertion
+        // below could be measuring the migration's defaults.
+        let before: (Option<String>, i64) = sqlx::query_as(
+            "SELECT effort_at_spawn, spawn_knobs_recorded FROM session_participants WHERE id = ?",
+        )
+        .bind(me.id)
+        .fetch_one(s.pool())
+        .await
+        .unwrap();
+        assert_eq!(before, (None, 0), "precondition: the row starts unrecorded");
+
+        // A per-run pick the reconciliation must carry through untouched (no
+        // persistent override is in force in this temp data dir).
+        sqlx::query("UPDATE session_participants SET effort = 'high' WHERE id = ?")
+            .bind(me.id)
+            .execute(s.pool())
+            .await
+            .unwrap();
+        let me = s.participant_by_slug("s1", "hands").await.unwrap().unwrap();
+
+        participant_spawn_config(
+            &s,
+            &me,
+            resolve_participant_config(&s, &me).await,
+            &paths,
+            &None,
+            "prompt".to_string(),
+            "127.0.0.1:1".parse().unwrap(),
+            mcp_temp.path(),
+            None,
+            &SignalingBridge::new(),
+        )
+        .await
+        .expect("spawn config");
+
+        let after: (Option<String>, Option<i64>, i64) = sqlx::query_as(
+            "SELECT effort_at_spawn, ultracode_at_spawn, spawn_knobs_recorded \
+             FROM session_participants WHERE id = ?",
+        )
+        .bind(me.id)
+        .fetch_one(s.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            after,
+            (Some("high".to_string()), None, 1),
+            "the spawn must record what it resolved, and flag the row as recorded"
         );
     }
 
