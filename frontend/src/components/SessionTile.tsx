@@ -26,6 +26,9 @@ interface SessionTileProps {
    *  Empty is safe, but it is not free: an author with no row reads as
    *  "Unknown participant", so the roster is what makes the tag informative. */
   authorLabels?: Record<string, string>;
+  /** Label → hue token, from the same roster (rc3 D20 — a user-picked
+   *  participant colour). Absent falls back to the label hash. */
+  authorHues?: Record<string, string>;
 }
 
 const NO_LABELS: Record<string, string> = {};
@@ -35,6 +38,7 @@ function SessionTileImpl({
   pendingCount = 0,
   phase = null,
   authorLabels = NO_LABELS,
+  authorHues,
 }: SessionTileProps) {
   const navigate = useNavigate();
   const closed = session.closed_at !== null;
@@ -48,11 +52,9 @@ function SessionTileImpl({
   const attention = useHealthStore((s) => s.attentionBySession[session.id]);
   // Slot 8 Quickview: first line of the latest text message (null until one exists).
   const quickview = firstLine(session.last_message);
-  // …and who wrote it, as `ROLE · Model` (rc3 D10). The tint here is
-  // `authorColorClass(label)` WITHOUT the roster hues (`useParticipantLabels`
-  // returns them; `Dashboard` does not thread them to the tile), i.e. the hash
-  // fallback — so a user-picked participant colour (D20) shows inside the
-  // session view but not on this byline. Threading `hues` is the fix (T2).
+  // …and who wrote it, as `ROLE · Model` (rc3 D10), tinted with the roster
+  // hues the Dashboard threads in (round 8) — so a user-picked participant
+  // colour (D20) reads the same on this byline as inside the session view.
   const quickviewAuthor = authorLabel(session.last_author, authorLabels);
 
   const open = () => navigate(`/sessions/${session.id}`);
@@ -165,7 +167,7 @@ function SessionTileImpl({
             <span
               className={cn(
                 "mr-1.5 font-semibold",
-                authorColorClass(quickviewAuthor),
+                authorColorClass(quickviewAuthor, authorHues),
               )}
             >
               {quickviewAuthor}

@@ -5,25 +5,14 @@ import { PendingTray } from "../components/PendingTray";
 import { UpdateBanner } from "../components/UpdateBanner";
 import { useHealthStore, appHealthSummary } from "../stores/health";
 import { useTauriQuery } from "../hooks/useInvoke";
-import { useTauriEvent } from "../hooks/useTauriEvent";
 import type { InstalledPluginView } from "../lib/bindings";
 
 // Topbar tabs for enabled plugins that contribute a panel (manifest
-// `slots[].panel_route`). Shell never unmounts, so this is also the app's
-// single live watcher keeping the tab row in sync with install/enable/
-// disable/uninstall — the same query key PluginManager uses, one cache.
+// `slots[].panel_route`). The `plugin:*` events invalidate this query from
+// `Providers.tsx`'s GlobalEventSync (round 8) — the same query key
+// PluginManager uses, one cache, one set of listeners.
 function PluginNavTabs() {
   const list = useTauriQuery<InstalledPluginView[]>("list_installed_plugins", {});
-  useTauriEvent<{ plugin_id: string }>(
-    "plugin:state-changed",
-    () => void list.refetch(),
-    [list.refetch],
-  );
-  useTauriEvent<{ plugin_id: string }>(
-    "plugin:uninstalled",
-    () => void list.refetch(),
-    [list.refetch],
-  );
 
   const withPanel = (list.data ?? []).filter(
     (p) => p.enabled && p.manifest.slots?.some((s) => s.panel_route),

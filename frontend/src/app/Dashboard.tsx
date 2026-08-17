@@ -102,13 +102,14 @@ function SessionTileLoader({
     "get_session_phase",
     { sessionId: session.id },
   );
-  const { labels } = useParticipantLabels(session.id);
+  const { labels, hues } = useParticipantLabels(session.id);
   return (
     <SessionTile
       session={session}
       pendingCount={pendingCount}
       phase={phase}
       authorLabels={labels}
+      authorHues={hues}
     />
   );
 }

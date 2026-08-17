@@ -82,6 +82,23 @@ describe("ApprovalGate", () => {
     expect(onViewFile).toHaveBeenCalledTimes(2);
   });
 
+  it("names the requester as ROLE · Model in Details too — never the stored slug (rc3 D10, round 8)", () => {
+    // The card printed the resolved label; the Details dialog's "Requested by"
+    // still printed `row.agent` — the slug leak the round-7 sweep found.
+    render(
+      <ApprovalGate
+        rows={[approval({ agent: "hands" })]}
+        label={(slug) => (slug === "hands" ? "HANDS · Claude Opus 5" : slug)}
+        onResolve={resolved()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+    const dialog = screen.getByRole("dialog", { name: "Approval details" });
+    expect(dialog.textContent).toContain("HANDS · Claude Opus 5");
+    // The bare slug reaches neither the card nor the dialog.
+    expect(screen.queryByText("hands")).toBeNull();
+  });
+
   it("offers no file button when the command names none, or no viewer is wired", () => {
     const { unmount } = render(
       <ApprovalGate rows={[approval()]} onResolve={resolved()} onViewFile={vi.fn()} />,

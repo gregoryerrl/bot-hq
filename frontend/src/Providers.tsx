@@ -95,6 +95,12 @@ const MODEL_KEYS = ["list_models"] as const;
 // EYES-sign-off findings — the session-header banner refetches when the bridge
 // fires `session:findings_changed` (eyes_flag / disposition_finding / approve_finding).
 const FINDINGS_KEYS = ["list_session_findings"] as const;
+// Plugin registry: install / enable / disable / uninstall / crash all change
+// `list_installed_plugins`, which the tab row (Shell) and the manager panel
+// share as one cache entry. Round 8: the two components each carried their own
+// copies of these listeners; the map is the one place (the `plugin:*` events
+// are typed in `src/tauri_events/types.rs`).
+const PLUGIN_KEYS = ["list_installed_plugins"] as const;
 // Everything a lagged burst could have left stale. `session:resync` fires when
 // the backend's broadcast receiver skipped events, and the emitter's watermark
 // only recovers a skipped `MessagePersisted` when a LATER row in that session
@@ -112,6 +118,7 @@ export const RESYNC_KEYS = [
   ...PROJECT_KEYS,
   ...MODEL_KEYS,
   ...FINDINGS_KEYS,
+  ...PLUGIN_KEYS,
   "get_session_messages",
   "get_staged_response",
   "get_session",
@@ -146,6 +153,7 @@ function GlobalEventSync() {
     [invalidate],
   );
   const onModel = useCallback(() => invalidate(MODEL_KEYS), [invalidate]);
+  const onPlugin = useCallback(() => invalidate(PLUGIN_KEYS), [invalidate]);
   const onFindings = useCallback(() => invalidate(FINDINGS_KEYS), [invalidate]);
   const setHealth = useHealthStore((s) => s.setHealth);
   const setAttention = useHealthStore((s) => s.setAttention);
@@ -254,6 +262,9 @@ function GlobalEventSync() {
   useTauriEvent("session:attention", onAttention, [onAttention]);
   useTauriEvent("session:activity", onActivity, [onActivity]);
   useTauriEvent("session:resync", onResync, [onResync]);
+  useTauriEvent("plugin:state-changed", onPlugin, [onPlugin]);
+  useTauriEvent("plugin:uninstalled", onPlugin, [onPlugin]);
+  useTauriEvent("plugin:crashed", onPlugin, [onPlugin]);
 
   // Bug C: backfill the event-driven stores once on mount. The activity/health
   // events fire on transitions and can be missed during the respawn window

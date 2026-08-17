@@ -111,6 +111,18 @@ describe("Providers — the slot-shaped runtime wire", () => {
     localStorage.removeItem("bothq:draft:s1");
   });
 
+  it("subscribes the plugin registry events once, for the tab row and the manager alike (round 8)", async () => {
+    // Shell and PluginManager each carried their own copies of these three
+    // listeners; the global map is the one place, invalidating the one query
+    // key both read.
+    const { RESYNC_KEYS } = await import("./Providers");
+    renderProviders();
+    for (const ev of ["plugin:state-changed", "plugin:uninstalled", "plugin:crashed"]) {
+      await waitFor(() => expect(handlers.has(ev)).toBe(true));
+    }
+    expect(RESYNC_KEYS).toContain("list_installed_plugins");
+  });
+
   it("purges a closed session's chat store and draft for ANY session (round 8)", async () => {
     const { useChatStore } = await import("./stores/chat");
     const msg = (id: number, session_id: string) =>

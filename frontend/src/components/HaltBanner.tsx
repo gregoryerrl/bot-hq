@@ -128,6 +128,7 @@ export function HaltBanner({
   halt,
   rows,
   label,
+  hues,
   onOpenTray,
 }: {
   /** The session's halt slot, from `get_session_halt`. Null = not halted. */
@@ -138,6 +139,8 @@ export function HaltBanner({
   /** slug → what to print for it (rc3 D10/D20), so the banner names a
    *  participant exactly as the chat byline does. */
   label?: (agent: string) => string;
+  /** Label → hue token (rc3 D20). Absent falls back to the label hash. */
+  hues?: Record<string, string>;
   /** Jump to the tray, when a pick is waiting there too. */
   onOpenTray?: () => void;
 }) {
@@ -221,6 +224,7 @@ export function HaltBanner({
               "font-semibold",
               authorColorClass(
                 label?.(activeHalt.declared_by) ?? activeHalt.declared_by,
+                hues,
               ),
             )}
           >

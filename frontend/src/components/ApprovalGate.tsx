@@ -34,6 +34,7 @@ import { fileArgInCommand } from "./FileViewerDialog";
 export function ApprovalGate({
   rows,
   label,
+  hues,
   onResolve,
   onCancel,
   onViewFile,
@@ -43,6 +44,8 @@ export function ApprovalGate({
   rows: readonly TrayRow[];
   /** slug → what to print for it (rc3 D10/D20). */
   label?: (agent: string) => string;
+  /** Label → hue token (rc3 D20). Absent falls back to the label hash. */
+  hues?: Record<string, string>;
   /** Resolve one approval. `confirmStale` re-sends a pick the backend held
    *  back because the request had aged. */
   onResolve: (
@@ -113,7 +116,7 @@ export function ApprovalGate({
         <span className="font-label-caps text-label-caps text-primary">
           ⛔ APPROVAL
         </span>
-        <span className={cn("text-sm font-semibold", authorColorClass(who))}>
+        <span className={cn("text-sm font-semibold", authorColorClass(who, hues))}>
           {who}
         </span>
         <span className="text-xs text-on-surface-variant">
@@ -222,6 +225,8 @@ export function ApprovalGate({
       {showDetails && (
         <GateDetailsDialog
           row={row}
+          who={who}
+          hues={hues}
           onClose={() => setShowDetails(false)}
           onViewFile={onViewFile}
         />
@@ -244,10 +249,15 @@ export function ApprovalGate({
  */
 function GateDetailsDialog({
   row,
+  who,
+  hues,
   onClose,
   onViewFile,
 }: {
   row: TrayRow;
+  /** The requester as `ROLE · Model` (rc3 D10) — never the stored slug. */
+  who: string;
+  hues?: Record<string, string>;
   onClose: () => void;
   onViewFile?: (path: string) => void;
 }) {
@@ -278,8 +288,8 @@ function GateDetailsDialog({
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-1">
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
             <dt className="text-on-surface-variant">Requested by</dt>
-            <dd className={cn("font-semibold", authorColorClass(row.agent))}>
-              {row.agent}
+            <dd className={cn("font-semibold", authorColorClass(who, hues))}>
+              {who}
             </dd>
             <dt className="text-on-surface-variant">Asked</dt>
             <dd className="text-on-surface">

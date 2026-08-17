@@ -813,6 +813,7 @@ export function SessionView() {
               halt={sessionHalt}
               rows={trayRows}
               label={(agent) => authorLabel(agent, labels)}
+              hues={hues}
             />
             {/* rc3 D33: an approval TAKES the input slot. Something is
                 synchronously blocked on it — a pre-push hook, a gated command —
@@ -822,6 +823,7 @@ export function SessionView() {
               <ApprovalGate
                 rows={pendingApprovals}
                 label={(agent) => authorLabel(agent, labels)}
+                hues={hues}
                 onResolve={async (choiceId, picked, confirmStale = false) => {
                   const res = await invoke<ResolveResult>("resolve_choice", {
                     choiceId,

@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
-import { useTauriEvent } from "../hooks/useTauriEvent";
 import { Button } from "../components/ui/Button";
 import { Card, CardDescription, CardTitle } from "../components/ui/Card";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -121,23 +120,9 @@ export function PluginManager() {
     "uninstall_plugin",
   );
 
-  // Refetch on any backend state change. The plugin:state-changed event
-  // covers enable/disable; uninstall + crash carry their own events.
-  useTauriEvent<{ plugin_id: string }>(
-    "plugin:state-changed",
-    () => void list.refetch(),
-    [list.refetch],
-  );
-  useTauriEvent<{ plugin_id: string }>(
-    "plugin:uninstalled",
-    () => void list.refetch(),
-    [list.refetch],
-  );
-  useTauriEvent<{ plugin_id: string }>(
-    "plugin:crashed",
-    () => void list.refetch(),
-    [list.refetch],
-  );
+  // Refetch on any backend state change: the `plugin:*` events invalidate
+  // `list_installed_plugins` from `Providers.tsx`'s GlobalEventSync (round 8),
+  // for this panel and the Shell's tab row alike.
 
   const handleInstall = () => {
     const source = installSource.trim();
