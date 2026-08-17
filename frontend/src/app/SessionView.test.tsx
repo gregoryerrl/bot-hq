@@ -49,7 +49,10 @@ vi.stubGlobal("ResizeObserver", ResizeObserverStub);
 // positions — see the disabled-row test below.
 /** The session's phase, and what `advance_session_phase` was called with. */
 const phaseFixture = vi.hoisted(() => ({ value: null as string | null }));
-const advanceCall = vi.hoisted(() => ({ args: null as Record<string, unknown> | null }));
+const advanceCall = vi.hoisted(() => ({
+  args: null as Record<string, unknown> | null,
+  reject: null as { kind: string; message: string } | null,
+}));
 
 const roster = vi.hoisted(() => ({
   rows: [] as unknown[],
@@ -136,6 +139,7 @@ vi.mock("@tauri-apps/api/core", () => ({
         return Promise.resolve(phaseFixture.value);
       case "advance_session_phase":
         advanceCall.args = args ?? null;
+        if (advanceCall.reject) return Promise.reject(advanceCall.reject);
         return Promise.resolve(null);
       case "list_session_participants":
         return Promise.resolve(roster.rows);
@@ -243,6 +247,27 @@ describe("SessionView phase control (round 4)", () => {
     await waitFor(() =>
       expect(advanceCall.args).toEqual({ sessionId: "s1", target: "apply" }),
     );
+  });
+
+  /**
+   * A REFUSED advance says so (round 8). The select snapped back with no
+   * message — the backend's reason (an open gate, unresolved findings) was
+   * caught and dropped, so a refusal looked like a mis-click.
+   */
+  it("shows the backend's reason when the advance is refused", async () => {
+    roster.rows = roster.default;
+    phaseFixture.value = "investigate";
+    // The shape a Tauri command rejects with (`AppError`), as mapError passes it through.
+    advanceCall.reject = { kind: "Internal", message: "an approval gate is open" };
+    try {
+      renderSessionView();
+      const control = await screen.findByLabelText("Session phase");
+      fireEvent.change(control, { target: { value: "apply" } });
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toContain("an approval gate is open");
+    } finally {
+      advanceCall.reject = null;
+    }
   });
 });
 

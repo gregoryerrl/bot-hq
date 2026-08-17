@@ -165,6 +165,11 @@ export function SessionView() {
     { sessionId: string; target: string }
   >("advance_session_phase");
   const [respawnError, setRespawnError] = useState<AppError | null>(null);
+  // A refused phase advance (an open gate, unresolved findings, an invalid
+  // target) used to snap the select back with no message — indistinguishable
+  // from a mis-click (round 8). Rendered beside the select; cleared on the
+  // next attempt.
+  const [phaseError, setPhaseError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Active subtab. All three panels stay MOUNTED — inactive ones are `hidden`
@@ -538,12 +543,13 @@ export function SessionView() {
                     className="rounded border border-outline-variant bg-surface-container px-1 py-0.5 text-on-surface"
                     value={phase}
                     onChange={(e) => {
+                      setPhaseError(null);
                       void advancePhase
                         .mutateAsync({
                           sessionId,
                           target: e.target.value,
                         })
-                        .catch(() => {});
+                        .catch((err: unknown) => setPhaseError(errorMessage(err)));
                     }}
                   >
                     {PHASE_NAMES.map((name) => (
@@ -552,6 +558,15 @@ export function SessionView() {
                       </option>
                     ))}
                   </select>
+                  {phaseError && (
+                    <span
+                      role="alert"
+                      className="ml-2 font-code-sm text-code-sm text-error"
+                      title={phaseError}
+                    >
+                      phase not advanced: {phaseError}
+                    </span>
+                  )}
                 </span>
               </>
             )}
