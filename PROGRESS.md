@@ -81,8 +81,9 @@ migration — approved, deferred to its own slice).
 404'd Hanken Grotesk, Inter and JetBrains Mono since the migration and no gate
 could see it; `lib/fonts.test.ts` reads the real CSS and the real `public/`.
 
-**Also:** `cl_stale_refs` sees a file named by its stem (30 → 27, predicted and
-measured; `82cda1e`); `session:created` fires for every create — its only
+**Also:** `cl_stale_refs` sees a file named by its stem (`82cda1e`, pinned by
+a temp-git-repo test — see the measurement caveat below); `session:created`
+fires for every create — its only
 emitter had been the deleted driver's (`4dbfe62`); dead code and orphaned schema
 (`6f7c2d8`, `7c3a296`, `0732707` migration 0064 drops `forward_events` + a dead
 index, `5e68189` the D9 spikes and Slint fonts); `teardown_session` no longer
@@ -95,8 +96,15 @@ in-code comments catch up (`ead9d00`, `43362e7`).
 **Source changed, not observed — stated:** the descriptor/general-rules text
 (compiled consts; a respawn from the old binary re-injects the old text), the
 A1 exclusion, and migration 0064 all wait for the user's next rebuild + relaunch
-— never done over live sessions. `cl_stale_refs` = 27 measured with a temporary
-test, since the running binary still reports 30.
+— never done over live sessions. `cl_stale_refs`: the "30 → 27" measured
+mid-round with a temporary test does NOT discriminate — the fix's own test
+fixture put `codebase_map_test` into the code corpus, so the old logic drops
+those three hits too (round 4's F7, reproduced by the hand fixing it); the
+running binary reports 30 at HEAD because the round's deletion of the D9
+spikes created three NEW stale references in the CL (`learnings-2026-07-26-*`),
+retired at close. The unit test with an independent temp repo is the pin, and
+the live count is to be re-measured after the user's next boot.
+
 
 Suites: **1207** Rust (+ 36 integration) + **430** frontend; clippy 4; `tsc`
 clean; release build green with the fresh dist (fonts under `dist/fonts/`,
