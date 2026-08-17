@@ -172,6 +172,82 @@ describe("ChatInput turn-status + Stop", () => {
     expect(screen.getByRole("textbox")).toHaveValue("");
   });
 
+  // The composer's half of the "I have to manually clear it" report. The box
+  // itself was never the culprit — the delivered message was re-staged behind
+  // it (see `SessionView`'s re-stage effect), so `staged`/`stagedText` came
+  // back legitimately and this component did the right thing with them.
+  //
+  // Pinned anyway, because it is the invariant the fix relies on: a delivery
+  // clears the box, a LATER genuine stage still rehydrates it, and the two are
+  // told apart by the props rather than by timing.
+  it("clears on delivery and still rehydrates a genuinely new staged message", () => {
+    const { rerender } = render(
+      <ChatInput
+        activity="busy"
+        busy={{ hands: true }}
+        busyLabel={LABEL}
+        onSend={() => {}}
+        onStage={() => {}}
+        onCancel={() => {}}
+        staged
+        stagedText="queued while they work"
+        deliveredTick={0}
+      />,
+    );
+    expect(screen.getByRole("textbox")).toHaveValue("queued while they work");
+
+    // Delivery fires. The tick bumps, but the staged query has NOT come back
+    // yet — this is the window the bug lived in.
+    rerender(
+      <ChatInput
+        activity="idle"
+        busy={{}}
+        busyLabel={LABEL}
+        onSend={() => {}}
+        onStage={() => {}}
+        onCancel={() => {}}
+        staged
+        stagedText="queued while they work"
+        deliveredTick={1}
+      />,
+    );
+    expect(screen.getByRole("textbox")).toHaveValue("");
+
+    // The refetch lands: still clear.
+    rerender(
+      <ChatInput
+        activity="idle"
+        busy={{}}
+        busyLabel={LABEL}
+        onSend={() => {}}
+        onStage={() => {}}
+        onCancel={() => {}}
+        staged={false}
+        stagedText={null}
+        deliveredTick={1}
+      />,
+    );
+    expect(screen.getByRole("textbox")).toHaveValue("");
+
+    // And the guard must not be permanent: a NEW staged message still
+    // rehydrates, which is what the effect is actually for (a reload while
+    // staged). Suppressing that forever would be a quieter second bug.
+    rerender(
+      <ChatInput
+        activity="busy"
+        busy={{ hands: true }}
+        busyLabel={LABEL}
+        onSend={() => {}}
+        onStage={() => {}}
+        onCancel={() => {}}
+        staged
+        stagedText="a different queued message"
+        deliveredTick={1}
+      />,
+    );
+    expect(screen.getByRole("textbox")).toHaveValue("a different queued message");
+  });
+
   it("names the busy participant by role and model whichever slot it is in", () => {
     // The old line hardcoded slot 1 = "Rain" + the verb "is reviewing", which
     // is bot-hq claiming to know what a role MEANS. It knows only that a turn

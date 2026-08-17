@@ -215,6 +215,13 @@ export function ChatInput({
   // Rehydrate the box from the backend's staged content (a reload while
   // staged). Only while staged — the box is readOnly then, so this can never
   // fight the user's typing.
+  //
+  // This effect is CORRECT and is not what refilled the box after a delivery:
+  // its deps are `[staged, stagedText]`, and during the post-delivery window
+  // neither changes, so it does not run. (Checked by kill test — guarding it
+  // against a "just delivered" flag changed nothing.) The box refilled because
+  // the delivered message was genuinely re-staged behind it; see the re-stage
+  // effect in `SessionView`.
   useEffect(() => {
     if (staged && stagedText != null && stagedText !== value) {
       setValue(stagedText);

@@ -368,6 +368,14 @@ export function SessionView() {
       if (payload.session_id !== sessionId) return;
       setDeliveredTick((t) => t + 1);
       clearStaged(sessionId);
+      // Drop the delivered content NOW rather than waiting for the refetch.
+      // The refetch is async, so until it lands `stagedResp` still describes a
+      // message the backend has already sent — and a stale non-null staged
+      // response beside a freshly cleared box is what refilled the composer.
+      // ChatInput guards this too; closing the window here means the guard is
+      // a backstop rather than the only thing standing between the user and
+      // clearing the box by hand.
+      queryClient.setQueryData(["get_staged_response", { sessionId }], null);
       void refetchStaged();
       void queryClient.invalidateQueries({
         queryKey: ["list_session_tray", { sessionId }],
@@ -378,8 +386,21 @@ export function SessionView() {
   // Picks staged AFTER the message was staged must ride too: re-stage with
   // the same text whenever the pick set changes while staged, so the backend
   // snapshot always equals what the tray shows as staged.
+  //
+  // **A DELIVERY also changes the pick set, and must not re-stage.** Delivery
+  // calls `clearStaged`, which empties `stagedMap` and moves this counter — so
+  // this effect ran, saw the pick set shrink to zero beside a `stagedResp` the
+  // refetch had not yet nulled, and re-staged the message that had just been
+  // sent. That is why the composer would not stay clear: the box was not
+  // refilling itself, the message was genuinely being put back. Guarded on the
+  // tick rather than on `stagedResp` alone, so it does not depend on the
+  // delivery handler's cache write winning a race with this render.
   const stagedPickCount = Object.keys(stagedMap).length;
+  const deliveredAtRef = useRef(deliveredTick);
   useEffect(() => {
+    const justDelivered = deliveredAtRef.current !== deliveredTick;
+    deliveredAtRef.current = deliveredTick;
+    if (justDelivered) return;
     if (!stagedResp) return;
     const current = trayRows
       .filter(
@@ -402,7 +423,7 @@ export function SessionView() {
       }).then(() => refetchStaged());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stagedPickCount]);
+  }, [stagedPickCount, deliveredTick]);
 
   if (!session) {
     return (
