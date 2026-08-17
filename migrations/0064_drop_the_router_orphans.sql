@@ -1,0 +1,23 @@
+-- Drop what the router deletion orphaned, and an index nothing reads.
+--
+-- Round 7 (2026-08-17). `core/router.rs` was deleted on 2026-08-13 and the
+-- `forward_events` module — its only writer and reader — on 2026-08-17
+-- (`87f520e`). The table stayed behind: no writer, no reader, no boot GC, 0 rows
+-- in the live database. A table nothing can write is not history, it is a
+-- question every schema reader has to answer again ("who uses this?"), so it
+-- goes. `IF EXISTS` because a database that never had 0041 applied is a database
+-- this migration must not fail on.
+--
+-- `idx_deliveries_message (message_id)` on `participant_deliveries` was created
+-- by 0044 for a lookup that was never written: every read of that table is keyed
+-- by `participant_id` (`withheld_for_participant`, the delivery cursor reads), and
+-- the UNIQUE `(participant_id, message_id)` autoindex serves all of them. The
+-- table is written once per participant per delivered row, so the index was a
+-- B-tree insert on the hot path buying nothing.
+--
+-- Nothing else moves. In particular the four `session_id`-leading indexes on
+-- `messages` are NOT touched here: two of them may be redundant with each other,
+-- but that is a measurement (EXPLAIN QUERY PLAN over the live queries), not a
+-- fact, and a migration is not the place to guess.
+DROP TABLE IF EXISTS forward_events;
+DROP INDEX IF EXISTS idx_deliveries_message;
