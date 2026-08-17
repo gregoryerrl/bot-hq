@@ -89,6 +89,9 @@ async fn run_loop<F>(
 {
     let mut watermarks: HashMap<Arc<str>, i64> = HashMap::new();
     let mut dirty: HashSet<Arc<str>> = HashSet::new();
+    // Sessions whose watermark was SEEDED by a touch and not yet flushed —
+    // the only state in which a later touch may LOWER it (see the Touch arm).
+    let mut seeded_unflushed: HashSet<Arc<str>> = HashSet::new();
     let mut touches_since_flush: usize = 0;
     let mut flush_at: Option<Instant> = None;
 
@@ -97,7 +100,7 @@ async fn run_loop<F>(
             Some(t) => tokio::select! {
                 m = rx.recv() => m,
                 _ = tokio::time::sleep_until(t) => {
-                    flush_once(&storage, &mut watermarks, &mut dirty, &emit_fn).await;
+                    flush_once(&storage, &mut watermarks, &mut seeded_unflushed, &mut dirty, &emit_fn).await;
                     touches_since_flush = 0;
                     flush_at = None;
                     continue;
@@ -120,14 +123,28 @@ async fn run_loop<F>(
                 // this row is history the frontend already has. Seeded to the
                 // row BEFORE this one, so this row and everything after it —
                 // including rows touched later in the same flush window — go
-                // out; nothing older does.
-                watermarks
-                    .entry(Arc::clone(&session_id))
-                    .or_insert(message_id - 1);
+                // out; nothing older does. Until the first flush the seed can
+                // only go DOWN: notifies are fire-and-forget after each writer's
+                // own await and writers are concurrent (pumps, sequencer,
+                // watchdog, the tray's OOB delivery), so ids can arrive out of
+                // order — seeded from the FIRST id, row 100 arriving after row
+                // 101 was never emitted until a remount (round 8, R2). The
+                // lowest id seen before the flush is the seed.
+                match watermarks.entry(Arc::clone(&session_id)) {
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(message_id - 1);
+                        seeded_unflushed.insert(Arc::clone(&session_id));
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut o) => {
+                        if seeded_unflushed.contains(&session_id) && message_id - 1 < *o.get() {
+                            *o.get_mut() = message_id - 1;
+                        }
+                    }
+                }
                 dirty.insert(session_id);
                 touches_since_flush += 1;
                 if touches_since_flush >= FLUSH_AT_N {
-                    flush_once(&storage, &mut watermarks, &mut dirty, &emit_fn).await;
+                    flush_once(&storage, &mut watermarks, &mut seeded_unflushed, &mut dirty, &emit_fn).await;
                     touches_since_flush = 0;
                     flush_at = None;
                 } else if flush_at.is_none() {
@@ -135,7 +152,7 @@ async fn run_loop<F>(
                 }
             }
             EmitMsg::Flush => {
-                flush_once(&storage, &mut watermarks, &mut dirty, &emit_fn).await;
+                flush_once(&storage, &mut watermarks, &mut seeded_unflushed, &mut dirty, &emit_fn).await;
                 touches_since_flush = 0;
                 flush_at = None;
             }
@@ -146,6 +163,7 @@ async fn run_loop<F>(
 async fn flush_once<F>(
     storage: &Storage,
     watermarks: &mut HashMap<Arc<str>, i64>,
+    seeded_unflushed: &mut HashSet<Arc<str>>,
     dirty: &mut HashSet<Arc<str>>,
     emit_fn: &Arc<F>,
 ) where
@@ -162,6 +180,8 @@ async fn flush_once<F>(
     let mut pending = std::mem::take(dirty);
     for sid in pending.drain() {
         let since = watermarks.get(&sid).copied();
+        // Flushed: from here the watermark only advances.
+        seeded_unflushed.remove(&sid);
         match storage.messages_for_session(&sid, since).await {
             Ok(msgs) => {
                 if let Some(last) = msgs.last() {
@@ -307,6 +327,42 @@ mod tests {
             captured[0].iter().map(|m| m.content.as_str()).collect::<Vec<_>>(),
             vec!["new"],
             "only the row that was persisted since launch goes out"
+        );
+    }
+
+    /// **The seed is the LOWEST id touched before the first flush** (round 8,
+    /// R2). Two rows persisted by concurrent writers can notify in the order
+    /// 101, 100; seeded from the first-arriving id, row 100 was never emitted.
+    /// Kill-tested: restore `or_insert` and "first" below is missing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn out_of_order_touches_before_the_first_flush_lower_the_seed() {
+        let storage = test_storage_with_messages("s1", &["old"]).await;
+        let first = storage
+            .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), "first", None)
+            .await
+            .unwrap();
+        let second = storage
+            .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), "second", None)
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let emitter = BatchEmitter::new(
+            move |msgs| cap.lock().unwrap().push(msgs),
+            storage,
+        );
+        // The later row's notify lands first.
+        emitter.touch("s1".into(), second.message_id());
+        emitter.touch("s1".into(), first.message_id());
+        emitter.flush();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].iter().map(|m| m.content.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second"],
+            "both rows persisted since launch go out; the history row does not"
         );
     }
 
