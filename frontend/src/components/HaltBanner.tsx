@@ -34,9 +34,11 @@ export type TrayRow = {
  * carries free-form options. Since round 8 the backend also says so at insert
  * (`kind = "approval"`, `storage::is_gate_row`), so the kind is the primary
  * signal here and the exact-menu check is the fallback for rows parked before
- * that (`kind = "choice"` with the gate menu). Across every tray row recorded
- * before the kind existed that separation was exact — 31 matches, all gates,
- * no false positives.
+ * that (`kind = "choice"` with the gate menu). Measured on the live DB on
+ * 2026-08-17, before the kind existed: 95 rows carried the exact menu, all of
+ * them gates (78 with a command, the rest push gates), and 0 command-carrying
+ * rows had any other menu — the fallback catches every legacy gate and
+ * false-positives on nothing. Retire it once no such rows remain.
  */
 export function isApproval(r: {
   kind?: string;

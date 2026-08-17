@@ -61,7 +61,7 @@ export function PolicyForm({
 
       <Field
         label="Per-action approval"
-        hint="Bash command prefixes that require request_approval on every invocation."
+        hint="Bash command prefixes the agent is told to request_approval for on every invocation — described to the agent, not mechanically enforced (the Tool Gate is the enforced list)."
       >
         <StringList
           items={value.per_action_approval ?? []}
@@ -71,7 +71,10 @@ export function PolicyForm({
         />
       </Field>
 
-      <Field label="Branch pattern" hint="Regex branch names must match. Empty = no constraint.">
+      <Field
+        label="Branch pattern"
+        hint="Regex the agent is told branch names must match — described to the agent, not mechanically enforced. Empty = no constraint."
+      >
         <input
           type="text"
           value={value.branch_pattern ?? ""}

@@ -50,7 +50,7 @@ pub enum Capability {
 impl Capability {
     /// Every capability, in the order the prompt lists them and the Roles tab
     /// renders its checklist — declaration order, which is also `Ord` order, so
-    /// a `BTreeSet` walk agrees with this array, and which groups the 17 boxes
+    /// a `BTreeSet` walk agrees with this array, and which groups the boxes
     /// into five short sections rather than one wall (see [`Capability::group`]).
     ///
     /// It exists so neither consumer carries a copy. A slug list hardcoded in
