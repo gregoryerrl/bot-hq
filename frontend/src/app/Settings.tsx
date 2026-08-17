@@ -231,6 +231,13 @@ function SessionDefaults() {
     "get_app_setting",
     { key: "worktree_default" },
   );
+  // `adherence_nudges` (storage/models.rs): the opt-out for the Track-A
+  // nudges — the CL-opener nudge at first spawn, the pre-Apply mutation
+  // reminder, the Plan→Apply nudge and the close-out learnings ask. Read in
+  // four places and, until round 8, settable nowhere but SQLite.
+  const { data: adherenceNudges, refetch: refetchNudges } = useTauriQuery<
+    string | null
+  >("get_app_setting", { key: "adherence_nudges" });
   const setAppSetting = useTauriMutation<void, { key: string; value: string }>(
     "set_app_setting",
   );
@@ -262,6 +269,33 @@ function SessionDefaults() {
         several sessions can work the same project in parallel. Clean worktrees
         are removed at close; anything uncommitted is kept. The New-session
         dialog can override this per session.
+      </p>
+      <label className="mt-3 flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={adherenceNudges !== "0"}
+          onChange={async (e) => {
+            try {
+              await setAppSetting.mutateAsync({
+                key: "adherence_nudges",
+                value: e.target.checked ? "1" : "0",
+              });
+              refetchNudges();
+            } catch {
+              // rendered below
+            }
+          }}
+          className="size-4 accent-primary"
+        />
+        <span className="font-body-md text-body-md text-on-surface">
+          Send adherence nudges to participants
+        </span>
+      </label>
+      <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+        The one-time reminders bot-hq posts into a session: open the Context
+        Library first, mutations belong in Apply, the Plan→Apply hand-off, and
+        the close-out learnings ask. Off = none of them; the tools and gates
+        are unaffected.
       </p>
       {setAppSetting.error && (
         <p className="mt-2 inline-block rounded border border-error/40 bg-error-container/20 px-2 py-1 font-code-sm text-code-sm text-on-error-container">

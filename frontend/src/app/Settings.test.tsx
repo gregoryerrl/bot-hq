@@ -138,4 +138,22 @@ describe("Settings", () => {
       screen.getByRole("checkbox", { name: /isolated git worktrees/i }),
     ).toBeChecked();
   });
+
+  it("offers the adherence-nudges opt-out, keyed on its own setting (round 8)", async () => {
+    // `adherence_nudges` was read in four places and settable nowhere but
+    // SQLite. Opt-OUT like worktrees: unset reads as on, "0" as off, and the
+    // write goes to ITS key, not the worktree one.
+    mockBackend({ adherence_nudges: "0" });
+    renderSettings();
+    await openPolicy();
+    const box = screen.getByRole("checkbox", { name: /adherence nudges/i });
+    await waitFor(() => expect(box).not.toBeChecked());
+    fireEvent.click(box);
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("set_app_setting", {
+        key: "adherence_nudges",
+        value: "1",
+      }),
+    );
+  });
 });
