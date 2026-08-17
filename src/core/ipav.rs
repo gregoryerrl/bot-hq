@@ -92,11 +92,22 @@ impl IpavPhase {
 /// (`session_phase`) so a tool call can read the phase without reaching through
 /// the session map.
 ///
-/// This is not persisted: `sessions` has no phase column, and a restart rebuilds
-/// the handle with `Default` (Investigate). The description above said
-/// `HashMap<SessionId, _>` with a `phase_log` field — neither has ever existed
-/// here, and the same sentence was in ARCHITECTURE.md, so correcting one left the
-/// other to re-seed it (round 5, N2).
+/// **Persisted since migration 0063.** `AppState::advance_phase` writes the new
+/// phase's `tag()` through `Storage::set_persisted_ipav_phase`, and
+/// `core/session.rs` reads `persisted_ipav_phase` back when it builds the handle,
+/// so a restart resumes where the work actually is instead of at Investigate. A
+/// NULL or unparseable column falls back to `IpavPhase::default()`.
+///
+/// Two corrections live here because the same paragraph has now been wrong
+/// twice. It said `HashMap<SessionId, _>` with a `phase_log` field until round 5
+/// — neither has ever existed here, and ARCHITECTURE.md carried the identical
+/// sentence, so correcting one alone left the other to re-seed it (round 5, N2).
+/// And the "not persisted" claim that stood in this spot survived that fix by a
+/// round: it was still asserting an in-memory-only phase nine lines above the
+/// sentence below, which already named `sessions.ipav_phase` (round 6, F1). The
+/// rule that catches both, and the third copy in `tauri_cmd/sessions.rs` that
+/// pair-tracking could not have caught: **an edit correcting one claim in a block
+/// re-reads the whole block against what shipped that day.**
 /// `Default` is DERIVED, so the default phase is stated once — on `IpavPhase`
 /// itself — and read from there. It used to be a hand-written impl naming
 /// `Investigate` a second time; migration 0063 added a third reader (a NULL or

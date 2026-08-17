@@ -185,7 +185,45 @@ async restartSession(sessionId: string) : Promise<Result<null, AppError>> {
  * DEFERRED until the op completes (≤ ~8s cap) so the working tree isn't left
  * half-written. The command returns immediately and a detached task drives the
  * escalation. No-op if the session isn't live.
+ * Move a session's IPAV phase — **the user's own hand on the chip**.
+ * 
+ * ## Why this did not exist until round 4
+ * 
+ * It did not, and the harness said it did. `rg 'advance_phase|set_phase|ipav'
+ * src/tauri_cmd/` returned nothing: no Tauri command wrote the phase, and
+ * `SessionPhaseChip` was a bare `<span>`. Meanwhile `bridge/tray.rs` documented
+ * `request_phase_advance`'s first response path as *"Click the phase chip →
+ * `AppState::advance_phase`"*, and `signaling/protocol.rs`'s tool description
+ * shipped the same claim **to every agent**: *"the ring stops until the user
+ * advances the chip OR replies in chat."*
+ * 
+ * So an agent could ask for acknowledgment before an irreversible Apply, and
+ * the only reachable answer was the implicit decline. The tool's stated purpose
+ * was unreachable, and the participants were told otherwise — the audit's F2
+ * class (a claim the code contradicts) landing in the one surface agents are
+ * handed as authoritative.
+ * 
+ * ## What it does, and what it deliberately does not
+ * 
+ * A plain advance, identical to the agent-side `advance_phase`: same
+ * `AppState` entry point, so the phase has exactly one production writer
+ * (`core/state.rs`) and the user's path cannot drift from the agents'. It
+ * clears the awaiting flag and answers a pending halt row for free, which is
+ * what makes it a real answer to `request_phase_advance` rather than a second
+ * way to set a chip.
+ * 
+ * It is NOT yet the D36 override. When the phase-advance vote lands, a stalled
+ * vote's escape valve is a user gate, and this command grows a flag to force
+ * past a tally rather than being replaced.
  */
+async advanceSessionPhase(sessionId: string, target: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("advance_session_phase", { sessionId, target }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async cancelSessionTurn(sessionId: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cancel_session_turn", { sessionId }) };
@@ -222,10 +260,12 @@ async renameSession(sessionId: string, title: string) : Promise<Result<null, App
 },
 /**
  * Read the current IPAV phase for a session. Returns one of "investigate" /
- * "plan" / "apply" / "verify", or `None` if the session isn't live (IPAV
- * state is in-memory only — restart loses it). Frontend SessionView header
- * uses this for the initial phase chip; subsequent updates come from the
- * `session:phase_changed` Tauri event.
+ * "plan" / "apply" / "verify", or `None` if the session isn't live — this
+ * reads the live-handle map (`AppState::current_phase`), not storage, so a
+ * closed session has no phase to report even though `sessions.ipav_phase`
+ * still holds its last one. Frontend SessionView header uses this for the
+ * initial phase chip; subsequent updates come from the `session:phase_changed`
+ * Tauri event.
  */
 async getSessionPhase(sessionId: string) : Promise<Result<string | null, AppError>> {
     try {
@@ -1680,7 +1720,28 @@ effort: string | null;
 /**
  * This participant's ultracode override (rc3 D12), or `null` to inherit.
  */
-ultracode: boolean | null }
+ultracode: boolean | null; 
+/**
+ * What this participant was ACTUALLY spawned with (migration 0061) — the
+ * pair left standing after the precedence chain and its exclusion rule.
+ * 
+ * **This is the field that answers the doc above `effort`.** That one is
+ * the user's CHOICE, and a choice of "inherit" says nothing about what was
+ * inherited: the chain runs per-role → `_all` → the config knob → the
+ * per-run pick, and `effort=max` + `ultracode` are mutually exclusive so
+ * the reconciliation can clear either. The frontend cannot compute this —
+ * `claude-overrides.json` keys by ROLE SLUG, which this view does not
+ * carry — and re-resolving it here would answer "what it WOULD be spawned
+ * with now", which diverges the moment Claude Config is edited mid-session.
+ */
+effort_at_spawn: string | null; ultracode_at_spawn: boolean | null; 
+/**
+ * Whether the two above describe a real spawn. The common path reconciles
+ * to `None`, so without this flag "spawned with no override in force" and
+ * "this row predates 0061" are the same pair of nulls — and a badge would
+ * have to guess which. `false` means say nothing.
+ */
+spawn_knobs_recorded: boolean }
 /**
  * Permission posture summary (counts only; bot-hq overrides per agent anyway).
  */

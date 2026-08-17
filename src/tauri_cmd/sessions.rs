@@ -1191,10 +1191,12 @@ pub async fn rename_session(
 }
 
 /// Read the current IPAV phase for a session. Returns one of "investigate" /
-/// "plan" / "apply" / "verify", or `None` if the session isn't live (IPAV
-/// state is in-memory only — restart loses it). Frontend SessionView header
-/// uses this for the initial phase chip; subsequent updates come from the
-/// `session:phase_changed` Tauri event.
+/// "plan" / "apply" / "verify", or `None` if the session isn't live — this
+/// reads the live-handle map (`AppState::current_phase`), not storage, so a
+/// closed session has no phase to report even though `sessions.ipav_phase`
+/// still holds its last one. Frontend SessionView header uses this for the
+/// initial phase chip; subsequent updates come from the `session:phase_changed`
+/// Tauri event.
 #[tauri::command]
 #[specta::specta]
 pub async fn get_session_phase(

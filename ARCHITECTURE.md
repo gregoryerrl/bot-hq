@@ -911,11 +911,18 @@ field until round 5. Neither has existed; `core/ipav.rs` carried the same wrong
 sentence in its own doc comment, so correcting either one alone left the other to
 re-seed it.)
 
-The CURRENT phase is not persisted — but the machinery that decides when it may
-CHANGE is (see "The phase-advance vote"), so "IPAV lives only in memory" is no
-longer the whole picture. Consequences of that split, both real: a restart resets
-the chip to Investigate while the work continues wherever it was, and the
-durable vote rows outlive the volatile phase they were cast about.
+Both halves are durable. The CURRENT phase is persisted in `sessions.ipav_phase`
+(migration 0063): `AppState::advance_phase` writes the new phase's tag, and
+`core/session.rs` restores it when it builds the handle, so a restart resumes
+where the work is rather than at Investigate. The machinery that decides when the
+phase may CHANGE is persisted too (see "The phase-advance vote"). NULL means the
+session has never transitioned, and reads as Investigate.
+
+(Until round 6 this paragraph said the phase was NOT persisted, and named "a
+restart resets the chip to Investigate while the work continues wherever it was"
+as a live consequence — which is verbatim the defect 0063 was written to fix.
+That sentence sat directly below the round-5 correction note above it, in the
+file every session is told to read first.)
 
 Agents die with the app, so a restart gives fresh sessions; they resume
 their own transcript via `--resume` off each participant's own
