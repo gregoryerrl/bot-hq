@@ -1841,6 +1841,25 @@ mod tests {
         assert_eq!(cmd.as_std().get_current_dir(), Some(Path::new("/tmp/repo")));
     }
 
+    /// **The agent subprocess carries the session id the git hooks read** —
+    /// CODEBASE.md seam 6 listed this producer as UNPINNED ("cut ⇒ findings
+    /// gate silently skipped, pushes under `ask` blocked") until round 8.
+    /// Kill-tested: comment out the `BOT_HQ_SESSION_ID` env line in
+    /// `build_command` and this goes red.
+    #[test]
+    fn build_command_sets_the_session_id_the_hooks_read() {
+        let c = cfg();
+        let cmd = build_command(&c);
+        let sid = cmd.as_std().get_envs().find_map(|(k, v)| {
+            (k == std::ffi::OsStr::new("BOT_HQ_SESSION_ID")).then(|| v.map(|v| v.to_owned()))
+        });
+        assert_eq!(
+            sid.flatten().as_deref(),
+            Some(std::ffi::OsStr::new(c.session_id.as_str())),
+            "BOT_HQ_SESSION_ID must be set to the session id on every agent spawn"
+        );
+    }
+
     #[test]
     fn overrides_merge_into_settings_and_env() {
         use crate::claude_config::{save_overrides, ClaudeOverrides, SkillVisibility};

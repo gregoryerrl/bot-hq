@@ -111,6 +111,16 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
         }
     }
     let data_dir = data_dir.ok_or_else(|| anyhow!("--data-dir is required"))?;
+    // The session context, resolved ONCE, here: `--session` when the hook was
+    // given one, else the `BOT_HQ_SESSION_ID` the agent subprocess and the
+    // session PTY carry. Every hook takes it as a parameter from this point —
+    // none reads the environment itself — so a test says which context it
+    // means. That matters because an agent-run `cargo test` INHERITS a real
+    // `BOT_HQ_SESSION_ID` (round 8): a hook test that assumed "the test process
+    // has no session id" was taking the other branch whenever an agent ran the
+    // suite, and passing anyway.
+    let env_sid = hook_session_id();
+    let sid = session.as_deref().or(env_sid.as_deref());
     match sub.as_str() {
         "commit-msg" => {
             let path = msg_file
@@ -118,13 +128,13 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
                 .ok_or_else(|| {
                     anyhow!("commit-msg needs the message file path (as positional or --msg-file)")
                 })?;
-            run_commit_msg(&data_dir, project.as_deref(), &path)
+            run_commit_msg(&data_dir, project.as_deref(), &path, sid)
         }
         // `"."` — every hook git invokes runs with the repo root as its CWD.
-        "pre-commit" => run_pre_commit(&data_dir, project.as_deref(), Path::new(".")),
-        "post-commit" => run_post_commit(&data_dir, project.as_deref(), session.as_deref()),
-        "pre-push" => run_pre_push(&data_dir, project.as_deref()),
-        "tool-gate" => run_tool_gate(&data_dir),
+        "pre-commit" => run_pre_commit(&data_dir, project.as_deref(), Path::new("."), sid),
+        "post-commit" => run_post_commit(&data_dir, project.as_deref(), sid),
+        "pre-push" => run_pre_push(&data_dir, project.as_deref(), sid),
+        "tool-gate" => run_tool_gate(&data_dir, sid),
         other => Err(anyhow!("unknown subcommand {other}")),
     }
 }
@@ -140,9 +150,14 @@ fn blocked_banner(hook: &str, body: &str) -> String {
 /// commit-msg handler. Scans the message file (passed by git as $1) for
 /// forbidden words. Exits 1 if any found — blocks the commit reliably,
 /// even when `git commit -m "..."` is used.
-fn run_commit_msg(data_dir: &Path, project: Option<&str>, msg_path: &Path) -> Result<i32> {
+fn run_commit_msg(
+    data_dir: &Path,
+    project: Option<&str>,
+    msg_path: &Path,
+    session_id: Option<&str>,
+) -> Result<i32> {
     audit_at_hook(data_dir, project, "commit-msg");
-    let policy = Policy::resolve(data_dir, project, hook_session_id().as_deref())?;
+    let policy = Policy::resolve(data_dir, project, session_id)?;
     if policy.forbidden_in_commits.is_empty() {
         return Ok(0);
     }
@@ -181,12 +196,17 @@ fn run_commit_msg(data_dir: &Path, project: Option<&str>, msg_path: &Path) -> Re
 /// pre-commit handler. Scans the staged DIFF only (forbidden words in
 /// source code being committed). Commit message scanning lives in
 /// commit-msg because pre-commit fires before git parses `-m`.
-fn run_pre_commit(data_dir: &Path, project: Option<&str>, repo: &Path) -> Result<i32> {
+fn run_pre_commit(
+    data_dir: &Path,
+    project: Option<&str>,
+    repo: &Path,
+    session_id: Option<&str>,
+) -> Result<i32> {
     audit_at_hook(data_dir, project, "pre-commit");
     // Layer 1 — EYES-sign-off gate. Independent of the forbidden-word policy, so
     // it must run BEFORE the empty-list early return below (a project with no
     // forbidden words still needs review-completion enforced).
-    if check_findings_gate(data_dir, "pre-commit") != 0 {
+    if check_findings_gate(data_dir, "pre-commit", session_id) != 0 {
         return Ok(1);
     }
     // Layer 2 — immutable-artifact guard. Always-on (policy-independent), so it
@@ -197,7 +217,7 @@ fn run_pre_commit(data_dir: &Path, project: Option<&str>, repo: &Path) -> Result
         return Ok(1);
     }
     // Layer 3 — forbidden-word scan.
-    let policy = Policy::resolve(data_dir, project, hook_session_id().as_deref())?;
+    let policy = Policy::resolve(data_dir, project, session_id)?;
     if policy.forbidden_in_commits.is_empty() {
         return Ok(0);
     }
@@ -323,9 +343,13 @@ fn check_immutable_artifacts(repo: &Path) -> i32 {
 /// post-commit verifier. Writes a violation if a forbidden word made it
 /// through pre-commit (e.g., via --amend, or pre-commit was bypassed).
 /// Always exits 0; the commit already happened.
-fn run_post_commit(data_dir: &Path, project: Option<&str>, session: Option<&str>) -> Result<i32> {
+fn run_post_commit(
+    data_dir: &Path,
+    project: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<i32> {
     audit_at_hook(data_dir, project, "post-commit");
-    let policy = Policy::resolve(data_dir, project, hook_session_id().as_deref())?;
+    let policy = Policy::resolve(data_dir, project, session_id)?;
     if policy.forbidden_in_commits.is_empty() {
         return Ok(0);
     }
@@ -348,7 +372,7 @@ fn run_post_commit(data_dir: &Path, project: Option<&str>, session: Option<&str>
         rt.block_on(async {
             let _ = log
                 .record(
-                    session.unwrap_or("<post-commit>").to_string(),
+                    session_id.unwrap_or("<post-commit>").to_string(),
                     "git-hook".to_string(),
                     ViolationKind::CommitGrep,
                     format!("git commit (sha={sha_short})"),
@@ -467,15 +491,15 @@ async fn log_force_push_block(
 /// the app can't be reached. A push with no `BOT_HQ_SESSION_ID` (e.g. a human
 /// pushing from a terminal) is blocked with guidance — `ask` only prompts a
 /// session's user.
-fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
+fn run_pre_push(data_dir: &Path, project: Option<&str>, session_id: Option<&str>) -> Result<i32> {
     audit_at_hook(data_dir, project, "pre-push");
     // EYES-sign-off backstop: a push must not carry unresolved blocking findings
     // (catches a commit created before the finding was filed, an --amend, or a
     // bypassed pre-commit). Independent of push_gate; fail-open on DB errors.
-    if check_findings_gate(data_dir, "pre-push") != 0 {
+    if check_findings_gate(data_dir, "pre-push", session_id) != 0 {
         return Ok(1);
     }
-    let session_id = hook_session_id();
+    let session_id = session_id.map(str::to_string);
     // **Fail CLOSED here, and only here** (E1). Every other `?` in this file
     // returns an error that `run_policy_check_cli` maps to exit 0 — soft-fail,
     // so an internal bug cannot break the user's git workflow. That is right for
@@ -768,7 +792,7 @@ async fn log_push_block(
 /// exit 2, NOT JSON.
 /// FAIL-OPEN (exit 0) on any parse/IO error or empty keyword list: a hook bug
 /// must never brick every Bash call; the prompt rules remain as the other layer.
-fn run_tool_gate(data_dir: &Path) -> Result<i32> {
+fn run_tool_gate(data_dir: &Path, session_id: Option<&str>) -> Result<i32> {
     use std::io::Read;
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_err() {
@@ -781,7 +805,7 @@ fn run_tool_gate(data_dir: &Path) -> Result<i32> {
     // (`tool_gate::resolve_keywords`), same list `action_gate` and
     // `terminal_exec` enforce. Fail-open on snapshot read errors, mirroring
     // the rest of this hook's posture.
-    let sid = hook_session_id();
+    let sid = session_id.map(str::to_string);
     let keywords = crate::policy::tool_gate::resolve_keywords(data_dir, sid.as_deref());
     // Auto-park (issues.md #29): when the command is gated AND we know the
     // session, park the approval here so the refusal IS the approval request —
@@ -1226,18 +1250,24 @@ fn audit_at_hook(data_dir: &Path, project: Option<&str>, hook_name: &str) {
 /// Gate decision for `hook` (commit/push). Returns 1 to BLOCK, 0 to proceed.
 /// 0 covers all the proceed cases: no session context, fail-open DB error, and
 /// no open blocking findings. On a block it prints the actionable banner.
-fn check_findings_gate(data_dir: &Path, hook: &str) -> i32 {
-    let Some(session_id) = hook_session_id() else {
+fn check_findings_gate(data_dir: &Path, hook: &str, session_id: Option<&str>) -> i32 {
+    // The session id is a PARAMETER, resolved once in `run_cli` — the gate
+    // never reads the environment itself, so a test can drive the block arm
+    // below without setting a process-global env var (tests run in parallel;
+    // a `set_var` in one would leak into every other hook test). Until round 8
+    // no test reached that arm at all: every hook test took the `None` return,
+    // so a hook that never blocked would have stayed green.
+    let Some(session_id) = session_id else {
         return 0; // no bot-hq session context (e.g. a human commit) → gate N/A
     };
-    let Some(findings) = open_blocking_findings(data_dir, &session_id) else {
+    let Some(findings) = open_blocking_findings(data_dir, session_id) else {
         return 0; // fail-open: DB unreadable for any reason
     };
     if findings.is_empty() {
         return 0;
     }
     eprintln!("{}", blocked_banner(hook, &findings_block_body(&findings)));
-    log_findings_block(data_dir, hook, &session_id, findings.len());
+    log_findings_block(data_dir, hook, session_id, findings.len());
     1
 }
 
@@ -1610,7 +1640,7 @@ mod tests {
         // Simulate git writing the commit message file.
         let msg_file = data.path().join("MSG");
         std::fs::write(&msg_file, "feat: helped by Acme\n").unwrap();
-        let code = run_commit_msg(data.path(), Some("foo"), &msg_file).unwrap();
+        let code = run_commit_msg(data.path(), Some("foo"), &msg_file, None).unwrap();
         assert_eq!(code, 1);
     }
 
@@ -1625,7 +1655,7 @@ mod tests {
         .unwrap();
         let msg_file = data.path().join("MSG");
         std::fs::write(&msg_file, "feat: clean message\n").unwrap();
-        let code = run_commit_msg(data.path(), Some("foo"), &msg_file).unwrap();
+        let code = run_commit_msg(data.path(), Some("foo"), &msg_file, None).unwrap();
         assert_eq!(code, 0);
     }
 
@@ -1646,7 +1676,7 @@ mod tests {
             "feat: clean\n# Please enter the commit message — Acme can help\n",
         )
         .unwrap();
-        let code = run_commit_msg(data.path(), Some("foo"), &msg_file).unwrap();
+        let code = run_commit_msg(data.path(), Some("foo"), &msg_file, None).unwrap();
         assert_eq!(code, 0, "comment lines should not trigger");
     }
 
@@ -1682,7 +1712,7 @@ mod tests {
     #[test]
     fn run_pre_commit_exits_zero_with_empty_policy() {
         let data = tempdir().unwrap();
-        let code = run_pre_commit(data.path(), Some("nope"), Path::new(".")).unwrap();
+        let code = run_pre_commit(data.path(), Some("nope"), Path::new("."), None).unwrap();
         assert_eq!(code, 0);
     }
 
@@ -1745,10 +1775,112 @@ mod tests {
         );
 
         assert_eq!(
-            run_pre_commit(data.path(), Some("p"), repo.path()).unwrap(),
+            run_pre_commit(data.path(), Some("p"), repo.path(), None).unwrap(),
             1,
             "the forbidden-word gate went blind on a diff it could not decode"
         );
+    }
+
+    /// **The block arm runs** (round 8, M1). Every earlier hook test took
+    /// `check_findings_gate`'s "no session id → 0" return, so a gate that
+    /// never blocked would have stayed green. With the session id passed in
+    /// and one open blocking finding in the DB the pre-commit gate returns 1;
+    /// another session's id, or none, returns 0. Plain `#[test]`: the gate
+    /// builds its own current-thread runtime, so it must not run inside one.
+    #[test]
+    fn the_findings_gate_blocks_a_session_commit_and_skips_a_human_one() {
+        let data = tempdir().unwrap();
+        let db_path = crate::paths::Paths::for_data_dir(data.path().to_path_buf()).db_path;
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let storage = crate::storage::Storage::open(&db_path).await.unwrap();
+            storage.create_session("s1", "t", None).await.unwrap();
+            storage
+                .insert_finding(
+                    "s1",
+                    "f1",
+                    "eyes",
+                    crate::storage::FindingSeverity::Blocking,
+                    "real bug",
+                    Some("a.rs:1"),
+                )
+                .await
+                .unwrap();
+        });
+        assert_eq!(
+            check_findings_gate(data.path(), "pre-commit", Some("s1")),
+            1,
+            "an open blocking finding must block the session's commit"
+        );
+        assert_eq!(
+            check_findings_gate(data.path(), "pre-commit", Some("s-other")),
+            0,
+            "findings are session-scoped"
+        );
+        assert_eq!(
+            check_findings_gate(data.path(), "pre-commit", None),
+            0,
+            "no session context → the gate is N/A (a human commit)"
+        );
+    }
+
+    /// **The session context is read from the environment in exactly one place
+    /// and handed to every hook** (round 8). The join a test cannot exercise is
+    /// the one that got cut silently before: `check_findings_gate` reading
+    /// `hook_session_id()` itself meant replacing that read with `None` kept
+    /// the whole suite green while the gate was off in production. Now the
+    /// only reader is `run_cli`, and each dispatch arm passes `sid` — pinned
+    /// here in the source. Kill-tested: drop `sid` from any arm → red.
+    #[test]
+    fn run_cli_is_the_only_reader_of_the_session_env_and_hands_it_to_every_hook() {
+        let code = include_str!("hooks.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prod = &code[..code.find("\n#[cfg(test)]").expect("test module")];
+        let calls = prod.matches("hook_session_id()").count()
+            - prod.matches("fn hook_session_id()").count();
+        assert_eq!(
+            calls, 1,
+            "hook_session_id() must be called exactly once in production (run_cli)"
+        );
+        let cli_at = prod.find("pub fn run_cli(").expect("run_cli exists");
+        let cli = &prod[cli_at..];
+        let cli = &cli[..cli.find("\nfn ").unwrap_or(cli.len())];
+        assert!(cli.contains("hook_session_id()"), "run_cli reads the env");
+        for hook in [
+            "run_commit_msg(",
+            "run_pre_commit(",
+            "run_post_commit(",
+            "run_pre_push(",
+            "run_tool_gate(",
+        ] {
+            let at = cli.find(hook).unwrap_or_else(|| panic!("run_cli dispatches {hook}"));
+            // The argument list, to its MATCHING close paren (arguments carry
+            // their own parens: `project.as_deref()`).
+            let rest = &cli[at + hook.len()..];
+            let mut depth = 1usize;
+            let mut end = rest.len();
+            for (i, ch) in rest.char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let args = rest[..end].trim();
+            assert!(
+                args.ends_with(", sid"),
+                "{hook} must receive the session context as its last argument: ({args})"
+            );
+        }
     }
 
     #[test]
@@ -1848,7 +1980,7 @@ mod tests {
     fn run_pre_push_exits_zero_when_mode_auto() {
         let data = tempdir().unwrap();
         // No policy file → default policy → mode=auto → exit 0
-        let code = run_pre_push(data.path(), Some("nope")).unwrap();
+        let code = run_pre_push(data.path(), Some("nope"), None).unwrap();
         assert_eq!(code, 0);
     }
 
@@ -1861,9 +1993,10 @@ mod tests {
             "push_gate: ask\n",
         )
         .unwrap();
-        // The cargo test process has no BOT_HQ_SESSION_ID, so this push has no
-        // session context → blocked with guidance (exit 1) before any HTTP call.
-        let code = run_pre_push(data.path(), Some("foo")).unwrap();
+        // No session context (passed explicitly — the test process itself DOES
+        // carry a real BOT_HQ_SESSION_ID whenever an agent runs the suite) →
+        // blocked with guidance (exit 1) before any HTTP call.
+        let code = run_pre_push(data.path(), Some("foo"), None).unwrap();
         assert_eq!(code, 1);
     }
 
@@ -1887,7 +2020,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            run_pre_push(data.path(), Some("foo")).unwrap(),
+            run_pre_push(data.path(), Some("foo"), None).unwrap(),
             1,
             "an unreadable policy let the push through — `push_gate` and \
              `force_push` both silently stopped applying"

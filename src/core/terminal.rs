@@ -141,6 +141,17 @@ impl SessionTerminal {
             cmd.cwd(dir);
         }
         cmd.env("TERM", "xterm-256color");
+        // The git hooks read BOT_HQ_SESSION_ID to know whose session a commit
+        // or push belongs to (`policy/hooks.rs::hook_session_id`): without it
+        // the blocking-findings gate returns "gate N/A" and a push under
+        // `push_gate = ask` fails closed. Only the agent subprocess carried it
+        // (`spawn.rs::build_command`), so a `git commit` typed through
+        // `terminal_exec` bypassed the findings gate the descriptors promise
+        // and a `git push` there was refused with "no bot-hq session context"
+        // (round 8, M1; CODEBASE.md seam 6). The PTY is the session's shell —
+        // whoever types in it, agent or user, commits and pushes as that
+        // session, which is what the gates are scoped to.
+        cmd.env("BOT_HQ_SESSION_ID", session_id);
 
         let child = pair
             .slave
@@ -509,6 +520,26 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         pred(term)
+    }
+
+    /// **The PTY carries the session id the git hooks read** (round 8, M1).
+    /// Without it a `git commit` typed through `terminal_exec` skipped the
+    /// blocking-findings gate ("no session context → gate N/A") and a push
+    /// under `push_gate = ask` failed closed. Kill-tested: drop the
+    /// `cmd.env("BOT_HQ_SESSION_ID", …)` in `spawn` and this goes red.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_pty_carries_the_session_id_the_hooks_read() {
+        let term = spawn_sh("printf 'sid=%s' \"$BOT_HQ_SESSION_ID\"");
+        let ok = wait_for(
+            &term,
+            |t| {
+                String::from_utf8_lossy(&t.scrollback.lock().unwrap().snapshot())
+                    .contains("sid=test-session")
+            },
+            5_000,
+        )
+        .await;
+        assert!(ok, "the shell did not see BOT_HQ_SESSION_ID=test-session");
     }
 
     #[tokio::test(flavor = "multi_thread")]

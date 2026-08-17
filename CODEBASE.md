@@ -813,7 +813,7 @@ half does not count. Details, evidence and the cheapest pins are in
 | 3 | capabilities → allowed/disallowed tools / bypass (F → A) | `participant_capabilities` → `build_command` | PINNED |
 | 4 | role Claude overrides → `--settings` + env (I → A) | `resolve_participant_overrides` → `settings_fragment`/`env_vars` | PINNED |
 | 5 | per-agent mcp-config (signaling addr + user MCPs) (C1 → A) | `mcp_config_json` | PINNED |
-| 6 | spawn env `BOT_HQ_SESSION_ID`/`BOT_HQ_AGENT` → git hooks (A → E) | `cmd.env` in `build_command` → `hook_session_id` | **UNPINNED at producer** — cut ⇒ findings gate silently skipped, pushes under `ask` blocked |
+| 6 | spawn env `BOT_HQ_SESSION_ID`/`BOT_HQ_AGENT` → git hooks (A → E) | `cmd.env` in `build_command` AND in `SessionTerminal::spawn` → `hook_session_id` | PINNED at both producers (`build_command_sets_the_session_id_the_hooks_read`, `the_pty_carries_the_session_id_the_hooks_read`) and at the consumer's block arm (`the_findings_gate_blocks_a_session_commit_and_skips_a_human_one`, round 8) |
 | 7 | PreToolUse hook fragment → `run_tool_gate` (A → E) | `--settings` hook cmd → `hooks.rs` | PINNED as halves + argv |
 | 8 | ring step → deal → persist (F ↔ B1) | `next_active_participant` → `hand_turn_to` → `set_current_turn`/`set_round_number` | PINNED end to end |
 | 9 | deal → stdin → commit (B1 → A → F) | `deliver_backlog` → `deliver_batch` → `commit_delivery` | PINNED; failure path is `warn!` only (no event, no row) |
