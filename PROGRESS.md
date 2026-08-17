@@ -22,6 +22,124 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-18 (round 9) — the round the sweeps were verified, s-69ef196a
+
+Mandate: continue round 8's handoffs (icon consolidation, fixture slug
+renames), audit again (messes, staleness, redundancies, mis/missed
+implementations, refactors/optimizations), and use the round-8 binary as
+live evidence. Twenty-four commits `9649aaf..` (the changelog commit follows),
+every batch reviewed by EYES before or at commit, every fix that closes a
+defect carried a RED-then-green test recorded in the session's `apply` doc.
+Not pushed. CL learnings in `learnings-2026-08-18-round9.md`.
+
+**Live evidence, both ways.** Round 8's fixes held on this build (`ea70ff6`,
+built 21:38Z): 0065 re-seeded the EYES prose from NULL and the HANDS prose
+byte-identically (diffed against the migration body); 0066's index set is
+exactly what `sqlite_master` holds; the session PTY carries
+`BOT_HQ_SESSION_ID`; the compact chat page — user-observed HELD;
+`cl_stale_refs` read 28 (27 + one checker false positive on a claude-code tool
+name). Five read-only sweep agents ran in parallel and every relayed claim
+was re-verified at the site: **three sweep claims failed verification** and
+are recorded so no round re-flags them — "no Tray tab exists" (it is
+`DocumentPane`'s `TrayPill`; the session's Workspace/Context/Terminal strip is
+a different tab strip), "`resolve_plugin_asset` should be `cfg(test)`" (it
+already is), and "delete the PluginManager 10 s poll" (the heartbeat dot's
+`Slow` steps and recovery to `Healthy` fire no event — the poll stays,
+documented). Round 8's own code supplied the top defect class again: the
+`get_session_messages` tail-paging wire had zero test callers (E1, the
+five-times-shipped class made six) — `select_messages` is a plain fn now, its
+kill test went RED as predicted, and both production SQL strings are functions
+EXPLAINed by tests (`d3022a7`).
+
+**Latent crashes (`9649aaf`).** `agents::events::short_line` sliced an
+unparseable claude-code stdout line at byte 160 and `terminal_tools` kept the
+last 16 KiB of lossy-decoded PTY output by byte offset — both panic inside a
+multibyte char (a box-drawing run in model text, cargo's progress bar in the
+terminal), one silencing the stdout pump, the other surfacing as a tool result
+that never comes. `src/text.rs` (`floor_char_boundary` / `ceil_char_boundary`)
+carries the idiom `clamped_body` had inline; the PTY tail walks forward so the
+cap stays a cap. Both REDs reproduced the exact "byte index N is not a char
+boundary" panic.
+
+**Data loss for the reviewer (`c8cf0b8`).** The reviewer redirect to
+`<phase>-eyes` took no `append`, so a reviewer's `mode:"append"` — the mode the
+descriptor sells to every caller — archived-and-replaced its own findings.
+EYES hit it in this session. `session_doc_write_eyes` appends now, pinned at
+the wire (dispatch as `preset_eyes`) and at the bridge.
+
+**Truth (`10dc885`, `4d38293`, `7e6e12d`, `57df30d`).** The phase-vote
+fingerprint digested every `session_documents` row, so an untagged scratch
+note orphaned everyone's votes while `advance_phase` promised "phase
+documents" — `phase IS NOT NULL` now, three assertions incl. that a
+`<phase>-eyes` write still moves it. `withdraw_question` called another
+participant's pending row "not pending" — a `Withdrawal` enum names the
+reason. Thirteen descriptors said something the handlers do not
+(`mark_awaiting_user`'s peer-word refusal, `halt`'s banner-not-tray, the
+approval park latching the ring, `gate_status` on approval rows, `eyes_flag`'s
+re-raise, `disposition_finding`'s surfacing, `supersede_question`'s
+same-prompt-only auto-supersede, `cl_register_read` awaited, `close_session`'s
+two pre-answers, `cl_write_file`'s protected paths / cap / push, `pass_turn`'s
+~200 chars, `advance_phase`'s phase-tagged); the plan's proposal to guard
+`halt` like `mark_awaiting_user` was reviewed OUT (a refused halt parks
+nothing — an undeclared stall) and the asymmetry is pinned at the wire
+instead: adding the guard to `halt` goes RED.
+
+**Messes (`f2ff436`, `17287bf`+`c2ef227`, `f5de8a4`, `562fd3e`, `04efc2d`,
+`c12ea38`).** The plugin `Loader` was re-scanned on every plugin mutation
+(a blocking walk + JSON parse of every manifest inside async commands) and read
+by nothing — deleted, `PluginRegistry::new` infallible. `~/.claude/settings.json`
+was rewritten with a bare `std::fs::write` (truncate-then-fill on the file the
+module promises never to clobber); atomic now, and — the review's catch — with
+the destination's existing MODE, since `rename` replaces the inode and a
+umask-default temp had turned a 0600 file into 0644. Three hooks built a tokio
+runtime solely to `block_on` a synchronous file append. The post-write library
+push said "detached" and was awaited — it is spawned (`Arc<Self>`), the tests
+drain the kept handle. A dead `default_model_id` read (nothing wrote the key
+since D8), an unkeyed shell cache, a dead `ExitCode`, two file reads on the
+2-worker reactor, three comments describing the past as present, one
+retention cutoff / one GC horizon / one `home_dir` / one `plugin_dir` /
+one `session_policies_dir`, `commit_delivery` stamping once per page, three
+event names as consts, the unused `glob` crate dropped.
+
+**Frontend (`e0391ee`, `7407553`, `8109791`, `407b6d2`, `ae9b62a`).** The
+approval gate showed `[object Object]` on a Tauri error; the running-tool
+counter parsed a stored timestamp as local; six dingbat sites (one a colour
+emoji) render the house icons; twenty over-exports; one short-session-id
+helper; the violations table `table-fixed`; the chat's resolved-tool-id set
+is kept incrementally in the store instead of re-parsed from the whole
+history on every 50 ms batch. **The two icon systems are one module**: the
+Context Library's nine icons moved as-is onto a second, class-sized base
+(`ClassSvg`, stroke 2, 14 px) — the only pixel change is the Register button's
+plus (16 → 14 px, the no-op override F1); unifying the bases and fusing the
+near-twins (`MemoryIcon`/`FileIcon`, `RescanIcon`/`RefreshIcon`) is a visual
+decision, deferred with the app open.
+
+**Fixtures speak in role slugs (`0eacc73`).** 214 `"brian"`/`"rain"` fixture
+literals across 35 test modules are `"hands"`/`"eyes"`; the sanctioned
+survivors are claims, not fixtures (the frozen oracle, the byte-frozen seeds,
+the guard's specimens, the retired-name assertions, `PEER_WORDS`, the
+legacy-authored row, the legacy on-disk `agents/brian/` paths). Two
+collisions the blind pass caused were caught by the suite and reverted by
+hand — the name sweep's own forbidden words, and a URL the sweep skipped past
+`http://` — a note for the next mechanical rename.
+
+**One preview subquery, not two (`272dcb2`).** The Dashboard's active-sessions
+read carried two byte-identical correlated subqueries per session; the newest
+text row is found once by `MAX(id)` and joined by rowid, EXPLAIN-pinned.
+
+**Docs (`795a18d`).** Twenty-seven present-tense claims corrected across
+ARCHITECTURE / CODEBASE / PLAN / README / CLAUDE / the PROGRESS header /
+DESIGN.md / docs/PLUGINS.md; details in that commit.
+
+**Not done this round, stated:** the parked user decisions (stale stashes +
+`wtbase/main` ref, a tray/findings index migration, the role-prose SEED
+contradictions → a guarded reseed 0067, ModalShell ×8, retention purge, CI,
+`request_approval`'s custom-label map, the dead-column drop) — surfaced as one
+tray question; the view/row struct dedup, `main()` split, test-module
+extraction and `useDragResize` cleanup (listed in the apply doc). Live
+confirmation of everything above waits for the next rebuild + relaunch and is
+the carry-over list with A1b (a declared halt's own tool result).
+
 ## 2026-08-17/18 (round 8) — the round the fixes were reviewed, s-a3f03bd9
 
 Mandate: continue round 7's T2 handoff, audit again (messes, staleness,
