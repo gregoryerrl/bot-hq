@@ -2097,10 +2097,7 @@ fn clamped_body(body: &str) -> std::borrow::Cow<'_, str> {
     if body.len() <= WIRE_BODY_CLAMP_BYTES {
         return std::borrow::Cow::Borrowed(body);
     }
-    let mut cut = WIRE_BODY_CLAMP_BYTES;
-    while !body.is_char_boundary(cut) {
-        cut -= 1;
-    }
+    let cut = crate::text::floor_char_boundary(body, WIRE_BODY_CLAMP_BYTES);
     std::borrow::Cow::Owned(format!(
         "{}\n\n[bot-hq: truncated on delivery — this message is {} bytes and the \
          per-message wire cap is {}. The full text is on the session record, not \

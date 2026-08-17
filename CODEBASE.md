@@ -489,6 +489,7 @@ fs watcher (`cl:changed`, `session:worktree_changed`, `plugin:assets_changed`).
 | `src/lib.rs` | crate root | S |
 | `src/paths.rs` | data-dir resolution, first-run init, legacy layout migrations (v0→v1→v2), `LockGuard` (PID, steals stale), legacy custom-instruction seeds | L |
 | `src/tauri_specta_gen.rs` | `collect_commands!` (the ONLY registration; an omitted command compiles but is unreachable) + TS export | S |
+| `src/text.rs` | `floor_char_boundary` / `ceil_char_boundary` — the byte-offset-to-char-boundary idiom every `&s[..n]` on arbitrary text must use (round 9: two panics — the stdout pump's log line and the PTY tail cut) | S |
 | `build.rs`, `tauri.conf.json`, `capabilities/` | Tauri build/config; main-window ACL (unrelated to plugin gating) | — |
 | `src/tauri_cmd/mod.rs`, `src/tauri_cmd/error.rs` | module list; `AppError` | S |
 | `src/tauri_cmd/sessions.rs` | session CRUD/lifecycle, `resolve_participant_picks`, `list_session_participants`, `get_participant_system_prompt`, `get_session_runtime` (7-field snapshot the FE seeds from), respawn/cancel/resume, `close_session` | XL |

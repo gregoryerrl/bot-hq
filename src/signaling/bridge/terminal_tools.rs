@@ -30,6 +30,20 @@ const EXEC_OUTPUT_CAP_BYTES: usize = 16 * 1024;
 const READ_DEFAULT_LINES: usize = 100;
 const READ_MAX_LINES: usize = 500;
 
+/// The tail of a command's output, at most [`EXEC_OUTPUT_CAP_BYTES`] of it —
+/// that's where the result and the prompt are. A trimmed head is replaced by
+/// a marker saying how much was cut.
+fn capped_tail(output: String) -> String {
+    if output.len() <= EXEC_OUTPUT_CAP_BYTES {
+        return output;
+    }
+    // A char boundary at or before the byte offset: lossy decoding yields
+    // valid UTF-8 but still multibyte glyphs (cargo's `━`, box-drawing `─`),
+    // and a byte-offset slice inside one panics (round 9).
+    let start = crate::text::ceil_char_boundary(&output, output.len() - EXEC_OUTPUT_CAP_BYTES);
+    format!("[…{start} bytes trimmed…]\n{}", &output[start..])
+}
+
 impl SignalingBridge {
     /// HANDS-only (enforced at the dispatch layer). Runs `command` in the
     /// session's terminal and — unless `block` is false — returns the output
@@ -97,15 +111,7 @@ impl SignalingBridge {
             .unwrap_or(EXEC_DEFAULT_WAIT_MS)
             .clamp(EXEC_QUIET_MS, EXEC_MAX_WAIT_MS);
         let (bytes, timed_out) = term.wait_settle(offset, EXEC_QUIET_MS, max_ms).await;
-        let mut output = String::from_utf8_lossy(&bytes).into_owned();
-        if output.len() > EXEC_OUTPUT_CAP_BYTES {
-            let cut = output.len() - EXEC_OUTPUT_CAP_BYTES;
-            // Keep the tail — that's where the result and the prompt are.
-            output = format!(
-                "[…{cut} bytes trimmed…]\n{}",
-                &output[output.len() - EXEC_OUTPUT_CAP_BYTES..]
-            );
-        }
+        let mut output = capped_tail(String::from_utf8_lossy(&bytes).into_owned());
         if timed_out {
             output.push_str(&format!(
                 "\n[still producing output after {max_ms}ms — command may be long-running; \
@@ -137,6 +143,7 @@ impl SignalingBridge {
 
 #[cfg(test)]
 mod tests {
+    use super::{capped_tail, EXEC_OUTPUT_CAP_BYTES};
     use crate::core::TerminalRegistry;
     use crate::policy::tool_gate::{save, GateMode, GatedKeyword};
     use crate::policy::ViolationsLog;
@@ -222,5 +229,32 @@ mod tests {
             read.contains("bothq-exec-marker"),
             "terminal_read missing marker: {read:?}"
         );
+    }
+
+    /// Round 9: the tail cut used to be `&output[len - CAP..]` — a BYTE offset
+    /// into lossy-decoded PTY output. cargo's progress bar (`━`, 3 bytes) and
+    /// box-drawing (`─`) put a multibyte char across that offset routinely, and
+    /// slicing inside one PANICS — inside `terminal_exec`, which surfaces as a
+    /// missing tool result that reads as "the command hung". The cut must land on
+    /// a char boundary.
+    #[test]
+    fn capped_tail_never_cuts_inside_a_multibyte_char() {
+        // Enough 3-byte glyphs that SOME offset `len - CAP` lands mid-char for at
+        // least one of the three alignments; assert all three.
+        for pad in 0..3 {
+            let mut s = "a".repeat(pad);
+            s.push_str(&"━".repeat(EXEC_OUTPUT_CAP_BYTES)); // 3 × CAP bytes
+            let out = capped_tail(s);
+            assert!(out.starts_with("[…"), "marker missing: {}", &out[..40]);
+            let body = out.split_once("…]\n").map(|(_, b)| b).unwrap();
+            assert!(body.len() <= EXEC_OUTPUT_CAP_BYTES);
+            assert!(body.chars().all(|c| c == '━'), "a partial glyph leaked into the tail");
+        }
+    }
+
+    #[test]
+    fn capped_tail_keeps_a_short_output_untouched() {
+        let s = "cargo test ✓ 12 passed".to_string();
+        assert_eq!(capped_tail(s.clone()), s);
     }
 }

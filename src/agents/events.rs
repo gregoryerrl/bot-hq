@@ -57,11 +57,15 @@ pub async fn pump_stderr<R: AsyncRead + Unpin>(reader: R, agent_name: String) {
     }
 }
 
+/// The first 160 CHARS of an unparseable line for the log — by chars, not
+/// bytes: model stdout is arbitrary text and a byte-offset slice inside a
+/// multibyte char panics the pump (round 9).
 fn short_line(s: &str) -> String {
-    if s.len() <= 160 {
+    let cut = crate::text::floor_char_boundary(s, 160);
+    if cut == s.len() {
         s.to_string()
     } else {
-        format!("{}…", &s[..160])
+        format!("{}…", &s[..cut])
     }
 }
 
@@ -803,5 +807,22 @@ mod tests {
             }
             other => panic!("expected TurnComplete, got {other:?}"),
         }
+    }
+
+    /// Round 9: `short_line` sliced the unparseable line at BYTE 160. Model
+    /// stdout is arbitrary text — a box-drawing run puts a 3-byte char across
+    /// that offset — and slicing inside a char PANICS, inside the stdout pump,
+    /// so the agent simply stops answering. Truncate by chars.
+    #[test]
+    fn short_line_truncates_multibyte_text_without_panicking() {
+        for pad in 0..3 {
+            let mut line = "x".repeat(pad);
+            line.push_str(&"─".repeat(120)); // 3 bytes each: > 160 bytes
+            let short = short_line(&line);
+            assert!(short.ends_with('…'), "no ellipsis: {short}");
+            assert!(short.chars().count() <= 161, "too long: {}", short.chars().count());
+            assert!(!short.contains('\u{FFFD}'));
+        }
+        assert_eq!(short_line("short"), "short");
     }
 }

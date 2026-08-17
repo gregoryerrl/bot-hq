@@ -12,3 +12,4 @@ pub mod storage;
 pub mod tauri_cmd;
 pub mod tauri_events;
 pub mod tauri_specta_gen;
+pub mod text;
