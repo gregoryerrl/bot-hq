@@ -76,9 +76,9 @@ Tick these off and tell us where it breaks:
       button surfaces a clear message — that's the check working.)*
 - [ ] **Create a project** — point it at a folder / git repo on your machine.
 - [ ] **Create a session** and open it.
-- [ ] **Drive one turn** — send Brian a simple task and confirm he responds.
+- [ ] **Drive one turn** — send HANDS a simple task and confirm it responds.
       *(This proves bot-hq can launch the `claude` agent — the #1 thing to verify.)*
-- [ ] **Make a commit** inside a session (have Brian commit something, or commit
+- [ ] **Make a commit** inside a session (have HANDS commit something, or commit
       in the session's working folder) and confirm it goes through. *(This
       exercises the policy git-hooks on Windows.)*
 - [ ] **Second instance is blocked** — launch bot-hq again while it's running;

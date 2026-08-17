@@ -73,7 +73,7 @@ for every item: CL `issues.md` #26–#31 + the archived s-b69a5c01
 session docs (investigate/apply/verify) + CL `session-study-method.md`.
 Read those before starting; this section is the map, not the territory.
 
-**Track 1 — harness fixes (standalone; none touch the duo pump):**
+**Track 1 — harness fixes (standalone; none touch the pump):**
 
 1. **#27 — tray answers preempt a running turn** — shipped 2026-08-06
    (`d71c4d1`) and **REVERSED by rc3 D34** (`7e1e04d`). The preempt interrupt is
@@ -351,7 +351,7 @@ extension points in `docs/PLUGINS.md`):
   agent-drivable Browser tab.
 - **Manifest-declared agents** — the "add an agent to sessions" tier;
   interim lever WAS the external MCP driver server, now removed (a backend-style
-  plugin is an ordinary process driving sessions over it).
+  plugin is an ordinary process driving sessions; that server was its transport).
 - **Child-webview surface** — real Browser tab (arbitrary sites refuse
   iframing).
 - **Background execution** — daemon-style plugins (CL cloud sync);

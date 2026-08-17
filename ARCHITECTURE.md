@@ -136,7 +136,8 @@ provider, base URL, token and context window.
 This paragraph used to say the pick came from `sessions.brian_model_id` /
 `rain_model_id`, which the Storage section below already described as unread —
 one document contradicting itself about where a load-bearing value comes from.
-Those columns are frozen legacy (rc3 D10); nothing reads them at spawn.
+Those columns were frozen legacy (rc3 D10) with no reader at spawn; migration
+0060 dropped them.
 
 `BOT_HQ_SESSION_ID` is also injected so git-hook subprocesses can read
 session-scoped state.
@@ -540,7 +541,7 @@ shell (`core/terminal.rs`) in its working repo — rendered by the session
 view's Terminal subtab (xterm.js) and shared with the agents through
 `terminal_exec` (HANDS-only; BLOCKING by default — writes the command, awaits
 output-settle via a quiet-window heuristic, returns the captured tail;
-`block:false` for long-running processes) and `terminal_read` (both agents;
+`block:false` for long-running processes) and `terminal_read` (every participant;
 scrollback tail as evidence text). `terminal_exec` re-classifies the command
 against the same two-tier Tool-Gate keyword list the PreToolUse hook uses
 (session snapshot → global fallback, `tool_gate::resolve_keywords`) and
