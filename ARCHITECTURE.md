@@ -163,7 +163,12 @@ gateway-backed agent routes through it.
 Settings → Roles** (rc3 D8/D10). It is the user's, not the product's: migration
 0046 seeded `roles.description_prompt` byte-for-byte from the constants in
 `src/agents/prompts.rs`, 0048 cleared the `builtin` flag so bot-hq claims no
-ownership, and 0049 removed the agent names from the seeded text.
+ownership, and 0049 removed the agent names from the seeded text. Later
+reseeds (0050, 0055, 0065, 0067) move the text the same way: each UPDATE is
+guarded on the previous seed (`description_prompt = '<previous>' OR IS NULL`),
+so a row the user edited is never touched and a cleared row takes the new
+built-in; `seeded_role_prose_is_byte_identical_to_the_hardcoded_constants`
+pins the migrated text to the constants.
 
 The constants remain in the binary as the SEED and as the fallback — an empty
 `description_prompt` resolves back to them (`resolve_role_prose` →

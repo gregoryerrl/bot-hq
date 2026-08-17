@@ -3528,6 +3528,81 @@ mod tests {
         )
     }
 
+    /// `0067_role_prose_says_what_the_ring_does.sql`'s two UPDATEs.
+    fn says_what_the_ring_does_statement(section: &str) -> String {
+        reseed_statement(
+            include_str!("../../migrations/0067_role_prose_says_what_the_ring_does.sql"),
+            "0067",
+            section,
+        )
+    }
+
+    /// **The guard on migration 0067, both directions, both roles** (round 9).
+    /// The prose being moved: "unless paused" on the tray-answer timing, the
+    /// end-of-task reconciliation (park the close-ask, then pass or halt naming
+    /// it), `supersede_question` in the dedupe protocol, the peer_ack ~200-char
+    /// / `final` rule on both roles, "gear button", and `mode:"append"` on the
+    /// EYES doc. Both roles are guarded on 0065's seed; a user's edit survives
+    /// on either row; a NULL row takes the new text.
+    #[tokio::test]
+    async fn the_0067_prose_reseed_overwrites_0065s_seed_but_not_a_user_edit() {
+        let s = storage_with_0044().await;
+
+        // Half 1 — a stock migrated database is on the NEW constants, for both,
+        // and the constants say the new things.
+        for (slug, expected) in [
+            ("hands", crate::agents::prompts::HANDS_ROLE),
+            ("eyes", crate::agents::prompts::EYES_ROLE),
+        ] {
+            let role = s.role_by_slug(slug).await.unwrap().unwrap();
+            let prose = role.description_prompt.expect("prose seeded");
+            assert_eq!(prose, expected, "0067 did not overwrite 0065's seed for {slug}");
+            assert!(prose.contains("under ~200 characters"), "{slug} lacks the peer_ack rule");
+            assert!(prose.contains("`final: true`"), "{slug} lacks the peer_ack final flag");
+        }
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap().description_prompt.unwrap();
+        assert!(hands.contains("unless paused"), "hands still says a paused session is dealt a turn");
+        assert!(hands.contains("supersede_question"), "hands never names supersede_question");
+        assert!(hands.contains("never leave the session bare-idle"), "hands lacks the close-ask reconciliation");
+        assert!(!hands.contains("gear tab"), "there is no gear tab");
+        let eyes = s.role_by_slug("eyes").await.unwrap().unwrap().description_prompt.unwrap();
+        assert!(eyes.contains("mode:\"append\""), "eyes prose does not name append on its doc");
+
+        // Half 2 — each statement, replayed against a row the user has edited,
+        // leaves it alone; replayed against a NULL row, seeds it.
+        for (slug, section) in [("hands", "-- 1. HANDS"), ("eyes", "-- 2. EYES")] {
+            let edit = format!("You are {slug}. Edited by the user.");
+            sqlx::query("UPDATE roles SET description_prompt = ? WHERE slug = ?")
+                .bind(&edit)
+                .bind(slug)
+                .execute(s.pool())
+                .await
+                .unwrap();
+            sqlx::query(&says_what_the_ring_does_statement(section))
+                .execute(s.pool())
+                .await
+                .unwrap();
+            assert_eq!(
+                s.role_by_slug(slug).await.unwrap().unwrap().description_prompt.as_deref(),
+                Some(edit.as_str()),
+                "0067 clobbered a user-edited prompt for {slug}"
+            );
+            sqlx::query("UPDATE roles SET description_prompt = NULL WHERE slug = ?")
+                .bind(slug)
+                .execute(s.pool())
+                .await
+                .unwrap();
+            sqlx::query(&says_what_the_ring_does_statement(section))
+                .execute(s.pool())
+                .await
+                .unwrap();
+            assert!(
+                s.role_by_slug(slug).await.unwrap().unwrap().description_prompt.is_some(),
+                "0067 left a NULL (use-the-built-in) row unseeded for {slug}"
+            );
+        }
+    }
+
     /// **The guard on migration 0065, both directions, both roles** (round 8).
     /// The prose being moved is the router's vocabulary — "the hub", "does NOT
     /// forward", "the volley-breaker" — plus the D37 vote sentence neither role

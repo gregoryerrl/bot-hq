@@ -414,7 +414,7 @@ session present (`ask` → HTTP → exit code).
 **What it does.** The sole persistence layer: `Storage` owns one `SqlitePool`
 (8 connections, foreign keys on, WAL journal — readers never block writers); every other
 area reads/writes through it. `Storage::open` runs `sqlx::migrate!`; migrations
-are immutable once applied (hook-guarded), highest `0066`, `0056` reverted by
+are immutable once applied (hook-guarded), highest `0067`, `0056` reverted by
 re-stamp. One timestamp helper (`now_utc()`, RFC3339-Z) is meant to be bound by
 every write.
 
@@ -439,7 +439,7 @@ every write.
 | `src/storage/projects.rs` | `projects` registry, CL path resolution | M |
 | `src/storage/plugins.rs`, `src/storage/plugin_kv.rs` | plugin registry + per-plugin kv | M / S |
 | `src/storage/cl_index.rs`, `src/storage/cl_atoms.rs` | CL index/folders/reads; FTS5 atoms + `cl_retrieve` | M / M |
-| `migrations/` | 0001…0066 (0056 absent) — append-only | — |
+| `migrations/` | 0001…0067 (0056 absent) — append-only | — |
 | `tests/storage_test.rs` | cross-cutting smoke: empty-DB migration, tray scoping, message since-id, session close/list, config round-trips | M |
 
 **Entry points.** `Storage::open` · `now_utc` · `next_active_participant` ·
