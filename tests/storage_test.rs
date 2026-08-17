@@ -15,6 +15,53 @@ async fn migration_runs_on_empty_db() {
     );
 }
 
+/// **Migration 0066 — the messages indexes earn their writes** (round 8).
+/// Three measured-dead-or-once-per-session indexes are gone, one seek index
+/// exists, and the two the measurement KEPT are still there. Kill-tested:
+/// comment out a DROP in 0066 → red.
+#[tokio::test]
+async fn migration_0066_drops_the_unearned_indexes_and_adds_the_seek() {
+    let s = Storage::memory().await.unwrap();
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'index' \
+         AND tbl_name IN ('messages', 'session_documents') ORDER BY name",
+    )
+    .fetch_all(s.pool())
+    .await
+    .unwrap();
+    for gone in [
+        "idx_messages_session_participant_time",
+        "idx_messages_session_author_time",
+        "session_documents_session_idx",
+    ] {
+        assert!(!names.iter().any(|n| n == gone), "{gone} should be dropped by 0066: {names:?}");
+    }
+    for kept in [
+        "idx_messages_session_time",
+        "idx_messages_session_id",
+        "idx_messages_participant_kind_id",
+        "session_documents_phase_idx",
+    ] {
+        assert!(names.iter().any(|n| n == kept), "{kept} must exist: {names:?}");
+    }
+    // And the spin-detection read seeks on the new index.
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+        "EXPLAIN QUERY PLAN SELECT id, content FROM messages \
+         WHERE participant_id = ? AND kind = 'text' AND id > ? ORDER BY id DESC LIMIT ?",
+    )
+    .bind(1_i64)
+    .bind(0_i64)
+    .bind(64_i64)
+    .fetch_all(s.pool())
+    .await
+    .unwrap();
+    let detail = plan.iter().map(|r| r.3.as_str()).collect::<Vec<_>>().join(" | ");
+    assert!(
+        detail.contains("idx_messages_participant_kind_id"),
+        "participant_text_since must seek on the new index, got: {detail}"
+    );
+}
+
 #[tokio::test]
 async fn pending_tray_open_sessions_excludes_closed() {
     use bot_hq::storage::QuestionKind;

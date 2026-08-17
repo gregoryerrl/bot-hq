@@ -1,0 +1,55 @@
+-- The messages indexes earn their writes — measured, not guessed.
+--
+-- Round 8 (2026-08-17). 0064 left the four `session_id`-leading indexes on
+-- `messages` alone because "two of them may be redundant with each other" was a
+-- measurement, not a fact. The measurement was taken: EXPLAIN QUERY PLAN over
+-- every statement touching `messages` (grep-enumerated) on a copy of the live
+-- database (31.5k rows / 45 sessions), verified again on a synthetic 30k-row
+-- 0044 schema by the round's reviewer.
+--
+-- `idx_messages_session_participant_time (session_id, participant_id,
+-- created_at)` — 1.66 MB — has ONE reader: `ensure_session_roster`'s rosterless
+-- repair (`WHERE session_id = ? AND participant_id IS NULL AND origin =
+-- 'participant'`; `IS NULL` is sargable and does use it), which runs once per
+-- session and never on a healthy respawn. After the drop it falls back to
+-- `idx_messages_session_id` (~700 rows for an average session, once). Every
+-- other statement touches `participant_id` only in a `<>` / `IS NULL`
+-- disjunction the index cannot seek. One B-tree insert per message write —
+-- ~8.4k/day measured — bought that.
+--
+-- `idx_messages_session_author_time (session_id, author, created_at)` — 1.75 MB
+-- — has ONE reader, `count_user_messages`, once per session spawn, and is not
+-- even covering for it (`kind = 'text'` forces a row lookup). It falls back to
+-- `idx_messages_session_id` too. 0044 kept it "for as long as the column is"
+-- because it feared a table scan on the message pane's per-agent reads; those
+-- reads key on `participant_id` now (0044 itself moved them), and the author
+-- column has four remaining readers, none of them per-agent pane reads.
+--
+-- `session_documents_session_idx (session_id)` is a strict prefix of
+-- `session_documents_phase_idx (session_id, phase)`; the planner already
+-- prefers the wider one for the session-only query.
+--
+-- NOT touched, on the same measurement: `idx_messages_session_time
+-- (session_id, created_at)` orders identically to `(session_id, id)` today (0
+-- inversions over 31,526 rows) but is the COVERING index for
+-- `MAX(m.created_at)` in `list_active_sessions*` — the dashboard's ORDER BY —
+-- and serves `has_message_from_other_participant_since`'s range; and
+-- `idx_messages_session_id`, which every watermark read seeks on.
+--
+-- ADDED: `participant_text_since` (`WHERE participant_id = ? AND kind = 'text'
+-- AND id > ? ORDER BY id DESC LIMIT ?`) — the spin-detection read on every
+-- turn completion — never binds `session_id`, so no existing index applies and
+-- it walks rowids backwards from the end to the watermark: fast while the
+-- watermark is fresh, and unbounded by the participant when it is not (a stale
+-- watermark plus a busy OTHER session). `(participant_id, kind, id)` seeks it
+-- (verified: `SEARCH messages USING INDEX … (participant_id=? AND kind=? AND
+-- id>?)`), ~0.7 MB. Net of this migration: three indexes fewer, one more,
+-- about 2.7 MB less on disk and two fewer B-tree inserts per message write.
+--
+-- `IF EXISTS` / `IF NOT EXISTS`: a database that skipped 0023 or 0044's index
+-- creation is a database this must not fail on.
+DROP INDEX IF EXISTS idx_messages_session_participant_time;
+DROP INDEX IF EXISTS idx_messages_session_author_time;
+DROP INDEX IF EXISTS session_documents_session_idx;
+CREATE INDEX IF NOT EXISTS idx_messages_participant_kind_id
+    ON messages (participant_id, kind, id);
