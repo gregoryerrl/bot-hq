@@ -367,6 +367,21 @@ export function SessionView() {
     (payload) => {
       if (payload.session_id !== sessionId) return;
       setDeliveredTick((t) => t + 1);
+      // **Clear the PERSISTED draft too, not just the live box.**
+      //
+      // `deliveredTick` is a transient edge, and only a MOUNTED ChatInput can
+      // observe it. ChatInput is unmounted whenever an approval gate holds the
+      // input slot (`pendingApprovals.length > 0` below), so a staged message
+      // delivered during a gate bumps the tick with nobody watching: on
+      // remount `prevTickRef` seeds to the current tick, sees no change, and
+      // the box re-seeds itself from this key — the delivered message, back in
+      // the box, needing a manual clear.
+      //
+      // Removing the key here makes the clear survive that, because it is
+      // durable state rather than an event nobody heard. The tick still does
+      // the in-memory clear for the common mounted case; this is the half that
+      // cannot be missed.
+      localStorage.removeItem(`bothq:draft:${sessionId}`);
       clearStaged(sessionId);
       // Drop the delivered content NOW rather than waiting for the refetch.
       // The refetch is async, so until it lands `stagedResp` still describes a

@@ -172,6 +172,51 @@ describe("ChatInput turn-status + Stop", () => {
     expect(screen.getByRole("textbox")).toHaveValue("");
   });
 
+  // The remount case: a staged message delivered while an approval gate holds
+  // the input slot bumps `deliveredTick` with no ChatInput mounted to see it.
+  // On remount the tick looks unchanged, so the box must come back EMPTY — and
+  // the only thing that can make it so is the persisted draft having been
+  // cleared at delivery, which `SessionView` now does.
+  it("comes back empty after a delivery it was unmounted for", () => {
+    localStorage.setItem("bothq:draft:s1", "queued while they work");
+    // Delivery happens while unmounted: the draft key is removed by the
+    // SessionView handler, and the tick moves from 0 to 1 unobserved.
+    localStorage.removeItem("bothq:draft:s1");
+    render(
+      <ChatInput
+        draftKey="bothq:draft:s1"
+        activity="idle"
+        busy={{}}
+        busyLabel={LABEL}
+        onSend={() => {}}
+        onStage={() => {}}
+        onCancel={() => {}}
+        deliveredTick={1}
+      />,
+    );
+    expect(screen.getByRole("textbox")).toHaveValue("");
+  });
+
+  // Without the draft removal, the same remount restores the delivered text —
+  // which is the bug, stated as a test so the two halves cannot be confused.
+  it("would restore the delivered text on remount if the draft survived", () => {
+    localStorage.setItem("bothq:draft:s2", "queued while they work");
+    render(
+      <ChatInput
+        draftKey="bothq:draft:s2"
+        activity="idle"
+        busy={{}}
+        busyLabel={LABEL}
+        onSend={() => {}}
+        onStage={() => {}}
+        onCancel={() => {}}
+        deliveredTick={1}
+      />,
+    );
+    expect(screen.getByRole("textbox")).toHaveValue("queued while they work");
+    localStorage.removeItem("bothq:draft:s2");
+  });
+
   // The composer's half of the "I have to manually clear it" report. The box
   // itself was never the culprit — the delivered message was re-staged behind
   // it (see `SessionView`'s re-stage effect), so `staged`/`stagedText` came
