@@ -764,7 +764,6 @@ impl SignalingBridge {
                             .deliver_oob(
                                 choice_id,
                                 p.choice.session_id.clone(),
-                                &p.choice.agent,
                                 &p.choice.question,
                                 &p.choice.options,
                                 picked,
@@ -803,7 +802,6 @@ impl SignalingBridge {
                     .deliver_oob(
                         choice_id,
                         q.session_id.clone(),
-                        &q.agent,
                         &q.prompt,
                         &options,
                         picked,
@@ -833,7 +831,6 @@ impl SignalingBridge {
         &self,
         choice_id: &str,
         session_id: String,
-        _agent: &str,
         question: &str,
         options: &[String],
         picked: String,
@@ -982,11 +979,14 @@ impl SignalingBridge {
     }
 
     /// Run an approved action_gate (ToolBlocklist) command at resolve time and
-    /// append its output to the OOB `body`. Used on the receiver-gone paths
-    /// (client timeout / post-restart) where action_gate's own future was
-    /// cancelled before it could execute in-band. `command` is None for any
-    /// non-executing tray item; a no-op unless the pick is Approved. Callers
-    /// gate this on the atomic status flip so it runs exactly once.
+    /// append its output to the OOB `body`. This is the ONLY path an approved
+    /// PARKED command runs through: `action_gate` parks and returns at once
+    /// (rc3 D35; an auto-allowed keyword executes directly and never parks),
+    /// so nothing runs "in-band" — every approval lands here through
+    /// `deliver_oob`, whether the agent's tool future is still open, timed out
+    /// or predates a restart. `command` is None for any non-executing tray
+    /// item; a no-op unless the pick is Approved. Callers gate this on the
+    /// atomic status flip so it runs exactly once.
     async fn maybe_run_gated(
         &self,
         session_id: &str,
