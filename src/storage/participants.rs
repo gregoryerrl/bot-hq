@@ -1983,19 +1983,6 @@ pub struct Envelope {
     /// reconciliation directive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     system_prefix: Option<String>,
-    /// This turn called `peer_ack` but carried substantive text, so the ack was
-    /// overridden and the turn posted anyway (router inventory #9).
-    ///
-    /// The router expressed this by splicing a sentence onto the front of the
-    /// body — the invisible string mutation this column exists to replace. As a
-    /// field it is renderable, queryable, and cannot be mistaken for something
-    /// the agent wrote.
-    #[serde(default, skip_serializing_if = "is_false")]
-    peer_ack_override: bool,
-}
-
-fn is_false(b: &bool) -> bool {
-    !*b
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -2020,10 +2007,6 @@ impl Envelope {
         self
     }
 
-    pub fn with_peer_ack_override(mut self, peer_ack_override: bool) -> Self {
-        self.peer_ack_override = peer_ack_override;
-        self
-    }
 }
 
 /// Render `(envelope, body)` into the bytes a participant reads.
@@ -2152,16 +2135,6 @@ pub fn render_wire(envelope: Option<&Envelope>, body: &str) -> String {
     if let Some(prefix) = &envelope.system_prefix {
         wire.push_str(prefix);
         wire.push('\n');
-    }
-    // Closest to the body, and after `system_prefix`, because the router built
-    // it that way: it spliced this sentence directly onto the trimmed body and
-    // everything else wrapped the pair. Same wording, so a session that reads
-    // both sides of task 14 sees no change.
-    if envelope.peer_ack_override {
-        wire.push_str(
-            "[peer_ack overridden — this turn carried substantive text, so it was \
-             forwarded anyway]\n",
-        );
     }
     wire.push_str(body);
     wire
@@ -3759,35 +3732,6 @@ mod tests {
         // carries its own `[PHASE: X]`, so an envelope would double-tag it.
         assert_eq!(render_wire(None, "advance to Apply"), "advance to Apply");
         assert_eq!(render_wire(Some(&Envelope::default()), "bare"), "bare");
-    }
-
-    /// Router inventory **#9**'s upgrade: the override tag was a sentence the
-    /// router spliced onto the body, and is now a field. Same wording on the
-    /// wire, so a session spanning task 14 sees no change.
-    #[test]
-    fn a_peer_ack_override_renders_its_tag_in_front_of_the_body() {
-        let tagged = Envelope::default().with_peer_ack_override(true);
-        assert_eq!(
-            render_wire(Some(&tagged), "the verdict"),
-            "[peer_ack overridden — this turn carried substantive text, so it was \
-             forwarded anyway]\nthe verdict"
-        );
-
-        // `false` renders nothing — the tag must not ride an ordinary turn.
-        let plain = Envelope::default().with_peer_ack_override(false);
-        assert_eq!(render_wire(Some(&plain), "the verdict"), "the verdict");
-
-        // Order: after the system prefix, closest to the body — the shape the
-        // router built by hand, where the tag was concatenated onto the body and
-        // everything else wrapped the pair.
-        let both = Envelope::default()
-            .with_system_prefix("HOST NOTE")
-            .with_peer_ack_override(true);
-        assert_eq!(
-            render_wire(Some(&both), "the verdict"),
-            "HOST NOTE\n[peer_ack overridden — this turn carried substantive text, so it \
-             was forwarded anyway]\nthe verdict"
-        );
     }
 
     #[test]

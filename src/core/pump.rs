@@ -1847,7 +1847,7 @@ mod tests {
 
         let ending = next_turn_end(&mut ring_rx).expect("the turn end must reach the ring");
         assert!(
-            matches!(ending, crate::core::sequencer::TurnEnding::Spoke { .. }),
+            matches!(ending, crate::core::sequencer::TurnEnding::Spoke),
             "a substantive turn is not a done-vote — the cycle must continue: {ending:?}"
         );
         // The prose is a row now; `from` is implicit in the participant the
@@ -2432,7 +2432,7 @@ mod tests {
         );
         let t2 = next_turn_end(&mut ring_rx).expect("turn 2 end");
         assert!(
-            matches!(t2, crate::core::sequencer::TurnEnding::Spoke { .. }),
+            matches!(t2, crate::core::sequencer::TurnEnding::Spoke),
             "peer_ack must not leak into the next turn: {t2:?}"
         );
         let bodies = turn_bodies(&storage).await;

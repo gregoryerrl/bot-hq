@@ -2818,7 +2818,7 @@ async fn halted_on_consensus(
         // `substantive_output_resets_the_tally` for the arithmetic that lets
         // one stale vote and one fresh one add up to an arrival nobody voted
         // for.
-        TurnEnding::Spoke { .. } => deps.storage.clear_done_votes(&deps.session_id).await,
+        TurnEnding::Spoke => deps.storage.clear_done_votes(&deps.session_id).await,
         // **A pass casts no vote, and RETRACTS its own.**
         //
         // Neither half is decoration. Casting nothing is what keeps a pass from
@@ -3668,16 +3668,12 @@ const PEER_ACK_MAX_SUPPRESSED_LEN: usize = 200;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnEnding {
     /// The turn carried substantive text. Steps the ring and RESETS the tally
-    /// for the whole session — see [`halted_on_consensus`].
-    Spoke {
-        /// A `peer_ack` was overridden because the turn carried substantive
-        /// text. The row records it via `Envelope::with_peer_ack_override`, so
-        /// the override is something the user can see rather than a sentence
-        /// spliced onto the body. **No ring behaviour reads it** — it decorates
-        /// the row and nothing else, which is why it rides the variant that is
-        /// otherwise indistinguishable from a plain substantive ending.
-        peer_ack_override: bool,
-    },
+    /// for the whole session — see [`halted_on_consensus`]. A `peer_ack` on
+    /// such a turn simply does not count (see [`turn_ending`]); it used to
+    /// carry a `peer_ack_override` flag that was documented as recorded on the
+    /// row and never was — no production path set the envelope field and no
+    /// ring behaviour read the payload (round 7 deleted both).
+    Spoke,
     /// Nothing left to do — the consensus vote.
     Done,
     /// **PASS: this participant declines the turn** (design §1, "a participant
@@ -3701,12 +3697,10 @@ pub enum TurnEnding {
 }
 
 impl TurnEnding {
-    /// The ordinary ending — substantive output with no ack to override.
-    ///
-    /// A named constant because it is what an errored turn ends as and what
-    /// nearly every test sends, and `Spoke { peer_ack_override: false }` puts
-    /// the one field no ring behaviour reads in front of the one it does.
-    pub const SPOKE: TurnEnding = TurnEnding::Spoke { peer_ack_override: false };
+    /// The ordinary ending — substantive output. A named alias, kept from when
+    /// `Spoke` carried a payload, because it is what an errored turn ends as and
+    /// what nearly every test sends.
+    pub const SPOKE: TurnEnding = TurnEnding::Spoke;
 
     /// Did this turn produce substantive output?
     ///
@@ -3722,7 +3716,7 @@ impl TurnEnding {
     /// says which variant is excluded, which is the same fact with the reason
     /// removed.
     fn is_substantive(self) -> bool {
-        matches!(self, TurnEnding::Spoke { .. })
+        matches!(self, TurnEnding::Spoke)
     }
 }
 
@@ -3797,7 +3791,9 @@ pub fn turn_ending(peer_ack: bool, peer_ack_final: bool, passed: bool, body: &st
     if peer_ack_final || content_free {
         return TurnEnding::Done;
     }
-    TurnEnding::Spoke { peer_ack_override: true }
+    // A peer_ack on a substantive turn does not count: the turn is an ordinary
+    // spoken turn and resets the tally like any other.
+    TurnEnding::SPOKE
 }
 
 #[cfg(test)]
@@ -3828,11 +3824,9 @@ mod tests {
     /// The three endings, named for the command literals below.
     ///
     /// Aliases rather than the paths themselves because a `TurnComplete` is
-    /// already three fields on one line in ~50 tests, and
-    /// `TurnEnding::Spoke { peer_ack_override: false }` would put the field NO
-    /// ring behaviour reads (it decorates the row) in front of the one every
-    /// one of those tests is about. `PASSED` is spelled out at its own call
-    /// sites for the same reason in reverse — it is the subject there.
+    /// already three fields on one line in ~50 tests. `PASSED` is spelled out
+    /// at its own call sites for the same reason in reverse — it is the subject
+    /// there.
     const SPOKE: TurnEnding = TurnEnding::SPOKE;
     const DONE: TurnEnding = TurnEnding::Done;
     const PASSED: TurnEnding = TurnEnding::Passed;
@@ -9507,14 +9501,14 @@ mod tests {
 
     /// Router inventory **#9** — the guard that exists because four full reviews
     /// were destroyed by an agent posting its verdict and acking in one turn.
-    /// Over the length floor, the ack does not become a vote and the row carries
-    /// the override tag.
+    /// Over the length floor, the ack does not become a vote — the turn is an
+    /// ordinary spoken turn.
     #[test]
     fn peer_ack_on_substantive_turn_forwards_anyway() {
         let review = "x".repeat(PEER_ACK_MAX_SUPPRESSED_LEN + 1);
         assert_eq!(
             turn_ending(true, false, false, &review),
-            TurnEnding::Spoke { peer_ack_override: true }
+            TurnEnding::SPOKE
         );
         // The floor itself is still an ack — `<=`, not `<`. One byte decides
         // which of the two rows above applies, so it is worth pinning that the
@@ -9539,7 +9533,7 @@ mod tests {
         let body = "z".repeat(PEER_ACK_MAX_SUPPRESSED_LEN + 1);
         assert_eq!(
             turn_ending(true, false, false, &body),
-            TurnEnding::Spoke { peer_ack_override: true }
+            TurnEnding::SPOKE
         );
         assert_eq!(
             turn_ending(false, false, false, &body),
@@ -9611,7 +9605,7 @@ mod tests {
         // pass is gone there is nothing left for it to outrank.
         assert_eq!(
             turn_ending(true, false, true, &verdict),
-            TurnEnding::Spoke { peer_ack_override: true },
+            TurnEnding::SPOKE,
             "#9 still applies once the pass is overridden"
         );
         assert_eq!(
