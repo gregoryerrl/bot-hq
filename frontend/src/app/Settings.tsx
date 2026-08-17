@@ -159,7 +159,11 @@ function GlobalPolicyPanel() {
   const { draft, setDraft, dirty } = useServerDraft<Policy>(server ?? {});
 
   const onSave = async () => {
-    await save.mutateAsync({ policy: draft });
+    try {
+      await save.mutateAsync({ policy: draft });
+    } catch {
+      return; // `save.error` renders below; no unhandled rejection
+    }
     refetch();
   };
 
@@ -251,11 +255,15 @@ function SessionDefaults() {
           type="checkbox"
           checked={worktreeDefault !== "0"}
           onChange={async (e) => {
-            await setAppSetting.mutateAsync({
-              key: "worktree_default",
-              value: e.target.checked ? "1" : "0",
-            });
-            refetch();
+            try {
+              await setAppSetting.mutateAsync({
+                key: "worktree_default",
+                value: e.target.checked ? "1" : "0",
+              });
+              refetch();
+            } catch {
+              // rendered below
+            }
           }}
           className="size-4 accent-primary"
         />
@@ -503,9 +511,13 @@ function ToolGateSection() {
 
   const onSave = async () => {
     // Drop blank keywords — they match nothing and only clutter the file.
-    await save.mutateAsync({
-      keywords: draft.filter((k) => k.keyword.trim() !== ""),
-    });
+    try {
+      await save.mutateAsync({
+        keywords: draft.filter((k) => k.keyword.trim() !== ""),
+      });
+    } catch {
+      return; // `save.error` renders below; no unhandled rejection
+    }
     refetch();
   };
 

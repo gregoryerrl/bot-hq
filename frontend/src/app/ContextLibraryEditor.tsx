@@ -240,7 +240,11 @@ function ProjectPolicyForm({ project }: { project: string }) {
   const { draft, setDraft, dirty } = useServerDraft<Policy>(server ?? {});
 
   const onSave = async () => {
-    await save.mutateAsync({ project, policy: draft });
+    try {
+      await save.mutateAsync({ project, policy: draft });
+    } catch {
+      return; // `save.error` renders below; no unhandled rejection
+    }
     await refetch();
   };
 

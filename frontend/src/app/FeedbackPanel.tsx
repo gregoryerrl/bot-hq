@@ -41,10 +41,17 @@ export function FeedbackPanel() {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
 
-  const { data: rows = [] } = useTauriQuery<AgentFeedbackView[]>(
-    "list_agent_feedback",
-    { status: filter === "all" ? null : filter },
-  );
+  // No event backs this query: agents file rows through the `file_feedback`
+  // MCP tool, which emits nothing, and Settings keeps this panel mounted once
+  // visited — so without a Refresh a row filed while the tab is open never
+  // appeared for the rest of the app's run (round 8).
+  const {
+    data: rows = [],
+    refetch,
+    isFetching,
+  } = useTauriQuery<AgentFeedbackView[]>("list_agent_feedback", {
+    status: filter === "all" ? null : filter,
+  });
 
   const setStatus = (id: number, status: string) => {
     setError(null);
@@ -79,7 +86,7 @@ export function FeedbackPanel() {
         />
       )}
 
-      <div className="mb-3 flex gap-1.5">
+      <div className="mb-3 flex items-center gap-1.5">
         {FILTERS.map((f) => (
           <Button
             key={f}
@@ -90,6 +97,13 @@ export function FeedbackPanel() {
             {f}
           </Button>
         ))}
+        <button
+          type="button"
+          onClick={() => refetch()}
+          className="ml-auto shrink-0 rounded border border-outline-variant px-2.5 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface"
+        >
+          {isFetching ? "Refreshing…" : "Refresh"}
+        </button>
       </div>
 
       {rows.length === 0 ? (

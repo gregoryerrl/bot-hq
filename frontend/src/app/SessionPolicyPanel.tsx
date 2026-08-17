@@ -64,7 +64,11 @@ export function SessionPolicyPanel({
   if (!open) return null;
 
   const onSave = async () => {
-    await save.mutateAsync({ sessionId, policy: draft });
+    try {
+      await save.mutateAsync({ sessionId, policy: draft });
+    } catch {
+      return; // `save.error` renders below; no unhandled rejection
+    }
     setSaved(true);
     refetch();
   };
@@ -247,10 +251,14 @@ function SessionToolGateSection({ sessionId }: { sessionId: string }) {
   }, [saved]);
 
   const onSave = async () => {
-    await save.mutateAsync({
-      sessionId,
-      keywords: draft.filter((k) => k.keyword.trim() !== ""),
-    });
+    try {
+      await save.mutateAsync({
+        sessionId,
+        keywords: draft.filter((k) => k.keyword.trim() !== ""),
+      });
+    } catch {
+      return; // `save.error` renders below; no unhandled rejection
+    }
     setSaved(true);
     refetch();
   };
