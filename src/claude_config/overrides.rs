@@ -121,6 +121,11 @@ pub fn load_overrides(data_dir: &Path) -> ClaudeOverrides {
 }
 
 /// Persist the override store (pretty JSON, 0600). Creates the data dir.
+///
+/// Written to a sibling temp file that is CREATED 0600 on unix, then renamed
+/// over the real one (round 9): the old write-then-chmod left a umask-default
+/// window on a file that may hold per-role env/tokens, and a bare
+/// `std::fs::write` could leave it half-written.
 pub fn save_overrides(data_dir: &Path, store: &ClaudeOverrides) -> Result<()> {
     let path = config_path(data_dir);
     if let Some(parent) = path.parent() {
@@ -128,9 +133,37 @@ pub fn save_overrides(data_dir: &Path, store: &ClaudeOverrides) -> Result<()> {
             .with_context(|| format!("creating data dir {}", parent.display()))?;
     }
     let body = serde_json::to_string_pretty(store).context("serializing claude-overrides")?;
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    let tmp = path.with_extension("json.tmp");
+    write_owner_only(&tmp, body.as_bytes())
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("renaming {} into {}", tmp.display(), path.display()))?;
+    // Belt and braces: an existing file's mode survives a rename, so re-assert.
     set_owner_only(&path);
     Ok(())
+}
+
+/// Create-or-truncate `path` with mode 0600 from the first byte (unix); a
+/// plain write elsewhere.
+#[cfg(unix)]
+fn write_owner_only(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(body)?;
+    // The mode on `create` is masked by the umask only downwards, but an
+    // existing temp file keeps its old mode — set it explicitly too.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+#[cfg(not(unix))]
+fn write_owner_only(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, body)
 }
 
 #[cfg(unix)]
@@ -250,6 +283,15 @@ mod tests {
         hands.effort = Some("high".into());
         save_overrides(dir.path(), &store).unwrap();
         assert_eq!(load_overrides(dir.path()), store);
+        // Round 9: temp + rename, and owner-only from the first byte.
+        let path = config_path(dir.path());
+        assert!(!path.with_extension("json.tmp").exists(), "temp file must be renamed away");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "override store must be owner-only, got {mode:o}");
+        }
     }
 
     #[test]

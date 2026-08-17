@@ -29,6 +29,12 @@ fn read_object(path: &Path) -> Result<Map<String, Value>> {
     }
 }
 
+/// Write the whole object back ATOMICALLY: to a sibling temp file, then
+/// `rename` over the real one (round 9). A bare `std::fs::write` truncates
+/// first and fills second, so a crash or a full disk mid-write left the user's
+/// real `~/.claude/settings.json` — the file this module promises never to
+/// clobber — empty or half-written. `policy/audit.rs` and `tauri_cmd/cl.rs`
+/// already wrote this way; this one did not.
 fn write_object(path: &Path, root: &Map<String, Value>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -36,7 +42,10 @@ fn write_object(path: &Path, root: &Map<String, Value>) -> Result<()> {
     }
     let mut body = serde_json::to_string_pretty(root).context("serializing settings.json")?;
     body.push('\n');
-    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("renaming {} into {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
@@ -144,6 +153,8 @@ mod tests {
             v["mcpServers"]["x"]["headers"]["Authorization"],
             "Bearer SECRET"
         );
+        // Round 9: written via a sibling temp + rename — no temp left behind.
+        assert!(!dir.path().join("settings.json.tmp").exists(), "temp file must be renamed away");
     }
 
     #[test]
