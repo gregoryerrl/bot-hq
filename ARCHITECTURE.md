@@ -51,8 +51,7 @@ return as the first plugin — TBD.
 
 The user directs the work and owns the decisions; the app is the bridge
 between user and agents. Policy enforcement runs at two layers (MCP tool calls + git
-hooks). Two MCP servers run in-process: one for agent ↔ UI signaling,
-one for external driver clients.
+hooks). One MCP server runs in-process, for agent ↔ UI signaling.
 
 **Stack:** Tauri v2 shell + React 18 frontend, Rust core on a tokio
 multi-thread runtime. Tauri owns the OS main thread.
@@ -71,8 +70,7 @@ multi-thread runtime. Tauri owns the OS main thread.
                     │   │  tokio runtime (worker threads) │  │
                     │   │   - signaling::SignalingBridge  │  │
                     │   │   - internal MCP HTTP server    │  │
-                    │   │   - external MCP HTTP server    │  │
-                    │   │   - per-session duo coordinator │  │
+                    │   │   - per-session turn ring       │  │
                     │   └─────────────────────────────────┘  │
                     └────────┬────────────┬──────────────────┘
                              │            │
@@ -426,8 +424,8 @@ model and effort. The picks persist on `session_participants`
 of "which model does this role run on" for every create path, including the ones
 with no dialog.
 
-Dialog-less create paths — the external driver's `create_session` and the plugin
-proxy — seed exactly ONE participant, the first active role by `roles.id`
+The dialog-less create path — the plugin proxy — seeds exactly ONE
+participant, the first active role by `roles.id`
 (design §1's "default 1"). The `rain_disabled_default` setting that used to
 govern them was deleted by rc3 D13: the dialog picks the roster now, so "start
 solo" is simply not adding a second participant.
@@ -570,26 +568,31 @@ see the rc3 decisions doc.
 
 ---
 
-## External MCP server (driver tools)
+## The external driver — REMOVED (2026-08-17)
 
-Second HTTP MCP server for external agents (another claude-code
-session, a test driver). Lives in `src/signaling/external_jsonrpc.rs`
-+ `src/signaling/external_server.rs`.
+bot-hq ran a second HTTP MCP server so an external agent could drive the app
+the way a human does: start sessions, send messages, answer gates. The user
+removed it and **demoted it to a future plugin**, the same call rc3 D9 made for
+the native agent loop.
 
-- **Bind:** `127.0.0.1:7892` (override via `BOT_HQ_EXTERNAL_MCP_PORT`;
-  disable via `BOT_HQ_EXTERNAL_MCP_DISABLED=1`).
-- **Auth:** bearer token at `<data_dir>/mcp-token` (UUIDv4, 0600,
-  auto-generated). Constant-time comparison via the `subtle` crate.
-- **Soft-fail:** if port is taken, internal MCP keeps working, external
-  marks "unavailable" — bot-hq stays usable.
+Deleted: `src/signaling/external_jsonrpc.rs`, `src/signaling/external_server.rs`,
+`tests/external_mcp_test.rs`, the `<data_dir>/.local/mcp-token` bearer token and
+its generation, the `BOT_HQ_EXTERNAL_MCP_PORT` / `_DISABLED` env vars, and the
+`external_server` field on `CoreAppState` — ~2,100 lines.
 
-Tools: see [README.md](README.md#available-external-tools) for the full
-list (20 driver tools including `list_sessions`, `list_models`,
-`create_session`, `send_message`, `wait_for_change`,
-`get_session_snapshot`, etc.). `list_models` exists because
-`create_session` accepts saved-model **ids** and a driver otherwise had
-no way to discover one; auth tokens are redacted there exactly as in
-`get_agent_configs`.
+**What survived, and why.** `wait_for_change` moved to `tauri_cmd/plugin_api.rs`:
+the plugin proxy was its only other caller, and that file already holds the
+storage and bridge it needs. Nothing else in the tree depended on the driver.
+
+**What the deletion bought beyond the deletion.** The driver's `wire` module was
+the sole reason two guards carried exemptions — `no_tool_description_an_agent_reads_names_an_agent`
+now runs with NO exempt strings at all, and `retired_identifier_test`'s
+carve-out list dropped from two files to one. A published wire is a promise that
+costs something to keep; deleting it refunded that.
+
+The design record is the code itself: `git show 2833949:src/signaling/external_jsonrpc.rs`
+holds the 20 tool descriptors, the bearer-auth handshake and the CORS handling a
+plugin rebuild would want.
 
 ---
 
@@ -949,7 +952,6 @@ Defaults (env-overridable via `BOT_HQ_DATA_DIR`):
   `<data_dir>/config/tool-gate.json`, `<data_dir>/config/claude-overrides.json`
 - **DB file:** `<data_dir>/.local/bot-hq.db`
 - **Single-instance lock:** `<data_dir>/.local/lock`
-- **External MCP token:** `<data_dir>/.local/mcp-token`
 - **Violations log:** `<data_dir>/.local/violations.jsonl`
 - **Policy-hash cache:** `<data_dir>/.local/.policy-hashes.json`
 - **Screenshots:** `<data_dir>/.local/screenshots/`
@@ -1008,12 +1010,19 @@ sync**, **GitHub tab**.
 
 ## Eval harness
 
-`bench/swebench/` is a SWE-bench rollout harness for evaluating the duo
+`bench/swebench/` is a SWE-bench rollout harness for evaluating a session
 on real GitHub issues — a Python client (`run_rollout.py`,
-`bothq_client.py`, `verify.py`, …) that drives sessions through the
-external MCP server and scores patches. It is a developer tool, **not
-part of the runtime core**: it ships in-repo but is not compiled into
-the `bot-hq` binary and does not run at app startup. See
+`bothq_client.py`, `verify.py`, …) that drives sessions and scores patches.
+It is a developer tool, **not part of the runtime core**: it ships in-repo
+but is not compiled into the `bot-hq` binary and does not run at app startup.
+
+> ⚠️ **NON-FUNCTIONAL as of 2026-08-17.** It drove sessions through the
+> external MCP server, which was removed and demoted to a future plugin. The
+> harness is left in-repo rather than deleted — it is the user's tool and the
+> rollout/scoring logic is independent of the transport — but it cannot run
+> until the driver plugin exists or it is re-pointed at another surface.
+
+See
 [`bench/swebench/README.md`](bench/swebench/README.md).
 
 ---

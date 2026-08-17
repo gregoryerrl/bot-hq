@@ -345,7 +345,7 @@ extension points in `docs/PLUGINS.md`):
 - **Plugin-contributed MCP tools** (agent↔plugin) — prerequisite for an
   agent-drivable Browser tab.
 - **Manifest-declared agents** — the "add an agent to sessions" tier;
-  interim lever is the external MCP driver server (a backend-style
+  interim lever WAS the external MCP driver server, now removed (a backend-style
   plugin is an ordinary process driving sessions over it).
 - **Child-webview surface** — real Browser tab (arbitrary sites refuse
   iframing).
@@ -364,7 +364,7 @@ extension points in `docs/PLUGINS.md`):
   "buildable on v1 today" wording misled a session into asserting it
   was unbuilt — the user had to correct the record.)
 - **Discord plugin** — bridge sessions to/from a Discord channel.
-  Probably a backend-style plugin on the external MCP driver.
+  Probably a backend-style plugin (the external driver is now itself a planned plugin).
 - **Clive plugin** — port of legacy bot-hq's Clive bot (Twitch/IRC).
 - **CL cloud sync** — `library/` is the sync boundary (see shipping.md
   hook); wants the background-execution tier.
@@ -460,8 +460,8 @@ Start from `git show c7bba28:src/agents/native/`.
 
 ## Out of scope
 
-- **Web UI.** bot-hq is desktop-only by design. The external MCP
-  driver server already enables programmatic access; a web frontend
+- **Web UI.** bot-hq is desktop-only by design. Programmatic access is
+  the planned driver PLUGIN's job now; a web frontend
   would be a separate product.
 - **Multi-user / multi-tenant.** Single-developer-workstation is the
   design target. Shared workstations are out of scope (auth-token

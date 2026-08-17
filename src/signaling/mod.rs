@@ -21,8 +21,6 @@
 //! decision doc itself flagged HTTP as the "promote if IPC gets hairy" fallback.
 
 mod bridge;
-pub mod external_jsonrpc;
-pub mod external_server;
 mod jsonrpc;
 /// Parity oracle for the session-focused redesign — pins today's tool
 /// authorization so the capability rewrite can be proven not to change it.
@@ -37,7 +35,6 @@ pub mod web_search;
 mod webview_js;
 
 pub use bridge::{gate_age_secs, PendingChoice, ResolveOutcome, SignalingBridge, SignalingEvent, STALE_GATE_MAX_AGE_SECS};
-pub use external_server::{start_external_server, ExternalServer};
 
 /// MCP server keys bot-hq strips from a spawned agent's forwarded
 /// `--mcp-config`. `bot-hq`: would create a recursive driver loop (the agent

@@ -26,7 +26,6 @@
 //!   .local/                        (host-only; never synced)
 //!     bot-hq.db
 //!     lock                         (single-instance PID lock)
-//!     mcp-token                    (external MCP bearer token, 0600 unix)
 //!     violations.jsonl             (policy audit trail)
 //!     .policy-hashes.json          (policy-file hash cache)
 //!     screenshots/<ts>.png
@@ -108,7 +107,6 @@ pub struct Paths {
     /// Bearer token for the external MCP server. Generated on first run as a
     /// UUIDv4 with 0o600 perms (unix). Lives under `.local/` (host-only secret,
     /// never synced). User can rotate by editing the file and restarting.
-    pub mcp_token_path: PathBuf,
     /// Policy audit trail: `<data_dir>/.local/violations.jsonl`.
     pub violations_path: PathBuf,
     /// Policy-file hash cache: `<data_dir>/.local/.policy-hashes.json`.
@@ -150,7 +148,6 @@ impl Paths {
         let db_path = local_dir.join("bot-hq.db");
         let lock_path = local_dir.join("lock");
         let version_path = data_dir.join("version.txt");
-        let mcp_token_path = local_dir.join("mcp-token");
         let violations_path = local_dir.join("violations.jsonl");
         let policy_hashes_path = local_dir.join(".policy-hashes.json");
         let screenshots_dir = local_dir.join("screenshots");
@@ -165,7 +162,6 @@ impl Paths {
             db_path,
             lock_path,
             version_path,
-            mcp_token_path,
             violations_path,
             policy_hashes_path,
             screenshots_dir,
@@ -185,16 +181,6 @@ impl Paths {
     /// The `projects/` root under the CL dir, walked by the startup backfill.
     pub fn cl_projects_dir(&self) -> PathBuf {
         self.cl_dir.join("projects")
-    }
-
-    /// Read the persisted external-MCP bearer token. Trims trailing whitespace
-    /// so a UUID written with a trailing newline still matches incoming
-    /// `Authorization: Bearer <token>` headers. Returns an error if the file
-    /// is missing — call `init()` first.
-    pub fn read_mcp_token(&self) -> Result<String> {
-        let raw = fs::read_to_string(&self.mcp_token_path)
-            .with_context(|| format!("reading mcp-token at {}", self.mcp_token_path.display()))?;
-        Ok(raw.trim().to_string())
     }
 
     /// Persist the internal signaling server's bound address so the git
@@ -296,61 +282,6 @@ impl Paths {
                         repaired_slots.push(rel.display().to_string());
                     }
                 }
-            }
-        }
-
-        // mcp-token: generate UUIDv4 on first run / if missing. 0o600 perms on
-        // Unix so other users on the machine can't read it. Idempotent — if the
-        // file exists, leave it alone (user might have rotated).
-        if !self.mcp_token_path.exists() {
-            if let Some(parent) = self.mcp_token_path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("creating {}", parent.display()))?;
-            }
-            let token = uuid::Uuid::new_v4().to_string();
-            fs::write(&self.mcp_token_path, format!("{token}\n")).with_context(|| {
-                format!("writing mcp-token at {}", self.mcp_token_path.display())
-            })?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = fs::Permissions::from_mode(0o600);
-                fs::set_permissions(&self.mcp_token_path, perms)
-                    .with_context(|| format!("0o600 perms on {}", self.mcp_token_path.display()))?;
-            }
-            #[cfg(windows)]
-            {
-                // No chmod on Windows — restrict the token to the current user via
-                // `icacls`: drop inherited ACEs, then grant only this user. Mirrors
-                // the unix 0o600 intent (owner-only). Best-effort: the user profile
-                // dir is already user-restricted, so a failure here is a hardening
-                // miss, not a reason to abort init (unlike the unix `?` above).
-                match std::env::var_os("USERNAME") {
-                    Some(user) => {
-                        let grant = format!("{}:F", user.to_string_lossy());
-                        match std::process::Command::new("icacls")
-                            .arg(&self.mcp_token_path)
-                            .arg("/inheritance:r")
-                            .arg("/grant:r")
-                            .arg(&grant)
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .status()
-                        {
-                            Ok(s) if s.success() => {}
-                            Ok(s) => {
-                                warn!("icacls exited {s} restricting mcp-token ACL (non-fatal)")
-                            }
-                            Err(e) => {
-                                warn!("could not run icacls for mcp-token ACL: {e} (non-fatal)")
-                            }
-                        }
-                    }
-                    None => warn!("USERNAME unset; mcp-token left at inherited ACL defaults"),
-                }
-            }
-            if !first_run {
-                repaired_slots.push("mcp-token".to_string());
             }
         }
 
@@ -465,7 +396,6 @@ impl Paths {
 
         // v0 → v1: host-only state → .local/
         for name in [
-            "mcp-token",
             "violations.jsonl",
             ".policy-hashes.json",
             "screenshots",
@@ -931,14 +861,19 @@ mod tests {
         assert!(consolidated.contains("## Migrated from agents/brian/custom-instruction.md"));
         assert!(consolidated.contains("hi"));
         // host-only state moved under .local/.
-        assert!(paths.mcp_token_path.exists());
         assert!(paths.violations_path.exists());
         // marker renamed; old root locations gone.
         assert!(paths.version_path.exists());
         assert!(!root.join("cl-version.txt").exists());
         assert!(!root.join("projects").exists());
         assert!(!root.join("custom-general-rules.md").exists());
-        assert!(!root.join("mcp-token").exists());
+        // **`mcp-token` is deliberately NOT migrated any more.** It was the
+        // external driver's bearer token, and the driver was removed when the
+        // user demoted it to a future plugin — so nothing reads the file. Moving
+        // a dead file into `.local/` is churn in someone's data directory, and
+        // DELETING it is not bot-hq's call: it is the user's file, and an
+        // upgrade that quietly removes user data is worse than a stray one.
+        assert!(root.join("mcp-token").exists(), "a dead token is left where it is, not moved or deleted");
     }
 
     #[test]

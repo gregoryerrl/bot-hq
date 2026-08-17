@@ -8,7 +8,7 @@ use crate::core::session::{
     open_session, spawn_existing_session, OpenSessionRequest, SessionAgent, SessionHandle,
 };
 use crate::paths::Paths;
-use crate::signaling::{ExternalServer, SignalingBridge, SignalingEvent, SignalingServer};
+use crate::signaling::{SignalingBridge, SignalingEvent, SignalingServer};
 use crate::storage::{MessageKind, Session, Storage};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -156,7 +156,6 @@ pub struct AppState {
     spawn_gate: Mutex<()>,
     /// External MCP server handle. None when disabled or port-busy at startup;
     /// the binary stays usable in that case (internal MCP keeps working).
-    pub external_server: Mutex<Option<ExternalServer>>,
     /// Populated from Tauri's `setup()` once the AppHandle exists. The
     /// external MCP starts BEFORE Tauri setup (see main.rs ordering), so
     /// any MCP tool that needs the webview (screenshot, click, scroll, etc.)
@@ -207,7 +206,6 @@ impl AppState {
             signaling_server: Mutex::new(Some(server)),
             sessions: Mutex::new(HashMap::new()),
             spawn_gate: Mutex::new(()),
-            external_server: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
             fs_watcher: std::sync::OnceLock::new(),
             pending_reconcile: Mutex::new(HashSet::new()),

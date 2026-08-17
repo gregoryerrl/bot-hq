@@ -26,13 +26,6 @@ pub(super) fn ok_response() -> ToolCallResult {
     result_json(&serde_json::json!({ "ok": true }), "{}")
 }
 
-/// Build a JSON-RPC INTERNAL_ERROR with an op-name prefix:
-/// `"{op}: {error display}"`. Used by external_jsonrpc.rs's tool dispatch
-/// so the wire surfaces which core method failed.
-pub(super) fn internal_err(op: &str, e: impl std::fmt::Display) -> JsonRpcError {
-    JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("{op}: {e}"))
-}
-
 /// Build a JSON-RPC INTERNAL_ERROR with no op prefix — just the error's
 /// `Display` text. Used by internal jsonrpc.rs's dispatch, where the
 /// surrounding match arm already names which bridge method ran.

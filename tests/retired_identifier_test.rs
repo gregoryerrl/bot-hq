@@ -77,13 +77,6 @@ const RETIRED: &[&str] = &["brian", "rain"];
 /// being named is genuinely frozen.
 const EXEMPT: &[(&str, &str)] = &[
     (
-        "src/signaling/external_jsonrpc.rs",
-        "The published driver wire. `brian_model_id` / `rain_model_at_spawn` are \
-         argument and field NAMES an external client sends; renaming them breaks \
-         every installed driver. D10's recorded exemption, documented at :38-62 \
-         and pinned by its own test at :851.",
-    ),
-    (
         "src/paths.rs",
         "`LEGACY_BRIAN_CUSTOM_INSTRUCTION` / `LEGACY_RAIN_CUSTOM_INSTRUCTION` are \
          byte-frozen seed templates: `migrate_agent_custom_instructions` compares \

@@ -358,9 +358,6 @@ Calls the SAME `core::AppState` fns the UI does — no second lifecycle path.
 
 | path | role | size |
 |---|---|---|
-| `src/signaling/external_server.rs` | listener, bearer auth, CORS, `/mcp` routing | M |
-| `src/signaling/external_jsonrpc.rs` | 20 tool descriptors + `call_external_tool` dispatch + `wait_for_change`; the `wire` module = the ONLY documented D10 exemption for `brian_*`/`rain_*` field names | L |
-| `tests/external_mcp_test.rs` | real `CoreAppState` + both servers on port 0, raw TCP: auth (incl. same-length wrong token), CORS, parse errors, tools/list, most tools; NOT `create_session`/`send_message`/`webview_*` calls | L |
 
 **Entry points.** `start_external_server` (env `BOT_HQ_EXTERNAL_MCP_DISABLED`,
 `BOT_HQ_EXTERNAL_MCP_PORT` default 7892; token `<data_dir>/.local/mcp-token`) ·
@@ -453,7 +450,7 @@ every write.
 | `src/storage/context_readings.rs` | per-turn context-window readings (P7) | M |
 | `src/storage/feedback.rs` | agent-filed bot-hq feedback | S |
 | `src/storage/models.rs` | `models` registry + `app_settings` kv | M |
-| `src/storage/agent_config.rs` | `agent_configs` — read by the spawn chain and by the external MCP server. Its `emma\|brian\|rain` CHECK made it unreachable for every rc3 role slug until 0060 rebuilt the table without it; the test that pinned the refusal now pins the acceptance | S |
+| `src/storage/agent_config.rs` | `agent_configs` — read by the spawn chain. Its `emma\|brian\|rain` CHECK made it unreachable for every rc3 role slug until 0060 rebuilt the table without it; the test that pinned the refusal now pins the acceptance | S |
 | `src/storage/projects.rs` | `projects` registry, CL path resolution | M |
 | `src/storage/plugins.rs`, `src/storage/plugin_kv.rs` | plugin registry + per-plugin kv | M / S |
 | `src/storage/cl_index.rs`, `src/storage/cl_atoms.rs` | CL index/folders/reads; FTS5 atoms + `cl_retrieve` | M / M |
@@ -493,7 +490,7 @@ migration → `PARTICIPANT_COLUMNS` const + `participant_from_row` + struct (+
 **What it does.** `src/main.rs` is the boot sequence: CLI arms (`policy-check`,
 `install-hooks`, `export-bindings`) short-circuit before the GUI; otherwise data
 dir → logging → single-instance lock → tokio → `Storage` + boot sweeps →
-bridge + internal MCP + llm proxy → `CoreAppState` → external MCP → signal
+bridge + internal MCP + llm proxy → `CoreAppState` → signal
 reapers → bindings export → plugin registry seed → Tauri builder (`.setup`:
 subscriber, fs watcher, control-event consumer, heartbeat sweep). `src/tauri_cmd/*`
 are thin `#[tauri::command]` wrappers (85 commands, all listed in
@@ -544,7 +541,7 @@ on launch: keep it out of feature commits.
 **Tests pin.** command set constructs + spot export; timer/watermark/flush
 (`batch_emitter.rs`); route arms emit typed events; fs-watcher pure scoping;
 paths migrations idempotent; `sessions.rs` "no Brian/Rain in any rendered
-payload"; the driver wire's frozen argument names (`external_jsonrpc.rs`). Not pinned: `Lagged`→resync, N=20 immediate flush, the control
+payload". Not pinned: `Lagged`→resync, N=20 immediate flush, the control
 consumer.
 
 **Where to add X.** New command → `#[tauri::command] #[specta::specta]` in the

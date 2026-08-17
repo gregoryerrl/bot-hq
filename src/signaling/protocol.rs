@@ -916,16 +916,17 @@ mod tests {
     /// among the most-read text in the product. Sweeping the WHOLE descriptor
     /// list — rather than the six that were wrong — is what stops the seventh.
     ///
-    /// **Both lists.** The first version of this sweep took `tool_descriptors()`
-    /// only, so the external driver's toolset kept shipping `create_session`
-    /// with agent-named parameters and nothing said so. A sweep that covers one
-    /// of two lists is how the seventh arrives anyway; the driver is an AI client
-    /// reading these descriptions exactly as a spawned agent does.
+    /// **It used to cover two lists.** The external driver had its own toolset,
+    /// and the first version of this sweep skipped it — so `create_session` kept
+    /// shipping agent-named parameters to a driver reading them exactly as a
+    /// spawned agent does. One list is all that remains to cover.
     ///
-    /// The only survivors are `external_jsonrpc::wire`'s identifiers — keys a
-    /// driver sends or the server returns, exempted string-by-string (see that
-    /// module for why renaming them is a behaviour change, not a prose fix). A
-    /// new agent-named key is not on that list and still fails.
+    /// **It now runs with NO exemptions at all.** The only ones it ever had were
+    /// `external_jsonrpc::wire`'s frozen identifiers — keys an external driver
+    /// sent or the server returned — and the external driver was removed when
+    /// the user demoted it to a future plugin. Deleting a published wire deleted
+    /// the reason its agent-named keys had to be tolerated, so this sweep got
+    /// strictly stronger by losing a caller.
     ///
     /// Word-boundary matched: `constraint` contains `rain`, and a substring
     /// check would fail on prose that is perfectly fine.
@@ -939,23 +940,9 @@ mod tests {
     /// guard written to stop a regression that had already happened once.
     #[test]
     fn no_tool_description_an_agent_reads_names_an_agent() {
-        use crate::signaling::external_jsonrpc::{external_tool_descriptors, wire};
-        // Rendered exactly as the schema carries them: the model args and spawn
-        // fields as bare keys, the legacy config keys only as the enum ARRAY the
-        // schema prints — so a bare `"brian"` anywhere else is still caught.
-        let exempt: Vec<String> = wire::MODEL_ARGS
-            .iter()
-            .chain(wire::SPAWN_MODEL_FIELDS.iter())
-            .map(|s| s.to_string())
-            .chain(std::iter::once(
-                serde_json::to_string(&wire::LEGACY_CONFIG_KEYS).unwrap(),
-            ))
-            .collect();
-        for d in tool_descriptors().iter().chain(external_tool_descriptors()) {
-            let text = format!("{} {} {}", d.name, d.description, d.input_schema).to_lowercase();
-            let prose = exempt
-                .iter()
-                .fold(text, |acc, id| acc.replace(&id.to_lowercase(), " "));
+        for d in tool_descriptors().iter() {
+            let prose =
+                format!("{} {} {}", d.name, d.description, d.input_schema).to_lowercase();
             for word in prose.split(|c: char| !c.is_alphanumeric()) {
                 assert!(
                     word != "brian" && word != "rain",

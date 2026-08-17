@@ -488,7 +488,7 @@ pub(crate) async fn dispatch(
             let core = core.ok_or_else(|| {
                 AppError::Internal("core state unavailable for plugin_session_wait".into())
             })?;
-            let msgs = crate::signaling::external_jsonrpc::wait_for_change(
+            let msgs = wait_for_change(
                 core,
                 &session_id,
                 since_id,
@@ -561,6 +561,76 @@ pub(crate) async fn dispatch(
         other => Err(AppError::Internal(format!(
             "catalog command {other:?} has no dispatch arm"
         ))),
+    }
+}
+
+/// Block until the session has at least one message past `since_id`, or
+/// `timeout_ms` elapses (then an empty Vec).
+///
+/// Lived in `signaling/external_jsonrpc.rs` until the external driver was
+/// removed (demoted to a future plugin). It has exactly one caller — the plugin
+/// proxy below — so it moved here rather than to a shared module: its inputs are
+/// `CoreAppState`'s storage and bridge, which this file already holds.
+///
+/// The ordering is the load-bearing part and survives the move intact:
+/// subscribe BEFORE the post-subscribe re-check, so an event that fires between
+/// the initial query and the subscribe cannot be missed. Broadcast lag is
+/// treated as a signal rather than an error, because a dropped event is
+/// indistinguishable from one that never fired if the poll is skipped.
+/// Block server-side until the session has at least one new message past
+/// `since_id`, or `timeout_ms` elapses. On timeout returns an empty Vec.
+async fn wait_for_change(
+    core: &CoreAppState,
+    session_id: &str,
+    since_id: Option<i64>,
+    timeout_ms: u64,
+) -> anyhow::Result<Vec<crate::storage::Message>> {
+    // Fast path: storage might already have new messages past since_id.
+    let initial = core
+        .storage
+        .messages_for_session(session_id, since_id)
+        .await?;
+    if !initial.is_empty() {
+        return Ok(initial);
+    }
+    // Subscribe BEFORE the post-subscribe re-check so we don't miss an event
+    // that fires between the initial query and the subscribe call.
+    let mut rx = core.bridge.subscribe();
+    let recheck = core
+        .storage
+        .messages_for_session(session_id, since_id)
+        .await?;
+    if !recheck.is_empty() {
+        return Ok(recheck);
+    }
+    let deadline = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => return Ok(Vec::new()),
+            ev = rx.recv() => {
+                match ev {
+                    Ok(crate::signaling::SignalingEvent::MessagePersisted { session_id: sid, .. }) if sid.as_ref() == session_id => {
+                        let msgs = core.storage.messages_for_session(session_id, since_id).await?;
+                        if !msgs.is_empty() {
+                            return Ok(msgs);
+                        }
+                    }
+                    // Receiver lag (broadcast channel full) is also a possible signal —
+                    // poll once to be safe.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let msgs = core.storage.messages_for_session(session_id, since_id).await?;
+                        if !msgs.is_empty() {
+                            return Ok(msgs);
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Ok(Vec::new());
+                    }
+                    _ => {} // other event types — ignore, keep waiting
+                }
+            }
+        }
     }
 }
 

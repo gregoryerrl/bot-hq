@@ -181,7 +181,7 @@ For a release build: `cargo tauri build` (bundles the app under
 bot-hq is a single Rust binary: a **Tauri v2** shell + **React 18 + TypeScript +
 Tailwind** UI, with the Rust core on a Tokio runtime. Every agent is a
 `claude-code` subprocess wired over stream-json — the CLI is bot-hq's only model
-connector. Two in-process MCP servers handle UI signaling and external driver
+connector. An in-process MCP server handles UI signaling
 access; storage is sqlite; policy is enforced by MCP tools plus git hooks.
 
 The canonical docs go deeper than this README:
@@ -208,7 +208,7 @@ bot-hq/
 │   ├── paths.rs           data-dir resolution + first-run init + single-instance lock
 │   ├── agents/            claude-code subprocess + stream-json I/O + hardcoded role prompts
 │   ├── core/              sessions, IPAV cache, duo coordination, broadcast
-│   ├── signaling/         in-process MCP HTTP servers (internal UI tools + external driver) + SignalingBridge
+│   ├── signaling/         in-process MCP HTTP server (UI tools) + SignalingBridge
 │   ├── storage/           sqlite (messages, sessions, agent_configs, questions, cl_index)
 │   ├── policy/            policy resolution, git-hook installer, session-permission grants, violations log
 │   ├── plugins/           plugin manifest parser, loader, capability gen, heartbeat watcher
@@ -233,8 +233,6 @@ Env vars read at startup:
 | Var                            | Default             | Purpose                                        |
 | ------------------------------ | ------------------- | ---------------------------------------------- |
 | `BOT_HQ_DATA_DIR`              | `~/.bot-hq/`        | Context Library + sqlite DB location           |
-| `BOT_HQ_EXTERNAL_MCP_PORT`     | `7892`              | External driver MCP server port                |
-| `BOT_HQ_EXTERNAL_MCP_DISABLED` | unset               | Set to `1` to skip external MCP server startup |
 | `RUN_LIVE_TESTS`               | unset               | Set to `1` to include subprocess tests         |
 | `RUST_LOG`                     | `info,bot_hq=debug` | tracing-subscriber EnvFilter                   |
 
@@ -256,7 +254,6 @@ apart — otherwise they share one Context Library, sqlite DB, and instance lock
   as an opt-in until rc3 D9 removed it; the CLI is the only connector.)
 - **Two MCP servers:** an **internal** one (UI-signaling tools served to the
   agents) on an ephemeral localhost port, and an **external** one on `127.0.0.1:7892`
-  (driver tools for any bearer-token-authenticated MCP client).
 - **Storage:** sqlite via sqlx — messages, sessions, agent/model configs, the
   durable awaiting-input tray, IPAV session documents, plugins, and the searchable CL
   index.

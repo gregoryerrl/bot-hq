@@ -4,7 +4,7 @@ use bot_hq::paths::{LockGuard, Paths};
 use bot_hq::plugins::Heartbeat;
 use bot_hq::plugins::PluginRegistry;
 use bot_hq::policy::{hooks, ViolationsLog};
-use bot_hq::signaling::{start_external_server, start_signaling_server, SignalingBridge};
+use bot_hq::signaling::{start_signaling_server, SignalingBridge};
 use bot_hq::storage::Storage;
 use bot_hq::tauri_events;
 use bot_hq::tauri_events::types::AgentMessage;
@@ -177,39 +177,6 @@ fn main() -> Result<()> {
             let core = Arc::new(CoreAppState::new(paths.clone(), storage, server).await);
             Ok::<_, anyhow::Error>((core, storage_arc, bridge_arc))
         })?;
-
-    // External MCP server — driver tools surface. Soft-fail on port
-    // conflict or when explicitly disabled.
-    runtime.block_on(async {
-        if std::env::var("BOT_HQ_EXTERNAL_MCP_DISABLED").is_ok() {
-            tracing::info!("external MCP server disabled via BOT_HQ_EXTERNAL_MCP_DISABLED");
-            return;
-        }
-        let port: u16 = std::env::var("BOT_HQ_EXTERNAL_MCP_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(7892);
-        let token = match paths.read_mcp_token() {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(?e, "external MCP: failed to read token, skipping startup");
-                return;
-            }
-        };
-        match start_external_server(Arc::clone(&core), port, token).await {
-            Ok(server) => {
-                tracing::info!(addr = %server.local_addr, "external MCP server up");
-                core.external_server.lock().await.replace(server);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    ?e,
-                    port,
-                    "external MCP port unavailable — skipping startup; internal MCP is unaffected"
-                );
-            }
-        }
-    });
 
     // Shutdown-signal handler. When killed from outside (SIGTERM from
     // launchd, SIGINT from terminal, SIGHUP on session disconnect), Tauri's

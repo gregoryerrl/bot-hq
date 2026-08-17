@@ -17,7 +17,7 @@ as the first bot-hq plugin — TBD). House framing: describe bot-hq as an
 "duo"-centric identity language).
 
 The original from-scratch rebuild shipped at v0.1.0; subsequent work
-added a UI redesign, an external driver MCP server, and a two-layer
+added a UI redesign and a two-layer
 policy enforcement layer (MCP tools + git hooks). Current work is
 maintenance + feature-extension on the existing system.
 
@@ -113,7 +113,6 @@ data dir.
 - `.local/bot-hq.db` — sqlite
 - `.local/lock` — single-instance lock
 - `.local/session-policies/<sid>.yaml` — per-session policy snapshots
-- `.local/mcp-token` — external MCP bearer token (UUIDv4, 0600)
 - `.local/violations.jsonl` — policy audit trail
 - `custom-instructions.md` (all agents), `general-rules.md`,
   `projects/<p>/{conventions,notes,policy.yaml,…}.md` — CL content
