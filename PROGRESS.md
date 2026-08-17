@@ -18,6 +18,74 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-17 (round 6) — the instrument round, s-feaeb876
+
+*Written in round 7 (2026-08-17, later the same day): rounds 5 and 6 left no
+entry here — the first two rounds to skip the changelog — and their CL learnings
+files say "what shipped is in PROGRESS.md". This and the entry below are
+reconstructed from the commits and those learnings; the round-7 report is the
+next entry up.*
+
+Eleven commits, `65c9c07..bd9e1e4` (+1192/−4190), pushed. Mandate: audit
+again, use the round-5 binary as live evidence.
+
+- **The phase is persisted** (`65c9c07`) — round 5 shipped 0063 with the column
+  written and never read back; `core/session.rs` now restores `ipav_phase` at
+  spawn instead of defaulting to Investigate, and three docs stop saying the
+  phase lives only in memory.
+- **The wiring guard can see what it scans** (`6b0a46b`, `6b303b1`) —
+  `tests/phase_vote_wiring_test.rs` split its production/test walk at the wrong
+  `mod tests {` and truncated at the first test item; both fixed, so a
+  defined-but-unmounted method reads as unmounted again.
+- **Staged messages, three fixes** (`a7ed23f`, `8397a70`, `4c0291d`, pinned by
+  `4ef8b71`): a staged message no longer interrupts the turn it waited for
+  (`UserSend::Staged` never preempts); a delivered stage is not put straight back
+  by the tray-pick re-stage effect; the delivered draft is cleared durably, not
+  only by an event a mounted view has to hear. The residue — a delivery to a
+  session the user is not viewing — is round 7's A3.
+- **The router's leftovers** (`87f520e`, `b604c67`, `bd9e1e4`): the
+  `forward_events` module and the bridge's open-blocking cache (dead since the
+  router went), the driver's documentation, and `bench/` (both harnesses imported
+  the deleted driver client). A tracked `bindings.ts` copy nothing read went too
+  (`8b50af6`).
+- Method findings recorded in the CL (`learnings-2026-08-17-round6-the-
+  instrument-round.md`): inherited CWD as the most reliable source of wrong
+  answers (`git -C`, `--project`, absolute paths); enumerate the FORMS a call site
+  takes before trusting a sweep (40 % false positives on a delete list from one
+  anchor); a guard's green proves nothing until it has been red; two mechanisms
+  on one observation are not corroboration; `codebase_map_test` cannot see
+  twelve tracked top-level directories.
+
+## 2026-08-17 (round 5) — the unwired epoch, s-e47937f5
+
+Four commits, `6dd6ffd`, `9b1fd08`, `3234071`, `fdf7401`. Mandate: audit
+again, use the round-4 binary as live evidence. (The session was spawned with
+no `working_repo_path` — the A tab rendered no diff, `action_gate` was
+unavailable and the full brand forbidden-word list applied; spawn audit sessions
+pointed at the repo.)
+
+- **The phase transition owns the epoch, and survives a restart** (`6dd6ffd`) —
+  D37's `bump_phase_epoch` shipped with a definition, five calls across three of
+  its own tests, and no production caller: `sessions.phase_epoch` sat at 0
+  through every live transition and the vote's time axis was inert. Wired at the
+  transition, plus migration 0063 (`sessions.ipav_phase`) so the phase itself
+  outlives an app restart, and `tests/phase_vote_wiring_test.rs`, which asks the
+  one question rustc, clippy and the suite structurally cannot — is anything
+  outside the defining file calling this?
+- **`cl_stale_refs` reports the right line** (`9b1fd08`) — a stripped block
+  comment shifted every later line number.
+- **The scroll containers take the pair** (`3234071`) — nine bare
+  `overflow-y-auto` containers got `overflow-x-hidden`, and
+  `frontend/src/lib/overflow.ts` + `overflow.test.ts` sweep the tree for the
+  class (the user's absolute no-horizontal-scroll rule, mechanically enforced
+  for the first time).
+- **Two inherited numbers that were never counted** (`fdf7401`) — figures
+  restated in docs from a moment that had moved; both now carry their date.
+- Recorded: the phase-vote fingerprint spans ALL session documents, so any doc
+  write between two votes orphans the earlier one — write, then vote (this became
+  round 7's descriptor text); a test module in `src/` is not reliably named
+  `tests` (five are not).
+
 ## 2026-08-17 — the phase-advance vote (D37), built in three reviewed slices
 
 The user's brainstorm from 2026-08-16, finally built:*"force that each phase
