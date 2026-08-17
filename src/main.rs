@@ -502,7 +502,13 @@ fn main() -> Result<()> {
                             match bot_hq::core::ipav::IpavPhase::parse(&target) {
                                 Some(phase) => {
                                     if let Err(e) =
-                                        core_for_worker.advance_phase(&session_id, phase).await
+                                        core_for_worker
+                                            .advance_phase(
+                                                &session_id,
+                                                phase,
+                                                bot_hq::core::state::PhaseAdvanceSource::Agent,
+                                            )
+                                            .await
                                     {
                                         tracing::warn!(?e, %session_id, %target, "advance_phase via MCP event failed");
                                     }

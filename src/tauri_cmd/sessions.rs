@@ -1079,7 +1079,7 @@ pub async fn advance_session_phase(
 ) -> Result<(), AppError> {
     let phase = crate::core::ipav::IpavPhase::parse(&target)
         .ok_or_else(|| AppError::Internal(format!("unknown phase {target:?}")))?;
-    core.advance_phase(&session_id, phase)
+    core.advance_phase(&session_id, phase, crate::core::state::PhaseAdvanceSource::User)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
 }

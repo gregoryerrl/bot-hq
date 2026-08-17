@@ -194,6 +194,34 @@ pub struct AppState {
     epilogue_in_flight: Mutex<HashSet<String>>,
 }
 
+/// Who moved the phase — the one thing `advance_phase` must branch on.
+///
+/// A bool would do it and did not: the ring-release decision reads as an
+/// incidental `false` at the call site, and the second caller inherited it
+/// silently. The variants name the two cases so a third has to say which it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseAdvanceSource {
+    /// A participant's own `advance_phase` tool call. Does NOT release the ring:
+    /// the caller is mid-turn, so a release would deal a turn over an empty
+    /// backlog (rc3 D28).
+    Agent,
+    /// The user picking a phase in the session header. RELEASES the ring: the
+    /// session is halted because nobody is mid-turn, and this is the response
+    /// that resumes it.
+    ///
+    /// When the phase-advance vote lands, its D36 escape valve — the user
+    /// forcing past a stalled tally — becomes a third variant here rather than a
+    /// flag beside this one, so "who advanced" stays a single question.
+    User,
+}
+
+impl PhaseAdvanceSource {
+    /// Whether this advance is also a user response that should deal a turn.
+    fn releases_ring(self) -> bool {
+        matches!(self, Self::User)
+    }
+}
+
 impl AppState {
     pub async fn new(paths: Paths, storage: Storage, server: SignalingServer) -> Self {
         let bridge = Arc::clone(&server.bridge);
@@ -1469,7 +1497,12 @@ impl AppState {
     /// both agents see the transition naturally. Also clears any awaiting-user
     /// halt — an agent that fired `request_phase_advance` has effectively been
     /// answered by the chip click, so the duo should resume.
-    pub async fn advance_phase(&self, session_id: &str, target: IpavPhase) -> Result<()> {
+    pub async fn advance_phase(
+        &self,
+        session_id: &str,
+        target: IpavPhase,
+        source: PhaseAdvanceSource,
+    ) -> Result<()> {
         let sessions = self.sessions.lock().await;
         let handle = sessions
             .get(session_id)
@@ -1478,10 +1511,24 @@ impl AppState {
         let prev_phase = handle.ipav.lock().await.current_phase;
 
         self.clear_awaiting(handle, session_id).await;
-        // Clears the halt without releasing the ring: a phase self-advance
-        // answers the question but is not a message anyone reads, so waking the
-        // ring on it would hand out a turn over an empty backlog (rc3 D28).
-        self.user_responded(session_id, Vec::new(), false, true).await;
+        // **Whether this releases the ring depends on WHO advanced**, and that
+        // is the whole reason `source` exists.
+        //
+        // An AGENT self-advance must not release: the participant is mid-turn —
+        // it just called `advance_phase` — so waking the ring would hand out a
+        // turn over an empty backlog (rc3 D28).
+        //
+        // A USER advance is the opposite case by construction. The session is
+        // halted precisely because nobody is mid-turn, and the user picking a
+        // phase IS the response that resumes it. Reusing the agent's `false`
+        // here cleared the halt row, cleared the awaiting badge, advanced the
+        // phase, persisted the notice — and dealt no turn, leaving a session
+        // that looks answered and does nothing until the idle watchdog's grace
+        // elapses. Found in review before it shipped; the premise in the
+        // paragraph above is stated as a fact about the CALLER, and this path
+        // is a caller it was never true for.
+        self.user_responded(session_id, Vec::new(), source.releases_ring(), true)
+            .await;
 
         handle.ipav.lock().await.advance(target);
 
@@ -2303,6 +2350,17 @@ mod tests {
     /// property that actually failed: not "does this path clear the halt" — each
     /// path looked fine on its own — but "is there more than one place that
     /// can". A fourth path added tomorrow inherits both halves or fails here.
+    /// The mapping the two call sites are pinned against above.
+    #[test]
+    fn only_a_user_advance_releases_the_ring() {
+        assert!(PhaseAdvanceSource::User.releases_ring());
+        assert!(
+            !PhaseAdvanceSource::Agent.releases_ring(),
+            "an agent is mid-turn when it self-advances; releasing deals a turn \
+             over an empty backlog (rc3 D28)"
+        );
+    }
+
     #[test]
     fn responding_to_the_user_is_one_function_with_no_second_way_to_do_half_of_it() {
         let src = include_str!("state.rs");
@@ -2336,6 +2394,36 @@ mod tests {
             prod.contains("!resolved_a_gate"),
             "the OOB release must pass clear_halt = !resolved_a_gate — a gate \
              answer answers that gate, not the session's halt"
+        );
+
+        // **And the phase paths must not both pass the same source.** The ring
+        // release is now a function of WHO advanced, and the failure this
+        // catches shipped in review: the user-facing command reused the agent's
+        // call verbatim, so picking a phase on a HALTED session cleared the halt
+        // row, cleared the awaiting badge, advanced the phase, persisted the
+        // notice — and dealt no turn. The session looked answered and did
+        // nothing until the idle watchdog's grace elapsed.
+        //
+        // Source-level for the reason stated above: nothing in this crate can
+        // build an `AppState` — the `sessions` map is only populated by a real
+        // session start with a subprocess — so "drive the user path against a
+        // halted session" is not a test that exists to be written here. This is
+        // weaker than that test would be, and it is what the file can carry.
+        let user_cmd = include_str!("../tauri_cmd/sessions.rs");
+        assert!(
+            user_cmd.contains("PhaseAdvanceSource::User"),
+            "the user's phase command must advance as User — as Agent it clears \
+             the halt and deals no turn, which is the silent-stall state"
+        );
+        assert!(
+            !user_cmd.contains("PhaseAdvanceSource::Agent"),
+            "nothing the USER invokes may advance as Agent"
+        );
+        let agent_path = include_str!("../main.rs");
+        assert!(
+            agent_path.contains("PhaseAdvanceSource::Agent"),
+            "a participant's own advance must stay Agent — releasing there deals \
+             a turn over an empty backlog while the caller is still mid-turn"
         );
 
         // And every way of responding goes through it. Three today; the count is
