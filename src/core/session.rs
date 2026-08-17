@@ -1100,33 +1100,22 @@ async fn spawn_session_handle(
             // which is a session's first phase by definition — so the wire is
             // unchanged; what is new is that the tag is part of the row the
             // user can see, rather than something added on the way out.
-            match storage
-                .post_to_channel(
-                    session.id.as_str(),
-                    "system",
-                    None,
-                    MessageKind::SystemNotice.as_str(),
-                    nudge,
-                    Some(Envelope::phase(IpavPhase::Investigate.name())),
-                )
-                .await
-            {
-                Ok(opener) => {
-                    bridge.notify_message_persisted(
-                        Arc::from(session.id.as_str()),
-                        opener.message_id(),
-                    );
-                    // No fan-out (rc3 D19). The row is persisted above and the
-                    // ring delivers it off each participant's cursor. Writing
-                    // every stdin here is what woke all participants at session
-                    // START, before a turn existed — so each snapshotted epoch 0
-                    // and every completion it ever sent was discarded.
-                }
-                // The nudge is a convenience — the prompt-side opener still
-                // pages the CL. Losing it must not fail a session open.
-                Err(e) => warn!(session_id = %session.id, error = %e,
-                                "CL-opener nudge not persisted; not delivered"),
-            }
+            // No fan-out (rc3 D19). The row is persisted and the ring delivers
+            // it off each participant's cursor. Writing every stdin here is
+            // what woke all participants at session START, before a turn
+            // existed — so each snapshotted epoch 0 and every completion it
+            // ever sent was discarded. The nudge is a convenience — the
+            // prompt-side opener still pages the CL — so a lost row (the
+            // helper warns) must not fail a session open.
+            crate::core::post_system_notice(
+                &storage,
+                Some(&bridge),
+                session.id.as_str(),
+                MessageKind::SystemNotice,
+                nudge,
+                Some(Envelope::phase(IpavPhase::Investigate.name())),
+            )
+            .await;
         }
     }
 
@@ -2023,25 +2012,22 @@ async fn boot_then_start(
     // Posted as a `boot` row so `channel_page` keeps it out of every backlog:
     // the participants are handed it directly, here, and must not also read it
     // back as unread history on turn one.
-    let receipt = match storage
-        .post_to_channel(
-            Arc::from(session_id),
-            "system",
-            None,
-            crate::storage::MessageKind::Boot.as_str(),
-            boot_primer(),
-            None,
-        )
-        .await
+    let receipt = match crate::core::post_system_notice(
+        &storage,
+        Some(&bridge),
+        session_id,
+        crate::storage::MessageKind::Boot,
+        boot_primer(),
+        None,
+    )
+    .await
     {
-        Ok(row) => {
-            bridge.notify_message_persisted(Arc::from(session_id), row.message_id());
-            row
-        }
-        Err(e) => {
+        Some(row) => row,
+        None => {
             // The primer is what boot IS. With no row there is nothing to
-            // deliver, so start the ring rather than stranding the session.
-            tracing::warn!(session_id, ?e, "boot primer not persisted; starting the ring unbooted");
+            // deliver, so start the ring rather than stranding the session
+            // (the helper has already warned about the row).
+            tracing::warn!(session_id, "boot primer not persisted; starting the ring unbooted");
             booting.store(false, std::sync::atomic::Ordering::Release);
             // This exit skips boot entirely, so no pump will ever end a boot
             // response — nothing else clears what the call site set.
@@ -2084,19 +2070,15 @@ async fn boot_then_start(
                      oriented. The rest join the rotation as they finish.]",
                     timeout.as_secs()
                 );
-                if let Ok(row) = storage
-                    .post_to_channel(
-                        Arc::from(session_id),
-                        "system",
-                        None,
-                        crate::storage::MessageKind::SystemNotice.as_str(),
-                        notice,
-                        None,
-                    )
-                    .await
-                {
-                    bridge.notify_message_persisted(Arc::from(session_id), row.message_id());
-                }
+                crate::core::post_system_notice(
+                    &storage,
+                    Some(&bridge),
+                    session_id,
+                    crate::storage::MessageKind::SystemNotice,
+                    notice,
+                    None,
+                )
+                .await;
                 tracing::warn!(session_id, ready, want, "boot timed out; starting the ring");
                 break;
             }
@@ -2155,29 +2137,19 @@ async fn boot_then_start(
             timeout.as_secs()
         )
     };
-    match storage
-        .post_to_channel(
-            Arc::from(session_id),
-            "system",
-            None,
-            crate::storage::MessageKind::SystemNotice.as_str(),
-            notice,
-            None,
-        )
-        .await
-    {
-        Ok(row) => bridge.notify_message_persisted(Arc::from(session_id), row.message_id()),
-        // The session is usable either way — it is waiting, which is its resting
-        // state. What is lost is the sentence telling the user so, and a session
-        // that looks stopped for no reason is the report this whole arc began
-        // with.
-        Err(e) => tracing::warn!(
-            session_id,
-            ?e,
-            "boot finished but its ready notice was not posted; the session is \
-             waiting with nothing on screen to say so"
-        ),
-    }
+    // The session is usable either way — it is waiting, which is its resting
+    // state. What a lost row costs is the sentence telling the user so, and a
+    // session that looks stopped for no reason is the report this whole arc
+    // began with (the helper warns).
+    crate::core::post_system_notice(
+        &storage,
+        Some(&bridge),
+        session_id,
+        crate::storage::MessageKind::SystemNotice,
+        notice,
+        None,
+    )
+    .await;
     tracing::info!(session_id, ready, want, "boot complete; the session waits for the user");
 }
 

@@ -185,21 +185,15 @@ impl SignalingBridge {
                 let body = format!("[System: {}]", outcome.summary());
                 tracing::warn!(%body, "library push refused by the secret scan");
                 if let Some(storage) = self.storage.lock().await.clone() {
-                    match storage
-                        .post_to_channel(
-                            session_id,
-                            "system",
-                            None,
-                            crate::storage::MessageKind::SystemNotice.as_str(),
-                            body,
-                            None,
-                        )
-                        .await
-                    {
-                        Ok(row) => self
-                            .notify_message_persisted(Arc::from(session_id), row.message_id()),
-                        Err(e) => tracing::warn!(?e, "push refusal not persisted"),
-                    }
+                    crate::core::post_system_notice(
+                        &storage,
+                        Some(self),
+                        session_id,
+                        crate::storage::MessageKind::SystemNotice,
+                        body,
+                        None,
+                    )
+                    .await;
                 }
             }
             crate::signaling::bridge::PushOutcome::Failed(_) => {

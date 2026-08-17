@@ -24,9 +24,13 @@ use anyhow::Result;
 /// helper makes the choice by name: a host row cannot come out of it in the
 /// user's voice. On a storage error it warns and returns `None`, matching the
 /// hand-rolled blocks it replaces (a failed notice must not fail its caller).
+///
+/// `bridge` is optional because two of the callers can run without one (the
+/// sequencer's and the pump's test shapes); a `None` posts the row and skips
+/// the UI notification, exactly as those sites' hand-rolled blocks did.
 pub async fn post_system_notice(
     storage: &Storage,
-    bridge: &SignalingBridge,
+    bridge: Option<&SignalingBridge>,
     session_id: &str,
     kind: MessageKind,
     body: impl Into<String>,
@@ -37,10 +41,12 @@ pub async fn post_system_notice(
         .await
     {
         Ok(persisted) => {
-            bridge.notify_message_persisted(
-                std::sync::Arc::from(session_id),
-                persisted.message_id(),
-            );
+            if let Some(bridge) = bridge {
+                bridge.notify_message_persisted(
+                    std::sync::Arc::from(session_id),
+                    persisted.message_id(),
+                );
+            }
             Some(persisted)
         }
         Err(e) => {
@@ -124,6 +130,71 @@ pub async fn broadcast_user_message(
 mod tests {
     use super::*;
     use crate::storage::render_wire;
+
+    /// **Every host row goes through `post_system_notice`** (round 8, T2-6).
+    /// Round 7 introduced the helper for the two sites that had posted in the
+    /// user's voice and left fourteen hand-rolled `post_to_channel(.., "system",
+    /// ..)` blocks beside it — the exact shape the helper exists to make
+    /// unnecessary, and the one a future host row would copy. This scans the
+    /// production half of every file that posts host rows and fails on a
+    /// `post_to_channel(` call whose origin argument is the literal `"system"`.
+    /// Kill-tested: re-inline one site → red.
+    #[test]
+    fn no_production_site_posts_a_system_row_by_hand() {
+        let files: &[(&str, &str)] = &[
+            ("core/state.rs", include_str!("state.rs")),
+            ("core/session.rs", include_str!("session.rs")),
+            ("core/sequencer.rs", include_str!("sequencer.rs")),
+            ("core/pump.rs", include_str!("pump.rs")),
+            ("core/watchdog.rs", include_str!("watchdog.rs")),
+            ("signaling/jsonrpc.rs", include_str!("../signaling/jsonrpc.rs")),
+            ("signaling/bridge/mod.rs", include_str!("../signaling/bridge/mod.rs")),
+            ("signaling/bridge/tray.rs", include_str!("../signaling/bridge/tray.rs")),
+            ("signaling/bridge/cl_write.rs", include_str!("../signaling/bridge/cl_write.rs")),
+            ("signaling/bridge/findings.rs", include_str!("../signaling/bridge/findings.rs")),
+        ];
+        for (name, src) in files {
+            let prod = match src.find("\n#[cfg(test)]") {
+                Some(at) => &src[..at],
+                None => src,
+            };
+            let code = prod
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut from = 0;
+            while let Some(at) = code[from..].find(".post_to_channel(") {
+                let call_at = from + at;
+                let rest = &code[call_at + ".post_to_channel(".len()..];
+                // The origin is the second argument: cut at the matching paren
+                // and look for the literal among the arguments.
+                let mut depth = 1usize;
+                let mut end = rest.len();
+                for (i, ch) in rest.char_indices() {
+                    match ch {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = i;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let args = &rest[..end];
+                assert!(
+                    !args.contains("\"system\""),
+                    "{name}: a host row is posted by hand — use core::post_system_notice: \
+                     post_to_channel({})",
+                    args.trim()
+                );
+                from = call_at + 1;
+            }
+        }
+    }
 
     /// **These tests moved with the mechanism (rc3 D19).** They used to assert
     /// the WIRE each participant received, because `broadcast_user_message` wrote

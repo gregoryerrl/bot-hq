@@ -1109,18 +1109,17 @@ impl SignalingBridge {
             // fails too the warning above is the whole record.
             let storage = self.storage.lock().await.clone();
             if let Some(storage) = storage {
-                let _ = storage
-                    .post_to_channel(
-                        std::sync::Arc::from(session_id.as_str()),
-                        "system",
-                        None,
-                        crate::storage::MessageKind::SystemNotice.as_str(),
-                        "[System: this halt could not be recorded — the session has \
-                         stopped and the banner is live, but it will not survive a \
-                         restart. Re-declare it if the app is relaunched.]",
-                        None,
-                    )
-                    .await;
+                crate::core::post_system_notice(
+                    &storage,
+                    Some(self),
+                    session_id.as_str(),
+                    crate::storage::MessageKind::SystemNotice,
+                    "[System: this halt could not be recorded — the session has \
+                     stopped and the banner is live, but it will not survive a \
+                     restart. Re-declare it if the app is relaunched.]",
+                    None,
+                )
+                .await;
             }
         }
         let _ = self.event_tx.send(SignalingEvent::AwaitingUser {

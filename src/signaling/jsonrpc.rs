@@ -372,32 +372,26 @@ async fn refuse_gated_tool(
                 cap.slug(),
                 caller.capabilities.unreadable_reason(),
             );
-            match storage
-                .post_to_channel(
-                    caller.session_id.as_str(),
-                    // Host-authored, so `origin = 'system'` with a NULL
-                    // participant (0044), exactly as the capped halt posts —
-                    // the refusal is the host's account, not the caller's turn
-                    // output.
-                    "system",
-                    None,
-                    crate::storage::MessageKind::SystemNotice.as_str(),
-                    body,
-                    None,
-                )
-                .await
+            // Host-authored (`origin = 'system'`, NULL participant, 0044),
+            // exactly as the capped halt posts — the refusal is the host's
+            // account, not the caller's turn output.
+            if crate::core::post_system_notice(
+                &storage,
+                Some(bridge),
+                caller.session_id.as_str(),
+                crate::storage::MessageKind::SystemNotice,
+                body,
+                None,
+            )
+            .await
+            .is_none()
             {
-                Ok(row) => bridge.notify_message_persisted(
-                    Arc::from(caller.session_id.as_str()),
-                    row.message_id(),
-                ),
-                Err(e) => tracing::warn!(
+                tracing::warn!(
                     session_id = %caller.session_id,
                     agent = %caller.agent,
                     tool = %name,
-                    ?e,
                     "a capability refusal was not recorded in the channel"
-                ),
+                );
             }
         } else {
             tracing::warn!(

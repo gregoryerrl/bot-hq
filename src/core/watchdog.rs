@@ -390,7 +390,7 @@ async fn deliver_idle_nudge(
     // user's voice, the exact misattribution `speaker_of`'s doc forbids.
     crate::core::post_system_notice(
         &idle_watch.storage,
-        bridge,
+        Some(bridge),
         session_id,
         MessageKind::SystemNotice,
         NOTICE,
@@ -402,7 +402,7 @@ async fn deliver_idle_nudge(
     // chat, so the user still sees that the session stalled.
     let Some(_nudge) = crate::core::post_system_notice(
         &idle_watch.storage,
-        bridge,
+        Some(bridge),
         session_id,
         MessageKind::SystemNotice,
         NUDGE,

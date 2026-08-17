@@ -1014,27 +1014,22 @@ impl AppState {
     /// account of what the close decided.
     async fn post_close_learnings_row(&self, id: &str, outcome: &close_learnings::Outcome) {
         let body = close_learnings::outcome_notice(outcome);
-        match self
-            .storage
-            .post_to_channel(
-                Arc::from(id),
-                "system",
-                None,
-                MessageKind::SystemNotice.as_str(),
-                body,
-                None,
-            )
-            .await
+        if crate::core::post_system_notice(
+            &self.storage,
+            Some(&self.bridge),
+            id,
+            MessageKind::SystemNotice,
+            body,
+            None,
+        )
+        .await
+        .is_none()
         {
-            Ok(row) => self
-                .bridge
-                .notify_message_persisted(Arc::from(id), row.message_id()),
-            Err(e) => tracing::warn!(
-                ?e,
+            tracing::warn!(
                 session_id = %id,
                 ?outcome,
                 "close epilogue: outcome row not posted; the close has no on-screen account"
-            ),
+            );
         }
     }
 
@@ -1767,7 +1762,7 @@ impl AppState {
         // row they read.
         crate::core::post_system_notice(
             &self.storage,
-            &self.bridge,
+            Some(&self.bridge),
             session_id,
             MessageKind::PhaseChange,
             target.transition_notice(),
@@ -1815,31 +1810,21 @@ impl AppState {
                 // It cannot ride the phase-change row above — that one is the
                 // user-visible "advanced to Apply" notice and this is a separate
                 // instruction to one agent, so two messages means two rows.
-                match self
-                    .storage
-                    .post_to_channel(
-                        session_id,
-                        "system",
-                        None,
-                        MessageKind::SystemNotice.as_str(),
-                        Self::APPLY_ENTRY_NUDGE,
-                        None,
-                    )
-                    .await
-                {
-                    Ok(nudge) => {
-                        // Same as the phase row above: persisted, read off the
-                        // cursor at the executor's next dealt turn — which is
-                        // when it can act on the reminder — rather than written
-                        // into a stdin mid-turn, where it opened a generation
-                        // outside the ring and arrived twice.
-                        self.bridge
-                            .notify_message_persisted(Arc::from(session_id), nudge.message_id());
-                    }
-                    // A missed nudge is a softer failure than a failed phase
-                    // advance, so it warns rather than aborting the transition.
-                    Err(e) => tracing::warn!(?e, session_id, "apply-entry nudge not persisted"),
-                }
+                // Same as the phase row above: persisted, read off the cursor
+                // at the executor's next dealt turn — which is when it can act
+                // on the reminder — rather than written into a stdin mid-turn,
+                // where it opened a generation outside the ring and arrived
+                // twice. A missed nudge is a softer failure than a failed phase
+                // advance: the helper warns, the transition stands.
+                crate::core::post_system_notice(
+                    &self.storage,
+                    Some(&self.bridge),
+                    session_id,
+                    MessageKind::SystemNotice,
+                    Self::APPLY_ENTRY_NUDGE,
+                    None,
+                )
+                .await;
             }
         }
         Ok(())

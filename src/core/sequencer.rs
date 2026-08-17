@@ -2724,61 +2724,47 @@ async fn pass_empty_turn(
 /// the participants are waiting on them, which is an instruction rather than an
 /// alarm.
 async fn announce_all_passed(deps: &SequencerDeps) {
-    match deps
-        .storage
-        .post_to_channel(
-            Arc::clone(&deps.session_id),
-            "system",
-            None,
-            MessageKind::SystemNotice.as_str(),
-            "Every participant passed this round — nobody has anything to add \
-             without you. The cycle has yielded; send a message to resume.",
-            None,
-        )
-        .await
+    if crate::core::post_system_notice(
+        &deps.storage,
+        deps.bridge.as_deref(),
+        &deps.session_id,
+        MessageKind::SystemNotice,
+        "Every participant passed this round — nobody has anything to add \
+         without you. The cycle has yielded; send a message to resume.",
+        None,
+    )
+    .await
+    .is_none()
     {
-        Ok(row) => {
-            if let Some(bridge) = deps.bridge.as_ref() {
-                bridge.notify_message_persisted(Arc::clone(&deps.session_id), row.message_id());
-            }
-        }
-        Err(e) => warn!(
+        warn!(
             session = %deps.session_id,
-            error = %e,
             "sequencer: the cycle yielded on an all-pass lap but its notice was not \
              posted; the session has stopped with nothing on screen to say so"
-        ),
+        );
     }
 }
 
 async fn announce_round_cap(deps: &SequencerDeps, laps: u32) {
-    match deps
-        .storage
-        .post_to_channel(
-            Arc::clone(&deps.session_id),
-            // Host-authored, so `origin = 'system'` with a NULL participant
-            // (0044) — the halt is nobody's turn output, and there is no
-            // `system` roster row to attribute it to.
-            "system",
-            None,
-            MessageKind::SystemNotice.as_str(),
-            round_cap_notice(laps),
-            None,
-        )
-        .await
+    // Host-authored (`origin = 'system'`, NULL participant, 0044) — the halt is
+    // nobody's turn output, and there is no `system` roster row to attribute
+    // it to.
+    if crate::core::post_system_notice(
+        &deps.storage,
+        deps.bridge.as_deref(),
+        &deps.session_id,
+        MessageKind::SystemNotice,
+        round_cap_notice(laps),
+        None,
+    )
+    .await
+    .is_none()
     {
-        Ok(row) => {
-            if let Some(bridge) = deps.bridge.as_ref() {
-                bridge.notify_message_persisted(Arc::clone(&deps.session_id), row.message_id());
-            }
-        }
-        Err(e) => warn!(
+        warn!(
             session = %deps.session_id,
             laps,
-            error = %e,
             "sequencer: the round cap halted the cycle but its notice was not posted; the \
              session has yielded with nothing on screen to say so"
-        ),
+        );
     }
 }
 

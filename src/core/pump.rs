@@ -545,43 +545,32 @@ pub async fn pump_agent(
                             // though it lands on Brian's stdin. No envelope —
                             // this site never wrapped the text, and B5 Task 2 is
                             // a plumbing change, not a prompt change.
-                            match storage
-                                .post_to_channel(
-                                    cfg.session_id.clone(),
-                                    "system",
-                                    None,
-                                    MessageKind::SystemNotice.as_str(),
-                                    "🔔 You're editing files before the Apply phase. Per IPAV, \
-                                     mutations belong in Apply — call advance_phase(\"Apply\") \
-                                     first, or note why this edit is intentional. (One-time \
-                                     reminder.)",
-                                    None,
-                                )
-                                .await
+                            // Persisted only. The direct write went into the
+                            // stdin of the agent that is mid-EDIT, which cannot
+                            // read it mid-generation anyway: it opened a fresh
+                            // generation the ring never dealt, whose completion
+                            // was discarded, and the row then arrived again off
+                            // the cursor. Read at this agent's next dealt turn
+                            // instead — later than the edit, and still the first
+                            // moment it can act (advance the phase, or say why
+                            // the edit was intended). Burnt on a successful
+                            // post; not burnt when nothing was recorded (the
+                            // helper warns), so the one-shot is still unspent.
+                            if crate::core::post_system_notice(
+                                &storage,
+                                cfg.bridge.as_deref(),
+                                &cfg.session_id,
+                                MessageKind::SystemNotice,
+                                "🔔 You're editing files before the Apply phase. Per IPAV, \
+                                 mutations belong in Apply — call advance_phase(\"Apply\") \
+                                 first, or note why this edit is intentional. (One-time \
+                                 reminder.)",
+                                None,
+                            )
+                            .await
+                            .is_some()
                             {
-                                Ok(m) => {
-                                    cfg.notify_persisted(m.message_id());
-                                    // Persisted only. The direct write went into
-                                    // the stdin of the agent that is mid-EDIT,
-                                    // which cannot read it mid-generation
-                                    // anyway: it opened a fresh generation the
-                                    // ring never dealt, whose completion was
-                                    // discarded, and the row then arrived again
-                                    // off the cursor. Read at this agent's next
-                                    // dealt turn instead — later than the edit,
-                                    // and still the first moment it can act
-                                    // (advance the phase, or say why the edit
-                                    // was intended).
-                                    // Burnt on a successful POST, and a failed
-                                    // delivery still burns it — same as before,
-                                    // when the send's error was discarded. A
-                                    // dead stdin is not something the next Edit
-                                    // would fix.
-                                    mutate_nudged = true;
-                                }
-                                // Not burnt: nothing was recorded and nothing
-                                // was sent, so the one-shot is still unspent.
-                                Err(e) => warn!(?e, "persisting the pre-Apply mutation nudge"),
+                                mutate_nudged = true;
                             }
                         }
                     }
@@ -708,23 +697,18 @@ pub async fn pump_agent(
                         // delivers it to every peer off its cursor — no separate
                         // wire copy, and none of the hold/drop ladder the router
                         // used to put between this row and the peer reading it.
-                        match storage
-                            .post_to_channel(
-                                cfg.session_id.clone(),
-                                "system",
-                                None,
-                                MessageKind::SystemNotice.as_str(),
-                                notice.as_str(),
-                                None,
-                            )
-                            .await
-                        {
-                            Ok(m) => cfg.notify_persisted(m.message_id()),
-                            // No row. The health mark and the tray halt below are
-                            // deliberately NOT gated on it: those tell the USER
-                            // the session is parked, which stays true either way.
-                            Err(e) => warn!(?e, "persisting the provider-limit notice"),
-                        }
+                        // A lost row (the helper warns) gates nothing: the
+                        // health mark and the tray halt below tell the USER the
+                        // session is parked, which stays true either way.
+                        crate::core::post_system_notice(
+                            &storage,
+                            cfg.bridge.as_deref(),
+                            &cfg.session_id,
+                            MessageKind::SystemNotice,
+                            notice.as_str(),
+                            None,
+                        )
+                        .await;
                         if let Some(bridge) = &cfg.bridge {
                             bridge.notify_agent_health(
                                 cfg.session_id.to_string(),
