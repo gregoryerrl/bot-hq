@@ -1,6 +1,8 @@
 import { useTauriQuery } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import type { RetrievalStatsView } from "../lib/bindings";
+import type { ReactNode } from "react";
+import { WarnIcon } from "../components/icons";
 
 // ============================================================================
 // MeasurementView — Stage-4b CL retrieval telemetry (tokens-per-task et al.).
@@ -17,7 +19,7 @@ function StatTile({
 }: {
   label: string;
   value: string;
-  hint?: string;
+  hint?: ReactNode;
   accent?: boolean;
   warn?: boolean;
 }) {
@@ -122,7 +124,12 @@ export function MeasurementView({ project }: { project: string }) {
               <StatTile
                 label="Stale-hit rate"
                 value={pct(stats.stale_hit_rate)}
-                hint={`${num(stats.stale_hits)} ⚠ atoms`}
+                hint={
+                  <>
+                    {num(stats.stale_hits)}{" "}
+                    <WarnIcon size={10} className="inline-block align-[-1px]" /> atoms
+                  </>
+                }
                 warn={stats.stale_hit_rate > 0}
               />
               <StatTile

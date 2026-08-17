@@ -38,11 +38,12 @@ import { SpawnBadge } from "../components/SpawnBadge";
 import type { AppError, ResolveResult, SessionInfo } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { GearIcon } from "../components/icons";
+import { GearIcon, WarnIcon } from "../components/icons";
 import { SubTabButton } from "../components/SubTabButton";
 import { SessionContextTab } from "./SessionContextTab";
 import { SessionTerminalTab } from "./SessionTerminalTab";
 import { invoke } from "@tauri-apps/api/core";
+import { shortSessionId } from "../lib/sessionId";
 
 
 /** Session-container subtabs. Workspace = chat + IPAV documents (the
@@ -516,7 +517,7 @@ export function SessionView() {
             </Link>
             <span className="mx-2 text-outline-variant">·</span>
             <code className="font-code-sm text-code-sm text-on-surface-variant">
-              {sessionId.slice(0, 8)}
+              {shortSessionId(sessionId)}
             </code>
             {phase && (
               <>
@@ -687,7 +688,8 @@ export function SessionView() {
             <code className="text-on-surface">--resume</code>.
             {dirtyCount > 0 && (
               <span className="mt-2 block text-warning">
-                ⚠️ {dirtyCount} uncommitted change{dirtyCount === 1 ? "" : "s"}{" "}
+                <WarnIcon size={12} className="mr-1 inline-block align-[-2px]" />
+                {dirtyCount} uncommitted change{dirtyCount === 1 ? "" : "s"}{" "}
                 in this session's working tree will be kept, not committed.
               </span>
             )}

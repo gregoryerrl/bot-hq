@@ -16,6 +16,7 @@ import type {
 } from "../lib/bindings";
 import { cn } from "../lib/cn";
 import { PARTICIPANT_COLORS } from "../components/authorColor";
+import { RescanIcon, WarnIcon } from "../components/icons";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { pickFolder } from "./contextLibraryShared";
@@ -799,7 +800,7 @@ export function Dashboard() {
                                   : "border-outline-variant",
                               )}
                             >
-                              ↻
+                              <RescanIcon size={10} className="mx-auto" />
                             </button>
                             {PARTICIPANT_COLORS.map((c) => (
                               <button
@@ -851,7 +852,8 @@ export function Dashboard() {
                     role="status"
                     className="mt-2 rounded border border-warning/50 bg-warning/15 px-3 py-2 font-code-sm text-code-sm text-warning"
                   >
-                    ⚠ {rosterWarning}
+                    <WarnIcon size={12} className="mr-1 inline-block align-[-2px]" />
+                    {rosterWarning}
                   </p>
                 )}
                 {invitableRoles.length === 0 && (

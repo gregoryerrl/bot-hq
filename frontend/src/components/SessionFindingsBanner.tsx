@@ -1,6 +1,7 @@
 import { useTauriQuery } from "../hooks/useInvoke";
 import type { FindingView } from "../lib/bindings";
 import { cn } from "../lib/cn";
+import { WarnIcon } from "./icons";
 
 /**
  * Inline header banner for the reviewer-sign-off gate — renders next to the
@@ -44,7 +45,8 @@ export function SessionFindingsBanner({ sessionId }: { sessionId: string }) {
               : "Unresolved blocking findings — they must be fixed or rebutted before committing"
           }
         >
-          ⚠ {openBlocking.length} unresolved finding
+          <WarnIcon size={12} className="mr-1 inline-block align-[-2px]" />
+          {openBlocking.length} unresolved finding
           {openBlocking.length === 1 ? "" : "s"}
           {escalated > 0 ? ` (${escalated} re-raised)` : ""}
         </span>

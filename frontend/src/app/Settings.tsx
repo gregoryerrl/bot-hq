@@ -7,8 +7,8 @@ import { Button } from "../components/ui/Button";
 import { SubTabButton } from "../components/SubTabButton";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
-import { terminalInputClass } from "./contextLibraryShared";
-import { SaveIcon } from "./contextLibraryShared";
+import { terminalInputClass, SaveIcon } from "./contextLibraryShared";
+import { WarnIcon } from "../components/icons";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
 import { ModelsPanel } from "./ModelsPanel";
 import { RolesPanel } from "./RolesPanel";
@@ -22,6 +22,7 @@ import type {
   SessionInfo,
   UpdateInfo,
 } from "../lib/bindings";
+import { shortSessionId } from "../lib/sessionId";
 
 type SettingsSubTab =
   | "roles"
@@ -332,7 +333,8 @@ function WorktreeKeptBadge({ sessionId }: { sessionId: string }) {
       className="shrink-0 rounded border border-warning/40 bg-warning/15 px-2 py-0.5 font-label-caps text-label-caps text-warning"
       title={`Worktree kept — may have uncommitted work: ${keptPath}`}
     >
-      ⚠ Worktree kept
+      <WarnIcon size={12} className="mr-1 inline-block align-[-2px]" />
+      Worktree kept
     </span>
   );
 }
@@ -380,7 +382,7 @@ function ArchivePanel() {
                   </p>
                   <p className="font-code-sm text-code-sm text-on-surface-variant">
                     <code className="text-on-surface-variant">
-                      {s.id.slice(0, 8)}
+                      {shortSessionId(s.id)}
                     </code>
                     <span className="mx-2 text-on-surface-variant/60">·</span>
                     closed {formatTimestamp(s.closed_at ?? "") || "—"}
