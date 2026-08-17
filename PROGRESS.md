@@ -18,6 +18,56 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-17 — the phase-advance vote (D37), built in three reviewed slices
+
+The user's brainstorm from 2026-08-16, finally built:*"force that each phase
+advance must be voted of all active participants. So each participant will
+genuinely have a turn."* Recorded as **D37** with its own number, because for a
+day it existed only as a clause inside D36 — the ruling on its escape valve —
+and a decision outliving its feature is how it went unbuilt.
+
+**Slice 1, storage (`f4abcf9`, `14be72d`).** Migration 0062: a vote is a ROW
+keyed `(participant, target_phase, artifact_fingerprint, phase_epoch)`, not a
+column — `done_vote` is cleared on `Spoke` and this feature exists to make
+participants speak between votes, so reusing it livelocks. The fingerprint closes
+the speech axis, the epoch the time axis (phases run backward). Solo and empty
+electorates are pinned separately because they fail differently.
+
+**Slice 2, the ring (`21cc059`).** `advance_phase` records a vote and moves the
+phase only on consensus. The tool stopped returning the literal "phase advanced"
+unconditionally — under a vote that is false in the common case, and the agent
+ACTS on it, writing the next phase's doc and mutating while the session is still
+in the previous phase. `on_mention` callers refused; a pass retracts its own vote.
+
+**Slice 3, D36's escape valve (`a31d49b`, `3225268`).** On the round cap, not the
+all-pass yield — the placement my own test falsified. An all-pass lap means
+everyone passed, a pass retracts the passer's vote, so a silent lap has nothing
+left to report. The reachable deadlock is the productive one. It names the
+deadlock and points at the phase control; it does not force the advance, because
+D36 says the gate never times out into advisory.
+
+**Where the design came from is worth recording: five of its properties are
+review findings, not mine.** The epoch (a fingerprint carries content identity,
+not time), the retraction (a reviewer cannot withdraw by editing, since it never
+moves the fingerprint), the tool's return contract, the storage-side resolution
+instead of a `oneshot` on the event bus, and the fingerprint filter on the
+open-vote read.
+
+**Two claims of mine were falsified mid-build, both by evidence I had asked for.**
+That an agent could safely await a reply on the event bus — refuted by
+`main.rs:465`, which says the slow work runs on a serial FIFO carrying subprocess
+kills, three lines from the handler I was going to attach to. And that the escape
+valve belonged on the all-pass yield — refuted by my own test, which could not
+pass.
+
+**Not observed against real data.** 0061 and 0062 are UNAPPLIED — the live DB is
+at 60, checked three times. Every test runs against in-memory SQLite, and nothing
+in the crate can construct an `AppState`, so the vote has never been driven
+through a live session. Both apply at the next app boot, which is also when the
+spawn badge starts rendering.
+
+Suites: **1228** Rust + **409** frontend; clippy 4.
+
 ## 2026-08-17 — the driver removed, two gaps closed, and a stall caught in review
 
 Follow-on to the round-4 audit below, in the same session. The user asked for the

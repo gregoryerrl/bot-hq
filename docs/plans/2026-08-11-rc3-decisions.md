@@ -1330,3 +1330,72 @@ reviewer getting a turn *before* a commit rather than after): a predicate whose
 safety branch was pinned by nothing, and a diff that was correct, compiled, and
 green while removing the last test covering a live error-swallowing write path.
 Neither was visible to reading, clippy, or the suite — only to a cut.
+
+---
+
+## D37 — The phase advances only when every active participant votes ✅ (user, 2026-08-17)
+
+**Decided by the user in `s-dbc0e856` (2026-08-16), built in `s-dc5a4f09`
+(2026-08-17).** Their words, after watching a full IPAV pass in which the
+reviewer was never dealt a turn:
+
+> "let's force that each phase advance must be voted of all active participants.
+> So each participant will genuinely have a turn. After investigation, HANDS will
+> vote to advance_phase, but it doesn't advance the phase yet, instead will rotate
+> the turn, EYES is next, if EYES found issues with investigation, then EYES will
+> not vote to advance_phase, EYES will instead rotate the turn and drop their
+> findings… So they literally must converge and smoke the issues before phase
+> advance."
+
+**It gets its own decision number, and that is deliberate.** D36 ruled on this
+feature's escape valve twenty minutes after the brainstorm, and the feature was
+then never built or tracked — for a day it existed only as a subordinate clause
+inside the ruling that governed it, absent from `PLAN.md` and from the round-3
+report. A decision outliving its feature is the inverse of round-4 F8, and the
+structural fix is that the thing decided gets its own entry rather than living
+inside the decision about its edge case.
+
+### What shipped
+
+- **The vote is a ROW, not a column.** `done_vote` is cleared session-wide on
+  `TurnEnding::Spoke`, and this feature exists to make participants speak between
+  votes — reusing it livelocks by construction.
+- **Keyed `(participant_id, target_phase, artifact_fingerprint, phase_epoch)`.**
+  The fingerprint closes the speech axis; the epoch closes the TIME axis, which
+  the first design missed — phases run backward, so a Plan-era vote would
+  otherwise match again after Plan → Investigate → Plan whenever the work came
+  back unchanged.
+- **The electorate is `enabled && participation_mode == "active"`**, character for
+  character the filter `all_active_voted_done` uses. Solo advances on its own
+  vote; an empty electorate is vacuously arrived.
+- **`on_mention` callers are refused**, because a vote counting toward nothing
+  while the tool reported an advance is a dead phase with no signal.
+- **A pass retracts the passer's own vote**, mirroring `TurnEnding::Passed`. The
+  asymmetry is the argument: the doc author can withdraw by editing, since the
+  fingerprint moves — a reviewer never moves the fingerprint, so without this its
+  vote could be undone only by someone else's edit.
+- **The tool stopped lying.** It returned the literal "phase advanced"
+  unconditionally, which under a vote is false in the common case — and the agent
+  ACTS on it, writing the next phase's document and mutating while the session is
+  still in the previous phase. `PhaseAdvanceOutcome` distinguishes advanced /
+  vote-recorded / refused, all three distinguishable by their first token.
+
+### D36's escape valve, and where it actually fires
+
+On the ROUND CAP, not the all-pass yield. The all-pass path looked right — it
+fires after one silent lap, before any cap check — but a pass retracts the
+passer's vote, so a silent lap leaves nothing to report. Measured: zero votes
+remaining. The reachable deadlock is the PRODUCTIVE one, where participants keep
+posting findings and the votes stand.
+
+It names the deadlock and points at the phase control. **It does not force the
+advance** — D36 is explicit that the gate stays blocking and never times out, and
+a cap that advanced on its own would convert a blocking review into an advisory
+one at lap N, the option the user rejected.
+
+### Not yet observed against real data
+
+Migrations 0061 and 0062 are UNAPPLIED — the live DB is at 60, checked three
+times. Every test runs against in-memory SQLite, and nothing in the crate can
+construct an `AppState`, so the vote has never been driven through a live
+session. It applies at the next app boot.
