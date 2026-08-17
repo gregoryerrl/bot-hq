@@ -5,6 +5,7 @@ import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/time";
 import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import type { AgentMessage } from "../lib/bindings";
+import { fileArgInCommand } from "./FileViewerDialog";
 
 interface ChatMessageProps {
   message: AgentMessage;
@@ -24,6 +25,10 @@ interface ChatMessageProps {
    *  from this set is still RUNNING and renders as such. Omitted (undefined) =
    *  the parent doesn't track it, so nothing is claimed either way. */
   resolvedToolIds?: ReadonlySet<string>;
+  /** Open a file named by a tool call in the session's file viewer (round 8).
+   *  Only tool_use ARGS are linkified — `file_path` / `path` / `notebook_path`
+   *  and a file argument inside `command` — never prose. Omitted = no button. */
+  onViewFile?: (path: string) => void;
 }
 
 // Author + relative-timestamp header. Shared by the text and tool message rows
@@ -78,6 +83,7 @@ export const ChatMessage = memo(function ChatMessage({
   expanded,
   onToggleExpand,
   resolvedToolIds,
+  onViewFile,
 }: ChatMessageProps) {
   if (message.kind === "phase_change") {
     return (
@@ -108,6 +114,7 @@ export const ChatMessage = memo(function ChatMessage({
         expanded={expanded}
         onToggleExpand={onToggleExpand}
         resolvedToolIds={resolvedToolIds}
+        onViewFile={onViewFile}
       />
     );
   }
@@ -136,6 +143,7 @@ function ToolMessage({
   expanded: controlledExpanded,
   onToggleExpand,
   resolvedToolIds,
+  onViewFile,
 }: {
   message: AgentMessage;
   groupedWithPrev?: boolean;
@@ -144,6 +152,7 @@ function ToolMessage({
   expanded?: boolean;
   onToggleExpand?: (id: number) => void;
   resolvedToolIds?: ReadonlySet<string>;
+  onViewFile?: (path: string) => void;
 }) {
   const [localExpanded, setLocalExpanded] = useState(false);
   const controlled =
@@ -173,6 +182,11 @@ function ToolMessage({
     resolvedToolIds !== undefined &&
     toolUseId !== null &&
     !resolvedToolIds.has(toolUseId);
+  // A file the tool call names, from its ARGS only (round 8): what a Read /
+  // Edit / Write touched, or the file argument of a Bash command (`--body-file
+  // /tmp/x.md`, a bare `*.md`). Prose paths are not linkified — the user's
+  // choice; the args are structured, the prose is not.
+  const viewablePath = isUse ? toolFilePath(previewSource) : null;
 
   return (
     <article className={cn("mb-1", groupedWithPrev ? "mt-0" : "mt-2")}>
@@ -208,6 +222,16 @@ function ToolMessage({
           {preview}
         </span>
       </button>
+      {viewablePath && onViewFile && (
+        <button
+          type="button"
+          onClick={() => onViewFile(viewablePath)}
+          className="mt-0.5 font-code-sm text-code-sm text-primary hover:underline"
+          title={viewablePath}
+        >
+          View {viewablePath.split("/").pop()}
+        </button>
+      )}
       {expanded && (
         <pre className="mt-1 whitespace-pre-wrap break-words rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-[0.7rem] leading-relaxed text-on-surface">
           {(() => {
@@ -287,6 +311,22 @@ function formatPreview(value: unknown, fallback: string): string {
     }
   }
   return clip(String(value));
+}
+
+/**
+ * The file a tool call's input names, if any — the same shapes `formatPreview`
+ * already understands, plus the command's file argument via `fileArgInCommand`.
+ * Exported for the test; the button above is its only render site.
+ */
+export function toolFilePath(input: unknown): string | null {
+  if (typeof input !== "object" || input === null) return null;
+  const v = input as Record<string, unknown>;
+  for (const key of ["file_path", "path", "notebook_path"] as const) {
+    const val = v[key];
+    if (typeof val === "string" && val.trim() !== "") return val;
+  }
+  if (typeof v.command === "string") return fileArgInCommand(v.command);
+  return null;
 }
 
 function clip(s: string): string {

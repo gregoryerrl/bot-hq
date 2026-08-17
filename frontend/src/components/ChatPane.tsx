@@ -38,7 +38,14 @@ const STICKY_THRESHOLD_PX = 80;
  * (keyed by message id) because virtualized rows unmount when scrolled away,
  * which would reset ChatMessage-local state.
  */
-export function ChatPane({ sessionId }: { sessionId: string }) {
+export function ChatPane({
+  sessionId,
+  onViewFile,
+}: {
+  sessionId: string;
+  /** Opens a file named by a tool call in the session's file viewer (round 8). */
+  onViewFile?: (path: string) => void;
+}) {
   const { data: initialMsgs = [], isLoading: messagesLoading } = useTauriQuery<
     AgentMessage[]
   >(
@@ -191,6 +198,7 @@ export function ChatPane({ sessionId }: { sessionId: string }) {
                   expanded={expandedIds.has(m.id)}
                   onToggleExpand={onToggleExpand}
                   resolvedToolIds={resolvedToolIds}
+                  onViewFile={onViewFile}
                 />
               </div>
             );

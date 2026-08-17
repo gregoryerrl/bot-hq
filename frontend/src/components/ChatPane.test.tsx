@@ -107,13 +107,13 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
-function renderPane() {
+function renderPane(onViewFile?: (path: string) => void) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={qc}>
-      <ChatPane sessionId="s1" />
+      <ChatPane sessionId="s1" onViewFile={onViewFile} />
     </QueryClientProvider>,
   );
 }
@@ -255,6 +255,47 @@ describe("ChatPane", () => {
     });
     expect(await screen.findByText("late message")).toBeInTheDocument();
     expect(screen.queryByText("foreign message")).not.toBeInTheDocument();
+  });
+
+  it("offers to view the file a tool call names — from its args, never its prose (round 8)", async () => {
+    // issues.md #1's second half: the file viewer existed and was wired to the
+    // gate card only. A Read's `file_path`, a Bash file argument, get a View
+    // button; a command with no file argument, and prose, do not.
+    const onViewFile = vi.fn();
+    renderPane(onViewFile);
+    await screen.findByText("hello one");
+    act(() => {
+      eventHandlers["agent:messages:batch"]?.({
+        payload: [
+          msg(
+            20,
+            JSON.stringify({
+              name: "Read",
+              input: { file_path: "/repo/src/lib.rs" },
+              tool_use_id: "t-read",
+            }),
+            "tool_use",
+          ),
+          msg(
+            21,
+            JSON.stringify({
+              name: "Bash",
+              input: { command: "cat --file /tmp/pr-body.md" },
+              tool_use_id: "t-cat",
+            }),
+            "tool_use",
+          ),
+          msg(22, "see /repo/src/lib.rs for details", "text"),
+        ],
+      });
+    });
+    const readBtn = await screen.findByRole("button", { name: "View lib.rs" });
+    fireEvent.click(readBtn);
+    expect(onViewFile).toHaveBeenCalledWith("/repo/src/lib.rs");
+    fireEvent.click(screen.getByRole("button", { name: "View pr-body.md" }));
+    expect(onViewFile).toHaveBeenCalledWith("/tmp/pr-body.md");
+    // The seeded `ls -la` Bash row and the prose row offer nothing.
+    expect(screen.getAllByRole("button", { name: /^View / })).toHaveLength(2);
   });
 
   it("marks a tool call running until its result lands", async () => {

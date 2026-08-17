@@ -802,7 +802,10 @@ export function SessionView() {
           {/* Chat history + live batches — virtualized, and a render boundary:
               per-batch re-renders stop inside ChatPane instead of re-rendering
               this whole view (header, subtabs, DocumentPane). */}
-          <ChatPane sessionId={sessionId} />
+          <ChatPane
+            sessionId={sessionId}
+            onViewFile={(path) => setViewFile({ sessionId, path })}
+          />
 
           <div className="border-t border-outline-variant">
             {/* rc3 D30: the halt sits ABOVE the box that answers it. */}
