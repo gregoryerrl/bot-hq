@@ -8,7 +8,6 @@
 //! attempts but also "user approved this push to main on 2026-05-15".
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -39,6 +38,30 @@ pub enum ViolationKind {
     /// tried to ship with unresolved EYES `blocking` findings. Logged Denied by
     /// the pre-commit / pre-push hook on a block.
     Findings,
+}
+
+impl ViolationKind {
+    /// The kinds an AGENT may request approval for through `request_approval`
+    /// — the tool's `kind` enum is derived from this list (`serde` names), so
+    /// the descriptor cannot drift from the parser. `PolicyMutation` (audit
+    /// only) and `Findings` (a hook verdict) are not requestable.
+    pub const REQUESTABLE: [ViolationKind; 6] = [
+        ViolationKind::PushGate,
+        ViolationKind::CommitGrep,
+        ViolationKind::ForcePush,
+        ViolationKind::ToolBlocklist,
+        ViolationKind::PerAction,
+        ViolationKind::GenericApproval,
+    ];
+
+    /// The serde wire name (`snake_case`), the same string `parse_violation_kind`
+    /// accepts.
+    pub fn wire_name(self) -> String {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::String(s)) => s,
+            _ => format!("{self:?}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
@@ -225,7 +248,7 @@ impl ViolationsLog {
         detail: Option<String>,
     ) -> ViolationRecord {
         ViolationRecord {
-            ts: Utc::now().to_rfc3339(),
+            ts: crate::storage::now_utc(),
             session_id: session_id.into(),
             agent: agent.into(),
             kind,

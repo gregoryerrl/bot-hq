@@ -208,21 +208,12 @@ pub(crate) fn capability_gated(tool: &str) -> bool {
 /// tool and rejected by another (the old `VALID_PHASES` drift), and any accepted
 /// casing/chip stores as a consistent tag the IPAV tabs can match.
 fn parse_optional_phase(args: &Value) -> Result<Option<String>, JsonRpcError> {
-    let raw = args.get("phase").and_then(Value::as_str);
-    match raw {
-        None => Ok(None),
-        Some(p) => match crate::core::ipav::IpavPhase::parse(p) {
-            Some(phase) => Ok(Some(phase.tag().to_string())),
-            None => Err(JsonRpcError::new(
-                JsonRpcError::INVALID_PARAMS,
-                format!(
-                    "phase must be one of {}, got {:?}",
-                    crate::core::ipav::IpavPhase::error_hint(),
-                    p
-                ),
-            )),
-        },
-    }
+    // One parser (`protocol::parse_phase_arg`), one error text — this used to
+    // re-implement the parse with its own wording (round 8, T2-6).
+    args.get("phase")
+        .and_then(Value::as_str)
+        .map(|p| super::protocol::parse_phase_arg("phase", p).map(|ph| ph.tag().to_string()))
+        .transpose()
 }
 
 /// Append a warning when the agent yields on top of a halt the user has not
@@ -2715,7 +2706,7 @@ mod tests {
         .expect_err("invalid phase enum should return Err(JsonRpcError)");
         assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
         assert!(
-            err.message.contains("phase must be one of"),
+            err.message.contains("unknown phase") && err.message.contains("expected"),
             "msg: {}",
             err.message
         );
@@ -2956,7 +2947,7 @@ mod tests {
         .expect_err("invalid phase enum should return Err(JsonRpcError)");
         assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
         assert!(
-            err.message.contains("phase must be one of"),
+            err.message.contains("unknown phase") && err.message.contains("expected"),
             "msg: {}",
             err.message
         );

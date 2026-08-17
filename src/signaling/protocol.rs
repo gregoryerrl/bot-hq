@@ -295,14 +295,12 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                 "properties": {
                     "kind": {
                         "type": "string",
-                        "enum": [
-                            "push_gate",
-                            "commit_grep",
-                            "force_push",
-                            "tool_blocklist",
-                            "per_action",
-                            "generic_approval"
-                        ],
+                        // Derived from the enum's own serde names, so the
+                        // schema and `parse_violation_kind` cannot disagree.
+                        "enum": crate::policy::ViolationKind::REQUESTABLE
+                            .iter()
+                            .map(|k| k.wire_name())
+                            .collect::<Vec<_>>(),
                         "description": "Which policy class triggered this request."
                     },
                     "action": {
@@ -907,6 +905,39 @@ mod tests {
             "ARCHITECTURE.md's tool count is not {n} — the registry moved and \
              the heading did not"
         );
+    }
+
+    /// `request_approval`'s `kind` enum is DERIVED from `ViolationKind::REQUESTABLE`
+    /// (round 8) — every listed name parses back through the serde parser the
+    /// handler uses, and the two audit-only kinds are absent. A hand-written
+    /// list had to be kept in lockstep with the enum by eye.
+    #[test]
+    fn request_approval_kind_enum_is_the_requestable_kinds() {
+        let d = tool_descriptors()
+            .into_iter()
+            .find(|d| d.name == "request_approval")
+            .expect("request_approval is registered");
+        let listed: Vec<String> = d.input_schema["properties"]["kind"]["enum"]
+            .as_array()
+            .expect("kind has an enum")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        let expected: Vec<String> = crate::policy::ViolationKind::REQUESTABLE
+            .iter()
+            .map(|k| k.wire_name())
+            .collect();
+        assert_eq!(listed, expected);
+        for name in &listed {
+            assert!(
+                serde_json::from_value::<crate::policy::ViolationKind>(serde_json::Value::String(
+                    name.clone()
+                ))
+                .is_ok(),
+                "{name} must parse as a ViolationKind"
+            );
+        }
+        assert!(!listed.iter().any(|n| n == "policy_mutation" || n == "findings"));
     }
 
     /// The three descriptions an agent's stop discipline turns on must say what

@@ -128,27 +128,17 @@ impl Storage {
         session_id: &str,
         since_id: Option<i64>,
     ) -> Result<Vec<Message>> {
-        let rows = match since_id {
-            Some(sid) => {
-                sqlx::query_as::<_, Message>(&format!(
-                    "SELECT {MESSAGE_COLUMNS} FROM messages \
-                     WHERE session_id = ? AND id > ? ORDER BY id ASC"
-                ))
-                .bind(session_id)
-                .bind(sid)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            None => {
-                sqlx::query_as::<_, Message>(&format!(
-                    "SELECT {MESSAGE_COLUMNS} FROM messages \
-                     WHERE session_id = ? ORDER BY id ASC"
-                ))
-                .bind(session_id)
-                .fetch_all(&self.pool)
-                .await?
-            }
-        };
+        // One statement: `?2 IS NULL OR id > ?2` is the house idiom for an
+        // optional filter (see `channel_page`), instead of two query strings
+        // that could drift.
+        let rows = sqlx::query_as::<_, Message>(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages \
+             WHERE session_id = ?1 AND (?2 IS NULL OR id > ?2) ORDER BY id ASC"
+        ))
+        .bind(session_id)
+        .bind(since_id)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
     }
 
