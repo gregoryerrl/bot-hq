@@ -139,6 +139,46 @@ type StagedPick = (String, String);
 /// names do, and `staged_responses`' type is readable in one line.
 type StagedResponse = (String, Vec<StagedPick>);
 
+/// **How a user message arrived — the one axis that decides whether it aborts an
+/// in-flight turn.**
+///
+/// The user's design, and the reason the Stage feature exists at all: *"staged
+/// messages should never interrupt the agents. It squeezes itself in the flow
+/// without interrupting anything. The Pause button is the only real interrupt."*
+///
+/// A typed Send is the always-typeable unblock's spine — it must take effect NOW
+/// rather than queue behind a turn in flight, so it fires a warm
+/// `control_request` interrupt at every agent first. A STAGED message is the
+/// opposite instrument: the user chose to queue it, and `deliver_staged` already
+/// waits for a turn boundary to release it. Sharing `broadcast` meant it also
+/// shared the preempt, so the queued message detonated on arrival — aborting the
+/// very turn it had politely waited for. The wait made it worse, not better:
+/// the boundary notification is async, so by delivery time the ring has usually
+/// dealt the NEXT turn, and that fresh turn is what got cut.
+///
+/// This is rc3 D34's decree ("Pause is the only real interrupt") reaching the
+/// one path D34 did not cover. D34 deleted the `tray-answer-preempt` outright
+/// because a tray click is never urgent; the preempt here cannot be deleted,
+/// because a typed Send legitimately needs it — so the decision is named instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserSend {
+    /// The user pressed Send (or an equivalent immediate action). Preempts.
+    Typed,
+    /// A staged message released at a turn boundary. Never preempts.
+    Staged,
+}
+
+impl UserSend {
+    /// Whether this delivery may abort an in-flight turn.
+    ///
+    /// Extracted so the decision is a value a test can assert rather than a
+    /// branch buried in `broadcast_as` — conventions.md's "pin the WIRE" rule.
+    /// The two call sites that choose a variant are pinned separately.
+    pub fn preempts(self) -> bool {
+        matches!(self, UserSend::Typed)
+    }
+}
+
 pub struct AppState {
     pub paths: Paths,
     pub storage: Storage,
@@ -1197,6 +1237,17 @@ impl AppState {
     }
 
     pub async fn broadcast(&self, session_id: &str, text: &str) -> Result<()> {
+        self.broadcast_as(session_id, text, UserSend::Typed).await
+    }
+
+    /// [`broadcast`](Self::broadcast) with the arrival mode named explicitly.
+    /// See [`UserSend`] for why the mode exists and what it decides.
+    pub async fn broadcast_as(
+        &self,
+        session_id: &str,
+        text: &str,
+        send: UserSend,
+    ) -> Result<()> {
         // The paste gate, FIRST — before any respawn work is spent on a
         // message that will be refused. s-f6a441ff: a 2,977,078-byte paste of
         // prod logs was accepted, delivered, and lodged in both participants'
@@ -1292,8 +1343,14 @@ impl AppState {
         // channel writes this ahead of the message on stdin, so each agent aborts
         // then reads the new message. No SIGKILL escalation (unlike cancel) — the
         // message IS the next work, and the process stays warm (no --resume).
-        for agent in handle.agents() {
-            agent.handle.interrupt("user-preempt");
+        //
+        // **A STAGED message takes none of this.** It is a queued message by the
+        // user's own choice, released at a turn boundary — preempting it aborts
+        // the turn it waited for. See [`UserSend`].
+        if send.preempts() {
+            for agent in handle.agents() {
+                agent.handle.interrupt("user-preempt");
+            }
         }
         // No recipient list: the row IS the delivery (rc3 D19). The ring hands
         // the turn to the front of the rotation and that participant drains the
@@ -1359,6 +1416,7 @@ impl AppState {
         session_id: &str,
         text: &str,
         picks: Vec<StagedPick>,
+        send: UserSend,
     ) -> Result<()> {
         // Same paste gate as `broadcast`, checked BEFORE the picks resolve —
         // a Send refused halfway would consume the staged answers and drop the
@@ -1399,8 +1457,10 @@ impl AppState {
         }
         if !text.trim().is_empty() {
             // The message is the release, and it posts after the answers — the
-            // last row of the batch, framing the turn.
-            return self.broadcast(session_id, text).await;
+            // last row of the batch, framing the turn. `send` rides through:
+            // this is the branch a staged delivery takes, and it is where the
+            // preempt lived.
+            return self.broadcast_as(session_id, text, send).await;
         }
         if answered == 0 {
             return Err(anyhow::anyhow!(
@@ -1530,7 +1590,12 @@ impl AppState {
         let Some((text, picks)) = self.staged_responses.lock().await.remove(session_id) else {
             return;
         };
-        match self.send_user_response(session_id, &text, picks.clone()).await {
+        // `Staged` is the whole point of this path: the user queued this message
+        // so it would NOT cut a turn. See [`UserSend`].
+        match self
+            .send_user_response(session_id, &text, picks.clone(), UserSend::Staged)
+            .await
+        {
             Ok(()) => {
                 // Delivered: the slot is empty again, in memory and on the row.
                 if let Err(e) = self.storage.set_staged_message(session_id, None).await {
@@ -2172,6 +2237,80 @@ mod tests {
         assert!(
             !src.contains(&needle),
             "the tray-answer preempt must not come back"
+        );
+    }
+
+    /// **A staged message must never abort a turn.**
+    ///
+    /// The user's stated reason for the Stage feature: *"staged messages should
+    /// never interrupt the agents. It squeezes itself in the flow without
+    /// interrupting anything. The Pause button is the only real interrupt —
+    /// that's literally why I added the stage feature."*
+    ///
+    /// What shipped broken: `deliver_staged` → `send_user_response` →
+    /// `broadcast`, which fires `interrupt("user-preempt")` at every agent. The
+    /// queued message inherited the typed-Send preempt wholesale, so it aborted
+    /// the turn it had politely waited for — and because the boundary
+    /// notification is async, the turn it cut was usually the NEXT one, freshly
+    /// dealt. Waiting made it worse rather than better.
+    ///
+    /// Three assertions, because restoring the bug needs only one of them back:
+    /// the decision, the GUARD that consults it, and the variant the staged path
+    /// picks. The third is the one that was missing entirely.
+    #[test]
+    fn a_staged_message_never_preempts() {
+        assert!(
+            UserSend::Typed.preempts(),
+            "a typed Send is the always-typeable unblock's spine and must take \
+             effect now — a typed message that does NOT preempt is the opposite \
+             bug, and just as real"
+        );
+        assert!(
+            !UserSend::Staged.preempts(),
+            "a staged message is queued by the user's own choice"
+        );
+
+        // Comments stripped: prose about a symbol is a record, not a wire —
+        // `phase_vote_wiring_test.rs` pays for this lesson at length, and this
+        // file's own doc comments quote both the call form and the guard.
+        let code = include_str!("state.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Assembled at runtime so this assertion cannot satisfy itself.
+        let needle = format!("interrupt(\"{}\")", "user-preempt");
+        let at = code
+            .find(&needle)
+            .expect("the typed-Send preempt must still exist");
+        let before = &code[..at];
+        let guard = before
+            .rfind("if send.preempts() {")
+            .expect("the preempt must be guarded by the arrival mode, not fired unconditionally");
+        assert!(
+            !before[guard..].contains('}'),
+            "the `if send.preempts()` block CLOSES before the preempt call, so \
+             the interrupt is unconditional again and every staged message cuts \
+             a turn"
+        );
+
+        // The staged path must pick the non-preempting variant. Scoped to
+        // `deliver_staged`'s own body — finding `UserSend::Staged` anywhere in
+        // the file proves nothing, which is the shape this codebase keeps
+        // shipping.
+        let ds = code
+            .find("pub async fn deliver_staged")
+            .expect("deliver_staged must exist");
+        let body = &code[ds..];
+        let end = body[1..]
+            .find("\n    pub async fn ")
+            .map_or(body.len(), |n| n + 1);
+        assert!(
+            body[..end].contains("UserSend::Staged"),
+            "`deliver_staged` must deliver as Staged — without it the queued \
+             message reaches `broadcast` as a typed Send and preempts, which is \
+             exactly the bug this test exists for"
         );
     }
 

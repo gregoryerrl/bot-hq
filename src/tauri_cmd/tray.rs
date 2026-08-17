@@ -91,6 +91,9 @@ pub async fn send_user_response(
         &session_id,
         &text,
         picks.into_iter().map(|p| (p.choice_id, p.picked)).collect(),
+        // The user pressed Send — the immediate path, which preempts. The other
+        // caller is `deliver_staged`, and it passes `Staged`.
+        crate::core::state::UserSend::Typed,
     )
     .await?;
     Ok(())
