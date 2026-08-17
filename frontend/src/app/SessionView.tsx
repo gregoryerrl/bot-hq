@@ -195,6 +195,12 @@ export function SessionView() {
   // rc3 P1: the composed system prompt of whichever participant chip was
   // clicked. Held as resolved TEXT rather than a slug so a slow read can't land
   // under a different participant's heading.
+  // A file a gate names (`--body-file /tmp/x.md`), opened in the same
+  // full-screen viewer the prompt view uses; `read_workspace_file` reads it.
+  const [viewFile, setViewFile] = useState<{
+    sessionId: string;
+    path: string;
+  } | null>(null);
   const [promptView, setPromptView] = useState<{
     title: string;
     text: string;
@@ -682,11 +688,14 @@ export function SessionView() {
       {/* rc3 P1: ~48 KB of standing instruction that nothing could display
           until now. Full-screen, because reading it is the point. */}
       <FileViewerDialog
-        target={null}
+        target={viewFile}
         inlineTitle={promptView?.title}
         inlineText={promptView?.text}
         inlineNote={promptView?.note}
-        onClose={() => setPromptView(null)}
+        onClose={() => {
+          setPromptView(null);
+          setViewFile(null);
+        }}
       />
 
       {respawnError && (
@@ -809,6 +818,7 @@ export function SessionView() {
                 onCancel={async () => {
                   await invoke("cancel_session_turn", { sessionId });
                 }}
+                onViewFile={(path) => setViewFile({ sessionId, path })}
               />
             ) : (
             /* key remounts the input per session so the draft seed (a lazy

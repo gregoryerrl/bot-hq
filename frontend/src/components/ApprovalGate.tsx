@@ -6,6 +6,7 @@ import { formatRelative } from "../lib/time";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import type { TrayRow } from "./HaltBanner";
+import { fileArgInCommand } from "./FileViewerDialog";
 
 /**
  * **An approval is not a question, and it must not be parkable (rc3 D33).**
@@ -35,6 +36,7 @@ export function ApprovalGate({
   label,
   onResolve,
   onCancel,
+  onViewFile,
 }: {
   /** Pending approvals, oldest first. Never empty — the caller decides to
    *  render this at all. */
@@ -50,6 +52,15 @@ export function ApprovalGate({
   ) => Promise<{ kind: string; command?: string; asked_at?: string | null }>;
   /** Pause the session — the one interrupt, kept reachable from here. */
   onCancel?: () => Promise<void>;
+  /**
+   * Open the file a gated command names (`--body-file /tmp/x.md`, a `.md` or
+   * image argument) in the full-screen viewer. The tray card had this since
+   * the viewer shipped; the gate lost it when rc3 D33 moved approvals into the
+   * input slot, and the user approved `gh issue comment … --body-file` bodies
+   * they could not see (seven of them on 2026-08-17). Optional only so the
+   * component renders in isolation; SessionView always wires it.
+   */
+  onViewFile?: (path: string) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -143,6 +154,7 @@ export function ApprovalGate({
           {row.command_text}
         </pre>
       )}
+      <ViewFileButton command={row.command_text} onViewFile={onViewFile} />
 
       {stale ? (
         <div className="mt-2 rounded border border-error/50 bg-error-container/30 p-2">
@@ -208,7 +220,11 @@ export function ApprovalGate({
         </p>
       )}
       {showDetails && (
-        <GateDetailsDialog row={row} onClose={() => setShowDetails(false)} />
+        <GateDetailsDialog
+          row={row}
+          onClose={() => setShowDetails(false)}
+          onViewFile={onViewFile}
+        />
       )}
     </div>
   );
@@ -229,9 +245,11 @@ export function ApprovalGate({
 function GateDetailsDialog({
   row,
   onClose,
+  onViewFile,
 }: {
   row: TrayRow;
   onClose: () => void;
+  onViewFile?: (path: string) => void;
 }) {
   const trapRef = useFocusTrap<HTMLDivElement>(true);
   useEscapeKey(onClose, true);
@@ -296,6 +314,7 @@ function GateDetailsDialog({
               <pre className="mt-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-mono text-xs text-on-surface">
                 {row.command_text}
               </pre>
+              <ViewFileButton command={row.command_text} onViewFile={onViewFile} />
             </>
           )}
         </div>
@@ -322,4 +341,29 @@ function gatePrompt(row: TrayRow): string {
   if (!row.command_text) return row.prompt;
   const firstLine = row.prompt.split("\n", 1)[0]?.trim();
   return firstLine || "Run gated command in this session's repo?";
+}
+
+/**
+ * "View <file>" for a gated command that names one. A gate that shows only a
+ * PATH is a body approved unseen — the exact gap the tray card closed and the
+ * D33 gate reopened. Renders nothing when the command names no file or no
+ * viewer is wired.
+ */
+function ViewFileButton({
+  command,
+  onViewFile,
+}: {
+  command: string | null | undefined;
+  onViewFile?: (path: string) => void;
+}) {
+  if (!command || !onViewFile) return null;
+  const file = fileArgInCommand(command);
+  if (!file) return null;
+  return (
+    <div className="mt-1.5">
+      <Button size="sm" variant="ghost" onClick={() => onViewFile(file)}>
+        View {file.split("/").pop()}
+      </Button>
+    </div>
+  );
 }

@@ -90,6 +90,22 @@ fn refuse_if_oversize(path: &str, bytes: u64) -> Result<(), AppError> {
     }
     Ok(())
 }
+/// Where a RELATIVE path an agent wrote resolves: the session's repo.
+///
+/// Gate commands name files both ways — `--body-file /tmp/522-comment.md` and
+/// `--body-file pr-body1.md` — and the agent's shell ran the second one from
+/// the repo. Canonicalizing a bare relative path resolved it against the APP's
+/// cwd instead, so the viewer refused exactly the file the gate was about.
+/// Absolute paths pass through; with no repo on the session, so does a
+/// relative one (and containment then decides).
+fn resolve_requested_path(path: &str, repo: Option<&str>) -> PathBuf {
+    let p = Path::new(path);
+    match repo {
+        Some(r) if p.is_relative() => Path::new(r).join(p),
+        _ => p.to_path_buf(),
+    }
+}
+
 
 /// Read a file for the viewer dialog, scoped to the session's repo + temp.
 #[tauri::command]
@@ -111,7 +127,7 @@ pub async fn read_workspace_file(
     // Canonicalize FIRST — this both resolves `..`/symlinks and proves the file
     // exists. A non-existent path can't be canonicalized, so "missing" and
     // "outside scope" are reported distinctly rather than as one vague error.
-    let canonical = Path::new(&path)
+    let canonical = resolve_requested_path(&path, repo.as_deref())
         .canonicalize()
         .map_err(|e| AppError::NotFound(format!("cannot read {path}: {e}")))?;
     if !is_contained(&canonical, &roots) {
@@ -169,6 +185,61 @@ pub async fn read_workspace_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relative_path_resolves_against_the_session_repo() {
+        assert_eq!(
+            resolve_requested_path("pr-body1.md", Some("/repo")),
+            PathBuf::from("/repo/pr-body1.md")
+        );
+        assert_eq!(
+            resolve_requested_path("docs/x.md", Some("/repo")),
+            PathBuf::from("/repo/docs/x.md")
+        );
+        // Absolute stays absolute; no repo leaves it alone.
+        assert_eq!(
+            resolve_requested_path("/tmp/522-comment.md", Some("/repo")),
+            PathBuf::from("/tmp/522-comment.md")
+        );
+        assert_eq!(
+            resolve_requested_path("pr-body1.md", None),
+            PathBuf::from("pr-body1.md")
+        );
+    }
+
+    /// The composition the change actually depends on: the join is only the
+    /// first step, and containment still runs on the CANONICAL result — so a
+    /// relative traversal joined onto the repo escapes it and is refused. A
+    /// later "skip canonicalize for relative paths" shortcut goes red here.
+    #[test]
+    fn a_relative_traversal_joined_onto_the_repo_is_still_refused() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        // A real file OUTSIDE the repo, reached from inside it by `..` hops.
+        let target = outside.path().join("secret.md");
+        std::fs::write(&target, "not yours").unwrap();
+        let repo_canon = repo.path().canonicalize().unwrap();
+        let outside_canon = outside.path().canonicalize().unwrap();
+        // Build a relative path from the repo to the outside file.
+        let hops = repo_canon.components().count();
+        let mut rel = PathBuf::new();
+        for _ in 0..hops.saturating_sub(1) {
+            rel.push("..");
+        }
+        // `outside_canon` is absolute; strip its root so the join is relative.
+        for c in outside_canon.components().skip(1) {
+            rel.push(c);
+        }
+        rel.push("secret.md");
+        let joined = resolve_requested_path(rel.to_str().unwrap(), repo_canon.to_str());
+        assert!(joined.starts_with(&repo_canon), "joined under the repo: {joined:?}");
+        let canonical = joined.canonicalize().expect("the traversal names a real file");
+        assert_eq!(canonical, target.canonicalize().unwrap());
+        assert!(
+            !is_contained(&canonical, &[repo_canon.clone()]),
+            "the canonical path left the repo and must be refused: {canonical:?}"
+        );
+    }
 
     #[test]
     fn containment_accepts_inside_and_rejects_outside() {

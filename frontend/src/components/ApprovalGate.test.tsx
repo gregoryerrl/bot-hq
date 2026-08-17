@@ -53,6 +53,50 @@ describe("ApprovalGate", () => {
     expect(box.className).toContain("break-all");
   });
 
+  // issues.md #1 (2026-08-17): the tray card could open the file a gated
+  // command names; the D33 gate could not, and the user approved seven
+  // `--body-file /tmp/*.md` bodies unseen that day. The button is the wire from
+  // the gate to the same viewer, on the card AND in Details.
+  it("offers to view the file a gated command names, on the card and in Details", async () => {
+    const onViewFile = vi.fn();
+    render(
+      <ApprovalGate
+        rows={[
+          approval({
+            command_text:
+              "gh pr merge 524 --squash --body-file /tmp/merge-524.md",
+          }),
+        ]}
+        onResolve={resolved()}
+        onViewFile={onViewFile}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "View merge-524.md" }));
+    expect(onViewFile).toHaveBeenCalledWith("/tmp/merge-524.md");
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+    // Two buttons now: the card's and the dialog's, both for the same path.
+    const buttons = screen.getAllByRole("button", { name: "View merge-524.md" });
+    expect(buttons).toHaveLength(2);
+    fireEvent.click(buttons[1]);
+    expect(onViewFile).toHaveBeenLastCalledWith("/tmp/merge-524.md");
+    expect(onViewFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers no file button when the command names none, or no viewer is wired", () => {
+    const { unmount } = render(
+      <ApprovalGate rows={[approval()]} onResolve={resolved()} onViewFile={vi.fn()} />,
+    );
+    expect(screen.queryByRole("button", { name: /^View / })).toBeNull();
+    unmount();
+    render(
+      <ApprovalGate
+        rows={[approval({ command_text: "gh pr create --body-file pr-body1.md" })]}
+        onResolve={resolved()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /^View / })).toBeNull();
+  });
+
   it("resolves on the spot — one click, no Send", async () => {
     // The whole point of the gate. In the tray an approval had a Send button of
     // its own, which is what let the user answer a row and watch nothing move.
