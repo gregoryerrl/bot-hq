@@ -18,6 +18,92 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-17 (round 7) — the live-evidence round, s-926b3c59
+
+Mandate: audit again (messes, staleness, redundancies, mis/missed
+implementations, refactors), use the round-6 binary as live evidence, read
+`issues.md` and the day's real work session (`s-a4e6da79`). Seventeen commits,
+`016aebe..4f170b4`, all reviewed before commit; the reviewer's own find is one
+of them. Report: the session's I/P/A/V docs; CL learnings in
+`learnings-2026-08-17-round7-the-live-evidence-round.md`.
+
+**Live evidence, both ways.** Rounds 5–6's fixes held on this build: 0061/0062/
+0063 applied and driven (10 vote rows in 3 sessions; epochs equal each session's
+transitions), the durable staged-message clear (`4c0291d`) observed on this
+session's own boundary, `participant_deliveries` clean. And the day's real
+session supplied the round's top findings — every one measured, none inferred.
+
+**A1 — bot-hq's own interrupts counted as failures** (`9569f58`). claude-code
+ends an aborted turn `is_error:true`, so a Pause, a typed-Send preempt or the
+agent's own `halt` (D35 interrupts the declarer) fed the pump's back-to-back-
+error streak; the "⚠ turns are failing back-to-back … close the session" halt
+fired **three times that day, every one over ordinary prose**, and each replaced
+the reason the agent had just declared. `SessionAgent::interrupt` stamps the
+participant's live turn epoch; the pump excludes an `is_error` completion at
+that epoch — keyed on the epoch, not a flag, so an idle-time interrupt cannot
+swallow the next real error. The wire cannot be omitted (non-`Option` cell) or
+bypassed (`AgentHandle::interrupt` is private) — the review's finding.
+
+**A2 — bot-hq in the user's voice** (`df7c4de`). The idle watchdog's chat
+notice and every phase-change notice went through the user-row writer, so since
+D23 put the origin on the wire every participant read `[user] Session idled…`
+and `[user] [PHASE: Apply] …` — the F13 class, live on two sites (rows
+27710/27811 in `s-a4e6da79`; observed in this session too). Both post through
+`core::post_system_notice`; the writer is renamed `insert_user_message` and
+kept with zero production callers on purpose.
+
+**issues.md, all three** — A3 the staged box (`016aebe`): the durable draft
+clear ran only inside a mounted `SessionView`, so a delivery to a session the
+user was not viewing left the sent text to refill the box; staging now drops the
+draft key and `Providers.tsx` clears it for any session. A4 the gate viewer
+(`c60d526`): `FileViewerDialog` + `read_workspace_file` existed and were wired
+only to the pre-D33 tray card; seven `--body-file /tmp/*.md` gates were approved
+unseen that day; the gate card and Details carry the button and relative paths
+resolve against the session's repo. A5 the tray answer (`4f170b4`): the "(out-
+of-band) … no longer waiting on the tool call" body was the PRIMARY delivery
+for every `ask_user_choice` (the tool has not blocked since D35) — 28 rows were
+94.6 % of one session's user-voice channel, one 1,636 chars for `Approve` +
+`exit 0`; now the id, the question and the pick, the menu only for a typed
+answer, the command named once.
+
+**A6/C1 — the descriptors said the opposite of the rules** (`a1475e7`).
+`ask_user_choice`: "the session stays halted until then… stop and wait" beside a
+prompt layer saying it halts nothing; `mark_awaiting_user`: a "non-blocking
+badge" that is the halt; `advance_phase`: "move the chip yourself" a day after
+D37 made it a vote (the reviewer in `s-a4e6da79` worked four minutes past a
+standing vote and never cast its own — no layer told it the vote existed).
+Rewritten as a pair, with the vote's doc-then-vote ordering, and pinned by
+negative guards. The seeded role prose still lacks a vote paragraph (reseed
+migration — approved, deferred to its own slice).
+
+**The reviewer's find: no font ever loaded** (`5d49d44`). `index.css` wrote
+`./fonts/…` while the files live in `public/fonts/`, so the built stylesheet
+404'd Hanken Grotesk, Inter and JetBrains Mono since the migration and no gate
+could see it; `lib/fonts.test.ts` reads the real CSS and the real `public/`.
+
+**Also:** `cl_stale_refs` sees a file named by its stem (30 → 27, predicted and
+measured; `82cda1e`); `session:created` fires for every create — its only
+emitter had been the deleted driver's (`4dbfe62`); dead code and orphaned schema
+(`6f7c2d8`, `7c3a296`, `0732707` migration 0064 drops `forward_events` + a dead
+index, `5e68189` the D9 spikes and Slint fonts); `teardown_session` no longer
+holds the global lock across a `git worktree remove` — one close stalled every
+other session — and the BatchEmitter no longer re-emits a session's whole
+channel on its first touch after launch (`3dcc339`); the changelog carries
+rounds 5 and 6 (`3c81857`); the canonical docs, installer description and
+in-code comments catch up (`ead9d00`, `43362e7`).
+
+**Source changed, not observed — stated:** the descriptor/general-rules text
+(compiled consts; a respawn from the old binary re-injects the old text), the
+A1 exclusion, and migration 0064 all wait for the user's next rebuild + relaunch
+— never done over live sessions. `cl_stale_refs` = 27 measured with a temporary
+test, since the running binary still reports 30.
+
+Suites: **1207** Rust (+ 36 integration) + **430** frontend; clippy 4; `tsc`
+clean; release build green with the fresh dist (fonts under `dist/fonts/`,
+referenced `../fonts/…`).
+
+---
+
 ## 2026-08-17 (round 6) — the instrument round, s-feaeb876
 
 *Written in round 7 (2026-08-17, later the same day): rounds 5 and 6 left no
