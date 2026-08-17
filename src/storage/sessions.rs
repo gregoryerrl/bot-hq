@@ -12,6 +12,24 @@ const SESSION_COLUMNS: &str = "id, title, working_repo_path, created_at, closed_
     (SELECT COUNT(*) > 1 FROM session_participants p \
      WHERE p.session_id = sessions.id AND p.enabled <> 0) AS multi_participant";
 
+/// The Dashboard's active-sessions read with the Quickview preview — a
+/// function so a test can EXPLAIN the production string (see
+/// [`Storage::list_active_sessions_with_preview`]).
+fn list_active_sessions_with_preview_sql() -> String {
+    format!(
+        "SELECT s.*, substr(m.content, 1, 200) AS last_message, m.author AS last_author \
+         FROM (SELECT {SESSION_COLUMNS} FROM sessions \
+               WHERE archived = 0 AND closed_at IS NULL) AS s \
+         LEFT JOIN messages m ON m.id = \
+             (SELECT MAX(m2.id) FROM messages m2 \
+               WHERE m2.session_id = s.id AND m2.kind = 'text') \
+         ORDER BY COALESCE(\
+             (SELECT MAX(m3.created_at) FROM messages m3 WHERE m3.session_id = s.id), \
+             s.created_at) DESC, \
+             s.id ASC"
+    )
+}
+
 impl Storage {
     pub async fn create_session(
         &self,
@@ -219,27 +237,21 @@ impl Storage {
 
     /// Like `list_active_sessions` but each row also carries a cheap preview of
     /// its latest `kind='text'` message (content capped at 200 chars + author),
-    /// for the dashboard Quickview. The two preview subqueries hit the same
-    /// `idx_messages_session_id` index the ORDER BY already uses, so there are
-    /// no extra per-tile round-trips. Dashboard-only consumer (`list_sessions`).
+    /// for the dashboard Quickview. Dashboard-only consumer (`list_sessions`),
+    /// refetched on every (2.5 s-throttled) message batch while a session runs.
+    ///
+    /// ONE preview lookup per session (round 9): the newest text row is found
+    /// once — `MAX(id)` over the `(session_id, id)` index — and joined by
+    /// primary key, projecting both preview columns from that row. It used to
+    /// be two byte-identical correlated subqueries (one per column), each an
+    /// index walk that read full `messages` rows until it met a text row.
+    /// `SESSION_COLUMNS` is unqualified and names `sessions.id` in its own
+    /// subquery, so it stays inside a `FROM sessions` derived table and the
+    /// join happens outside it.
     pub async fn list_active_sessions_with_preview(&self) -> Result<Vec<SessionWithPreview>> {
-        let rows = sqlx::query_as::<_, SessionWithPreview>(&format!(
-            "SELECT {SESSION_COLUMNS}, \
-                    (SELECT substr(m.content, 1, 200) FROM messages m \
-                       WHERE m.session_id = sessions.id AND m.kind = 'text' \
-                       ORDER BY m.id DESC LIMIT 1) AS last_message, \
-                    (SELECT m.author FROM messages m \
-                       WHERE m.session_id = sessions.id AND m.kind = 'text' \
-                       ORDER BY m.id DESC LIMIT 1) AS last_author \
-             FROM sessions \
-             WHERE archived = 0 AND closed_at IS NULL \
-             ORDER BY COALESCE(\
-                 (SELECT MAX(m.created_at) FROM messages m WHERE m.session_id = sessions.id), \
-                 created_at) DESC, \
-                 id ASC"
-        ))
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query_as::<_, SessionWithPreview>(&list_active_sessions_with_preview_sql())
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows)
     }
 
@@ -554,6 +566,25 @@ mod tests {
         let empty = rows.iter().find(|r| r.session.id == "s-empty").unwrap();
         assert!(empty.last_message.is_none());
         assert!(empty.last_author.is_none());
+    }
+
+    /// The preview read finds the newest text row ONCE and by index — pinned
+    /// over the production string (round 9): the join's `MAX(id)` subquery must
+    /// seek the session index, and the row itself is fetched by primary key.
+    #[tokio::test]
+    async fn the_preview_read_finds_the_newest_text_row_once_by_index() {
+        let s = Storage::memory().await.unwrap();
+        let sql = format!("EXPLAIN QUERY PLAN {}", super::list_active_sessions_with_preview_sql());
+        let rows: Vec<(i64, i64, i64, String)> =
+            sqlx::query_as(&sql).fetch_all(s.pool()).await.unwrap();
+        let plan = rows.iter().map(|r| r.3.as_str()).collect::<Vec<_>>().join(" | ");
+        let seeks = plan.matches("SEARCH m2 USING COVERING INDEX idx_messages_session_id").count()
+            + plan.matches("SEARCH m2 USING INDEX idx_messages_session_id").count();
+        assert_eq!(seeks, 1, "one MAX(id) seek for the preview row, got: {plan}");
+        assert!(
+            plan.contains("SEARCH m USING INTEGER PRIMARY KEY"),
+            "the preview row is fetched by primary key, got: {plan}"
+        );
     }
 
     #[tokio::test]
