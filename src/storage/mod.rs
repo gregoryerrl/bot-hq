@@ -55,6 +55,7 @@ pub use row_types::{
     QuestionKind, RetrievalStats, Session, SessionDocument, SessionTrayEntry, SessionWithPreview,
 };
 pub(crate) use time::now_utc;
+pub use messages::{messages_tail_sql, participant_text_since_sql};
 
 /// A user's search text as a `LIKE` pattern: `%…%`, lower-cased, with the
 /// pattern metacharacters escaped so `%`, `_` and `\` in the input match

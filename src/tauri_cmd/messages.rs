@@ -24,13 +24,29 @@ pub async fn get_session_messages(
     before_id: Option<i64>,
     limit: Option<i64>,
 ) -> Result<Vec<AgentMessage>, AppError> {
-    let msgs = match (since_id, limit) {
-        (Some(_), _) => storage.messages_for_session(&session_id, since_id).await,
-        (None, Some(k)) => storage.messages_tail(&session_id, before_id, k).await,
-        (None, None) => storage.messages_for_session(&session_id, None).await,
-    }
-    .map_err(|e| AppError::DbError(e.to_string()))?;
+    let msgs = select_messages(&storage, &session_id, since_id, before_id, limit)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?;
     Ok(msgs.into_iter().map(AgentMessage::from).collect())
+}
+
+/// The command's dispatch, as a plain function so a test can reach it: which
+/// storage read each `(since_id, before_id, limit)` shape becomes. Extracted in
+/// round 9 — the command had NO test caller (its two tests were named after it
+/// and called storage directly), so `before_id` could be dropped on the floor
+/// with a green suite: "load older" would re-serve the newest page forever.
+pub(crate) async fn select_messages(
+    storage: &Storage,
+    session_id: &str,
+    since_id: Option<i64>,
+    before_id: Option<i64>,
+    limit: Option<i64>,
+) -> anyhow::Result<Vec<crate::storage::Message>> {
+    match (since_id, limit) {
+        (Some(_), _) => storage.messages_for_session(session_id, since_id).await,
+        (None, Some(k)) => storage.messages_tail(session_id, before_id, k).await,
+        (None, None) => storage.messages_for_session(session_id, None).await,
+    }
 }
 
 /// Send a user message to a session: one row every participant reads off its
@@ -89,5 +105,39 @@ mod tests {
         let after = storage.messages_for_session("s1", Some(id1)).await.unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].content, "second");
+    }
+
+    /// The three shapes of the dispatch, through the function the command
+    /// wraps. The last case is the kill test: drop `before_id` in
+    /// `select_messages` and "load older" returns the newest page again.
+    #[tokio::test]
+    async fn select_messages_routes_each_shape_to_the_right_read() {
+        let storage = Storage::memory().await.unwrap();
+        storage.create_session("s1", "t", None).await.unwrap();
+        let mut ids = Vec::new();
+        for body in ["m1", "m2", "m3", "m4", "m5"] {
+            ids.push(
+                storage
+                    .post_to_channel("s1", "participant", Some("hands"), MessageKind::Text.as_str(), body, None)
+                    .await
+                    .unwrap()
+                    .message_id(),
+            );
+        }
+        let bodies = |rows: Vec<crate::storage::Message>| {
+            rows.into_iter().map(|m| m.content).collect::<Vec<_>>()
+        };
+        // neither: the whole history, oldest first
+        let all = select_messages(&storage, "s1", None, None, None).await.unwrap();
+        assert_eq!(bodies(all), ["m1", "m2", "m3", "m4", "m5"]);
+        // since_id: everything after it (limit ignored)
+        let since = select_messages(&storage, "s1", Some(ids[2]), None, Some(1)).await.unwrap();
+        assert_eq!(bodies(since), ["m4", "m5"]);
+        // limit: the newest k, chronological
+        let tail = select_messages(&storage, "s1", None, None, Some(2)).await.unwrap();
+        assert_eq!(bodies(tail), ["m4", "m5"]);
+        // limit + before_id: the page BEFORE that row — the "load older" read
+        let older = select_messages(&storage, "s1", None, Some(ids[3]), Some(2)).await.unwrap();
+        assert_eq!(bodies(older), ["m2", "m3"], "before_id must reach messages_tail");
     }
 }

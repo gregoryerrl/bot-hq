@@ -45,10 +45,9 @@ async fn migration_0066_drops_the_unearned_indexes_and_adds_the_seek() {
         assert!(names.iter().any(|n| n == kept), "{kept} must exist: {names:?}");
     }
     // And the spin-detection read seeks on the new index.
-    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
-        "EXPLAIN QUERY PLAN SELECT id, content FROM messages \
-         WHERE participant_id = ? AND kind = 'text' AND id > ? ORDER BY id DESC LIMIT ?",
-    )
+    // The production string, not a copy of it (round 9).
+    let sql = format!("EXPLAIN QUERY PLAN {}", bot_hq::storage::participant_text_since_sql());
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&sql)
     .bind(1_i64)
     .bind(0_i64)
     .bind(64_i64)

@@ -20,6 +20,28 @@ fn messages_since_sql() -> String {
     )
 }
 
+/// The chat's tail page (`messages_tail`): newest first from the
+/// `(session_id, id)` index, `id < COALESCE(?2, ?3)` for the same reason
+/// `messages_since_sql` COALESCEs — an optional bound must not become a
+/// disjunction and lose the seek. `?3` is `i64::MAX`. A test EXPLAINs this
+/// exact string (round 9: it was inline and unpinned on the hotter path).
+pub fn messages_tail_sql() -> String {
+    format!(
+        "SELECT {MESSAGE_COLUMNS} FROM messages \
+         WHERE session_id = ?1 AND id < COALESCE(?2, ?3) ORDER BY id DESC LIMIT ?4"
+    )
+}
+
+/// The spin-detection read (`participant_text_since`): a participant's newest
+/// prose rows after a watermark, served by `idx_messages_participant_kind_id`
+/// (migration 0066). `pub` so `tests/storage_test.rs` EXPLAINs the production
+/// string rather than a hand-copied one.
+pub fn participant_text_since_sql() -> &'static str {
+    "SELECT id, content FROM messages \
+     WHERE participant_id = ? AND kind = 'text' AND id > ? \
+     ORDER BY id DESC LIMIT ?"
+}
+
 impl Storage {
     /// The user-row write path — a `MessageKind` + content shape — expressed as
     /// a thin wrapper over
@@ -135,7 +157,6 @@ impl Storage {
         Ok(n as u64)
     }
 
-    /// All messages for the session, oldest first.
     /// The NEWEST `limit` rows of a session, oldest-first, optionally those
     /// before `before_id` (exclusive) — the chat's mount read and its "load
     /// older" page (round 8, N2). `messages_for_session(sid, None)` has no
@@ -153,10 +174,7 @@ impl Storage {
         // Newest first from the (session_id, id) index, then reversed in
         // memory so callers get chronological order. `COALESCE` keeps the
         // seek (see `messages_since_sql`); i64::MAX is above every id.
-        let mut rows = sqlx::query_as::<_, Message>(&format!(
-            "SELECT {MESSAGE_COLUMNS} FROM messages \
-             WHERE session_id = ?1 AND id < COALESCE(?2, ?3) ORDER BY id DESC LIMIT ?4"
-        ))
+        let mut rows = sqlx::query_as::<_, Message>(&messages_tail_sql())
         .bind(session_id)
         .bind(before_id)
         .bind(i64::MAX)
@@ -214,11 +232,7 @@ impl Storage {
         since_id: i64,
         limit: i64,
     ) -> Result<Option<(String, i64)>> {
-        let rows: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT id, content FROM messages \
-             WHERE participant_id = ? AND kind = 'text' AND id > ? \
-             ORDER BY id DESC LIMIT ?",
-        )
+        let rows: Vec<(i64, String)> = sqlx::query_as(participant_text_since_sql())
         .bind(participant_id)
         .bind(since_id)
         .bind(limit)
@@ -289,6 +303,28 @@ mod tests {
         assert!(
             plan.contains("session_id=?") && plan.contains("id>?"),
             "the read must seek on (session_id, id), got: {plan}"
+        );
+    }
+
+    /// The tail page seeks too (round 9): same COALESCE idiom, same index,
+    /// pinned over the production string like the watermark read — this is the
+    /// mount read and every "load older" click, the hotter of the two.
+    #[tokio::test]
+    async fn the_tail_page_seeks_below_its_bound() {
+        let s = Storage::memory().await.unwrap();
+        let sql = format!("EXPLAIN QUERY PLAN {}", super::messages_tail_sql());
+        let rows: Vec<(i64, i64, i64, String)> = sqlx::query_as(&sql)
+            .bind("s1")
+            .bind(Some(10_i64))
+            .bind(i64::MAX)
+            .bind(300_i64)
+            .fetch_all(s.pool())
+            .await
+            .unwrap();
+        let plan = rows.iter().map(|r| r.3.as_str()).collect::<Vec<_>>().join(" | ");
+        assert!(
+            plan.contains("session_id=?") && plan.contains("id<?"),
+            "the tail read must seek on (session_id, id), got: {plan}"
         );
     }
 
