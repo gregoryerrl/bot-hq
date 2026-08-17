@@ -1262,8 +1262,21 @@ async fn call_tool(
                     "bridge data_dir not configured (test bridge?)".to_string(),
                 )
             })?;
-            let path = crate::tauri_cmd::screenshot::capture_main_window(handle, data_dir)
-                .map_err(internal_err_no_prefix)?;
+            // `capture_main_window` sleeps 150 ms and waits on a `screencapture`
+            // child — blocking work, on a 2-worker runtime; off the reactor.
+            let handle = handle.clone();
+            let data_dir = data_dir.to_path_buf();
+            let path = tokio::task::spawn_blocking(move || {
+                crate::tauri_cmd::screenshot::capture_main_window(&handle, &data_dir)
+            })
+            .await
+            .map_err(|e| {
+                JsonRpcError::new(
+                    JsonRpcError::INTERNAL_ERROR,
+                    format!("screenshot task failed: {e}"),
+                )
+            })?
+            .map_err(internal_err_no_prefix)?;
             Ok(result_json(
                 &json!({ "path": path.display().to_string() }),
                 "{}",

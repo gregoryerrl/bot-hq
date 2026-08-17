@@ -344,8 +344,20 @@ impl SignalingBridge {
             .map(PathBuf::from);
 
         // Walk disk; collect relative_path -> WalkedFile { mtime, snippet, body }.
-        let mut on_disk: HashMap<String, WalkedFile> = HashMap::new();
-        walk_cl_dir(&root, &root, project, &mut on_disk);
+        // Sync `read_to_string` per file, off the reactor: the library is a
+        // few hundred files today and grows, and this runs on the fs-watcher
+        // path as well as the MCP one.
+        let on_disk: HashMap<String, WalkedFile> = {
+            let root = root.clone();
+            let project = project.to_string();
+            tokio::task::spawn_blocking(move || {
+                let mut out = HashMap::new();
+                walk_cl_dir(&root, &root, &project, &mut out);
+                out
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("CL walk task failed: {e}"))?
+        };
 
         // Existing rows.
         let existing = storage.cl_index_search(Some(project), None).await?;

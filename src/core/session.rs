@@ -743,9 +743,14 @@ async fn spawn_session_handle(
     // cannot start.
     let ipav = Arc::new(Mutex::new(
         match storage.persisted_ipav_phase(&session.id).await {
-            Ok(Some(tag)) => IpavState {
-                current_phase: IpavPhase::parse(&tag).unwrap_or_default(),
-            },
+            Ok(Some(tag)) => {
+                // Observable: until round 8 the restore left no trace, so the
+                // only evidence it ran was the chip.
+                tracing::debug!(session_id = %session.id, phase = %tag, "restored the persisted IPAV phase");
+                IpavState {
+                    current_phase: IpavPhase::parse(&tag).unwrap_or_default(),
+                }
+            }
             Ok(None) => IpavState::default(),
             Err(e) => {
                 warn!(?e, session_id = %session.id, "reading the persisted IPAV phase");
