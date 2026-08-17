@@ -162,12 +162,20 @@ impl SignalingBridge {
     /// resolves through [`Storage::display_name_of`], so a third role reviewing
     /// is attributed as itself instead of as somebody else; an unreadable roster
     /// degrades to an unattributed header rather than to a wrong name.
+    ///
+    /// `append` means the same thing it means on [`Self::session_doc_write`]:
+    /// the new body lands under a timestamped separator below the existing
+    /// review doc, nothing is archived. Round 9: this path took no `append` at
+    /// all, so a reviewer's `mode:"append"` — the mode the descriptor sells to
+    /// every caller — silently REPLACED its own findings; the participant the
+    /// `<phase>-eyes` redirect exists to protect was the one it destroyed for.
     pub async fn session_doc_write_eyes(
         &self,
         session_id: &str,
         phase: &str,
         body: &str,
         author_slug: &str,
+        append: bool,
     ) -> Result<(i64, String)> {
         let slug = format!("{phase}-eyes");
         let author = self.participant_display_name(session_id, author_slug).await;
@@ -175,15 +183,36 @@ impl SignalingBridge {
             Some(name) => format!("### Review findings — {name}"),
             None => "### Review findings".to_string(),
         };
-        let attributed = format!("{heading}\n\n{body}");
         let id = {
             let storage_guard = self.storage.lock().await;
             let Some(storage) = storage_guard.as_ref() else {
                 return Err(anyhow::anyhow!("storage not configured"));
             };
-            Self::archive_superseded_doc(storage, session_id, &slug, &attributed).await;
+            let existing = if append {
+                storage
+                    .session_document_by_slug(session_id, &slug)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|d| d.body)
+            } else {
+                None
+            };
+            let composed = match existing {
+                // The heading is already at the top of the existing doc; an
+                // appended slice goes under the separator, not under a second
+                // heading.
+                Some(prev) => format!(
+                    "{prev}\n\n---\n_appended {}_\n\n{body}",
+                    crate::storage::now_utc()
+                ),
+                None => format!("{heading}\n\n{body}"),
+            };
+            if !append {
+                Self::archive_superseded_doc(storage, session_id, &slug, &composed).await;
+            }
             storage
-                .upsert_session_document(session_id, &slug, &attributed, Some(phase))
+                .upsert_session_document(session_id, &slug, &composed, Some(phase))
                 .await?
         };
         let _ = self.event_tx.send(SignalingEvent::DocChanged {
@@ -260,7 +289,7 @@ mod tests {
             .await
             .unwrap();
         let (_, eyes_slug) = bridge
-            .session_doc_write_eyes("s1", "plan", "the reviewer's notes", "eyes")
+            .session_doc_write_eyes("s1", "plan", "the reviewer's notes", "eyes", false)
             .await
             .unwrap();
         assert_eq!(eyes_slug, "plan-eyes");
@@ -320,7 +349,7 @@ mod tests {
         let expected = storage.display_name_of(&reviewer).await;
 
         bridge
-            .session_doc_write_eyes("s1", "plan", "the review", "eyes")
+            .session_doc_write_eyes("s1", "plan", "the review", "eyes", false)
             .await
             .unwrap();
 
@@ -484,8 +513,8 @@ mod tests {
         bridge.set_storage(storage.clone()).await;
         storage.create_session("s1", "test", None).await.unwrap();
 
-        bridge.session_doc_write_eyes("s1", "verify", "verdict v1", "eyes").await.unwrap();
-        bridge.session_doc_write_eyes("s1", "verify", "verdict v2", "eyes").await.unwrap();
+        bridge.session_doc_write_eyes("s1", "verify", "verdict v1", "eyes", false).await.unwrap();
+        bridge.session_doc_write_eyes("s1", "verify", "verdict v2", "eyes", false).await.unwrap();
 
         let archived = bridge
             .session_doc_read("s1", "verify-eyes@1")
@@ -494,5 +523,40 @@ mod tests {
             .expect("superseded eyes verdict archived");
         assert!(archived.body.contains("verdict v1"));
         assert!(archived.phase.is_none(), "archive is untagged");
+    }
+
+    /// Round 9: `mode:"append"` reached the reviewer branch and was DROPPED —
+    /// `session_doc_write_eyes` took no `append`, archived, and replaced. A
+    /// reviewer appending its second slice of findings destroyed the first,
+    /// which is precisely the participant the co-located doc exists to serve.
+    /// RED before the fix: the second body replaced the first.
+    #[tokio::test]
+    async fn a_reviewers_append_keeps_the_earlier_findings() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        bridge
+            .session_doc_write_eyes("s1", "investigate", "E1 the wire is unpinned", "eyes", false)
+            .await
+            .unwrap();
+        bridge
+            .session_doc_write_eyes("s1", "investigate", "E2 a stray doc line", "eyes", true)
+            .await
+            .unwrap();
+
+        let doc = bridge
+            .session_doc_read("s1", "investigate-eyes")
+            .await
+            .unwrap()
+            .expect("the review doc exists");
+        assert!(doc.body.contains("E1 the wire is unpinned"), "first slice lost: {}", doc.body);
+        assert!(doc.body.contains("E2 a stray doc line"), "second slice missing: {}", doc.body);
+        assert!(doc.body.contains("_appended "), "no separator: {}", doc.body);
+        assert_eq!(doc.body.matches("### Review findings").count(), 1, "one heading, not two");
+        assert_eq!(doc.phase.as_deref(), Some("investigate"));
+        // An append supersedes nothing — no archive row.
+        assert!(bridge.session_doc_read("s1", "investigate-eyes@1").await.unwrap().is_none());
     }
 }

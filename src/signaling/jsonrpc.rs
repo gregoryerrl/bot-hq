@@ -925,7 +925,7 @@ async fn call_tool(
             };
             // A reviewer contributing to a phase doc must not overwrite the
             // executor's single per-phase doc. Route a phase-tagged REVIEWER
-            // write to a co-located, attributed `<phase>-review` doc (same phase
+            // write to a co-located, attributed `<phase>-eyes` doc (same phase
             // tag → same IPAV tab). Untagged reviewer scratch writes fall
             // through to the normal overwrite path.
             //
@@ -946,7 +946,7 @@ async fn call_tool(
             ) {
                 (true, Some(p)) => {
                     let (id, eyes_slug) = bridge
-                        .session_doc_write_eyes(&caller.session_id, p, &body, &caller.agent)
+                        .session_doc_write_eyes(&caller.session_id, p, &body, &caller.agent, append)
                         .await
                         .map_err(internal_err_no_prefix)?;
                     Ok(ToolCallResult::text(
@@ -2819,6 +2819,50 @@ mod tests {
             plan.body, "the plan",
             "the reviewer's write must not have overwritten the phase doc"
         );
+    }
+
+    /// **`mode:"append"` must survive the reviewer redirect** (round 9). The
+    /// reviewer arm called `session_doc_write_eyes` with no `append` at all, so a
+    /// reviewer's append — the descriptor sells the mode to every caller — was
+    /// archived-and-replaced: its earlier findings destroyed by its own second
+    /// slice. Wire-level: through `dispatch`, as the reviewer, twice.
+    #[tokio::test]
+    async fn a_reviewers_append_reaches_the_review_doc_as_an_append() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+        let reviewer = CallerIdentity {
+            session_id: "s1".into(),
+            agent: "eyes".into(),
+            capabilities: crate::agents::ResolvedCapabilities::Known(
+                crate::agents::CapabilitySet::preset_eyes(),
+            ),
+        };
+        for (body, mode) in [("E1 first slice", "replace"), ("E2 second slice", "append")] {
+            dispatch(
+                req(
+                    "tools/call",
+                    json!({
+                        "name": "session_doc_write",
+                        "arguments": {"slug": "investigate", "body": body, "phase": "investigate", "mode": mode}
+                    }),
+                    1,
+                ),
+                &reviewer,
+                &bridge,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        let doc = bridge
+            .session_doc_read("s1", "investigate-eyes")
+            .await
+            .unwrap()
+            .expect("the review doc");
+        assert!(doc.body.contains("E1 first slice"), "the append replaced the first slice: {}", doc.body);
+        assert!(doc.body.contains("E2 second slice"), "{}", doc.body);
     }
 
     /// Both docs land under the SAME phase tag, which is what puts them in one
