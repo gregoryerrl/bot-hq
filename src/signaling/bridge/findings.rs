@@ -439,7 +439,7 @@ mod tests {
         let uid = bridge
             .eyes_flag(
                 "s1".into(),
-                "rain".into(),
+                "eyes".into(),
                 FindingSeverity::Blocking,
                 "NPE: job reads adAccount->id but command aliased it away".into(),
                 Some("ReconcileMetaData.php:42".into()),
@@ -452,7 +452,7 @@ mod tests {
         assert!(blocked.contains(&uid), "block message lists the uid: {blocked}");
 
         let res = bridge
-            .disposition_finding(uid, FindingStatus::Fixed, "fixed in abc123".into(), "brian".into())
+            .disposition_finding(uid, FindingStatus::Fixed, "fixed in abc123".into(), "hands".into())
             .await
             .unwrap();
         assert!(res.contains("fixed"), "got: {res}");
@@ -465,7 +465,7 @@ mod tests {
         bridge
             .eyes_flag(
                 "s1".into(),
-                "rain".into(),
+                "eyes".into(),
                 FindingSeverity::Advisory,
                 "nit: rename a variable".into(),
                 None,
@@ -483,7 +483,7 @@ mod tests {
     async fn disposition_unknown_uid_is_noop() {
         let bridge = bridge_with_session("s1").await;
         let res = bridge
-            .disposition_finding("nope".into(), FindingStatus::Fixed, "x".into(), "brian".into())
+            .disposition_finding("nope".into(), FindingStatus::Fixed, "x".into(), "hands".into())
             .await
             .unwrap();
         assert!(res.contains("no-op"), "got: {res}");
@@ -502,12 +502,12 @@ mod tests {
         storage.create_session("s1", "t", None).await.unwrap();
 
         let uid = bridge
-            .eyes_flag("s1".into(), "rain".into(), FindingSeverity::Blocking, "same bug".into(), None)
+            .eyes_flag("s1".into(), "eyes".into(), FindingSeverity::Blocking, "same bug".into(), None)
             .await
             .unwrap();
         // Re-flag with NO Brian turn since → dedups to the same finding, NO bump.
         let uid2 = bridge
-            .eyes_flag("s1".into(), "rain".into(), FindingSeverity::Blocking, "same bug".into(), None)
+            .eyes_flag("s1".into(), "eyes".into(), FindingSeverity::Blocking, "same bug".into(), None)
             .await
             .unwrap();
         assert_eq!(uid, uid2, "re-flag dedups to the same finding id");
@@ -530,7 +530,7 @@ mod tests {
             .unwrap();
         // Re-flag now that Brian has had a turn → escalates.
         let uid3 = bridge
-            .eyes_flag("s1".into(), "rain".into(), FindingSeverity::Blocking, "same bug".into(), None)
+            .eyes_flag("s1".into(), "eyes".into(), FindingSeverity::Blocking, "same bug".into(), None)
             .await
             .unwrap();
         assert_eq!(uid, uid3);
@@ -548,12 +548,12 @@ mod tests {
         bridge.set_storage(storage.clone()).await;
         storage.create_session("s1", "t", None).await.unwrap();
         let uid = bridge
-            .eyes_flag("s1".into(), "rain".into(), FindingSeverity::Blocking, "bug".into(), None)
+            .eyes_flag("s1".into(), "eyes".into(), FindingSeverity::Blocking, "bug".into(), None)
             .await
             .unwrap();
         // HANDS fixes (gate clears); escalation still awaits EYES confirm.
         bridge
-            .disposition_finding(uid.clone(), FindingStatus::Fixed, "fixed".into(), "brian".into())
+            .disposition_finding(uid.clone(), FindingStatus::Fixed, "fixed".into(), "hands".into())
             .await
             .unwrap();
         assert_eq!(storage.get_finding(&uid).await.unwrap().unwrap().eyes_approved, 0);

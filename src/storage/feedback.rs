@@ -116,7 +116,7 @@ mod tests {
         s.insert_feedback(
             "s-datahub",
             Some("bcc-data-hub-ingest"),
-            "brian",
+            "hands",
             "issue",
             "Gate command is unreadable",
             "The body-file content never renders.",
@@ -128,22 +128,22 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].project.as_deref(), Some("bcc-data-hub-ingest"));
         assert_eq!(all[0].status, "open");
-        assert_eq!(all[0].agent, "brian");
+        assert_eq!(all[0].agent, "hands");
     }
 
     #[tokio::test]
     async fn either_agent_may_file() {
         let s = db().await;
         s.create_session("s1", "t", None).await.unwrap();
-        s.insert_feedback("s1", None, "brian", "issue", "a", "b")
+        s.insert_feedback("s1", None, "hands", "issue", "a", "b")
             .await
             .unwrap();
-        s.insert_feedback("s1", None, "rain", "idea", "c", "d")
+        s.insert_feedback("s1", None, "eyes", "idea", "c", "d")
             .await
             .unwrap();
         let all = s.list_feedback(None).await.unwrap();
         let agents: Vec<_> = all.iter().map(|f| f.agent.as_str()).collect();
-        assert!(agents.contains(&"brian") && agents.contains(&"rain"));
+        assert!(agents.contains(&"hands") && agents.contains(&"eyes"));
     }
 
     #[tokio::test]
@@ -151,7 +151,7 @@ mod tests {
         let s = db().await;
         s.create_session("s1", "t", None).await.unwrap();
         let id = s
-            .insert_feedback("s1", None, "rain", "idea", "batch approvals", "…")
+            .insert_feedback("s1", None, "eyes", "idea", "batch approvals", "…")
             .await
             .unwrap();
         assert_eq!(s.open_feedback_count().await.unwrap(), 1);
@@ -172,10 +172,10 @@ mod tests {
     async fn newest_first() {
         let s = db().await;
         s.create_session("s1", "t", None).await.unwrap();
-        s.insert_feedback("s1", None, "brian", "issue", "first", "…")
+        s.insert_feedback("s1", None, "hands", "issue", "first", "…")
             .await
             .unwrap();
-        s.insert_feedback("s1", None, "brian", "issue", "second", "…")
+        s.insert_feedback("s1", None, "hands", "issue", "second", "…")
             .await
             .unwrap();
         let all = s.list_feedback(None).await.unwrap();

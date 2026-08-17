@@ -270,7 +270,7 @@ mod tests {
         let emitter = BatchEmitter::new(|_| {}, storage);
         let ev = SignalingEvent::AwaitingUser {
             session_id: "s1".into(),
-            agent: "brian".into(),
+            agent: "hands".into(),
             reason: "test reason".into(),
         };
 
@@ -294,7 +294,7 @@ mod tests {
         let emitter = BatchEmitter::new(|_| {}, storage);
         let ev = SignalingEvent::AgentAdvancePhase {
             session_id: "s1".into(),
-            agent: "brian".into(),
+            agent: "hands".into(),
             target: "Apply".into(),
         };
 
@@ -350,7 +350,7 @@ mod tests {
         let emitter = BatchEmitter::new(|_| {}, storage);
         let ev = SignalingEvent::AgentHealth {
             session_id: "s1".into(),
-            agent: "brian".into(),
+            agent: "hands".into(),
             health: "retrying".into(),
         };
         route(ev, &emitter, &move |name: &str, payload: Value| {
@@ -359,7 +359,7 @@ mod tests {
         let captured = captured_events.lock().unwrap();
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].0, AgentHealthEvent::EVENT_NAME);
-        assert_eq!(captured[0].1["agent"], "brian");
+        assert_eq!(captured[0].1["agent"], "hands");
         assert_eq!(captured[0].1["health"], "retrying");
     }
 

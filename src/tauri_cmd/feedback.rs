@@ -89,7 +89,7 @@ mod tests {
         // project is where the friction was HIT; the subject is always bot-hq.
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.insert_feedback("s1", Some("bcc-data-hub-ingest"), "rain", "idea", "t", "b")
+        s.insert_feedback("s1", Some("bcc-data-hub-ingest"), "eyes", "idea", "t", "b")
             .await
             .unwrap();
         let v: Vec<AgentFeedbackView> = s
@@ -100,7 +100,7 @@ mod tests {
             .map(AgentFeedbackView::from)
             .collect();
         assert_eq!(v[0].project.as_deref(), Some("bcc-data-hub-ingest"));
-        assert_eq!(v[0].agent, "rain");
+        assert_eq!(v[0].agent, "eyes");
         assert_eq!(v[0].status, "open");
     }
 

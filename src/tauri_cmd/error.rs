@@ -87,7 +87,7 @@ mod tests {
         // outermost context (which is all plain `to_string()` would give).
         let root = std::io::Error::new(std::io::ErrorKind::NotFound, "os error 206");
         let chained =
-            anyhow::Error::new(root).context("spawning claude-code for agent rain");
+            anyhow::Error::new(root).context("spawning claude-code for agent eyes");
         let AppError::Internal(msg) = AppError::from(chained) else {
             panic!("expected Internal");
         };

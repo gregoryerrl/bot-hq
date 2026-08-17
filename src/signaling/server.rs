@@ -485,16 +485,16 @@ mod tests {
 
     #[test]
     fn parse_path_ok() {
-        let p = parse_path("/sessions/abc-123/brian/mcp").unwrap();
+        let p = parse_path("/sessions/abc-123/hands/mcp").unwrap();
         assert_eq!(p.session_id, "abc-123");
-        assert_eq!(p.agent, "brian");
+        assert_eq!(p.agent, "hands");
     }
 
     #[test]
     fn parse_path_reject() {
         assert!(parse_path("/").is_none());
-        assert!(parse_path("/sessions/abc/brian").is_none());
-        assert!(parse_path("/other/abc/brian/mcp").is_none());
+        assert!(parse_path("/sessions/abc/hands").is_none());
+        assert!(parse_path("/other/abc/hands/mcp").is_none());
     }
 
     #[tokio::test]
@@ -517,7 +517,7 @@ mod tests {
         let client_a = client.clone();
         let call = tokio::spawn(async move {
             let body =
-                json!({ "session_id": "s1", "agent": "brian", "branch": "main" }).to_string();
+                json!({ "session_id": "s1", "agent": "hands", "branch": "main" }).to_string();
             let resp = client_a
                 .post(&url_a)
                 .header("content-type", "application/json")
@@ -541,7 +541,7 @@ mod tests {
         // Reject → {"approved": false}. Also covers the no-branch body shape.
         let mut sub = bridge.subscribe();
         let call = tokio::spawn(async move {
-            let body = json!({ "session_id": "s1", "agent": "brian" }).to_string();
+            let body = json!({ "session_id": "s1", "agent": "hands" }).to_string();
             let resp = client
                 .post(&url)
                 .header("content-type", "application/json")
@@ -596,7 +596,7 @@ mod tests {
             }
         };
 
-        let body = json!({ "session_id": "s1", "agent": "brian", "command": "gh pr create -t x" })
+        let body = json!({ "session_id": "s1", "agent": "hands", "command": "gh pr create -t x" })
             .to_string();
         let (status, txt) = post(body.clone()).await;
         assert_eq!(status, StatusCode::OK);
@@ -630,7 +630,7 @@ mod tests {
         let resp = reqwest::Client::new()
             .post(&url)
             .header("content-type", "application/json")
-            .body(json!({ "agent": "brian" }).to_string())
+            .body(json!({ "agent": "hands" }).to_string())
             .send()
             .await
             .unwrap();
@@ -720,11 +720,11 @@ mod tests {
     #[test]
     fn mcp_config_shape() {
         let addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
-        let s = mcp_config_json(addr, "sess1", "brian", None, &serde_json::Map::new());
+        let s = mcp_config_json(addr, "sess1", "hands", None, &serde_json::Map::new());
         assert!(s.contains("mcpServers"));
         assert!(s.contains("bot-hq-signaling"));
         assert!(s.contains("\"type\": \"http\""));
-        assert!(s.contains("http://127.0.0.1:54321/sessions/sess1/brian/mcp"));
+        assert!(s.contains("http://127.0.0.1:54321/sessions/sess1/hands/mcp"));
     }
 
     #[test]
@@ -735,7 +735,7 @@ mod tests {
             "chrome-devtools".into(),
             json!({ "command": "node", "args": ["main.js"] }),
         );
-        let s = mcp_config_json(addr, "sess1", "brian", None, &extras);
+        let s = mcp_config_json(addr, "sess1", "hands", None, &extras);
         let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
         let servers = parsed
             .get("mcpServers")

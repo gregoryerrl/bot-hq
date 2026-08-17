@@ -359,7 +359,7 @@ mod tests {
             s.insert_tray_entry(
                 sid,
                 cid,
-                "brian",
+                "hands",
                 QuestionKind::Choice,
                 "Run gated command?",
                 Some(&opts),
@@ -449,7 +449,7 @@ mod tests {
         s.insert_tray_entry(
             "open-1",
             "c-open",
-            "brian",
+            "hands",
             QuestionKind::Choice,
             "q?",
             Some(&opts),
@@ -461,7 +461,7 @@ mod tests {
         s.insert_tray_entry(
             "closed-1",
             "c-closed",
-            "brian",
+            "hands",
             QuestionKind::Choice,
             "q?",
             Some(&opts),
@@ -509,7 +509,7 @@ mod tests {
             s.insert_tray_entry(
                 "s1",
                 cid,
-                "brian",
+                "hands",
                 QuestionKind::Choice,
                 "q?",
                 Some(&opts),

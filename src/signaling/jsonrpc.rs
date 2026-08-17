@@ -1334,7 +1334,7 @@ mod tests {
     fn caller() -> CallerIdentity {
         CallerIdentity {
             session_id: "s1".into(),
-            agent: "brian".into(),
+            agent: "hands".into(),
             capabilities: crate::agents::ResolvedCapabilities::Known(
                 crate::agents::CapabilitySet::preset_hands(),
             ),
@@ -1345,7 +1345,7 @@ mod tests {
     fn eyes_caller() -> CallerIdentity {
         CallerIdentity {
             session_id: "s1".into(),
-            agent: "rain".into(),
+            agent: "eyes".into(),
             capabilities: crate::agents::ResolvedCapabilities::Known(
                 crate::agents::CapabilitySet::preset_eyes(),
             ),
@@ -1432,7 +1432,7 @@ mod tests {
                 archive,
             } => {
                 assert_eq!(session_id, "s1");
-                assert_eq!(agent, "brian");
+                assert_eq!(agent, "hands");
                 assert!(!archive);
             }
             other => panic!("expected SessionCloseRequest, got {other:?}"),
@@ -1526,7 +1526,7 @@ mod tests {
         bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "vision.md".to_string(),
                 "The harness is the core of it, restated at a similar length.".to_string(),
@@ -1615,7 +1615,7 @@ mod tests {
             assert_eq!(
                 v["result"]["isError"],
                 json!(true),
-                "tool {tool} should return is_error=true for rain"
+                "tool {tool} should return is_error=true for eyes"
             );
             let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
             // The refusal names the CAPABILITY it needed, not the role that has
@@ -2151,7 +2151,7 @@ mod tests {
                 json!({"name": "cl_write_file", "arguments": {
                     "project": "bot-hq",
                     "file_path": "notes.md",
-                    "content": "rain-authored"
+                    "content": "eyes-authored"
                 }}),
                 1,
             ),
@@ -2388,7 +2388,7 @@ mod tests {
         match ev {
             SignalingEvent::AgentAdvancePhase { target, agent, .. } => {
                 assert_eq!(target, "Apply");
-                assert_eq!(agent, "brian");
+                assert_eq!(agent, "hands");
             }
             other => panic!("expected AgentAdvancePhase, got {other:?}"),
         }
@@ -2522,7 +2522,7 @@ mod tests {
         assert_eq!(
             v["result"]["isError"],
             json!(false),
-            "rain should be allowed to call request_phase_advance"
+            "eyes should be allowed to call request_phase_advance"
         );
     }
 
@@ -3018,7 +3018,7 @@ mod tests {
                 "tools/call",
                 json!({
                     "name": "session_doc_write",
-                    "arguments": {"slug": "rain-scratch", "body": "my notes"}
+                    "arguments": {"slug": "eyes-scratch", "body": "my notes"}
                 }),
                 1,
             ),
@@ -3032,10 +3032,10 @@ mod tests {
         assert_ne!(
             v["result"]["isError"],
             json!(true),
-            "rain's untagged scratch doc must be allowed"
+            "eyes's untagged scratch doc must be allowed"
         );
         let read = bridge
-            .session_doc_read("s1", "rain-scratch")
+            .session_doc_read("s1", "eyes-scratch")
             .await
             .unwrap();
         assert!(read.is_some(), "untagged scratch doc should persist");

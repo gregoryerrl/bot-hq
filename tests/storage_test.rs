@@ -78,7 +78,7 @@ async fn pending_tray_open_sessions_excludes_closed() {
         s.insert_tray_entry(
             sid,
             cid,
-            "brian",
+            "hands",
             QuestionKind::Choice,
             "go?",
             Some(&opts),
@@ -110,7 +110,7 @@ async fn withdraw_pending_tray_for_session_scoped_and_only_pending() {
         s.insert_tray_entry(
             sid,
             cid,
-            "brian",
+            "hands",
             QuestionKind::Choice,
             "q",
             Some(&opts),
@@ -262,7 +262,7 @@ async fn upsert_agent_config_inserts_new_via_constructor() {
 async fn agent_config_round_trips_every_column_it_still_projects() {
     let s = Storage::memory().await.unwrap();
     let cfg = AgentConfig {
-        agent_name: "rain".into(),
+        agent_name: "eyes".into(),
         provider: "deepseek".into(),
         model_name: "deepseek-v4-pro".into(),
         base_url: Some("https://api.deepseek.com/anthropic".into()),
@@ -272,7 +272,7 @@ async fn agent_config_round_trips_every_column_it_still_projects() {
     };
     s.upsert_agent_config(&cfg).await.unwrap();
 
-    let got = s.get_agent_config("rain").await.unwrap().unwrap();
+    let got = s.get_agent_config("eyes").await.unwrap().unwrap();
     assert_eq!(got.provider, "deepseek");
     assert_eq!(got.model_name, "deepseek-v4-pro");
     assert_eq!(
@@ -289,7 +289,7 @@ async fn agent_config_round_trips_every_column_it_still_projects() {
         ..got
     };
     s.upsert_agent_config(&back).await.unwrap();
-    let got = s.get_agent_config("rain").await.unwrap().unwrap();
+    let got = s.get_agent_config("eyes").await.unwrap().unwrap();
     assert_eq!(got.context_window, None);
 }
 

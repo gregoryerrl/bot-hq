@@ -303,7 +303,7 @@ mod tests {
             .await
             .unwrap();
         // Audit row so the full cl_reads -> cl_index -> projects cascade is hit.
-        s.record_cl_read(cl_id, Some("s1"), "brian").await.unwrap();
+        s.record_cl_read(cl_id, Some("s1"), "hands").await.unwrap();
         assert_eq!(s.cl_reads_for_session("s1").await.unwrap().len(), 1);
 
         s.delete_project("p").await.unwrap();

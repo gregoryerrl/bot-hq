@@ -545,11 +545,11 @@ mod tests {
         );
         write(
             &dir.path().join("library/projects/foo/policy.yaml"),
-            "forbidden_in_commits:\n  - bot-hq\n  - brian\n",
+            "forbidden_in_commits:\n  - bot-hq\n  - hands\n",
         );
         let p = Policy::resolve(dir.path(), Some("foo"), None).unwrap();
         // overlay replaces (not merges): only project list wins
-        assert_eq!(p.forbidden_in_commits, vec!["bot-hq", "brian"]);
+        assert_eq!(p.forbidden_in_commits, vec!["bot-hq", "hands"]);
     }
 
     #[test]
@@ -699,7 +699,7 @@ mod tests {
         // bot-hq forbids — written synthetically so this test file doesn't itself
         // trip the (now word-boundary) pre-commit scan it's testing.
         p.forbidden_in_commits =
-            vec!["rain".into(), "Acme".into(), "Hyphen-Joined-Tag".into(), "Zeta".into()];
+            vec!["eyes".into(), "Acme".into(), "Hyphen-Joined-Tag".into(), "Zeta".into()];
 
         // The reported false positives no longer trip (substring, not whole word).
         for ok in [
@@ -715,8 +715,8 @@ mod tests {
         }
 
         // Genuine whole-word brand/footer mentions still caught.
-        assert_eq!(p.first_forbidden_word("let it rain"), Some("rain"));
-        assert_eq!(p.first_forbidden_word("(rain)"), Some("rain"));
+        assert_eq!(p.first_forbidden_word("let it eyes"), Some("eyes"));
+        assert_eq!(p.first_forbidden_word("(eyes)"), Some("eyes"));
         assert_eq!(p.first_forbidden_word("ship Acme Opus"), Some("Acme"));
         assert_eq!(p.first_forbidden_word("the Acme: model"), Some("Acme"));
         assert_eq!(
@@ -728,11 +728,11 @@ mod tests {
 
     #[test]
     fn contains_word_boundary_semantics() {
-        assert!(contains_word("let it rain", "rain"));
-        assert!(contains_word("rain.", "rain"));
-        assert!(!contains_word("constraint", "rain"));
+        assert!(contains_word("let it eyes", "eyes"));
+        assert!(contains_word("eyes.", "eyes"));
+        assert!(!contains_word("constraint", "eyes"));
         assert!(!contains_word("AcmeConfig", "Acme"));
-        assert!(!contains_word("eyes_check", "rain")); // `_` is a word char
+        assert!(!contains_word("eyes_check", "eyes")); // `_` is a word char
         assert!(contains_word("bot-hq is here", "bot-hq")); // hyphen edges are boundaries
         assert!(!contains_word("anything", "")); // empty needle never matches
     }
@@ -752,7 +752,7 @@ mod tests {
         // identifier does not trip.
         assert!(!contains_word("fooacmeconfig", "Acme"));
         assert!(!contains_word("acme_config", "Acme")); // `_` is a word char
-        assert!(!contains_word("constraint", "rain"));
+        assert!(!contains_word("constraint", "eyes"));
     }
 
     #[test]

@@ -350,7 +350,7 @@ mod tests {
         let ack = bridge
             .ask_user_choice(
                 "s1".into(),
-                "brian".into(),
+                "hands".into(),
                 "pick".into(),
                 vec!["Yes".into(), "No".into()],
             )
@@ -391,7 +391,7 @@ mod tests {
             id: 1,
             session_id: "s".into(),
             choice_id: "c".into(),
-            agent: "brian".into(),
+            agent: "hands".into(),
             kind: "choice".into(),
             prompt: "Run gated command?".into(),
             options_json: Some(r#"["Approve","Reject"]"#.into()),

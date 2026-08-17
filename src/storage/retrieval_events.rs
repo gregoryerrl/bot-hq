@@ -119,13 +119,13 @@ mod tests {
         let s = mem().await;
         // Two events in project "p": one 3-atom/300-tok with a stale hit, one
         // empty (retrieval miss). A third event in "other" must not leak in.
-        s.log_retrieval_event(Some("s1"), Some("brian"), "p", "commit hooks", 3, 300, 3000, 1, "[]")
+        s.log_retrieval_event(Some("s1"), Some("hands"), "p", "commit hooks", 3, 300, 3000, 1, "[]")
             .await
             .unwrap();
-        s.log_retrieval_event(Some("s1"), Some("brian"), "p", "no match here", 0, 0, 3000, 0, "[]")
+        s.log_retrieval_event(Some("s1"), Some("hands"), "p", "no match here", 0, 0, 3000, 0, "[]")
             .await
             .unwrap();
-        s.log_retrieval_event(Some("s2"), Some("rain"), "other", "x", 5, 500, 3000, 0, "[]")
+        s.log_retrieval_event(Some("s2"), Some("eyes"), "other", "x", 5, 500, 3000, 0, "[]")
             .await
             .unwrap();
 
@@ -162,7 +162,7 @@ mod tests {
     #[tokio::test]
     async fn retrieval_stats_since_filters_by_window() {
         let s = mem().await;
-        s.log_retrieval_event(Some("s1"), Some("brian"), "p", "q", 1, 100, 3000, 0, "[]")
+        s.log_retrieval_event(Some("s1"), Some("hands"), "p", "q", 1, 100, 3000, 0, "[]")
             .await
             .unwrap();
         // A far-future `since` excludes everything already written.

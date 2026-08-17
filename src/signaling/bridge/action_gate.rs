@@ -297,7 +297,7 @@ mod tests {
         )
         .await;
         let out = bridge
-            .action_gate("s1".into(), "brian".into(), "echo hi-there".into())
+            .action_gate("s1".into(), "hands".into(), "echo hi-there".into())
             .await
             .unwrap();
         assert!(out.contains("hi-there"), "out: {out}");
@@ -310,7 +310,7 @@ mod tests {
         let repo = tempdir().unwrap();
         let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
         let out = bridge
-            .action_gate("s1".into(), "brian".into(), "echo loose".into())
+            .action_gate("s1".into(), "hands".into(), "echo loose".into())
             .await
             .unwrap();
         assert!(out.contains("loose"), "out: {out}");
@@ -326,7 +326,7 @@ mod tests {
         bridge.set_storage(storage.clone()).await;
         storage.create_session("s-norepo", "t", None).await.unwrap();
         let err = bridge
-            .action_gate("s-norepo".into(), "brian".into(), "echo x".into())
+            .action_gate("s-norepo".into(), "hands".into(), "echo x".into())
             .await
             .unwrap_err();
         assert!(
@@ -350,7 +350,7 @@ mod tests {
         .await;
         // Park contract: the call returns immediately with a gate_id.
         let parked = bridge
-            .action_gate("s1".into(), "brian".into(), cmd)
+            .action_gate("s1".into(), "hands".into(), cmd)
             .await
             .unwrap();
         assert!(parked.contains("parked"), "got: {parked}");
@@ -483,7 +483,7 @@ mod tests {
         .await;
         // Park contract: the call returns immediately with a gate_id.
         let parked = bridge
-            .action_gate("s1".into(), "brian".into(), cmd)
+            .action_gate("s1".into(), "hands".into(), cmd)
             .await
             .unwrap();
         assert!(parked.contains("parked"), "got: {parked}");
@@ -518,7 +518,7 @@ mod tests {
         let ack = bridge
             .request_approval_parked(
                 "s1".into(),
-                "brian".into(),
+                "hands".into(),
                 "Query prod?".into(),
                 vec!["Approve".into(), "Deny".into()],
                 ApprovalContext {
@@ -570,7 +570,7 @@ mod tests {
         .await;
         let mut sub = bridge.subscribe();
         let b2 = Arc::clone(&bridge);
-        let call = tokio::spawn(async move { b2.action_gate("s1".into(), "brian".into(), cmd).await });
+        let call = tokio::spawn(async move { b2.action_gate("s1".into(), "hands".into(), cmd).await });
         let cid = loop {
             match sub.recv().await.unwrap() {
                 SignalingEvent::PendingChoice(p) => break p.choice_id,
@@ -626,7 +626,7 @@ mod tests {
             .insert_tray_entry(
                 "s1",
                 "cid-1",
-                "brian",
+                "hands",
                 crate::storage::QuestionKind::Choice,
                 "Run gated command in this session's repo?",
                 Some(&opts),
@@ -677,7 +677,7 @@ mod tests {
             .insert_tray_entry(
                 "s1",
                 "cid-2",
-                "brian",
+                "hands",
                 crate::storage::QuestionKind::Choice,
                 "Run?",
                 Some(&opts),
@@ -734,7 +734,7 @@ mod tests {
             .insert_tray_entry(
                 "s1",
                 "cid-stale",
-                "brian",
+                "hands",
                 crate::storage::QuestionKind::Choice,
                 "Run gated command in this session's repo?",
                 Some(&opts),
@@ -775,7 +775,7 @@ mod tests {
             .insert_tray_entry(
                 "s1",
                 "cid-reject",
-                "brian",
+                "hands",
                 crate::storage::QuestionKind::Choice,
                 "Run gated command in this session's repo?",
                 Some(&opts),
@@ -824,7 +824,7 @@ mod tests {
         let cmd = format!("touch {}", marker.display()); // matches no keyword
 
         let (gate_id, existing) = bridge
-            .park_gated_command("s1", "brian", &cmd)
+            .park_gated_command("s1", "hands", &cmd)
             .await
             .unwrap();
         assert!(!gate_id.is_empty());
@@ -839,7 +839,7 @@ mod tests {
         // Identical command while pending → same gate, flagged existing, so a
         // retried Bash call can't stack a second card.
         let (dup_id, dup_existing) = bridge
-            .park_gated_command("s1", "brian", &cmd)
+            .park_gated_command("s1", "hands", &cmd)
             .await
             .unwrap();
         assert_eq!(dup_id, gate_id);
@@ -867,7 +867,7 @@ mod tests {
         .await;
 
         let first = bridge
-            .action_gate("s1".into(), "brian".into(), "echo hi".into())
+            .action_gate("s1".into(), "hands".into(), "echo hi".into())
             .await
             .unwrap();
         assert!(first.contains("parked for the user's approval"), "got: {first}");
@@ -885,7 +885,7 @@ mod tests {
 
         // Identical command re-parked → the SAME gate, flagged as existing.
         let dup = bridge
-            .action_gate("s1".into(), "brian".into(), "echo hi".into())
+            .action_gate("s1".into(), "hands".into(), "echo hi".into())
             .await
             .unwrap();
         assert!(dup.contains("ALREADY parked"), "got: {dup}");
@@ -909,7 +909,7 @@ mod tests {
         // A rejected re-fire parks FRESH (pending-only dedupe): reject the new
         // gate and confirm its status carries the user's reasoning.
         let refire = bridge
-            .action_gate("s1".into(), "brian".into(), "echo hi".into())
+            .action_gate("s1".into(), "hands".into(), "echo hi".into())
             .await
             .unwrap();
         assert!(refire.contains("parked for the user's approval"), "post-resolve re-fire is a fresh gate: {refire}");
@@ -946,7 +946,7 @@ mod tests {
         .await;
 
         let parked = bridge
-            .action_gate("s1".into(), "brian".into(), cmd.clone())
+            .action_gate("s1".into(), "hands".into(), cmd.clone())
             .await
             .unwrap();
         let gate_id = parked
@@ -971,7 +971,7 @@ mod tests {
         let marker2 = repo.path().join("old.txt");
         let cmd2 = format!("touch {}", marker2.display());
         let parked2 = bridge
-            .action_gate("s1".into(), "brian".into(), cmd2.clone())
+            .action_gate("s1".into(), "hands".into(), cmd2.clone())
             .await
             .unwrap();
         let gate_id2 = parked2

@@ -1606,7 +1606,7 @@ mod tests {
         let ack = bridge
             .ask_user_choice(
                 "s1".into(),
-                "brian".into(),
+                "hands".into(),
                 "pick".into(),
                 vec!["Yes".into(), "No".into()],
             )
@@ -1673,7 +1673,7 @@ mod tests {
             .insert_tray_entry(
                 "s1",
                 "cid-phase",
-                "brian",
+                "hands",
                 crate::storage::QuestionKind::Choice,
                 "Pick something?",
                 Some(&["A".to_string(), "B".to_string()]),
@@ -1701,7 +1701,7 @@ mod tests {
             .insert_tray_entry(
                 "s1",
                 "cid-closed",
-                "brian",
+                "hands",
                 crate::storage::QuestionKind::Choice,
                 "Pick again?",
                 Some(&["A".to_string()]),
@@ -1731,12 +1731,12 @@ mod tests {
         storage.create_session("s1", "t", None).await.unwrap();
 
         let first = bridge
-            .mark_awaiting_user("s1".into(), "brian".into(), "temp.md ready, awaiting go".into())
+            .mark_awaiting_user("s1".into(), "hands".into(), "temp.md ready, awaiting go".into())
             .await;
         assert!(first.is_none(), "the first yield has no prior halt");
 
         let second = bridge
-            .mark_awaiting_user("s1".into(), "brian".into(), "temp.md still ready".into())
+            .mark_awaiting_user("s1".into(), "hands".into(), "temp.md still ready".into())
             .await;
         assert_eq!(
             second.as_deref(),
@@ -1917,7 +1917,7 @@ mod tests {
         storage.create_session("s1", "t", None).await.unwrap();
 
         bridge
-            .mark_awaiting_user("s1".into(), "brian".into(), "first".into())
+            .mark_awaiting_user("s1".into(), "hands".into(), "first".into())
             .await;
         // The real path a user reply takes (core::state::broadcast), not a
         // stand-in — this is the mechanism the guard's "still pending means
@@ -1926,7 +1926,7 @@ mod tests {
         assert!(cleared, "the session's halt slot should have been set");
 
         let after = bridge
-            .mark_awaiting_user("s1".into(), "brian".into(), "second".into())
+            .mark_awaiting_user("s1".into(), "hands".into(), "second".into())
             .await;
         assert!(after.is_none(), "a yield after the user acted is not a repeat");
     }
@@ -1941,10 +1941,10 @@ mod tests {
         storage.create_session("s1", "t", None).await.unwrap();
 
         bridge
-            .mark_awaiting_user("s1".into(), "rain".into(), "rain waits".into())
+            .mark_awaiting_user("s1".into(), "eyes".into(), "eyes waits".into())
             .await;
         let hands = bridge
-            .mark_awaiting_user("s1".into(), "brian".into(), "brian waits".into())
+            .mark_awaiting_user("s1".into(), "hands".into(), "hands waits".into())
             .await;
         assert!(hands.is_none(), "another agent's halt is not this agent's repeat");
     }
@@ -1954,12 +1954,12 @@ mod tests {
         let bridge = SignalingBridge::new();
         let mut sub = bridge.subscribe();
         bridge
-            .mark_awaiting_user("s1".into(), "brian".into(), "ping".into())
+            .mark_awaiting_user("s1".into(), "hands".into(), "ping".into())
             .await;
         let ev = sub.recv().await.unwrap();
         assert!(
             matches!(ev, SignalingEvent::AwaitingUser { session_id, agent, reason }
-            if session_id == "s1" && agent == "brian" && reason == "ping")
+            if session_id == "s1" && agent == "hands" && reason == "ping")
         );
     }
 
@@ -1987,7 +1987,7 @@ mod tests {
 
         let mut sub = bridge.subscribe();
         bridge
-            .mark_awaiting_user("s1".into(), "brian".into(), "ping".into())
+            .mark_awaiting_user("s1".into(), "hands".into(), "ping".into())
             .await;
 
         // refresh() fires inside set_session_awaiting (before the AwaitingUser
@@ -2032,7 +2032,7 @@ mod tests {
             .insert_tray_entry(
                 "s-reopen",
                 "old-choice-id",
-                "brian",
+                "hands",
                 crate::storage::QuestionKind::Choice,
                 "Ship it?",
                 Some(&opts),
@@ -2089,7 +2089,7 @@ mod tests {
             .insert_tray_entry(
                 "s-oob",
                 "cid-oob",
-                "brian",
+                "hands",
                 crate::storage::QuestionKind::Choice,
                 "Ship it?",
                 Some(&opts),
@@ -2140,7 +2140,7 @@ mod tests {
             bridge_clone
                 .ask_user_choice(
                     "s-fallback".into(),
-                    "brian".into(),
+                    "hands".into(),
                     "Pick something?".into(),
                     vec!["A".into(), "B".into()],
                 )
@@ -2226,7 +2226,7 @@ mod tests {
             .insert_tray_entry(
                 "s-moot",
                 "cid-q",
-                "brian",
+                "hands",
                 crate::storage::QuestionKind::Choice,
                 "Re-push to staging?",
                 Some(&opts),
@@ -2248,7 +2248,7 @@ mod tests {
                 .insert_tray_entry(
                     "s-moot",
                     cid,
-                    "brian",
+                    "hands",
                     crate::storage::QuestionKind::Choice,
                     "Run gated command?",
                     Some(&opts),
@@ -2292,7 +2292,7 @@ mod tests {
             .insert_tray_entry(
                 "s-clean",
                 "cid-gate-early",
-                "brian",
+                "hands",
                 crate::storage::QuestionKind::Choice,
                 "Run gated command?",
                 Some(&opts),
@@ -2310,7 +2310,7 @@ mod tests {
             .insert_tray_entry(
                 "s-clean",
                 "cid-q",
-                "brian",
+                "hands",
                 crate::storage::QuestionKind::Choice,
                 "Pick something?",
                 Some(&opts),
@@ -2342,7 +2342,7 @@ mod tests {
             bridge_clone
                 .request_approval(
                     "s1".into(),
-                    "brian".into(),
+                    "hands".into(),
                     "Approve push?".into(),
                     vec!["Approve".into(), "Deny".into()],
                     ApprovalContext {
@@ -2380,7 +2380,7 @@ mod tests {
         let ack = bridge
             .request_approval_parked(
                 "s1".into(),
-                "brian".into(),
+                "hands".into(),
                 "Query prod?".into(),
                 vec!["Approve".into(), "Deny".into()],
                 ApprovalContext {
@@ -2423,7 +2423,7 @@ mod tests {
             bridge_clone
                 .request_approval(
                     "s1".into(),
-                    "brian".into(),
+                    "hands".into(),
                     "Approve push?".into(),
                     vec!["Approve".into(), "Deny".into()],
                     ApprovalContext {
@@ -2470,7 +2470,7 @@ mod tests {
             bridge_clone
                 .request_approval(
                     "s1".into(),
-                    "brian".into(),
+                    "hands".into(),
                     "Approve push?".into(),
                     vec!["Approve once".into(), "Deny".into()],
                     ApprovalContext {
@@ -2515,7 +2515,7 @@ mod tests {
             bridge_clone
                 .request_approval(
                     "s1".into(),
-                    "brian".into(),
+                    "hands".into(),
                     "Approve force-push?".into(),
                     vec!["Approve".into(), "Deny".into()],
                     ApprovalContext {
@@ -2552,7 +2552,7 @@ mod tests {
             bridge_clone
                 .ask_user_choice(
                     "s1".into(),
-                    "brian".into(),
+                    "hands".into(),
                     "pick".into(),
                     vec!["a".into(), "b".into()],
                 )
@@ -2591,7 +2591,7 @@ mod tests {
             bridge_clone
                 .ask_user_choice(
                     "s1".into(),
-                    "brian".into(),
+                    "hands".into(),
                     "same question".into(),
                     vec!["a".into(), "b".into()],
                 )
@@ -2605,7 +2605,7 @@ mod tests {
             bridge_clone
                 .ask_user_choice(
                     "s1".into(),
-                    "brian".into(),
+                    "hands".into(),
                     "same question".into(),
                     vec!["a".into(), "b".into()],
                 )
@@ -2649,7 +2649,7 @@ mod tests {
         let q1 = tokio::spawn(async move {
             b1.ask_user_choice(
                 "s1".into(),
-                "brian".into(),
+                "hands".into(),
                 "question one".into(),
                 vec!["a".into(), "b".into()],
             )
@@ -2660,7 +2660,7 @@ mod tests {
         let q2 = tokio::spawn(async move {
             b2.ask_user_choice(
                 "s1".into(),
-                "brian".into(),
+                "hands".into(),
                 "question two".into(),
                 vec!["a".into(), "b".into()],
             )
@@ -2702,7 +2702,7 @@ mod tests {
             .insert_tray_entry(
                 "s1",
                 "stale-cid",
-                "brian",
+                "hands",
                 crate::storage::QuestionKind::Choice,
                 "stale prompt",
                 Some(&["a".to_string(), "b".to_string()]),
@@ -2717,7 +2717,7 @@ mod tests {
             bridge_clone
                 .supersede_question_with_new(
                     "s1".into(),
-                    "brian".into(),
+                    "hands".into(),
                     "stale-cid".into(),
                     "rephrased".into(),
                     vec!["x".into(), "y".into()],

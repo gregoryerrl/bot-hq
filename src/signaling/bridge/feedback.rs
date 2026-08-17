@@ -65,11 +65,11 @@ mod tests {
     async fn both_agents_can_file() {
         let (bridge, storage) = bridge_with_storage().await;
         bridge
-            .file_feedback("s1", "brian", "issue", "gate unreadable", "…")
+            .file_feedback("s1", "hands", "issue", "gate unreadable", "…")
             .await
             .unwrap();
         bridge
-            .file_feedback("s1", "rain", "idea", "batch approvals", "…")
+            .file_feedback("s1", "eyes", "idea", "batch approvals", "…")
             .await
             .unwrap();
         let all = storage.list_feedback(None).await.unwrap();
@@ -80,7 +80,7 @@ mod tests {
     async fn unknown_kind_is_refused_rather_than_stored() {
         let (bridge, storage) = bridge_with_storage().await;
         let err = bridge
-            .file_feedback("s1", "brian", "complaint", "x", "y")
+            .file_feedback("s1", "hands", "complaint", "x", "y")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown kind"), "{err}");
@@ -91,7 +91,7 @@ mod tests {
     async fn kind_is_normalized_not_rejected_on_case() {
         let (bridge, storage) = bridge_with_storage().await;
         bridge
-            .file_feedback("s1", "brian", "  Idea ", "x", "y")
+            .file_feedback("s1", "hands", "  Idea ", "x", "y")
             .await
             .unwrap();
         assert_eq!(storage.list_feedback(None).await.unwrap()[0].kind, "idea");
@@ -101,7 +101,7 @@ mod tests {
     async fn empty_title_is_refused() {
         let (bridge, _s) = bridge_with_storage().await;
         assert!(bridge
-            .file_feedback("s1", "brian", "issue", "   ", "body")
+            .file_feedback("s1", "hands", "issue", "   ", "body")
             .await
             .is_err());
     }

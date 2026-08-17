@@ -2113,13 +2113,13 @@ mod tests {
             .participant_by_slug("s1", "hands")
             .await
             .unwrap()
-            .expect("ensure_session_roster seeds brian")
+            .expect("ensure_session_roster seeds hands")
             .id;
         let eyes = storage
             .participant_by_slug("s1", "eyes")
             .await
             .unwrap()
-            .expect("ensure_session_roster seeds rain")
+            .expect("ensure_session_roster seeds eyes")
             .id;
 
         let (seq_tx, mut seq_rx) = mpsc::channel(1);

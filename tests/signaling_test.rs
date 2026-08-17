@@ -123,7 +123,7 @@ async fn server_rejects_get() {
     let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
     let addr = server.local_addr;
     let req = format!(
-        "GET /sessions/s1/brian/mcp HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+        "GET /sessions/s1/hands/mcp HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
     );
     let mut sock = TcpStream::connect(addr).await.unwrap();
     sock.write_all(req.as_bytes()).await.unwrap();

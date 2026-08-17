@@ -538,7 +538,7 @@ mod tests {
         s.insert_user_message("s-msg", MessageKind::Text, "first prompt")
             .await
             .unwrap();
-        s.post_to_channel("s-msg", "participant", Some("hands"), MessageKind::Text.as_str(), "brian reply", None)
+        s.post_to_channel("s-msg", "participant", Some("hands"), MessageKind::Text.as_str(), "hands reply", None)
             .await
             .unwrap();
         s.post_to_channel("s-msg", "participant", Some("hands"), MessageKind::ToolUse.as_str(), "{\"tool\":\"x\"}", None)
@@ -547,7 +547,7 @@ mod tests {
 
         let rows = s.list_active_sessions_with_preview().await.unwrap();
         let msg = rows.iter().find(|r| r.session.id == "s-msg").unwrap();
-        assert_eq!(msg.last_message.as_deref(), Some("brian reply"));
+        assert_eq!(msg.last_message.as_deref(), Some("hands reply"));
         assert_eq!(msg.last_author.as_deref(), Some("hands"));
 
         // A session with no text messages → None preview, not an error.

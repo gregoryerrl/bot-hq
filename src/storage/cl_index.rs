@@ -254,12 +254,12 @@ mod tests {
         let s = Storage::memory().await.unwrap();
         s.upsert_project("p", "p", None, None, None).await.unwrap();
         let cl_id = s.upsert_cl_index("p", "notes.md", "d", None).await.unwrap();
-        s.record_cl_read(cl_id, Some("s1"), "brian").await.unwrap();
-        s.record_cl_read(cl_id, Some("s2"), "rain").await.unwrap();
+        s.record_cl_read(cl_id, Some("s1"), "hands").await.unwrap();
+        s.record_cl_read(cl_id, Some("s2"), "eyes").await.unwrap();
 
         let reads = s.cl_reads_for_session("s1").await.unwrap();
         assert_eq!(reads.len(), 1);
-        assert_eq!(reads[0].agent, "brian");
+        assert_eq!(reads[0].agent, "hands");
         assert_eq!(reads[0].cl_index_id, cl_id);
         // Scoped by session: s2 has its own row, an unknown session has none.
         assert_eq!(s.cl_reads_for_session("s2").await.unwrap().len(), 1);

@@ -1844,24 +1844,24 @@ mod tests {
         // fail-closed commit gate reads it via current_agent_health.
         let bridge = SignalingBridge::new();
         assert_eq!(
-            bridge.current_agent_health("s1", "rain"),
+            bridge.current_agent_health("s1", "eyes"),
             None,
             "unset = None (assume running; events fire only on change)"
         );
-        bridge.notify_agent_health("s1".into(), "rain", "stalled");
+        bridge.notify_agent_health("s1".into(), "eyes", "stalled");
         assert_eq!(
-            bridge.current_agent_health("s1", "rain").as_deref(),
+            bridge.current_agent_health("s1", "eyes").as_deref(),
             Some("stalled")
         );
         // Latest write wins (recovery overwrites).
-        bridge.notify_agent_health("s1".into(), "rain", "running");
+        bridge.notify_agent_health("s1".into(), "eyes", "running");
         assert_eq!(
-            bridge.current_agent_health("s1", "rain").as_deref(),
+            bridge.current_agent_health("s1", "eyes").as_deref(),
             Some("running")
         );
         // Distinct agents + sessions stay independent.
-        assert_eq!(bridge.current_agent_health("s1", "brian"), None);
-        assert_eq!(bridge.current_agent_health("s2", "rain"), None);
+        assert_eq!(bridge.current_agent_health("s1", "hands"), None);
+        assert_eq!(bridge.current_agent_health("s2", "eyes"), None);
     }
 
     /// **Every per-session map is actually emptied** (round-2 audit, R2).

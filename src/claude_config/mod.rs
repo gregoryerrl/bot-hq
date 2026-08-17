@@ -334,7 +334,7 @@ mod tests {
             let inh = inheritance(surface);
             let rendered = format!("{:?} {:?} {}", inh.inherited_by, inh.skipped_by, inh.note);
             let lower = rendered.to_lowercase();
-            for banned in ["brian", "rain"] {
+            for banned in ["hands", "eyes"] {
                 assert!(
                     !lower.split(|c: char| !c.is_alphanumeric()).any(|w| w == banned),
                     "{surface:?} still names {banned}: {rendered}"

@@ -522,7 +522,7 @@ rename to new";
     #[test]
     fn the_preflight_command_carries_the_models_own_gateway_and_credential() {
         let cfg = AgentConfig {
-            agent_name: "brian".into(),
+            agent_name: "hands".into(),
             provider: "deepseek".into(),
             model_name: "deepseek-v4-pro".into(),
             base_url: Some("https://api.deepseek.com/anthropic".into()),
@@ -562,7 +562,7 @@ rename to new";
         // legible failure, and not one this test claims otherwise about.
         for token in [None, Some("")] {
             let cfg = AgentConfig {
-                agent_name: "brian".into(),
+                agent_name: "hands".into(),
                 provider: "anthropic".into(),
                 model_name: "claude-opus-5".into(),
                 base_url: None,

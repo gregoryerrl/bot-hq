@@ -781,7 +781,7 @@ mod tests {
         let msg = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "plans/2026/handoff.md".to_string(),
                 "nested body".to_string(),
@@ -815,7 +815,7 @@ mod tests {
         let msg = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "notes.md".to_string(),
                 "new full body".to_string(),
@@ -836,7 +836,7 @@ mod tests {
             let err = bridge
                 .cl_write_file(
                     "s1".to_string(),
-                    "brian".to_string(),
+                    "hands".to_string(),
                     "bot-hq".to_string(),
                     bad.to_string(),
                     "body".to_string(),
@@ -857,7 +857,7 @@ mod tests {
         let err = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "big.md".to_string(),
                 "x".repeat(MAX_WRITE_BYTES + 1),
@@ -881,7 +881,7 @@ mod tests {
         let err = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "diary.md".to_string(),
                 "overwrite attempt".to_string(),
@@ -906,7 +906,7 @@ mod tests {
         let err = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "_globals".to_string(),
                 "custom-instructions.md".to_string(),
                 "agent-authored rules".to_string(),
@@ -925,7 +925,7 @@ mod tests {
         let err = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "_globals".to_string(),
                 "agents/sneaky.md".to_string(),
                 "x".to_string(),
@@ -940,7 +940,7 @@ mod tests {
         let msg = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "_globals".to_string(),
                 "eod.md".to_string(),
                 "today: shipped cl_write_file".to_string(),
@@ -962,7 +962,7 @@ mod tests {
         bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "notes.md".to_string(),
                 "a learning".to_string(),
@@ -986,7 +986,7 @@ mod tests {
         let msg = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "notes.md".to_string(),
                 "- new delta".to_string(),
@@ -1013,7 +1013,7 @@ mod tests {
         let err = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "notes.md".to_string(),
                 String::new(),
@@ -1029,7 +1029,7 @@ mod tests {
         let err = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "notes.md".to_string(),
                 "x".repeat(400),
@@ -1044,7 +1044,7 @@ mod tests {
         let msg = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "notes.md".to_string(),
                 "x".repeat(400),
@@ -1059,7 +1059,7 @@ mod tests {
         let msg = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "notes.md".to_string(),
                 "x".repeat(300),
@@ -1115,7 +1115,7 @@ mod tests {
         let msg = bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "followups.md".to_string(),
                 "## Items\n- **#94 rollout** — DONE, everything landed\n".to_string(),
@@ -1139,7 +1139,7 @@ mod tests {
         bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "draft.md".to_string(),
                 "the approved draft".to_string(),
@@ -1151,7 +1151,7 @@ mod tests {
         bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "draft.md".to_string(),
                 "a whole new direction".to_string(),
@@ -1171,7 +1171,7 @@ mod tests {
             .unwrap();
         let log = String::from_utf8_lossy(&log.stdout).to_string();
         assert!(log.lines().count() >= 2, "one commit per write, got:\n{log}");
-        assert!(log.contains("cl: bot-hq/draft.md (brian)"), "got:\n{log}");
+        assert!(log.contains("cl: bot-hq/draft.md (hands)"), "got:\n{log}");
 
         // The destroyed-draft scenario is now recoverable.
         let old = std::process::Command::new("git")
@@ -1266,7 +1266,7 @@ mod tests {
         bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "vision.md".to_string(),
                 "The harness is the core. The harness is the core, restated at length \
@@ -1301,7 +1301,7 @@ mod tests {
         bridge
             .cl_write_file(
                 "s1".to_string(),
-                "brian".to_string(),
+                "hands".to_string(),
                 "bot-hq".to_string(),
                 "vision.md".to_string(),
                 "The harness is the core, written out at a comparable length.".to_string(),

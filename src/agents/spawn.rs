@@ -1689,9 +1689,9 @@ mod tests {
 
     fn cfg() -> SpawnConfig {
         SpawnConfig {
-            agent_name: "brian".into(),
+            agent_name: "hands".into(),
             config: AgentConfig {
-                agent_name: "brian".into(),
+                agent_name: "hands".into(),
                 provider: "anthropic".into(),
                 model_name: "claude-opus-4-7".into(),
                 base_url: None,
@@ -1723,8 +1723,8 @@ mod tests {
     /// test that proves the name is inert.
     fn eyes_cfg() -> SpawnConfig {
         let mut c = cfg();
-        c.agent_name = "rain".into();
-        c.config.agent_name = "rain".into();
+        c.agent_name = "eyes".into();
+        c.config.agent_name = "eyes".into();
         c.capabilities = crate::agents::ResolvedCapabilities::Known(
             crate::agents::CapabilitySet::preset_eyes(),
         );
@@ -2666,7 +2666,7 @@ mod tests {
             .windows(2)
             .find(|w| w[0] == "--settings")
             .map(|w| w[1].clone())
-            .expect("brian must get --settings carrying the PreToolUse hook");
+            .expect("hands must get --settings carrying the PreToolUse hook");
         assert!(settings.contains("PreToolUse"), "settings: {settings}");
         assert!(
             settings.contains("policy-check tool-gate"),

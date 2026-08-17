@@ -351,7 +351,7 @@ mod tests {
             .participant_by_slug("s1", "hands")
             .await
             .unwrap()
-            .expect("ensure_session_roster seeds brian")
+            .expect("ensure_session_roster seeds hands")
             .id;
 
         let post = |kind: MessageKind, body: &'static str| {

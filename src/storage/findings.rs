@@ -190,7 +190,7 @@ mod tests {
         s.insert_finding(
             "s1",
             "f1",
-            "rain",
+            "eyes",
             FindingSeverity::Blocking,
             "NPE: job reads adAccount->id but command aliased it",
             Some("ReconcileMetaData.php:42"),
@@ -201,7 +201,7 @@ mod tests {
         s.insert_finding(
             "s1",
             "f2",
-            "rain",
+            "eyes",
             FindingSeverity::Advisory,
             "nit: rename variable",
             None,
@@ -216,7 +216,7 @@ mod tests {
 
         // Dispositioning the blocking one clears the gate.
         let n = s
-            .disposition_finding("f1", FindingStatus::Fixed, Some("fixed in abc123"), "brian")
+            .disposition_finding("f1", FindingStatus::Fixed, Some("fixed in abc123"), "hands")
             .await
             .unwrap();
         assert_eq!(n, 1);
@@ -228,7 +228,7 @@ mod tests {
 
         // Idempotent: a second disposition of the same uid is a no-op.
         assert_eq!(
-            s.disposition_finding("f1", FindingStatus::Fixed, Some("x"), "brian")
+            s.disposition_finding("f1", FindingStatus::Fixed, Some("x"), "hands")
                 .await
                 .unwrap(),
             0,
@@ -237,7 +237,7 @@ mod tests {
 
         let one = s.get_finding("f1").await.unwrap().unwrap();
         assert_eq!(one.status, "fixed");
-        assert_eq!(one.disposed_by.as_deref(), Some("brian"));
+        assert_eq!(one.disposed_by.as_deref(), Some("hands"));
         assert_eq!(one.disposition_reason.as_deref(), Some("fixed in abc123"));
     }
 
@@ -246,13 +246,13 @@ mod tests {
         let s = Storage::memory().await.unwrap();
         seed(&s).await;
         s.create_session("s2", "t", None).await.unwrap();
-        s.insert_finding("s1", "f1", "rain", FindingSeverity::Blocking, "bug A", None)
+        s.insert_finding("s1", "f1", "eyes", FindingSeverity::Blocking, "bug A", None)
             .await
             .unwrap();
-        s.insert_finding("s1", "f2", "rain", FindingSeverity::Blocking, "bug B", None)
+        s.insert_finding("s1", "f2", "eyes", FindingSeverity::Blocking, "bug B", None)
             .await
             .unwrap();
-        s.insert_finding("s2", "f3", "rain", FindingSeverity::Blocking, "other session", None)
+        s.insert_finding("s2", "f3", "eyes", FindingSeverity::Blocking, "other session", None)
             .await
             .unwrap();
 
@@ -269,14 +269,14 @@ mod tests {
         // finding without EYES agreement — no deadlock.
         let s = Storage::memory().await.unwrap();
         seed(&s).await;
-        s.insert_finding("s1", "f1", "rain", FindingSeverity::Blocking, "disputed bug", None)
+        s.insert_finding("s1", "f1", "eyes", FindingSeverity::Blocking, "disputed bug", None)
             .await
             .unwrap();
         s.disposition_finding(
             "f1",
             FindingStatus::Rebutted,
             Some("tests prove the path is unreachable"),
-            "brian",
+            "hands",
         )
         .await
         .unwrap();
@@ -287,7 +287,7 @@ mod tests {
     async fn reraise_target_increment_and_approve() {
         let s = Storage::memory().await.unwrap();
         seed(&s).await;
-        s.insert_finding("s1", "f1", "rain", FindingSeverity::Blocking, "dup bug", None)
+        s.insert_finding("s1", "f1", "eyes", FindingSeverity::Blocking, "dup bug", None)
             .await
             .unwrap();
         // An OPEN same-summary finding is the dedup target.
@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(found.raise_count, 1);
         assert_eq!(found.eyes_approved, 0);
         // A disposed finding is NOT a dedup target (a re-flag becomes a fresh one).
-        s.disposition_finding("f1", FindingStatus::Fixed, Some("done"), "brian")
+        s.disposition_finding("f1", FindingStatus::Fixed, Some("done"), "hands")
             .await
             .unwrap();
         assert!(s

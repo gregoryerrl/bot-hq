@@ -75,7 +75,7 @@ mod tests {
         let cfg = AgentConfig {
             // `brian`, not `hands`, and that is not nostalgia — see the test
             // below for what this table can actually hold.
-            agent_name: "brian".to_string(),
+            agent_name: "hands".to_string(),
             provider: "anthropic".to_string(),
             model_name: "fast-thinker-1".to_string(),
             base_url: None,
@@ -86,7 +86,7 @@ mod tests {
         storage.upsert_agent_config(&cfg).await.unwrap();
 
         let fetched = storage
-            .get_agent_config("brian")
+            .get_agent_config("hands")
             .await
             .unwrap()
             .expect("the row just written");
@@ -97,7 +97,7 @@ mod tests {
         // edit through any surface can still destroy it silently.
         assert_eq!(fetched.context_window, Some(200_000));
 
-        assert!(storage.list_agent_configs().await.unwrap().iter().any(|c| c.agent_name == "brian"));
+        assert!(storage.list_agent_configs().await.unwrap().iter().any(|c| c.agent_name == "hands"));
         assert!(storage.get_agent_config("nobody").await.unwrap().is_none());
     }
 
@@ -150,7 +150,7 @@ mod tests {
     #[tokio::test]
     async fn the_retired_names_are_not_seeded_any_more() {
         let storage = Storage::memory().await.unwrap();
-        for slug in ["emma", "brian", "rain"] {
+        for slug in ["emma", "hands", "eyes"] {
             assert!(
                 storage.get_agent_config(slug).await.unwrap().is_none(),
                 "`{slug}` is still seeded"

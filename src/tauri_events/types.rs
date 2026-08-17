@@ -297,14 +297,14 @@ mod tests {
         let msg = AgentMessage {
             id: 1,
             session_id: "s1".to_string(),
-            author: "brian".to_string(),
+            author: "hands".to_string(),
             kind: "text".to_string(),
             content: "hello".to_string(),
             created_at: "2026-05-26T18:00:00Z".to_string(),
         };
         let v = serde_json::to_value(&msg).unwrap();
         assert_eq!(v["session_id"], "s1");
-        assert_eq!(v["author"], "brian");
+        assert_eq!(v["author"], "hands");
         assert_eq!(v["content"], "hello");
     }
 
@@ -313,7 +313,7 @@ mod tests {
         let m = Message {
             id: 7,
             session_id: "s1".into(),
-            author: "rain".into(),
+            author: "eyes".into(),
             kind: "text".into(),
             content: "looks clean".into(),
             created_at: "2026-05-26T18:01:00Z".into(),

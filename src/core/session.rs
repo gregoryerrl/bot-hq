@@ -4366,11 +4366,11 @@ mod tests {
         // Each agent gets ITS role's prose, not the other's and not both.
         assert!(
             !hands.contains("SENTINEL_EYES_R7Q"),
-            "brian was briefed with the 'eyes' role"
+            "hands was briefed with the 'eyes' role"
         );
         assert!(
             !eyes.contains("SENTINEL_HANDS_R7Q"),
-            "rain was briefed with the 'hands' role"
+            "eyes was briefed with the 'hands' role"
         );
 
         // And the edit REPLACED the built-in prose rather than landing next to

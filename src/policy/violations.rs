@@ -412,7 +412,7 @@ mod tests {
         let log = ViolationsLog::new(dir.path());
         log.record(
             "s1",
-            "brian",
+            "hands",
             ViolationKind::PushGate,
             "git push origin main",
             ViolationOutcome::Approved,
@@ -422,7 +422,7 @@ mod tests {
         .unwrap();
         log.record(
             "s1",
-            "brian",
+            "hands",
             ViolationKind::CommitGrep,
             "git commit",
             ViolationOutcome::Denied,

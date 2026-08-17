@@ -1877,7 +1877,7 @@ mod tests {
             .insert_finding(
                 "s1",
                 "f1",
-                "rain",
+                "eyes",
                 crate::storage::FindingSeverity::Blocking,
                 "real bug",
                 Some("a.rs:1"),
@@ -1888,7 +1888,7 @@ mod tests {
             .insert_finding(
                 "s1",
                 "f2",
-                "rain",
+                "eyes",
                 crate::storage::FindingSeverity::Advisory,
                 "nit",
                 None,
@@ -1899,7 +1899,7 @@ mod tests {
             .insert_finding(
                 "s1",
                 "f3",
-                "rain",
+                "eyes",
                 crate::storage::FindingSeverity::Blocking,
                 "fixed one",
                 None,
@@ -1911,7 +1911,7 @@ mod tests {
                 "f3",
                 crate::storage::FindingStatus::Fixed,
                 Some("done"),
-                "brian",
+                "hands",
             )
             .await
             .unwrap();
@@ -2005,7 +2005,7 @@ mod tests {
         // No signaling-addr file → the app isn't reachable → fail-closed Blocked,
         // with a reason naming the cause (no network call attempted).
         let data = tempdir().unwrap();
-        match decide_push(data.path(), "s1", "brian", Some("main")).await {
+        match decide_push(data.path(), "s1", "hands", Some("main")).await {
             PushDecision::Blocked(reason) => {
                 assert!(reason.contains("not running"), "reason: {reason}");
             }
@@ -2280,7 +2280,7 @@ mod tests {
         // No signaling-addr file → no network call, no gate promised.
         let data = tempdir().unwrap();
         assert_eq!(
-            park_gate(data.path(), "s1", "brian", "rm -rf /tmp/x").await,
+            park_gate(data.path(), "s1", "hands", "rm -rf /tmp/x").await,
             None
         );
     }
