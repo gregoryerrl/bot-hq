@@ -259,13 +259,15 @@ describe("ChatPane", () => {
 
   it("mounts on the newest page and loads older rows on demand (round 8, N2)", async () => {
     // A 3,412-row session used to be pulled whole across IPC on every mount.
-    // The mount read asks for the tail (`limit`), and a FULL page shows the
-    // "Load older" button; the next page is asked for BEFORE the oldest held
-    // id and is prepended, and a short page hides the button.
+    // The mount read asks for CHAT_PAGE + 1 (the extra row is a PROBE, trimmed
+    // before the store sees it); a full probe shows the "Load older" button;
+    // the next page is asked for BEFORE the oldest held id and is prepended,
+    // and a short probe hides the button. Exactly 2 × CHAT_PAGE rows is the
+    // case a "full page ⇒ more" heuristic got wrong (one dud click); the
+    // probe gets it right: two pages, then no button.
     const { CHAT_PAGE } = await import("./ChatPane");
     const row = (id: number) => ({ ...msg(id, `row ${id}`, "text"), id });
-    // Two full pages then a short one: ids 1..(2*PAGE+5).
-    const total = CHAT_PAGE * 2 + 5;
+    const total = CHAT_PAGE * 2;
     const calls: Array<Record<string, unknown> | undefined> = [];
     vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === "get_session_messages") {
@@ -281,28 +283,27 @@ describe("ChatPane", () => {
       return Promise.resolve([]);
     });
     renderPane();
-    // The mount read is bounded…
-    await waitFor(() => expect(calls[0]?.limit).toBe(CHAT_PAGE));
-    const older = await screen.findByRole("button", { name: /load older/i });
-    // …and the store holds one page, ending at the newest row.
+    // The mount read asks for the probe…
+    await waitFor(() => expect(calls[0]?.limit).toBe(CHAT_PAGE + 1));
+    const older = await screen.findByRole("button", { name: /older/i });
+    // …and the store holds exactly one page (probe trimmed), ending at the newest row.
     expect(useChatStore.getState().messages["s1"]).toHaveLength(CHAT_PAGE);
     expect(useChatStore.getState().messages["s1"]?.[CHAT_PAGE - 1].id).toBe(total);
+    // The button describes the action, not a count it cannot know.
+    expect(older.textContent).toBe(`Load ${CHAT_PAGE} older`);
     fireEvent.click(older);
     await waitFor(() =>
       expect(useChatStore.getState().messages["s1"]).toHaveLength(CHAT_PAGE * 2),
     );
-    // Asked for the page BEFORE the oldest held id, prepended in order.
+    // Asked for the page BEFORE the oldest held id, with the probe, prepended in order.
     expect(calls[1]?.beforeId).toBe(total - CHAT_PAGE + 1);
-    expect(useChatStore.getState().messages["s1"]?.[0].id).toBe(total - CHAT_PAGE * 2 + 1);
-    fireEvent.click(screen.getByRole("button", { name: /load older/i }));
-    await waitFor(() =>
-      expect(useChatStore.getState().messages["s1"]).toHaveLength(total),
-    );
-    // A short page: nothing older remains, the button is gone.
-    await waitFor(() =>
-      expect(screen.queryByRole("button", { name: /load older/i })).not.toBeInTheDocument(),
-    );
+    expect(calls[1]?.limit).toBe(CHAT_PAGE + 1);
     expect(useChatStore.getState().messages["s1"]?.[0].id).toBe(1);
+    // Exactly two pages existed: the second probe came back short, so the
+    // button is gone without a dud click.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /older/i })).not.toBeInTheDocument(),
+    );
   });
 
   it("offers to view the file a tool call names — from its args, never its prose (round 8)", async () => {

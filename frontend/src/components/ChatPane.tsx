@@ -58,7 +58,10 @@ export function ChatPane({
     AgentMessage[]
   >(
     "get_session_messages",
-    { sessionId, sinceId: null, limit: CHAT_PAGE },
+    // `CHAT_PAGE + 1`: the extra row is a PROBE, not a rendered message — its
+    // presence is what says older rows exist (`channel_page`'s `limit+1`
+    // idiom). Trimmed before the store sees it.
+    { sessionId, sinceId: null, limit: CHAT_PAGE + 1 },
     { enabled: !!sessionId },
   );
 
@@ -78,8 +81,11 @@ export function ChatPane({
   const [loadingOlder, setLoadingOlder] = useState(false);
   useEffect(() => {
     if (initialMsgs.length > 0) {
-      setMessages(sessionId, initialMsgs);
-      setMayHaveOlder(initialMsgs.length >= CHAT_PAGE);
+      // The probe row (the oldest of CHAT_PAGE + 1) is dropped; a full probe
+      // means there IS an older row, not "there might be".
+      const more = initialMsgs.length > CHAT_PAGE;
+      setMessages(sessionId, more ? initialMsgs.slice(1) : initialMsgs);
+      setMayHaveOlder(more);
     }
   }, [initialMsgs, sessionId, setMessages]);
   const prependOlder = useChatStore((s) => s.prependOlder);
@@ -92,10 +98,13 @@ export function ChatPane({
         sessionId,
         sinceId: null,
         beforeId: first.id,
-        limit: CHAT_PAGE,
+        limit: CHAT_PAGE + 1,
       });
-      prependOlder(sessionId, page);
-      setMayHaveOlder(page.length >= CHAT_PAGE);
+      // Same probe: a page of CHAT_PAGE + 1 means more remain; the probe row
+      // is trimmed so exactly CHAT_PAGE rows are prepended.
+      const more = page.length > CHAT_PAGE;
+      prependOlder(sessionId, more ? page.slice(1) : page);
+      setMayHaveOlder(more);
     } catch {
       // Leave the button; the next click retries.
     } finally {
@@ -212,7 +221,7 @@ export function ChatPane({
               disabled={loadingOlder}
               className="rounded border border-outline-variant px-2.5 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface disabled:opacity-60"
             >
-              {loadingOlder ? "Loading older…" : `Load older (${CHAT_PAGE} more)`}
+              {loadingOlder ? "Loading older…" : `Load ${CHAT_PAGE} older`}
             </button>
           </div>
         )}
