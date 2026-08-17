@@ -234,6 +234,25 @@ pub struct AppState {
     /// turn we just gave it, which is the likely one. A session in this set
     /// skips straight to teardown.
     epilogue_in_flight: Mutex<HashSet<String>>,
+    /// Sessions whose [`teardown_session`](Self::teardown_session) is between
+    /// its guard block and the end of its cleanup tail.
+    ///
+    /// Round 7 narrowed the `sessions` lock in `teardown_session` to the
+    /// remove + kill + row close, so the tail (PTY reap, tray withdrawal,
+    /// policy-snapshot cleanup, bridge unregister, worktree removal) runs
+    /// unlocked — and `ensure_session_started` consults neither `closed_at`
+    /// (a closed session's respawn is the Archive panel's "reopen for review",
+    /// a feature) nor any other marker. A `respawn_session` landing in that
+    /// gap (SessionView fires one on mount) got a fresh handle whose bridge
+    /// registration, policy file and PTY the tail then tore down under it.
+    /// This set is that marker: inserted under the same guard that removes
+    /// the handle, read by `ensure_session_started` under the same lock,
+    /// removed once the tail has finished. Nothing is held across I/O — the
+    /// alternative, holding `spawn_gate` for the whole teardown, would sit
+    /// across the worktree `spawn_blocking`, which is round 7's complaint
+    /// with a narrower victim set. `std::sync::Mutex`: every hold is a
+    /// non-awaiting insert / contains / remove.
+    closing: std::sync::Mutex<HashSet<String>>,
 }
 
 /// Who moved the phase — the one thing `advance_phase` must branch on.
@@ -346,6 +365,36 @@ impl AppState {
             staged_responses: Mutex::new(std::collections::HashMap::new()),
             terminals: Arc::new(crate::core::TerminalRegistry::new()),
             epilogue_in_flight: Mutex::new(HashSet::new()),
+            closing: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Is this session between its teardown's guard block and the end of its
+    /// cleanup tail? See the `closing` field. A poisoned lock reads as "not
+    /// closing" — fail-OPEN, the opposite of a refusal guard's usual
+    /// direction, accepted because the critical sections are a `HashSet`
+    /// insert / contains / remove and cannot realistically panic.
+    fn is_closing(&self, session_id: &str) -> bool {
+        self.closing
+            .lock()
+            .map(|c| c.contains(session_id))
+            .unwrap_or(false)
+    }
+
+    /// Set (`true`) or clear (`false`) the closing mark. Returns whether the
+    /// call CHANGED the set — so `mark_closing(id, true)` answers "am I the
+    /// teardown that owns this session's tail?", which is what makes
+    /// `teardown_session` idempotent under two overlapping closes.
+    fn mark_closing(&self, session_id: &str, closing: bool) -> bool {
+        match self.closing.lock() {
+            Ok(mut set) => {
+                if closing {
+                    set.insert(session_id.to_string())
+                } else {
+                    set.remove(session_id)
+                }
+            }
+            Err(_) => false,
         }
     }
 
@@ -387,6 +436,15 @@ impl AppState {
         let _gate = self.spawn_gate.lock().await;
         {
             let mut sessions = self.sessions.lock().await;
+            // Read under the SAME lock `teardown_session` inserts under: a
+            // teardown in progress has removed the handle (so the fast path
+            // above fell through) and its tail is still unregistering the
+            // session's bridge state — a spawn now would be torn down under
+            // itself. Once the tail is done the marker is gone and a respawn
+            // (the Archive panel's reopen-for-review) proceeds normally.
+            if self.is_closing(session_id) {
+                anyhow::bail!("session {session_id} is closing; retry once it has closed");
+            }
             if let Some(handle) = sessions.get(session_id) {
                 if !handle.is_stale() {
                     return Ok(());
@@ -404,7 +462,7 @@ impl AppState {
         // The roster seed moved into `spawn_session_handle` (B4b.2) — it is the
         // choke point BOTH creation paths share, and this one is not: the
         // external driver's `open_session` never reaches here.
-        let handle = spawn_existing_session(
+        let mut handle = spawn_existing_session(
             session_id,
             &self.paths,
             self.storage.clone(),
@@ -412,11 +470,22 @@ impl AppState {
             self.signaling_addr,
         )
         .await?;
-        self.watch_session_repo(session_id, &handle);
-        self.sessions
-            .lock()
-            .await
-            .insert(session_id.to_string(), handle);
+        {
+            let mut sessions = self.sessions.lock().await;
+            // The spawn above ran outside the map lock (it takes seconds). A
+            // teardown that started meanwhile has already closed the row and
+            // is unregistering the session's bridge state: registering this
+            // handle would keep subprocesses alive for a session that no
+            // longer exists. Kill them and report, rather than insert.
+            if self.is_closing(session_id) {
+                for agent in handle.agents_mut() {
+                    agent.handle.kill();
+                }
+                anyhow::bail!("session {session_id} closed while its agents were spawning");
+            }
+            self.watch_session_repo(session_id, &handle);
+            sessions.insert(session_id.to_string(), handle);
+        }
         // The path a RELAUNCH takes: this is where a session that was mid-stage
         // gets its message back.
         self.rehydrate_stage(session_id).await;
@@ -986,19 +1055,38 @@ impl AppState {
         // Nothing below needs the map: the handle is out of it, the kills are
         // queued, and the rest is per-session I/O — EXCEPT the row close, which
         // stays under the guard on purpose: "removed from the map" and "closed
-        // in storage" must be one step, or a `broadcast` landing in the gap
-        // finds no handle, a still-open row, and respawns a session that is
-        // being torn down (review, round 7). One UPDATE; the slow work stays
-        // outside.
+        // in storage" must be one step (one UPDATE; the slow work stays
+        // outside). What CAN respawn a session in the gap after this block is
+        // not `broadcast` (its `Deliver` step errors on a missing handle) but
+        // `ensure_session_started` — `respawn_session` fires it on every
+        // SessionView mount — so the guard also marks the session `closing`,
+        // under this same lock, and `ensure_session_started` refuses the id
+        // until the tail below has finished (round 8). The marker is cleared
+        // at the end of this function on every path — and it is what makes
+        // this function idempotent: two overlapping closes (the epilogue's
+        // detached teardown and a user's Close in the same instant; two
+        // `TearDownNow` plans) both reach here, and only the one that SET the
+        // mark owns the tail. The other returns at once — the handle is
+        // already out of the map, the row is being closed, and a second tail
+        // would clear the mark while the first is still unregistering
+        // (review, round 8).
         {
             let mut sessions = self.sessions.lock().await;
+            if !self.mark_closing(id, true) {
+                tracing::debug!(session_id = %id, "teardown already in progress; joining it");
+                return Ok(());
+            }
             if let Some(mut handle) = sessions.remove(id) {
                 for agent in handle.agents_mut() {
                     agent.handle.kill();
                 }
             }
             if let Some(archive) = archive {
-                self.storage.close_session(id, archive).await?;
+                if let Err(e) = self.storage.close_session(id, archive).await {
+                    // Not torn down after all: leave the session respawnable.
+                    self.mark_closing(id, false);
+                    return Err(e);
+                }
             }
         }
         // A stage the user left on this session can never deliver now — drop
@@ -1065,6 +1153,9 @@ impl AppState {
         // Tell the UI the session is closed so it can navigate away from the
         // (now-closed) session view + refresh its session lists.
         self.bridge.notify_session_closed(id.to_string());
+        // Tail done: the session may be respawned again (Archive panel,
+        // "reopen for review").
+        self.mark_closing(id, false);
         Ok(())
     }
 
@@ -2320,6 +2411,132 @@ mod tests {
         assert!(
             close < reap,
             "the sessions guard's block must close before the terminal reap"
+        );
+    }
+
+    /// **A teardown cannot be respawned into** (round 8, R1).
+    ///
+    /// Round 7's narrowed guard left `teardown_session`'s cleanup tail
+    /// unlocked, and `ensure_session_started` (`respawn_session` on every
+    /// SessionView mount) consults no marker — so a spawn landing in that gap
+    /// registered a handle the tail then unregistered under it. The marker is
+    /// the `closing` set; the pin is where it is written and read: set INSIDE
+    /// the guard block that removes the handle, cleared AFTER the tail's last
+    /// step, and read by `ensure_session_started` INSIDE its own `sessions`
+    /// re-check — a read outside that hold reopens the window (the reviewer's
+    /// first check). No `AppState` can be built in tests; the source is the
+    /// pin. Kill-tested: deleting the `is_closing` check goes red here.
+    #[test]
+    fn a_closing_session_is_marked_under_the_guard_and_refused_by_the_spawn_path() {
+        let code = include_str!("state.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body_of = |name: &str| {
+            let at = code
+                .find(&format!("async fn {name}("))
+                .unwrap_or_else(|| panic!("{name} must exist"));
+            let rest = &code[at..];
+            // The body ends at the next fn at impl indent, pub or not.
+            let end = [
+                rest[1..].find("\n    pub async fn "),
+                rest[1..].find("\n    async fn "),
+                rest[1..].find("\n    pub fn "),
+                rest[1..].find("\n    fn "),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .map_or(rest.len(), |n| n + 1);
+            rest[..end].to_string()
+        };
+
+        // teardown: mark inside the guard block, clear after the tail.
+        let td = body_of("teardown_session");
+        let nested = "\n        {\n            let mut sessions = self.sessions.lock().await;";
+        let lock = td.find(nested).expect("teardown's guard block");
+        let close = td[lock..]
+            .find("\n        }\n")
+            .map(|n| lock + n)
+            .expect("teardown's guard block closes");
+        let mark = td
+            .find("self.mark_closing(id, true)")
+            .expect("teardown must mark the session closing");
+        assert!(
+            lock < mark && mark < close,
+            "the closing mark must be set INSIDE the sessions guard block"
+        );
+        let notify = td
+            .find("notify_session_closed(")
+            .expect("teardown notifies the UI last");
+        let clear = td
+            .rfind("self.mark_closing(id, false)")
+            .expect("teardown must clear the closing mark");
+        assert!(
+            notify < clear,
+            "the closing mark must be cleared AFTER the tail's last step"
+        );
+        // …and on the ONE early return (a failed row close, nothing torn down)
+        // the mark is cleared first — otherwise that session stays marked
+        // forever and can never be respawned (the reviewer's nit).
+        let err_return = td[mark..]
+            .find("return Err(e)")
+            .map(|n| mark + n)
+            .expect("the failed row close returns early");
+        let err_clear = td[mark..]
+            .find("self.mark_closing(id, false)")
+            .map(|n| mark + n)
+            .expect("the failed row close clears the mark");
+        assert!(
+            err_clear < err_return && err_return < close,
+            "a failed row close must clear the closing mark before returning"
+        );
+        // Idempotence: the mark is the ownership test — a second overlapping
+        // teardown returns before touching anything.
+        let join = td[lock..]
+            .find("return Ok(())")
+            .map(|n| lock + n)
+            .expect("a second teardown returns early");
+        assert!(
+            mark < join && join < close,
+            "the second teardown must return inside the guard block, right after the mark"
+        );
+
+        // ensure_session_started: read inside the re-check, under the sessions
+        // lock taken beneath the spawn gate.
+        let es = body_of("ensure_session_started");
+        let gate = es
+            .find("self.spawn_gate.lock().await")
+            .expect("ensure_session_started takes the spawn gate");
+        let recheck = es[gate..]
+            .find("let mut sessions = self.sessions.lock().await;")
+            .map(|n| gate + n)
+            .expect("the re-check takes the sessions lock");
+        let recheck_close = es[recheck..]
+            .find("\n        }\n")
+            .map(|n| recheck + n)
+            .expect("the re-check block closes");
+        let read = es[gate..]
+            .find("self.is_closing(session_id)")
+            .map(|n| gate + n)
+            .expect("ensure_session_started must refuse a closing session");
+        assert!(
+            recheck < read && read < recheck_close,
+            "the closing read must sit INSIDE the sessions re-check block, \
+             not before the lock is taken and not after it is released"
+        );
+        // …and again after the spawn, before the insert: a teardown that ran
+        // during the (seconds-long) spawn must not get a handle registered.
+        let insert = es
+            .find("sessions.insert(session_id.to_string(), handle)")
+            .expect("the spawned handle is inserted");
+        let read_after_spawn = es
+            .rfind("self.is_closing(session_id)")
+            .expect("the post-spawn closing read");
+        assert!(
+            read < read_after_spawn && read_after_spawn < insert,
+            "the post-spawn closing read must precede the insert"
         );
     }
 
