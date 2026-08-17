@@ -18,6 +18,76 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-17 — the driver removed, two gaps closed, and a stall caught in review
+
+Follow-on to the round-4 audit below, in the same session. The user asked for the
+audit's parked item to be built, asked why a round-3 brainstorm had never been
+implemented, and then removed a subsystem.
+
+**Why the phase-advance vote was never built — answered from the record.** The
+user's msg 22012 in `s-dbc0e856` ended *"This is just an example… **What do you
+think?**"* — a brainstorm, never converted into an instruction. One sub-question
+did become a decision (**D36**, the escape valve). Then 21 minutes later the user
+redirected to the hard retirement, and at 15:22 said *"Settle all your pending
+tasks here in this session, no deferrals."* **The vote was a pending task at that
+moment** — D36 had been written to govern it 20 minutes earlier — and the session
+acknowledged the mandate without ever enumerating what "all pending tasks"
+contained. Not refused, not deferred with a reason, not logged. Confirmed by
+absence: zero "vote" hits in the round-3 report or `PLAN.md`. **A decision
+outliving its feature**, the inverse of F8 below.
+
+**The external driver is GONE** (`d0661b4`, −2,314 lines). The user demoted it to
+a future plugin, the call rc3 D9 made for the native agent loop. `wait_for_change`
+survived into `tauri_cmd/plugin_api.rs`, the plugin proxy being its only other
+caller. What the deletion refunded is the part worth recording: the driver's
+`wire` module was the sole reason two guards carried exemptions, so
+`no_tool_description_an_agent_reads_names_an_agent` now runs with **no exempt
+strings at all** and the identifier guard's carve-outs went from two files to one.
+Two things deliberately NOT deleted — an existing install's `mcp-token` (dead, but
+a user's file), and `bench/swebench/`, now non-functional and bannered as such.
+
+**Migration 0061 + `SpawnBadge`** (`2833949`) — what a participant was actually
+spawned with. `effort`/`ultracode` are the user's CHOICE and 94 of 94 live rows
+inherit, so rendering them says nothing about anyone. The effective value cannot
+be computed in the frontend (`claude-overrides.json` keys by ROLE SLUG, which
+`ParticipantView` does not carry) and must not be re-derived at read time (that
+answers "what it WOULD be spawned with now"). So the reconciliation moved out of
+`build_command` — a sync fn with no Storage, which is exactly why the value could
+never be recorded — into `reconcile_spawn_knobs`, called where Storage lives.
+`spawn_knobs_recorded` exists because the common path reconciles to `None`: a null
+pair is what SUCCESS looks like, and without the flag it is indistinguishable from
+a row predating the migration.
+
+**The user can move the phase** (`2833949`) — no Tauri command wrote it and
+`SessionPhaseChip` was a bare span, while `protocol.rs` told every agent *"the ring
+stops until the user advances the chip"*. `request_phase_advance` could only ever
+be declined; its stated purpose was unreachable for as long as it has existed.
+
+**And that fix shipped a silent stall, caught in review** (`b44649d`, `9c0bc7b`).
+The new command reused `AppState::advance_phase`, which passed `release_ring =
+false` — the sole gate on the only turn-dealing call. Its comment states the
+premise as a fact about the CALLER: *"the participant is mid-turn."* True for the
+agent tool, false by construction for a user acting on a halted session. So
+picking a phase cleared the halt, cleared the badge, advanced, persisted the
+notice, and dealt no turn. `PhaseAdvanceSource { Agent, User }` rather than a bool,
+because a bool is how the second caller inherited the wrong value unread.
+
+**The pattern all three share, in the reviewer's framing:** the premise a caller
+had to satisfy was written at the DEFINITION and unreadable at the CALL SITE —
+`participants.ts:23`'s reconcile-at-merge, `wire`'s frozen-for-clients,
+`release_ring`'s mid-turn. Each second caller read a name and a type, both true for
+it. **A premise a caller must satisfy belongs in the type.**
+
+Coverage note, stated as a limit rather than a claim: nothing in this crate can
+build an `AppState` (the `sessions` map is only populated by a real session start
+with a subprocess), so the live test that fix deserves cannot be written here. It
+has the mapping as a unit test plus a source-level guard — **weaker, not
+equivalent**. A later advisory found that guard pinned three of four links, and the
+fourth was measured: a literal `false` restores the stall and passes all 1178 lib
+tests.
+
+Suites: **1210** Rust + **409** frontend; clippy 4; release green.
+
 ## 2026-08-17 (round 4) — a dead feature, and the instrument that hid two live names
 
 Report in [`docs/plans/2026-08-17-rc3-audit-round4.md`](docs/plans/2026-08-17-rc3-audit-round4.md).
