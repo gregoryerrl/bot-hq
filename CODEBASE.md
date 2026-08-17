@@ -756,7 +756,7 @@ to `isPolicyFile` → branch in `EditorAreaImpl`.
 | `tests/phase_vote_wiring_test.rs` | every storage method the D37 phase-advance vote needs has a caller OUTSIDE its defining file — round 5's E1, where `bump_phase_epoch` was defined, tested seven times and called by nothing, leaving the epoch at 0 through 114 live transitions. A `pub` method on a `pub struct` is never `dead_code`, and a test that calls it does not pin its mount |
 | `examples/dump_role_prose.rs` | LIVE: generator for the role-prose reseed migrations |
 | `examples/native_loop.rs`, `examples/subscription_loop.rs` | research spikes for the native loop that D9 deleted (historical) |
-| `scripts/`, `packaging/`, `site/`, `bench/`, `templates/`, `start` | turn-latency tool · Homebrew cask · landing page · eval harnesses · CL seeds · dev launcher |
+| `scripts/`, `packaging/`, `site/`, `templates/`, `start` | turn-latency tool · Homebrew cask · landing page · CL seeds · dev launcher |
 | `Cargo.toml`, `frontend/package.json`, `.gitignore`, `.env` | deps + config |
 
 **Where to add X.** New canonical fact → update the ARCHITECTURE.md H2 AND grep

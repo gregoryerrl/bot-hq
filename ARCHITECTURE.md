@@ -959,9 +959,9 @@ the source of truth; SQLite carries two DERIVED, disposable layers on top:
   recomputes it and prefixes `⚠ possibly stale` when the code has
   drifted since indexing. Every `cl_retrieve` logs one row to
   `retrieval_events` (tokens, stale/empty counts) — surfaced in the
-  Library's Measurement tab. Behavioral complement: the standalone
-  `bench/cl_poison/` eval measures whether agents OBEY a poisoned atom
-  or VERIFY against the source.
+  Library's Measurement tab. (A standalone `bench/cl_poison/` eval measured
+  whether agents OBEY a poisoned atom or VERIFY against the source; it was
+  removed with `bench/` — see "Eval harness — REMOVED".)
 
 **All-agents files** (always loaded at spawn, same content for every
 agent):
@@ -1077,22 +1077,25 @@ sync**, **GitHub tab**.
 
 ---
 
-## Eval harness
+## Eval harness — REMOVED (2026-08-17)
 
-`bench/swebench/` is a SWE-bench rollout harness for evaluating a session
-on real GitHub issues — a Python client (`run_rollout.py`,
-`bothq_client.py`, `verify.py`, …) that drives sessions and scores patches.
-It is a developer tool, **not part of the runtime core**: it ships in-repo
-but is not compiled into the `bot-hq` binary and does not run at app startup.
+`bench/` held two Python harnesses: `swebench/`, a SWE-bench rollout harness
+that drove sessions over real GitHub issues and scored the patches, and
+`cl_poison/`, an obey-vs-verify eval measuring whether agents follow a poisoned
+CL atom or check it against the source. Neither was compiled into the binary or
+run at startup.
 
-> ⚠️ **NON-FUNCTIONAL as of 2026-08-17.** It drove sessions through the
-> external MCP server, which was removed and demoted to a future plugin. The
-> harness is left in-repo rather than deleted — it is the user's tool and the
-> rollout/scoring logic is independent of the transport — but it cannot run
-> until the driver plugin exists or it is re-pointed at another surface.
+Both drove bot-hq through the **external MCP server, removed earlier the same
+day**, and `cl_poison` imported `swebench`'s client directly
+(`sys.path.insert(...)` + `from bothq_client import …`), so the two failed as a
+unit. They were first bannered NON-FUNCTIONAL and kept, on the reasoning that
+the rollout/scoring logic is transport-independent; round 6 deleted them at the
+user's direction rather than carry ~1,900 lines of frozen Python that must be
+rewritten whenever the driver returns as a plugin.
 
-See
-[`bench/swebench/README.md`](bench/swebench/README.md).
+**The design record is the code itself:** `git show b604c67:bench/swebench/run_rollout.py`
+and its siblings. That is the same convention this file uses for the driver's own
+removal above.
 
 ---
 

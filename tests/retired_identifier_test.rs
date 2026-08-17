@@ -59,18 +59,16 @@
 //! repair (delete the specimens) removes the only proof the rule works. `tests/`
 //! was swept by hand at round 4 and holds no retired identifier outside comments.
 //!
-//! **`bench/` is out of scope, decided rather than overlooked** (round 4, raised
-//! in review). It holds 29 occurrences of the retired names in Python code and
-//! test fixtures, and no guard reaches them: this rule is Rust-specific — it
-//! splits compiler-carried identifiers on `_` — and `framing.ts` is frontend-only.
-//! Extending either over a directory of Python dev tooling would be applying a
-//! rule to a class it was not written for. The stronger reason is that both
-//! benches are NON-FUNCTIONAL: they drive the external MCP server, which was
-//! removed, so every name in them sits in code that must be rewritten when the
-//! driver plugin lands. Renaming there is churn on frozen code, and the banner
-//! at the top of each README is the honest signal instead. What DID matter — a
-//! user-facing README titling the current product "the bot-hq duo — Brian +
-//! Rain" — was fixed at the source.
+//! **`bench/` was held out of scope in round 4 and DELETED in round 6**, so the
+//! question it raised is moot. The reasoning is kept because it is the shape of
+//! the next such argument: `bench/` held 29 occurrences of the retired names in
+//! Python, and no guard reached them — this rule is Rust-specific (it splits
+//! compiler-carried identifiers on `_`) and `framing.ts` is frontend-only, so
+//! extending either over a directory of Python dev tooling would apply a rule to
+//! a class it was not written for. The stronger reason was that both benches were
+//! NON-FUNCTIONAL against the removed external MCP server, making renaming churn
+//! on frozen code. What DID matter — a user-facing README titling the current
+//! product "the bot-hq duo — Brian + Rain" — was fixed at the source.
 //!
 //! **`code_of` truncates at a non-`://` `//` inside a string literal**, so an
 //! identifier written after one in the same string is not scanned. That is a false

@@ -41,8 +41,9 @@ jobs:
             args: ''
             rust-targets: ''
           # Windows: NSIS .exe installer. Known staged runtime gaps (PID
-          # lock, bash hooks, mcp-token ACL) — tracked in PLAN.md / CL
-          # shipping notes; the compile-level reaper/signal gating landed.
+          # lock, bash hooks) — tracked in PLAN.md / CL shipping notes; the
+          # compile-level reaper/signal gating landed. The mcp-token ACL gap
+          # went with the external driver's token (2026-08-17): no token, no gap.
           - platform: windows-latest
             args: ''
             rust-targets: ''
