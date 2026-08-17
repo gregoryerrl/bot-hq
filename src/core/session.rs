@@ -21,50 +21,6 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
-use uuid::Uuid;
-
-pub struct OpenSessionRequest {
-    pub title: String,
-    pub working_repo_path: Option<PathBuf>,
-    /// Seed only the FIRST active role (`true`) or a full roster (`false`).
-    ///
-    /// The external driver has no create dialog and the setting that used to
-    /// answer for it is deleted, so it passes `true` — the rc3 D13 product
-    /// default of one participant. See [`Storage::ensure_session_roster`].
-    ///
-    /// **`false` no longer means "however many roles exist"** (round-2 audit
-    /// B3). It meant exactly that until the seeder gained a ceiling: a caller
-    /// asking for a non-solo session got every active non-`on_mention` role,
-    /// so adding a role in Settings silently widened every driver-created
-    /// session and the subprocess bill with it. The seeder now clamps to
-    /// `MAX_SESSION_PARTICIPANTS`.
-    ///
-    /// It stays a boolean here rather than becoming a count, deliberately:
-    /// this is a wire the external driver sends, and the plugin path — which
-    /// is the one the audit found reachable with a surprising roster — gained
-    /// the `participants` count instead. Widening this one is a second
-    /// breaking change with no caller asking for it yet.
-    pub solo: bool,
-    /// Per-slot saved-model ids, positional over the default roster's turn
-    /// order — `models[0]` overrides the first participant's model, `models[1]`
-    /// the second, and a short vec leaves the rest on the role's default.
-    /// `None` in a slot = fall back to the role's `default_model_id`, which is
-    /// the historical behaviour (rc3 **D10**: was `slot0_model_id` /
-    /// `slot1_model_id`).
-    pub models: Vec<Option<String>>,
-}
-
-impl OpenSessionRequest {
-    /// The historical default: the full roster, models resolved from the roles.
-    pub fn full(title: impl Into<String>, working_repo_path: Option<PathBuf>) -> Self {
-        Self {
-            title: title.into(),
-            working_repo_path,
-            solo: false,
-            models: Vec::new(),
-        }
-    }
-}
 
 /// One live participant: its process handle plus its roster identity.
 ///
@@ -359,59 +315,6 @@ fn resolve_spawn_roster<'a>(
             .collect(),
     );
     live
-}
-
-pub async fn open_session(
-    req: OpenSessionRequest,
-    paths: &Paths,
-    storage: Storage,
-    bridge: Arc<SignalingBridge>,
-    signaling_addr: SocketAddr,
-) -> Result<SessionHandle> {
-    let id = Uuid::new_v4().to_string();
-    storage
-        .create_session(
-            &id,
-            &req.title,
-            req.working_repo_path.as_ref().and_then(|p| p.to_str()),
-        )
-        .await
-        .context("creating session row")?;
-
-    // The solo/duo choice needs no column: this is what decides whether the
-    // participants after the first are enabled, and `Session::multi_participant`
-    // is derived from the rows it writes. The `set_session_spawn_config` write
-    // that used to mirror it into `sessions.rain_enabled` was a cached count of
-    // the roster and went with the column (0060).
-    seed_default_roster(&storage, &id, req.solo, &req.models, &[]).await;
-
-    // **Re-read AFTER seeding, and that ordering is the whole point of deriving
-    // the flag.** `multi_participant` is computed by the SELECT, so the row
-    // fetched by `create_session` — taken before any participant existed —
-    // answers `false` for every session, including a duo. `spawn_session_handle`
-    // reads it to size `ensure_session_roster`, so a stale copy would ask for a
-    // roster of one.
-    //
-    // The mirrored write this replaces had the same hazard pointing the other
-    // way: it kept an in-memory field in step with a column that a later reader
-    // could still find disagreeing with the rows. Derived state has to be read
-    // after the thing it derives from; the cost is one SELECT per session
-    // created.
-    let session = storage
-        .get_session(&id)
-        .await
-        .context("re-reading the session after its roster was seeded")?
-        .context("session row vanished between create and spawn")?;
-
-    spawn_session_handle(
-        session,
-        req.working_repo_path,
-        paths,
-        storage,
-        bridge,
-        signaling_addr,
-    )
-    .await
 }
 
 /// Seed the default roster and lay the caller's PER-SLOT picks onto it.

@@ -4,9 +4,7 @@ use crate::core::activity::ActivityTracker;
 use crate::core::broadcast::broadcast_user_message;
 use crate::core::close_learnings;
 use crate::core::ipav::IpavPhase;
-use crate::core::session::{
-    open_session, spawn_existing_session, OpenSessionRequest, SessionAgent, SessionHandle,
-};
+use crate::core::session::{spawn_existing_session, SessionAgent, SessionHandle};
 use crate::paths::Paths;
 use crate::signaling::{SignalingBridge, SignalingEvent, SignalingServer};
 use crate::storage::{MessageKind, Session, Storage};
@@ -351,64 +349,22 @@ impl AppState {
         }
     }
 
-    /// Open a session with a full roster, bypassing the create dialog.
-    ///
-    /// **No caller since 2026-08-17.** The external driver was its only one, and
-    /// that was removed and demoted to a planned plugin (PLAN.md). Kept rather
-    /// than deleted because it is the entry point that plugin would reuse, and
-    /// because the roster note below is the hard-won part — audited round 6, B7,
-    /// same call as `set_project_working_repo_path_if_unset`. The Tauri create
-    /// path does NOT come through here; it builds its own `OpenSessionRequest`.
-    ///
-    /// `slot0_model_id` / `slot1_model_id` are saved-model ids; `None` falls back
-    /// to the per-agent config, which is the historical behaviour. Pass them when
-    /// the caller wants a SPECIFIC model for this session. The two parameter
-    /// NAMES are the driver's wire contract and are left alone; what they mean
-    /// here is slot 0 and slot 1 (rc3 D10).
-    ///
-    /// **This path has no dialog, so it takes the product default: ONE
-    /// participant** (rc3 D13 — the `rain_disabled_default` setting it used to
-    /// read is deleted, and design §1 puts the default at one agent). See
-    /// [`Storage::ensure_session_roster`], which seeds it. A driver that wants a
-    /// second participant has to add the role to the session it creates; passing
-    /// `slot1_model_id` alone does NOT add one, and there is no roster slot for
-    /// it to land on.
-    pub async fn open_session(
-        &self,
-        title: impl Into<String>,
-        working_repo_path: Option<std::path::PathBuf>,
-        slot0_model_id: Option<String>,
-        slot1_model_id: Option<String>,
-    ) -> Result<String> {
-        let mut req = OpenSessionRequest::full(title, working_repo_path);
-        // rc3 D13: the product default with no UI behind it. One participant.
-        req.solo = true;
-        // Positional over the default roster's turn order. The two parameter
-        // NAMES are the external driver's wire contract and are left alone; what
-        // they mean here is slot 0 and slot 1 (rc3 D10).
-        req.models = vec![slot0_model_id, slot1_model_id];
-        let handle = open_session(
-            req,
-            &self.paths,
-            self.storage.clone(),
-            Arc::clone(&self.bridge),
-            self.signaling_addr,
-        )
-        .await?;
-        let id = handle.id.clone();
-        self.watch_session_repo(&id, &handle);
-        self.sessions.lock().await.insert(id.clone(), handle);
-        self.rehydrate_stage(&id).await;
-        // Tell the frontend a session was created. This covers the external
-        // driver path (UI create paths already self-invalidate list_sessions);
-        // no-op until the AppHandle is set in setup.
+    /// Tell the frontend — and, through it, plugins holding `list_sessions`
+    /// (`PluginHost` relays it as `sessions_changed`) — that a session row now
+    /// exists and its handle is registered. Called by BOTH create paths
+    /// (`tauri_cmd::sessions::create_session` and `dispatch_session_inner`)
+    /// once `ensure_session_started` has run, so the invalidate never races the
+    /// insert. Until round 7 the only emitter was `open_session`, the external
+    /// driver's entry point, which had had no caller since the driver's
+    /// removal — the event was never emitted in production while two live
+    /// subscribers waited for it. No-op until the `AppHandle` is set in setup.
+    pub fn notify_session_created(&self, session_id: &str) {
         if let Some(app) = self.app_handle.get() {
             let _ = app.emit(
                 crate::tauri_events::types::SESSION_CREATED,
-                serde_json::json!({ "session_id": id }),
+                serde_json::json!({ "session_id": session_id }),
             );
         }
-        Ok(id)
     }
 
     /// Spawn subprocesses for an existing session row if not already running.
@@ -2484,11 +2440,25 @@ mod tests {
             "the FLAG half: without it the fresh ring parks for nothing and the \
              message waits for a boundary that never fires"
         );
-        // Both spawn paths rehydrate — creation and the respawn a relaunch takes.
+        // Every path that puts a live handle in the map rehydrates. Since round 7
+        // deleted `open_session` (the external driver's create path) that is ONE
+        // site — `ensure_session_started`, which both remaining create paths (the
+        // dialog and the plugin proxy's `dispatch_session_inner`) and the respawn a
+        // relaunch takes all go through. A second site would be a new spawn path,
+        // and it must rehydrate too; zero would be the bug this guards.
         assert_eq!(
             prod.matches("self.rehydrate_stage(").count(),
-            2,
-            "every path that puts a live handle in the map must restore its stage"
+            1,
+            "every path that puts a live handle in the map must restore its stage — \
+             the one spawn path is `ensure_session_started`"
+        );
+        let started = prod
+            .split("pub async fn ensure_session_started")
+            .nth(1)
+            .expect("ensure_session_started exists");
+        assert!(
+            started.contains("self.rehydrate_stage("),
+            "and it is ensure_session_started that does it"
         );
     }
 

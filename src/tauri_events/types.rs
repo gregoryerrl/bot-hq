@@ -247,9 +247,13 @@ impl PluginAssetsChangedEvent {
 /// `list_projects`. No payload.
 pub const PROJECT_CHANGED: &str = "project:changed";
 
-/// Emitted (direct `app.emit`) when a session is created via a path the frontend
-/// doesn't already self-invalidate (the external driver). Carries
-/// `{ session_id }`; the frontend invalidates `list_sessions`.
+/// Emitted (direct `app.emit`, `AppState::notify_session_created`) once a
+/// created session's row is committed and its spawn attempted — from BOTH
+/// create paths (the dialog's `create_session` and the plugin proxy's
+/// `dispatch_session_inner`). Carries `{ session_id }`; the frontend
+/// invalidates `list_sessions` and `PluginHost` relays `sessions_changed` to
+/// plugins holding `list_sessions`. Until round 7 its only emitter was the
+/// removed external driver's entry point, so it never fired in production.
 pub const SESSION_CREATED: &str = "session:created";
 
 /// Emitted (direct `app.emit`) when the saved-model registry changes (upsert or

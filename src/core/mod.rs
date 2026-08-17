@@ -24,7 +24,7 @@ pub mod worktree;
 pub use activity::{ActivityTracker, SessionActivity};
 pub use close_learnings::{decide as decide_close_epilogue, Epilogue};
 pub use ipav::{IpavPhase, IpavState};
-pub use session::{open_session, OpenSessionRequest, SessionHandle};
+pub use session::SessionHandle;
 pub use state::AppState;
 pub use terminal::{SessionTerminal, TerminalRegistry};
 pub use watchdog::{run_stall_watchdog, AgentLiveness};

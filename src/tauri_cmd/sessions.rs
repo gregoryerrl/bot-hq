@@ -697,6 +697,12 @@ pub async fn create_session(
         if let Err(e) = core_bg.ensure_session_started(&spawn_id).await {
             tracing::warn!(session_id = %spawn_id, error = ?e, "post-create background spawn failed");
         }
+        // The row is committed and the handle (if the spawn succeeded) is
+        // registered: tell the frontend and, through it, plugins holding
+        // `list_sessions`. The dialog already invalidates its own list; this
+        // is for everything that was never told (round 7 — the event had no
+        // live emitter).
+        core_bg.notify_session_created(&spawn_id);
     });
     Ok(session.into())
 }
@@ -841,7 +847,12 @@ pub(crate) async fn dispatch_session_inner(
     // Register the project mapping BEFORE spawn so the agents' system prompt
     // picks up project-scoped CL conventions.
     bridge.register_session(id.clone(), project).await;
-    core.ensure_session_started(&id).await?;
+    let started = core.ensure_session_started(&id).await;
+    // Emitted AFTER the spawn attempt, so an invalidate cannot race the insert
+    // — and regardless of the attempt's outcome, because the row exists either
+    // way (a plugin holding `list_sessions` is told `sessions_changed`).
+    core.notify_session_created(&id);
+    started?;
     core.broadcast(&id, &prompt).await?;
     Ok(session.into())
 }
@@ -1239,6 +1250,49 @@ mod tests {
         let s = Arc::new(Storage::memory().await.unwrap());
         let b = SignalingBridge::new();
         (s, b)
+    }
+
+    /// `session:created` had exactly one emitter — `AppState::open_session`,
+    /// the external driver's entry point — and that had had no caller since
+    /// the driver was removed, so the event was never emitted in production
+    /// while `Providers.tsx` and `PluginHost.tsx` (which relays it to plugins
+    /// holding `list_sessions` as `sessions_changed`) waited for it. Nothing in
+    /// this crate can build a `CoreAppState` (its constructor binds a port),
+    /// so this pins the source: BOTH create paths call the emitter after the
+    /// spawn attempt. Delete either call and this goes red.
+    #[test]
+    fn both_create_paths_announce_the_session() {
+        let code = include_str!("sessions.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body_of = |name: &str| {
+            let at = code
+                .find(&format!("async fn {name}("))
+                .unwrap_or_else(|| panic!("{name} must exist"));
+            let rest = &code[at..];
+            let end = rest[1..]
+                .find("\n#[tauri::command]")
+                .or_else(|| rest[1..].find("\npub(crate) async fn "))
+                .or_else(|| rest[1..].find("\n#[cfg(test)]"))
+                .map_or(rest.len(), |n| n + 1);
+            rest[..end].to_string()
+        };
+        for name in ["create_session", "dispatch_session_inner"] {
+            let body = body_of(name);
+            let emit = body.find("notify_session_created(").unwrap_or_else(|| {
+                panic!("{name} must announce the session it created")
+            });
+            let spawn = body
+                .find("ensure_session_started(")
+                .unwrap_or_else(|| panic!("{name} must spawn"));
+            assert!(
+                spawn < emit,
+                "{name}: the announcement must follow the spawn attempt, so an \
+                 invalidate cannot race the handle registration"
+            );
+        }
     }
 
     /// **`SessionInfo.multi_participant` tracks the ROSTER, and distinguishes
