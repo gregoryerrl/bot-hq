@@ -179,9 +179,13 @@ impl Storage {
         Ok(())
     }
 
+    /// Close the row. Also clears the turn holder: a closed session holds no
+    /// turn, and 27 closed rows still named one on 2026-08-17 — an ending state
+    /// that read like a session mid-turn (round 7).
     pub async fn close_session(&self, id: &str, archive: bool) -> Result<()> {
         sqlx::query(
-            "UPDATE sessions SET closed_at = ?, archived = ? \
+            "UPDATE sessions SET closed_at = ?, archived = ?, \
+                 current_turn_participant_id = NULL \
              WHERE id = ? AND closed_at IS NULL",
         )
         .bind(now_utc())
@@ -459,6 +463,31 @@ mod tests {
         // Archived flag preserved so the UI can badge it.
         assert_eq!(closed.iter().find(|x| x.id == "s-c").unwrap().archived, 1);
         assert_eq!(closed.iter().find(|x| x.id == "s-b").unwrap().archived, 0);
+    }
+
+    /// A closed session holds no turn. `set_current_turn` is written by the ring
+    /// at every handover and cleared by `halt`, but a session closed mid-turn
+    /// kept its holder forever — 27 closed rows named one on 2026-08-17.
+    #[tokio::test]
+    async fn closing_a_session_clears_its_turn_holder() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-t", "mid-turn", None).await.unwrap();
+        s.set_current_turn("s-t", Some(7)).await;
+        let holder: (Option<i64>,) =
+            sqlx::query_as("SELECT current_turn_participant_id FROM sessions WHERE id = ?")
+                .bind("s-t")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(holder.0, Some(7), "the ring's write lands");
+        s.close_session("s-t", false).await.unwrap();
+        let holder: (Option<i64>,) =
+            sqlx::query_as("SELECT current_turn_participant_id FROM sessions WHERE id = ?")
+                .bind("s-t")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(holder.0, None, "closing clears the holder");
     }
 
     #[tokio::test]

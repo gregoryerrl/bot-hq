@@ -69,8 +69,8 @@ pub fn spawn_subscriber<EM, EB>(
 
 fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_event: &EB) {
     match ev {
-        SignalingEvent::MessagePersisted { session_id, message_id: _ } => {
-            emitter.touch(session_id);
+        SignalingEvent::MessagePersisted { session_id, message_id } => {
+            emitter.touch(session_id, message_id);
         }
         SignalingEvent::PendingChoice(p) => {
             let payload = PendingChoiceEvent {

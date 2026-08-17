@@ -976,11 +976,37 @@ impl AppState {
     /// closed it — the row is closed once, before the epilogue, so the UI never
     /// waits on a learnings turn.
     async fn teardown_session(&self, id: &str, archive: Option<bool>) -> Result<()> {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(mut handle) = sessions.remove(id) {
-            for agent in handle.agents_mut() {
-                agent.handle.kill();
+        // **The global `sessions` lock is held for the remove + kill only.**
+        // It used to be taken at the top and held to the end — across the PTY
+        // reap, the DB close, the tray withdrawal, the policy-file cleanup, the
+        // bridge unregister and a `spawn_blocking(git worktree remove)` — so
+        // for the whole of one session's close every other session's
+        // `broadcast_as`, `halt_declared`, `resolve_choice` wake,
+        // `current_phase` and `get_session_runtime` blocked behind it (round 7).
+        // Nothing below needs the map: the handle is out of it, the kills are
+        // queued, and the rest is per-session I/O — EXCEPT the row close, which
+        // stays under the guard on purpose: "removed from the map" and "closed
+        // in storage" must be one step, or a `broadcast` landing in the gap
+        // finds no handle, a still-open row, and respawns a session that is
+        // being torn down (review, round 7). One UPDATE; the slow work stays
+        // outside.
+        {
+            let mut sessions = self.sessions.lock().await;
+            if let Some(mut handle) = sessions.remove(id) {
+                for agent in handle.agents_mut() {
+                    agent.handle.kill();
+                }
             }
+            if let Some(archive) = archive {
+                self.storage.close_session(id, archive).await?;
+            }
+        }
+        // A stage the user left on this session can never deliver now — drop
+        // the content and clear the durable slot, so a relaunch does not
+        // rehydrate a message for a session that no longer exists.
+        self.staged_responses.lock().await.remove(id);
+        if let Err(e) = self.storage.set_staged_message(id, None).await {
+            tracing::warn!(?e, session_id = %id, "clearing the closed session's staged message failed");
         }
         // Stop live-watching this session's working repo.
         if let Some(watcher) = self.fs_watcher.get() {
@@ -988,9 +1014,6 @@ impl AppState {
         }
         // Reap the session's PTY terminal alongside the agent subprocesses.
         self.terminals.kill_and_remove(id).await;
-        if let Some(archive) = archive {
-            self.storage.close_session(id, archive).await?;
-        }
         // The session's pending tray items are moot now the agents are gone —
         // withdraw them so a closed session doesn't leave dead `pending` rows.
         if let Err(e) = self.storage.withdraw_pending_tray_for_session(id).await {
@@ -2246,6 +2269,60 @@ mod tests {
     /// notification is async, the turn it cut was usually the NEXT one, freshly
     /// dealt. Waiting made it worse rather than better.
     ///
+    /// `teardown_session` holds the global `sessions` lock for the remove + kill
+    /// ONLY. Held to the end of the function (as it was until round 7) it
+    /// serialised every other session's broadcast, halt, tray wake and runtime
+    /// read behind one session's PTY reap, DB close, policy cleanup and
+    /// `git worktree remove`. No `AppState` can be built in tests, so the scope
+    /// is pinned in the source: the guard is bound inside a nested block, and
+    /// that block closes before the first thing that does I/O.
+    #[test]
+    fn teardown_holds_the_sessions_lock_for_the_kill_only() {
+        let code = include_str!("state.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let at = code
+            .find("async fn teardown_session(")
+            .expect("teardown_session must exist");
+        let body = &code[at..];
+        let end = body[1..]
+            .find("\n    pub async fn ")
+            .map_or(body.len(), |n| n + 1);
+        let body = &body[..end];
+        // The guard is the first statement of an anonymous nested block: an
+        // opening `{` alone on a body-level line, then the lock one indent in.
+        // (A top-level `let mut sessions = …` at body indent — the shape that
+        // held the lock to the end — does not match; checked by mutating it.)
+        let nested = "\n        {\n            let mut sessions = self.sessions.lock().await;";
+        let lock = body
+            .find(nested)
+            .expect("the sessions guard must be the first statement of its own nested block");
+        // …and that block closes (a body-level `}`) before the terminal reap —
+        // the first await after the kills — but AFTER the row close, which
+        // must happen under the guard so "out of the map" and "closed in
+        // storage" are one step (a broadcast in the gap would respawn).
+        let reap = body
+            .find("kill_and_remove(")
+            .expect("teardown reaps the terminal");
+        let row_close = body
+            .find("close_session(id, archive)")
+            .expect("teardown closes the row");
+        let close = body[lock..]
+            .find("\n        }\n")
+            .map(|n| lock + n)
+            .expect("the guard's block closes");
+        assert!(
+            lock < row_close && row_close < close,
+            "the row close must sit INSIDE the sessions guard's block"
+        );
+        assert!(
+            close < reap,
+            "the sessions guard's block must close before the terminal reap"
+        );
+    }
+
     /// The phase-change notice is HOST-authored (round 7). Nothing in this
     /// crate can build an `AppState` to drive `advance_phase` end to end (the
     /// `sessions` map is only populated by a real spawn), so the wire cannot be
