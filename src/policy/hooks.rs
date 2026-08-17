@@ -366,23 +366,19 @@ fn run_post_commit(
             "bot-hq post-commit: forbidden word '{word}' slipped through \
              (sha={sha_short}). Logging violation."
         );
-        let log = ViolationsLog::new(data_dir);
-        // Best-effort log. Use a tokio runtime since the log API is async.
-        let rt = hook_runtime().context("building runtime for post-commit log")?;
-        rt.block_on(async {
-            let _ = log
-                .record(
-                    session_id.unwrap_or("<post-commit>").to_string(),
-                    "git-hook".to_string(),
-                    ViolationKind::CommitGrep,
-                    format!("git commit (sha={sha_short})"),
-                    ViolationOutcome::Denied,
-                    Some(format!(
-                        "forbidden word '{word}' detected post-commit by hook"
-                    )),
-                )
-                .await;
-        });
+        // Best-effort log. The append is a synchronous file write — no runtime
+        // needed for it (round 9: three hook sites built a tokio runtime solely
+        // to `block_on` a `record` whose body was `append_blocking`).
+        let _ = ViolationsLog::new(data_dir).record_blocking(
+            session_id.unwrap_or("<post-commit>").to_string(),
+            "git-hook".to_string(),
+            ViolationKind::CommitGrep,
+            format!("git commit (sha={sha_short})"),
+            ViolationOutcome::Denied,
+            Some(format!(
+                "forbidden word '{word}' detected post-commit by hook"
+            )),
+        );
     }
     Ok(0)
 }
@@ -462,26 +458,28 @@ fn pushing_non_fast_forward() -> bool {
     })
 }
 
-/// Best-effort fail-closed `ForcePush`/Denied violation for a force-push the hook
-/// blocked. Mirrors `log_push_block`.
-async fn log_force_push_block(
+/// Best-effort fail-closed Denied violation for a push the hook blocked —
+/// `ForcePush` (policy is 'blocked') or `PushGate` (the prompt couldn't be
+/// surfaced). One function for both (round 9: two near-identical async fns
+/// differed only in the kind and the detail string, and each needed a tokio
+/// runtime built around it to `block_on` a synchronous file append).
+fn log_push_denial(
     data_dir: &Path,
     session_id: &str,
     agent: &str,
     branch: Option<&str>,
+    kind: ViolationKind,
+    reason: &str,
 ) {
     let action = crate::policy::push_gate_action(branch);
-    let log = ViolationsLog::new(data_dir);
-    let _ = log
-        .record(
-            session_id.to_string(),
-            agent.to_string(),
-            ViolationKind::ForcePush,
-            action,
-            ViolationOutcome::Denied,
-            Some("pre-push blocked: force_push policy is 'blocked'".into()),
-        )
-        .await;
+    let _ = ViolationsLog::new(data_dir).record_blocking(
+        session_id.to_string(),
+        agent.to_string(),
+        kind,
+        action,
+        ViolationOutcome::Denied,
+        Some(format!("pre-push blocked: {reason}")),
+    );
 }
 
 /// POSTs the running app's `/hooks/pre-push` route to surface a per-push
@@ -537,9 +535,14 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>, session_id: Option<&str>
     if matches!(policy.force_push, ForcePushMode::Blocked) && pushing_non_fast_forward() {
         let branch = current_branch();
         if let Some(sid) = session_id.as_deref() {
-            if let Ok(rt) = hook_runtime() {
-                rt.block_on(log_force_push_block(data_dir, sid, &hook_agent(), branch.as_deref()));
-            }
+            log_push_denial(
+                data_dir,
+                sid,
+                &hook_agent(),
+                branch.as_deref(),
+                ViolationKind::ForcePush,
+                "force_push policy is 'blocked'",
+            );
         }
         eprintln!(
             "{}",
@@ -596,8 +599,8 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>, session_id: Option<&str>
 
     // The hook is a fresh subprocess that can't reach the running app's bridge
     // directly — POST `/hooks/pre-push` and block on the user's pick. One
-    // current-thread runtime drives both the HTTP call and the fail-closed
-    // violation log (mirrors run_post_commit).
+    // current-thread runtime drives the HTTP call (the fail-closed violation
+    // log is a synchronous append and needs none).
     let rt = match hook_runtime() {
         Ok(rt) => rt,
         Err(e) => {
@@ -636,13 +639,14 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>, session_id: Option<&str>
             // Fail-closed: the prompt couldn't be surfaced. The happy path's
             // violation is written by the bridge's resolve_choice; this records
             // our own so a blocked push still leaves an audit trail.
-            rt.block_on(log_push_block(
+            log_push_denial(
                 data_dir,
                 &session_id,
                 &agent,
                 branch.as_deref(),
+                ViolationKind::PushGate,
                 &reason,
-            ));
+            );
             eprintln!(
                 "{}",
                 blocked_banner(
@@ -746,29 +750,6 @@ fn classify_push_response(status: reqwest::StatusCode, body: &str) -> PushDecisi
         Some(false) => PushDecision::Rejected,
         None => PushDecision::Blocked("bot-hq response missing 'approved'".into()),
     }
-}
-
-/// Best-effort fail-closed violation record (`PushGate` / Denied) for a push
-/// the hook blocked because the prompt couldn't be surfaced.
-async fn log_push_block(
-    data_dir: &Path,
-    session_id: &str,
-    agent: &str,
-    branch: Option<&str>,
-    reason: &str,
-) {
-    let action = crate::policy::push_gate_action(branch);
-    let log = ViolationsLog::new(data_dir);
-    let _ = log
-        .record(
-            session_id.to_string(),
-            agent.to_string(),
-            ViolationKind::PushGate,
-            action,
-            ViolationOutcome::Denied,
-            Some(format!("pre-push blocked: {reason}")),
-        )
-        .await;
 }
 
 /// PreToolUse hook handler — the **Tool Gate** tripwire, injected into
@@ -1273,27 +1254,19 @@ fn check_findings_gate(data_dir: &Path, hook: &str, session_id: Option<&str>) ->
 
 /// Best-effort audit record for a findings-gate block (`Findings` / Denied), so
 /// violations.jsonl shows the gate fired — mirrors `run_post_commit`'s logging
-/// (own current-thread runtime; the hook is a sync subprocess). Never fails the
+/// (a synchronous append; the hook is a sync subprocess). Never fails the
 /// hook: a logging error is swallowed (the block already landed via stderr).
 fn log_findings_block(data_dir: &Path, hook: &str, session_id: &str, n: usize) {
     let agent = hook_agent();
     let action = if hook == "pre-push" { "git push" } else { "git commit" };
-    let log = ViolationsLog::new(data_dir);
-    let Ok(rt) = hook_runtime() else {
-        return;
-    };
-    rt.block_on(async {
-        let _ = log
-            .record(
-                session_id.to_string(),
-                agent,
-                ViolationKind::Findings,
-                action.to_string(),
-                ViolationOutcome::Denied,
-                Some(format!("{n} unresolved EYES blocking finding(s)")),
-            )
-            .await;
-    });
+    let _ = ViolationsLog::new(data_dir).record_blocking(
+        session_id.to_string(),
+        agent,
+        ViolationKind::Findings,
+        action.to_string(),
+        ViolationOutcome::Denied,
+        Some(format!("{n} unresolved EYES blocking finding(s)")),
+    );
 }
 
 /// Read open BLOCKING findings for `session_id` from the DB, read-only. Returns
