@@ -64,7 +64,7 @@ export function FeedbackPanel() {
     });
 
   return (
-    <div className="h-full overflow-y-auto px-4 py-3">
+    <div className="h-full overflow-y-auto overflow-x-hidden px-4 py-3">
       <p className="mb-3 font-body-md text-body-md text-on-surface-variant">
         Issues and ideas the agents raised about bot-hq itself, filed from
         whatever project they were working on. Work them from a bot-hq session.

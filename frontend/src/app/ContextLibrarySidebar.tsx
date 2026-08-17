@@ -257,7 +257,7 @@ export function WorkspaceSidebar({
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-1 py-1">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden px-1 py-1">
         {isLoading ? (
           <div className="space-y-1 px-2 py-2">
             {[0, 1, 2].map((i) => (

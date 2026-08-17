@@ -60,7 +60,7 @@ export function ContextManager() {
   return (
     <div className="flex h-full bg-background">
       <aside className="flex w-60 flex-shrink-0 flex-col border-r border-outline-variant bg-surface-container">
-        <div className="min-h-0 flex-1 overflow-y-auto py-1">
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1">
           {ordered.length === 0 ? (
             <p className="px-3 py-3 font-code-sm text-code-sm text-on-surface-variant">
               No registered projects yet. Register one to manage its context.

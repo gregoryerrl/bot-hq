@@ -257,7 +257,7 @@ function GateDetailsDialog({
         <h2 className="mb-3 font-headline-md text-headline-md text-on-surface">
           Approval details
         </h2>
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-1">
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
             <dt className="text-on-surface-variant">Requested by</dt>
             <dd className={cn("font-semibold", authorColorClass(row.agent))}>

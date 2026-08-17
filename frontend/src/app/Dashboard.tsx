@@ -492,7 +492,7 @@ export function Dashboard() {
             aria-modal="true"
             aria-label="New session"
             className={cn(
-              "fixed left-1/2 top-1/2 z-50 w-[min(480px,90vw)] max-h-[90vh] -translate-x-1/2 -translate-y-1/2 overflow-y-auto",
+              "fixed left-1/2 top-1/2 z-50 w-[min(480px,90vw)] max-h-[90vh] -translate-x-1/2 -translate-y-1/2 overflow-y-auto overflow-x-hidden",
               "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
             )}
           >

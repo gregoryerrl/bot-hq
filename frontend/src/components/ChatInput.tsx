@@ -408,7 +408,7 @@ export function ChatInput({
                 <ul
                   role="listbox"
                   aria-label="Mention a participant"
-                  className="absolute bottom-full left-0 z-10 mb-1 max-h-48 w-full overflow-y-auto rounded border border-outline-variant bg-surface-container-lowest py-1 shadow-lg"
+                  className="absolute bottom-full left-0 z-10 mb-1 max-h-48 w-full overflow-y-auto overflow-x-hidden rounded border border-outline-variant bg-surface-container-lowest py-1 shadow-lg"
                 >
                   {matches.map((m, i) => (
                     <li key={m.slug}>
@@ -424,8 +424,15 @@ export function ChatInput({
                           insertMention(m.slug);
                         }}
                         onMouseEnter={() => setHighlight(i)}
+                        // `min-w-0` + the per-span truncate: the label is
+                        // USER-TYPED (rc3 D20), so this row's width is user
+                        // controlled. A flex child defaults to `min-width:auto`
+                        // and refuses to shrink below its content, so without
+                        // this a long label widens the row past the picker and
+                        // the container scrolls sideways — which the pair above
+                        // now clips into invisibility rather than fixing.
                         className={cn(
-                          "flex w-full items-baseline gap-2 px-3 py-1.5 text-left text-sm",
+                          "flex w-full min-w-0 items-baseline gap-2 px-3 py-1.5 text-left text-sm",
                           m.slug === active?.slug
                             ? "bg-surface-container-high text-on-surface"
                             : "text-on-surface-variant",
@@ -433,13 +440,13 @@ export function ChatInput({
                       >
                         <span
                           className={cn(
-                            "font-semibold",
+                            "truncate font-semibold",
                             authorColorClass(m.label, authorHues),
                           )}
                         >
                           {m.label}
                         </span>
-                        <span className="font-mono text-xs opacity-60">
+                        <span className="shrink-0 font-mono text-xs opacity-60">
                           @{m.slug}
                         </span>
                       </button>

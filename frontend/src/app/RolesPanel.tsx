@@ -169,7 +169,7 @@ export function RolesPanel() {
               </span>
             </label>
           </div>
-          <ul className="min-h-0 flex-1 overflow-y-auto">
+          <ul className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
             {creating && (
               <li>
                 <button
@@ -232,7 +232,7 @@ export function RolesPanel() {
         </div>
 
         {/* ---- detail ---- */}
-        <div className="min-w-0 flex-1 overflow-y-auto rounded-lg border border-outline-variant bg-surface-container">
+        <div className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden rounded-lg border border-outline-variant bg-surface-container">
           {creating && selectedId === null ? (
             <RoleForm
               key="new"

@@ -643,7 +643,7 @@ function TrayChoice({
               overflowed and got clipped by the pane's overflow-x-hidden.
               `anywhere` breaks at any point, and max-h keeps a giant issue body
               from swallowing the card — Expand shows it in full. */}
-          <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded bg-surface-container-high px-2 py-1 text-[0.7rem] font-mono text-on-surface-variant">
+          <pre className="max-h-48 overflow-y-auto overflow-x-hidden whitespace-pre-wrap [overflow-wrap:anywhere] rounded bg-surface-container-high px-2 py-1 text-[0.7rem] font-mono text-on-surface-variant">
             {entry.command_text}
           </pre>
           {/* A gate that names a file shows only the PATH — the body being
