@@ -29,7 +29,7 @@ The session is a fixed rotation over its active participants. **You act only whe
 - **One pass per turn.** If a turn reaches you and nothing is yours to do, `pass_turn` once — a further pass the same turn is refused. A full lap of passes yields the session to the user on its own.
 - **Pass silently.** The pass row is the whole message — prose beside it is either substantive (it cancels your pass) or noise that doubles the transcript. A no-change poll (\"CI still running, nothing new\") is a PASS, not a report: report a change once, when it happens. Measured in `s-f6a441ff`: five still-waiting narrations in one minute of CI-watching, each a full model turn, while the user waited for the lap to settle.
 - **The user's messages LAND only when the session stops or at a turn boundary.** While anyone is working nothing the user writes can interrupt: they may compose and STAGE a message at any time, but a staged message delivers between turns — batched with their staged tray answers, exactly like a typed Send — and never cuts a turn in flight. Their single true interrupt is the Pause button. So the session gives the user the floor when it stops — a declared halt, a pending approval gate, a full-lap yield, or consensus — and their staged words reach you at the next boundary otherwise. The stop-discipline below stays load-bearing: a session that will not stop still starves the user of a floor, staged or not.
-- What stops what: a **question** (`ask_user_choice`) stops NOTHING — it parks in the user's tray and the answer arrives batched with their next message. An **approval gate** stops the session until the user answers it. A **halt** (`mark_awaiting_user`) stops the session until the user responds. The session holds ONE halt slot — a later declaration replaces the earlier.
+- What stops what: a **question** (`ask_user_choice`) stops NOTHING — it parks in the user's tray and the answer arrives as a user row at your next dealt turn — an idle session is dealt one at once, a working session reads it at its next boundary, often alongside the user's next message. An **approval gate** stops the session until the user answers it. A **halt** (`mark_awaiting_user`) stops the session until the user responds. The session holds ONE halt slot — a later declaration replaces the earlier.
 
 ## Commit conventions
 
@@ -68,7 +68,7 @@ From the 2026-07-27 archive study — the recurring failure was confident claims
 
 The bot-hq host exposes two tools your subprocess can call. Use them — don't ask the user inline as prose.
 
-- `ask_user_choice(question, options)` — parks a decision in the user's tray and returns immediately; the session KEEPS WORKING, and the pick arrives later, batched with the user's next message. Use when you need a decision between concrete options that nothing is blocked on right now.
+- `ask_user_choice(question, options)` — parks a decision in the user's tray and returns immediately; the session KEEPS WORKING, and the pick arrives later as a user row — an idle session is dealt a turn for it at once, a working session reads it at its next boundary. Use when you need a decision between concrete options that nothing is blocked on right now.
 - `mark_awaiting_user(reason)` — declares the session's halt: everything STOPS and the user gets the floor. Your `reason` is the recap they read above their input box — say where things stand and what you need. Use it when the next move is genuinely the user's.
 
 What the user can SEE: your chat prose and your halt reason — not your tool traffic. Tool inputs and outputs (the command your Bash ran, the file body you wrote, a peer's tool result) never render for them, so \"the command posted in chat\" is false unless you actually pasted it into a message. Anything the user must act on — a command to run, a path, a diff — goes VERBATIM into chat or into the halt reason itself. Measured in `s-ff729daa`: a halt asked the user to run \"the tinker command posted in chat\" while the command existed only inside the declarer's own tool input; the user searched the chat, found nothing, and lost two more round-trips shouting \"WHERE IS IT\" at a session that had stopped for exactly this answer.
@@ -77,7 +77,7 @@ Prose questions to the user are detectable but discouraged; always prefer the st
 
 ### Question discipline (whoever holds the ask capability)
 
-What each user-facing tool COSTS (know this before choosing one): a **question** (`ask_user_choice`) parks in the user's tray and stops NOTHING — the session keeps working and the answer arrives batched with the user's next message. An **approval** and a **halt** stop the whole session until the user acts. The archive study still holds: ~60% of questions asked were answerable by the agent — ask only what you cannot decide.
+What each user-facing tool COSTS (know this before choosing one): a **question** (`ask_user_choice`) parks in the user's tray and stops NOTHING — the session keeps working and the answer arrives as a user row (an idle session is dealt a turn for it at once; a working one reads it at its next boundary). An **approval** and a **halt** stop the whole session until the user acts. The archive study still holds: ~60% of questions asked were answerable by the agent — ask only what you cannot decide.
 
 **When your queue is empty and the next move is the user's, STOP.** Declare the halt (`mark_awaiting_user`) with a recap of where things stand, or pass your turn — a full lap of passes yields the session on its own. Re-declaring a halt on a state the user still hasn't acted on is harmless (the session holds ONE halt slot; a later declaration replaces the earlier) — but pointless, so prefer passing once your halt is declared. **Never manufacture work to avoid stopping**: drafting artifacts for peer review, re-reviewing a peer's confirmation of your own finding, polishing what is already agreed. The measured failure (`s-86a81478`): an executor with an empty queue said \"I won't halt on a state they haven't acted on\" and invented a CL-delta review chore instead — three participants volleyed over it for 25 minutes while the user sat unable to type, because the session only gives the user the floor when it STOPS. A session at the user's move that will not stop is a session the user cannot steer.
 
@@ -180,7 +180,7 @@ Each substantive task walks through four phases. The current phase appears as `[
 3. **Apply** — produce the deliverable, implementing against the `plan` doc (read it first). **The `apply` doc IS the deliverable**, shaped to the task: for code, a tight changelog beside the diff; for a deploy, the merge + smoke output; for an investigation or review, the synthesized findings themselves. The participant holding the edit capability executes any mutations (Edit/Write/Bash); a review-only participant does not write — so it can pull the deliverable in Verify via `session_doc_search(phase=\"apply\")` without re-deriving from the diff. The session view's A tab auto-renders your working repo's `git diff` color-coded (GitHub-style: green adds, red removes, blue hunks, yellow file headers); point the user there for visual review instead of pasting diffs into chat. Apply-phase docs render below the diff in the same tab.
 4. **Verify** — confirm the deliverable against the `apply` doc (read it first). Check the *thing you produced*: tests / type-check for code, the smoke output for a deploy, an adversarial proof-read for an investigation or review. Cite the output. Output: chat summary + a `phase=\"verify\"` doc capturing commands run, output observed, manual checks, and any flakes / known limits.
 
-**The phase moves by VOTE — `advance_phase(target)` casts yours** (rc3 D37). No user click is needed, but no single participant moves it either: the phase advances only when every active participant has voted for the same target at the same state of the work, so each participant genuinely gets a turn on the boundary. Until then the tool answers `NOT ADVANCED` with the tally and you are still in the current phase — do not act as though you are in the next one. Two mechanics to respect: **write your phase doc first, then vote** — the vote is fingerprinted over the session's phase documents, so a doc write after your vote orphans it (and any change to the work orphans everyone's, which is the point: everyone re-votes on changed work); and **a pass retracts your vote**. On consensus the dashboard chip moves and every participant receives a `[PHASE: X]` transition notice. Push, commit, and destructive ops have their own gates (`request_approval`, `check_commit_message`) — IPAV doesn't double-gate them.
+**The phase moves by VOTE — `advance_phase(target)` casts yours** (rc3 D37). No user click is needed, and with more than one active participant no single one moves it either: the phase advances only when every active participant has voted for the same target at the same state of the work, so each participant genuinely gets a turn on the boundary (a solo roster's own vote is that consensus — the chip moves on the call). Until then the tool answers `NOT ADVANCED` with the tally and you are still in the current phase — do not act as though you are in the next one. Two mechanics to respect: **write your phase doc first, then vote** — the vote is fingerprinted over the session's phase documents, so a doc write after your vote orphans it (and any change to the work orphans everyone's, which is the point: everyone re-votes on changed work); and **a pass retracts your vote**. On consensus the dashboard chip moves and every participant receives a `[PHASE: X]` transition notice. Push, commit, and destructive ops have their own gates (`request_approval`, `check_commit_message`) — IPAV doesn't double-gate them.
 
 Use `request_phase_advance(target, reason)` only when you specifically want to pause for explicit user acknowledgment before an irreversible Apply (force-push, prod writes, large rewrites). Most transitions don't need it.
 
@@ -246,6 +246,18 @@ mod tests {
             GENERAL_RULES.contains("A pending gate halts the session"),
             "action_gate must say the session waits at the gate"
         );
+        // Round 8: an idle session is dealt a turn for the answer at once —
+        // "batched with the user's next message" was true only for a working
+        // session (`tray_wake` releases the ring when nothing runs).
+        assert!(
+            !GENERAL_RULES.contains("batched with the user's next message")
+                && !GENERAL_RULES.contains("batched with their next message"),
+            "the answer does not wait for the user's next message on an idle session"
+        );
+        assert!(
+            GENERAL_RULES.contains("dealt a turn for it at once"),
+            "and the idle-session release is stated"
+        );
     }
 
     /// rc3 D37 made the phase a VOTE; this layer said "self-advance … no user
@@ -258,6 +270,12 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("The phase moves by VOTE"),
             "the IPAV paragraph must say the phase moves by vote"
+        );
+        // Round 8: a solo roster's own vote is the consensus — "no single
+        // participant moves it" is true only with more than one.
+        assert!(
+            GENERAL_RULES.contains("a solo roster's own vote is that consensus"),
+            "the solo case must be stated"
         );
         assert!(
             GENERAL_RULES.contains("write your phase doc first, then vote"),

@@ -160,7 +160,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         vec![
         ToolDescriptor {
             name: "ask_user_choice",
-            description: gated_by("ask_user_choice", "Ask the user to pick one option from a list. Returns IMMEDIATELY with a parked acknowledgment (status=parked plus a choice_id) — it does NOT block and it halts NOTHING: the question sits in the user's tray while the session keeps working, and the pick arrives later as a user message batched with the user's next send. After calling it, carry on with whatever else is workable (or pass if nothing is) — don't guess the answer, poll, or re-ask; if you must rephrase, withdraw the old question first. Use this whenever a decision belongs to the user."),
+            description: gated_by("ask_user_choice", "Ask the user to pick one option from a list. Returns IMMEDIATELY with a parked acknowledgment (status=parked plus a choice_id) — it does NOT block and it halts NOTHING: the question sits in the user's tray while the session keeps working, and the pick arrives later as a user row you read at your next dealt turn — an idle session is dealt one the moment the user answers, a working session reads it at its next boundary (often alongside the user's next send). After calling it, carry on with whatever else is workable (or pass if nothing is) — don't guess the answer, poll, or re-ask; if you must rephrase, withdraw the old question first. Use this whenever a decision belongs to the user."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -219,7 +219,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "advance_phase",
-            description: "Cast your VOTE to move the IPAV phase (rc3 D37 — no user gate, but not a solo move either): the phase advances only when every active participant has voted for the same target at the same state of the work; until then the tool answers NOT ADVANCED with the tally, and you are still in the current phase. Call it whenever your work crosses a boundary — investigation done -> Plan, plan stated -> Apply, mutation done -> Verify — and expect your peers to vote on their turns. The state of the work is fingerprinted over the session's phase documents, so WRITE your phase doc first, then vote (a doc write after your vote orphans it, and everyone re-votes on changed work); a pass retracts your vote. On consensus the chip moves and every participant reads a [PHASE: X] transition notice. Use exact phase names: Investigate, Plan, Apply, Verify.",
+            description: "Cast your VOTE to move the IPAV phase (rc3 D37 — no user gate; with more than one active participant it is not a solo move either): the phase advances only when every active participant has voted for the same target at the same state of the work — a solo roster's own vote IS that consensus and moves the chip at once; until then the tool answers NOT ADVANCED with the tally, and you are still in the current phase. Call it whenever your work crosses a boundary — investigation done -> Plan, plan stated -> Apply, mutation done -> Verify — and expect your peers to vote on their turns. The state of the work is fingerprinted over the session's phase documents, so WRITE your phase doc first, then vote (a doc write after your vote orphans it, and everyone re-votes on changed work); a pass retracts your vote. On consensus the chip moves and every participant reads a [PHASE: X] transition notice. Use exact phase names: Investigate, Plan, Apply, Verify.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -414,7 +414,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "override_reviewer_block",
-            description: gated_by("override_reviewer_block", "Override a 'reviewer down' commit block when this session's reviewer is Stalled/Dead and you've confirmed the change is safe to ship unreviewed. `reason` is REQUIRED and is logged + shown in the gate response (the fail-closed escape valve — mirrors a finding rebuttal). The override auto-clears when the reviewer recovers. Only needed when check_open_findings returns 'blocked: reviewer down'."),
+            description: gated_by("override_reviewer_block", "REQUEST an override of a 'reviewer down' commit block when this session's reviewer is Stalled/Dead and you've confirmed the change is safe to ship unreviewed. It does NOT lift the block itself: it parks an Approve/Reject decision for the user (returns at once with the gate id) and the block lifts only on their Approve — the user decides, you do not. `reason` is REQUIRED and is shown to them beside the decision (the fail-closed escape valve). Only needed when check_open_findings returns 'blocked: reviewer down'."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -436,7 +436,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "close_session",
-            description: gated_by("close_session", "Close the session this agent is running in. Kills every participant's subprocess and marks the session row closed (or archived). Use this when the user asks you to close the session and the conversation has reached a natural stopping point. Fire-and-forget — your subprocess will be terminated shortly after this call returns."),
+            description: gated_by("close_session", "Close the session this agent is running in. Kills every participant's subprocess and marks the session row closed (or archived). Use this when the user asks you to close the session and the conversation has reached a natural stopping point. The FIRST call may answer with a close-out learnings nudge or a Context-Library staleness report instead of closing — act on it (write the delta, or decide there is none), then call again; the call that closes is fire-and-forget — your subprocess is terminated shortly after it returns."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -451,7 +451,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "list_my_pending_questions",
-            description: "List the questions YOU (this agent) have currently parked for the user in this session. Includes ask_user_choice prompts, mark_awaiting_user halts, and request_approval gates that haven't been resolved yet. **Call this BEFORE issuing a new `ask_user_choice` to avoid duplicate retries** — if you already have a pending one on the same topic, supersede or withdraw it first. Returns a JSON array of { choice_id, kind, prompt, options, asked_at, supersedes_id }.",
+            description: "List the questions YOU (this agent) have currently parked for the user in this session: ask_user_choice prompts and request_approval / action_gate gates that haven't been resolved yet. (A halt is not a tray row — `mark_awaiting_user` fills the session's single halt slot, which the user's next message clears.) **Call this BEFORE issuing a new `ask_user_choice` to avoid duplicate retries** — if you already have a pending one on the same topic, supersede or withdraw it first. Returns a JSON array of { choice_id, kind, prompt, options, asked_at, supersedes_id }.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -498,7 +498,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "session_doc_write",
-            description: "Upsert a per-session scratch document (plan, investigation findings, notes — any free-form text). Isolated to THIS session; does NOT appear in cl_index_search and won't pollute the CL. **Tag with `phase` (one of `investigate`/`plan`/`apply`/`verify`) and the doc is keyed BY PHASE — exactly ONE rewritable doc per phase. Writing that phase again (even under a different slug) overwrites the single doc; if you found new info, rewrite the whole doc, never create a `-v2`.** Phase-tagged docs surface in the matching IPAV document tab and are retrievable via `session_doc_search(phase=...)`. Untagged docs are keyed by `slug` (many allowed) — session-scoped scratch, invisible to tabs and phase searches. Promote to CL by writing the body to a CL path with Write/Bash + cl_rescan(project) ONLY when the user asks.\n\n`mode: \"append\"` adds to the existing body under a timestamped separator instead of replacing it. Use it when a phase ships in SLICES: rewriting the whole doc per slice is what leaves it stale, and the phase key means you cannot open a second one. An append supersedes nothing, so nothing is archived. Default is `replace`.",
+            description: "Upsert a per-session scratch document (plan, investigation findings, notes — any free-form text). Isolated to THIS session; does NOT appear in cl_index_search and won't pollute the CL. **Tag with `phase` (one of `investigate`/`plan`/`apply`/`verify`) and the doc is keyed BY PHASE — exactly ONE rewritable doc per phase. Writing that phase again (even under a different slug) overwrites the single doc; if you found new info, rewrite the whole doc, never create a `-v2`.** Phase-tagged docs surface in the matching IPAV document tab and are retrievable via `session_doc_search(phase=...)`. Untagged docs are keyed by `slug` (many allowed) — session-scoped scratch, invisible to tabs and phase searches. Two mechanics to know: a caller that files review findings (a reviewer) has its phase-tagged write redirected to the co-located `<phase>-eyes` doc, so the executor's doc is never overwritten by a review; and every phase REPLACE archives the previous body as an untagged `<slug>@<n>` doc (capped), which an unfiltered `session_doc_search` will list. Promote to CL by writing the body to a CL path with Write/Bash + cl_rescan(project) ONLY when the user asks.\n\n`mode: \"append\"` adds to the existing body under a timestamped separator instead of replacing it. Use it when a phase ships in SLICES: rewriting the whole doc per slice is what leaves it stale, and the phase key means you cannot open a second one. An append supersedes nothing, so nothing is archived. Default is `replace`.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -943,6 +943,32 @@ mod tests {
         assert!(!adv.contains("chip yourself"), "the self-move claim must not come back: {adv}");
         let req = desc("request_phase_advance");
         assert!(!req.contains("self-advance"), "no self-advance framing: {req}");
+        // Round 8, second pass — the same defect class, four more tools.
+        assert!(
+            ask.contains("next dealt turn") && ask.contains("idle session is dealt one"),
+            "the pick is read at the next dealt turn, at once when idle: {ask}"
+        );
+        assert!(
+            !ask.contains("batched with the user's next send"),
+            "an idle session does not wait for the user's next send: {ask}"
+        );
+        assert!(
+            adv.contains("solo roster's own vote IS that consensus"),
+            "a solo roster moves the chip on its own vote: {adv}"
+        );
+        let ovr = desc("override_reviewer_block");
+        assert!(ovr.contains("REQUEST an override"), "it requests, it does not override: {ovr}");
+        assert!(ovr.contains("lifts only on their Approve"), "the user decides: {ovr}");
+        assert!(!ovr.contains("auto-clears"), "nothing auto-clears: {ovr}");
+        let pend = desc("list_my_pending_questions");
+        assert!(!pend.contains("mark_awaiting_user halts"), "no halt rows exist since D35: {pend}");
+        assert!(pend.contains("A halt is not a tray row"), "and it says where the halt lives: {pend}");
+        let close = desc("close_session");
+        assert!(close.contains("The FIRST call may answer"), "the first call may not close: {close}");
+        assert!(!close.contains(". Fire-and-forget"), "the bare fire-and-forget promise is gone: {close}");
+        let docw = desc("session_doc_write");
+        assert!(docw.contains("`<phase>-eyes`"), "the reviewer redirect is described: {docw}");
+        assert!(docw.contains("`<slug>@<n>`"), "the archives are described: {docw}");
     }
 
     /// **Nothing an agent reads names a person (rc3 D10).**
