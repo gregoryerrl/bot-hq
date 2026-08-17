@@ -56,6 +56,24 @@ pub use row_types::{
 };
 pub(crate) use time::now_utc;
 
+/// A user's search text as a `LIKE` pattern: `%…%`, lower-cased, with the
+/// pattern metacharacters escaped so `%`, `_` and `\` in the input match
+/// themselves. Every `LIKE ?` fed by this must carry `ESCAPE '\\'`. Without it
+/// a search for `_` or `%` matched every row and `foo_bar` matched `fooXbar`
+/// (round 8, N3).
+pub(crate) fn like_pattern(query: &str) -> String {
+    let mut out = String::with_capacity(query.len() + 2);
+    out.push('%');
+    for ch in query.to_lowercase().chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('%');
+    out
+}
+
 #[derive(Clone)]
 pub struct Storage {
     pool: SqlitePool,
@@ -148,7 +166,7 @@ impl Storage {
         let vis_and = if agent_only { " AND agent_visible = 1" } else { "" };
         let vis_pre = if agent_only { "agent_visible = 1 AND " } else { "" };
         let vis_where = if agent_only { " WHERE agent_visible = 1" } else { "" };
-        let like = query.map(|q| format!("%{}%", q.to_lowercase()));
+        let like = query.map(like_pattern);
         let columns = if table == "cl_index" {
             cl_index_columns()
         } else {
@@ -158,9 +176,9 @@ impl Storage {
         let rows: Vec<T> = match (project_id, like) {
             (Some(pid), Some(q)) => sqlx::query_as::<_, T>(&format!(
                 "{select} WHERE project_id = ?{vis_and} AND ( \
-                    LOWER({path_column}) LIKE ? \
-                    OR LOWER(description) LIKE ? \
-                    OR LOWER(IFNULL(tags, '')) LIKE ?) \
+                    LOWER({path_column}) LIKE ? ESCAPE '\\' \
+                    OR LOWER(description) LIKE ? ESCAPE '\\' \
+                    OR LOWER(IFNULL(tags, '')) LIKE ? ESCAPE '\\') \
                  ORDER BY updated_at DESC"
             ))
             .bind(pid)
@@ -176,9 +194,9 @@ impl Storage {
             .fetch_all(&self.pool)
             .await?,
             (None, Some(q)) => sqlx::query_as::<_, T>(&format!(
-                "{select} WHERE {vis_pre}(LOWER({path_column}) LIKE ? \
-                    OR LOWER(description) LIKE ? \
-                    OR LOWER(IFNULL(tags, '')) LIKE ?) \
+                "{select} WHERE {vis_pre}(LOWER({path_column}) LIKE ? ESCAPE '\\' \
+                    OR LOWER(description) LIKE ? ESCAPE '\\' \
+                    OR LOWER(IFNULL(tags, '')) LIKE ? ESCAPE '\\') \
                  ORDER BY updated_at DESC"
             ))
             .bind(&q)

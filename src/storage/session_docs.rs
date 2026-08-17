@@ -61,12 +61,12 @@ impl Storage {
         query: Option<&str>,
         phase: Option<&str>,
     ) -> Result<Vec<SessionDocument>> {
-        let like = query.map(|q| format!("%{}%", q.to_lowercase()));
+        let like = query.map(crate::storage::like_pattern);
         let mut sql = format!(
             "SELECT {DOCUMENT_COLUMNS} FROM session_documents WHERE session_id = ?"
         );
         if like.is_some() {
-            sql.push_str(" AND (LOWER(slug) LIKE ? OR LOWER(body) LIKE ?)");
+            sql.push_str(" AND (LOWER(slug) LIKE ? ESCAPE '\\' OR LOWER(body) LIKE ? ESCAPE '\\')");
         }
         if phase.is_some() {
             sql.push_str(" AND phase = ?");
@@ -118,6 +118,29 @@ impl Storage {
 #[cfg(test)]
 mod session_doc_tests {
     use super::*;
+
+    /// `%` and `_` in a search are LITERALS (round 8, N3): the pattern is
+    /// escaped and every `LIKE` carries `ESCAPE '\\'`. Before this a search for
+    /// `_` matched every document and `foo_bar` matched `fooXbar`.
+    #[tokio::test]
+    async fn a_search_for_a_wildcard_character_matches_it_literally() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.upsert_session_document("s1", "a", "progress 100% done", None).await.unwrap();
+        s.upsert_session_document("s1", "b", "snake_case names", None).await.unwrap();
+        s.upsert_session_document("s1", "c", "snakeXcase names", None).await.unwrap();
+        s.upsert_session_document("s1", "d", "plain prose", None).await.unwrap();
+        let slugs = |docs: Vec<SessionDocument>| {
+            let mut v: Vec<String> = docs.into_iter().map(|d| d.slug).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(slugs(s.session_documents_for("s1", Some("%"), None).await.unwrap()), vec!["a"]);
+        assert_eq!(slugs(s.session_documents_for("s1", Some("snake_case"), None).await.unwrap()), vec!["b"]);
+        assert_eq!(slugs(s.session_documents_for("s1", Some("_"), None).await.unwrap()), vec!["b"]);
+        assert_eq!(slugs(s.session_documents_for("s1", Some("names"), None).await.unwrap()), vec!["b", "c"]);
+        assert_eq!(crate::storage::like_pattern("a%b_c\\d"), "%a\\%b\\_c\\\\d%");
+    }
 
     async fn seeded() -> (Storage, &'static str, &'static str) {
         let s = Storage::memory().await.unwrap();
