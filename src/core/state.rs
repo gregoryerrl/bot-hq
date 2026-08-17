@@ -229,8 +229,8 @@ impl PhaseAdvanceSource {
 /// Migration 0062 gave the phase-advance vote an epoch to close its TIME axis,
 /// and justified the design by its call-site count — *"exactly ONE production
 /// call site, `AppState`'s phase writer"*. That call site was never written.
-/// `bump_phase_epoch` shipped with a definition, seven tests that call it
-/// directly, and nothing else, so the column sat at 0, no vote was ever
+/// `bump_phase_epoch` shipped with a definition, five calls across three tests in
+/// its own file, and nothing else, so the column sat at 0, no vote was ever
 /// invalidated by a transition, and no vote row was ever cleared (round 5, E1).
 ///
 /// Nothing in this crate can construct an `AppState`, so a guard on
@@ -2613,7 +2613,8 @@ mod tests {
     /// The behaviour half of round 5's E1. Migration 0062 built the epoch to
     /// close the vote's TIME axis and justified it by having exactly one
     /// production call site; that call site did not exist, so the column stayed
-    /// at 0 through 114 live phase changes and no tally was ever invalidated.
+    /// at 0 through every phase change the database recorded (125 by 2026-08-17,
+    /// and the count only grows) and no tally was ever invalidated.
     ///
     /// This drives the seam directly with a real `Storage` — the reason the seam
     /// exists, since nothing in the crate can build an `AppState`. Asserted on

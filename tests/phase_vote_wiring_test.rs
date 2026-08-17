@@ -4,11 +4,20 @@
 //! Round 5, finding E1. Migration 0062 shipped the vote with an epoch to close
 //! its TIME axis and justified the design by counting call sites — *"exactly ONE
 //! production call site, `AppState`'s phase writer"*. That call site was never
-//! written. `Storage::bump_phase_epoch` had a definition, seven tests calling it
-//! directly, and nothing else, so `sessions.phase_epoch` stayed at 0 across 114
-//! live phase changes: no vote was ever invalidated by a transition, and no vote
-//! row was ever cleared. A two-participant tally could be completed by one live
-//! vote plus one left over from a previous visit to the same phase.
+//! written. `Storage::bump_phase_epoch` had a definition, five calls across three
+//! `#[tokio::test]` functions in its own file, and nothing else, so
+//! `sessions.phase_epoch` stayed at 0 across every phase change the database
+//! recorded (125 by 2026-08-17, and the count only grows): no vote was
+//! ever invalidated by a transition, and no vote row was ever cleared. A
+//! two-participant tally could be completed by one live vote plus one left over
+//! from a previous visit to the same phase.
+//!
+//! (The counts above were "seven tests" in the first version of this file and in
+//! `6dd6ffd`'s message. Seven was the number of grep line HITS, two of which were
+//! doc comments — a count of matches read as a count of tests. Corrected in
+//! Verify by actually counting. The commit message keeps the wrong figure because
+//! rewriting shipped history for a supporting detail costs more than it fixes;
+//! this file is the artifact a future session reads.)
 //!
 //! **Three layers of verification could not see it, and the reason is
 //! mechanical.** `bump_phase_epoch` is `pub` on a `pub struct` in a lib crate, so

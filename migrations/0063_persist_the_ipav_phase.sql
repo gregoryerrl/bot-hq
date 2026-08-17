@@ -24,7 +24,8 @@
 -- ## Why a column and not a re-derivation
 --
 -- The phase COULD be recovered from the newest `phase_change` row in `messages`
--- — 114 of them exist. That was rejected: `phase_change` rows are synthetic
+-- — 125 of them existed on 2026-08-17, and the count only grows. That was
+-- rejected: `phase_change` rows are synthetic
 -- `author=user` host rows whose BODY is `transition_notice()`, so recovering the
 -- phase means parsing prose back into an enum, and the prose is guard-tested to
 -- change wording. A column stores the answer instead of reconstructing it.
