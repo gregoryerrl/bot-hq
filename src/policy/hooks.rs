@@ -435,26 +435,112 @@ fn line_is_force(line: &str, is_ancestor: impl Fn(&str, &str) -> bool) -> bool {
     !is_ancestor(remote_oid, local_oid)
 }
 
+/// One ref update git hands the pre-push hook on stdin: `<local ref> <local
+/// oid> <remote ref> <remote oid>`. Parsed ONCE per hook run (round 10, B3) and
+/// shared by the force check and the approval prompt — stdin can only be read
+/// once, and until this the prompt never read it at all: it named the
+/// checked-out branch (`symbolic-ref HEAD`), so pushing `526-…` from a checkout
+/// of `527-…` asked the user to "Allow `git push` to `527-…`" (`s-766f4ab9`,
+/// trays b8725c80 / 66a2b6e2 — the user approved a push labelled with the
+/// wrong branch, and the violations log carries the same wrong action).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PushUpdate {
+    local_ref: String,
+    local_oid: String,
+    remote_ref: String,
+    remote_oid: String,
+}
+
+/// Parse git's pre-push stdin lines. Malformed lines are dropped rather than
+/// failing the whole read — the force check and the naming both degrade to
+/// "no updates" for them, which is the pre-existing fail-open posture.
+fn parse_push_updates(input: &str) -> Vec<PushUpdate> {
+    input
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split_whitespace();
+            let (local_ref, local_oid, remote_ref, remote_oid) =
+                (f.next()?, f.next()?, f.next()?, f.next()?);
+            Some(PushUpdate {
+                local_ref: local_ref.to_string(),
+                local_oid: local_oid.to_string(),
+                remote_ref: remote_ref.to_string(),
+                remote_oid: remote_oid.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Read the pre-push ref updates off stdin — ONLY when stdin is not a
+/// terminal. Under git the hook's stdin is a pipe; from `cargo test` or a
+/// hand-run hook it is the terminal, and `read_to_string` on a terminal blocks
+/// until EOF (the reason this used to be lazy and force-only). Fail-open:
+/// unreadable stdin reads as no updates.
+fn read_push_updates() -> Vec<PushUpdate> {
+    use std::io::{IsTerminal, Read};
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Vec::new();
+    }
+    let mut input = String::new();
+    if stdin.lock().read_to_string(&mut input).is_err() {
+        return Vec::new();
+    }
+    parse_push_updates(&input)
+}
+
+/// The refs a push touches, as the user should read them: `refs/heads/x` →
+/// `x`, `refs/tags/v1` → `v1`, a delete (local oid all-zero) as `:x`; anything
+/// else verbatim. Empty when git handed the hook no updates (a push of nothing,
+/// or a hand-run hook), which callers turn into the HEAD fallback.
+fn pushed_ref_names(updates: &[PushUpdate]) -> Vec<String> {
+    updates
+        .iter()
+        .map(|u| {
+            let name = u
+                .remote_ref
+                .strip_prefix("refs/heads/")
+                .or_else(|| u.remote_ref.strip_prefix("refs/tags/"))
+                .unwrap_or(&u.remote_ref);
+            if is_zero_oid(&u.local_oid) {
+                format!(":{name}")
+            } else {
+                name.to_string()
+            }
+        })
+        .collect()
+}
+
+/// What the approval prompt / violations action name for this push: the pushed
+/// refs when git said which, else the checked-out branch (the pre-round-10
+/// behaviour, and the only answer when stdin carried nothing).
+fn push_target_label(names: &[String], head: Option<&str>) -> Option<String> {
+    if names.is_empty() {
+        head.map(str::to_string)
+    } else {
+        // Plain, comma-joined: the prompt and the action wrap it in their own
+        // backticks ("Allow `git push` to `a, b` …").
+        Some(names.join(", "))
+    }
+}
+
 /// Whether the in-flight push rewrites published history — git's pre-push signal
 /// for `--force` / `--force-with-lease` (the flag itself is never passed to the
-/// hook). Reads the ref updates on stdin and asks git for ancestry. Fail-OPEN
-/// (returns false) if stdin can't be read, so a read glitch never blocks a plain
-/// fast-forward push. A remote tip missing locally makes `--is-ancestor` error,
-/// which is treated as a rewrite (safe direction for a `blocked` policy).
-fn pushing_non_fast_forward() -> bool {
-    use std::io::Read;
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() {
-        return false;
-    }
-    input.lines().any(|line| {
-        line_is_force(line, |remote, local| {
-            std::process::Command::new("git")
-                .args(["merge-base", "--is-ancestor", remote, local])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        })
+/// hook). Asks git for ancestry over the parsed stdin updates. A remote tip
+/// missing locally makes `--is-ancestor` error, which is treated as a rewrite
+/// (safe direction for a `blocked` policy).
+fn pushing_non_fast_forward(updates: &[PushUpdate]) -> bool {
+    updates.iter().any(|u| {
+        line_is_force(
+            &format!("{} {} {} {}", u.local_ref, u.local_oid, u.remote_ref, u.remote_oid),
+            |remote, local| {
+                std::process::Command::new("git")
+                    .args(["merge-base", "--is-ancestor", remote, local])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            },
+        )
     })
 }
 
@@ -528,12 +614,25 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>, session_id: Option<&str>
     };
     use crate::policy::{ForcePushMode, PushGateMode};
 
+    // The ref updates, read ONCE and LAZILY (round 10, B3): both the force
+    // check and the approval prompt read them, stdin has one read in it, and
+    // it is read only on a path that needs it — a `push_gate: auto` push and a
+    // session-less one return before ever touching stdin, so a hand-run hook
+    // or a test binary whose stdin is an open pipe never blocks on EOF.
+    let updates: std::cell::OnceCell<Vec<PushUpdate>> = std::cell::OnceCell::new();
+    // What the user is asked about: the pushed refs, else HEAD.
+    let label = |updates: &[PushUpdate]| {
+        push_target_label(&pushed_ref_names(updates), current_branch().as_deref())
+    };
+
     // force_push gate — independent of push_gate and checked FIRST, so a
     // force-push can't ride through on push_gate=auto. A non-fast-forward push is
     // git's pre-push signal for --force / --force-with-lease (the flag is never
     // passed to the hook). Blocked outright when force_push == Blocked.
-    if matches!(policy.force_push, ForcePushMode::Blocked) && pushing_non_fast_forward() {
-        let branch = current_branch();
+    if matches!(policy.force_push, ForcePushMode::Blocked)
+        && pushing_non_fast_forward(updates.get_or_init(read_push_updates))
+    {
+        let branch = label(updates.get_or_init(read_push_updates));
         if let Some(sid) = session_id.as_deref() {
             log_push_denial(
                 data_dir,
@@ -563,8 +662,6 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>, session_id: Option<&str>
         return Ok(0);
     }
 
-    let branch = current_branch();
-
     // No session id → not an agent push inside a live session (e.g. a human at a
     // terminal). `ask` can only prompt a session's user, so block with guidance
     // rather than allowing — allowing here would let an agent bypass via
@@ -586,6 +683,7 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>, session_id: Option<&str>
     };
 
     let agent = hook_agent();
+    let branch = label(updates.get_or_init(read_push_updates));
 
     // One non-alarming line so the agent doesn't mistake the wait for a block and
     // try to work around it. Silent until the user answers.
@@ -1454,6 +1552,85 @@ mod tests {
         // Malformed lines (missing oids) are never a force.
         assert!(!line_is_force("refs/heads/main", |_, _| false));
         assert!(!line_is_force("", |_, _| false));
+    }
+
+    /// **The push prompt names the refs being pushed, not the checked-out
+    /// branch (round 10, B3).** `s-766f4ab9`: HANDS pushed `526-…` from a
+    /// checkout of `527-…` and the user approved "Allow `git push` to `527-…`".
+    /// The label comes from git's stdin lines; HEAD is only the fallback.
+    #[test]
+    fn the_push_prompt_names_the_pushed_refs_and_falls_back_to_head() {
+        let local = "1111111111111111111111111111111111111111";
+        let remote = "2222222222222222222222222222222222222222";
+        let zero = "0000000000000000000000000000000000000000";
+        let input = format!(
+            "refs/heads/526-nanoid-advisory-still-open {local} refs/heads/526-nanoid-advisory-still-open {zero}\n\
+             refs/tags/v1.2.0 {local} refs/tags/v1.2.0 {zero}\n\
+             refs/heads/old-branch {zero} refs/heads/old-branch {remote}\n\
+             refs/heads/short 3333333333333333333333333333333333333333 refs/heads/short\n"
+        );
+        let updates = parse_push_updates(&input);
+        assert_eq!(updates.len(), 3, "a three-field line is dropped, not fatal");
+        assert_eq!(updates[0].remote_ref, "refs/heads/526-nanoid-advisory-still-open");
+        let names = pushed_ref_names(&updates);
+        assert_eq!(
+            names,
+            vec![
+                "526-nanoid-advisory-still-open".to_string(),
+                "v1.2.0".to_string(),
+                ":old-branch".to_string(),
+            ],
+            "heads and tags lose their prefix; a delete is spelled `:name`"
+        );
+        // The label the prompt/action carry: the refs, never HEAD, when git
+        // said which refs move…
+        assert_eq!(
+            push_target_label(&names, Some("527-reconcile-test-timezone")).as_deref(),
+            Some("526-nanoid-advisory-still-open, v1.2.0, :old-branch")
+        );
+        // …and HEAD only when stdin carried nothing (a hand-run hook, a push
+        // of nothing).
+        assert_eq!(
+            push_target_label(&[], Some("527-reconcile-test-timezone")).as_deref(),
+            Some("527-reconcile-test-timezone")
+        );
+        assert_eq!(push_target_label(&[], None), None);
+        // The force check reads the same parsed updates: the delete and the
+        // create are never a force; the oracle decides the rest.
+        assert!(!pushing_non_fast_forward(&parse_push_updates(&format!(
+            "refs/heads/x {zero} refs/heads/x {remote}\n"
+        ))));
+        // And the hook WIRES it: run_pre_push reads the updates once and labels
+        // the prompt from them — the label reaches `decide_push`, not
+        // `current_branch()` alone (which is what shipped the wrong branch).
+        let src = include_str!("hooks.rs");
+        let body = src
+            .split("fn run_pre_push(")
+            .nth(1)
+            .expect("run_pre_push exists")
+            .split("\nfn ")
+            .next()
+            .expect("a split always yields a first part");
+        let label_def = body
+            .find("push_target_label(&pushed_ref_names(updates)")
+            .expect("the prompt label comes from the pushed refs");
+        let ask_label = body
+            .rfind("let branch = label(updates.get_or_init(read_push_updates));")
+            .expect("the ask path labels from the (lazily read) updates");
+        let decide = body.find("decide_push(").expect("the hook still asks the app");
+        assert!(label_def < ask_label && ask_label < decide, "label → ask, in that order");
+        assert_eq!(
+            body.matches("current_branch()").count(),
+            1,
+            "HEAD is read once, as the fallback inside the label — not as the prompt"
+        );
+        // Lazy: nothing reads stdin unconditionally — an `auto` push and a
+        // session-less push return before the read (a hand-run hook or a test
+        // binary with an open pipe on stdin must never block on EOF).
+        assert!(
+            !body.contains("let updates = read_push_updates();"),
+            "stdin is read through the OnceCell on the paths that need it, never eagerly"
+        );
     }
 
     #[test]
