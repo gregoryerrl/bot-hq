@@ -45,7 +45,8 @@ impl SignalingBridge {
         // User-hidden files (agent_visible = 0) refuse AGENT writes: an agent
         // that can't see a diary in search must not be able to overwrite it by
         // guessing its path. The Library UI edits bypass this (different path).
-        if let Some(storage) = self.storage.lock().await.clone() {
+        let storage = self.storage.lock().await.clone();
+        if let Some(storage) = storage {
             if let Ok(Some(row)) = storage.get_cl_index(&project, &file_path).await {
                 if !row.agent_visible {
                     anyhow::bail!(
@@ -189,7 +190,8 @@ impl SignalingBridge {
                 crate::signaling::bridge::PushOutcome::RefusedSecrets(_) => {
                     let body = format!("[System: {}]", outcome.summary());
                     tracing::warn!(%body, "library push refused by the secret scan");
-                    if let Some(storage) = bridge.storage.lock().await.clone() {
+                    let storage = bridge.storage.lock().await.clone();
+                    if let Some(storage) = storage {
                         crate::core::post_system_notice(
                             &storage,
                             Some(&bridge),

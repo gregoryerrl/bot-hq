@@ -86,7 +86,8 @@ impl SignalingBridge {
         // Same spawn inputs as the Terminal subtab's `terminal_open`: the
         // session's working repo (worktree-aware) as cwd, the app handle for
         // `terminal:output` emits so the user SEES agent-typed commands live.
-        let cwd = match self.storage.lock().await.clone() {
+        let storage = self.storage.lock().await.clone();
+        let cwd = match storage {
             Some(storage) => storage
                 .get_session(&session_id)
                 .await?

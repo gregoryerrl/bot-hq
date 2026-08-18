@@ -72,7 +72,11 @@ impl SignalingBridge {
         // approval gets the existing gate back instead of stacking a
         // second confusable prompt. PENDING rows only — a re-fire after
         // a reject is an intentional retry and parks fresh.
-        if let Some(storage) = self.storage.lock().await.clone() {
+        // Bound first: an `if let` scrutinee's temporaries — the mutex guard —
+        // live to the end of the statement in edition 2021, i.e. across the
+        // await below. `let` drops the guard before the body runs.
+        let storage = self.storage.lock().await.clone();
+        if let Some(storage) = storage {
             if let Ok(Some(existing)) = storage.pending_gate_for_command(session_id, command).await {
                 return Ok((existing, true));
             }

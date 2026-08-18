@@ -85,8 +85,7 @@ impl SignalingBridge {
         project: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<ClIndexEntry>> {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
+        let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(Vec::new());
         };
         storage.cl_index_search(project, query).await
@@ -99,8 +98,7 @@ impl SignalingBridge {
         project: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<ClIndexEntry>> {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
+        let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(Vec::new());
         };
         storage.cl_index_search_agent(project, query).await
@@ -253,8 +251,7 @@ impl SignalingBridge {
         project: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<crate::storage::ClFolder>> {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
+        let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(Vec::new());
         };
         storage.cl_folder_search(project, query).await
@@ -269,8 +266,7 @@ impl SignalingBridge {
         description: &str,
         tags: Option<&str>,
     ) -> Result<()> {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
+        let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(());
         };
         // Ensure the project row exists. _globals is bootstrapped by the
@@ -296,8 +292,7 @@ impl SignalingBridge {
         project: &str,
         file_path: &str,
     ) -> Result<()> {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
+        let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(());
         };
         let Some(entry) = storage.get_cl_index(project, file_path).await? else {

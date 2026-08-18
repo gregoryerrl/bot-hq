@@ -98,8 +98,7 @@ impl SignalingBridge {
         append: bool,
     ) -> Result<i64> {
         let id = {
-            let storage_guard = self.storage.lock().await;
-            let Some(storage) = storage_guard.as_ref() else {
+            let Some(storage) = self.storage.lock().await.clone() else {
                 return Err(anyhow::anyhow!("storage not configured"));
             };
             let key = effective_slug(slug, phase);
@@ -130,7 +129,7 @@ impl SignalingBridge {
             // append replaces nothing, so archiving it would just duplicate the
             // prefix into the archive on every slice.
             if phase.is_some() && !append {
-                Self::archive_superseded_doc(storage, session_id, key, body).await;
+                Self::archive_superseded_doc(&storage, session_id, key, body).await;
             }
             storage
                 .upsert_session_document(session_id, key, body, phase)
@@ -184,8 +183,7 @@ impl SignalingBridge {
             None => "### Review findings".to_string(),
         };
         let id = {
-            let storage_guard = self.storage.lock().await;
-            let Some(storage) = storage_guard.as_ref() else {
+            let Some(storage) = self.storage.lock().await.clone() else {
                 return Err(anyhow::anyhow!("storage not configured"));
             };
             let existing = if append {
@@ -209,7 +207,7 @@ impl SignalingBridge {
                 None => format!("{heading}\n\n{body}"),
             };
             if !append {
-                Self::archive_superseded_doc(storage, session_id, &slug, &composed).await;
+                Self::archive_superseded_doc(&storage, session_id, &slug, &composed).await;
             }
             storage
                 .upsert_session_document(session_id, &slug, &composed, Some(phase))
@@ -229,8 +227,7 @@ impl SignalingBridge {
         query: Option<&str>,
         phase: Option<&str>,
     ) -> Result<Vec<crate::storage::SessionDocument>> {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
+        let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(Vec::new());
         };
         storage
@@ -244,8 +241,7 @@ impl SignalingBridge {
         session_id: &str,
         slug: &str,
     ) -> Result<Option<crate::storage::SessionDocument>> {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
+        let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(None);
         };
         storage.session_document_by_slug(session_id, slug).await

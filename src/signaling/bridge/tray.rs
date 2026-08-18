@@ -237,8 +237,8 @@ impl SignalingBridge {
         // Look up the stale row by choice_id to capture its internal id (for
         // the new row's supersedes_id FK) BEFORE marking it superseded.
         let stale_internal_id = {
-            let storage_guard = self.storage.lock().await;
-            match storage_guard.as_ref() {
+            let storage = self.storage.lock().await.clone();
+            match storage {
                 Some(storage) => storage
                     .get_tray_entry(&stale_choice_id)
                     .await
@@ -250,8 +250,8 @@ impl SignalingBridge {
         };
         // Flip status + drop parked oneshot + fire ChoiceResolved for the UI.
         {
-            let storage_guard = self.storage.lock().await;
-            if let Some(storage) = storage_guard.as_ref() {
+            let storage = self.storage.lock().await.clone();
+            if let Some(storage) = storage {
                 if let Err(e) = storage.supersede_tray_entry(&stale_choice_id).await {
                     tracing::warn!(?e, %stale_choice_id, "supersede (explicit) storage update failed");
                 }
@@ -294,8 +294,7 @@ impl SignalingBridge {
         agent: &str,
         prompt: &str,
     ) -> Option<i64> {
-        let storage_guard = self.storage.lock().await;
-        let storage = storage_guard.as_ref()?;
+        let storage = self.storage.lock().await.clone()?;
         let rows = storage.tray_entries_for_session(session_id).await.ok()?;
         let latest = rows
             .into_iter()
@@ -307,7 +306,6 @@ impl SignalingBridge {
         if let Err(e) = storage.supersede_tray_entry(&stale_choice_id).await {
             tracing::warn!(?e, %stale_choice_id, "supersede (auto) storage update failed");
         }
-        drop(storage_guard);
         // Drop the parked oneshot so any (rare) still-listening client gets
         // the standard cancellation.
         self.pending.lock().await.remove(&stale_choice_id);
@@ -456,8 +454,7 @@ impl SignalingBridge {
         supersedes_id: Option<i64>,
         command_text: Option<&str>,
     ) {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
+        let Some(storage) = self.storage.lock().await.clone() else {
             return;
         };
         if let Err(e) = storage
@@ -504,8 +501,8 @@ impl SignalingBridge {
     pub async fn withdraw_question_for(&self, choice_id: &str, asker: Option<&str>) -> Withdrawal {
         if let Some(asker) = asker {
             let owner = {
-                let storage_guard = self.storage.lock().await;
-                match storage_guard.as_ref() {
+                let storage = self.storage.lock().await.clone();
+                match storage {
                     Some(storage) => storage
                         .get_tray_entry(choice_id)
                         .await
@@ -538,8 +535,8 @@ impl SignalingBridge {
         // BEFORE the withdraw flips the row away from `pending` — the latch
         // discriminator matches pending rows only.
         let gate_session = {
-            let storage_guard = self.storage.lock().await;
-            match storage_guard.as_ref() {
+            let storage = self.storage.lock().await.clone();
+            match storage {
                 Some(storage) => storage
                     .get_tray_entry(choice_id)
                     .await
@@ -553,7 +550,7 @@ impl SignalingBridge {
                 None => None,
             }
         };
-        let storage_guard = self.storage.lock().await;
+        let storage = self.storage.lock().await.clone();
         // **The DURABLE row counts too.** The return value was "was there an
         // in-memory park?", so withdrawing a row that outlived its process — a
         // question parked before a restart, which is the case the durable row
@@ -561,7 +558,7 @@ impl SignalingBridge {
         // while actually withdrawing it. The tool's own answer said the opposite
         // of what happened.
         let mut withdrew_row = false;
-        if let Some(storage) = storage_guard.as_ref() {
+        if let Some(storage) = storage {
             match storage.withdraw_tray_entry(choice_id).await {
                 Ok(rows) => withdrew_row = rows > 0,
                 Err(e) => {
@@ -569,7 +566,6 @@ impl SignalingBridge {
                 }
             }
         }
-        drop(storage_guard);
         if let Some(session_id) = gate_session {
             self.notify_ring_gate(&session_id, choice_id, false).await;
         }
@@ -593,8 +589,7 @@ impl SignalingBridge {
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::storage::SessionTrayEntry>> {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
+        let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(Vec::new());
         };
         storage.tray_entries_for_session(session_id).await
@@ -605,8 +600,7 @@ impl SignalingBridge {
     /// "needs your input [N]" counts — survives restart, unlike the in-memory
     /// pending map.
     pub async fn list_pending_tray_open(&self) -> Result<Vec<crate::storage::SessionTrayEntry>> {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
+        let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(Vec::new());
         };
         storage.pending_tray_open_sessions().await
@@ -655,8 +649,8 @@ impl SignalingBridge {
         // fired, and the ring stayed latched for the life of the process. The
         // withdraw path has always read first; this one now does too.
         let gate_session = {
-            let storage_guard = self.storage.lock().await;
-            match storage_guard.as_ref() {
+            let storage = self.storage.lock().await.clone();
+            match storage {
                 Some(storage) => match storage.get_tray_entry(choice_id).await {
                     Ok(row) => row
                         .filter(|row| {
@@ -687,8 +681,8 @@ impl SignalingBridge {
         // double-run. This is the durable exactly-once that replaces the
         // in-memory oneshot's guarantee.
         let flipped = {
-            let storage_guard = self.storage.lock().await;
-            match storage_guard.as_ref() {
+            let storage = self.storage.lock().await.clone();
+            match storage {
                 Some(storage) => match storage.answer_tray_entry(choice_id, &picked).await {
                     Ok(rows) => rows == 1,
                     Err(e) => {
@@ -785,8 +779,8 @@ impl SignalingBridge {
                         // Age-stamp from the durable row (the in-memory park
                         // carries no ask-time); a miss just omits the line.
                         let asked_at = {
-                            let storage_guard = self.storage.lock().await;
-                            match storage_guard.as_ref() {
+                            let storage = self.storage.lock().await.clone();
+                            match storage {
                                 Some(storage) => storage
                                     .get_tray_entry(choice_id)
                                     .await
@@ -820,8 +814,8 @@ impl SignalingBridge {
                 // CoreAppState injects the answer into the live (respawned)
                 // session — the only channel to a resumed subprocess.
                 let q = {
-                    let storage_guard = self.storage.lock().await;
-                    match storage_guard.as_ref() {
+                    let storage = self.storage.lock().await.clone();
+                    match storage {
                         Some(storage) => storage.get_tray_entry(choice_id).await?,
                         None => None,
                     }
@@ -926,8 +920,8 @@ impl SignalingBridge {
             .await
             .map(|phase| crate::storage::Envelope::phase(phase.name()));
         let receipt = {
-            let storage_guard = self.storage.lock().await;
-            match storage_guard.as_ref() {
+            let storage = self.storage.lock().await.clone();
+            match storage {
                 Some(storage) => match storage
                     .post_to_channel(
                         session_id.as_str(),
@@ -1125,8 +1119,8 @@ impl SignalingBridge {
         // the two — but a halt nobody can recover is not allowed to look
         // identical to one that persisted.
         let recorded = {
-            let storage_guard = self.storage.lock().await;
-            match storage_guard.as_ref() {
+            let storage = self.storage.lock().await.clone();
+            match storage {
                 Some(storage) => match storage
                     .declare_session_halt(&session_id, &agent, &text)
                     .await
@@ -1282,8 +1276,8 @@ impl SignalingBridge {
     ) {
         let body = format!("[PHASE REQUEST -> {target}] {reason}");
         {
-            let storage_guard = self.storage.lock().await;
-            if let Some(storage) = storage_guard.as_ref() {
+            let storage = self.storage.lock().await.clone();
+            if let Some(storage) = storage {
                 // The receipt is dropped: this row records the agent's request,
                 // and the only thing done with `body` afterwards is
                 // `emit_halt_row` — a UI event, not a wire into any agent's
