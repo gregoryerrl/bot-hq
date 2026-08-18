@@ -240,27 +240,44 @@ impl SignalingBridge {
         question: String,
         options: Vec<String>,
     ) -> Result<String> {
-        // Look up the stale row by choice_id to capture its internal id (for
-        // the new row's supersedes_id FK) BEFORE marking it superseded.
-        let stale_internal_id = {
-            let storage = self.storage.lock().await.clone();
-            match storage {
-                Some(storage) => storage
-                    .get_tray_entry(&stale_choice_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|q| q.id),
-                None => None,
-            }
+        // ONE read of the stale row: its internal id (the new row's
+        // `supersedes_id` FK) and — round 11 — its owner. "Replace a stale
+        // question YOU parked" is the tool's promise, and `withdraw_question`
+        // already refuses a peer's row; this path retired any row by
+        // choice_id, from any participant, in any session. A read ERROR
+        // refuses too (the scoping is the only control here); a missing row
+        // falls through — nothing to protect, and the new question is still
+        // the caller's to park.
+        let storage = self.storage.lock().await.clone();
+        let stale_internal_id = match &storage {
+            Some(storage) => match storage.get_tray_entry(&stale_choice_id).await {
+                Ok(Some(row)) => {
+                    if row.agent != agent || row.session_id != session_id {
+                        tracing::warn!(
+                            %stale_choice_id,
+                            asker = %agent,
+                            owner = %row.agent,
+                            "refusing to supersede a question parked by another participant or session"
+                        );
+                        anyhow::bail!(
+                            "not superseded: {stale_choice_id} was parked by another participant \
+                             (or in another session); you can only supersede your own questions"
+                        );
+                    }
+                    Some(row.id)
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(?e, %stale_choice_id, "supersede: the stale row could not be read; refusing");
+                    anyhow::bail!("not superseded: {stale_choice_id} could not be read; try again");
+                }
+            },
+            None => None,
         };
         // Flip status + drop parked oneshot + fire ChoiceResolved for the UI.
-        {
-            let storage = self.storage.lock().await.clone();
-            if let Some(storage) = storage {
-                if let Err(e) = storage.supersede_tray_entry(&stale_choice_id).await {
-                    tracing::warn!(?e, %stale_choice_id, "supersede (explicit) storage update failed");
-                }
+        if let Some(storage) = storage {
+            if let Err(e) = storage.supersede_tray_entry(&stale_choice_id).await {
+                tracing::warn!(?e, %stale_choice_id, "supersede (explicit) storage update failed");
             }
         }
         self.pending.lock().await.remove(&stale_choice_id);
@@ -512,39 +529,43 @@ impl SignalingBridge {
     /// "not pending" (round 9) — that told the caller a state that does not
     /// hold, when the bridge knew exactly why it refused.
     pub async fn withdraw_question_for(&self, choice_id: &str, asker: Option<&str>) -> Withdrawal {
-        if let Some(asker) = asker {
-            // "Yours only" — read the row's owner. A read ERROR is not "no
-            // owner": it refuses (round 10). `.ok().flatten()` used to fold the
-            // error into `None` and the withdrawal went ahead, which for the one
-            // control this ungated tool has is fail-OPEN. No storage at all
-            // (tests / bootstrap) and a row that does not exist still fall
-            // through: there is no owner to protect in either.
-            let storage = self.storage.lock().await.clone();
-            let owner = match storage {
-                Some(storage) => match storage.get_tray_entry(choice_id).await {
-                    Ok(row) => row.map(|row| row.agent),
-                    Err(e) => {
+        // ONE read of the row serves both questions asked of it (round 11 —
+        // it used to be read twice, across three storage locks): whose is it,
+        // and is it a gate. No storage at all (tests / bootstrap) reads as
+        // "no row".
+        let storage = self.storage.lock().await.clone();
+        let row = match &storage {
+            Some(storage) => match storage.get_tray_entry(choice_id).await {
+                Ok(row) => row,
+                Err(e) => {
+                    if asker.is_some() {
+                        // "Yours only" — a read ERROR is not "no owner": it
+                        // refuses (round 10). Folding the error into `None`
+                        // let the withdrawal go ahead, which for the one
+                        // control this ungated tool has is fail-OPEN.
                         tracing::warn!(
                             ?e,
                             choice_id,
-                            asker,
                             "withdraw_question: the row's owner could not be read; refusing"
                         );
                         return Withdrawal::Unverifiable;
                     }
-                },
-                None => None,
-            };
-            if let Some(owner) = owner {
-                if owner != asker {
-                    tracing::warn!(
-                        choice_id,
-                        asker,
-                        owner,
-                        "refusing to withdraw a question parked by another participant"
-                    );
-                    return Withdrawal::NotYours;
+                    None
                 }
+            },
+            None => None,
+        };
+        if let (Some(asker), Some(row)) = (asker, row.as_ref()) {
+            // A row that does not exist falls through: there is no owner to
+            // protect.
+            if row.agent != asker {
+                tracing::warn!(
+                    choice_id,
+                    asker,
+                    owner = %row.agent,
+                    "refusing to withdraw a question parked by another participant"
+                );
+                return Withdrawal::NotYours;
             }
         }
         let parked = self.pending.lock().await.remove(choice_id);
@@ -557,23 +578,13 @@ impl SignalingBridge {
         // the session stays halted on a gate nobody can answer any more. Read
         // BEFORE the withdraw flips the row away from `pending` — the latch
         // discriminator matches pending rows only.
-        let gate_session = {
-            let storage = self.storage.lock().await.clone();
-            match storage {
-                Some(storage) => storage
-                    .get_tray_entry(choice_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .filter(|row| {
-                        row.status == "pending"
-                            && crate::storage::is_gate_row(&row.kind, row.options_json.as_deref())
-                    })
-                    .map(|row| row.session_id),
-                None => None,
-            }
-        };
-        let storage = self.storage.lock().await.clone();
+        let gate_session = row
+            .as_ref()
+            .filter(|row| {
+                row.status == "pending"
+                    && crate::storage::is_gate_row(&row.kind, row.options_json.as_deref())
+            })
+            .map(|row| row.session_id.clone());
         // **The DURABLE row counts too.** The return value was "was there an
         // in-memory park?", so withdrawing a row that outlived its process — a
         // question parked before a restart, which is the case the durable row
@@ -2960,6 +2971,62 @@ mod tests {
         }
         let _ = q1.await.unwrap();
         let _ = q2.await.unwrap();
+    }
+
+    /// **A supersede is scoped to the caller's own rows** (round 11). The
+    /// tool says "replace a stale question YOU parked … without disturbing
+    /// the others", `withdraw_question` refuses a peer's row (`NotYours`), and
+    /// this path — which retires a row and mints a new one — did no check at
+    /// all: any participant holding the capability could retire another's
+    /// pending question, or one from another session, by choice_id.
+    #[tokio::test]
+    async fn supersede_refuses_a_peers_row_and_another_sessions_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("test.db")).await.unwrap();
+        storage.create_session("s1", "test", None).await.unwrap();
+        storage.create_session("s2", "test", None).await.unwrap();
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let opts = ["a".to_string(), "b".to_string()];
+        storage
+            .insert_tray_entry("s1", "eyes-cid", "eyes", crate::storage::QuestionKind::Choice, "eyes asks", Some(&opts), None, None)
+            .await
+            .unwrap();
+        storage
+            .insert_tray_entry("s2", "other-cid", "hands", crate::storage::QuestionKind::Choice, "other session", Some(&opts), None, None)
+            .await
+            .unwrap();
+
+        // hands (s1) tries to supersede eyes's row.
+        let res = bridge
+            .supersede_question_with_new(
+                "s1".into(),
+                "hands".into(),
+                "eyes-cid".into(),
+                "rephrased".into(),
+                vec!["x".into(), "y".into()],
+            )
+            .await;
+        assert!(res.is_err(), "a peer's row is not yours to supersede");
+        // hands (s1) tries to supersede its own slug's row in ANOTHER session.
+        let res = bridge
+            .supersede_question_with_new(
+                "s1".into(),
+                "hands".into(),
+                "other-cid".into(),
+                "rephrased".into(),
+                vec!["x".into(), "y".into()],
+            )
+            .await;
+        assert!(res.is_err(), "another session's row is not yours to supersede");
+
+        // Both rows are untouched, and no new question was parked anywhere.
+        let eyes = storage.get_tray_entry("eyes-cid").await.unwrap().unwrap();
+        assert_eq!(eyes.status, "pending");
+        let other = storage.get_tray_entry("other-cid").await.unwrap().unwrap();
+        assert_eq!(other.status, "pending");
+        assert_eq!(storage.tray_entries_for_session("s1").await.unwrap().len(), 1);
+        assert_eq!(storage.tray_entries_for_session("s2").await.unwrap().len(), 1);
     }
 
     #[tokio::test]
