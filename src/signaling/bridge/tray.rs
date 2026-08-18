@@ -844,6 +844,34 @@ impl SignalingBridge {
                     .as_deref()
                     .and_then(|j| serde_json::from_str(j).ok())
                     .unwrap_or_default();
+                // **The audit record, on this path too** (round 10). The
+                // in-memory branch above writes violations.jsonl from the
+                // approval context it parked with; a gate answered after a
+                // restart (or after `unregister_session` dropped the park) came
+                // through here and was never recorded, while the descriptor
+                // told the agent every outcome is. The context is not on the
+                // row, so the KIND is reconstructed from the row's shape: a
+                // gated command is the Tool Gate's; any other Approve/Reject
+                // row is a generic approval (a push gate resolves in-band with
+                // its hook blocked on it, so it does not reach here).
+                if crate::storage::is_gate_row(&q.kind, q.options_json.as_deref()) {
+                    if let Some(log) = self.violations.as_ref() {
+                        let (kind, action) = match q.command_text.as_deref() {
+                            Some(cmd) => (crate::policy::ViolationKind::ToolBlocklist, cmd.to_string()),
+                            None => (crate::policy::ViolationKind::GenericApproval, q.prompt.clone()),
+                        };
+                        let _ = log
+                            .record(
+                                q.session_id.clone(),
+                                q.agent.clone(),
+                                kind,
+                                action,
+                                gate_verdict(&picked),
+                                Some("resolved from the durable tray row (no live park)".to_string()),
+                            )
+                            .await;
+                    }
+                }
                 Ok(self
                     .deliver_oob(
                         choice_id,
@@ -2717,6 +2745,77 @@ mod tests {
         ask.await.unwrap();
         let recs = log.read_all().unwrap();
         assert_eq!(recs[0].outcome, ViolationOutcome::Denied);
+    }
+
+    /// **A gate answered after a restart is still audited** (round 10). With no
+    /// live park — the durable-row branch — the resolve used to write nothing
+    /// to violations.jsonl while `request_approval`'s descriptor told the agent
+    /// every outcome is recorded. The kind is reconstructed from the row: a
+    /// gated command records as the Tool Gate's, a command-less approval as
+    /// generic; a plain question still records nothing.
+    #[tokio::test]
+    async fn a_gate_resolved_from_the_durable_row_is_still_audited() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = ViolationsLog::new(dir.path());
+        let bridge = SignalingBridge::with_violations_log(log.clone());
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        let gate_opts = vec!["Approve".to_string(), "Reject".to_string()];
+        // Rows written before "the restart": no in-memory park for either.
+        storage
+            .insert_tray_entry(
+                "s1",
+                "g-cmd",
+                "hands",
+                crate::storage::QuestionKind::Approval,
+                "Run gated command in this session's repo?",
+                Some(&gate_opts),
+                None,
+                Some("echo hi"),
+            )
+            .await
+            .unwrap();
+        storage
+            .insert_tray_entry(
+                "s1",
+                "g-plain",
+                "hands",
+                crate::storage::QuestionKind::Approval,
+                "Query prod read-only?",
+                Some(&gate_opts),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        storage
+            .insert_tray_entry(
+                "s1",
+                "q-1",
+                "hands",
+                crate::storage::QuestionKind::Choice,
+                "Which?",
+                Some(&["a".to_string(), "b".to_string()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        // Reject the command (nothing runs), approve the plain gate, answer
+        // the question.
+        bridge.resolve_choice("g-cmd", "Reject".into()).await.unwrap();
+        bridge.resolve_choice("g-plain", "Approve".into()).await.unwrap();
+        bridge.resolve_choice("q-1", "a".into()).await.unwrap();
+
+        let recs = log.read_all().unwrap();
+        assert_eq!(recs.len(), 2, "two gates audited, the question not: {recs:?}");
+        assert_eq!(recs[0].kind, ViolationKind::ToolBlocklist);
+        assert_eq!(recs[0].action, "echo hi");
+        assert_eq!(recs[0].outcome, ViolationOutcome::Denied);
+        assert_eq!(recs[1].kind, ViolationKind::GenericApproval);
+        assert_eq!(recs[1].action, "Query prod read-only?");
+        assert_eq!(recs[1].outcome, ViolationOutcome::Approved);
     }
 
     #[tokio::test]
