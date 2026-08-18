@@ -652,10 +652,11 @@ async fn spawn_session_handle(
     // gets the one-shot CL-opener nudge below; a `--resume` reopen does not.
     let is_first_spawn = live.iter().all(|p| p.claude_session_id.is_none());
 
-    // Third element: the prompt file this slot spawned with, kept because the
+    // Second element: the prompt file this slot spawned with, kept because the
     // `SpawnConfig` that names it is consumed by the spawn one line later and
-    // the session view reads it back (rc3 P1).
-    let mut spawned: Vec<(usize, AgentHandle, PathBuf)> = Vec::with_capacity(live.len());
+    // the session view reads it back (rc3 P1). Pushed in `live` order, so the
+    // slot IS the index (round 10 dropped a slot element nothing read).
+    let mut spawned: Vec<(AgentHandle, PathBuf)> = Vec::with_capacity(live.len());
     for (slot, p) in live.iter().enumerate() {
         // D8's model chain: the participant's own pick (create dialog) wins,
         // then the ROLE's default, then the per-agent row. The middle step is
@@ -717,7 +718,7 @@ async fn spawn_session_handle(
         // pre-flight is what surfaces that at configure time.
         let system_prompt_path = spawn_cfg.system_prompt_path.clone();
         let handle = spawn_supervised_agent(spawn_cfg, RetryPolicy::default()).await?;
-        spawned.push((slot, handle, system_prompt_path));
+        spawned.push((handle, system_prompt_path));
     }
     // The second slot's spawn model is NULL when this session runs one agent —
     // the header's "no peer" state, which the old code produced by skipping
@@ -811,7 +812,7 @@ async fn spawn_session_handle(
     let mut handles: Vec<AgentHandle> = Vec::with_capacity(spawned.len());
     let mut prompt_paths: Vec<PathBuf> = Vec::with_capacity(spawned.len());
     let mut event_rxs = Vec::with_capacity(spawned.len());
-    for (_, mut handle, prompt_path) in spawned {
+    for (mut handle, prompt_path) in spawned {
         event_rxs.push(std::mem::replace(
             &mut handle.event_rx,
             tokio::sync::mpsc::channel(1).1,
@@ -849,7 +850,7 @@ async fn spawn_session_handle(
     // so a pump can be handed its own.
     let mut turn_epochs: Vec<Option<Arc<std::sync::atomic::AtomicU64>>> =
         vec![None; handles.len()];
-    let sequencer_tx = {
+    let (sequencer_tx, ring_kick) = {
         let mut inputs = std::collections::HashMap::new();
         let mut epochs = std::collections::HashMap::new();
         // The map is keyed by participant id and the value is that participant's
@@ -893,14 +894,14 @@ async fn spawn_session_handle(
             participants = ring,
             "turn sequencer spawned"
         );
-        Some((tx, kick))
+        (tx, kick)
     };
-    // Split back out: the tx is cloned into every pump below, and the kick is
-    // held until orientation finishes (rc3 D21).
-    let (sequencer_tx, ring_kick) = match sequencer_tx {
-        Some((tx, kick)) => (Some(tx), Some(kick)),
-        None => (None, None),
-    };
+    // The tx is cloned into every pump below (`PumpConfig::sequencer_tx` stays
+    // an `Option` for the pump's own tests, which run without a ring); the kick
+    // is held until orientation finishes (rc3 D21). Round 10 removed an
+    // `Option` around this pair whose `None` arm nothing could reach — the
+    // block above always spawns the ring.
+    let (sequencer_tx, ring_kick) = (Some(sequencer_tx), Some(ring_kick));
     // rc3 **D21**: every participant orients in PARALLEL before the ring starts.
     // Flipped false by `boot_then_start` immediately before the kick, so turn
     // one binds its epoch normally. One cell for the whole session — boot ends
@@ -1055,9 +1056,11 @@ async fn spawn_session_handle(
             }
         },
     ));
-    // The idle nudge is addressed to the participant that can act on it, so it
-    // goes to the first agent holding `edit_files` and falls back to the first
-    // agent when nobody does (a review-only session still deserves the nudge).
+    // The idle nudge is addressed to the participant that can act on it — the
+    // first one holding `edit_files` — and falls back to slot 0 when nobody
+    // does: a review-only session still deserves the nudge, and the fallback
+    // is stated ONCE, here (`IdleWatch::hands_participant_id`'s doc defers to
+    // this site).
     let hands_slot = live
         .iter()
         .position(|p| participant_capabilities(p).grants(crate::agents::Capability::EditFiles))
@@ -1067,7 +1070,6 @@ async fn spawn_session_handle(
         hands_participant_id: live.get(hands_slot).map(|p| p.id),
         ipav: Arc::clone(&ipav),
         user_broadcasts: Arc::clone(&user_broadcasts),
-        session_id: session.id.clone(),
     });
     let hands_slug = live.get(hands_slot).map(|p| p.slug.clone());
     tokio::spawn(crate::core::watchdog::run_stall_watchdog(
@@ -1160,9 +1162,10 @@ async fn spawn_session_handle(
 /// A1 (adherence): the one-shot session-start CL-opener nudge text for a
 /// session targeting `project`, or `None` for a repo-less / `_globals` session
 /// (no project conventions to page in). Distinct from the system-prompt CL
-/// INDEX primer (layer 2b, `render_cl_primer`) — this is a runtime stdin nudge
-/// delivered to each agent. Pure so it's unit-testable; the caller posts it as a
-/// `system` row carrying the phase envelope, and delivers that row.
+/// INDEX primer (layer 2b, `render_cl_primer`) — this is a runtime row, posted
+/// once as a `system` message carrying the phase envelope; the ring delivers it
+/// off each participant's cursor (rc3 D19 — no stdin fan-out). Pure so it's
+/// unit-testable.
 fn cl_opener_nudge(project: Option<&str>) -> Option<String> {
     let name = project.filter(|p| !p.is_empty() && *p != "_globals")?;
     Some(format!(
@@ -1936,7 +1939,7 @@ async fn spawn_ring(
     bridge
         .register_session_sequencer(session_id.to_string(), tx.clone())
         .await;
-    (tx.clone(), RingKick(tx))
+    (tx.clone(), RingKick { _held: tx })
 }
 
 /// How long orientation may take before the ring starts anyway (rc3 **D21** §4:
@@ -2030,14 +2033,20 @@ async fn boot_then_start(
             // The primer is what boot IS. With no row there is nothing to
             // deliver, so start the ring rather than stranding the session
             // (the helper has already warned about the row).
-            tracing::warn!(session_id, "boot primer not persisted; starting the ring unbooted");
+            tracing::warn!(session_id, "boot primer not persisted; the session waits unbooted");
             booting.store(false, std::sync::atomic::Ordering::Release);
             // This exit skips boot entirely, so no pump will ever end a boot
             // response — nothing else clears what the call site set.
             for slug in &slugs {
                 activity.set_busy_slug(slug, false);
             }
-            kick.fire().await;
+            // The ring waits for the user here as it does on the normal exit
+            // below (rc3 D29): firing turn one into a session with no primer
+            // and no task deals a turn nobody can use — the pass-volley shape
+            // D29 exists to prevent, reached through a storage hiccup. A
+            // session with an unfired kick is not stranded; the user's first
+            // message starts it.
+            drop(kick);
             return;
         }
     };
@@ -2156,35 +2165,28 @@ async fn boot_then_start(
     tracing::info!(session_id, ready, want, "boot complete; the session waits for the user");
 }
 
-/// The "hand out turn one" command, held rather than sent (rc3 **D21**).
+/// **The boot-scoped hold on the ring** (rc3 D21 → D29).
 ///
-/// Nothing else mints a `UserMessage` at spawn, so without firing this the ring
-/// sits with no holder and never starts. It used to be a detached `tokio::spawn`
-/// inside [`spawn_ring`] — that detachment is the seam D21's BOOT phase needed,
-/// so it is now a value the caller fires after orientation instead.
+/// This was the "hand out turn one" command, held rather than sent: `spawn_ring`
+/// used to fire a `UserMessage` from a detached task, D21 turned that into a
+/// value the caller fired after orientation, and D29 then decided the ring
+/// should NOT start at boot at all — a fired kick dealt turn one into a session
+/// with no task, and every pass fed the next pass (`s-8ac0d2d0`: 23 provider
+/// calls in 77 seconds producing nothing). Since round 10 no path fires it: the
+/// boot's normal exit, its timeout and its primer-not-persisted error arm all
+/// yield, and a `--resume` spawn never boots. The `fire` method is gone with
+/// its last caller.
 ///
-/// **Returned rather than optional**, so a path that forgets to boot cannot
-/// silently never start: the type has to be consumed or explicitly dropped.
-pub(crate) struct RingKick(tokio::sync::mpsc::Sender<crate::core::sequencer::SequencerCommand>);
-
-impl RingKick {
-    /// Hand turn one to the front of the rotation. No mentions: nobody has typed
-    /// anything yet.
-    async fn fire(self) {
-        if let Err(e) = self
-            .0
-            .send(crate::core::sequencer::SequencerCommand::UserMessage {
-                mentions: Vec::new(),
-            })
-            .await
-        {
-            // A closed channel here means the ring task is already gone, and
-            // the cost is the whole first turn: nothing else mints this kick,
-            // so the session sits with a full backlog and no holder until the
-            // user types.
-            tracing::warn!(?e, "the ring kick was dropped; the session's first turn is not dealt");
-        }
-    }
+/// What is left is a hold token: it keeps one sender to the ring alive for the
+/// duration of boot and is dropped — explicitly, every path says so — when the
+/// session yields to the user. **Returned rather than optional** so every spawn
+/// path has to say what it does with it; and it is what
+/// `the_ring_waits_for_orientation_and_then_starts` observes: in that test this
+/// is the ring channel's LAST sender, so the ring's `recv` seeing the channel
+/// CLOSE is the proof the kick was dropped unfired rather than fired late.
+pub(crate) struct RingKick {
+    /// The sender this token keeps alive until boot yields. Never sent on.
+    _held: tokio::sync::mpsc::Sender<crate::core::sequencer::SequencerCommand>,
 }
 
 /// One participant's finished spawn config — **the whole D8 model chain in one
@@ -4104,7 +4106,7 @@ mod tests {
         let br = Arc::clone(&bridge);
         let task = tokio::spawn(async move {
             boot_then_start(
-                "s1", &st, &br, inputs, done_rx, flag, RingKick(ring_tx),
+                "s1", &st, &br, inputs, done_rx, flag, RingKick { _held: ring_tx },
                 std::time::Duration::from_secs(30),
                 Arc::clone(&act),
                 vec!["hands".to_string(), "eyes".to_string()],
@@ -4208,7 +4210,7 @@ mod tests {
         let boot_act = Arc::clone(&act);
         tokio::spawn(async move {
             boot_then_start(
-                "s1", &st, &br, inputs, done_rx, flag, RingKick(ring_tx),
+                "s1", &st, &br, inputs, done_rx, flag, RingKick { _held: ring_tx },
                 std::time::Duration::from_millis(150),
                 boot_act,
                 vec!["hands".to_string(), "eyes".to_string()],

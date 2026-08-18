@@ -45,12 +45,12 @@
 //!
 //! A receipt carries the session its row belongs to, and delivering it into
 //! another session's agent wires one session's text into another's process. The
-//! compare used to live on
-//! [`SessionHandle::send_to_all`](crate::core::SessionHandle::send_to_all),
-//! which was the only caller holding both ids — and that left two
-//! receipt-carrying routes past it: `SessionAgent::deliver` and the three-hop
-//! `agent.handle.input().deliver(&receipt)`. Receipt-gated is not scope-gated,
-//! and those two were receipt-gated only.
+//! compare used to live on `SessionHandle::send_to_all` (the pre-D19 fan-out,
+//! since deleted), which was the only caller holding both ids — and that left
+//! two receipt-carrying routes past it: `SessionAgent::deliver` and the
+//! three-hop `agent.handle.input().deliver(&receipt)`, both also gone with the
+//! fan-out. Receipt-gated is not scope-gated, and those two were receipt-gated
+//! only.
 //!
 //! Both routes END at
 //! [`ParticipantInput::deliver`](crate::agents::ParticipantInput::deliver), so
@@ -1248,10 +1248,12 @@ pub enum SequencerCommand {
 ///
 /// **All of it is per-CYCLE state, deliberately, and that is the invariant the
 /// type exists to hold.** Nothing here is persisted and nothing survives a
-/// session: `spin`, `laps`, `summons` and `spoke_this_lap` each describe the
-/// current uninterrupted stretch, and a stretch that ends must not leave a
-/// streak, a lap count or a summons queue behind for the next one to inherit.
-/// The individual field docs say why for each.
+/// session: `spin`, `laps`, `spoke_this_lap` and the summons ANCHOR each
+/// describe the current uninterrupted stretch, and a stretch that ends must not
+/// leave a streak, a lap count or an anchor behind for the next one to
+/// inherit. The one deliberate exception is the summons QUEUE — an unserved
+/// summons is the user's standing instruction, not stretch state; see its
+/// field doc. The individual field docs say why for each.
 #[derive(Default)]
 struct RingState {
     /// The turn in flight. `None` is "the cycle has not started", which is also
@@ -1291,9 +1293,15 @@ struct RingState {
     /// it. `a_user_message_starts_the_lap_count_over` is that case.
     laps: u32,
     /// Who the user has summoned, and where the rotation was when they did
-    /// (rc3 D17). In the cycle's frame for the same reason `spin` and `laps` are:
-    /// it describes THIS stretch, and a queue that outlived one would hand out a
-    /// turn nobody asked for.
+    /// (rc3 D17). The ANCHOR is in the cycle's frame for the same reason `spin`
+    /// and `laps` are. The QUEUE is not per-stretch, and that is deliberate
+    /// (round 10 confirmed the code over an older reading of this doc): a
+    /// summons the user typed and the ring has not yet served survives a halt
+    /// — a summoned participant that halts before its peer's summons is served
+    /// leaves that peer queued, and the user's next message serves it before
+    /// the rotation restarts (`restart = user_spoke && summons.queue.is_empty()`
+    /// in `advance_turn`). Nobody asked for a turn the queue holds — the user
+    /// did, by name; dropping it at the halt would silently unsummon them.
     summons: Summons,
     /// Has any participant done anything but PASS since the current lap began
     /// (rc3 **D27**)? A lap of nothing but passes is a lap in which nobody had
@@ -2720,6 +2728,12 @@ async fn pass_empty_turn(
 /// A failed WRITE is logged, and loudly: the cycle is already halted by then,
 /// so what is lost is the only on-screen account of why — the notification gap
 /// the module doc names, which is exactly what D7 exists to close.
+///
+/// (Round 10: this paragraph and the two above are `announce_round_cap`'s and
+/// sat on `announce_all_passed` for a while — one function's doc merged onto
+/// the other's; the round-cap function is documented below by reference to
+/// this block, which the two share.)
+///
 /// Post the all-passed notice and tell the UI it landed (rc3 **D27**).
 ///
 /// Mirrors [`announce_round_cap`], and for the same reason: a cycle that yields
@@ -2748,6 +2762,9 @@ async fn announce_all_passed(deps: &SequencerDeps) {
     }
 }
 
+/// Post [`round_cap_notice`] into the channel and tell the UI it landed (rc3
+/// **D7**). The post-is-the-contract / notification-is-the-nicety and the
+/// loud-on-failed-write reasoning are stated once, on [`announce_all_passed`].
 async fn announce_round_cap(deps: &SequencerDeps, laps: u32) {
     // Host-authored (`origin = 'system'`, NULL participant, 0044) — the halt is
     // nobody's turn output, and there is no `system` roster row to attribute
@@ -3108,8 +3125,8 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Hando
 /// its own turn end, and it stays there: moving the clear here would close the
 /// sub-second gap between a completion and the next handover, and buy a wedge
 /// for it — a completion that never arrives would leave the flag set and the
-/// input locked forever, which `SessionHandle::send_to_all`'s doc records as a
-/// hazard already paid for once. That gap CAN be typed into, and harmlessly: no
+/// input locked forever — the hazard the pre-D19 fan-out (`send_to_all`, since
+/// deleted) had already paid for once. That gap CAN be typed into, and harmlessly: no
 /// turn is in flight there, so the message takes the designed fresh-turn path
 /// rather than landing mid-turn. A permanently locked input is worse than a
 /// window whose worst case is the intended behaviour.
@@ -3495,10 +3512,12 @@ async fn deliver_backlog(
 // changed in the move.
 // ---------------------------------------------------------------------------
 
-/// Tokenize a forward body for convergence comparison: split on whitespace, trim
-/// each token of leading/trailing non-alphanumerics, lowercase, drop empties — so
-/// "OK.", "OK", "ok" all reduce to {ok}.
-pub(super) fn token_set(s: &str) -> HashSet<String> {
+/// Tokenize one turn's prose for the spin-detection comparison: split on
+/// whitespace, trim each token of leading/trailing non-alphanumerics, lowercase,
+/// drop empties — so "OK.", "OK", "ok" all reduce to {ok}. (The vocabulary was
+/// "a forward body" from the deleted router; the sole caller is `spinning`,
+/// comparing a participant's own consecutive turns.)
+fn token_set(s: &str) -> HashSet<String> {
     s.split_whitespace()
         .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
         .filter(|t| !t.is_empty())
@@ -3511,7 +3530,7 @@ pub(super) fn token_set(s: &str) -> HashSet<String> {
 /// catches it fast rather than deferring to the hard-cap. One empty, one not →
 /// 0.0. Two DISTINCT substantive messages always carry alphanumeric tokens, so
 /// they can never collide at 1.0 via the both-empty path.
-pub(super) fn jaccard_from_sets(sa: &HashSet<String>, sb: &HashSet<String>) -> f64 {
+fn jaccard_from_sets(sa: &HashSet<String>, sb: &HashSet<String>) -> f64 {
     if sa.is_empty() && sb.is_empty() {
         return 1.0;
     }
@@ -3525,7 +3544,7 @@ pub(super) fn jaccard_from_sets(sa: &HashSet<String>, sb: &HashSet<String>) -> f
 }
 
 /// String-level convenience wrapper (tokenizes BOTH sides). Test-only: the hot
-/// path keeps the previous forward's token set and calls `jaccard_from_sets`
+/// path keeps the previous turn's token set and calls `jaccard_from_sets`
 /// directly, so it never re-tokenizes the previous body.
 #[cfg(test)]
 fn jaccard_similarity(a: &str, b: &str) -> f64 {
@@ -3687,11 +3706,6 @@ pub enum TurnEnding {
 }
 
 impl TurnEnding {
-    /// The ordinary ending — substantive output. A named alias, kept from when
-    /// `Spoke` carried a payload, because it is what an errored turn ends as and
-    /// what nearly every test sends.
-    pub const SPOKE: TurnEnding = TurnEnding::Spoke;
-
     /// Did this turn produce substantive output?
     ///
     /// **One caller — spin detection** — so this is naming, not sharing. The
@@ -3776,14 +3790,14 @@ pub fn turn_ending(peer_ack: bool, peer_ack_final: bool, passed: bool, body: &st
         return TurnEnding::Passed;
     }
     if !peer_ack {
-        return TurnEnding::SPOKE;
+        return TurnEnding::Spoke;
     }
     if peer_ack_final || content_free {
         return TurnEnding::Done;
     }
     // A peer_ack on a substantive turn does not count: the turn is an ordinary
     // spoken turn and resets the tally like any other.
-    TurnEnding::SPOKE
+    TurnEnding::Spoke
 }
 
 #[cfg(test)]
@@ -3817,7 +3831,7 @@ mod tests {
     /// already three fields on one line in ~50 tests. `PASSED` is spelled out
     /// at its own call sites for the same reason in reverse — it is the subject
     /// there.
-    const SPOKE: TurnEnding = TurnEnding::SPOKE;
+    const SPOKE: TurnEnding = TurnEnding::Spoke;
     const DONE: TurnEnding = TurnEnding::Done;
     const PASSED: TurnEnding = TurnEnding::Passed;
 
@@ -4562,7 +4576,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: seats[0].id,
                 epoch: 1,
-                ending: TurnEnding::SPOKE,
+                ending: TurnEnding::Spoke,
             },
         )
         .await;
@@ -4619,7 +4633,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: seats[0].id,
                 epoch: 1,
-                ending: TurnEnding::SPOKE,
+                ending: TurnEnding::Spoke,
             },
         )
         .await;
@@ -5037,7 +5051,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: a,
                 epoch: 1,
-                ending: TurnEnding::SPOKE,
+                ending: TurnEnding::Spoke,
             },
         )
         .await;
@@ -5047,7 +5061,7 @@ mod tests {
             SequencerCommand::TurnComplete {
                 participant_id: b,
                 epoch: 2,
-                ending: TurnEnding::SPOKE,
+                ending: TurnEnding::Spoke,
             },
         )
         .await;
@@ -9443,9 +9457,11 @@ mod tests {
         );
 
         // No data dir at all: the backstop stays ARMED at its default rather
-        // than resolving to `0` (off).
+        // than resolving to `0` (off). The property, not just the constant —
+        // an edit that set both to 0 would pass the equality above and below.
         let (deps, _storage, _seats) = ring(&[("a", "active")]).await;
         assert_eq!(round_cap_laps(&deps), DEFAULT_ROUND_CAP_LAPS);
+        assert_ne!(round_cap_laps(&deps), 0, "the default is an armed cap, never off");
 
         // A snapshot that sets nothing inherits the same default.
         let (deps, _storage, _seats, _dir) = capped_ring(&[("a", "active")], None).await;
@@ -9593,7 +9609,7 @@ mod tests {
         let review = "x".repeat(PEER_ACK_MAX_SUPPRESSED_LEN + 1);
         assert_eq!(
             turn_ending(true, false, false, &review),
-            TurnEnding::SPOKE
+            TurnEnding::Spoke
         );
         // The floor itself is still an ack — `<=`, not `<`. One byte decides
         // which of the two rows above applies, so it is worth pinning that the
@@ -9618,11 +9634,11 @@ mod tests {
         let body = "z".repeat(PEER_ACK_MAX_SUPPRESSED_LEN + 1);
         assert_eq!(
             turn_ending(true, false, false, &body),
-            TurnEnding::SPOKE
+            TurnEnding::Spoke
         );
         assert_eq!(
             turn_ending(false, false, false, &body),
-            TurnEnding::SPOKE,
+            TurnEnding::Spoke,
             "no ack at all is substantive, and carries no override tag"
         );
         // Trimmed before measuring, like the router: whitespace must not push a
@@ -9682,7 +9698,7 @@ mod tests {
         let verdict = "v".repeat(PEER_ACK_MAX_SUPPRESSED_LEN + 1);
         assert_eq!(
             turn_ending(false, false, true, &verdict),
-            TurnEnding::SPOKE,
+            TurnEnding::Spoke,
             "the pass is overridden, and an overridden pass is NOT tagged"
         );
         // With an ack alongside it, the ack ladder decides what the overridden
@@ -9690,7 +9706,7 @@ mod tests {
         // pass is gone there is nothing left for it to outrank.
         assert_eq!(
             turn_ending(true, false, true, &verdict),
-            TurnEnding::SPOKE,
+            TurnEnding::Spoke,
             "#9 still applies once the pass is overridden"
         );
         assert_eq!(

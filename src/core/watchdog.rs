@@ -158,9 +158,11 @@ pub(crate) fn idle_unflagged_decision(
 /// readable.
 pub struct IdleWatch {
     pub storage: Storage,
-    /// The participant that can act on the nudge — the first one holding
-    /// `edit_files` (rc3 D10/D11: a capability, not a name). A review-only
-    /// participant has no state-declaring verbs to answer with.
+    /// The participant the nudge summons — the first one holding `edit_files`
+    /// (rc3 D10/D11: a capability, not a name), falling back to slot 0 when
+    /// nobody does, because a review-only session still deserves the nudge.
+    /// The choice is made ONCE, at the spawn site (`core/session.rs`, where
+    /// `hands_slot` is computed); this field only carries it.
     ///
     /// An id to SUMMON with, not a stdin to write to. The nudge used to go
     /// straight into that stdin, which woke a generation the ring had not dealt:
@@ -174,12 +176,6 @@ pub struct IdleWatch {
     /// Bumped by `AppState::broadcast` on every user prompt. In-memory on
     /// purpose: a storage count races the first poll at session start.
     pub user_broadcasts: Arc<AtomicU64>,
-    /// The session this watch reads halt state for. Every declared stop now
-    /// fills the session's HALT SLOT (agent halts, provider-limit,
-    /// error-streak, spin, the all-pass yield, the round cap, consensus), so
-    /// the slot is the one suppression signal the nudge needs — a halted
-    /// session is declared, not stalled.
-    pub session_id: String,
 }
 
 /// Per-session watchdog loop. Holds `Weak<AgentLiveness>` per agent so it
@@ -272,8 +268,13 @@ pub async fn run_stall_watchdog(
                 // now (2026-08-15: "HALT means the floor is the user's"), so
                 // idle-under-a-halt is the design, never the anomaly. Same
                 // lazy gate and same fail-quiet posture as the tray query.
+                // Every declared stop fills the session's HALT SLOT (agent
+                // halts, provider-limit, error-streak, spin, the all-pass
+                // yield, the round cap, consensus), so the slot is the one
+                // suppression signal the nudge needs — a halted session is
+                // declared, not stalled.
                 let halted = if candidate {
-                    match idle_watch.storage.session_halt(&idle_watch.session_id).await {
+                    match idle_watch.storage.session_halt(&session_id).await {
                         Ok(h) => h.is_some(),
                         Err(e) => {
                             warn!(session_id = %session_id, error = %e,
@@ -319,8 +320,7 @@ pub async fn run_stall_watchdog(
                         && !activity.holds_wakes()
                     {
                         nudged_at = Some(broadcasts);
-                        deliver_idle_nudge(&session_id, idle_watch, &activity, &bridge)
-                            .await;
+                        deliver_idle_nudge(&session_id, idle_watch, &bridge).await;
                     }
                 } else if decision.chip && nudged_at == Some(broadcasts) {
                     // The wedge outlived this window's one nudge — measured in
@@ -359,15 +359,12 @@ pub async fn run_stall_watchdog(
     }
 }
 
-/// Persist the chat-visible notice and push the declare-state nudge into
-/// HANDS' stdin. Best-effort on every edge: a dead input channel or a failed
-/// insert degrades to the chip alone (already emitted by the caller).
-async fn deliver_idle_nudge(
-    session_id: &str,
-    idle_watch: &IdleWatch,
-    activity: &ActivityTracker,
-    bridge: &SignalingBridge,
-) {
+/// Persist the chat-visible notice and the declare-state nudge as host rows,
+/// then RELEASE THE RING with the executor summoned so it is dealt a real turn
+/// that reads them (rc3 D19 — no stdin write; the body says why). Best-effort on
+/// every edge: a failed insert degrades to the chip alone (already emitted by
+/// the caller).
+async fn deliver_idle_nudge(session_id: &str, idle_watch: &IdleWatch, bridge: &SignalingBridge) {
     const NOTICE: &str =
         "Session idled with no question or halt parked — nudged the executor to declare state.";
     const NUDGE: &str = "[System: this session went idle with no question parked and no \
@@ -429,13 +426,11 @@ async fn deliver_idle_nudge(
             idle_watch.hands_participant_id.into_iter().collect(),
         )
         .await;
-    let _ = activity;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn liveness_touch_and_tools() {
@@ -539,11 +534,12 @@ mod tests {
     }
 
     #[test]
-    fn idle_decision_suppressed_while_working_declared() {
-        // An unexpired declare_working means bare-Idle is EXPECTED — no chip,
-        // no nudge, exactly like a pending tray row. A filled halt slot is a
-        // DECLARED stop (2026-08-15: every stop is a HALT) — idle under a
-        // banner is the design, never the anomaly.
+    fn idle_decision_suppressed_while_a_halt_is_declared() {
+        // A filled halt slot is a DECLARED stop (2026-08-15: every stop is a
+        // HALT) — idle under a banner is the design, never the anomaly, so no
+        // chip and no nudge, exactly like a pending tray row. (The retired
+        // `declare_working` used to be the suppression here; the halt slot
+        // replaced it.)
         let d = idle_unflagged_decision(OVER, 3, false, None, false, true, GRACE);
         assert_eq!(d, IdleDecision { chip: false, nudge: false });
     }
@@ -571,22 +567,14 @@ mod tests {
             hands_participant_id: Some(1),
             ipav,
             user_broadcasts: Arc::new(AtomicU64::new(1)),
-            session_id: "s1".to_string(),
         };
         let bridge = SignalingBridge::new();
-        let activity =
-            ActivityTracker::new(
-                "s1",
-                Arc::new(AtomicBool::new(false)),
-                Arc::clone(&bridge),
-                vec!["hands".into(), "eyes".into()],
-            );
         // The ring, so the wake can be observed where it now happens.
         let (ring_tx, mut ring_rx) = tokio::sync::mpsc::channel(4);
         bridge
             .register_session_sequencer("s1".to_string(), ring_tx)
             .await;
-        deliver_idle_nudge("s1", &idle_watch, &activity, &bridge).await;
+        deliver_idle_nudge("s1", &idle_watch, &bridge).await;
 
         let rows = storage.channel_after("s1", 0, 100).await.unwrap().rows;
         assert_eq!(rows.len(), 2, "NOTICE and NUDGE are separate messages");

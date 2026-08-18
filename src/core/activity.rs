@@ -1,9 +1,11 @@
 //! Per-session activity — the source of truth for the chat-input lock +
 //! Cancel button (interrupt redesign, Batch 2). Mirrors the `awaiting`
 //! `Arc<AtomicBool>` pattern: created per session in `spawn_session_handle`,
-//! shared with each participant's pump (which clears its own `busy` on `TurnComplete`) and the
-//! dispatch sites (which set `busy` when input is sent to an agent), and emits a
-//! `SessionActivity` SignalingEvent whenever the derived state changes.
+//! shared with each participant's pump (which clears its own `busy` on
+//! `TurnComplete`), the ring (`hand_turn_to` — the one busy-TRUE writer, rc3
+//! D19b) and the boot phase (`boot_then_start`, which marks everyone busy while
+//! they orient and lets each pump clear itself), and emits a `SessionActivity`
+//! SignalingEvent whenever the derived state changes.
 
 use crate::signaling::SignalingBridge;
 use std::collections::HashMap;

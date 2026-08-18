@@ -1,5 +1,7 @@
-//! Per-agent event pump. Persists agent events to storage, fans text chunks
-//! out to the peer with the IPAV buffer rule.
+//! Per-agent event pump. Persists every event of one participant's claude-code
+//! stream as a channel row (text, tool use/result, completion) and reports each
+//! turn's completion to the ring; the ring delivers rows off each peer's cursor
+//! (rc3 D19 — no fan-out lives here since the router's deletion).
 
 use crate::agents::{AgentEvent, AgentHealth};
 use crate::core::activity::ActivityTracker;
@@ -71,9 +73,9 @@ pub struct PumpConfig {
     /// ring" structurally true rather than asserted.
     pub self_nudges: bool,
     /// Per-session activity tracker (interrupt redesign, Batch 2). The pump
-    /// clears this agent's `busy` on `TurnComplete`/`Exited`, and sets the
-    /// PEER's `busy` when it forwards a chunk. `None` in tests / solo configs
-    /// that don't drive the input lock.
+    /// clears this agent's `busy` on `TurnComplete`/`Exited` — and only clears:
+    /// the ring is the one busy-TRUE writer (rc3 D19b), so nothing here marks a
+    /// peer. `None` in tests / solo configs that don't drive the input lock.
     pub activity: Option<Arc<ActivityTracker>>,
     /// Shared "this agent is mid-atomic-tool" flag (interrupt redesign, Batch
     /// 3.1 Part 1). The pump sets it on an atomic `ToolUse` (git commit/push/
@@ -331,10 +333,9 @@ fn detect_provider_limit(text: &str) -> Option<String> {
     if text.trim().len() > PROVIDER_LIMIT_MAX_CHUNK {
         return None;
     }
-    let lower = text.to_lowercase();
-    if !PROVIDER_LIMIT_PATTERNS.iter().any(|p| lower.contains(p)) {
-        return None;
-    }
+    // One pass: the first line carrying a pattern IS the answer, so there is
+    // no whole-text pre-check to lowercase separately (round 10 — it
+    // lowercased the chunk twice on the hot text path).
     text.lines()
         .find(|l| {
             let ll = l.to_lowercase();
@@ -347,9 +348,10 @@ fn detect_provider_limit(text: &str) -> Option<String> {
 /// its message on several consecutive nudged turns; one notice per window.
 const LIMIT_NOTICE_DEDUPE: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Pump events from one agent. Each text chunk is persisted; the peer-forward
-/// path depends on the current IPAV phase. `TurnComplete` flushes pending
-/// buffered text immediately regardless of phase.
+/// Pump events from one agent. Each text chunk is persisted as a row; the ring
+/// delivers rows to peers off their cursors (rc3 D19), so nothing here forwards.
+/// `TurnComplete` reports the turn to the ring with its ending (spoke / passed /
+/// done) and clears this agent's busy flag.
 pub async fn pump_agent(
     cfg: PumpConfig,
     mut event_rx: mpsc::Receiver<AgentEvent>,
@@ -463,11 +465,17 @@ pub async fn pump_agent(
                     // INFO because it is once per turn and it is the number
                     // `scripts/turn-latency.py` calls `start` — measurable from
                     // the log now, not only by reconstruction.
+                    // NOTE (round 10): `turn_opened_at` resets at THIS pump's
+                    // last completion, so on a ring of N ≥ 2 the figure spans
+                    // the peers' turns as well as the handover gap — a bound
+                    // on prefill, not the gap itself (`scripts/turn-latency.py`
+                    // measures SPLIT from `participant_deliveries` for that).
+                    // Stamping the handover instant is a listed follow-up.
                     tracing::info!(
                         agent = %cfg.slug,
                         epoch = live,
-                        waited_ms = turn_opened_at.elapsed().as_millis() as u64,
-                        "turn opened: first event after the ring handed it over"
+                        since_last_completion_ms = turn_opened_at.elapsed().as_millis() as u64,
+                        "turn opened: first event since this pump's last completion"
                     );
                 }
             }
@@ -784,7 +792,7 @@ pub async fn pump_agent(
                 // failed participant never saw. `Spoke` clears the tally, which
                 // is the conservative answer of the two.
                 let ending = if is_error {
-                    crate::core::sequencer::TurnEnding::SPOKE
+                    crate::core::sequencer::TurnEnding::Spoke
                 } else {
                     crate::core::sequencer::turn_ending(
                         peer_ack_pending,
@@ -2253,7 +2261,7 @@ mod tests {
         match next_wire(&mut seq_rx).await {
             crate::core::sequencer::SequencerCommand::TurnComplete { ending, .. } => assert_eq!(
                 ending,
-                crate::core::sequencer::TurnEnding::SPOKE,
+                crate::core::sequencer::TurnEnding::Spoke,
                 "a turn carrying a review is substantive output, pass or no pass"
             ),
             other => panic!("expected a TurnComplete, got {other:?}"),
@@ -2331,7 +2339,7 @@ mod tests {
             endings,
             vec![
                 crate::core::sequencer::TurnEnding::Passed,
-                crate::core::sequencer::TurnEnding::SPOKE
+                crate::core::sequencer::TurnEnding::Spoke
             ],
             "turn 2 called nothing, so it is ordinary output"
         );

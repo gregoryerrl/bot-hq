@@ -599,8 +599,10 @@ impl AppState {
     /// user message respawns each agent via `--resume`, restoring prior context.
     /// No-op (`Done`) if the session isn't live.
     pub async fn cancel_session_turn(&self, session_id: &str) -> Result<CancelOutcome> {
-        // Set inside the lock, acted on outside it.
-        let pause_ring;
+        // The pause command goes to the ring OUTSIDE the `sessions` lock (see
+        // below); reaching this far past the early return is what decides it,
+        // so no flag is needed (round 10 dropped a `pause_ring` that could only
+        // ever be `true`).
         let deferred = {
             let mut sessions = self.sessions.lock().await;
             let Some(handle) = sessions.get_mut(session_id) else {
@@ -620,11 +622,10 @@ impl AppState {
             // ordinary completion, and the ring deals the NEXT participant under
             // the Paused banner — a fresh turn started by a Stop.
             //
-            // Sent BEFORE the interrupt goes out, which is what makes the
-            // ordering safe: the completion the interrupt causes cannot reach
-            // the ring ahead of a command queued before the agent was even
-            // signalled.
-            pause_ring = true;
+            // Sent BEFORE the interrupt goes out (below, past this block),
+            // which is what makes the ordering safe: the completion the
+            // interrupt causes cannot reach the ring ahead of a command queued
+            // before the agent was even signalled.
             // A fresh cancel begins un-superseded; `broadcast` flips this true if a
             // user message arrives during the escalation window (then the SIGKILL
             // is skipped). Reset here so a prior supersede can't suppress THIS kill.
@@ -639,10 +640,11 @@ impl AppState {
                 .then(|| Arc::clone(&handle.in_atomic_tool))
         };
         // Outside the `sessions` lock: `notify_ring_pause` takes the bridge's
-        // own, and holding two is how a lock-order hazard starts.
-        if pause_ring {
-            self.bridge.notify_ring_pause(session_id).await;
-        }
+        // own, and holding two is how a lock-order hazard starts. (The one
+        // deliberate exception to that rule is `broadcast_as`, which keeps the
+        // guard through delivery so the stale-check and the deliver cannot be
+        // split by a respawn — it says so at its `break sessions`.)
+        self.bridge.notify_ring_pause(session_id).await;
         match deferred {
             Some(flag) => {
                 tracing::info!(session_id, "cancel: deferring interrupt — mid atomic tool");
@@ -1181,7 +1183,6 @@ impl AppState {
         // Drop any queued post-cancel reconciliation flag (a session cancelled
         // then closed without a follow-up message would otherwise linger).
         self.pending_reconcile.lock().await.remove(id);
-        // Same for wakes held during a pause — moot once the session closes.
         // Worktree-isolated session: remove its worktree if (and only if) it
         // is clean. Never forced — a dirty worktree outlives the session so
         // uncommitted work is recoverable; the session branch always survives.
@@ -1411,6 +1412,13 @@ impl AppState {
         // the SAME lock hold we deliver under, respawning up to a few times. The
         // healthy `break sessions` keeps that hold through delivery (no TOCTOU);
         // an absent session breaks too → the `ok_or` below errors as before.
+        // **This is the one deliberate exception to "never hold `sessions`
+        // across a bridge/storage await"** (`cancel_session_turn` states the
+        // rule): the hold spans the row insert, the mention resolve and the
+        // ring release below, and it is kept because a respawn slipping between
+        // the stale-check and the delivery is exactly the deaf-agent loss the
+        // check exists to prevent (round 10 recorded the trade-off; the cost is
+        // that other AppState callers wait a few DB round-trips per user send).
         let mut attempts = 0u32;
         let sessions = loop {
             let sessions = self.sessions.lock().await;
