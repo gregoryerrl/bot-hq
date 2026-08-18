@@ -320,3 +320,87 @@ describe("tray staging (rc3 D34)", () => {
     );
   });
 });
+
+// Round 11 (the user's ideas.md): an untagged session doc is a CUSTOM
+// document — its own tab beside Tray | I P A V, named by its slug — so a
+// session can surface a task checklist, an issue write-up, a scratchpad,
+// whatever the work needs, without bending it into an IPAV phase. The phase
+// docs' archived versions (`<slug>@<n>`) are untagged too and must NOT become
+// tabs.
+describe("custom document tabs", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  const docs = [
+    {
+      id: 1,
+      session_id: "s1",
+      slug: "apply",
+      body: "# apply doc",
+      phase: "apply",
+      created_at: "2026-08-18T10:00:00Z",
+      updated_at: "2026-08-18T10:00:00Z",
+    },
+    {
+      id: 2,
+      session_id: "s1",
+      slug: "tasks.md",
+      body: "- [ ] first task",
+      phase: null,
+      created_at: "2026-08-18T10:01:00Z",
+      updated_at: "2026-08-18T10:01:00Z",
+    },
+    {
+      id: 3,
+      session_id: "s1",
+      slug: "plan@1",
+      body: "an archived plan",
+      phase: null,
+      created_at: "2026-08-18T10:02:00Z",
+      updated_at: "2026-08-18T10:02:00Z",
+    },
+  ];
+
+  function renderDocs() {
+    mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === "session_doc_search") {
+        const phase = (args as { phase?: string } | undefined)?.phase;
+        return Promise.resolve(
+          phase ? docs.filter((d) => d.phase === phase) : docs,
+        );
+      }
+      if (cmd === "compute_apply_diff")
+        return Promise.resolve({ lines: [], note: null });
+      return Promise.resolve([]);
+    });
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    return render(
+      <QueryClientProvider client={qc}>
+        <DocumentPane sessionId="s1" sessionPhase="apply" />
+      </QueryClientProvider>,
+    );
+  }
+
+  it("offers an untagged doc as its own tab, and not the archived versions", async () => {
+    renderDocs();
+    // The custom tab appears once the unfiltered search lands.
+    const tab = await screen.findByRole("button", { name: "tasks.md" });
+    expect(tab).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "plan@1" })).toBeNull();
+    // Phase docs are still where they were — under their phase, not as tabs.
+    expect(screen.queryByRole("button", { name: "apply" })).toBeNull();
+  });
+
+  it("shows the custom doc when its tab is picked, and returns to a phase on click", async () => {
+    renderDocs();
+    fireEvent.click(await screen.findByRole("button", { name: "tasks.md" }));
+    expect(await screen.findByText("first task")).toBeInTheDocument();
+    // Back to the phase view via its pill.
+    fireEvent.click(screen.getByRole("button", { name: "A" }));
+    await waitFor(() =>
+      expect(screen.queryByText("first task")).toBeNull(),
+    );
+    expect(await screen.findByText("apply doc")).toBeInTheDocument();
+  });
+});

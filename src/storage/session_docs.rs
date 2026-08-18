@@ -13,8 +13,10 @@ impl Storage {
     /// `created_at` is preserved. `phase` is the IPAV phase tag — one of
     /// `investigate` / `plan` / `apply` / `verify` — used by the session view's
     /// document tabs and by phase-filtered searches. Untagged docs (`None`)
-    /// are session-scoped scratch invisible to tabs and phase searches.
-    /// Returns the row id.
+    /// are custom documents — each gets its own tab beside I/P/A/V, named by
+    /// its slug (round 11) — except the phase docs' archived versions
+    /// (`<slug>@<n>`), which stay out of the tabs; neither kind answers a
+    /// phase-filtered search. Returns the row id.
     pub async fn upsert_session_document(
         &self,
         session_id: &str,

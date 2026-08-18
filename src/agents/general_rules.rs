@@ -146,7 +146,7 @@ Use `session_doc_write(slug, body, phase?)` for plans, investigation findings, a
 
 **One rewritable doc per phase.** A phase-tagged write is keyed BY PHASE, not by slug — there is exactly ONE `investigate` / `plan` / `apply` / `verify` doc, and re-writing it (even under a different slug) overwrites that single doc. Found new information? REWRITE the whole doc; never spin up a `plan-v2`. Use the phase name as the slug for phase docs. Untagged scratch docs (no `phase`) are keyed by `slug` — pick one that reads well later (e.g. `findings-broadcast`); many are allowed.
 
-**Tag docs with `phase`** (one of `investigate` / `plan` / `apply` / `verify`) to surface them in the session view's matching IPAV document tab and enable cross-phase context retrieval via `session_doc_search(phase=<x>)`. Untagged docs are session-scoped scratch — invisible to the tabs and to phase-filtered searches. In Apply: `session_doc_search(phase=\"plan\")` finds the plan. In Verify: `session_doc_search(phase=\"apply\")` finds the apply summary. Prefer this over scrolling chat history.
+**Tag docs with `phase`** (one of `investigate` / `plan` / `apply` / `verify`) to surface them in the session view's matching IPAV document tab and enable cross-phase context retrieval via `session_doc_search(phase=<x>)`. **Untagged docs are CUSTOM documents**: each surfaces as its own tab beside I/P/A/V, named by its slug — use one for a document the IPAV set does not cover (a task checklist, an issue write-up, a running scratchpad) when the user asks for it or the work needs it; a session may have several or none. They stay out of phase-filtered searches; the phase docs' archived versions (`<slug>@<n>`) are not tabs. In Apply: `session_doc_search(phase=\"plan\")` finds the plan. In Verify: `session_doc_search(phase=\"apply\")` finds the apply summary. Prefer this over scrolling chat history.
 
 To promote a session doc to the shared CL — only when the user asks — write its body with `cl_write_file(project, file_path, content)` (the guarded, versioned CL write that auto-rescans; it needs the `write_context_library` capability, so a participant without it asks the one that has it). There's no dedicated promote tool; the CL write IS the promotion — never a bare `Write`/`Bash` into the library path, which skips the traversal guard, the size cap, the atomic write, the git snapshot and the rescan.
 
@@ -474,6 +474,21 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("keyed BY PHASE"),
             "must explain phase-tagged docs are keyed by phase, not slug"
+        );
+    }
+
+    /// Round 11 (the user's ideas.md): an UNTAGGED doc is a custom document with
+    /// its own tab beside I/P/A/V, not invisible scratch — the layer must say
+    /// so, and must no longer say the opposite.
+    #[test]
+    fn untagged_session_docs_are_custom_documents_with_their_own_tab() {
+        assert!(
+            GENERAL_RULES.contains("Untagged docs are CUSTOM documents"),
+            "session-doc section must teach that an untagged doc surfaces as its own tab"
+        );
+        assert!(
+            !GENERAL_RULES.contains("invisible to the tabs"),
+            "the layer must not claim untagged docs are invisible to the tabs any more"
         );
     }
 

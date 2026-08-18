@@ -71,9 +71,18 @@ export const DocumentPane = memo(function DocumentPane({
   // phase transition updates the underlying phase but does NOT yank the user
   // off the Tray.
   const [showTray, setShowTray] = useState(false);
+  // A CUSTOM document's slug when one of its tabs is selected (round 11 — the
+  // user's ideas.md): an untagged doc is not scratch, it is a document the
+  // IPAV set does not cover (a task checklist, an issue write-up), and it gets
+  // its own tab beside I/P/A/V, named by its slug. Null = a phase (or the
+  // Tray) is showing.
+  const [customSlug, setCustomSlug] = useState<string | null>(null);
   // The parent's "open the tray" signal (the HaltBanner pointer).
   useEffect(() => {
-    if (openTraySignal) setShowTray(true);
+    if (openTraySignal) {
+      setShowTray(true);
+      setCustomSlug(null);
+    }
   }, [openTraySignal]);
 
   // Follow the session's phase whenever it changes (the fix for #3). Firing
@@ -86,6 +95,27 @@ export const DocumentPane = memo(function DocumentPane({
   const { data: docs = [], error: docsError } = useTauriQuery<
     SessionDocumentView[]
   >("session_doc_search", { sessionId, phase: activePhase });
+  // Every doc, unfiltered, for the custom tabs — same query family, so the
+  // `session:doc_changed` invalidation (DOC_KEYS, prefix-matched) refreshes
+  // it too. Custom = untagged AND not an archived phase version: a phase
+  // REPLACE parks the previous body as an untagged `<slug>@<n>` doc, which is
+  // history to read via `session_doc_search`, not a document to tab.
+  const { data: allDocs = [] } = useTauriQuery<SessionDocumentView[]>(
+    "session_doc_search",
+    { sessionId },
+  );
+  const customDocs = useMemo(
+    () =>
+      allDocs
+        .filter((d) => d.phase == null && !isArchivedVersion(d.slug))
+        .sort((a, b) => a.created_at.localeCompare(b.created_at)),
+    [allDocs],
+  );
+  const customDoc = useMemo(
+    () =>
+      customSlug ? (customDocs.find((d) => d.slug === customSlug) ?? null) : null,
+    [customDocs, customSlug],
+  );
 
   // Apply tab gets a live git diff above the phase=apply session docs.
   // Refetches on session change; Apply tab visibility doesn't matter for the
@@ -144,20 +174,40 @@ export const DocumentPane = memo(function DocumentPane({
 
   return (
     <div className="flex h-full min-w-0 flex-col border-l border-outline-variant bg-surface-container-lowest/50">
-      <div className="flex items-center gap-1 border-b border-outline-variant px-3 py-2">
+      {/* `flex-wrap`, never a horizontal scroller: custom tabs are as many as
+          the session made, and the row grows DOWN. */}
+      <div className="flex flex-wrap items-center gap-1 border-b border-outline-variant px-3 py-2">
         <TrayPill
           selected={showTray}
-          onSelect={() => setShowTray(true)}
+          onSelect={() => {
+            setShowTray(true);
+            setCustomSlug(null);
+          }}
           count={pendingTrayCount}
         />
         <span className="mx-1 h-4 w-px bg-outline-variant" aria-hidden />
         <PhasePillRow
-          selected={showTray ? null : activePhase}
+          selected={showTray || customDoc ? null : activePhase}
           onSelect={(p) => {
             setShowTray(false);
+            setCustomSlug(null);
             setActivePhase(p);
           }}
         />
+        {customDocs.length > 0 && (
+          <span className="mx-1 h-4 w-px bg-outline-variant" aria-hidden />
+        )}
+        {customDocs.map((d) => (
+          <CustomDocPill
+            key={d.id}
+            slug={d.slug}
+            selected={!showTray && customDoc?.slug === d.slug}
+            onSelect={() => {
+              setShowTray(false);
+              setCustomSlug(d.slug);
+            }}
+          />
+        ))}
       </div>
       {/* min-w-0: without it a flex item's `min-width:auto` refuses to shrink
           below its content, so a long gated command pushes the pane wider than
@@ -165,6 +215,8 @@ export const DocumentPane = memo(function DocumentPane({
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3">
         {showTray ? (
           <TrayList sessionId={sessionId} />
+        ) : customDoc ? (
+          <DocArticle doc={customDoc} summary={summary} onSummarize={runSummary} />
         ) : (
           <>
             {activePhase === "apply" &&
@@ -187,34 +239,12 @@ export const DocumentPane = memo(function DocumentPane({
               )
             ) : (
               activeDocs.map((doc) => (
-                <article key={doc.id} className="mb-6">
-                  <header className="mb-2 flex items-center justify-between gap-2">
-                    <h4 className="min-w-0 truncate text-sm font-semibold text-on-surface">
-                      {doc.slug}
-                    </h4>
-                    <div className="flex shrink-0 items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => runSummary(doc.slug)}
-                        disabled={
-                          summary?.slug === doc.slug &&
-                          summary.status === "loading"
-                        }
-                        title="Summarize this document (TL;DR) with a background model"
-                        className="rounded border border-outline-variant bg-transparent px-2 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
-                      >
-                        {summary?.slug === doc.slug &&
-                        summary.status === "loading"
-                          ? "…"
-                          : "TL;DR"}
-                      </button>
-                      <span className="text-[0.65rem] text-on-surface-variant">
-                        {doc.updated_at}
-                      </span>
-                    </div>
-                  </header>
-                  <Markdown>{doc.body}</Markdown>
-                </article>
+                <DocArticle
+                  key={doc.id}
+                  doc={doc}
+                  summary={summary}
+                  onSummarize={runSummary}
+                />
               ))
             )}
           </>
@@ -230,6 +260,81 @@ export const DocumentPane = memo(function DocumentPane({
     </div>
   );
 });
+
+/** A phase-doc REPLACE archives the previous body as `<slug>@<n>` (see
+ *  `bridge/session_docs.rs::archive_superseded_doc`) — untagged, and history
+ *  rather than a document of its own. */
+function isArchivedVersion(slug: string): boolean {
+  return /@\d+$/.test(slug);
+}
+
+/** One document — a phase doc under its phase, or a custom doc under its own
+ *  tab — with the TL;DR affordance and its last-write time. */
+function DocArticle({
+  doc,
+  summary,
+  onSummarize,
+}: {
+  doc: SessionDocumentView;
+  summary: { slug: string; status: "loading" | "done" | "error" } | null;
+  onSummarize: (slug: string) => void;
+}) {
+  const loading = summary?.slug === doc.slug && summary.status === "loading";
+  return (
+    <article className="mb-6">
+      <header className="mb-2 flex items-center justify-between gap-2">
+        <h4 className="min-w-0 truncate text-sm font-semibold text-on-surface">
+          {doc.slug}
+        </h4>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onSummarize(doc.slug)}
+            disabled={loading}
+            title="Summarize this document (TL;DR) with a background model"
+            className="rounded border border-outline-variant bg-transparent px-2 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
+          >
+            {loading ? "…" : "TL;DR"}
+          </button>
+          <span className="text-[0.65rem] text-on-surface-variant">
+            {doc.updated_at}
+          </span>
+        </div>
+      </header>
+      <Markdown>{doc.body}</Markdown>
+    </article>
+  );
+}
+
+/** A custom document's tab (round 11) — the same pill shape as the Tray and
+ *  phase pills, labelled by the doc's slug as written (slugs are names, not
+ *  keywords, so no uppercase), truncated when long with the full slug in the
+ *  title. */
+function CustomDocPill({
+  slug,
+  selected,
+  onSelect,
+}: {
+  slug: string;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cn(
+        "inline-flex max-w-[12rem] items-center gap-1 rounded border-t-2 px-2 py-1 text-xs font-semibold",
+        selected
+          ? "border-on-surface/70 bg-surface-container-high/80 text-on-surface"
+          : "border-transparent bg-transparent text-on-surface-variant hover:text-on-surface",
+      )}
+      title={`${slug} — a custom document this session wrote`}
+    >
+      <span className="truncate">{slug}</span>
+    </button>
+  );
+}
 
 // One-shot TL;DR modal: a scrim + focus-trapped panel mirroring ConfirmDialog,
 // but display-only (single Close). Backdrop click and Escape both dismiss; the

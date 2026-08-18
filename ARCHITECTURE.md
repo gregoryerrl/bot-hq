@@ -392,11 +392,14 @@ tab; a declared halt renders as the banner above the input.
 **DocumentPane:** a **Tray** tab (pending questions, approvals and gated
 commands for this session — the single answer surface) followed by the IPAV
 tabs (I/P/A/V chips), which drive `session_doc_search(session_id,
-phase=<x>)`. Each IPAV tab renders matching `session_documents` rows; counts
-surface on the chips. The A tab also renders the live color-coded `git diff`
-for the session's working repo via the `compute_apply_diff` Tauri command
-(`src/tauri_cmd/docs.rs`, parser `parse_diff_lines`), consumed by
-`DocumentPane.tsx`.
+phase=<x>)`, followed by one tab per **custom document** — an untagged
+`session_documents` row the session wrote (a task checklist, an issue
+write-up; round 11, the user's ideas.md), named by its slug; the phase docs'
+archived versions (`<slug>@<n>`) are not tabs. Each IPAV tab renders matching
+`session_documents` rows; counts surface on the chips. The A tab also renders
+the live color-coded `git diff` for the session's working repo via the
+`compute_apply_diff` Tauri command (`src/tauri_cmd/docs.rs`, parser
+`parse_diff_lines`), consumed by `DocumentPane.tsx`.
 
 **Context Library tab:** two Settings-style subtabs — **Library Tree** |
 **Context Manager** — whose pill row is the page header (no panel repeats
@@ -935,7 +938,9 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   (choices/approvals/gated commands). Survives app restart. Renamed from
   `session_questions`/`questions` in migration 0010.
 - `session_documents` (id PK, session_id, slug, body, phase, …) —
-  per-session IPAV scratch docs.
+  per-session docs: one rewritable doc per IPAV phase (`phase` set), the
+  reviewer's co-located `<phase>-eyes` doc, archived phase versions
+  (`<slug>@<n>`, untagged) and custom documents (untagged, own tab).
 - `findings` (id PK, session_id, finding_uid UNIQUE, agent, severity,
   summary, code_ref, status, disposition_reason, disposed_by,
   created_at, updated_at) — EYES review findings backing the commit
