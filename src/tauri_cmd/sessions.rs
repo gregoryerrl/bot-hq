@@ -1050,6 +1050,22 @@ pub async fn respawn_session(
     Ok(())
 }
 
+/// **Reopen a closed session** (round 10, B4 — the user's pick: "a Reopen
+/// button for closed sessions"). Clears `closed_at` / `archived` / the halt
+/// slot, respawns the roster via `--resume`, and fires `session:created` so
+/// the dashboard lists it again. The SessionView's mount respawn no longer
+/// touches a closed row (`ensure_session_started` refuses one), so this button
+/// is the ONLY way an archived session's participants come back.
+#[tauri::command]
+#[specta::specta]
+pub async fn reopen_session(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+) -> Result<(), AppError> {
+    core.reopen_session(&session_id).await?;
+    Ok(())
+}
+
 /// Cancel a session's in-flight turn (the Stop button — interrupt redesign,
 /// Batch 3 + 3.1, now interrupt-first). Sends a `control_request` interrupt to
 /// abort the turn while KEEPING the process alive (warm cache, no `--resume`

@@ -11,6 +11,7 @@ import { useContextStore } from "../stores/context";
 import { useDragResize } from "../hooks/useDragResize";
 import { useChatStore } from "../stores/chat";
 import { ChatInput, draftKeyFor } from "../components/ChatInput";
+import { ClosedSessionBar } from "../components/ClosedSessionBar";
 import { HaltBanner, isApproval, type SessionHalt, type TrayRow } from "../components/HaltBanner";
 import { useTrayStaging, stagedFor } from "../stores/trayStaging";
 import { ApprovalGate } from "../components/ApprovalGate";
@@ -329,15 +330,25 @@ export function SessionView() {
     setShowCloseConfirm(true);
   };
 
+  // Round 10 (B4): a CLOSED session is read-only history — no respawn on
+  // view. Waits for the row (`session` is undefined until `get_session`
+  // answers) and skips when `closed_at` is set; the backend refuses a closed
+  // row too (`ensure_session_started`), so this is the frontend half of one
+  // rule, not the rule. The Reopen button (`ClosedSessionBar`) is the only way
+  // an archived session's participants come back; once it clears `closed_at`
+  // the invalidated read re-runs this effect, which then finds the roster
+  // already live and no-ops.
+  const closedAt = session?.closed_at ?? null;
+  const sessionKnown = session !== undefined;
   useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId || !sessionKnown || closedAt) return;
     setRespawnError(null);
     respawn.mutate(
       { sessionId },
       { onError: (err) => setRespawnError(err) },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+  }, [sessionId, sessionKnown, closedAt]);
 
   const clearChat = useChatStore((s) => s.clear);
 
@@ -810,6 +821,13 @@ export function SessionView() {
           />
 
           <div className="border-t border-outline-variant">
+            {/* Round 10 (B4): a closed session's history is read-only — the
+                composer, the halt banner and the gate slot all stand down for
+                the one control that applies, Reopen. */}
+            {closedAt ? (
+              <ClosedSessionBar sessionId={sessionId} closedAt={closedAt} />
+            ) : (
+            <>
             {/* rc3 D30: the halt sits ABOVE the box that answers it. */}
             <HaltBanner
               halt={sessionHalt}
@@ -926,6 +944,8 @@ export function SessionView() {
               }}
               onClose={onCloseClick}
             />
+            )}
+            </>
             )}
           </div>
         </section>

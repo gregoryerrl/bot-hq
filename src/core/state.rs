@@ -249,11 +249,15 @@ pub struct AppState {
     /// Round 7 narrowed the `sessions` lock in `teardown_session` to the
     /// remove + kill + row close, so the tail (PTY reap, tray withdrawal,
     /// policy-snapshot cleanup, bridge unregister, worktree removal) runs
-    /// unlocked — and `ensure_session_started` consults neither `closed_at`
-    /// (a closed session's respawn is the Archive panel's "reopen for review",
-    /// a feature) nor any other marker. A `respawn_session` landing in that
-    /// gap (SessionView fires one on mount) got a fresh handle whose bridge
-    /// registration, policy file and PTY the tail then tore down under it.
+    /// unlocked — and at the time `ensure_session_started` consulted neither
+    /// `closed_at` (a closed session's respawn was the Archive panel's
+    /// "reopen for review") nor any other marker. A `respawn_session` landing
+    /// in that gap (SessionView fires one on mount) got a fresh handle whose
+    /// bridge registration, policy file and PTY the tail then tore down under
+    /// it. (Since round 10 `ensure_session_started` DOES refuse a closed row —
+    /// reopening is the explicit `reopen_session` — but the closed marker is
+    /// still what covers the tail: the row is closed under the guard, the
+    /// tail runs after, and this set is what a spawn in between reads.)
     /// This set is that marker: inserted under the same guard that removes
     /// the handle, read by `ensure_session_started` under the same lock,
     /// removed once the tail has finished. Nothing is held across I/O — the
@@ -262,6 +266,20 @@ pub struct AppState {
     /// with a narrower victim set. `std::sync::Mutex`: every hold is a
     /// non-awaiting insert / contains / remove.
     closing: std::sync::Mutex<HashSet<String>>,
+}
+
+/// **The closed-row refusal** `ensure_session_started` applies (round 10, B4),
+/// pure so the rule has a test seat: a row with `closed_at` set is not
+/// spawnable; reopening is `AppState::reopen_session`, which clears the column
+/// before it spawns.
+fn refuse_closed(session_id: &str, closed_at: Option<&str>) -> Result<()> {
+    match closed_at {
+        Some(when) => anyhow::bail!(
+            "session {session_id} is closed (since {when}); reopen it first — viewing a \
+             closed session no longer respawns its participants"
+        ),
+        None => Ok(()),
+    }
 }
 
 /// Who moved the phase — the one thing `advance_phase` must branch on.
@@ -471,6 +489,22 @@ impl AppState {
                 }
             }
         }
+        // **A closed row does not respawn** (round 10, B4 — the user's pick: a
+        // closed session reopens on a Reopen button, not on a view). Until
+        // this, viewing an archived session revived its whole roster — the
+        // Archive tab's "reopen for review": four such rosters were alive at
+        // once on 2026-08-18 from clicks made to copy session ids, one of them
+        // idle-NUDGED post-close into burning a turn to re-close itself. The
+        // one path that may spawn a roster for a closed row is
+        // `reopen_session`, which clears `closed_at` FIRST and then lands here.
+        // Read here rather than in the Tauri command so the auto-heal in
+        // `broadcast_as` and `restart_session` inherit the refusal — a plugin
+        // broadcast into a closed session must not revive it either.
+        if let Ok(Some(row)) = self.storage.get_session(session_id).await {
+            if let Err(refusal) = refuse_closed(session_id, row.closed_at.as_deref()) {
+                return Err(refusal);
+            }
+        }
         // The roster seed moved into `spawn_session_handle` (B4b.2) — it is the
         // choke point every creation path shares, and this one was not: the
         // external driver's `open_session` (deleted 2026-08-17) never reached here.
@@ -502,6 +536,27 @@ impl AppState {
         // gets its message back.
         self.rehydrate_stage(session_id).await;
         Ok(())
+    }
+
+    /// **Reopen a closed session** (round 10, B4): clear the row's `closed_at`
+    /// / `archived` / halt slot, spawn the roster (`--resume` off each
+    /// participant's own claude session id, as any respawn does), and tell the
+    /// frontend. `notify_session_created` is the right event by its own
+    /// documented meaning — "a session row now exists" for `list_sessions` and
+    /// the plugins' `sessions_changed` — which is exactly what a reopen changes.
+    /// A row that was not closed reopens nothing and spawns nothing: the
+    /// SessionView's mount respawn already covers a live session.
+    pub async fn reopen_session(&self, session_id: &str) -> Result<()> {
+        let moved = self.storage.reopen_session(session_id).await?;
+        if !moved {
+            anyhow::bail!("session {session_id} is not closed; nothing to reopen");
+        }
+        tracing::info!(session_id, "session reopened on the user's button; respawning its roster");
+        let started = self.ensure_session_started(session_id).await;
+        // The row moved either way — say so even if the spawn failed, so the
+        // dashboard lists it and the SessionView's own retry banner takes over.
+        self.notify_session_created(session_id);
+        started
     }
 
     /// Force-restart a session's roster: evict the live handle (killing every
@@ -3038,6 +3093,57 @@ mod tests {
             body.contains("return;"),
             "the released branch returns — it must not fall through to the interrupt"
         );
+    }
+
+    /// **A closed session reopens on a button, not on a view** (round 10, B4).
+    /// The spawn path refuses a closed row, and the reopen clears the row
+    /// BEFORE it spawns — so the refusal cannot bite the reopen, and nothing
+    /// but the reopen can revive a closed roster. Pure rule + source pins,
+    /// because `ensure_session_started` spawns real subprocesses.
+    #[test]
+    fn a_closed_row_is_refused_by_the_spawn_path_and_reopened_by_the_button() {
+        assert!(refuse_closed("s1", None).is_ok(), "an open row spawns");
+        let err = refuse_closed("s1", Some("2026-08-18T04:50:41Z"))
+            .expect_err("a closed row is refused");
+        assert!(err.to_string().contains("reopen it first"), "{err}");
+
+        let src = include_str!("state.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        let started = prod
+            .split("pub async fn ensure_session_started")
+            .nth(1)
+            .expect("ensure_session_started exists")
+            .split("\n    pub ")
+            .next()
+            .expect("a split always yields a first part");
+        let refuse = started
+            .find("refuse_closed(")
+            .expect("the spawn path applies the closed-row refusal");
+        let spawn = started
+            .find("spawn_existing_session(")
+            .expect("the spawn path still spawns");
+        assert!(refuse < spawn, "the refusal is read BEFORE anything is spawned");
+
+        let reopen = prod
+            .split("pub async fn reopen_session")
+            .nth(1)
+            .expect("reopen_session exists")
+            .split("\n    pub ")
+            .next()
+            .expect("a split always yields a first part");
+        let clear = reopen
+            .find(".reopen_session(session_id)")
+            .expect("the reopen clears the row through storage");
+        let start = reopen
+            .find("ensure_session_started(session_id)")
+            .expect("the reopen spawns through the one spawn path");
+        let told = reopen
+            .find("notify_session_created(session_id)")
+            .expect("the reopen tells the frontend the row is live again");
+        assert!(clear < start && start < told, "clear the row → spawn → tell the UI");
     }
 
     /// **The epilogue's turn runs BEFORE anything is torn down.**

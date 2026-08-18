@@ -215,6 +215,32 @@ impl Storage {
         Ok(())
     }
 
+    /// **Reopen a closed row** (round 10, B4 — the user's pick: "a Reopen button
+    /// for closed sessions"). Clears `closed_at` AND `archived` (the dashboard
+    /// filters on both), and empties the halt slot — the halt a session closed
+    /// under is not a stop the reopened session declared. Returns whether a row
+    /// moved: `false` for an unknown or still-open session, which is what makes
+    /// a double click harmless.
+    ///
+    /// The other half of the reopen — the roster respawn — is
+    /// `AppState::reopen_session`, and it is the ONLY path that may spawn a
+    /// roster for a row that was closed: `ensure_session_started` refuses closed
+    /// rows since round 10, so viewing an archived session no longer revives
+    /// its participants (four such rosters were alive at once on 2026-08-18,
+    /// spawned by clicks through the Archive to copy session ids).
+    pub async fn reopen_session(&self, id: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE sessions SET closed_at = NULL, archived = 0, \
+                 halt_declared_by = NULL, halt_reason = NULL, halt_declared_at = NULL \
+             WHERE id = ? AND closed_at IS NOT NULL",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("reopening session {id}"))?;
+        Ok(res.rows_affected() > 0)
+    }
+
     /// Active sessions: not archived, not closed. Ordered by LAST ACTIVITY —
     /// the newest message timestamp, falling back to `created_at` for
     /// message-less (just-created) sessions — so the dashboard surfaces the
@@ -369,6 +395,45 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use crate::storage::Storage;
+
+    /// **A closed session reopens on a button, not on a view** (round 10, B4).
+    /// The storage half: `reopen_session` clears BOTH `closed_at` and
+    /// `archived` (the dashboard's active filter is `archived = 0 AND
+    /// closed_at IS NULL`), empties the halt slot the session closed under, and
+    /// is a no-op on an open or unknown row.
+    #[tokio::test]
+    async fn reopen_clears_closed_archived_and_the_halt_slot() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.declare_session_halt("s1", "hands", "done for now").await.unwrap();
+        // Close it archived, as the Archive tab's rows are.
+        s.close_session("s1", true).await.unwrap();
+        let row = s.get_session("s1").await.unwrap().unwrap();
+        assert!(row.closed_at.is_some() && row.archived == 1);
+        assert!(s.session_halt("s1").await.unwrap().is_some(), "the halt outlives the close");
+        assert!(
+            s.list_active_sessions().await.unwrap().is_empty(),
+            "closed + archived: off the dashboard"
+        );
+
+        assert!(s.reopen_session("s1").await.unwrap(), "a closed row moves");
+        let row = s.get_session("s1").await.unwrap().unwrap();
+        assert!(row.closed_at.is_none(), "reopened: closed_at cleared");
+        assert_eq!(row.archived, 0, "reopened: archived cleared too, or the dashboard still hides it");
+        assert!(
+            s.session_halt("s1").await.unwrap().is_none(),
+            "the halt the session closed under is not the reopened session's stop"
+        );
+        assert_eq!(
+            s.list_active_sessions().await.unwrap().len(),
+            1,
+            "back on the dashboard"
+        );
+
+        // A second click, or a reopen of an open row, moves nothing.
+        assert!(!s.reopen_session("s1").await.unwrap());
+        assert!(!s.reopen_session("nope").await.unwrap());
+    }
 
     /// **The staged message survives the process** (B1-F11, migration 0058).
     ///

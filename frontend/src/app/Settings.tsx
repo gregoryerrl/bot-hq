@@ -350,9 +350,11 @@ function ArchivePanel() {
           Archived Sessions
         </h1>
         <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
-          Every closed session. Click one to reopen it for review — its
-          participants re-spawn via <code>--resume</code> and pick up their
-          prior context when claude-code still has it.
+          Every closed session. Click one to review its history — read-only,
+          nothing respawns. <strong>Reopen</strong> (in the session view)
+          brings its participants back via <code>--resume</code> with their
+          prior context when claude-code still has it, and puts it back on
+          the dashboard.
         </p>
       </div>
       {isLoading ? (
