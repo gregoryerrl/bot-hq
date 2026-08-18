@@ -17,7 +17,11 @@ use std::sync::Arc;
 #[tauri::command]
 #[specta::specta]
 pub async fn claude_config_read() -> Result<ClaudeConfigView, AppError> {
-    Ok(read_claude_config())
+    // A directory walk + a file read per skill + two JSON reads + stats — off
+    // the 2-worker reactor (round 10), like `cl.rs` / `docs.rs` / `files.rs`.
+    tokio::task::spawn_blocking(read_claude_config)
+        .await
+        .map_err(|e| AppError::Internal(format!("claude_config_read task panicked: {e}")))
 }
 
 #[tauri::command]

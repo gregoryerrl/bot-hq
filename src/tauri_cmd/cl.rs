@@ -781,6 +781,9 @@ pub async fn cl_rename_project(
 }
 
 /// Resolve + canonicalize a project's CL root for the disk-op commands below.
+/// The canonicalize is a stat chain, so it runs off the reactor with the rest
+/// of each command's disk work (round 10 — it used to run on the 2-worker
+/// reactor while only the cheap half was blocking-spawned).
 async fn canonical_cl_root(
     bridge: &SignalingBridge,
     project: &str,
@@ -789,8 +792,13 @@ async fn canonical_cl_root(
         .cl_project_root(project)
         .await
         .ok_or_else(|| AppError::Internal("bridge data_dir not configured".into()))?;
-    root.canonicalize()
-        .map_err(|e| AppError::NotFound(format!("project '{project}' not found: {e}")))
+    let project = project.to_string();
+    tokio::task::spawn_blocking(move || {
+        root.canonicalize()
+            .map_err(|e| AppError::NotFound(format!("project '{project}' not found: {e}")))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("canonical_cl_root task panicked: {e}")))?
 }
 
 /// `_globals` paths that bot-hq itself owns: custom-instructions.md,
