@@ -1216,6 +1216,12 @@ fn write_hook(hooks_dir: &Path, kind: HookKind, body: &str) -> Result<WriteOutco
         .with_context(|| format!("reading existing hook {}", path.display()))?;
     if existing.contains(MANAGED_MARKER) {
         if existing == body {
+            // Unchanged CONTENT is not an unchanged hook: git runs a hook only
+            // when it is executable and says nothing otherwise, and
+            // `write_executable` writes then chmods in two steps, so a hook
+            // that lost its bit stayed silently off while every later install
+            // reported it unchanged (round 11). Re-assert the mode.
+            ensure_executable(&path)?;
             return Ok(WriteOutcome::Unchanged);
         }
         write_executable(&path, body)?;
@@ -1229,12 +1235,27 @@ fn write_hook(hooks_dir: &Path, kind: HookKind, body: &str) -> Result<WriteOutco
 
 fn write_executable(path: &Path, body: &str) -> Result<()> {
     std::fs::write(path, body).with_context(|| format!("writing hook {}", path.display()))?;
+    ensure_executable(path)
+}
+
+/// `chmod 0755` unless the file already carries an executable bit. Split out
+/// of `write_executable` so an unchanged hook can be re-armed without a rewrite.
+fn ensure_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms)?;
+        let mut perms = std::fs::metadata(path)
+            .with_context(|| format!("reading hook mode {}", path.display()))?
+            .permissions();
+        if perms.mode() & 0o111 == 0 {
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms)
+                .with_context(|| format!("marking hook executable {}", path.display()))?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
     Ok(())
 }
@@ -1706,6 +1727,36 @@ mod tests {
         let rep = install_hooks(repo.path(), data.path(), Some("foo")).unwrap();
         assert_eq!(rep.unchanged.len(), 4, "second run should change nothing");
         assert!(rep.installed.is_empty());
+    }
+
+    /// **An unchanged managed hook is re-made executable** (round 11). git
+    /// runs a hook only if it is executable and says nothing when it is not;
+    /// `write_executable` writes then chmods in two steps, so a crash between
+    /// them — or anything else that dropped the bit — left a byte-identical,
+    /// non-executable hook that every later install reported `unchanged` and
+    /// never touched: every git-side gate silently off while the report said
+    /// success.
+    #[cfg(unix)]
+    #[test]
+    fn install_hooks_restores_the_executable_bit_on_an_unchanged_hook() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = tempdir().unwrap();
+        let data = tempdir().unwrap();
+        init_repo(repo.path());
+        install_hooks(repo.path(), data.path(), Some("foo")).unwrap();
+        let hook = repo.path().join(".git/hooks/pre-commit");
+        let mut perms = std::fs::metadata(&hook).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&hook, perms).unwrap();
+        assert_eq!(std::fs::metadata(&hook).unwrap().permissions().mode() & 0o111, 0);
+
+        let rep = install_hooks(repo.path(), data.path(), Some("foo")).unwrap();
+        assert!(rep.unchanged.contains(&"pre-commit".to_string()), "content is unchanged");
+        assert_ne!(
+            std::fs::metadata(&hook).unwrap().permissions().mode() & 0o111,
+            0,
+            "the unchanged hook must be executable again, or git never runs it"
+        );
     }
 
     #[test]
