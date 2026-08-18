@@ -162,6 +162,22 @@ async respawnSession(sessionId: string) : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * **Reopen a closed session** (round 10, B4 — the user's pick: "a Reopen
+ * button for closed sessions"). Clears `closed_at` / `archived` / the halt
+ * slot, respawns the roster via `--resume`, and fires `session:created` so
+ * the dashboard lists it again. The SessionView's mount respawn no longer
+ * touches a closed row (`ensure_session_started` refuses one), so this button
+ * is the ONLY way an archived session's participants come back.
+ */
+async reopenSession(sessionId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reopen_session", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Force-restart a live session's agents so they pick up a Claude-config change
  * (overrides + inherited settings are read at spawn). Unlike `respawn_session`
  * this is NOT a no-op on a healthy session — it evicts and re-spawns. Agents
