@@ -39,21 +39,25 @@ s-2a9dcf52); the phase vote walked I→P→A→V; `cl_stale_refs` read 32 (round
 9's own learnings file added the four it says not to fix). And the two
 real-work sessions carried FOUR defects no unit test had reached:
 
-- **A staged tray answer at a halt was lost to the declarer's own D35
-  interrupt (`5eaf9df`).** The user picks while HANDS is mid-turn; HANDS ends
-  the turn with `halt`; the ring delivers the staged answer AS the release and
-  deals HANDS a fresh turn ~20 ms before HANDS's halt tool-result ack fires
-  the self-interrupt, which aborts the residual generation and the message
-  just queued on stdin. The session sat bare-idle until the 90-second idle
+- **A staged tray answer at a halt was dealt into the declarer's still-live
+  turn and lost (`5eaf9df` → reverted `8d99f7d` → fixed in the ring).** The
+  user picks while HANDS is mid-turn; HANDS ends the turn with `halt`; the
+  ring delivers the staged answer AS the release and deals HANDS a fresh turn
+  ~20 ms before HANDS's process has finished the halted turn (its tool-result
+  ack, the D35 self-interrupt on it). Measured with a claude-code stream-json
+  probe: a message that arrives mid-turn is folded INTO that turn and answered
+  under its `result` — so the answer's completion carried the OLD epoch, the
+  ring discarded it, and the session sat bare-idle until the 90-second idle
   nudge re-dealt it — five traces since 08-16, three of them the ONLY nudges
-  s-766f4ab9 ever got. The bridge keeps a per-session, per-DECLARER halt
-  latch now: set when a halt takes effect (before the awaiting flip,
-  regardless of whether the durable row persisted), cleared only by the one
-  release signal; `halt_declared` skips the interrupt when the acking agent's
-  halt is gone. Not the awaiting flag (a gate answer clears it while the halt
-  stands — EYES) and not the DB slot (an unrecorded halt is still in effect —
-  EYES again); the queue-semantics probe is in the verify doc, the row
-  attribution after the fix waits for a real occurrence.
+  s-766f4ab9 ever got. The first cut skipped the interrupt (a bridge halt
+  latch); the probe showed that cures nothing — the fold-in happens with or
+  without the interrupt — so it was reverted and the RING fixed: a release
+  that lands while `winding_down` names the halted holder is stashed and
+  replayed on that holder's completion (live or discarded), on its respawn,
+  or after a 3-second grace, whichever comes first (`release_ring` is the one
+  restart body). The interrupt fires as D35 designed; it is what makes the
+  completion arrive in milliseconds. Pinned by three ring tests, RED with the
+  stash disabled.
 - **The gate ran approved commands in the wrong shell (`811b9bd`).**
   claude-code's Bash tool runs under the user's login shell (zsh); the gate
   re-ran the approved text under macOS's `/bin/bash` **3.2**, which dies on a

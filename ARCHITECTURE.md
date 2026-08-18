@@ -308,11 +308,15 @@ the round cap ends it.
    (D22's lap existed because halting at a first-turn park made a participant
    that asks every turn unreachable to its peers — `s-e8a20797`; a question no
    longer reaches the ring at all, so that failure cannot come back this way.)
-   Since round 10 a halt whose user answer arrives before its own tool-result
-   ack (a tray pick staged during the declarer's turn, delivered at the halt
-   boundary) does NOT interrupt the declarer — the bridge's per-declarer halt
-   latch says the halt is already released, and the dealt answer would
-   otherwise be lost to the interrupt.
+   Since round 10 the RELEASE of a holder-declared halt waits for the
+   halted holder's completion: the holder's turn ends ring-side at once, but
+   its process is still finishing (the halt tool's result, the D35 interrupt
+   on it), and a message dealt into that window is folded by claude-code
+   into the OLD turn — its answer comes back under the old epoch and the ring
+   discards it (five live traces, ~95 s each until the idle nudge). A
+   `UserMessage` arriving while `RingState::winding_down` names that holder
+   is stashed and replayed on its completion (live or discarded), on its
+   respawn, or after `HALT_WIND_DOWN_GRACE` (3 s) — whichever comes first.
 2b. **The all-pass lap** — a full lap in which every dealt participant PASSED
    yields to the user with a visible notice (rc3 D27, `announce_all_passed`):
    nobody had anything to add, and the only party who can change that is the

@@ -156,10 +156,10 @@ UNPINNED join), 12–14 (tray/halt/gate ↔ ring), 18 (Stage — main.rs hop UNP
 
 **Gotchas → pointers.** Halt = the session row's slot (D35), gates latch the ring
 via `notify_ring_gate`; a parked QUESTION stops nothing (D35 — its answer
-batches into Send, D34). The bridge's per-declarer halt LATCH
-(`session_halt_latch`, `halt_outstanding_for`, round 10) is what
-`AppState::halt_declared` reads at the ack: a halt released before its own
-tool-result ack does not interrupt the declarer. Ring in-memory
+batches into Send, D34). A release that lands while the halted holder is still
+finishing is held (`RingState::winding_down` / `stashed_release`, round 10)
+and replayed on that holder's completion, its respawn, or
+`HALT_WIND_DOWN_GRACE` — `release_ring` is the one restart body. Ring in-memory
 state (deferred/held/summons/staged/laps) is lost on restart; only `open_gates`
 reseeds. Gate rows are recognised by `is_gate_options`/`GATE_OPTIONS_JSON`
 (`storage/tray.rs`; the frontend mirrors it in `HaltBanner.tsx::isApproval`) —
@@ -301,12 +301,11 @@ halts or latches the ring via per-session registries; fans out `SignalingEvent`s
 over one broadcast (UI via `src/tauri_events/bridge_subscriber.rs`, the main.rs
 control handler, the plugin proxy's `wait_for_change`); fronts storage for findings,
 session docs, CL index/write/push, feedback, terminals. Everything per-session
-lives in 15 registries on one struct (13 keyed by session id, 2 by `(session, agent)`;
-the 15th is round 10's per-declarer halt latch).
+lives in 14 registries on one struct (12 keyed by session id, 2 by `(session, agent)`).
 
 | path | role | size |
 |---|---|---|
-| `src/signaling/bridge/mod.rs` | struct + 15 registries (incl. the per-declarer halt latch `session_halt_latch` — `latch_halt` / `halt_outstanding_for` / cleared by `notify_halts_cleared`, round 10), `SignalingEvent` (17 variants), register/`unregister_session`, `notify_*` emitters, close-gate + retired-terms, policy resolution, reviewer-override request | XL |
+| `src/signaling/bridge/mod.rs` | struct + 14 registries, `SignalingEvent` (17 variants), register/`unregister_session`, `notify_*` emitters, close-gate + retired-terms, policy resolution, reviewer-override request | XL |
 | `src/signaling/bridge/tray.rs` | `ask_user_choice_inner`, `request_approval(_parked)`, supersede/withdraw, `resolve_choice_confirmable`, `deliver_oob`, `emit_halt_row`/`mark_awaiting_user`, `request_phase_advance` | XL |
 | `src/signaling/bridge/action_gate.rs` | `park_gated_command` (dedupe) / `execute_gated` (`tool_gate::run_in_repo`), `gate_status` | L |
 | `src/signaling/bridge/findings.rs` | `eyes_flag`/`approve`/`disposition`/`check_open_findings` + reviewer-down gate + override | M |
@@ -340,8 +339,7 @@ failures are log-only. `unregister_session` leaks `session_sequencer`,
 
 **Tests pin.** halt reaches the ring / a question does not; a declared halt
 halts + a user message releases (`a_parked_question_halts_the_ring_and_a_user_message_releases_it`
-is named for the pre-D35 behaviour; it calls `mark_awaiting_user`); the halt
-latch's declare/release/per-declarer cycle; any approval opens a gate; parks immediately; OOB
+is named for the pre-D35 behaviour; it calls `mark_awaiting_user`); any approval opens a gate; parks immediately; OOB
 fallbacks (receiver dropped, reopened session); gate execute-once + post-restart
 execute (`action_gate.rs`); dedup/raise + reviewer-down decision (`findings.rs`);
 slug collapse, archive-on-rewrite, append (`session_docs.rs`); traversal, atomic

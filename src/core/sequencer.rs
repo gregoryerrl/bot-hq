@@ -773,6 +773,13 @@ const MAX_TURN_BATCHES: usize = 32;
 /// `0` means the cap is OFF — a deliberate unattended run. Per-session
 /// override: `round_cap` in [`crate::policy::Policy`], inherited
 /// general → project → session and editable in the gear tab.
+/// How long a release held for a halted holder's completion waits before it is
+/// dealt regardless (round 10, B1 — see `RingState::winding_down`). The
+/// completion follows the halt's own tool-result ack and the D35 interrupt on it,
+/// so the wait is milliseconds in the ordinary case; this bounds the wedge a
+/// hung process would otherwise be.
+const HALT_WIND_DOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub const DEFAULT_ROUND_CAP_LAPS: u32 = 500;
 
 /// The cap in force for this session RIGHT NOW, in laps.
@@ -1326,6 +1333,35 @@ struct RingState {
     /// staged send lands exactly like a typed one — never mid-turn, never
     /// superseding the holder.
     staged_pending: bool,
+    /// **The halted holder whose completion is still owed** (round 10, B1).
+    ///
+    /// A halt declared by the holder ends its turn ring-side at once (`holder`
+    /// cleared, epoch bumped) while its process is still finishing — the halt
+    /// tool's result has to reach it, and the D35 self-interrupt fires on that
+    /// result. If the user's release arrives in that window (a tray answer
+    /// staged during the turn is delivered AS the release, ~20 ms after the
+    /// halt), dealing it at once writes the message onto a process still inside
+    /// its previous turn: claude-code folds a message that arrives mid-turn INTO
+    /// that turn (measured in this round's queue probe — a message queued
+    /// during a tool call is answered under the same `result`), so the answer
+    /// comes back under the OLD epoch and the ring discards the completion —
+    /// and the interrupt, if it lands after the fold-in, aborts the answer
+    /// outright. Either way the ring waits on an epoch nothing will produce
+    /// until the idle nudge re-deals it 90 seconds later: five live traces
+    /// since 08-16 (`s-766f4ab9` ×3, `s-d931f81b`, `s-dbc0e856`).
+    ///
+    /// So a release that arrives while this is `Some` is STASHED
+    /// (`stashed_release`) and replayed the moment the named participant's
+    /// completion — live or discarded, it does not matter — arrives, or the
+    /// moment it is respawned (`ParticipantJoined`), whichever comes first. The
+    /// deal then lands on an idle process with an empty queue. The interrupt
+    /// keeps firing as D35 designed: it is what makes the completion arrive in
+    /// milliseconds rather than at the residual generation's leisure.
+    winding_down: Option<i64>,
+    /// The mentions of a `UserMessage` held back by `winding_down` (see above);
+    /// `None` = nothing held. Two releases in the window merge into one — the
+    /// rows are already in the channel, and one restart drains them.
+    stashed_release: Option<Vec<i64>>,
     /// Participants that have parked a question and cannot proceed until the user
     /// answers (rc3 D22). The ring skips no-one on account of this — it HALTS when
     /// it reaches one, which is what bounds the extra work at one lap. Cleared by
@@ -1360,6 +1396,25 @@ struct RingState {
 }
 
 impl RingState {
+    /// Hold a release back for the halted holder's completion (round 10, B1).
+    /// A second release in the window merges its mentions into the first — one
+    /// restart drains every row.
+    fn stash_release(&mut self, mentions: Vec<i64>) {
+        match self.stashed_release.as_mut() {
+            Some(held) => held.extend(mentions),
+            None => self.stashed_release = Some(mentions),
+        }
+    }
+
+    /// The held release, once nothing is winding down any more; `None` when
+    /// there is nothing to replay or a completion is still owed.
+    fn take_stashed_release(&mut self) -> Option<Vec<i64>> {
+        if self.winding_down.is_some() {
+            return None;
+        }
+        self.stashed_release.take()
+    }
+
     /// Apply a `TurnComplete` (`SequencerCommand::TurnComplete`).
     ///
     /// Step 3 of R6, and the arm the decomposition was FOR: the largest of the
@@ -1382,6 +1437,20 @@ impl RingState {
         completed: u64,
         ending: TurnEnding,
     ) {
+            // **The halted holder has finished** (round 10, B1): whatever this
+            // completion names, the process behind `participant_id` is idle
+            // now, so a release held back for it can be dealt. Replayed AFTER
+            // this completion is handled (below), by the caller — see
+            // `take_stashed_release`.
+            if self.winding_down == Some(participant_id) {
+                debug!(
+                    session = %deps.session_id,
+                    participant_id,
+                    held_release = self.stashed_release.is_some(),
+                    "sequencer: the halted holder's completion arrived; the ring may deal again"
+                );
+                self.winding_down = None;
+            }
             // The completion has to name the turn in flight: the same
             // participant AND the same turn.
             //
@@ -1661,9 +1730,39 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
         );
     }
     loop {
+        // **The one place this loop waits with a clock** (round 10, B1): while a
+        // release is held for a halted holder's completion, `recv` is bounded by
+        // `HALT_WIND_DOWN_GRACE`. The completion is expected in milliseconds
+        // (the D35 interrupt fires on the halt's own ack), but a process that
+        // never completes and never dies would otherwise hold the user's answer
+        // forever; past the grace the release is dealt anyway — the pre-round-10
+        // behaviour, bounded — and the wait is logged.
+        let bounded = state.stashed_release.is_some();
         let cmd = match state.deferred.pop_front() {
             Some(cmd) => cmd,
-            None => match rx.recv().await {
+            None => match {
+                if bounded {
+                    tokio::time::timeout(HALT_WIND_DOWN_GRACE, rx.recv())
+                        .await
+                        .map_err(|_| ())
+                } else {
+                    Ok(rx.recv().await)
+                }
+            } {
+                Err(()) => {
+                    warn!(
+                        session = %deps.session_id,
+                        winding_down = ?state.winding_down,
+                        "sequencer: the halted holder's completion did not arrive within the \
+                         grace; dealing the held release anyway"
+                    );
+                    state.winding_down = None;
+                    if let Some(mentions) = state.take_stashed_release() {
+                        release_ring(&deps, &mut rx, &mut state, mentions).await;
+                    }
+                    continue;
+                }
+                Ok(cmd) => match cmd {
                 // **The steer releases the pause, and it is the release the rest
                 // of the app already ships.** `state`'s user-message path calls
                 // `set_paused(false)` with the comment "a user message is the
@@ -1706,6 +1805,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 }
                 Some(cmd) => cmd,
                 None => break,
+                },
             },
         };
         // **The pause gate: while paused, nothing that could wake a participant
@@ -1741,61 +1841,34 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 state
                     .on_turn_complete(&deps, &mut rx, participant_id, completed, ending)
                     .await;
+                // A release held back for this participant's completion is dealt
+                // now that its process is idle (round 10, B1) — the same path a
+                // fresh `UserMessage` takes, so nothing about the restart differs.
+                if let Some(mentions) = state.take_stashed_release() {
+                    debug!(
+                        session = %deps.session_id,
+                        "sequencer: replaying the release held for the halted holder's completion"
+                    );
+                    release_ring(&deps, &mut rx, &mut state, mentions).await;
+                }
             }
             SequencerCommand::UserMessage { mentions } => {
-                // **Whoever the user named takes the next turn, in the order
-                // they were named** (rc3 D17). Appended rather than assigned:
-                // two messages in quick succession queue behind each other, the
-                // same way two mentions in one message do.
-                //
-                // The queue is drained one entry per turn by `advance_turn`, and
-                // it pre-empts the ring step rather than replacing the rotation
-                // — see `Summons` for why the anchor is what makes that an
-                // insertion.
-                state.summons.queue.extend(mentions);
-                // The user spoke, so nobody is waiting on them any more (rc3
-                // D22). Cleared BEFORE the ring is stepped, or the restart would
-                // land on a participant this set still calls blocked and halt on
-                // the spot — the release re-halting itself.
-                state.halted_pending_user = false;
-                // The user's own output is substantive, so it resets the tally —
-                // but the reset is NOT written here. It rides the restart itself,
-                // in `advance_turn`; see the comment there for why this arm is
-                // the wrong place to own it.
-                //
-                // The user speaking with nobody named resets the cycle to the
-                // front of the rotation, whoever held the turn — `None` is what
-                // `next_active_participant` reads as "reset". The previous
-                // holder's turn is not cancelled; nothing here can stop it. What
-                // happens instead is that the epoch moves, so its completion is
-                // discarded when it arrives.
-                //
-                // Spin state IS cleared here, unlike the tally. Router inventory
-                // #12 names the pair — a user message clears done-votes AND the
-                // repetition streak — and the streak has to go for a reason the
-                // tally does not share: it is what a halt was decided on, so a
-                // streak surviving the message that released the halt would let
-                // the first turn of the new cycle be judged against prose from
-                // before the user spoke, and halt again on it.
-                //
-                // **Placed on the call site rather than the mechanism, which is
-                // the opposite of the tally's placement**, and the argument in
-                // `advance_turn` for binding to the mechanism applies here too.
-                // It is here because every restart-to-the-front reachable today
-                // IS a user message — a halt leaves no holder, so no completion
-                // can be live, so nothing else reaches the front — and moving it
-                // would mean threading this map through `advance_turn` to cover
-                // a path that does not exist yet. If a second restart path ever
-                // lands, this belongs next to the tally clear, not here.
-                state.spin.clear();
-                state.reseed_gates_if_needed(&deps).await;
-                advance_turn(
-                    &deps,
-                    &mut rx,
-                    &mut state,
-                    true,
-                )
-                .await;
+                // **A release that lands while the halted holder is still
+                // finishing waits for its completion** (round 10, B1) — see
+                // `RingState::winding_down` for the fold-in it prevents. Held
+                // here, not dropped: the rows are already in the channel, and
+                // the replay drains them exactly as this arm would have.
+                if let Some(pid) = state.winding_down {
+                    debug!(
+                        session = %deps.session_id,
+                        winding_down = pid,
+                        "sequencer: a release arrived while the halted holder is still finishing; \
+                         holding it until that completion lands"
+                    );
+                    state.stash_release(mentions);
+                    continue;
+                }
+                release_ring(&deps, &mut rx, &mut state, mentions).await;
             }
             SequencerCommand::MessageStaged => {
                 if state.holder.is_none() {
@@ -1858,6 +1931,21 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         pass_empty_turn(&deps, &state.holder, state.epoch, &mut state.deferred).await
                     }
                 }
+                // A respawned participant will never complete the turn its old
+                // process was finishing: a release held for it is dealt now
+                // (round 10, B1) — AFTER its fresh stdin is registered above, so
+                // the replay's deal reaches the new process, not the dead one.
+                if state.winding_down == Some(participant_id) {
+                    state.winding_down = None;
+                    if let Some(mentions) = state.take_stashed_release() {
+                        debug!(
+                            session = %deps.session_id,
+                            participant_id,
+                            "sequencer: the halted holder respawned; replaying the held release"
+                        );
+                        release_ring(&deps, &mut rx, &mut state, mentions).await;
+                    }
+                }
             }
             SequencerCommand::HaltDeclared { participant_id } => {
                 // Unguarded and uncounted, unlike a completion — see the variant
@@ -1888,6 +1976,13 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     "sequencer: a halt was declared; the ring stops where it stands"
                 );
                 if ends_a_turn {
+                    // The holder's turn ends here ring-side, but its PROCESS is
+                    // still finishing (the halt tool's result, the D35
+                    // interrupt on it): remember whose completion is owed, so a
+                    // release arriving in that window waits for it instead of
+                    // being dealt into the old turn (round 10, B1 — see
+                    // `RingState::winding_down`).
+                    state.winding_down = participant_id;
                     state.reseed_gates_if_needed(&deps).await;
                     advance_turn(
                         &deps,
@@ -2062,6 +2157,64 @@ fn release_held(
     held.append(deferred);
     std::mem::swap(held, deferred);
     replayed
+}
+
+/// **The user spoke: restart the ring** — the body of the `UserMessage` arm,
+/// shared with the replay of a release held back for a halted holder's
+/// completion (round 10, B1) so the two restarts cannot drift.
+async fn release_ring(
+    deps: &SequencerDeps,
+    rx: &mut mpsc::Receiver<SequencerCommand>,
+    state: &mut RingState,
+    mentions: Vec<i64>,
+) {
+    // **Whoever the user named takes the next turn, in the order
+    // they were named** (rc3 D17). Appended rather than assigned:
+    // two messages in quick succession queue behind each other, the
+    // same way two mentions in one message do.
+    //
+    // The queue is drained one entry per turn by `advance_turn`, and
+    // it pre-empts the ring step rather than replacing the rotation
+    // — see `Summons` for why the anchor is what makes that an
+    // insertion.
+    state.summons.queue.extend(mentions);
+    // The user spoke, so nobody is waiting on them any more (rc3
+    // D22). Cleared BEFORE the ring is stepped, or the restart would
+    // land on a participant this set still calls blocked and halt on
+    // the spot — the release re-halting itself.
+    state.halted_pending_user = false;
+    // The user's own output is substantive, so it resets the tally —
+    // but the reset is NOT written here. It rides the restart itself,
+    // in `advance_turn`; see the comment there for why this arm is
+    // the wrong place to own it.
+    //
+    // The user speaking with nobody named resets the cycle to the
+    // front of the rotation, whoever held the turn — `None` is what
+    // `next_active_participant` reads as "reset". The previous
+    // holder's turn is not cancelled; nothing here can stop it. What
+    // happens instead is that the epoch moves, so its completion is
+    // discarded when it arrives.
+    //
+    // Spin state IS cleared here, unlike the tally. Router inventory
+    // #12 names the pair — a user message clears done-votes AND the
+    // repetition streak — and the streak has to go for a reason the
+    // tally does not share: it is what a halt was decided on, so a
+    // streak surviving the message that released the halt would let
+    // the first turn of the new cycle be judged against prose from
+    // before the user spoke, and halt again on it.
+    //
+    // **Placed on the call site rather than the mechanism, which is
+    // the opposite of the tally's placement**, and the argument in
+    // `advance_turn` for binding to the mechanism applies here too.
+    // It is here because every restart-to-the-front reachable today
+    // IS a user message — a halt leaves no holder, so no completion
+    // can be live, so nothing else reaches the front — and moving it
+    // would mean threading this map through `advance_turn` to cover
+    // a path that does not exist yet. If a second restart path ever
+    // lands, this belongs next to the tally clear, not here.
+    state.spin.clear();
+    state.reseed_gates_if_needed(deps).await;
+    advance_turn(deps, rx, state, true).await;
 }
 
 /// Step the ring, stamp the new turn, and deliver its backlog — emptying the
@@ -8133,6 +8286,14 @@ mod tests {
             "delivery is live in this run"
         );
         send(&tx, halt_by(a)).await;
+        // The halted turn's own completion (its process finishing after the
+        // halt tool's ack) — stale for the ring, but it is what says A is idle;
+        // a release arriving before it is held (round 10, B1).
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
 
         // Unread, so any silence below is the halt holding rather than a ring
         // step that found nothing to hand over.
@@ -8971,6 +9132,122 @@ mod tests {
             Some("s1"),
             "the staged response delivers as the halt's release"
         );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **A release that lands while the halted holder is still finishing waits
+    /// for its completion** (round 10, B1). The live shape: HANDS declares a
+    /// halt (its turn ends ring-side at once), the user's staged answer is
+    /// delivered as the release ~20 ms later, and HANDS's process is still
+    /// inside the halted turn — the halt tool's result and the D35 interrupt on
+    /// it are still in flight. Dealing at once writes the answer onto that
+    /// process, which folds it into the OLD turn (measured: a message queued
+    /// mid-turn is answered under the same `result`), so the answer's
+    /// completion carries the old epoch, is discarded, and the ring waits on
+    /// an epoch nothing produces until the idle nudge — five live traces
+    /// (`s-766f4ab9` ×3, `s-d931f81b`, `s-dbc0e856`, ~95 s each). Held until
+    /// the completion — live or discarded — arrives, the deal lands on an idle
+    /// process and its answer opens the NEW epoch.
+    #[tokio::test]
+    async fn a_release_during_the_halted_holders_wind_down_waits_for_its_completion() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        // A declares the halt: its turn ends ring-side; its process is still
+        // finishing (no completion yet).
+        send(&tx, halt_by(a)).await;
+        // The user's answer arrives in that window — the release.
+        post(&storage, "user", None, "the answer").await;
+        send(&tx, user_message()).await;
+        // Nobody is dealt: A is winding down and the release is held.
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+
+        // A's completion for the halted turn (epoch 1 — stale, since the halt
+        // moved the epoch) lands: discarded as a completion, but it is the
+        // signal that A's process is idle — the held release is dealt NOW, to
+        // A, at the front.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["the answer"],
+            "the release is dealt once the halted holder has actually finished"
+        );
+        seats[1].quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// The bounded wait: a halted holder whose completion never comes (and whose
+    /// process never dies) must not hold the user's answer forever — past
+    /// `HALT_WIND_DOWN_GRACE` the release is dealt regardless, and the wait is
+    /// logged. Slow by construction (it waits the grace out); kept because a
+    /// wedge here is the failure the round-10 fix must not trade the old one for.
+    #[tokio::test]
+    async fn a_held_release_is_dealt_after_the_grace_if_no_completion_comes() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        send(&tx, halt_by(a)).await;
+        post(&storage, "user", None, "the answer").await;
+        send(&tx, user_message()).await;
+        seats[0].quiet().await;
+        // No completion, no respawn. The grace elapses; the release is dealt.
+        let m = tokio::time::timeout(HALT_WIND_DOWN_GRACE + Duration::from_secs(2), seats[0].rx.recv())
+            .await
+            .expect("the held release must be dealt once the grace has elapsed")
+            .expect("the sequencer dropped A's stdin");
+        assert_eq!(rows_of(m.message.content), vec!["the answer"]);
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// The other way a winding-down process stops owing a completion: it is
+    /// RESPAWNED. A held release is dealt to the fresh stdin then, not held for
+    /// a completion the dead process will never send.
+    #[tokio::test]
+    async fn a_held_release_is_dealt_when_the_halted_holder_respawns() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        send(&tx, halt_by(a)).await;
+        post(&storage, "user", None, "the answer").await;
+        send(&tx, user_message()).await;
+        seats[0].quiet().await;
+
+        // A's process died and came back: its old stdin never sees anything
+        // more; the joined one is dealt the held release.
+        let (input, mut joined) = late_stdin(a);
+        send(&tx, SequencerCommand::ParticipantJoined { participant_id: a, input }).await;
+        assert_eq!(
+            joined.expect(1).await,
+            vec!["the answer"],
+            "the respawn ends the wait; the release lands on the NEW stdin"
+        );
+        seats[0].quiet().await;
         drop(tx);
         assert!(exited(task).await);
     }
