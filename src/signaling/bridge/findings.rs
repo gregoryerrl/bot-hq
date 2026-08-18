@@ -141,22 +141,23 @@ impl SignalingBridge {
         // fail. `session_reviewers` is registered at spawn from the roster's
         // capability snapshots. With several reviewers, ANY of them being down
         // blocks: the change is unreviewed by that one either way.
-        let reviewers = self.session_reviewers(session_id);
-        let down = reviewers.iter().find(|slug| {
-            matches!(
-                self.current_agent_health(session_id, slug).as_deref(),
-                Some("stalled") | Some("dead")
-            ) && !self.agent_rpc_recent(session_id, slug, REVIEWER_LIVENESS_WINDOW)
-        });
-        let verdict = reviewer_block_decision(
-            !reviewers.is_empty(),
-            down.map(|slug| self.current_agent_health(session_id, slug))
-                .unwrap_or(None)
-                .as_deref(),
-            false,
-            self.reviewer_override_reason(session_id).as_deref(),
-        );
-        Ok(verdict.unwrap_or_else(|| "ok".to_string()))
+        //
+        // One decision per reviewer, made by the pure fn with BOTH inputs —
+        // the event-derived health and the wire-level liveness (round 11: the
+        // finder used to fold the liveness in and then hand the decision a
+        // literal `false`, so the branch the decision documents as the
+        // s-32196a61 fix could never run and the liveness rule lived twice).
+        let override_reason = self.reviewer_override_reason(session_id);
+        for slug in self.session_reviewers(session_id) {
+            let health = self.current_agent_health(session_id, &slug);
+            let recent = self.agent_rpc_recent(session_id, &slug, REVIEWER_LIVENESS_WINDOW);
+            if let Some(verdict) =
+                reviewer_block_decision(true, health.as_deref(), recent, override_reason.as_deref())
+            {
+                return Ok(verdict);
+            }
+        }
+        Ok("ok".to_string())
     }
 
     /// All findings for a session — backs the `list_session_findings` Tauri
