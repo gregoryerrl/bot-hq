@@ -58,8 +58,9 @@ impl JsonRpcError {
     }
 
     /// The Tauri `AppHandle` isn't wired yet (app still in setup, or a test
-    /// bridge has none). Shared by every webview / web_search tool in both the
-    /// internal and external dispatchers.
+    /// bridge has none). Shared by every webview / web_search tool in the
+    /// dispatcher (there was an external one too until the driver server was
+    /// removed on 2026-08-17).
     pub fn app_handle_missing() -> Self {
         Self::new(Self::INTERNAL_ERROR, "Tauri AppHandle not yet initialized")
     }
@@ -92,10 +93,10 @@ impl JsonRpcResponse {
 /// Parse an IPAV phase target from an MCP argument. Returns INVALID_PARAMS
 /// with the canonical error_hint message on failure. `field` is the
 /// argument name as the dispatcher exposes it on the wire (`"target"` for
-/// internal `advance_phase`/`request_phase_advance`, `"phase"` for
-/// external `advance_phase`) — preserved in the error string for caller
-/// clarity. Single source of truth so the three dispatch sites can't
-/// drift on what they tell agents.
+/// `advance_phase`/`request_phase_advance`, `"phase"` for
+/// `session_doc_search`'s optional filter) — preserved in the error string
+/// for caller clarity. Single source of truth so the three call sites in
+/// `jsonrpc.rs` can't drift on what they tell agents.
 pub(crate) fn parse_phase_arg(
     field: &str,
     value: &str,

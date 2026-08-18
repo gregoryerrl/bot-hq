@@ -113,7 +113,7 @@ mod tests {
         r.deferred_ms = 8000;
         r.deferral_capped = true;
         r.slot0_interrupt_queued = Some(false); // dropped
-        r.slot1_interrupt_queued = None; // Rain disabled
+        r.slot1_interrupt_queued = None; // slot 1 unused (a one-participant roster)
         r.cancel_superseded = true;
         s.insert_cancel_event(&r).await.unwrap();
 
@@ -125,7 +125,7 @@ mod tests {
         assert_eq!(e.deferral_capped, 1);
         // The distinction the old code threw away: dropped vs ignored vs absent.
         assert_eq!(e.slot0_interrupt_queued, Some(0), "dropped interrupt");
-        assert_eq!(e.slot1_interrupt_queued, None, "no Rain in this session");
+        assert_eq!(e.slot1_interrupt_queued, None, "no second slot in this session");
         assert_eq!(e.cancel_superseded, 1);
         assert_eq!(e.both_idle, 0);
     }

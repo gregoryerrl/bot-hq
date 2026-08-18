@@ -1,8 +1,10 @@
-//! `findings` bridge methods — server-side logic for the EYES-sign-off gate.
-//! EYES files via `eyes_flag`; HANDS resolves via `disposition_finding`; the
-//! gate's prompted-primary read is `check_open_findings`. Thin bridge→storage,
-//! mirroring the other tool surfaces. Per-agent access (eyes_flag = EYES-only,
-//! disposition_finding = HANDS-only) is enforced in `jsonrpc.rs::call_tool`.
+//! `findings` bridge methods — server-side logic for the reviewer sign-off
+//! gate. A participant holding `FileFinding` files via `eyes_flag`; one holding
+//! `DispositionFinding` resolves via `disposition_finding`; the gate's
+//! prompted-primary read is `check_open_findings`. Thin bridge→storage,
+//! mirroring the other tool surfaces. Access is by CAPABILITY, enforced in
+//! `jsonrpc.rs::call_tool` (`caller.capabilities.allows_tool`) — no agent name
+//! is compared anywhere (rc3 D10/D16; `agents/capability.rs::required_for`).
 
 use super::*;
 use crate::storage::{Finding, FindingSeverity, FindingStatus};
@@ -69,7 +71,7 @@ impl SignalingBridge {
         Ok(uid)
     }
 
-    /// EYES (rain) confirms an escalated finding's resolution — clears the
+    /// The reviewer (`ApproveFinding`) confirms an escalated finding's resolution — clears the
     /// escalation "awaiting EYES confirm" signal (sets `eyes_approved`). NON-
     /// gating: the commit gate is already open once HANDS dispositioned, so this
     /// only closes the soft-escalation loop. Returns a human-readable result.

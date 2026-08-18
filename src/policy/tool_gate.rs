@@ -226,7 +226,7 @@ pub fn match_keyword(
     None
 }
 
-/// Execute `command` via `sh -c` in `cwd`, capturing combined stdout/stderr +
+/// Execute `command` via the agent's shell (`gate_shell`) in `cwd`, capturing combined stdout/stderr +
 /// exit code, bounded by `timeout`. stdin is `/dev/null` so a command that
 /// expects input (e.g. `gh issue comment` with no `--body`) fails fast instead
 /// of hanging. On timeout the child is killed (kill-on-drop) and `code` is 124.

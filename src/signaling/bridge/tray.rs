@@ -1736,10 +1736,11 @@ mod tests {
 
     #[tokio::test]
     async fn ask_user_choice_parks_and_returns_immediately() {
-        // ask_user_choice is non-blocking: it parks the question, halts the duo,
-        // and returns a `{status:"parked", choice_id}` ack right away — it does
-        // NOT wait for the user. The pick is delivered later out-of-band, and
-        // resolving clears the awaiting halt.
+        // ask_user_choice is non-blocking: it parks the question and returns a
+        // `{status:"parked", choice_id}` ack right away — it does NOT wait for
+        // the user, and (rc3 D35) it halts NOTHING: no awaiting flag, no ring
+        // command — the assertions below check exactly that. The pick is
+        // delivered later out-of-band.
         use std::sync::atomic::{AtomicBool, Ordering};
         let bridge = SignalingBridge::new();
         let storage = crate::storage::Storage::memory().await.unwrap();
@@ -2635,12 +2636,14 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_choice_delivered_clears_awaiting() {
-        // Regression for "the duo goes silent after the user answers": a Delivered
-        // resolve must clear the awaiting halt the gate set, or the router keeps
-        // dropping every Brian<->Rain peer-forward (router::route_forward is gated on
-        // this flag). Uses request_approval (the blocking path that yields
-        // Delivered); the non-blocking ask_user_choice clears awaiting on its OOB
-        // resolve too — see ask_user_choice_parks_and_returns_immediately.
+        // Regression for "the session goes silent after the user answers": a
+        // Delivered resolve must clear the awaiting halt the gate set. (The
+        // original symptom was the deleted bilateral router dropping every
+        // peer-forward while the flag stayed up; today the flag is what the D35
+        // gate release and the input lock read, and a stale one still reads as
+        // a session waiting on the user.) Uses request_approval (the blocking
+        // path that yields Delivered); the non-blocking ask_user_choice sets no
+        // flag at all — see ask_user_choice_parks_and_returns_immediately.
         use std::sync::atomic::{AtomicBool, Ordering};
         let bridge = SignalingBridge::new();
         let flag = Arc::new(AtomicBool::new(false));
@@ -2671,7 +2674,7 @@ mod tests {
                 _ => continue,
             }
         };
-        // The gate halts the duo; set_session_awaiting runs before the
+        // The gate halts the session; set_session_awaiting runs before the
         // PendingChoice event emits, so this read is race-free.
         assert!(
             flag.load(Ordering::Acquire),

@@ -354,7 +354,8 @@ fn parse_path(path: &str) -> Option<CallerPath> {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     // `/sessions/<id>/<agent>/mcp` (no token — a session spawned before C1-1) or
     // `/sessions/<id>/<agent>/<token>/mcp`. Both parse; whether a missing token
-    // is ACCEPTED is `authorize_caller`'s decision, not this function's.
+    // is ACCEPTED is `bridge.mcp_token_matches`'s decision (in `handle`), not
+    // this function's.
     match parts.as_slice() {
         ["sessions", session_id, agent, "mcp"] => Some(CallerPath {
             session_id: session_id.to_string(),

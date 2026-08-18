@@ -617,9 +617,11 @@ fn plugin_asset_error(status: u16) -> tauri::http::Response<Vec<u8>> {
         .expect("static status-only response")
 }
 
-/// Boot-time GC horizon for the two append-only runtime tables (`session_tray`
-/// resolved rows, `activity_events`): rows older than this many days are
-/// purged at startup. One number, spelled once (round 9).
+/// Boot-time GC horizon for the append-only runtime tables — `session_tray`
+/// resolved rows, `activity_events`, and (round 10) `participant_deliveries`,
+/// `context_readings`, `retrieval_events`, `cancel_events`, `cl_reads`
+/// (`storage/gc.rs`): rows older than this many days are purged at startup.
+/// One number, spelled once (round 9).
 const GC_RETENTION_DAYS: i64 = 90;
 
 /// How many daily log files to keep. Bounded from the start: this data home

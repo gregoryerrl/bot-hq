@@ -1,5 +1,5 @@
-//! `findings` table: the EYES-sign-off gate's persistence layer. EYES (rain)
-//! files findings via `eyes_flag`; HANDS (brian) resolves them via
+//! `findings` table: the reviewer sign-off gate's persistence layer. The
+//! reviewer files findings via `eyes_flag`; the executor resolves them via
 //! `disposition_finding`. An `open` `blocking` finding gates `git commit` (the
 //! MCP `check_open_findings` tool is the prompted primary; the pre-commit /
 //! pre-push hooks are the mechanical backstop). Mirrors `tray.rs`'s shape.

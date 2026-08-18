@@ -2,7 +2,8 @@
 //!
 //! The PreToolUse hook blocks a `gate`-mode Bash command (exit 2) and tells the
 //! agent to call `action_gate(command)`. This module classifies the command
-//! against the GLOBAL keyword list and:
+//! against the session's resolved keyword list (`tool_gate::resolve_keywords`:
+//! the session snapshot first, the global list as fallback) and:
 //!   - `auto_allow` / no-match → runs it immediately in the session's repo,
 //!   - `gate`                  → surfaces Approve/Reject; on approve, runs it.
 //!

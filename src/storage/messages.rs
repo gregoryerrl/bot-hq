@@ -469,7 +469,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_message_returns_a_receipt_for_the_row_it_wrote() {
-        // The point of the convergence: the duo pump's per-chunk write is now
+        // The point of the convergence: the participant pump's per-chunk write is now
         // receipt-bearing, so B5's receipt-gated send needs neither a second
         // row nor a re-read of the row to obtain one. Asserted against the
         // PERSISTED row rather than the arguments — a receipt that can diverge

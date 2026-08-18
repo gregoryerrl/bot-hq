@@ -158,12 +158,13 @@ pub struct ActivityTracker {
     session_id: String,
     /// This session's participant slugs in TURN ORDER, fixed at spawn.
     ///
-    /// Two jobs, both of which used to be done by the literal strings `"brian"`
-    /// and `"rain"` (rc3 D10):
-    ///   * translating the legacy `Author` two-party discriminant (the deleted
-    ///     router's vocabulary) onto the slug this tracker keys `busy` by,
-    ///   * filling the frozen two-boolean wire payload, whose fields name slots
-    ///     0 and 1 and no longer name agents.
+    /// One job, which used to be done by the literal strings `"brian"` and
+    /// `"rain"` (rc3 D10): filling the frozen two-boolean wire payload
+    /// (`slot0_busy` / `slot1_busy`), whose fields name slots 0 and 1 and no
+    /// longer name agents — read as `slot(0)` / `slot(1)` in
+    /// `recompute_locked`. (The other job it once had — translating the
+    /// deleted router's two-party `Author` discriminant onto a slug — went with
+    /// the router; `set_busy_slug` is the only busy setter now.)
     ///
     /// A session with one participant has one entry and a session with three has
     /// three; only the first two reach the wire.
@@ -193,7 +194,7 @@ impl ActivityTracker {
         })
     }
 
-    /// Participant-keyed [`set_busy`], and now the only form — the two-party
+    /// Participant-keyed busy setter, and now the only form — the two-party
     /// `Author` discriminant it was named against was deleted in the D10
     /// retirement. `"user"` cannot enter the map: `set_busy` early-returns on it.
     pub fn set_busy_slug(&self, slug: &str, busy: bool) {
@@ -281,7 +282,7 @@ impl ActivityTracker {
         )
     }
 
-    /// Participant-keyed [`is_busy`]. An unknown slug reads idle, which is the
+    /// Participant-keyed busy read. An unknown slug reads idle, which is the
     /// honest answer for a participant that has never taken a turn.
     pub fn is_busy_slug(&self, slug: &str) -> bool {
         let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());

@@ -262,8 +262,8 @@ fn is_halt_tool(name: &str) -> bool {
 ///
 /// Suppression is safe to make explicit because it has never destroyed content —
 /// the turn's text is persisted by the `AgentEvent::Text` arm as it arrives,
-/// independent of whether a Forward is later emitted. `final` skips the WAKE,
-/// not the record.
+/// independent of how the turn ends ring-side. `final` changes the VOTE the
+/// turn ends with, not the record.
 fn peer_ack_is_final(name: &str, input: &serde_json::Value) -> bool {
     is_peer_ack_tool(name) && input.get("final").and_then(|v| v.as_bool()) == Some(true)
 }
@@ -1630,7 +1630,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn errored_turn_emits_no_forward() {
+    async fn errored_turn_still_ends_the_turn_ring_side() {
         // Regression (Rain on the DeepSeek gateway, 2026-05-29): a turn that ends
         // in an API error must not bounce to the peer: the peer replies, and that
         // re-triggers the failing agent — an unbounded error-spam loop.
@@ -1844,9 +1844,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn text_emits_forward_only_on_turn_complete() {
-        // I/P is turn-based: text does NOT emit a Forward mid-turn; the pump emits
-        // exactly one Forward on TurnComplete carrying the buffered text.
+    async fn text_ends_the_turn_only_on_turn_complete() {
+        // I/P is turn-based: text does NOT end the turn mid-stream; the pump tells
+        // the ring the turn ended exactly once, on TurnComplete.
         let (storage, state) = setup().await; // default phase = Investigate
         let (cfg, mut ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
@@ -1856,7 +1856,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             next_turn_end(&mut ring_rx).is_none(),
-            "must not emit a Forward mid-turn (before TurnComplete)"
+            "must not end the turn mid-stream (before TurnComplete)"
         );
 
         ev_tx
@@ -1887,7 +1887,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn apply_phase_coalesces_into_one_forward() {
+    async fn apply_phase_hands_over_once_per_turn() {
         let (storage, state) = setup().await;
         state.lock().await.current_phase = IpavPhase::Apply;
 
@@ -1899,7 +1899,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             next_turn_end(&mut ring_rx).is_none(),
-            "no Forward mid-turn in Apply"
+            "no turn end mid-stream in Apply"
         );
 
         ev_tx.send(AgentEvent::Text("step 2".into())).await.unwrap();
@@ -1937,7 +1937,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn turn_complete_emits_forward() {
+    async fn turn_complete_ends_the_turn() {
         let (storage, state) = setup().await;
         let (cfg, mut ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
@@ -1966,7 +1966,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn tool_use_persists_but_emits_no_forward() {
+    async fn tool_use_persists_but_does_not_end_the_turn() {
         let (storage, state) = setup().await;
         let (cfg, mut ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
@@ -1985,7 +1985,7 @@ mod tests {
 
         assert!(
             next_turn_end(&mut ring_rx).is_none(),
-            "tool use alone emits no Forward"
+            "tool use alone does not end the turn"
         );
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1);
@@ -2354,9 +2354,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn peer_ack_sets_flag_in_forward() {
-        // peer_ack is PASSED THROUGH to the router (which suppresses the wake): the
-        // pump emits a Forward with peer_ack=true. The text is still persisted.
+    async fn peer_ack_ends_the_turn_as_a_done_vote() {
+        // peer_ack reaches the ring as the turn's ENDING — a done vote
+        // (`TurnEnding::Done`), which is what the consensus halt counts. The
+        // text is still persisted. (Under the deleted router this was a
+        // `Forward` with `peer_ack=true` that suppressed the peer wake.)
         let (storage, state) = setup().await;
         let (cfg, mut ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
@@ -2404,8 +2406,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn peer_ack_flag_is_per_turn() {
-        // The peer_ack flag applies only to the turn it was called in: turn 1's
-        // Forward carries peer_ack=true, turn 2's (no ack) carries peer_ack=false.
+        // The peer_ack flag applies only to the turn it was called in: turn 1
+        // ends as a done vote, turn 2 (no ack) ends as an ordinary spoken turn.
         let (storage, state) = setup().await;
         let (cfg, mut ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);

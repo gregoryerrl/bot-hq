@@ -98,9 +98,11 @@ impl Storage {
     ///
     /// One slot per session, replace-on-restage, exactly like the halt. Kept
     /// OFF the `Session` row struct deliberately: that struct derives `FromRow`
-    /// and is built by three `query_as` sites, so every field added to it has to
-    /// appear in all three SELECTs or they fail at RUNTIME. This column has two
-    /// readers and one writer, so it pays for a widened row type nowhere.
+    /// and is read by four SELECTs (three `query_as::<_, Session>` sites plus
+    /// `SessionWithPreview`'s flattened prefix), all through `SESSION_COLUMNS`
+    /// — so a new field is one edit there, but a widened row type still costs
+    /// the generated TS bindings and every consumer. This column has two
+    /// readers and one writer, so it pays for that nowhere.
     pub async fn set_staged_message(&self, session_id: &str, text: Option<&str>) -> Result<()> {
         sqlx::query("UPDATE sessions SET staged_message = ? WHERE id = ?")
             .bind(text)

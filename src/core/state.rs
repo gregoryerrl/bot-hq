@@ -2168,6 +2168,13 @@ impl AppState {
     /// participant reads them off its own cursor (D19), so holding a copy bought
     /// nothing. The PAUSE still suppresses the release, which is the half that
     /// was doing the work.
+    fn tray_wake(holds_wakes: bool, recorded: bool, ring_running: bool) -> TrayWake {
+        TrayWake {
+            clear_halt: true,
+            release: !holds_wakes && recorded && !ring_running,
+        }
+    }
+
     /// Does answering THIS tray row clear the session's halt slot? Only a row
     /// that was READ and is a question (rc3 D35: a gate answers its approval,
     /// not the halt). `None` — the row could not be read, or is gone — clears
@@ -2175,13 +2182,6 @@ impl AppState {
     /// while a halt left standing is one message away from cleared.
     fn tray_answer_clears_halt(row: Option<&crate::storage::SessionTrayEntry>) -> bool {
         row.is_some_and(|r| !crate::storage::is_gate_row(&r.kind, r.options_json.as_deref()))
-    }
-
-    fn tray_wake(holds_wakes: bool, recorded: bool, ring_running: bool) -> TrayWake {
-        TrayWake {
-            clear_halt: true,
-            release: !holds_wakes && recorded && !ring_running,
-        }
     }
 
     pub async fn resolve_choice(

@@ -13,14 +13,15 @@
 //! `400 ... messages[N].role: unknown variant `system``, killing every turn.
 //!
 //! `--bare` (skip plugin sync / hooks / LSP) *reduces* but does **not**
-//! eliminate the injection — verified empirically: a fresh `--bare` Rain
-//! still 400s on a fixed `messages[11]`. The injection happens at
+//! eliminate the injection — verified empirically (2026-07, on the reviewer
+//! participant of that day's roster): a fresh `--bare` process still 400s on
+//! a fixed `messages[11]`. The injection happens at
 //! request-build time and is not stored in the transcript, so it cannot be
 //! sanitized at the source from bot-hq's side.
 //!
 //! ## What it does
 //!
-//! A tiny localhost reverse proxy. Rain's `ANTHROPIC_BASE_URL` points at it
+//! A tiny localhost reverse proxy. The routed participant's `ANTHROPIC_BASE_URL` points at it
 //! (`http://127.0.0.1:<port>/<hex(real-upstream)>`); for each request it
 //! rewrites the JSON body — hoisting any `role:"system"` message out of
 //! `messages[]` and into the top-level `system` field (which every gateway

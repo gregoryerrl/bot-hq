@@ -292,7 +292,8 @@ impl FindingStatus {
     }
 }
 
-/// A row from the `activity_events` table — one duo-activity transition.
+/// A row from the `activity_events` table — one session-activity transition
+/// (the derived state across the whole roster, however many participants).
 ///
 /// `state` is the DERIVED session activity, which collapses both agents and is
 /// outranked by `awaiting`/`paused`; the per-agent flags are what answer "was

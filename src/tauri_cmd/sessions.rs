@@ -781,8 +781,9 @@ pub(crate) async fn dispatch_session_inner(
 ) -> Result<SessionInfo, AppError> {
     // No create dialog on this path → placement comes from the configured
     // default (worktree_default), and the roster size from `participants` when
-    // the caller pins it (the `plugin_sessions` create arm, the external
-    // driver) or from the product default below.
+    // the caller pins it (the `plugin_sessions` create arm; the external driver
+    // did too until its removal on 2026-08-17) or from the product default
+    // below.
     //
     // **This was `eyes_override: Option<bool>`** (round-2 audit B3). A boolean
     // cannot express rc3's roster, and `true` meant "seed every active role" —

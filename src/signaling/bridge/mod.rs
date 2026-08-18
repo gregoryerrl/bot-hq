@@ -353,8 +353,8 @@ pub struct SignalingBridge {
     /// agent's blocking `ask_user_choice` tool call already client-side
     /// timed out (claude-code's MCP tool timeout is shorter than typical
     /// user-response latency), the answer is otherwise lost. We persist a
-    /// synthetic user message so the duo sees the resolution on its next
-    /// message poll. None on bridges constructed before storage is wired
+    /// synthetic user message so the participants see the resolution on their
+    /// next turn. None on bridges constructed before storage is wired
     /// (test bridges + the pre-storage window in main).
     storage: Mutex<Option<Storage>>,
     /// Tauri AppHandle, populated from `setup()` once the webview exists.
