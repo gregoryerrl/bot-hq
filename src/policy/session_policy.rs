@@ -55,9 +55,9 @@ pub fn write_session_policy(
     }
     let path = session_policy_path(data_dir, session_id);
     let body = serde_yaml::to_string(policy).with_context(|| "serializing session policy")?;
-    // Atomic (temp + rename, mode kept) — see `policy::write_yaml_atomically`
+    // Atomic (temp + rename, mode kept) — see `policy::write_config_atomically`
     // for why a bare `std::fs::write` here was a fail-open gate.
-    crate::policy::write_yaml_atomically(&path, &body)
+    crate::policy::write_config_atomically(&path, &body)
 }
 
 /// Read the session's policy snapshot if one exists. Returns `Ok(None)` when

@@ -57,17 +57,10 @@ impl HashCache {
 
     fn save(&self, data_dir: &Path) -> Result<()> {
         let p = crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).policy_hashes_path;
-        if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating parent for {}", p.display()))?;
-        }
         let body = serde_json::to_string_pretty(self).context("serializing hash cache")?;
-        let tmp = p.with_extension("json.tmp");
-        std::fs::write(&tmp, body)
-            .with_context(|| format!("writing temp hash cache at {}", tmp.display()))?;
-        std::fs::rename(&tmp, &p)
-            .with_context(|| format!("renaming temp into {}", p.display()))?;
-        Ok(())
+        // The shared temp + rename writer (round 11) — this was a third
+        // hand-rolled copy, without the mode preservation the others have.
+        crate::policy::write_config_atomically(&p, &body)
     }
 }
 

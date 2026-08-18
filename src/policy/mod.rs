@@ -392,7 +392,7 @@ pub fn read_policy_file(path: &Path) -> Result<Policy> {
 /// write doesn't read back as an unauthorized mutation on the next audit.
 pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<()> {
     let body = serde_yaml::to_string(policy).with_context(|| "serializing policy")?;
-    write_yaml_atomically(path, &body)
+    write_config_atomically(path, &body)
 }
 
 /// Write `body` to `path` — creating parent dirs — through a same-directory
@@ -403,8 +403,11 @@ pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<()> {
 /// `Policy::resolve` fails OPEN on a malformed file — so a torn write of
 /// `policy.yaml` silently dropped the forbidden-word list, the push gate and
 /// the force-push block until the next save. `claude_config` already had the
-/// atomic primitive; both writers now share it.
-pub(crate) fn write_yaml_atomically(path: &Path, body: &str) -> Result<()> {
+/// atomic primitive; both writers now share it — and so do the JSON config
+/// files (`tool-gate.json`, the policy hash cache) since round 11, which had
+/// the same torn-write shape: `tool_gate::load` fails OPEN on a malformed file
+/// (an empty keyword list = no gating at all).
+pub(crate) fn write_config_atomically(path: &Path, body: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating parent dir for {}", path.display()))?;
@@ -536,7 +539,7 @@ mod tests {
         // And the session snapshot writer shares the same path.
         let src = include_str!("session_policy.rs");
         assert!(
-            src.contains("write_yaml_atomically(&path, &body)"),
+            src.contains("write_config_atomically(&path, &body)"),
             "write_session_policy must go through the shared atomic writer"
         );
         assert!(

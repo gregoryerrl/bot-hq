@@ -185,15 +185,14 @@ pub fn resolve_keywords(data_dir: &Path, session_id: Option<&str>) -> Vec<GatedK
 
 /// Persist the global keyword list (pretty JSON). Creates the data dir if
 /// needed. Errors are returned (the Settings command surfaces them to the UI).
+/// Atomic — temp + rename through the shared config writer (round 11): a bare
+/// `std::fs::write` truncates before it fills, and `load` fails OPEN on a torn
+/// or empty file, which reads as "no keywords" — no gating at all — until the
+/// next save.
 pub fn save(data_dir: &Path, keywords: &[GatedKeyword]) -> Result<()> {
     let path = config_path(data_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating data dir {}", parent.display()))?;
-    }
     let body = serde_json::to_string_pretty(keywords).context("serializing tool-gate keywords")?;
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    crate::policy::write_config_atomically(&path, &body)
 }
 
 /// Decide how a Bash call is handled. Case-insensitive substring of each
@@ -305,6 +304,35 @@ mod tests {
         ];
         save(dir.path(), &kws).unwrap();
         assert_eq!(load(dir.path()), kws);
+    }
+
+    /// **`save` is atomic** (round 11): temp + rename through the shared config
+    /// writer, no `.tmp` left behind, and a rewrite keeps the file's mode —
+    /// `load` fails OPEN on a torn file, so a truncate-then-fill write was a
+    /// window in which every Bash call ran ungated.
+    #[cfg(unix)]
+    #[test]
+    fn save_is_atomic_and_keeps_the_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        save(dir.path(), &[kw("gh", GateMode::Gate)]).unwrap();
+        let path = config_path(dir.path());
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&path, perms).unwrap();
+        save(dir.path(), &[kw("gh", GateMode::Gate), kw("rm -rf", GateMode::Gate)]).unwrap();
+        assert_eq!(load(dir.path()).len(), 2);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "a rewrite keeps the existing mode (rename replaces the inode)"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp file survives the rename");
     }
 
     #[test]
