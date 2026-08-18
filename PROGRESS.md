@@ -23,6 +23,110 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-18 (round 11) — the round the user's own entries were read, s-021aa8ee
+
+Mandate: audit again (messes, staleness, redundancies, mis/missed
+implementations, refactors/optimizations), use the round-10 binary as live
+evidence, work the user's two CL entries (`issues.md`: Reopen; `ideas.md`:
+custom session documents), and tidy the UI (the empty space above Stage /
+Pause). Twenty-three change commits `76cd7aa..4fc1495` (this changelog commit
+follows), one logical change per commit, every batch reviewed by EYES, every
+defect fix RED-then-green in the session's `apply` doc — one of them by a
+mutation run after the fact, because the type change made the old shape
+uncompilable. Unattended for most of it: the user auto-allowed everything and
+went to sleep after the investigate turn. CL learnings in
+`learnings-2026-08-18-round11.md`.
+
+**Live evidence (the round-10 build, `target/debug`, relaunched 11:06Z).**
+Zero WARN/ERROR the whole day; Reopen spawned `s-766f4ab9` and viewing spawned
+nothing; four gated `gh` commands with `--jq` bodies and nested quotes ran
+`exit 0` under `gate_shell` where the round-9 build exited 2; two halts →
+completion in ~55 ms, `held_release=false`, and no idle nudge since the relaunch
+(the round-9 build nudged five times). The push prompt went unobserved (no push).
+And the user's own entry was live evidence of a defect: four minutes after that
+Reopen, "no indication the session reopened; a second click errors".
+
+**The [H], first and alone (`76cd7aa`).** The tray insert stamped
+`kind = approval` only for the exact `["Approve","Reject"]` menu while the ring
+latch fired on any approval context, and every lift path reads `is_gate_row` —
+so an agent's `request_approval` with its own labels latched a gate nothing
+could lift, until restart. Never hit live (every gate row in the DB is
+canonical). `kind = approval` is the durable marker for every approval-context
+row; the gate slot renders a custom menu's own labels; `gate_verdict` — the
+fail-closed execution predicate — untouched (EYES's correction of the first
+plan). Pinned by a non-canonical-menu test that walks latch → marker → lift →
+verbatim pick, and two vitest cases (custom labels resolve as offered; the
+canonical menu still resolves with the literals).
+
+**The user's entries.** Reopen (`63be349`): `session:created` refreshed the
+dashboard list and never the mounted view's `get_session`, so the closed bar
+stayed on screen; the bar refetches the row itself, the event also invalidates
+`get_session`, and a not-closed row is a success no-op instead of the "not
+closed; nothing to reopen" error the second click hit. Custom documents
+(`89d9ac9`): the DocumentPane lists every untagged doc that is not an archived
+phase version (`<slug>@<n>`) as its own tab after I/P/A/V, wrapping, with the
+doc article shared; the three compiled texts that said untagged docs were
+"invisible to the tabs" now say what they are (guard-tested); the roles prose is
+untouched (still literally true; a reseed for one sentence was not worth it).
+
+**The UI (`6cf5b2e`, `2b0736f`, `c1fd648`, `f1ee4bf`, `850e4e0`).** The footer
+said "Agents: idle" over two working agents because the health map is
+transition-only — liveness comes from the activity store now. The composer's
+buttons sat beside the auto-growing box, bottom-aligned (~110 px of blank
+above them at four lines); they sit in a footer row under it with the status
+line, same row count when locked, no gap at any height, `min-w-0` on the box,
++2 px auto-grow, the key hint tooltip-only. Then three sweeps: nine raw Save
+buttons → `Button`, three hand-rolled edge banners → `ErrorBanner edge`, five
+skeleton idioms → `Skeleton`, three modal shells onto the common one, the
+unused `Select` wrapper gone; document tabs are `role="tab"`, two raw UTC
+stamps go through `formatTimestamp`, list rows keep their identity across a
+removal (`useListEditor` keys), the roster refetch is per session; and the
+tidiness list — the doubled rule between the panes, chip paddings, one radius
+(DESIGN.md amended to the shipped 2 px), focus rings on `Button`/`SegToggle`,
+seven micro-labels on the `label-caps` token, FeedbackPanel's padding, tab-row
+alignment + `tabpanel`s, the nav's `pt-1`, the dialog's selects, one `<h1>` per
+page.
+
+**Backend fixes, each RED-then-green.** An unchanged managed hook is made
+executable again (`348919a` — git runs a hook only if it is executable and says
+nothing otherwise); `supersede_question` is scoped to the caller's rows
+(`ed66217`; withdraw folds its three locks into one read); the durable-row
+audit is written once and reads a custom menu right (`6631596`, EYES's
+`9694d5cb`); a close during a running epilogue JOINS it for every decision and
+still archives (`cebce56` + `storage::archive_session`, EYES's A2); the
+wind-down grace reads both pause latches, is a deadline, and — the follow-up
+EYES caught as blocking `e4daf94f` — is armed on a bounded read only
+(`a8a0fc6`, `ba5fef7`: the first cut armed it at the top of an unbounded read,
+so a stash after any idle >3 s expired on the spot; every test sends commands
+milliseconds apart, so all stayed green — the "vacuous by a millisecond" class,
+pinned now by idling past the grace before the release); the fs watcher keeps
+one refcounted watch per root keyed by owner (`d5e3a6b`); `tool-gate.json` and
+the hash cache are written atomically through the one config writer
+(`cc486b1`). Then the chores: the dead `QuestionKind` variants (`d1cf9e2`); the
+reviewer gate deciding liveness once (`6f2c770`); plugin copies/removals off
+the reactor and symlink-safe (`ae766a2`); the Pause deferral into `AppState`
+where a test can reach it (`c97eb77`); the small refactors (`40e0052`: lazy
+HEAD fallback, `update_is_force`, session-scoped `gate_status`, plugin message
+reads with `limit`/`before_id`, one-pass epoch cells, honest column docs); the
+comment sweep (`1f71c02`); the canonical docs (`4fc1495`: rc3-decisions'
+shipped items marked, seams 14/11, ARCHITECTURE's round-10 gaps, the site's
+roles section N-participant).
+
+**Gates (all bare, exit 0):** `cargo test` 1312 passed (1275 lib, 1 bin, 36
+integration/doc), 1 ignored; vitest 50 files / 462 tests; `tsc --noEmit`
+clean; `npm run build` (41 KB CSS); `cargo build --release`.
+
+**Not done this round, stated:** `messages` retention, tray/findings index
+migration, ModalShell ×8 (the shells now share tokens, not a component), CI,
+the dead-column drop, view/row dedup, `main()` split, Dashboard.tsx extraction,
+`useDragResize`, the 2-slot busy/health wire, `context_window` field drop,
+`cl_write_file` version+push serialisation, the web_search teardown race, a
+reseed of the roles prose sentence about untagged docs (still literally true).
+Live confirmation waits for the relaunch: Reopen flips the view in place and a
+second click is a no-op; the footer reads "Agents: OK" over live sessions; the
+composer's footer row; custom-doc tabs; the FE tidiness list; a
+`request_approval` with a custom menu answered in the gate slot lifts the ring.
+
 ## 2026-08-18 (round 10) — the round the real-work sessions were read, s-23e3348f
 
 Mandate: audit again (messes, staleness, redundancies, mis/missed
