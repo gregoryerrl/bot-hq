@@ -414,25 +414,19 @@ fn is_zero_oid(oid: &str) -> bool {
     !oid.is_empty() && oid.bytes().all(|b| b == b'0')
 }
 
-/// Classify one pre-push stdin line — `<local ref> <local oid> <remote ref>
-/// <remote oid>` — as a non-fast-forward (force) update, given an ancestry oracle
-/// `is_ancestor(remote_oid, local_oid)`. Creates (remote all-zero), deletes
-/// (local all-zero), and malformed lines are NOT force updates. Pure, so the
-/// classification is unit-testable without a git process.
-fn line_is_force(line: &str, is_ancestor: impl Fn(&str, &str) -> bool) -> bool {
-    let mut f = line.split_whitespace();
-    let _local_ref = f.next();
-    let local_oid = f.next().unwrap_or("");
-    let _remote_ref = f.next();
-    let remote_oid = f.next().unwrap_or("");
-    if local_oid.is_empty() || remote_oid.is_empty() {
-        return false;
-    }
-    if is_zero_oid(local_oid) || is_zero_oid(remote_oid) {
+/// Classify one parsed pre-push update as a non-fast-forward (force) update,
+/// given an ancestry oracle `is_ancestor(remote_oid, local_oid)`. Creates
+/// (remote all-zero) and deletes (local all-zero) are NOT force updates;
+/// malformed lines never become a `PushUpdate` at all (`parse_push_updates`).
+/// Pure, so the classification is unit-testable without a git process. Took a
+/// raw line until round 11, and the hook — which parses stdin once — rendered
+/// each update back into a line for it to re-split.
+fn update_is_force(u: &PushUpdate, is_ancestor: impl Fn(&str, &str) -> bool) -> bool {
+    if is_zero_oid(&u.local_oid) || is_zero_oid(&u.remote_oid) {
         return false;
     }
     // Non-fast-forward = the remote tip is not an ancestor of the local tip.
-    !is_ancestor(remote_oid, local_oid)
+    !is_ancestor(&u.remote_oid, &u.local_oid)
 }
 
 /// One ref update git hands the pre-push hook on stdin: `<local ref> <local
@@ -513,10 +507,13 @@ fn pushed_ref_names(updates: &[PushUpdate]) -> Vec<String> {
 
 /// What the approval prompt / violations action name for this push: the pushed
 /// refs when git said which, else the checked-out branch (the pre-round-10
-/// behaviour, and the only answer when stdin carried nothing).
-fn push_target_label(names: &[String], head: Option<&str>) -> Option<String> {
+/// behaviour, and the only answer when stdin carried nothing). `head` is a
+/// thunk (round 11): it is a `git symbolic-ref` subprocess, and it used to be
+/// spawned eagerly as an argument even when the refs were known and it was
+/// never read.
+fn push_target_label(names: &[String], head: impl FnOnce() -> Option<String>) -> Option<String> {
     if names.is_empty() {
-        head.map(str::to_string)
+        head()
     } else {
         // Plain, comma-joined: the prompt and the action wrap it in their own
         // backticks ("Allow `git push` to `a, b` …").
@@ -531,16 +528,13 @@ fn push_target_label(names: &[String], head: Option<&str>) -> Option<String> {
 /// (safe direction for a `blocked` policy).
 fn pushing_non_fast_forward(updates: &[PushUpdate]) -> bool {
     updates.iter().any(|u| {
-        line_is_force(
-            &format!("{} {} {} {}", u.local_ref, u.local_oid, u.remote_ref, u.remote_oid),
-            |remote, local| {
-                std::process::Command::new("git")
-                    .args(["merge-base", "--is-ancestor", remote, local])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            },
-        )
+        update_is_force(u, |remote, local| {
+            std::process::Command::new("git")
+                .args(["merge-base", "--is-ancestor", remote, local])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
     })
 }
 
@@ -622,7 +616,7 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>, session_id: Option<&str>
     let updates: std::cell::OnceCell<Vec<PushUpdate>> = std::cell::OnceCell::new();
     // What the user is asked about: the pushed refs, else HEAD.
     let label = |updates: &[PushUpdate]| {
-        push_target_label(&pushed_ref_names(updates), current_branch().as_deref())
+        push_target_label(&pushed_ref_names(updates), || current_branch())
     };
 
     // force_push gate — independent of push_gate and checked FIRST, so a
@@ -1557,23 +1551,28 @@ mod tests {
     }
 
     #[test]
-    fn line_is_force_flags_only_non_fast_forward() {
+    fn update_is_force_flags_only_non_fast_forward() {
         let local = "1111111111111111111111111111111111111111";
         let remote = "2222222222222222222222222222222222222222";
         let zero = "0000000000000000000000000000000000000000";
         let r = "refs/heads/main";
+        let force = |line: String, oracle: fn(&str, &str) -> bool| {
+            parse_push_updates(&line)
+                .first()
+                .is_some_and(|u| update_is_force(u, oracle))
+        };
 
         // Fast-forward: remote IS an ancestor of local → not a force.
-        assert!(!line_is_force(&format!("{r} {local} {r} {remote}"), |_, _| true));
+        assert!(!force(format!("{r} {local} {r} {remote}"), |_, _| true));
         // Non-fast-forward: remote is NOT an ancestor of local → force.
-        assert!(line_is_force(&format!("{r} {local} {r} {remote}"), |_, _| false));
+        assert!(force(format!("{r} {local} {r} {remote}"), |_, _| false));
         // Create (remote all-zero) is never a force, even if the oracle says no.
-        assert!(!line_is_force(&format!("{r} {local} {r} {zero}"), |_, _| false));
+        assert!(!force(format!("{r} {local} {r} {zero}"), |_, _| false));
         // Delete (local all-zero) is never a force.
-        assert!(!line_is_force(&format!("{r} {zero} {r} {remote}"), |_, _| false));
-        // Malformed lines (missing oids) are never a force.
-        assert!(!line_is_force("refs/heads/main", |_, _| false));
-        assert!(!line_is_force("", |_, _| false));
+        assert!(!force(format!("{r} {zero} {r} {remote}"), |_, _| false));
+        // Malformed lines (missing oids) never parse into an update at all.
+        assert!(!force("refs/heads/main".to_string(), |_, _| false));
+        assert!(!force(String::new(), |_, _| false));
     }
 
     /// **The push prompt names the refs being pushed, not the checked-out
@@ -1607,16 +1606,24 @@ mod tests {
         // The label the prompt/action carry: the refs, never HEAD, when git
         // said which refs move…
         assert_eq!(
-            push_target_label(&names, Some("527-reconcile-test-timezone")).as_deref(),
+            push_target_label(&names, || Some("527-reconcile-test-timezone".to_string()))
+                .as_deref(),
             Some("526-nanoid-advisory-still-open, v1.2.0, :old-branch")
         );
         // …and HEAD only when stdin carried nothing (a hand-run hook, a push
-        // of nothing).
+        // of nothing) — the fallback is a thunk, not read when the refs are
+        // known (round 11).
         assert_eq!(
-            push_target_label(&[], Some("527-reconcile-test-timezone")).as_deref(),
+            push_target_label(&[], || Some("527-reconcile-test-timezone".to_string()))
+                .as_deref(),
             Some("527-reconcile-test-timezone")
         );
-        assert_eq!(push_target_label(&[], None), None);
+        assert_eq!(push_target_label(&[], || None), None);
+        assert_eq!(
+            push_target_label(&names, || panic!("HEAD must not be read when the refs are known"))
+                .as_deref(),
+            Some("526-nanoid-advisory-still-open, v1.2.0, :old-branch")
+        );
         // The force check reads the same parsed updates: the delete and the
         // create are never a force; the oracle decides the rest.
         assert!(!pushing_non_fast_forward(&parse_push_updates(&format!(

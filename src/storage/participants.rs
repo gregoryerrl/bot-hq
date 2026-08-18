@@ -1226,9 +1226,7 @@ impl Storage {
     /// the ring steps by place IN the rotation, so it needs to know WHICH row
     /// held the turn rather than only where that row sat. `None` resets the
     /// cycle to the front, which is what a user message does.
-    /// Record who holds the turn, so the UI can say "waiting for its turn"
-    /// rather than leaving a participant that has not been reached yet
-    /// indistinguishable from a dead one.
+    /// Record who holds the turn.
     ///
     /// `sessions.current_turn_participant_id` has existed since 0044 and
     /// **nothing wrote it** — the ring knew whose turn it was and the column
@@ -1236,7 +1234,15 @@ impl Storage {
     /// only the first participant acted for two minutes and read as two broken
     /// agents.
     ///
-    /// Best-effort: a failed write costs a UI hint, never a turn, so it warns
+    /// **Who reads it (round 11, verified): nothing in the UI.** The WORKING
+    /// badge that once did was retired with `declare_working` (0057); today the
+    /// column is DB-side telemetry — session studies and `sqlite3` reads of who
+    /// held the turn when — plus the tests. The turn-status line derives "who is
+    /// working" from the activity tracker's busy map, not from here. Kept
+    /// because one UPDATE per handover is cheap and the answer it records is
+    /// not derivable afterwards from the rows.
+    ///
+    /// Best-effort: a failed write costs a reading, never a turn, so it warns
     /// and moves on rather than propagating.
     pub async fn set_current_turn(&self, session_id: &str, participant_id: Option<i64>) {
         if let Err(e) = sqlx::query(
@@ -1275,8 +1281,11 @@ impl Storage {
     /// tracked laps-ever and a cap that tracked laps-this-stretch would be two
     /// numbers with one name.
     ///
-    /// Best-effort, like the turn holder: a failed write costs a UI hint and a
-    /// post-hoc reading, never a turn.
+    /// **Who reads it (round 11, verified): no UI surface** —
+    /// [`round_number`](Self::round_number) has test callers only; the column
+    /// is DB-side telemetry (how far an unattended run got, read after the
+    /// fact), like the turn holder. Best-effort, like it: a failed write costs
+    /// a post-hoc reading, never a turn.
     pub async fn set_round_number(&self, session_id: &str, round: u32) {
         if let Err(e) = sqlx::query("UPDATE sessions SET round_number = ? WHERE id = ?")
             .bind(round)

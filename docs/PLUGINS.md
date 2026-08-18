@@ -240,7 +240,7 @@ host's JSON views (same shapes the bot-hq UI renders).
 |---|---|---|
 | `list_sessions` | — | list of active sessions (titles, repos, status) |
 | `get_session` | `session_id` | one session's details |
-| `list_messages` | `session_id`, `since_id?` | a session's chat history |
+| `list_messages` | `session_id`, `since_id?`, `limit?`, `before_id?` | a session's chat history — the delta since `since_id`, else a `limit`-sized tail (`before_id` pages older), else everything |
 | `session_doc_search` | `session_id`, `query?`, `phase?` | a session's I/P/A/V phase documents |
 | `cl_index_search` | `project?`, `query?` | Context Library file index — rows: `{ project, file_path, description, tags, updated_at }` (same shape agents see) |
 | `cl_folder_search` | `project?`, `query?` | Context Library folder descriptions — rows: `{ project, folder_path, description, tags, updated_at }` |
@@ -252,7 +252,7 @@ host's JSON views (same shapes the bot-hq UI renders).
 | `plugin_session_create` | `first_message`, `project?`, `title?`, `participants?`, `duo?` | (needs `plugin_sessions`) create a helper session you own; returns `{ session_id }`; one agent unless you ask for more |
 | `plugin_session_send` | `session_id`, `text` | (needs `plugin_sessions`) send a message to a session you created |
 | `plugin_session_wait` | `session_id`, `since_id?`, `timeout_ms?` | (needs `plugin_sessions`) long-poll new messages (default 25 s, clamp 100 ms–60 s) → `[AgentMessage]` |
-| `plugin_session_messages` | `session_id`, `since_id?` | (needs `plugin_sessions`) read a created session's messages → `[AgentMessage]` |
+| `plugin_session_messages` | `session_id`, `since_id?`, `limit?`, `before_id?` | (needs `plugin_sessions`) read a created session's messages → `[AgentMessage]`; same read shapes as `list_messages` |
 | `plugin_session_close` | `session_id` | (needs `plugin_sessions`) close + archive a session you created |
 | `plugin_kv_get` | `key` | your plugin's own saved state |
 | `plugin_kv_set` | `key`, `value` | write your own state (key ≤256 B, value ≤256 KB; namespaced server-side; wiped on uninstall) |

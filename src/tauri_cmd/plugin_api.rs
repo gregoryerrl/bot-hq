@@ -257,10 +257,17 @@ pub(crate) async fn dispatch(
         "list_messages" => {
             let session_id = need_str(args, "session_id")?;
             let since_id = opt_i64(args, "since_id");
-            let msgs = storage
-                .messages_for_session(&session_id, since_id)
-                .await
-                .map_err(|e| AppError::DbError(e.to_string()))?;
+            let before_id = opt_i64(args, "before_id");
+            let limit = opt_i64(args, "limit");
+            // Same read shapes as the UI's `get_session_messages` (round 11):
+            // `since_id` = the delta since a cursor, else a `limit`-sized tail
+            // (`before_id` pages older), else the whole channel — a plugin
+            // reading a 3,000-row session no longer has only the last shape.
+            let msgs = crate::tauri_cmd::messages::select_messages(
+                storage, &session_id, since_id, before_id, limit,
+            )
+            .await
+            .map_err(|e| AppError::DbError(e.to_string()))?;
             let out: Vec<crate::tauri_events::types::AgentMessage> =
                 msgs.into_iter().map(Into::into).collect();
             to_json(&out)
@@ -503,11 +510,14 @@ pub(crate) async fn dispatch(
         "plugin_session_messages" => {
             let session_id = need_str(args, "session_id")?;
             let since_id = opt_i64(args, "since_id");
+            let before_id = opt_i64(args, "before_id");
+            let limit = opt_i64(args, "limit");
             require_owned_session(storage, plugin_id, &session_id).await?;
-            let msgs = storage
-                .messages_for_session(&session_id, since_id)
-                .await
-                .map_err(|e| AppError::DbError(e.to_string()))?;
+            let msgs = crate::tauri_cmd::messages::select_messages(
+                storage, &session_id, since_id, before_id, limit,
+            )
+            .await
+            .map_err(|e| AppError::DbError(e.to_string()))?;
             let out: Vec<crate::tauri_events::types::AgentMessage> =
                 msgs.into_iter().map(Into::into).collect();
             to_json(&out)

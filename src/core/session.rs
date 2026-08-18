@@ -864,13 +864,15 @@ async fn spawn_session_handle(
         // be two literal `roster_row(&roster, "brian")` / `"rain"` lookups, and
         // that pair is the whole reason a third participant could sit in the
         // ring with no process behind it.
-        for (p, handle) in live.iter().zip(&handles) {
+        // The pump's per-slot epoch cell is the SAME cell the ring publishes to
+        // (`epochs`) — filled in this one pass too (round 11: a second loop
+        // over `live` re-read the map by id, which is one more place the slot
+        // ↔ participant pairing could come apart from the map).
+        for (slot, (p, handle)) in live.iter().zip(&handles).enumerate() {
             inputs.insert(p.id, handle.input().clone());
             let cell = Arc::new(std::sync::atomic::AtomicU64::new(0));
-            epochs.insert(p.id, Arc::clone(&cell));
-        }
-        for (slot, p) in live.iter().enumerate() {
-            turn_epochs[slot] = epochs.get(&p.id).map(Arc::clone);
+            turn_epochs[slot] = Some(Arc::clone(&cell));
+            epochs.insert(p.id, cell);
         }
         let ring = inputs.len();
         let deps = crate::core::sequencer::SequencerDeps {

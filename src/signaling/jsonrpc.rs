@@ -667,8 +667,10 @@ async fn call_tool(
         }
         "gate_status" => {
             let gate_id = arg_required_str(&args, "gate_id")?;
+            // Scoped to the caller's session (round 11): the row carries the
+            // user's answer and the exact command.
             let msg = bridge
-                .gate_status(&gate_id)
+                .gate_status_for(&gate_id, Some(&caller.session_id))
                 .await
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(msg))

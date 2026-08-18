@@ -117,6 +117,16 @@ impl SignalingBridge {
     /// a parked command ran — the archive study's ghost states ("did the merge
     /// happen?") each burned a user round-trip to resolve.
     pub async fn gate_status(&self, gate_id: &str) -> Result<String> {
+        self.gate_status_for(gate_id, None).await
+    }
+
+    /// [`gate_status`](Self::gate_status) scoped to the caller's session
+    /// (round 11): a gate row carries the user's answer text and the exact
+    /// command, and the tool is deliberately ungated, so a participant holding
+    /// another session's id could read that session's gate. Another session's
+    /// gate answers exactly like a missing one — no oracle. `None` = unscoped
+    /// (host / tests).
+    pub async fn gate_status_for(&self, gate_id: &str, session_id: Option<&str>) -> Result<String> {
         let storage = self
             .storage
             .lock()
@@ -126,6 +136,9 @@ impl SignalingBridge {
         let Some(row) = storage.get_tray_entry(gate_id).await? else {
             return Ok(format!("gate_status: no gate with id {gate_id}"));
         };
+        if session_id.is_some_and(|sid| sid != row.session_id) {
+            return Ok(format!("gate_status: no gate with id {gate_id}"));
+        }
         // Only a ToolBlocklist (action_gate) approval carries a command —
         // `ask_user_choice_inner` sets `command_text` for that kind alone. A
         // parked `request_approval` (push_gate / per_action) has none, so the
@@ -507,6 +520,38 @@ mod tests {
         assert!(marker.exists(), "approved command should have run");
         let status = bridge.gate_status(&cid).await.unwrap();
         assert!(status.starts_with("approved"), "got: {status}");
+    }
+
+    /// **`gate_status` answers only for the caller's own session** (round 11).
+    /// The tool is ungated by design; the scoping is what keeps one session's
+    /// gate — its command, the user's answer — out of another's reach, and a
+    /// foreign gate reads exactly like a missing one.
+    #[tokio::test]
+    async fn gate_status_does_not_answer_for_another_sessions_gate() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage.create_session("s2", "t", None).await.unwrap();
+        storage
+            .insert_tray_entry(
+                "s2",
+                "gate-in-s2",
+                "hands",
+                crate::storage::QuestionKind::Approval,
+                "Run gated command?",
+                Some(&["Approve".to_string(), "Reject".to_string()]),
+                None,
+                Some("echo secret"),
+            )
+            .await
+            .unwrap();
+        let foreign = bridge.gate_status_for("gate-in-s2", Some("s1")).await.unwrap();
+        assert_eq!(foreign, "gate_status: no gate with id gate-in-s2");
+        assert!(!foreign.contains("echo secret"));
+        let own = bridge.gate_status_for("gate-in-s2", Some("s2")).await.unwrap();
+        assert!(own.starts_with("pending"), "the owning session reads it: {own}");
+        assert!(own.contains("echo secret"));
     }
 
     #[tokio::test]
