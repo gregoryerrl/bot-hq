@@ -131,6 +131,26 @@ fn main() -> Result<()> {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(?e, "startup activity-event GC failed"),
             }
+            // And for the five other append-only telemetry tables (round 10):
+            // deliveries grow N× `messages`, the rest once per turn / tool call
+            // / Stop; none is read past this horizon. `messages` is not swept —
+            // its retention is the user's parked decision.
+            for (what, purged) in [
+                (
+                    "participant deliveries",
+                    storage.purge_participant_deliveries(GC_RETENTION_DAYS).await,
+                ),
+                ("context readings", storage.purge_context_readings(GC_RETENTION_DAYS).await),
+                ("retrieval events", storage.purge_retrieval_events(GC_RETENTION_DAYS).await),
+                ("cancel events", storage.purge_cancel_events(GC_RETENTION_DAYS).await),
+                ("CL reads", storage.purge_cl_reads(GC_RETENTION_DAYS).await),
+            ] {
+                match purged {
+                    Ok(n) if n > 0 => tracing::info!(purged = n, what, "startup GC"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(?e, what, "startup GC failed"),
+                }
+            }
             let violations = ViolationsLog::new(&paths.data_dir);
             // Wipe any stale per-session policy snapshots — a leftover file would
             // leak a prior session's resolved policy into a fresh session that

@@ -24,6 +24,7 @@ mod cl_index;
 mod context_readings;
 mod feedback;
 mod findings;
+mod gc;
 mod messages;
 mod models;
 mod participants;
