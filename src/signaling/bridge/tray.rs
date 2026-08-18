@@ -874,9 +874,23 @@ impl SignalingBridge {
         flipped: bool,
         asked_at: Option<String>,
     ) -> ResolveOutcome {
-        let mooting = self
-            .gates_approved_since(&session_id, choice_id, asked_at.as_deref())
-            .await;
+        // The "approved since you asked" block decorates QUESTIONS only (round
+        // 10, B5). A gate is not a premise that a later gate can overtake — and
+        // every approved gate lands as its own answer row with its own output,
+        // so on an approval row the block only ever listed the sibling gates of
+        // the same batch ("… merge 528 (8m later) … whether it succeeded is not
+        // recorded", `s-766f4ab9`), telling the agent nothing it did not already
+        // have and warning it about a premise a gate does not carry.
+        let is_gate = command_text.is_some()
+            || crate::storage::is_gate_options(
+                serde_json::to_string(options).ok().as_deref(),
+            );
+        let mooting = if is_gate {
+            Vec::new()
+        } else {
+            self.gates_approved_since(&session_id, choice_id, asked_at.as_deref())
+                .await
+        };
         let mut body = oob_resolution_body(
             choice_id,
             question,
@@ -2400,6 +2414,56 @@ mod tests {
         assert!(!body.contains("Approved in this session after you asked"));
         assert!(!body.contains("git push origin main"));
         assert!(body.contains("Picked: A"));
+    }
+
+    /// The block is for QUESTIONS (round 10, B5): an approval row resolved after
+    /// a sibling gate was approved carries no "approved since you asked" list —
+    /// its siblings each arrive as their own answer row.
+    #[tokio::test]
+    async fn oob_replay_of_an_approval_carries_no_mooting_block() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s-gates", "title", None).await.unwrap();
+        let gate_opts = vec!["Approve".to_string(), "Reject".to_string()];
+        // Two gates parked together (the merge pair from s-766f4ab9)…
+        for (cid, cmd) in [
+            ("cid-merge-528", "merge-tool 528 --squash"),
+            ("cid-merge-529", "merge-tool 529 --squash"),
+        ] {
+            storage
+                .insert_tray_entry(
+                    "s-gates",
+                    cid,
+                    "hands",
+                    crate::storage::QuestionKind::Approval,
+                    "Run gated command in this session's repo?",
+                    Some(&gate_opts),
+                    None,
+                    Some(cmd),
+                )
+                .await
+                .unwrap();
+        }
+        // …the first approved strictly after both were asked (now_utc() is
+        // millisecond-precision; nudge past the inserts), then the second
+        // resolved.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        storage.answer_tray_entry("cid-merge-528", "Approve").await.unwrap();
+        // No in-memory park (a durable-row resolve), so the body is the OOB one.
+        // Reject, so nothing runs.
+        let outcome = bridge
+            .resolve_choice("cid-merge-529", "Reject".into())
+            .await
+            .unwrap();
+        let ResolveOutcome::DeliveredOutOfBand { body, .. } = outcome else {
+            panic!("expected the OOB path");
+        };
+        assert!(
+            !body.contains("Approved in this session after you asked"),
+            "an approval's answer must not list its sibling gates as mooting: {body}"
+        );
+        assert!(!body.contains("merge-tool 528"), "the sibling is not named here: {body}");
     }
 
     #[tokio::test]
