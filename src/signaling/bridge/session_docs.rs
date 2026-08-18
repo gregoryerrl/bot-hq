@@ -60,21 +60,24 @@ impl SignalingBridge {
         if existing.body == new_body {
             return None;
         }
-        for n in 1..=MAX_DOC_ARCHIVES {
-            let candidate = format!("{slug}@{n}");
-            let occupied = matches!(
-                storage.session_document_by_slug(session_id, &candidate).await,
-                Ok(Some(_))
-            );
-            if !occupied || n == MAX_DOC_ARCHIVES {
-                storage
-                    .upsert_session_document(session_id, &candidate, &existing.body, None)
-                    .await
-                    .ok()?;
-                return Some(candidate);
-            }
-        }
-        None
+        // One read of the occupied slots (round 10) — this used to probe
+        // `{slug}@1`, `{slug}@2`, … with a SELECT each until it found a free
+        // one, up to fifty round-trips per phase-doc rewrite. Same slot rule as
+        // before: the first free number, and past the cap the newest archive
+        // (`@MAX`) is overwritten so storage stays bounded.
+        let occupied = storage
+            .session_document_archive_slots(session_id, slug)
+            .await
+            .unwrap_or_default();
+        let n = (1..=MAX_DOC_ARCHIVES)
+            .find(|n| !occupied.contains(n))
+            .unwrap_or(MAX_DOC_ARCHIVES);
+        let candidate = format!("{slug}@{n}");
+        storage
+            .upsert_session_document(session_id, &candidate, &existing.body, None)
+            .await
+            .ok()?;
+        Some(candidate)
     }
     /// Agent-callable: upsert a per-session scratch document. Phase-tagged
     /// writes are keyed by phase (one rewritable doc per IPAV phase — see

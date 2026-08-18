@@ -108,17 +108,24 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
-    /// Count atoms for one file. Used by `cl_rescan` to backfill the derived FTS
-    /// layer after migration 0024 when `cl_index` rows predate `cl_atoms`.
-    pub async fn count_atoms_for_file(&self, project_id: &str, file_path: &str) -> Result<i64> {
-        let n = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM cl_atoms WHERE project_id = ? AND file_path = ?",
+    /// The files of `project_id` that have at least one atom — `cl_rescan`'s
+    /// backfill check for the derived FTS layer (`cl_index` rows that predate
+    /// `cl_atoms`, migration 0024). One grouped
+    /// query for the rescan's "unchanged file with no atoms yet" check (round
+    /// 10), which used to run a per-file `COUNT(*)` (`count_atoms_for_file`,
+    /// deleted with this) once per unchanged file on every rescan, including
+    /// the fs-watcher's.
+    pub async fn files_with_atoms(
+        &self,
+        project_id: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT file_path FROM cl_atoms WHERE project_id = ? GROUP BY file_path",
         )
         .bind(project_id)
-        .bind(file_path)
-        .fetch_one(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
-        Ok(n)
+        Ok(rows.into_iter().map(|(p,)| p).collect())
     }
 
     /// Ranked body retrieval over the FTS atom index — the read side of Phase 3.

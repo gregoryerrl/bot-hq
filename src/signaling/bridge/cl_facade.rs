@@ -363,6 +363,10 @@ impl SignalingBridge {
         // an O(disk × index) linear scan (`existing.iter().find`) per on-disk file.
         let by_path: HashMap<&str, &_> =
             existing.iter().map(|e| (e.file_path.as_str(), e)).collect();
+        // Which indexed files already have atoms — one grouped query, so the
+        // unchanged-file arm below is a set lookup instead of a COUNT per file
+        // (round 10; this loop also runs from the fs-watcher).
+        let atomised = storage.files_with_atoms(project).await?;
         for (rel, walked) in &on_disk {
             let WalkedFile { mtime, snippet, body } = walked;
             match by_path.get(rel.as_str()) {
@@ -387,7 +391,7 @@ impl SignalingBridge {
                     report.touched.push(rel.clone());
                 }
                 _ => {
-                    if storage.count_atoms_for_file(project, rel).await? == 0 {
+                    if !atomised.contains(rel.as_str()) {
                         storage
                             .replace_atoms_for_file(project, rel, &atoms_with_code_hash(body, repo_root.as_deref()), mtime)
                             .await?;

@@ -98,6 +98,44 @@ impl Storage {
             .await
     }
 
+    /// The occupied archive slots of a phase doc — the `n` of every
+    /// `{slug}@{n}` row in the session (round 10). One query where the
+    /// bridge's `archive_superseded_doc` used to probe `{slug}@1`,
+    /// `{slug}@2`, … one `SELECT` each until it found a free one, up to fifty
+    /// round-trips per phase-doc rewrite. `%`, `_` and `\` in the slug are
+    /// escaped so a slug like `plan_v2` cannot match `planXv2@1`; rows whose
+    /// suffix is not a number are ignored (a scratch doc the agent happened
+    /// to name `plan@final`).
+    pub async fn session_document_archive_slots(
+        &self,
+        session_id: &str,
+        slug: &str,
+    ) -> Result<Vec<u32>> {
+        let mut pattern = String::with_capacity(slug.len() + 3);
+        for ch in slug.chars() {
+            if matches!(ch, '%' | '_' | '\\') {
+                pattern.push('\\');
+            }
+            pattern.push(ch);
+        }
+        pattern.push_str("@%");
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT slug FROM session_documents \
+             WHERE session_id = ? AND slug LIKE ? ESCAPE '\\'",
+        )
+        .bind(session_id)
+        .bind(&pattern)
+        .fetch_all(&self.pool)
+        .await?;
+        let prefix = format!("{slug}@");
+        let mut slots: Vec<u32> = rows
+            .into_iter()
+            .filter_map(|(s,)| s.strip_prefix(&prefix)?.parse().ok())
+            .collect();
+        slots.sort_unstable();
+        Ok(slots)
+    }
+
     /// Fetch one document by (session_id, slug). None when not found.
     pub async fn session_document_by_slug(
         &self,
@@ -119,6 +157,26 @@ impl Storage {
 #[cfg(test)]
 mod session_doc_tests {
     use super::*;
+
+    /// The archive-slot read is one query and reads only THIS slug's numbered
+    /// archives (round 10): a slug with a LIKE metacharacter is matched
+    /// literally, a non-numeric suffix is ignored, and a sibling slug that
+    /// shares a prefix is not counted.
+    #[tokio::test]
+    async fn archive_slots_are_read_in_one_query_for_this_slug_only() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        for slug in ["plan@1", "plan@3", "plan@final", "plan_v2@2", "planning@1", "plan"] {
+            s.upsert_session_document("s1", slug, "x", None).await.unwrap();
+        }
+        assert_eq!(s.session_document_archive_slots("s1", "plan").await.unwrap(), vec![1, 3]);
+        assert_eq!(s.session_document_archive_slots("s1", "plan_v2").await.unwrap(), vec![2]);
+        assert!(s.session_document_archive_slots("s1", "apply").await.unwrap().is_empty());
+        assert!(
+            s.session_document_archive_slots("s2", "plan").await.unwrap().is_empty(),
+            "another session's archives are not this session's"
+        );
+    }
 
     /// `%` and `_` in a search are LITERALS (round 8, N3): the pattern is
     /// escaped and every `LIKE` carries `ESCAPE '\\'`. Before this a search for
