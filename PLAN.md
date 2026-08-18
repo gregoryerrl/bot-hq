@@ -214,10 +214,11 @@ description, hard delete (no OS trash).
 `ideas.md`, assessment at
 `docs/plans/2026-06-27-context-library-v2-assessment.md`). Shipped: FTS5
 atomization + `cl_retrieve` ranked retrieval, retrieval-time ⚠
-stale-flagging (`code_hash`), retrieval telemetry + Measurement tab, and
-the `bench/cl_poison/` obey-vs-verify eval (authored, never run — live trials
-cost model calls; DELETED with `bench/` in round 6, recoverable from git
-history if the eval is wanted once a driver plugin exists). The arc's human-review queue was REMOVED
+stale-flagging (`code_hash`), retrieval telemetry + Measurement tab.
+(A `bench/cl_poison/` obey-vs-verify eval was authored, never run — live
+trials cost model calls — and DELETED with `bench/` in round 6; recoverable
+from git history if wanted once a driver plugin exists. Not a shipped
+capability.) The arc's human-review queue was REMOVED
 2026-07-21 (approvals were rubber-stamped in practice) in favor of
 direct agent writes via `cl_write_file`. Deferred remainder,
 roughly in value order:
@@ -358,7 +359,9 @@ extension points in `docs/PLUGINS.md`):
   today plugins run while mounted.
 - **Zip/signed URL installs** — URL install is manifest+entry only;
   multi-file bundles need local-dir install.
-- **Per-plugin CSP overrides; inline `slot_name` slots** — reserved.
+- **Inline `slot_name` slots** — reserved (`manifest.rs` validates the field;
+  nothing renders one yet). Per-plugin CSP EXTRAS shipped — consent-gated
+  `csp.extra_origins`, `docs/PLUGINS.md` §Extra CSP origins.
 
 ### First plugins (each needs its own design doc)
 

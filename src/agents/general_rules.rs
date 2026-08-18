@@ -148,7 +148,7 @@ Use `session_doc_write(slug, body, phase?)` for plans, investigation findings, a
 
 **Tag docs with `phase`** (one of `investigate` / `plan` / `apply` / `verify`) to surface them in the session view's matching IPAV document tab and enable cross-phase context retrieval via `session_doc_search(phase=<x>)`. Untagged docs are session-scoped scratch — invisible to the tabs and to phase-filtered searches. In Apply: `session_doc_search(phase=\"plan\")` finds the plan. In Verify: `session_doc_search(phase=\"apply\")` finds the apply summary. Prefer this over scrolling chat history.
 
-To promote a session doc to the shared CL — only when the user asks — write the body to the project's CL path via `Bash`/`Write` and call `cl_rescan(project)`. There's no dedicated promote tool; the CL write IS the promotion.
+To promote a session doc to the shared CL — only when the user asks — write its body with `cl_write_file(project, file_path, content)` (the guarded, versioned CL write that auto-rescans; it needs the `write_context_library` capability, so a participant without it asks the one that has it). There's no dedicated promote tool; the CL write IS the promotion — never a bare `Write`/`Bash` into the library path, which skips the traversal guard, the size cap, the atomic write, the git snapshot and the rescan.
 
 ## Production data access
 
@@ -554,6 +554,31 @@ mod tests {
                  to a session that may not have one"
             );
         }
+    }
+
+    /// **Promoting a session doc goes through `cl_write_file`** (round 10).
+    /// The paragraph used to route agents around the one guarded, versioned,
+    /// capability-gated CL write — "write the body via `Bash`/`Write` and call
+    /// `cl_rescan`" — while the CL section of the same constant mandates
+    /// `cl_write_file`. One constant contradicting itself, in the layer every
+    /// participant reads.
+    #[test]
+    fn promotion_to_the_cl_names_the_guarded_write() {
+        let para = GENERAL_RULES
+            .split("To promote a session doc to the shared CL")
+            .nth(1)
+            .expect("the promotion paragraph exists")
+            .split("\n\n")
+            .next()
+            .expect("a split always yields a first part");
+        assert!(
+            para.contains("`cl_write_file(project, file_path, content)`"),
+            "promotion names the guarded write: {para}"
+        );
+        assert!(
+            !para.contains("via `Bash`/`Write` and call `cl_rescan(project)`"),
+            "promotion no longer routes around cl_write_file: {para}"
+        );
     }
 
     #[test]

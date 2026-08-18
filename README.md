@@ -26,9 +26,10 @@ A single AI coding assistant is fast but unaccountable — it can confidently sh
 plausible-looking bug, forget your project's conventions, or rewrite a file you
 didn't want touched. bot-hq is built around three ideas that fix that:
 
-- **A builder and a reviewer, not a lone agent.** Real review catches what the
-  author misses — especially when the reviewer runs a *different* model and gives a
-  genuine second opinion instead of an echo.
+- **Review, not a lone agent.** A session runs the roles the work needs — typically
+  one that writes and one that reviews it adversarially — and real review catches
+  what the author misses, especially when the reviewer runs a *different* model and
+  gives a genuine second opinion instead of an echo.
 - **A shared, durable knowledge base.** Your conventions, gotchas, and project
   memory live in one place the agents read *before* they start — so they begin
   informed, not cold.
@@ -278,15 +279,15 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `ask_user_choice(question, options)` | Park a structured question for the user. Returns a parked ack; the pick arrives out-of-band. |
 | `mark_awaiting_user(reason)` | Declare the session's HALT (D35): the ring stops where it stands, the single halt slot carries the reason, the declarer's own in-flight generation is interrupted, and the user gets the floor. Refused when the reason names a peer (use `halt` for a legitimate user-wait that must mention a role). |
 | `peer_ack(final?)` | Say you have converged and end the round instead of bouncing another acknowledgment. A content-free ack (or `final: true`) ends the turn as a DONE vote toward consensus; a substantive turn stays an ordinary turn with the ack recorded as overridden, so a review is never silently downgraded to agreement. |
-| `halt(reason?)` | Yield to the user and unlock the chat input (sets awaiting, which outranks busy). Like `mark_awaiting_user` framed as a yield. HANDS only. |
+| `halt(reason?)` | Yield to the user and unlock the chat input (sets awaiting, which outranks busy). Like `mark_awaiting_user` framed as a yield. Needs the `halt` capability. |
 | `request_approval(kind, action, …)` | Per-action approval gate. Used by push gate, force-push, per-action approval. |
 | `action_gate(command)` | Run a Bash command the Tool Gate blocked: bot-hq surfaces Approve/Reject and, on approve, executes it in the session repo and returns the output. |
 | `check_commit_message(message)` | Pre-commit grep of a proposed message against the project's forbidden-words policy. Returns `ok` or `forbidden_word:<w>`. |
-| `eyes_flag(severity, summary, …)` | **EYES only.** File a review finding; a `blocking` one gates HANDS's next `git commit` until resolved. |
-| `disposition_finding(finding_id, status, reason)` | **HANDS only.** Resolve a finding (`fixed` / `rebutted`), clearing the commit gate. |
+| `eyes_flag(severity, summary, …)` | Needs `file_finding`. File a review finding; a `blocking` one gates the executor's next `git commit` until resolved. |
+| `disposition_finding(finding_id, status, reason)` | Needs `disposition_finding`. Resolve a finding (`fixed` / `rebutted`), clearing the commit gate. |
 | `check_open_findings()` | Check for unresolved blocking findings before committing. Returns `ok` or the blocking list. |
-| `override_reviewer_block()` | **HANDS only.** Escape valve for the fail-closed "reviewer is down" commit block. |
-| `approve_finding(finding_id)` | **EYES only.** Sign off that an escalated fix HANDS marked fixed is genuinely resolved. |
+| `override_reviewer_block()` | Needs `override_reviewer_block`. Escape valve for the fail-closed "reviewer is down" commit block. |
+| `approve_finding(finding_id)` | Needs `approve_finding`. Sign off that an escalated fix the executor marked fixed is genuinely resolved. |
 | `close_session()` | Ask the host to close this session. |
 | `list_my_pending_questions()` | List questions THIS agent has parked but haven't been answered. Used to avoid duplicate retries. |
 | `withdraw_question(choice_id)` | Withdraw a stale parked question. |
@@ -295,8 +296,8 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `cl_retrieve(project, query, paths?, budget_tokens?)` | Pull ranked CL CONTENT inline under a token budget, instead of the search-then-read-whole-file loop. The 95% path for getting CL knowledge on a topic. |
 | `cl_folder_search(project, query?)` | Search CL folder descriptions (folder-level parallel to `cl_index_search`). |
 | `cl_register_read(project, file_path)` | Audit insert recording which CL file the agent read. |
-| `cl_register_folder_description(project, folder_path, …)` | Write a CL folder description (HANDS only). |
-| `cl_write_file(project, file_path, content)` | Create or replace a CL file directly (HANDS only; auto-rescans). |
+| `cl_register_folder_description(project, folder_path, …)` | Write a CL folder description (needs `write_context_library`). |
+| `cl_write_file(project, file_path, content)` | Create or replace a CL file directly (needs `write_context_library`; auto-rescans). |
 | `cl_rescan(project)` | Re-stat a project's CL directory after creating new files. |
 | `advance_phase(target)` | Cast your vote to advance the IPAV phase; it moves when every active participant has voted at the same state of the work (D37). |
 | `request_phase_advance(target, reason)` | Request a user-acknowledged phase advance before an irreversible step. |
@@ -316,14 +317,18 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `gate_status(gate_id)` | Current state of a parked `action_gate` command: pending, approved (with output), or rejected. Read this instead of guessing whether a gated command ran. |
 | `cl_stale_refs(project)` | Report CL claims that name code the repo no longer has. Report-only; never edits. |
 
-Role boundary (enforced server-side, from the role's capability ticks): a reviewer is blocked from the
-HANDS-only tools — `ask_user_choice`, `mark_awaiting_user`, `halt`, `request_approval`,
-`action_gate`, `supersede_question`, `disposition_finding`, `override_reviewer_block`,
-`terminal_exec` (EYES reads the terminal via `terminal_read`, never types into it),
-and `cl_register_folder_description` (a reviewer converges via `peer_ack`, which is not gated);
-`cl_write_file` needs `write_context_library` and `close_session` needs `close_session` (D16).
-A role without `file_finding` is blocked from the reviewer tools — `eyes_flag` and `approve_finding`
-(HANDS can't file or sign off on findings against its own work).
+Role boundary (enforced server-side, from the role's capability ticks — `capability::required_for`
+is the one mapping, and there is no name-keyed list any more): a tool is refused to any participant
+whose role does not hold the capability it needs — `ask_user_choice` needs `ask_user`;
+`mark_awaiting_user` and `halt` need `halt`; `request_approval` needs `park_approval`; `action_gate`
+needs `gated_bash`; `supersede_question` needs `supersede_question`; `disposition_finding` and
+`override_reviewer_block` need their own; `terminal_exec` needs `run_terminal` (a role without it
+reads the terminal via `terminal_read`, never types into it); `eyes_flag` needs `file_finding` and
+`approve_finding` needs `approve_finding`; `cl_write_file` and `cl_register_folder_description` need
+`write_context_library`; `close_session` needs `close_session` (D16). The seeded pair — HANDS holds the
+executing set, EYES the reviewing set — is the user's configuration in Settings → Roles, so a role that
+holds both can do both; `peer_ack` and `withdraw_question` are ungated (the latter is scoped to the
+asker's own rows).
 
 </details>
 

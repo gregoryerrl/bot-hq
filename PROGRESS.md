@@ -22,6 +22,103 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-18 (round 10) — the round the real-work sessions were read, s-23e3348f
+
+Mandate: audit again (messes, staleness, redundancies, mis/missed
+implementations, refactors/optimizations), use the round-9 binary as live
+evidence, and study two real-work sessions that ran on it — `s-766f4ab9`
+(ad-manager, 5 h) and `s-2a9dcf52` (studyroom, 1 h). Twenty commits
+`5eaf9df..` (the docs commit closes the round), one logical change per
+commit, every batch reviewed by EYES, every defect fix RED-then-green in the
+session's `apply` doc. CL learnings in `learnings-2026-08-18-round10.md`.
+
+**Live evidence.** 0067 moved the role rows (hands 11767 / eyes 13979 chars,
+exactly as round 9 predicted); zero WARN/ERROR since the relaunch; the
+reviewer's `session_doc_write` append landed live (`plan-eyes` in
+s-2a9dcf52); the phase vote walked I→P→A→V; `cl_stale_refs` read 32 (round
+9's own learnings file added the four it says not to fix). And the two
+real-work sessions carried FOUR defects no unit test had reached:
+
+- **A staged tray answer at a halt was lost to the declarer's own D35
+  interrupt (`5eaf9df`).** The user picks while HANDS is mid-turn; HANDS ends
+  the turn with `halt`; the ring delivers the staged answer AS the release and
+  deals HANDS a fresh turn ~20 ms before HANDS's halt tool-result ack fires
+  the self-interrupt, which aborts the residual generation and the message
+  just queued on stdin. The session sat bare-idle until the 90-second idle
+  nudge re-dealt it — five traces since 08-16, three of them the ONLY nudges
+  s-766f4ab9 ever got. The bridge keeps a per-session, per-DECLARER halt
+  latch now: set when a halt takes effect (before the awaiting flip,
+  regardless of whether the durable row persisted), cleared only by the one
+  release signal; `halt_declared` skips the interrupt when the acking agent's
+  halt is gone. Not the awaiting flag (a gate answer clears it while the halt
+  stands — EYES) and not the DB slot (an unrecorded halt is still in effect —
+  EYES again); the queue-semantics probe is in the verify doc, the row
+  attribution after the fix waits for a real occurrence.
+- **The gate ran approved commands in the wrong shell (`811b9bd`).**
+  claude-code's Bash tool runs under the user's login shell (zsh); the gate
+  re-ran the approved text under macOS's `/bin/bash` **3.2**, which dies on a
+  heredoc inside `$(…)` whose body carries an apostrophe. Two approved
+  PR-creating gates ran, exited 2, created nothing, approvals spent (round 7's
+  sh→bash was one shell short). `gate_shell`: `$SHELL` when POSIX-family, else
+  zsh→bash→sh; RED under bash with the live gates' exact error.
+- **The push prompt named the checked-out branch, not the pushed ref
+  (`34f5a36`).** HANDS pushed `526-…` from a checkout of `527-…` and the user
+  approved "Allow `git push` to `527-…`". The hook reads git's ref lines once,
+  lazily (an eager read blocked two tests forever on an open pipe), and names
+  the pushed refs; HEAD only as the fallback.
+- **Viewing a closed session respawned its whole roster (`c290414`).**
+  Clicking through the Archive to copy session ids left four claude processes
+  alive for two closed sessions, and the round-9 session — revived with an
+  empty halt slot — was idle-nudged into burning a turn to re-close itself.
+  The user's pick: a **Reopen** button. `ensure_session_started` refuses a
+  closed row on every path; `reopen_session` clears `closed_at`/`archived`/
+  the halt slot and spawns; a closed session's view shows read-only history
+  and the button.
+
+Plus the "approved since you asked" block no longer decorates approval rows
+with their own sibling gates (`714005e`).
+
+**Sweeps, verified again.** Five parallel read-only agents, every relayed
+claim re-read at the site: three claims failed — the ring's yields do NOT
+strand a staged message (the completion path parks it first; pinned by two
+tests after a flush added at both yields stayed green when removed,
+`059a755`), a summons queue surviving a halt is the user's standing
+instruction (doc corrected), and `set_cancelling` at an idle instant is
+honest, not a defect. What held: bridge storage guards across ~27 awaits
+(`94f0c93`), the archive slot probe ×50 and the per-file atom count on rescan
+(`00e8e36`), `withdraw_question` fail-open on a storage error (`db5413d`), a
+gate answered after a restart never audited (`c71fd6e`), an unreadable tray
+row clearing the halt (`8071cf7`), five append-only tables with no GC
+(`049b6cc`), two non-atomic policy writers (`43e6507`), fs work on the
+reactor (`d9684ae`), plugin by-id scans (`6714ed3`), and the doc/dead-code
+sweeps (`6e2604b`, `53f8783`).
+
+**Frontend (`f0102f3`).** The HaltBanner's tray pointers were buttons no
+site wired; the SessionTile's phase-tinted hover border was built as
+`hover:${ring}` and never reached the stylesheet; the roster read had no
+invalidation (the SpawnBadge stayed blank); D35 copy at three sites; tabs
+are `role="tab"`; a house `ui/Select`; a11y and memo nits.
+
+**Docs (this commit).** README/ARCHITECTURE name capabilities where they
+named roles; per-plugin CSP is shipped, not deferred; the all-pass lap is in
+"how a cycle stops"; CODEBASE names the pre-D35 test names for what they
+are; `general_rules.rs` promotes a session doc through `cl_write_file`
+(compiled — the rebuild ships it); three descriptors say what their handlers
+do (`pass_turn` once per turn, `cl_index_search`'s `abs_path`,
+`session_doc_search`'s `created_at`).
+
+**Not done this round, stated:** `messages` retention, tray/findings index
+migration, ModalShell ×8, CI, `request_approval`'s custom-label map, the
+dead-column drop, view/row dedup, `main()` split, Dashboard.tsx extraction,
+`useDragResize`, the 2-slot busy/health wire, the pump's handover stamp,
+`context_window` field drop, `cl_write_file` version+push serialisation
+(relayed, low), the web_search teardown race (unverified), consolidating
+the inline error blocks into `ErrorBanner` and the size-specific selects
+into `ui/Select` (visual decisions). Live confirmation waits for the
+relaunch: B1 → no idle nudge after a staged answer at a halt; B2 → an
+approved heredoc-in-`$()` gate runs; B3 → a push prompt names the pushed
+ref; B4 → clicking a closed session spawns nothing, Reopen does.
+
 ## 2026-08-18 (round 9) — the round the sweeps were verified, s-69ef196a
 
 Mandate: continue round 8's handoffs (icon consolidation, fixture slug

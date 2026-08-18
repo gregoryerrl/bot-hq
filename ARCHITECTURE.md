@@ -131,7 +131,9 @@ participant**, in this order (`core/session.rs::resolve_participant_config`
 4. else a built-in default, with a warning naming the participant.
 
 Whichever id wins is looked up in the saved-model `models` registry for the
-provider, base URL, token and context window.
+provider, base URL and token (its `context_window` is copied into the spawn
+config but read by nothing — see the two-unread-columns note below; the live
+context meter divides by the window claude-code reports per turn).
 
 This paragraph used to say the pick came from `sessions.brian_model_id` /
 `rain_model_id`, which the Storage section below already described as unread —
@@ -306,6 +308,15 @@ the round cap ends it.
    (D22's lap existed because halting at a first-turn park made a participant
    that asks every turn unreachable to its peers — `s-e8a20797`; a question no
    longer reaches the ring at all, so that failure cannot come back this way.)
+   Since round 10 a halt whose user answer arrives before its own tool-result
+   ack (a tray pick staged during the declarer's turn, delivered at the halt
+   boundary) does NOT interrupt the declarer — the bridge's per-declarer halt
+   latch says the halt is already released, and the dealt answer would
+   otherwise be lost to the interrupt.
+2b. **The all-pass lap** — a full lap in which every dealt participant PASSED
+   yields to the user with a visible notice (rc3 D27, `announce_all_passed`):
+   nobody had anything to add, and the only party who can change that is the
+   user. A staged message is delivered at that boundary like any other.
 3. **Spin detection** — token-set Jaccard at `SPIN_SIMILARITY_THRESHOLD` (0.85)
    over ONE participant's output across rounds, for `SPIN_BREAK_STREAK` (2)
    running. Cross-agent echo is impossible in a ring; self-repetition is not.
@@ -455,8 +466,9 @@ govern them was deleted by rc3 D13: the dialog picks the roster now, so "start
 solo" is simply not adding a second participant.
 
 **Two per-model columns are now unread** (rc3 D9). Both survive in the
-schema — dropping either needs a migration, and the user is starting the
-database over, so they are left in place rather than migrated away:
+schema: dropping either needs a rebuild-table migration that buys nothing —
+0060, which did rebuild `models` for the retirement of the agent names,
+carried `native` forward deliberately — so they are left in place:
 
 - **`models.native`** (migration 0036) — opted a model into the native
   loop. Nothing reads or writes it; `MODEL_COLUMNS` does not project it,
@@ -552,7 +564,7 @@ is a list that is wrong and does not know it.
 **Session terminal (Terminal subtab).** Each session lazily spawns one PTY
 shell (`core/terminal.rs`) in its working repo — rendered by the session
 view's Terminal subtab (xterm.js) and shared with the agents through
-`terminal_exec` (HANDS-only; BLOCKING by default — writes the command, awaits
+`terminal_exec` (needs `run_terminal`; BLOCKING by default — writes the command, awaits
 output-settle via a quiet-window heuristic, returns the captured tail;
 `block:false` for long-running processes) and `terminal_read` (every participant;
 scrollback tail as evidence text). `terminal_exec` re-classifies the command
@@ -1051,8 +1063,10 @@ agent):
 — the single source of truth shared by the storage resolver, policy
 resolver, and policy audit (so the `library/` location can't desync them).
 
-**Agents write CL content directly via `cl_write_file`** (HANDS-only;
-EYES reviews instead of writing). The tool is a guarded create-or-replace
+**Agents write CL content directly via `cl_write_file`** (needs the
+`write_context_library` capability — a role without it flags corrections in
+chat instead; the seeded EYES role does not hold it). The tool is a guarded
+create-or-replace
 inside the project's CL root: relative-path + traversal checks, a 1 MiB
 cap, atomic tmp+rename, mkdir-p for new subfolders, an automatic
 `cl_rescan`, and a refusal on bot-hq-owned `_globals` system files
@@ -1133,8 +1147,10 @@ panel tabs. The author contract is [`docs/PLUGINS.md`](docs/PLUGINS.md);
 Deferred plugin TIERS (extension points documented in PLUGINS.md):
 plugin-contributed MCP tools (agent↔plugin), manifest-declared agents,
 child-webview surface (real Browser tab), background execution,
-zip/signed URL installs, per-plugin CSP overrides, inline `slot_name`
-slots, host-event relay.
+zip/signed URL installs, inline `slot_name` slots, host-event relay.
+(Per-plugin CSP extras SHIPPED — consent-gated `csp.extra_origins`,
+`manifest.rs::validate_csp_extra_origins` / `serve.rs::build_plugin_csp`;
+PLUGINS.md §Extra CSP origins.)
 
 Concrete plugin ideas building on the runtime (each needs its own
 design doc): **Cognotify** (human-comprehension deck over sessions +

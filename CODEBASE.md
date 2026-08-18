@@ -155,7 +155,11 @@ UNPINNED join), 12–14 (tray/halt/gate ↔ ring), 18 (Stage — main.rs hop UNP
 28 (mentions), 30 (boot orphan sweep).
 
 **Gotchas → pointers.** Halt = the session row's slot (D35), gates latch the ring
-via `notify_ring_gate`; a parked QUESTION stops nothing (D34). Ring in-memory
+via `notify_ring_gate`; a parked QUESTION stops nothing (D35 — its answer
+batches into Send, D34). The bridge's per-declarer halt LATCH
+(`session_halt_latch`, `halt_outstanding_for`, round 10) is what
+`AppState::halt_declared` reads at the ack: a halt released before its own
+tool-result ack does not interrupt the declarer. Ring in-memory
 state (deferred/held/summons/staged/laps) is lost on restart; only `open_gates`
 reseeds. Gate rows are recognised by `is_gate_options`/`GATE_OPTIONS_JSON`
 (`storage/tray.rs`; the frontend mirrors it in `HaltBanner.tsx::isApproval`) —
@@ -221,7 +225,9 @@ every role-slug roster and is now reachable. Two close entry points
 **Tests pin.** roster → spawn order + capability gating, the D8 model chain,
 byte-identical prompt composition, layer-2 roster facts, project resolution,
 `the_spawn_roster_registers_every_reviewer_it_returns`,
-`starting_the_ring_registers_it_so_a_parked_question_can_halt_it` (`session.rs`);
+`starting_the_ring_registers_it_so_a_parked_question_can_halt_it` (`session.rs` — the
+name is pre-D35: its body declares a HALT via `mark_awaiting_user`, and a
+question no longer reaches the ring);
 `decide`/`plan` tables (`close_learnings.rs`); decision tables + the two-row nudge
 wire (`watchdog.rs`); worktree/terminal/update pure logic. Not pinned: the
 concurrent double-close, PTY child reaping, the escalation branch.
@@ -295,11 +301,12 @@ halts or latches the ring via per-session registries; fans out `SignalingEvent`s
 over one broadcast (UI via `src/tauri_events/bridge_subscriber.rs`, the main.rs
 control handler, the plugin proxy's `wait_for_change`); fronts storage for findings,
 session docs, CL index/write/push, feedback, terminals. Everything per-session
-lives in 14 registries on one struct (12 keyed by session id, 2 by `(session, agent)`).
+lives in 15 registries on one struct (13 keyed by session id, 2 by `(session, agent)`;
+the 15th is round 10's per-declarer halt latch).
 
 | path | role | size |
 |---|---|---|
-| `src/signaling/bridge/mod.rs` | struct + 14 registries, `SignalingEvent` (17 variants), register/`unregister_session`, `notify_*` emitters, close-gate + retired-terms, policy resolution, reviewer-override request | XL |
+| `src/signaling/bridge/mod.rs` | struct + 15 registries (incl. the per-declarer halt latch `session_halt_latch` — `latch_halt` / `halt_outstanding_for` / cleared by `notify_halts_cleared`, round 10), `SignalingEvent` (17 variants), register/`unregister_session`, `notify_*` emitters, close-gate + retired-terms, policy resolution, reviewer-override request | XL |
 | `src/signaling/bridge/tray.rs` | `ask_user_choice_inner`, `request_approval(_parked)`, supersede/withdraw, `resolve_choice_confirmable`, `deliver_oob`, `emit_halt_row`/`mark_awaiting_user`, `request_phase_advance` | XL |
 | `src/signaling/bridge/action_gate.rs` | `park_gated_command` (dedupe) / `execute_gated` (`tool_gate::run_in_repo`), `gate_status` | L |
 | `src/signaling/bridge/findings.rs` | `eyes_flag`/`approve`/`disposition`/`check_open_findings` + reviewer-down gate + override | M |
@@ -331,8 +338,10 @@ failures are log-only. `unregister_session` leaks `session_sequencer`,
 `session_reviewers`, `session_attention` (audit C2-1). Known-flaky:
 `ask_user_choice_auto_supersedes_reask_same_prompt` (sleep-coordinated).
 
-**Tests pin.** halt reaches the ring / a question does not; parked question halts
-+ user message releases; any approval opens a gate; parks immediately; OOB
+**Tests pin.** halt reaches the ring / a question does not; a declared halt
+halts + a user message releases (`a_parked_question_halts_the_ring_and_a_user_message_releases_it`
+is named for the pre-D35 behaviour; it calls `mark_awaiting_user`); the halt
+latch's declare/release/per-declarer cycle; any approval opens a gate; parks immediately; OOB
 fallbacks (receiver dropped, reopened session); gate execute-once + post-restart
 execute (`action_gate.rs`); dedup/raise + reviewer-down decision (`findings.rs`);
 slug collapse, archive-on-rewrite, append (`session_docs.rs`); traversal, atomic
@@ -372,8 +381,8 @@ substring matcher over Bash calls.
 | path | role | size |
 |---|---|---|
 | `src/policy/mod.rs` | `Policy`, `resolve_at_root`/`merge`, `first_forbidden_word`/`contains_word` (one impl, word-boundary, case-insensitive), prompt block render | L |
-| `src/policy/hooks.rs` | `policy-check` CLI: commit-msg / pre-commit (forbidden words on added lines + immutable-migration guard + EYES findings gate) / post-commit / pre-push (`decide_push` HTTP round-trip) / tool-gate (PreToolUse → `park_gate`); `install_hooks`; `check_findings_gate` on its OWN read-only sqlite | XL |
-| `src/policy/tool_gate.rs` | keyword list resolution (session snapshot → global), `match_keyword` (substring, gate wins), `run_in_repo` | M |
+| `src/policy/hooks.rs` | `policy-check` CLI: commit-msg / pre-commit (forbidden words on added lines + immutable-migration guard + EYES findings gate) / post-commit / pre-push (`decide_push` HTTP round-trip; the prompt names the PUSHED refs from git's stdin lines — `parse_push_updates`/`pushed_ref_names`, read once and lazily — HEAD only as fallback) / tool-gate (PreToolUse → `park_gate`); `install_hooks`; `check_findings_gate` on its OWN read-only sqlite, over storage's `OPEN_BLOCKING_FOR_SESSION` predicate | XL |
+| `src/policy/tool_gate.rs` | keyword list resolution (session snapshot → global), `match_keyword` (substring, gate wins), `run_in_repo` in the AGENT's shell (`gate_shell`: `$SHELL` if POSIX-family, else zsh→bash→sh — macOS bash is 3.2 and dies on heredoc-in-`$()`) | M |
 | `src/policy/session_policy.rs` | `.local/session-policies/<sid>.yaml` snapshot write-if-absent (enforced by the caller) / read / purge at boot | S |
 | `src/policy/violations.rs` | append-only `violations.jsonl` (unbounded) | M |
 | `src/policy/audit.rs` | policy-file tamper detection (sha256 cache) | M |
@@ -430,6 +439,7 @@ every write.
 | `src/storage/findings.rs` | EYES findings CRUD + `count_open_blocking_findings` | M |
 | `src/storage/session_docs.rs` | per-session IPAV docs + archives | M |
 | `src/storage/activity_events.rs` | activity transition ledger (read only by tests + boot sweep) | S |
+| `src/storage/gc.rs` | boot-time retention purges for the five append-only telemetry tables (`participant_deliveries`, `context_readings`, `retrieval_events`, `cancel_events`, `cl_reads`), run by `main.rs` beside the tray/activity sweeps; `messages` is deliberately not swept | S |
 | `src/storage/cancel_events.rs` | Stop/interrupt escalation ledger | S |
 | `src/storage/retrieval_events.rs` | `cl_retrieve` telemetry | S |
 | `src/storage/context_readings.rs` | per-turn context-window readings (P7) | M |
@@ -492,7 +502,7 @@ fs watcher (`cl:changed`, `session:worktree_changed`, `plugin:assets_changed`).
 | `src/text.rs` | `floor_char_boundary` / `ceil_char_boundary` — the byte-offset-to-char-boundary idiom every `&s[..n]` on arbitrary text must use (round 9: two panics — the stdout pump's log line and the PTY tail cut) | S |
 | `build.rs`, `tauri.conf.json`, `capabilities/` | Tauri build/config; main-window ACL (unrelated to plugin gating) | — |
 | `src/tauri_cmd/mod.rs`, `src/tauri_cmd/error.rs` | module list; `AppError` | S |
-| `src/tauri_cmd/sessions.rs` | session CRUD/lifecycle, `resolve_participant_picks`, `list_session_participants`, `get_participant_system_prompt`, `get_session_runtime` (7-field snapshot the FE seeds from), respawn/cancel/resume, `close_session` | XL |
+| `src/tauri_cmd/sessions.rs` | session CRUD/lifecycle, `resolve_participant_picks`, `list_session_participants`, `get_participant_system_prompt`, `get_session_runtime` (7-field snapshot the FE seeds from), respawn/cancel/resume, `reopen_session` (round 10: clears `closed_at`/`archived`/the halt slot, then spawns — `ensure_session_started` refuses a closed row on every other path), `close_session` | XL |
 | `src/tauri_cmd/messages.rs` | `get_session_messages` / `broadcast_message` | S |
 | `src/tauri_cmd/tray.rs` | choices/approvals/halts/staged responses (`stage_user_response`, `send_user_response`, `resolve_choice`, `discard_choice`) | M |
 | `src/tauri_cmd/docs.rs` | session docs search, `compute_apply_diff` (git in `spawn_blocking`), `summarize_session_doc` (headless `claude -p`), `validate_model` | L |
@@ -621,7 +631,8 @@ without polling.
 | `frontend/src/components/ChatInput.tsx` | compose / Stage / Send / Pause / Resume, `@`-mention picker | L |
 | `frontend/src/components/ChatMessage.tsx` | one row incl. tool_use/tool_result pills | M |
 | `frontend/src/components/DocumentPane.tsx` | I/P/A/V doc tabs + Apply-tab colored diff (memoised `groupDiffByFile`) + Tray tab | L |
-| `frontend/src/components/HaltBanner.tsx` | HALT state + the SOLE `isApproval`/`isTrayItem` predicates | M |
+| `frontend/src/components/HaltBanner.tsx` | HALT state + the SOLE `isApproval`/`isTrayItem` predicates; its tray pointer calls `onOpenTray` (SessionView → DocumentPane's `openTraySignal`) | M |
+| `frontend/src/components/ClosedSessionBar.tsx` | what a CLOSED session shows in place of its composer: read-only history + the **Reopen** button (`reopen_session`) — the only path that revives an archived roster (round 10) | S |
 | `frontend/src/components/ApprovalGate.tsx` | Approve/Reject gate replacing the input | M |
 | `frontend/src/components/PendingTray.tsx`, `frontend/src/components/ChoicePrompt.tsx` | topbar bell; one tray question | S |
 | `frontend/src/components/ContextMeter.tsx`, `frontend/src/components/SessionFindingsBanner.tsx`, `frontend/src/components/SessionPhaseChip.tsx`, `frontend/src/components/PhasePill.tsx`, `frontend/src/components/HealthDot.tsx` | badges/chips | S |
@@ -677,7 +688,7 @@ every other FE area imports.
 | `frontend/src/app/SessionPolicyPanel.tsx`, `frontend/src/components/PolicyForm.tsx`, `frontend/src/components/GatedKeywordList.tsx` | session gear drawer; shared policy editor; gated keyword rows | M / S / S |
 | `frontend/src/app/ViolationsPanel.tsx`, `frontend/src/app/FeedbackPanel.tsx`, `frontend/src/app/MeasurementView.tsx` | violations viewer; feedback triage; CL retrieval stats | M / S / S |
 | `frontend/src/components/UpdateBanner.tsx` | dismissible update banner | S |
-| `frontend/src/components/ui/Button.tsx`, `frontend/src/components/ui/Card.tsx`, `frontend/src/components/ui/Input.tsx`, `frontend/src/components/ui/SegToggle.tsx`, `frontend/src/components/ui/Textarea.tsx` | base atoms (no `Select` yet) | S |
+| `frontend/src/components/ui/Button.tsx`, `frontend/src/components/ui/Card.tsx`, `frontend/src/components/ui/Input.tsx`, `frontend/src/components/ui/Select.tsx`, `frontend/src/components/ui/SegToggle.tsx`, `frontend/src/components/ui/Textarea.tsx` | base atoms (`Select` since round 10: one house `selectClass` shared by Models/Roles/ClaudeConfig; the size-specific inline selects elsewhere still spell their own) | S |
 | `frontend/src/components/icons.tsx` | THE hand-rolled SVG icon set — two bases kept deliberately (attribute-sized stroke 1.75 `Svg`; class-sized stroke 2 `ClassSvg`, the family moved in from the CL module in round 9); the near-twins `MemoryIcon`/`FileIcon` and `RescanIcon`/`RefreshIcon` await a visual decision | S |
 | `frontend/src/components/Markdown.tsx`, `frontend/src/components/ErrorBanner.tsx`, `frontend/src/components/ConfirmDialog.tsx`, `frontend/src/components/SubTabButton.tsx` | shared atoms | S |
 | `frontend/src/components/authorColor.ts` | label → hue class; D20 8-hue palette named by colour | S |
