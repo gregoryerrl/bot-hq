@@ -208,9 +208,16 @@ function GlobalEventSync() {
       setHealth(p.session_id, p.agent, p.health as AgentHealth);
       // A health flip is the spawn's first observable edge: re-read the roster
       // so spawn-time columns written after the mount read reach the view.
-      invalidate(ROSTER_KEYS);
+      // THIS session's roster only (round 11): the event carries the session,
+      // and the prefix key refetched every open session's roster on one
+      // agent's retrying→running flip.
+      for (const key of ROSTER_KEYS) {
+        void queryClient.invalidateQueries({
+          queryKey: [key, { sessionId: p.session_id }],
+        });
+      }
     },
-    [setHealth, invalidate],
+    [setHealth, queryClient],
   );
   const onAttention = useCallback(
     (p: { session_id: string; state: string | null }) => {

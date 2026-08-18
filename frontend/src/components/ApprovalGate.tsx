@@ -3,7 +3,7 @@ import { Button } from "./ui/Button";
 import { errorMessage } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import { authorColorClass } from "./authorColor";
-import { formatRelative } from "../lib/time";
+import { formatRelative, formatTimestamp } from "../lib/time";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import type { TrayRow } from "./HaltBanner";
@@ -328,7 +328,9 @@ function GateDetailsDialog({
             <dt className="text-on-surface-variant">Asked</dt>
             <dd className="text-on-surface">
               {formatRelative(row.asked_at)}{" "}
-              <span className="text-on-surface-variant">({row.asked_at})</span>
+              <span className="text-on-surface-variant" title={row.asked_at}>
+                ({formatTimestamp(row.asked_at)})
+              </span>
             </dd>
             <dt className="text-on-surface-variant">Kind</dt>
             <dd className="text-on-surface">

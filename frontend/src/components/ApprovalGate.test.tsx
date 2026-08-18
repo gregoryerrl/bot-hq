@@ -328,7 +328,12 @@ describe("ApprovalGate", () => {
     fireEvent.click(screen.getByRole("button", { name: "Details" }));
     const dialog = screen.getByRole("dialog", { name: "Approval details" });
     expect(dialog).toHaveTextContent("hands");
-    expect(dialog).toHaveTextContent("2026-08-14T10:00:00Z");
+    // The ask time renders in the user's locale (round 11 — it used to print
+    // the raw UTC string); the exact stamp survives as the title.
+    expect(dialog).toHaveTextContent(
+      new Date("2026-08-14T10:00:00Z").toLocaleString(),
+    );
+    expect(dialog.querySelector('[title="2026-08-14T10:00:00Z"]')).not.toBeNull();
     expect(dialog).toHaveTextContent("c-1");
     expect(dialog).toHaveTextContent("Approve / Reject");
     expect(dialog).toHaveTextContent("Context the card never shows.");

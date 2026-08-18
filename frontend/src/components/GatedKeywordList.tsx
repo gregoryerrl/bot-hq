@@ -34,7 +34,7 @@ export function GatedKeywordList({
   emptyState,
   footer,
 }: GatedKeywordListProps) {
-  const { replaceAt, removeAt, append } = useListEditor(value, onChange);
+  const { keys, replaceAt, removeAt, append } = useListEditor(value, onChange);
   const updateRow = (i: number, patch: Partial<GatedKeyword>) =>
     replaceAt(i, { ...value[i], ...patch });
   const addRow = () => append({ keyword: "", mode: "gate" });
@@ -46,7 +46,7 @@ export function GatedKeywordList({
       ) : (
         <ul className="flex flex-col gap-2">
           {value.map((k, i) => (
-            <li key={i} className="flex items-center gap-2">
+            <li key={keys[i]} className="flex items-center gap-2">
               <input
                 type="text"
                 value={k.keyword}

@@ -174,7 +174,7 @@ function StringList({
   onChange: (next: string[]) => void;
   disabled?: boolean;
 }) {
-  const { replaceAt, removeAt, append } = useListEditor(items, onChange);
+  const { keys, replaceAt, removeAt, append } = useListEditor(items, onChange);
 
   return (
     <div className="flex flex-col gap-2">
@@ -184,7 +184,7 @@ function StringList({
         </p>
       )}
       {items.map((it, i) => (
-        <div key={i} className="flex items-center gap-2">
+        <div key={keys[i]} className="flex items-center gap-2">
           <input
             type="text"
             value={it}

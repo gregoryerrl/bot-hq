@@ -15,7 +15,7 @@ import { FileViewerDialog, fileArgInCommand } from "./FileViewerDialog";
 import { TrashIcon } from "./icons";
 import { Button } from "./ui/Button";
 import { cn } from "../lib/cn";
-import { formatRelative } from "../lib/time";
+import { formatRelative, formatTimestamp } from "../lib/time";
 import { groupDiffByFile, type DiffLine } from "../lib/diffGroups";
 import { authorLabel, useParticipantLabels } from "../lib/participants";
 import type {
@@ -176,7 +176,11 @@ export const DocumentPane = memo(function DocumentPane({
     <div className="flex h-full min-w-0 flex-col border-l border-outline-variant bg-surface-container-lowest/50">
       {/* `flex-wrap`, never a horizontal scroller: custom tabs are as many as
           the session made, and the row grows DOWN. */}
-      <div className="flex flex-wrap items-center gap-1 border-b border-outline-variant px-3 py-2">
+      <div
+        role="tablist"
+        aria-label="Session documents"
+        className="flex flex-wrap items-center gap-1 border-b border-outline-variant px-3 py-2"
+      >
         <TrayPill
           selected={showTray}
           onSelect={() => {
@@ -296,8 +300,11 @@ function DocArticle({
           >
             {loading ? "…" : "TL;DR"}
           </button>
-          <span className="text-[0.65rem] text-on-surface-variant">
-            {doc.updated_at}
+          <span
+            className="text-[0.65rem] text-on-surface-variant"
+            title={doc.updated_at}
+          >
+            {formatTimestamp(doc.updated_at)}
           </span>
         </div>
       </header>
@@ -322,6 +329,8 @@ function CustomDocPill({
   return (
     <button
       type="button"
+      role="tab"
+      aria-selected={selected}
       onClick={onSelect}
       className={cn(
         "inline-flex max-w-[12rem] items-center gap-1 rounded border-t-2 px-2 py-1 text-xs font-semibold",
@@ -541,6 +550,9 @@ function TrayPill({
   const hasPending = count > 0;
   return (
     <button
+      type="button"
+      role="tab"
+      aria-selected={selected}
       onClick={onSelect}
       className={cn(
         "inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold uppercase border-t-2",

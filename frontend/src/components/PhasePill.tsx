@@ -30,6 +30,9 @@ interface PhasePillProps {
 export function PhasePill({ phase, selected, onSelect }: PhasePillProps) {
   return (
     <button
+      type="button"
+      role="tab"
+      aria-selected={selected}
       onClick={() => onSelect(phase)}
       className={cn(
         "inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold uppercase",

@@ -65,7 +65,7 @@ function renderTray(rows: SessionTrayView[], participants: unknown[] = []) {
 async function openTray(rows: SessionTrayView[], participants: unknown[] = []) {
   renderTray(rows, participants);
   // The Tray tab is phase-independent and starts closed.
-  fireEvent.click(await screen.findByRole("button", { name: /tray/i }));
+  fireEvent.click(await screen.findByRole("tab", { name: /tray/i }));
 }
 
 describe("tray card attribution (rc3 D10)", () => {
@@ -385,19 +385,19 @@ describe("custom document tabs", () => {
   it("offers an untagged doc as its own tab, and not the archived versions", async () => {
     renderDocs();
     // The custom tab appears once the unfiltered search lands.
-    const tab = await screen.findByRole("button", { name: "tasks.md" });
+    const tab = await screen.findByRole("tab", { name: "tasks.md" });
     expect(tab).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "plan@1" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "plan@1" })).toBeNull();
     // Phase docs are still where they were — under their phase, not as tabs.
-    expect(screen.queryByRole("button", { name: "apply" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "apply" })).toBeNull();
   });
 
   it("shows the custom doc when its tab is picked, and returns to a phase on click", async () => {
     renderDocs();
-    fireEvent.click(await screen.findByRole("button", { name: "tasks.md" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "tasks.md" }));
     expect(await screen.findByText("first task")).toBeInTheDocument();
     // Back to the phase view via its pill.
-    fireEvent.click(screen.getByRole("button", { name: "A" }));
+    fireEvent.click(screen.getByRole("tab", { name: "A" }));
     await waitFor(() =>
       expect(screen.queryByText("first task")).toBeNull(),
     );
