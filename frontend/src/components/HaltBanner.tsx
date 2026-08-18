@@ -69,6 +69,10 @@ export function isTrayItem(r: {
   kind: string;
   options: readonly string[];
 }): boolean {
+  // `"halt"` is legacy DATA: rows a `mark_awaiting_user` parked before rc3
+  // D35 moved the halt to the session slot. Nothing writes it any more (the
+  // backend enum lost the variant in round 11), but the archive still holds
+  // such rows and they are not tray items.
   return r.kind !== "halt" && !isApproval(r);
 }
 

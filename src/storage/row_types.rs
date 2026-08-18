@@ -182,12 +182,13 @@ pub enum QuestionKind {
     /// [`is_gate_row`](crate::storage::is_gate_row) (kind OR menu), not the
     /// kind alone.
     Approval,
-    /// Free-text open question — user types a reply via normal chat input.
-    OpenAsk,
-    /// `mark_awaiting_user` — informational halt. **Nothing writes this since
-    /// rc3 D35** (the halt is a session-state slot, `sessions.halt_*`); kept so
-    /// the rows parked before D35 still parse.
-    Halt,
+    // Round 11 removed two variants nothing produced or consumed: `OpenAsk`
+    // (`"open_ask"` — never written), and `Halt` (`"halt"` — a
+    // `mark_awaiting_user` row until rc3 D35 moved the halt to the session
+    // slot). This enum is WRITE-side only — `SessionTrayEntry.kind` is a plain
+    // `String` and readers compare literals — so legacy `"halt"` rows in the
+    // archive still read fine: the frontend's `isTrayItem` and every reader
+    // treat that literal as "not a tray item", and the boot GC retires them.
 }
 
 impl QuestionKind {
@@ -195,16 +196,14 @@ impl QuestionKind {
         match self {
             QuestionKind::Choice => "choice",
             QuestionKind::Approval => "approval",
-            QuestionKind::OpenAsk => "open_ask",
-            QuestionKind::Halt => "halt",
         }
     }
-
 }
 
 /// A row from the `session_tray` table. Mirrors a tray item the agent has
 /// surfaced to the user — a question, an approval, an action_gate gated
-/// command, or a `mark_awaiting_user` halt — via the per-session tray.
+/// command — via the per-session tray. (`kind = "halt"` rows are legacy data
+/// from before rc3 D35 moved the halt to the session slot; nothing writes them.)
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct SessionTrayEntry {
     pub id: i64,
@@ -213,7 +212,7 @@ pub struct SessionTrayEntry {
     pub agent: String,
     pub kind: String,
     pub prompt: String,
-    /// JSON-encoded `Vec<String>` for kind=choice / approval; NULL for open_ask / halt.
+    /// JSON-encoded `Vec<String>` for kind=choice / approval; NULL on legacy `halt` rows.
     pub options_json: Option<String>,
     pub status: String,
     pub picked_option: Option<String>,

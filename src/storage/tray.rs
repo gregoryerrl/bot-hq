@@ -86,8 +86,8 @@ impl Storage {
         Ok(res.last_insert_rowid())
     }
 
-    /// Mark a tray entry as answered + record the picked option (for choices)
-    /// or the typed reply (for open_ask). Idempotent on already-answered:
+    /// Mark a tray entry as answered + record the picked option. Idempotent on
+    /// already-answered:
     /// returns Ok with 0 rows affected so callers don't have to guard.
     pub async fn answer_tray_entry(&self, choice_id: &str, picked: &str) -> Result<u64> {
         let res = sqlx::query(
@@ -106,8 +106,10 @@ impl Storage {
 
     // `clear_pending_halts` lived here until rc3 D35 moved the halt off the
     // tray entirely — it is a session-state slot now (`clear_session_halt`,
-    // storage/sessions.rs). Nothing writes kind='halt' rows any more; the ones
-    // in the archive are history.
+    // storage/sessions.rs). Nothing writes kind='halt' rows any more (round 11
+    // removed the `QuestionKind::Halt` variant with them); the ones in the
+    // archive are legacy DATA, matched as the literal `"halt"` by readers
+    // (`HaltBanner.tsx::isTrayItem`) and retired by the boot GC.
 
     /// Mark a tray entry as withdrawn (agent abandons it; never to be answered).
     pub async fn withdraw_tray_entry(&self, choice_id: &str) -> Result<u64> {
