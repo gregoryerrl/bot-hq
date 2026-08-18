@@ -365,11 +365,10 @@ pub(crate) async fn install_plugin_inner(
     // unreachable from here: falling through with a live row would
     // cascade-wipe the plugin's KV (REPLACE = DELETE+INSERT, plugin_kv FK).
     if storage
-        .list_plugins()
+        .get_plugin(&manifest.id)
         .await
         .map_err(anyhow_to_app)?
-        .iter()
-        .any(|r| r.id == manifest.id)
+        .is_some()
     {
         return Err(AppError::Conflict(format!(
             "plugin already installed: {} — registry entry exists; uninstall first{}",
@@ -424,11 +423,9 @@ pub(crate) async fn install_plugin_inner(
     );
 
     let row = storage
-        .list_plugins()
+        .get_plugin(&manifest.id)
         .await
         .map_err(anyhow_to_app)?
-        .into_iter()
-        .find(|r| r.id == manifest.id)
         .ok_or_else(|| AppError::Internal("plugin row vanished after insert".into()))?;
     Ok(InstalledPluginView::from_row(row, manifest, &registry.heartbeat))
 }
@@ -449,11 +446,10 @@ pub(crate) async fn preview_plugin_manifest_inner(
     validate_requested_capabilities(&manifest)?;
     validate_csp_origins(&raw_json)?;
     let registered = storage
-        .list_plugins()
+        .get_plugin(&manifest.id)
         .await
         .map_err(anyhow_to_app)?
-        .iter()
-        .any(|r| r.id == manifest.id);
+        .is_some();
     let orphan_dir = !registered && registry.plugin_dir(&manifest.id).exists();
     let capabilities = manifest
         .requested_capabilities
@@ -481,11 +477,9 @@ pub(crate) async fn reapprove_linked_plugin_inner(
     plugin_id: &str,
 ) -> Result<InstalledPluginView, AppError> {
     let row = storage
-        .list_plugins()
+        .get_plugin(&plugin_id)
         .await
         .map_err(anyhow_to_app)?
-        .into_iter()
-        .find(|r| r.id == plugin_id)
         .ok_or_else(|| AppError::NotFound(format!("plugin {plugin_id}")))?;
     if !row.linked {
         return Err(AppError::Validation(format!(
@@ -534,11 +528,9 @@ pub(crate) async fn reapprove_linked_plugin_inner(
     );
 
     let row = storage
-        .list_plugins()
+        .get_plugin(&plugin_id)
         .await
         .map_err(anyhow_to_app)?
-        .into_iter()
-        .find(|r| r.id == plugin_id)
         .ok_or_else(|| AppError::Internal("plugin row vanished after reapprove".into()))?;
     Ok(InstalledPluginView::from_row(row, manifest, &registry.heartbeat))
 }
@@ -556,11 +548,9 @@ pub(crate) async fn reinstall_plugin_inner(
     linked: bool,
 ) -> Result<InstalledPluginView, AppError> {
     storage
-        .list_plugins()
+        .get_plugin(&plugin_id)
         .await
         .map_err(anyhow_to_app)?
-        .into_iter()
-        .find(|r| r.id == plugin_id)
         .ok_or_else(|| AppError::NotFound(format!("plugin {plugin_id}")))?;
     if linked && is_url(source) {
         return Err(AppError::Validation(
@@ -640,11 +630,9 @@ pub(crate) async fn reinstall_plugin_inner(
     );
 
     let row = storage
-        .list_plugins()
+        .get_plugin(&plugin_id)
         .await
         .map_err(anyhow_to_app)?
-        .into_iter()
-        .find(|r| r.id == plugin_id)
         .ok_or_else(|| AppError::Internal("plugin row vanished after reinstall".into()))?;
     Ok(InstalledPluginView::from_row(row, manifest, &registry.heartbeat))
 }
@@ -660,11 +648,9 @@ pub(crate) async fn update_plugin_from_source_inner(
     plugin_id: &str,
 ) -> Result<InstalledPluginView, AppError> {
     let row = storage
-        .list_plugins()
+        .get_plugin(&plugin_id)
         .await
         .map_err(anyhow_to_app)?
-        .into_iter()
-        .find(|r| r.id == plugin_id)
         .ok_or_else(|| AppError::NotFound(format!("plugin {plugin_id}")))?;
     if row.linked {
         return Err(AppError::Validation(format!(
@@ -709,11 +695,9 @@ pub(crate) async fn update_plugin_from_source_inner(
     copy_dir_all(Path::new(&source), &plugin_dir).map_err(io_to_app)?;
 
     let row = storage
-        .list_plugins()
+        .get_plugin(&plugin_id)
         .await
         .map_err(anyhow_to_app)?
-        .into_iter()
-        .find(|r| r.id == plugin_id)
         .ok_or_else(|| AppError::Internal("plugin row vanished after update".into()))?;
     Ok(InstalledPluginView::from_row(row, manifest, &registry.heartbeat))
 }
@@ -762,11 +746,9 @@ async fn uninstall_plugin_inner(
     plugin_id: &str,
 ) -> Result<(), AppError> {
     let row = storage
-        .list_plugins()
+        .get_plugin(&plugin_id)
         .await
         .map_err(anyhow_to_app)?
-        .into_iter()
-        .find(|r| r.id == plugin_id)
         .ok_or_else(|| AppError::NotFound(format!("plugin {plugin_id}")))?;
 
     storage.delete_plugin(plugin_id).await.map_err(anyhow_to_app)?;

@@ -129,6 +129,21 @@ impl Storage {
         Ok(())
     }
 
+    /// One plugin row by id (round 10) — the by-id seek every install /
+    /// enable / uninstall / update command used to do as `list_plugins()` +
+    /// a Rust scan. Same projection as [`list_plugins`](Self::list_plugins).
+    pub async fn get_plugin(&self, id: &str) -> Result<Option<Plugin>> {
+        let row = sqlx::query_as::<_, Plugin>(
+            "SELECT id, name, version, enabled, manifest_json, dir_path, csp_json, linked, source_path, installed_at \
+             FROM plugins WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("reading plugin {id}"))?;
+        Ok(row)
+    }
+
     pub async fn list_plugins(&self) -> Result<Vec<Plugin>> {
         let rows = sqlx::query_as::<_, Plugin>(
             "SELECT id, name, version, enabled, manifest_json, dir_path, csp_json, linked, source_path, installed_at \
