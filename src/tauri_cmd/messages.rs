@@ -1,5 +1,6 @@
-//! Message stream commands. Frontend SessionView polls `get_session_messages`
-//! once on mount, then subscribes to `agent.messages.batch` for deltas.
+//! Message stream commands. Frontend SessionView reads `get_session_messages`
+//! once on mount, then subscribes to `agent:messages:batch` for deltas (Tauri
+//! event names take colons, never dots — `EVENT_NAME_BATCH`).
 //! `broadcast_message` is the inverse — the user→agent send path.
 
 use crate::core::AppState as CoreAppState;

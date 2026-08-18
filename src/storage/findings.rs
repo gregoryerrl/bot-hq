@@ -8,6 +8,14 @@ use super::*;
 
 /// Full column projection for a `Finding` — shared by every read so they can't
 /// drift (mirrors `tray.rs::TRAY_COLUMNS`).
+/// The one predicate that decides "an open blocking finding gates this
+/// session's commit/push" — bound `session_id`, oldest first. Shared with the
+/// pre-commit/pre-push hook (`policy/hooks.rs`), which reads the DB over its
+/// own read-only connection and used to spell this text a second time (round
+/// 10): two spellings of a gate predicate can drift in one direction silently.
+pub const OPEN_BLOCKING_FOR_SESSION: &str =
+    "WHERE session_id = ? AND status = 'open' AND severity = 'blocking' ORDER BY id ASC";
+
 const FINDING_COLUMNS: &str = "id, session_id, finding_uid, agent, severity, summary, \
      code_ref, status, disposition_reason, disposed_by, created_at, updated_at, \
      raise_count, eyes_approved";
@@ -92,9 +100,7 @@ impl Storage {
         session_id: &str,
     ) -> Result<Vec<Finding>> {
         let rows = sqlx::query_as::<_, Finding>(&format!(
-            "SELECT {FINDING_COLUMNS} FROM findings \
-             WHERE session_id = ? AND status = 'open' AND severity = 'blocking' \
-             ORDER BY id ASC"
+            "SELECT {FINDING_COLUMNS} FROM findings {OPEN_BLOCKING_FOR_SESSION}"
         ))
         .bind(session_id)
         .fetch_all(&self.pool)

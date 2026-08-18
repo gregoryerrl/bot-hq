@@ -1,5 +1,7 @@
-//! Local normalizing proxy for agents on a non-Anthropic, Anthropic-compatible
-//! gateway (currently Rain → DeepSeek via `ANTHROPIC_BASE_URL`).
+//! Local normalizing proxy for participants whose model row carries a custom
+//! `base_url` — an Anthropic-compatible gateway that is not Anthropic's (the
+//! DeepSeek gateway is the one this was built against; the routing rule is
+//! per model row, never per participant name — rc3 D10).
 //!
 //! ## Why this exists
 //!
@@ -26,8 +28,9 @@
 //! response straight back. Source-agnostic: it strips the alien role no
 //! matter which hook/mechanism injected it.
 //!
-//! Only agents with a custom `base_url` route through it; Brian hits the
-//! real first-party API directly and never touches the proxy.
+//! Only participants whose model has a custom `base_url` route through it; a
+//! participant on the first-party API hits it directly and never touches the
+//! proxy.
 
 use anyhow::{Context, Result};
 use bytes::Bytes;

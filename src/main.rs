@@ -176,8 +176,9 @@ fn main() -> Result<()> {
             }
             server.set_addr_file(paths.signaling_addr_path.clone());
 
-            // Local normalizing proxy for agents on a non-first-party gateway
-            // (Rain → DeepSeek): strips request-build-time `role:"system"`
+            // Local normalizing proxy for participants whose model row has a
+            // custom `base_url` (a non-first-party, Anthropic-compatible
+            // gateway): strips request-build-time `role:"system"`
             // injections that strict gateways 400 on. Soft-fail — if it can't
             // bind, those agents hit their gateway directly and the rest of
             // bot-hq is unaffected. Started before any agent spawns so the addr

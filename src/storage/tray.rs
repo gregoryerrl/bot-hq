@@ -205,12 +205,14 @@ impl Storage {
     /// have been overtaken by it (issues.md #18 — a staging-push choice sat
     /// through the push it asked about and replayed as live state).
     ///
-    /// Deliberately unfiltered on time and outcome. `answered_at` has two
-    /// historical shapes in this table (RFC3339 and sqlite's
-    /// `datetime('now')` — see migrations 0012/0015), which sort differently
-    /// as strings for the same instant, so a SQL `answered_at > ?` would
-    /// mis-order across them. The caller parses both sides and compares
-    /// instants.
+    /// Deliberately unfiltered on time and outcome, and small by construction:
+    /// it is one session's answered gates. The caller parses `answered_at` and
+    /// compares instants rather than binding a SQL `>` — a habit from when this
+    /// column carried two shapes (sqlite's `datetime('now')` and RFC3339;
+    /// migrations 0012/0015 normalised it, and only 0054's one-time close-out
+    /// of legacy halt rows wrote the zone-less shape again, on rows that are
+    /// long purged). Round 10 kept the parse: it costs nothing here and stays
+    /// correct if any writer ever slips again.
     pub async fn answered_gates_for_session(
         &self,
         session_id: &str,

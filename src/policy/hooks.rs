@@ -1404,11 +1404,12 @@ async fn query_open_blocking(
         .connect()
         .await
         .with_context(|| format!("opening {} read-only", db_path.display()))?;
-    let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
-        "SELECT finding_uid, summary, code_ref FROM findings \
-         WHERE session_id = ? AND status = 'open' AND severity = 'blocking' \
-         ORDER BY id ASC",
-    )
+    // The predicate is storage's own (`OPEN_BLOCKING_FOR_SESSION`), so the
+    // hook and the MCP `check_open_findings` cannot disagree on what gates.
+    let rows = sqlx::query_as::<_, (String, String, Option<String>)>(&format!(
+        "SELECT finding_uid, summary, code_ref FROM findings {}",
+        crate::storage::OPEN_BLOCKING_FOR_SESSION
+    ))
     .bind(session_id)
     .fetch_all(&mut conn)
     .await

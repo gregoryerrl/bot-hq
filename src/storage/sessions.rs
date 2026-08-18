@@ -282,8 +282,9 @@ impl Storage {
     }
 
     /// Closed sessions (both just-closed and archived), most-recently-closed
-    /// first. Surfaces in the Settings → Archive tab. `id ASC` tiebreaks the
-    /// 1-second `datetime('now')` granularity for stable ordering.
+    /// first. Surfaces in the Settings → Archive tab. `id ASC` tiebreaks equal
+    /// `closed_at` values (`close_session` writes `now_utc()`, millisecond
+    /// RFC3339-Z, so ties are rare but possible) for stable ordering.
     pub async fn list_closed_sessions(&self) -> Result<Vec<Session>> {
         let rows = sqlx::query_as::<_, Session>(&format!(
             "SELECT {SESSION_COLUMNS} FROM sessions \
@@ -344,8 +345,8 @@ impl Storage {
         Ok(())
     }
 
-    /// Record the model one TURN SLOT spawned with (slot 0 → `brian_model_at_spawn`,
-    /// slot 1 → `rain_model_at_spawn`).
+    /// Record the model one TURN SLOT spawned with (slot 0 → `slot0_model_at_spawn`,
+    /// slot 1 → `slot1_model_at_spawn`; migration 0060 renamed the pair).
     ///
     /// The session header reads those two columns, so they are still written —
     /// but positionally, off the roster's turn order, rather than off an agent

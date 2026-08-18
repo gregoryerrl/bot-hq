@@ -13,7 +13,8 @@
 //! restart re-emitted its entire history through Tauri IPC (this session
 //! stood at 1,954 rows when it was measured; the 06:48Z rebuild that day did
 //! it to three live sessions). The frontend already loads history through
-//! `list_messages` on mount, so the replay was duplicate work at best and a
+//! `get_session_messages` on mount (`list_messages` is the plugin API's grant
+//! name for the same read), so the replay was duplicate work at best and a
 //! multi-MB emit at worst. Seeding to `message_id - 1` emits exactly the rows
 //! persisted since launch.
 //!

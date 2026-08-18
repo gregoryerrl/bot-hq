@@ -21,6 +21,11 @@ impl Storage {
         Ok(row)
     }
 
+    /// No production caller since rc3 D8 retired the Agents tab that listed
+    /// these rows; read by `tests/storage_test.rs::migration_runs_on_empty_db`
+    /// (an integration test — which is why this is not `#[cfg(test)]`) and the
+    /// round-trip test below. Round 10 says so rather than deleting it: the
+    /// integration test is the one place that pins "0060 seeds nothing here".
     pub async fn list_agent_configs(&self) -> Result<Vec<AgentConfig>> {
         let rows = sqlx::query_as::<_, AgentConfig>(&format!(
             "SELECT {AGENT_CONFIG_COLUMNS} FROM agent_configs ORDER BY agent_name"
@@ -73,8 +78,6 @@ mod tests {
     async fn upsert_and_get_round_trip() {
         let storage = Storage::memory().await.unwrap();
         let cfg = AgentConfig {
-            // `brian`, not `hands`, and that is not nostalgia — see the test
-            // below for what this table can actually hold.
             agent_name: "hands".to_string(),
             provider: "anthropic".to_string(),
             model_name: "fast-thinker-1".to_string(),
@@ -146,11 +149,14 @@ mod tests {
 
     /// The three names the dropped CHECK used to allow are gone from the table.
     /// Not "no longer special" — absent: they named two agents retired by D10
-    /// and one removed in 0017.
+    /// and one removed in 0017. (Round 10: the fixture looped `hands`/`eyes`,
+    /// which the CHECK never allowed and nothing ever seeded, so two of its
+    /// three assertions could not fail; the literals below are the CHECK's own —
+    /// bare string DATA, exempt from `retired_identifier_test` by design.)
     #[tokio::test]
     async fn the_retired_names_are_not_seeded_any_more() {
         let storage = Storage::memory().await.unwrap();
-        for slug in ["emma", "hands", "eyes"] {
+        for slug in ["emma", "brian", "rain"] {
             assert!(
                 storage.get_agent_config(slug).await.unwrap().is_none(),
                 "`{slug}` is still seeded"

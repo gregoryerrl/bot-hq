@@ -48,17 +48,6 @@ impl MessageKind {
         }
     }
 
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "text" => MessageKind::Text,
-            "tool_use" => MessageKind::ToolUse,
-            "tool_result" => MessageKind::ToolResult,
-            "phase_change" => MessageKind::PhaseChange,
-            "system_notice" => MessageKind::SystemNotice,
-            "boot" => MessageKind::Boot,
-            _ => return None,
-        })
-    }
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
@@ -204,15 +193,6 @@ impl QuestionKind {
         }
     }
 
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "choice" => QuestionKind::Choice,
-            "approval" => QuestionKind::Approval,
-            "open_ask" => QuestionKind::OpenAsk,
-            "halt" => QuestionKind::Halt,
-            _ => return None,
-        })
-    }
 }
 
 /// A row from the `session_tray` table. Mirrors a tray item the agent has
