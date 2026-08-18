@@ -133,53 +133,45 @@ where
         // Own the debouncer so the watch lives as long as this task (the whole
         // app); we also mutate its watch-set as sessions register/unregister.
         let mut debouncer = debouncer;
-        // Watched session repos: repo root → session_id.
-        let mut repos: HashMap<PathBuf, String> = HashMap::new();
-        // Watched plugin served dirs: dir root → plugin_id.
-        let mut plugin_dirs: HashMap<PathBuf, String> = HashMap::new();
+        // Watched session repos, keyed by session with the notify watch shared
+        // per root; watched plugin served dirs, keyed by plugin, same shape.
+        let mut repos = WatchSet::default();
+        let mut plugin_dirs = WatchSet::default();
         loop {
             tokio::select! {
                 Some(cmd) = cmd_rx.recv() => match cmd {
                     WatchCmd::AddRepo { session_id, path } => {
-                        match debouncer.watcher().watch(&path, RecursiveMode::Recursive) {
-                            Ok(()) => {
-                                repos.insert(path, session_id);
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = ?e, ?path, "fs watcher: failed to watch session repo");
-                            }
+                        if let Some(stale) = repos.remove(&session_id) {
+                            let _ = debouncer.watcher().unwatch(&stale);
+                        }
+                        if repos.is_watched(&path)
+                            || debouncer.watcher().watch(&path, RecursiveMode::Recursive).is_ok()
+                        {
+                            repos.add(session_id, path);
+                        } else {
+                            tracing::warn!(?path, "fs watcher: failed to watch session repo");
                         }
                     }
                     WatchCmd::RemoveRepo { session_id } => {
-                        let gone: Vec<PathBuf> = repos
-                            .iter()
-                            .filter(|(_, sid)| **sid == session_id)
-                            .map(|(p, _)| p.clone())
-                            .collect();
-                        for p in gone {
+                        if let Some(p) = repos.remove(&session_id) {
                             let _ = debouncer.watcher().unwatch(&p);
-                            repos.remove(&p);
                         }
                     }
                     WatchCmd::AddPluginDir { plugin_id, path } => {
-                        match debouncer.watcher().watch(&path, RecursiveMode::Recursive) {
-                            Ok(()) => {
-                                plugin_dirs.insert(path, plugin_id);
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = ?e, ?path, "fs watcher: failed to watch plugin dir");
-                            }
+                        if let Some(stale) = plugin_dirs.remove(&plugin_id) {
+                            let _ = debouncer.watcher().unwatch(&stale);
+                        }
+                        if plugin_dirs.is_watched(&path)
+                            || debouncer.watcher().watch(&path, RecursiveMode::Recursive).is_ok()
+                        {
+                            plugin_dirs.add(plugin_id, path);
+                        } else {
+                            tracing::warn!(?path, "fs watcher: failed to watch plugin dir");
                         }
                     }
                     WatchCmd::RemovePluginDir { plugin_id } => {
-                        let gone: Vec<PathBuf> = plugin_dirs
-                            .iter()
-                            .filter(|(_, pid)| **pid == plugin_id)
-                            .map(|(p, _)| p.clone())
-                            .collect();
-                        for p in gone {
+                        if let Some(p) = plugin_dirs.remove(&plugin_id) {
                             let _ = debouncer.watcher().unwatch(&p);
-                            plugin_dirs.remove(&p);
                         }
                     }
                 },
@@ -204,9 +196,10 @@ where
                             serde_json::to_value(ClChangedEvent { project }).unwrap_or(Value::Null),
                         );
                     }
-                    // Working-repo files → the session's A-tab diff is now stale.
+                    // Working-repo files → EVERY session on that repo has a
+                    // stale A-tab diff.
                     let sessions: BTreeSet<String> =
-                        batch.iter().filter_map(|p| session_for_path(p, &repos)).collect();
+                        batch.iter().flat_map(|p| repos.owners_for_path(p)).collect();
                     for session_id in sessions {
                         emit(
                             WorktreeChangedEvent::EVENT_NAME,
@@ -256,60 +249,99 @@ fn scope_for_path(path: &Path, cl_dir: &Path) -> Option<String> {
     }
 }
 
-/// Map a changed path under a watched session repo back to its session_id.
-/// `None` if the path is under no watched repo, or if it lives in a build / VCS
-/// dir whose churn shouldn't trigger an A-tab recompute.
-fn session_for_path(path: &Path, repos: &HashMap<PathBuf, String>) -> Option<String> {
-    for (root, session_id) in repos {
-        if let Ok(rel) = path.strip_prefix(root) {
-            if rel
-                .components()
-                .any(|c| matches!(c, std::path::Component::Normal(n) if is_ignored_component(n)))
-            {
-                return None;
+/// Watched roots keyed by OWNER (a session id, a plugin id), the notify watch
+/// shared per PATH and reference-counted.
+///
+/// Round 11: both registries were `HashMap<PathBuf, owner>`, so two owners on
+/// one root — two sessions on the same working repo (worktrees off, or the
+/// direct fallback), two linked plugins on one dir — overwrote each other: only
+/// the last registrant was ever notified, and closing either one UNWATCHED the
+/// path the other still needed. Here a root is watched once, released when its
+/// last owner leaves, and a change under it names every owner.
+#[derive(Default)]
+struct WatchSet {
+    by_owner: HashMap<String, PathBuf>,
+    refs: HashMap<PathBuf, usize>,
+}
+
+impl WatchSet {
+    /// Is `path` already carrying a notify watch (some owner registered it)?
+    fn is_watched(&self, path: &Path) -> bool {
+        self.refs.get(path).is_some_and(|n| *n > 0)
+    }
+
+    /// Register `owner` at `path` (the caller has made sure the path is
+    /// watched). An owner registers once; re-registering replaces its root —
+    /// call [`remove`](Self::remove) first to release the old one.
+    fn add(&mut self, owner: String, path: PathBuf) {
+        if let Some(prev) = self.by_owner.insert(owner, path.clone()) {
+            if prev != path {
+                self.release(&prev);
             }
-            return Some(session_id.clone());
+        }
+        *self.refs.entry(path).or_insert(0) += 1;
+    }
+
+    /// Unregister `owner`. Returns the root to UNWATCH when this was its last
+    /// owner — `None` while another owner still needs it, or when the owner
+    /// was not registered.
+    fn remove(&mut self, owner: &str) -> Option<PathBuf> {
+        let path = self.by_owner.remove(owner)?;
+        self.release(&path)
+    }
+
+    fn release(&mut self, path: &Path) -> Option<PathBuf> {
+        let n = self.refs.get_mut(path)?;
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            self.refs.remove(path);
+            Some(path.to_path_buf())
+        } else {
+            None
         }
     }
-    None
+
+    /// Every owner whose root contains `path` — deterministic order (sorted) —
+    /// or none if the path lives in a build / VCS dir whose churn shouldn't
+    /// trigger anything.
+    fn owners_for_path(&self, path: &Path) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .by_owner
+            .iter()
+            .filter(|(_, root)| under_root_and_not_churn(path, root))
+            .map(|(owner, _)| owner.clone())
+            .collect();
+        out.sort();
+        out
+    }
+}
+
+/// `path` is under `root` and no component between them is hidden or a known
+/// build dir.
+fn under_root_and_not_churn(path: &Path, root: &Path) -> bool {
+    match path.strip_prefix(root) {
+        Ok(rel) => !rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::Normal(n) if is_ignored_component(n))),
+        Err(_) => false,
+    }
 }
 
 /// One `plugin:assets_changed` event per plugin whose served dir the batch
 /// touched — deduped (BTreeSet, so deterministic order), churn-filtered,
-/// and scoped strictly to the owning plugin: a path under A's root can
-/// never yield B's id. This is the whole emit-mapping the watcher loop
-/// runs; extracted so the two-plugin scoping contract is testable without
-/// notify/debounce timing.
-fn plugin_events_for_batch(
-    batch: &[PathBuf],
-    plugin_dirs: &HashMap<PathBuf, String>,
-) -> Vec<PluginAssetsChangedEvent> {
+/// and scoped strictly to the owning plugin(s): a path under A's root can
+/// never yield B's id unless B is registered on that same root. This is the
+/// whole emit-mapping the watcher loop runs; extracted so the scoping
+/// contract is testable without notify/debounce timing.
+fn plugin_events_for_batch(batch: &[PathBuf], plugin_dirs: &WatchSet) -> Vec<PluginAssetsChangedEvent> {
     let changed: BTreeSet<String> = batch
         .iter()
-        .filter_map(|p| plugin_for_path(p, plugin_dirs))
+        .flat_map(|p| plugin_dirs.owners_for_path(p))
         .collect();
     changed
         .into_iter()
         .map(|plugin_id| PluginAssetsChangedEvent { plugin_id })
         .collect()
-}
-
-/// Map a changed path under a watched plugin served dir back to its
-/// plugin_id, with the same build/VCS churn filter as session repos (linked
-/// plugin dirs are user repos — `cargo build` noise must not spam reloads).
-fn plugin_for_path(path: &Path, plugin_dirs: &HashMap<PathBuf, String>) -> Option<String> {
-    for (root, plugin_id) in plugin_dirs {
-        if let Ok(rel) = path.strip_prefix(root) {
-            if rel
-                .components()
-                .any(|c| matches!(c, std::path::Component::Normal(n) if is_ignored_component(n)))
-            {
-                return None;
-            }
-            return Some(plugin_id.clone());
-        }
-    }
-    None
 }
 
 /// A path component to ignore: any hidden (`.`-prefixed) name — covers `.git`,
@@ -398,36 +430,76 @@ mod tests {
         assert_eq!(scope_for_path(&cl().join(".DS_Store"), &cl()), None);
     }
 
+    /// A registry from `(root, owner)` pairs, as the loop builds one.
+    fn watch_set(pairs: &[(&str, &str)]) -> WatchSet {
+        let mut set = WatchSet::default();
+        for (root, owner) in pairs {
+            set.add(owner.to_string(), PathBuf::from(root));
+        }
+        set
+    }
+
+    fn owners(set: &WatchSet, path: &str) -> Vec<String> {
+        set.owners_for_path(Path::new(path))
+    }
+
     #[test]
     fn plugin_path_maps_to_plugin_and_filters_churn() {
-        let mut dirs = HashMap::new();
-        dirs.insert(PathBuf::from("/home/me/cognotify"), "cognotify".to_string());
-        dirs.insert(PathBuf::from("/data/plugins/hello"), "hello".to_string());
+        let dirs = watch_set(&[
+            ("/home/me/cognotify", "cognotify"),
+            ("/data/plugins/hello", "hello"),
+        ]);
 
         // Files inside a watched dir map to their plugin.
-        assert_eq!(
-            plugin_for_path(Path::new("/home/me/cognotify/materials/m1.html"), &dirs),
-            Some("cognotify".to_string())
-        );
-        assert_eq!(
-            plugin_for_path(Path::new("/data/plugins/hello/index.html"), &dirs),
-            Some("hello".to_string())
-        );
+        assert_eq!(owners(&dirs, "/home/me/cognotify/materials/m1.html"), vec!["cognotify"]);
+        assert_eq!(owners(&dirs, "/data/plugins/hello/index.html"), vec!["hello"]);
         // Build/VCS churn in a LINKED repo is filtered.
-        assert_eq!(
-            plugin_for_path(Path::new("/home/me/cognotify/target/debug/x"), &dirs),
-            None
-        );
-        assert_eq!(
-            plugin_for_path(Path::new("/home/me/cognotify/.git/index"), &dirs),
-            None
-        );
-        assert_eq!(
-            plugin_for_path(Path::new("/home/me/cognotify/node_modules/x/y.js"), &dirs),
-            None
-        );
+        assert!(owners(&dirs, "/home/me/cognotify/target/debug/x").is_empty());
+        assert!(owners(&dirs, "/home/me/cognotify/.git/index").is_empty());
+        assert!(owners(&dirs, "/home/me/cognotify/node_modules/x/y.js").is_empty());
         // Unwatched paths map to nothing.
-        assert_eq!(plugin_for_path(Path::new("/somewhere/else.html"), &dirs), None);
+        assert!(owners(&dirs, "/somewhere/else.html").is_empty());
+    }
+
+    /// **Two owners on one root both hear about it, and the watch outlives the
+    /// first to leave** (round 11). The registries were path→owner maps, so the
+    /// second session on a shared working repo (worktrees off) silently
+    /// replaced the first, and closing either one unwatched the root the other
+    /// still needed. Now: one watch, reference-counted; a change names every
+    /// owner; only the last release asks for an unwatch.
+    #[test]
+    fn two_owners_share_one_watch_and_the_last_one_out_releases_it() {
+        let mut set = WatchSet::default();
+        set.add("s1".into(), PathBuf::from("/repo"));
+        set.add("s2".into(), PathBuf::from("/repo"));
+        assert!(set.is_watched(Path::new("/repo")));
+        assert_eq!(owners(&set, "/repo/src/main.rs"), vec!["s1", "s2"], "both are told");
+        // s1 closes: the root is still watched for s2, nothing to unwatch yet.
+        assert_eq!(set.remove("s1"), None);
+        assert!(set.is_watched(Path::new("/repo")));
+        assert_eq!(owners(&set, "/repo/src/main.rs"), vec!["s2"]);
+        // s2 closes: the last owner out releases the watch.
+        assert_eq!(set.remove("s2"), Some(PathBuf::from("/repo")));
+        assert!(!set.is_watched(Path::new("/repo")));
+        assert!(owners(&set, "/repo/src/main.rs").is_empty());
+        // Removing a stranger is a no-op.
+        assert_eq!(set.remove("nobody"), None);
+    }
+
+    /// An owner that re-registers on a different root releases the old one
+    /// (or keeps it if somebody else still holds it) and counts once on the new.
+    #[test]
+    fn re_registering_an_owner_moves_it_and_keeps_the_counts_honest() {
+        let mut set = WatchSet::default();
+        set.add("s1".into(), PathBuf::from("/a"));
+        set.add("s2".into(), PathBuf::from("/a"));
+        set.add("s1".into(), PathBuf::from("/b"));
+        assert!(set.is_watched(Path::new("/a")), "s2 still holds /a");
+        assert!(set.is_watched(Path::new("/b")));
+        assert_eq!(owners(&set, "/a/f"), vec!["s2"]);
+        assert_eq!(owners(&set, "/b/f"), vec!["s1"]);
+        assert_eq!(set.remove("s2"), Some(PathBuf::from("/a")));
+        assert_eq!(set.remove("s1"), Some(PathBuf::from("/b")));
     }
 
     /// The two-plugin scoping contract (PLUGINS.md: "a file in YOUR served
@@ -435,12 +507,7 @@ mod tests {
     /// never B's, never a duplicate.
     #[test]
     fn assets_events_scope_to_the_owning_plugin_only() {
-        let dirs: HashMap<PathBuf, String> = [
-            (PathBuf::from("/plugins/a"), "plugin-a".to_string()),
-            (PathBuf::from("/plugins/b"), "plugin-b".to_string()),
-        ]
-        .into_iter()
-        .collect();
+        let dirs = watch_set(&[("/plugins/a", "plugin-a"), ("/plugins/b", "plugin-b")]);
 
         // Batch touching only A → exactly one event, tagged A.
         let evs =
@@ -499,43 +566,28 @@ mod tests {
         );
     }
 
-    fn repos_with(root: &str, sid: &str) -> HashMap<PathBuf, String> {
-        let mut m = HashMap::new();
-        m.insert(PathBuf::from(root), sid.to_string());
-        m
-    }
-
     #[test]
     fn session_for_source_file_maps_to_session() {
-        let repos = repos_with("/repo", "s1");
-        assert_eq!(
-            session_for_path(Path::new("/repo/src/main.rs"), &repos),
-            Some("s1".to_string())
-        );
+        let repos = watch_set(&[("/repo", "s1")]);
+        assert_eq!(owners(&repos, "/repo/src/main.rs"), vec!["s1"]);
     }
 
     #[test]
     fn session_ignores_build_and_vcs_churn() {
-        let repos = repos_with("/repo", "s1");
-        assert_eq!(session_for_path(Path::new("/repo/target/debug/x"), &repos), None);
-        assert_eq!(session_for_path(Path::new("/repo/.git/index"), &repos), None);
-        assert_eq!(
-            session_for_path(Path::new("/repo/node_modules/a/b.js"), &repos),
-            None
-        );
-        assert_eq!(session_for_path(Path::new("/repo/.vite/dep.js"), &repos), None);
+        let repos = watch_set(&[("/repo", "s1")]);
+        assert!(owners(&repos, "/repo/target/debug/x").is_empty());
+        assert!(owners(&repos, "/repo/.git/index").is_empty());
+        assert!(owners(&repos, "/repo/node_modules/a/b.js").is_empty());
+        assert!(owners(&repos, "/repo/.vite/dep.js").is_empty());
         // Shared IGNORED_BUILD_DIRS adds vendor/ + coverage/ (previously only the
         // CL walker filtered these — the watcher copy had drifted).
-        assert_eq!(session_for_path(Path::new("/repo/vendor/x/y.php"), &repos), None);
-        assert_eq!(
-            session_for_path(Path::new("/repo/coverage/lcov.info"), &repos),
-            None
-        );
+        assert!(owners(&repos, "/repo/vendor/x/y.php").is_empty());
+        assert!(owners(&repos, "/repo/coverage/lcov.info").is_empty());
     }
 
     #[test]
     fn session_for_path_outside_all_repos_is_none() {
-        let repos = repos_with("/repo", "s1");
-        assert_eq!(session_for_path(Path::new("/elsewhere/file"), &repos), None);
+        let repos = watch_set(&[("/repo", "s1")]);
+        assert!(owners(&repos, "/elsewhere/file").is_empty());
     }
 }
