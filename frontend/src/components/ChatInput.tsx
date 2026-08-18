@@ -75,7 +75,6 @@ function matchMentionables(
 interface ChatInputProps {
   placeholder?: string;
   onSend: (text: string) => Promise<void> | void;
-  disabled?: boolean;
   /**
    * This session's participants, for the `@` picker (rc3 **D17**).
    *
@@ -162,7 +161,6 @@ export function draftKeyFor(sessionId: string): string {
 export function ChatInput({
   placeholder,
   onSend,
-  disabled,
   mentionables,
   activity,
   busy,
@@ -341,12 +339,15 @@ export function ChatInput({
 
   // Auto-grow: reset to `auto` so scrollHeight reflects actual content height,
   // then clamp to 200px (~8 rows). Beyond that the textarea scrolls
-  // internally instead of pushing the chat list off-screen.
+  // internally instead of pushing the chat list off-screen. `scrollHeight` is
+  // the padding box and the element is `border-box` with a 1px border, so the
+  // two border widths are added back — without them the box sat 2px short of
+  // its own content and always had a hair of internal scroll (round 11).
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+    el.style.height = `${Math.min(el.scrollHeight + 2, 200)}px`;
   }, [value]);
 
   // Typed to what it uses (`preventDefault`) rather than `FormEvent`, so the
@@ -361,7 +362,7 @@ export function ChatInput({
     const text = value.trim();
     // Staged answers make an empty Send meaningful (rc3 D34): the picks ARE
     // the response, and the backend requires text or at least one pick.
-    if ((!text && stagedAnswers === 0) || disabled || sending) return;
+    if ((!text && stagedAnswers === 0) || sending) return;
     setSending(true);
     setError(null);
     try {
@@ -375,8 +376,6 @@ export function ChatInput({
       setSending(false);
     }
   };
-
-  const hint = "↵";
 
   return (
     <>
@@ -418,209 +417,206 @@ export function ChatInput({
           )}
         </div>
       )}
-      {/* Unlocked but still working — the locked branch has its own TurnStatus. */}
-      {!locked && (
-        <StillWorkingNotice busy={busy} label={busyLabel} hues={authorHues} />
-      )}
+      {/* Two rows, always: the box, then ONE footer row — status on the left
+          (which participants are working / the Pause drain), the staged-answer
+          chip beside it, Stage|Send and Pause on the right. Round 11: the
+          buttons used to sit BESIDE the box, bottom-aligned, so an auto-grown
+          textarea (2 → 8 rows) left a blank column above them that grew as the
+          user typed, and the locked state spent a third row on the status
+          line alone. */}
       <form onSubmit={handleSubmit} className="flex flex-col gap-1.5 p-3">
-        {locked && (
-          <TurnStatus
-            activity={activity}
-            busy={busy}
-            label={busyLabel}
-            hues={authorHues}
-          />
-        )}
-        <div className="flex items-end gap-2">
-          <>
-            <div className="relative flex-1">
-              {pickerOpen && (
-                <ul
-                  role="listbox"
-                  aria-label="Mention a participant"
-                  className="absolute bottom-full left-0 z-10 mb-1 max-h-48 w-full overflow-y-auto overflow-x-hidden rounded border border-outline-variant bg-surface-container-lowest py-1 shadow-lg"
-                >
-                  {matches.map((m, i) => (
-                    <li key={m.slug}>
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={m.slug === active?.slug}
-                        // `onMouseDown`, not `onClick`: a click blurs the
-                        // textarea first, and the blur closes the picker before
-                        // the click can land on it.
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          insertMention(m.slug);
-                        }}
-                        onMouseEnter={() => setHighlight(i)}
-                        // `min-w-0` + the per-span truncate: the label is
-                        // USER-TYPED (rc3 D20), so this row's width is user
-                        // controlled. A flex child defaults to `min-width:auto`
-                        // and refuses to shrink below its content, so without
-                        // this a long label widens the row past the picker and
-                        // the container scrolls sideways — which the pair above
-                        // now clips into invisibility rather than fixing.
-                        className={cn(
-                          "flex w-full min-w-0 items-baseline gap-2 px-3 py-1.5 text-left text-sm",
-                          m.slug === active?.slug
-                            ? "bg-surface-container-high text-on-surface"
-                            : "text-on-surface-variant",
-                        )}
-                      >
-                        <span
-                          className={cn(
-                            "truncate font-semibold",
-                            authorColorClass(m.label, authorHues),
-                          )}
-                        >
-                          {m.label}
-                        </span>
-                        <span className="shrink-0 font-mono text-xs opacity-60">
-                          @{m.slug}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <Textarea
-                ref={textareaRef}
-                rows={2}
-                placeholder={placeholder ?? "Message…"}
-                value={value}
-                onChange={(e) => {
-                  updateValue(e.target.value);
-                  setCaret(e.target.selectionStart ?? e.target.value.length);
-                }}
-                // Clicking or arrowing into an earlier `@token` reopens the
-                // picker there, so a mention can be fixed rather than retyped.
-                onSelect={(e) =>
-                  setCaret(e.currentTarget.selectionStart ?? 0)
+        {/* `min-w-0`: a flex/grid child defaults to `min-width:auto` and a
+            textarea's min-content is ~20 characters, so at the narrow end of
+            the split the row overflowed the pane (round 11). */}
+        <div className="relative min-w-0">
+          {pickerOpen && (
+            <ul
+              role="listbox"
+              aria-label="Mention a participant"
+              className="absolute bottom-full left-0 z-10 mb-1 max-h-48 w-full overflow-y-auto overflow-x-hidden rounded border border-outline-variant bg-surface-container-lowest py-1 shadow-lg"
+            >
+              {matches.map((m, i) => (
+                <li key={m.slug}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={m.slug === active?.slug}
+                    // `onMouseDown`, not `onClick`: a click blurs the
+                    // textarea first, and the blur closes the picker before
+                    // the click can land on it.
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      insertMention(m.slug);
+                    }}
+                    onMouseEnter={() => setHighlight(i)}
+                    // `min-w-0` + the per-span truncate: the label is
+                    // USER-TYPED (rc3 D20), so this row's width is user
+                    // controlled. A flex child defaults to `min-width:auto`
+                    // and refuses to shrink below its content, so without
+                    // this a long label widens the row past the picker and
+                    // the container scrolls sideways — which the pair above
+                    // now clips into invisibility rather than fixing.
+                    className={cn(
+                      "flex w-full min-w-0 items-baseline gap-2 px-3 py-1.5 text-left text-sm",
+                      m.slug === active?.slug
+                        ? "bg-surface-container-high text-on-surface"
+                        : "text-on-surface-variant",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "truncate font-semibold",
+                        authorColorClass(m.label, authorHues),
+                      )}
+                    >
+                      {m.label}
+                    </span>
+                    <span className="shrink-0 font-mono text-xs opacity-60">
+                      @{m.slug}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <Textarea
+            ref={textareaRef}
+            rows={2}
+            placeholder={placeholder ?? "Message…"}
+            value={value}
+            onChange={(e) => {
+              updateValue(e.target.value);
+              setCaret(e.target.selectionStart ?? e.target.value.length);
+            }}
+            // Clicking or arrowing into an earlier `@token` reopens the
+            // picker there, so a mention can be fixed rather than retyped.
+            onSelect={(e) =>
+              setCaret(e.currentTarget.selectionStart ?? 0)
+            }
+            onKeyDown={(e) => {
+              // **The picker owns these keys while it is open**, and Enter
+              // most of all: an open picker means the user is mid-mention,
+              // so sending the message on Enter would fire it half-typed.
+              if (pickerOpen) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setHighlight((h) => (h + 1) % matches.length);
+                  return;
                 }
-                onKeyDown={(e) => {
-                  // **The picker owns these keys while it is open**, and Enter
-                  // most of all: an open picker means the user is mid-mention,
-                  // so sending the message on Enter would fire it half-typed.
-                  if (pickerOpen) {
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      setHighlight((h) => (h + 1) % matches.length);
-                      return;
-                    }
-                    if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setHighlight(
-                        (h) => (h - 1 + matches.length) % matches.length,
-                      );
-                      return;
-                    }
-                    if (e.key === "Enter" || e.key === "Tab") {
-                      e.preventDefault();
-                      if (active) insertMention(active.slug);
-                      return;
-                    }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setPickerDismissed(true);
-                      return;
-                    }
-                  }
-                  // Enter sends; Shift+Enter inserts a newline (so multi-line
-                  // messages aren't lost). ⌘/Ctrl+Enter also sends. Skip while an
-                  // IME is composing so multibyte input isn't cut mid-character.
-                  if (
-                    e.key === "Enter" &&
-                    !e.shiftKey &&
-                    !e.nativeEvent.isComposing
-                  ) {
-                    e.preventDefault();
-                    handleSubmit(e);
-                  }
-                }}
-                disabled={disabled || sending || activity === "cancelling"}
-                readOnly={staged}
-                // Right padding leaves room for the kbd hint overlay.
-                className={cn(
-                  "w-full resize-none pr-14",
-                  staged && "opacity-80",
-                )}
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setHighlight(
+                    (h) => (h - 1 + matches.length) % matches.length,
+                  );
+                  return;
+                }
+                if (e.key === "Enter" || e.key === "Tab") {
+                  e.preventDefault();
+                  if (active) insertMention(active.slug);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setPickerDismissed(true);
+                  return;
+                }
+              }
+              // Enter sends; Shift+Enter inserts a newline (so multi-line
+              // messages aren't lost). ⌘/Ctrl+Enter also sends. Skip while an
+              // IME is composing so multibyte input isn't cut mid-character.
+              if (
+                e.key === "Enter" &&
+                !e.shiftKey &&
+                !e.nativeEvent.isComposing
+              ) {
+                e.preventDefault();
+                handleSubmit(e);
+              }
+            }}
+            disabled={sending || activity === "cancelling"}
+            readOnly={staged}
+            title="Enter to send · Shift+Enter for a newline"
+            className={cn("w-full resize-none", staged && "opacity-80")}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-on-surface-variant">
+            {locked ? (
+              <TurnStatus
+                activity={activity}
+                busy={busy}
+                label={busyLabel}
+                hues={authorHues}
               />
-              <kbd
-                aria-hidden
-                className="pointer-events-none absolute bottom-1.5 right-2 select-none rounded border border-outline-variant bg-surface-container-lowest px-1.5 py-0.5 font-mono text-[0.65rem] text-on-surface-variant"
-                title="Enter to send · Shift+Enter for a newline"
-              >
-                {hint}
-              </kbd>
-            </div>
+            ) : (
+              <StillWorkingNotice busy={busy} label={busyLabel} hues={authorHues} />
+            )}
             {stagedAnswers > 0 && (
               <span
-                className="self-center whitespace-nowrap rounded bg-primary/15 px-1.5 py-0.5 text-[0.7rem] text-primary"
+                className="whitespace-nowrap rounded bg-primary/15 px-1.5 py-0.5 text-[0.7rem] text-primary"
                 title="Staged tray answers — they travel with this response as one Send"
               >
                 +{stagedAnswers} answer{stagedAnswers > 1 ? "s" : ""}
               </span>
             )}
-            {locked ? (
-              staged ? (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={handleUnstage}
-                  className="min-w-[5.5rem]"
-                  title="Staged — delivers at the next turn break, with your staged answers. Click to edit."
-                >
-                  Staged ✓
-                </Button>
-              ) : (
-                <Button
-                  type="submit"
-                  variant="primary"
-                  disabled={
-                    (!value.trim() && stagedAnswers === 0) ||
-                    !onStage ||
-                    staging ||
-                    activity === "cancelling"
-                  }
-                  className="min-w-[5.5rem]"
-                  title="Queue this message — it delivers at the next turn break, never mid-turn. Pause is the interrupt."
-                >
-                  {staging ? "Staging…" : "Stage"}
-                </Button>
-              )
+          </div>
+          {locked ? (
+            staged ? (
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={handleUnstage}
+                className="min-w-[5.5rem]"
+                title="Staged — delivers at the next turn break, with your staged answers. Click to edit."
+              >
+                Staged ✓
+              </Button>
             ) : (
               <Button
                 type="submit"
                 variant="primary"
                 disabled={
-                  (!value.trim() && stagedAnswers === 0) || disabled || sending
+                  (!value.trim() && stagedAnswers === 0) ||
+                  !onStage ||
+                  staging ||
+                  activity === "cancelling"
                 }
-                // Fixed min-width so the label cycle (Send → Sending… → Send)
-                // doesn't dance the layout on every submit.
                 className="min-w-[5.5rem]"
+                title="Queue this message — it delivers at the next turn break, never mid-turn. Pause is the interrupt."
               >
-                {sending ? "Sending…" : "Send"}
+                {staging ? "Staging…" : "Stage"}
               </Button>
-            )}
-            {locked && onCancel && (
-              <Button
-                type="button"
-                variant="danger"
-                onClick={handleCancel}
-                // Disabled while the cancel is in flight — either the local
-                // press latency (`cancelling`) or the backend's explicit state.
-                disabled={cancelling || activity === "cancelling"}
-                className="min-w-[5.5rem]"
-                // Named for what it IS (rc3 D33): the only interrupt in the
-                // product. Everything else — a parked question, an approval, a
-                // halt — is the session arriving somewhere, not being cut off.
-                title="Pause the agents — the one interrupt. The session parks until you steer, resume, or close."
-              >
-                {cancelling || activity === "cancelling" ? "Pausing…" : "Pause"}
-              </Button>
-            )}
-          </>
+            )
+          ) : (
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={(!value.trim() && stagedAnswers === 0) || sending}
+              // Fixed min-width so the label cycle (Send → Sending… → Send)
+              // doesn't dance the layout on every submit.
+              className="min-w-[5.5rem]"
+              title="Send — Enter · Shift+Enter for a newline"
+            >
+              {sending ? "Sending…" : "Send"}
+            </Button>
+          )}
+          {locked && onCancel && (
+            <Button
+              type="button"
+              variant="danger"
+              onClick={handleCancel}
+              // Disabled while the cancel is in flight — either the local
+              // press latency (`cancelling`) or the backend's explicit state.
+              disabled={cancelling || activity === "cancelling"}
+              className="min-w-[5.5rem]"
+              // Named for what it IS (rc3 D33): the only interrupt in the
+              // product. Everything else — a parked question, an approval, a
+              // halt — is the session arriving somewhere, not being cut off.
+              title="Pause the agents — the one interrupt. The session parks until you steer, resume, or close."
+            >
+              {cancelling || activity === "cancelling" ? "Pausing…" : "Pause"}
+            </Button>
+          )}
         </div>
       </form>
     </>
@@ -696,21 +692,19 @@ function StillWorkingNotice({
   // unreachable, and are gone).
   if (!anyBusy(busy)) return null;
   return (
-    <div className="flex items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-1.5 text-xs text-on-surface-variant">
-      <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-        <span>Stopping ·</span>
-        <WorkerLine busy={busy} label={label} hues={hues} />
-        <span>— finishing the current tool.</span>
-      </span>
+    <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+      <span>Stopping ·</span>
+      <WorkerLine busy={busy} label={label} hues={hues} />
+      <span>— finishing the current tool.</span>
       <BouncingDots />
-    </div>
+    </span>
   );
 }
 
-// Rendered above the composer while a turn is in flight (the textarea stays
-// mounted and writable under the lock since the Stage toggle, 2026-08-15):
-// which participants are working, with a little animated spice. The user
-// Pauses to interrupt.
+// Rendered in the composer's footer row while a turn is in flight (the
+// textarea stays mounted and writable under the lock since the Stage toggle,
+// 2026-08-15): which participants are working, with a little animated spice.
+// The user Pauses to interrupt.
 function TurnStatus({
   activity,
   busy,
@@ -724,24 +718,18 @@ function TurnStatus({
 }) {
   // A cancel-in-flight reads as "Stopping…" regardless of who was busy.
   if (activity === "cancelling") {
-    return (
-      <div className="flex flex-1 items-center gap-2 px-1 text-xs text-on-surface-variant">
-        <span className="animate-pulse">Stopping the turn…</span>
-      </div>
-    );
+    return <span className="animate-pulse">Stopping the turn…</span>;
   }
   return (
-    <div className="flex flex-1 items-center gap-2 px-1 text-xs text-on-surface-variant">
-      <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-        {anyBusy(busy) ? (
-          <WorkerLine busy={busy} label={label} hues={hues} />
-        ) : (
-          // Locked but no per-agent flag yet (e.g. a stale snapshot): stay generic.
-          <span>A participant is working</span>
-        )}
-      </span>
+    <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+      {anyBusy(busy) ? (
+        <WorkerLine busy={busy} label={label} hues={hues} />
+      ) : (
+        // Locked but no per-agent flag yet (e.g. a stale snapshot): stay generic.
+        <span>A participant is working</span>
+      )}
       <BouncingDots />
-    </div>
+    </span>
   );
 }
 

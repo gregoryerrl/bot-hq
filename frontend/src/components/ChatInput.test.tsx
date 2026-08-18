@@ -99,6 +99,40 @@ describe("ChatInput turn-status + Stop", () => {
     expect(screen.getByText("is working")).toBeInTheDocument();
   });
 
+  it("puts the status and the buttons on ONE footer row under the box, never beside it", () => {
+    // Round 11 (the user: "an empty space above Stage and Pause"). The buttons
+    // sat beside the auto-growing textarea, bottom-aligned, so every extra
+    // line the user typed opened a taller blank column above them, and the
+    // locked state spent a third row on the status line. Now: the box, then a
+    // footer row that carries the status on the left and the buttons on the
+    // right — the same row count as before when locked, no gap at any height.
+    render(
+      <ChatInput
+        activity="busy"
+        busy={{ hands: true, eyes: false }}
+        busyLabel={LABEL}
+        onSend={() => {}}
+        onStage={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    const pause = screen.getByRole("button", { name: "Pause" });
+    const stage = screen.getByRole("button", { name: "Stage" });
+    const status = screen.getByText("is working");
+    const row = pause.parentElement!;
+    expect(row).toBe(stage.parentElement);
+    expect(row.contains(status)).toBe(true);
+    // The box is a full-width row of its own ABOVE that footer, so nothing
+    // sits beside it to leave a column empty…
+    const box = screen.getByRole("textbox").parentElement!;
+    expect(row.contains(box)).toBe(false);
+    expect(box.nextElementSibling).toBe(row);
+    // …and it can shrink with the pane (a textarea's min-content is ~20
+    // characters; `min-width:auto` would overflow the split's narrow end).
+    expect(box.className).toContain("min-w-0");
+    expect(row.className).not.toContain("items-end");
+  });
+
   it("stages the typed message, locks it, and un-stages back to editable", async () => {
     const onStage = vi.fn().mockResolvedValue(undefined);
     const onUnstage = vi.fn().mockResolvedValue(undefined);
