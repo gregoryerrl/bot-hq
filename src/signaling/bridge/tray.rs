@@ -1180,11 +1180,6 @@ impl SignalingBridge {
                 None => true,
             }
         };
-        // The halt latch, BEFORE the awaiting flip and regardless of
-        // `recorded` (round 10, B1): the stop takes effect either way, so the
-        // ack-time interrupt decision must see it either way. See
-        // `SignalingBridge::session_halt_latch`.
-        self.latch_halt(&session_id, &agent);
         self.set_session_awaiting(&session_id, &agent, halt_ring).await;
         if !recorded {
             // Best-effort, and on the same storage that just failed — but the
@@ -2049,74 +2044,6 @@ mod tests {
             matches!(ev, SignalingEvent::AwaitingUser { session_id, agent, reason }
             if session_id == "s1" && agent == "hands" && reason == "ping")
         );
-    }
-
-    /// **The halt latch (round 10, B1).** A declared halt is outstanding for
-    /// its declarer from the moment it takes effect until a real user response
-    /// releases it — the predicate `AppState::halt_declared` reads at the ack
-    /// to decide whether the D35 self-interrupt still applies. Storage-less
-    /// bridge on purpose: `emit_halt_row` treats "no storage" as recorded, so
-    /// this is also the shape in which the DB halt slot could never have said
-    /// anything, which is why the latch and not the slot is the predicate.
-    #[tokio::test]
-    async fn a_declared_halt_is_outstanding_for_its_declarer_until_the_release() {
-        let bridge = SignalingBridge::new();
-        // Never declared here → unknown → outstanding (the safe side).
-        assert!(bridge.halt_outstanding_for("s1", "hands"));
-        bridge
-            .mark_awaiting_user("s1".into(), "hands".into(), "waiting".into())
-            .await;
-        assert!(bridge.halt_outstanding_for("s1", "hands"), "declared: outstanding");
-        assert!(
-            !bridge.halt_outstanding_for("s1", "eyes"),
-            "a session with a latch holds only its declarers: eyes never declared"
-        );
-        // The release: only `notify_halts_cleared` — the one signal fired from
-        // the one production `clear_session_halt` — clears it.
-        bridge.notify_halts_cleared("s1".into());
-        assert!(
-            !bridge.halt_outstanding_for("s1", "hands"),
-            "released: the ack must not interrupt the declarer any more"
-        );
-        // A fresh declaration re-arms it.
-        bridge
-            .mark_awaiting_user("s1".into(), "hands".into(), "waiting again".into())
-            .await;
-        assert!(bridge.halt_outstanding_for("s1", "hands"));
-        // Unregistering forgets the session — back to unknown/outstanding.
-        bridge.unregister_session("s1").await;
-        assert!(bridge.halt_outstanding_for("s1", "hands"));
-    }
-
-    /// Per DECLARER, not one bool per session (EYES, plan-eyes): a peer's halt
-    /// declared inside the release→ack window neither shields nor sinks a
-    /// stale ack.
-    #[tokio::test]
-    async fn the_halt_latch_is_kept_per_declarer() {
-        let bridge = SignalingBridge::new();
-        // A declared, released, then B declares: A's late ack finds only B held.
-        bridge
-            .mark_awaiting_user("s1".into(), "hands".into(), "a".into())
-            .await;
-        bridge.notify_halts_cleared("s1".into());
-        bridge
-            .mark_awaiting_user("s1".into(), "eyes".into(), "b".into())
-            .await;
-        assert!(!bridge.halt_outstanding_for("s1", "hands"), "A's halt is gone");
-        assert!(bridge.halt_outstanding_for("s1", "eyes"), "B's stands");
-        // Both declared with no release between: both acks interrupt.
-        bridge
-            .mark_awaiting_user("s1".into(), "hands".into(), "a2".into())
-            .await;
-        assert!(bridge.halt_outstanding_for("s1", "hands"));
-        assert!(bridge.halt_outstanding_for("s1", "eyes"));
-        // Host-declared halts latch under their agent slug too.
-        bridge.notify_halts_cleared("s1".into());
-        bridge
-            .mark_awaiting_user_for("s1".into(), "eyes".into(), "spin".into())
-            .await;
-        assert!(bridge.halt_outstanding_for("s1", "eyes"));
-        assert!(!bridge.halt_outstanding_for("s1", "hands"));
     }
 
     #[tokio::test]

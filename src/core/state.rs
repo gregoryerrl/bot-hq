@@ -2197,28 +2197,7 @@ impl AppState {
     /// this tool use…"). By the time the result is in the stream there is
     /// nothing left to race; a halt whose result is an error took no effect
     /// and does not interrupt. `main.rs` pins the routing.
-    ///
-    /// **A halt already RELEASED does not interrupt its declarer (round 10,
-    /// B1).** Five live traces (`s-766f4ab9` ×3, `s-d931f81b`, `s-dbc0e856`):
-    /// the user's tray answer, staged during the declarer's turn, is delivered
-    /// at the halt boundary — the ring restarts and deals the declarer that
-    /// answer ~20 ms BEFORE its own tool-result ack lands here; the interrupt
-    /// then aborted the residual generation AND the message just queued on
-    /// stdin, and the session sat bare-idle until the 90-second idle nudge
-    /// re-dealt it. The bridge's halt latch is the predicate — set when a halt
-    /// takes effect, cleared only by a real user response — so this skips
-    /// exactly when the halt the ack belongs to is gone. Not the awaiting
-    /// flag (a gate answer clears it while the halt stands) and not the DB slot
-    /// (`emit_halt_row` keeps an unrecorded halt in effect).
     pub async fn halt_declared(&self, session_id: &str, agent_slug: &str) {
-        if !self.bridge.halt_outstanding_for(session_id, agent_slug) {
-            tracing::debug!(
-                session_id,
-                agent = agent_slug,
-                "halt already released before its ack; declarer not interrupted"
-            );
-            return;
-        }
         let sessions = self.sessions.lock().await;
         if let Some(handle) = sessions.get(session_id) {
             for agent in handle.agents() {
@@ -3076,42 +3055,6 @@ mod tests {
             "the close epilogue must not use `await_both_idle` — it returns on the \
              first idle poll, which inside a lap is the handover gap the ring keeps \
              deliberately (hand_turn_to's doc)"
-        );
-    }
-
-    /// **A released halt does not interrupt its declarer (round 10, B1).**
-    /// `halt_declared` must ask the bridge's halt latch BEFORE it reaches for
-    /// the interrupt, and return when the halt is gone. Source-pinned because
-    /// the wire (`AppState` + a live agent's control channel) has no unit
-    /// seam; the latch's own semantics are pinned in `bridge::tray` tests.
-    #[test]
-    fn a_released_halt_does_not_interrupt_its_declarer() {
-        let src = include_str!("state.rs");
-        let prod = src
-            .split("mod tests {")
-            .next()
-            .expect("a split always yields a first part");
-        let body = prod
-            .split("pub async fn halt_declared")
-            .nth(1)
-            .expect("halt_declared exists")
-            .split("\n    pub ")
-            .next()
-            .expect("a split always yields a first part");
-        let latch = body
-            .find("halt_outstanding_for(")
-            .expect("halt_declared must consult the bridge's halt latch");
-        let interrupt = body
-            .find(".interrupt(")
-            .expect("halt_declared still fires the D35 self-interrupt");
-        assert!(
-            latch < interrupt,
-            "the latch is read BEFORE the interrupt, so a released halt returns \
-             without touching the declarer"
-        );
-        assert!(
-            body.contains("return;"),
-            "the released branch returns — it must not fall through to the interrupt"
         );
     }
 
