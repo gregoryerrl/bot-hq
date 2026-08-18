@@ -430,6 +430,30 @@ pub struct SignalingBridge {
     /// network round trip — but the tests that assert on the remote need to,
     /// so the handle is kept: `await_library_push` (test-only) drains it.
     library_push: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// **The halt latch** (round 10, B1): which participants have a halt
+    /// OUTSTANDING in a session — set by the one call that makes a halt take
+    /// effect (`emit_halt_row`, before the awaiting flip and regardless of
+    /// whether the durable row persisted) and cleared by the one call that
+    /// releases one (`notify_halts_cleared`, fired only from `user_responded`
+    /// when `clear_session_halt` cleared a row). Read at the halt's ACK by
+    /// `AppState::halt_declared` to decide whether the D35 self-interrupt still
+    /// applies: a halt released in the ~30 ms between the declaration and its
+    /// tool-result ack (a staged tray answer delivered at the halt boundary —
+    /// five live traces, `s-766f4ab9`) must NOT interrupt the declarer, because
+    /// the ring has already dealt it the answer and the interrupt eats that
+    /// message off stdin.
+    ///
+    /// Why not the DB halt slot: `emit_halt_row` keeps the halt in effect when
+    /// `declare_session_halt` fails, so an empty slot cannot mean "released".
+    /// Why not the awaiting flag: an approval-gate answer clears it while the
+    /// halt stands. Per DECLARER rather than one bool per session so a peer's
+    /// halt declared inside that window neither shields nor sinks a stale ack:
+    /// A declared → released → B declares → A's late ack finds only B held and
+    /// skips; A and B both declared with no release → both acks interrupt.
+    ///
+    /// Absent (never declared, or unregistered) reads as OUTSTANDING — the safe
+    /// side; an entry with an empty set is a released session.
+    session_halt_latch: std::sync::Mutex<HashMap<String, std::collections::HashSet<String>>>,
 }
 
 /// What an `advance_phase` call actually did — **the tool's honest answer**.
@@ -522,6 +546,7 @@ impl SignalingBridge {
             turn_passes: std::sync::Mutex::new(HashMap::new()),
             mcp_tokens: std::sync::Mutex::new(HashMap::new()),
             library_push: std::sync::Mutex::new(None),
+            session_halt_latch: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -967,6 +992,10 @@ impl SignalingBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .retain(|k, _| !k.starts_with(&format!("{session_id}:")));
+        self.session_halt_latch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(session_id);
     }
 
     /// A3b: record that the agent ran `cl_rescan` or `cl_write_file` this
@@ -1246,9 +1275,44 @@ impl SignalingBridge {
     /// clears. Callers guard on `cleared > 0` so this only fires when a halt was
     /// actually pending. Fire-and-forget.
     pub fn notify_halts_cleared(&self, session_id: String) {
+        // The release half of the halt latch (round 10, B1): the session's
+        // halt was cleared by a real user response, so no declarer's ack may
+        // interrupt it any more. An empty set, not a removed key — absent
+        // means unknown and reads as outstanding.
+        self.session_halt_latch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(session_id.clone(), std::collections::HashSet::new());
         let _ = self
             .event_tx
             .send(SignalingEvent::HaltsCleared { session_id });
+    }
+
+    /// The declaration half of the halt latch (round 10, B1): `agent` has a halt
+    /// outstanding in `session_id` until [`notify_halts_cleared`] fires. Called
+    /// by `emit_halt_row` for every halt that takes effect — the agent's own
+    /// `halt` / `mark_awaiting_user`, the host-declared ones
+    /// (`mark_awaiting_user_for`), and the ring's own stops.
+    pub(super) fn latch_halt(&self, session_id: &str, agent: &str) {
+        self.session_halt_latch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(agent.to_string());
+    }
+
+    /// Does `agent` still have a halt outstanding in `session_id`? Read at the
+    /// halt's tool-result ack to decide whether the D35 self-interrupt applies.
+    /// **Absent reads as `true`** — a session this bridge has no latch for
+    /// (never declared here, or already unregistered) is treated as halted, the
+    /// side an interrupt cannot make worse.
+    pub fn halt_outstanding_for(&self, session_id: &str, agent: &str) -> bool {
+        self.session_halt_latch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(session_id)
+            .map_or(true, |held| held.contains(agent))
     }
 
     /// Fire a `SessionClosed` event after a session finished closing, so the UI
