@@ -126,6 +126,55 @@ describe("ApprovalGate", () => {
     );
   });
 
+  // Round 11: an agent's `request_approval` may carry its OWN labels (the
+  // tool schema suggests one starting "Approve" and one "Deny"). Since the
+  // backend now stamps every approval-context row `kind = approval` — the
+  // marker that latches AND lifts the ring — such a row lands in this slot,
+  // and it must offer the labels the agent offered, not a hardcoded pair: the
+  // pick goes back to the agent verbatim, and a label it never sent is a
+  // correctness regression, not a cosmetic one.
+  it("renders a custom menu's own labels and resolves with the picked label", async () => {
+    const onResolve = resolved();
+    render(
+      <ApprovalGate
+        rows={[
+          approval({
+            kind: "approval",
+            options: ["Approve — read only", "Deny with reason"],
+            command_text: null,
+          }),
+        ]}
+        onResolve={onResolve}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reject" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Deny with reason" }));
+    await waitFor(() =>
+      expect(onResolve).toHaveBeenCalledWith("c-1", "Deny with reason", false),
+    );
+  });
+
+  // The other half of the same rule: the canonical menu still resolves with
+  // the LITERAL "Approve" — only that string runs a parked command
+  // (`gate_verdict` is fail-closed by design). A refactor that sent
+  // `options[0]` through would look identical on screen and break every
+  // action gate.
+  it("keeps the canonical menu resolving with the literal Approve / Reject", async () => {
+    const onResolve = resolved();
+    render(
+      <ApprovalGate rows={[approval({ kind: "approval" })]} onResolve={onResolve} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    await waitFor(() =>
+      expect(onResolve).toHaveBeenCalledWith("c-1", "Reject", false),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() =>
+      expect(onResolve).toHaveBeenLastCalledWith("c-1", "Approve", false),
+    );
+  });
+
   it("rejects through the same path", async () => {
     const onResolve = resolved();
     render(<ApprovalGate rows={[approval()]} onResolve={onResolve} />);

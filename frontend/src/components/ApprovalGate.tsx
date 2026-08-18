@@ -32,6 +32,16 @@ import { fileArgInCommand } from "./FileViewerDialog";
  * A user approving `git push` needs to read that push, not five commands at
  * once.
  */
+/** The host's gate menu — one-click Approve/Reject, and the only menu whose
+ *  literal `Approve` runs a parked command. Anything else is an agent's
+ *  `request_approval` carrying its own labels, rendered as-is. */
+function isCanonicalMenu(options: readonly string[]): boolean {
+  return (
+    options.length === 0 ||
+    (options.length === 2 && options[0] === "Approve" && options[1] === "Reject")
+  );
+}
+
 export function ApprovalGate({
   rows,
   label,
@@ -188,23 +198,44 @@ export function ApprovalGate({
           </div>
         </div>
       ) : (
-        <div className="mt-2 flex items-center gap-2">
-          <Button
-            type="button"
-            variant="primary"
-            disabled={!!busy}
-            onClick={() => void resolve("Approve")}
-          >
-            {busy === "Approve" ? "Approving…" : "Approve"}
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            disabled={!!busy}
-            onClick={() => void resolve("Reject")}
-          >
-            {busy === "Reject" ? "Rejecting…" : "Reject"}
-          </Button>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {isCanonicalMenu(row.options) ? (
+            <>
+              <Button
+                type="button"
+                variant="primary"
+                disabled={!!busy}
+                onClick={() => void resolve("Approve")}
+              >
+                {busy === "Approve" ? "Approving…" : "Approve"}
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={!!busy}
+                onClick={() => void resolve("Reject")}
+              >
+                {busy === "Reject" ? "Rejecting…" : "Reject"}
+              </Button>
+            </>
+          ) : (
+            // An agent's `request_approval` with its OWN labels (round 11):
+            // the buttons ARE those labels, and the pick goes back verbatim.
+            // Only the host's canonical menu above resolves with the literal
+            // "Approve" that runs a parked command — a custom row carries no
+            // command, so nothing executes on this path.
+            row.options.map((option, i) => (
+              <Button
+                key={option}
+                type="button"
+                variant={i === 0 ? "primary" : "secondary"}
+                disabled={!!busy}
+                onClick={() => void resolve(option)}
+              >
+                {busy === option ? "Sending…" : option}
+              </Button>
+            ))
+          )}
           {onCancel && (
             <Button
               type="button"

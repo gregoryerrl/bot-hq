@@ -167,13 +167,20 @@ pub struct Model {
 pub enum QuestionKind {
     /// `ask_user_choice` — has a fixed set of options.
     Choice,
-    /// An Approve/Reject GATE — a parked `action_gate` command, a push gate,
-    /// a reviewer-down override request: policy-initiated, menu exactly
-    /// `["Approve","Reject"]`, answered on the spot in the gate slot rather
-    /// than the tray. Written at insert since round 8; rows parked before
-    /// that carry `choice` with the gate menu, which is why every reader goes
-    /// through [`is_gate_row`](crate::storage::is_gate_row) (kind OR menu),
-    /// not the kind alone.
+    /// A GATE — a parked `action_gate` command, a push gate, a reviewer-down
+    /// override request, an agent's `request_approval`: policy-initiated
+    /// (an approval context at insert), answered on the spot in the gate slot
+    /// rather than the tray, and the marker that LATCHES the ring (D35) and
+    /// lifts it again. Any menu: the host's gates carry the canonical
+    /// `["Approve","Reject"]` (one-click buttons; only that literal `Approve`
+    /// runs a parked command); an agent's `request_approval` may carry its own
+    /// labels, which the gate slot renders as-is (round 11 — the marker used to
+    /// require the canonical menu while the latch did not, so a custom-labelled
+    /// approval latched a gate nothing could lift). Written at insert since
+    /// round 8; rows parked before that carry `choice` with the gate menu, which
+    /// is why every reader goes through
+    /// [`is_gate_row`](crate::storage::is_gate_row) (kind OR menu), not the
+    /// kind alone.
     Approval,
     /// Free-text open question — user types a reply via normal chat input.
     OpenAsk,

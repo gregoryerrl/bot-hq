@@ -30,11 +30,15 @@ export type TrayRow = {
  * something they could answer whenever they got to it while a pre-push hook
  * blocked on it.
  *
- * Both gate kinds ask exactly `Approve`/`Reject`; an `ask_user_choice` question
+ * The host's gates ask exactly `Approve`/`Reject`; an `ask_user_choice` question
  * carries free-form options. Since round 8 the backend also says so at insert
  * (`kind = "approval"`, `storage::is_gate_row`), so the kind is the primary
  * signal here and the exact-menu check is the fallback for rows parked before
- * that (`kind = "choice"` with the gate menu). Measured on the live DB on
+ * that (`kind = "choice"` with the gate menu). Since round 11 the kind is
+ * stamped on EVERY approval-context row — an agent's `request_approval` with
+ * its own labels included — because it is also the marker that latches and
+ * lifts the ring; the gate slot renders such a menu's own labels. Measured on
+ * the live DB on
  * 2026-08-17, before the kind existed: 95 rows carried the exact menu, all of
  * them gates (78 with a command, the rest push gates), and 0 command-carrying
  * rows had any other menu — the fallback catches every legacy gate and

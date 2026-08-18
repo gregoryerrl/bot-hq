@@ -371,12 +371,19 @@ impl SignalingBridge {
         // survives restart even though the parked oneshot in `pending` does
         // not. Best-effort: if storage isn't wired yet (test bridges built
         // via ::new), continue without persisting.
-        // The row says what it is: a policy-initiated ask with the exact gate
-        // menu is an `approval` (answered in the gate slot, latching the ring);
-        // anything else — a question, or a custom-labelled request_approval —
-        // is a `choice`. Readers still accept the pre-round-8 shape
+        // The row says what it is: a policy-initiated ask — an approval
+        // context, whatever its menu — is an `approval`; a question is a
+        // `choice`. `kind = approval` is the durable GATE MARKER: it is what
+        // latches the ring below and what every lift path reads back
+        // (`is_gate_row` — resolve, withdraw, the respawn reseed). Round 11:
+        // this used to require the exact `["Approve","Reject"]` menu as well,
+        // while the latch fired on the context alone — so a `request_approval`
+        // with the agent's own labels latched a gate that nothing could lift.
+        // The render slot is the frontend's call (`isApproval`): a canonical
+        // menu is the one-click Approve/Reject gate, a custom menu shows its
+        // own labels there. Readers still accept the pre-round-8 shape
         // (`choice` + gate menu) through `is_gate_row`.
-        let kind = if is_approval && options.iter().map(String::as_str).eq(["Approve", "Reject"]) {
+        let kind = if is_approval {
             crate::storage::QuestionKind::Approval
         } else {
             crate::storage::QuestionKind::Choice
@@ -1617,6 +1624,73 @@ mod tests {
             rx.try_recv().is_err(),
             "a question is not a gate; the ring hears nothing"
         );
+    }
+
+    /// **The latch and the lift read the same marker** (round 11). A
+    /// `request_approval` carries the agent's OWN menu — the tool schema even
+    /// suggests one starting "Approve" and one "Deny" — and it must latch the
+    /// ring (D35: an approval halts) AND lift it when answered. Before this the
+    /// insert stamped `kind = approval` only for the exact `["Approve","Reject"]`
+    /// menu while the latch fired on the approval context alone; every lift path
+    /// (`resolve`, `withdraw`, the respawn reseed) keyed on `is_gate_row`, so a
+    /// custom-labelled approval parked the ring for the process lifetime. Both
+    /// older latch tests use the canonical menu, which is why nothing caught it.
+    #[tokio::test]
+    async fn a_custom_menu_approval_lifts_the_gate_it_latched() {
+        use crate::core::sequencer::SequencerCommand;
+        use std::sync::atomic::AtomicBool;
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        bridge
+            .register_session_awaiting("s1".into(), Arc::new(AtomicBool::new(false)))
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+
+        let ack = bridge
+            .request_approval_parked(
+                "s1".into(),
+                "hands".into(),
+                "Query prod read-only?".into(),
+                vec!["Approve — read only".into(), "Deny with reason".into()],
+                super::super::ApprovalContext {
+                    kind: crate::policy::ViolationKind::PerAction,
+                    action: "psql -h prod …".into(),
+                    detail: None,
+                },
+            )
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        let choice_id = v["choice_id"].as_str().unwrap().to_string();
+        assert!(
+            matches!(rx.try_recv(), Ok(SequencerCommand::GateOpened { .. })),
+            "an approval with a custom menu still latches the ring"
+        );
+        // The durable row says what it is: policy-initiated, so a gate — the
+        // marker every lift path reads.
+        let row = storage.get_tray_entry(&choice_id).await.unwrap().unwrap();
+        assert_eq!(row.kind, "approval", "the row carries the gate marker, not the menu");
+        assert!(
+            crate::storage::is_gate_row(&row.kind, row.options_json.as_deref()),
+            "is_gate_row must recognise the row the latch was opened for"
+        );
+
+        // The user answers with one of the agent's OWN labels.
+        bridge
+            .resolve_choice(&choice_id, "Approve — read only".into())
+            .await
+            .unwrap();
+        assert!(
+            matches!(rx.try_recv(), Ok(SequencerCommand::GateResolved { .. })),
+            "the answer must LIFT the latch it opened — otherwise the ring is parked \
+             until the process restarts"
+        );
+        // And the pick recorded is the label the agent offered, untouched.
+        let row = storage.get_tray_entry(&choice_id).await.unwrap().unwrap();
+        assert_eq!(row.picked_option.as_deref(), Some("Approve — read only"));
     }
 
     /// A session with no ring registered must not panic or block — the bridge is
