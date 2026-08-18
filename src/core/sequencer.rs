@@ -6307,6 +6307,86 @@ mod tests {
         assert!(exited(task).await);
     }
 
+    /// **A stage survives no yield** (round 10, C1). The user stages during the
+    /// LAST turn of an all-pass lap; that turn's completion is a boundary, and
+    /// `on_turn_complete`'s staged branch parks and hands delivery to the app
+    /// BEFORE the all-pass logic could yield with the flag up — with no second
+    /// `MessageStaged`. Pinned because a sweep read the yield as a strand: the
+    /// ORDER of the branches in `on_turn_complete` (consensus, spin, staged,
+    /// then `advance_turn`) is what keeps it from being one, and a flush added
+    /// at the yield itself is unreachable with the flag set — verified by
+    /// adding and removing one while this test stayed green.
+    #[tokio::test]
+    async fn a_stage_during_the_last_turn_of_an_all_pass_lap_still_delivers() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        let mut events = bridge.subscribe();
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: PASSED })
+            .await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"]);
+
+        // Staged while B holds the last turn of the lap: flag only.
+        send(&tx, SequencerCommand::MessageStaged).await;
+        assert!(next_due_quick(&mut events).await.is_none(), "no delivery mid-turn");
+
+        // B passes: every turn of the lap was a pass — and the stage is still
+        // handed to the app at this boundary, ahead of any yield.
+        send(&tx, SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: PASSED })
+            .await;
+        assert_eq!(
+            next_due(&mut events).await.as_deref(),
+            Some("s1"),
+            "the boundary of an all-pass lap still hands the staged message to the app"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// Same pin at the round cap: the capping turn's completion parks and
+    /// delivers the stage before the cap logic runs.
+    #[tokio::test]
+    async fn a_stage_during_the_capping_turn_still_delivers() {
+        let (mut deps, storage, mut seats, _dir) =
+            capped_ring(&[("a", "active"), ("b", "active")], Some(1)).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        let mut events = bridge.subscribe();
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        // A -> B is mid-lap; B's completion wraps the ring, and with a cap of
+        // one lap that wrap is the cap.
+        let w = lap_step(&storage, &tx, &mut seats[1], a, 1, "t1").await;
+        assert!(w.contains(&"t1".to_string()));
+        send(&tx, SequencerCommand::MessageStaged).await;
+        assert!(next_due_quick(&mut events).await.is_none(), "no delivery mid-turn");
+        post(&storage, "user", None, "t2").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: SPOKE })
+            .await;
+        assert_eq!(
+            next_due(&mut events).await.as_deref(),
+            Some("s1"),
+            "the capping boundary still hands the staged message to the app"
+        );
+        seats[0].quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
     /// One substantive turn is enough to earn the lap — the yield is for a lap
     /// where NOBODY spoke, not for one that contained a pass.
     #[tokio::test]
