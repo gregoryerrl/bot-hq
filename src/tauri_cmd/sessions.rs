@@ -1053,9 +1053,12 @@ pub async fn respawn_session(
 /// **Reopen a closed session** (round 10, B4 — the user's pick: "a Reopen
 /// button for closed sessions"). Clears `closed_at` / `archived` / the halt
 /// slot, respawns the roster via `--resume`, and fires `session:created` so
-/// the dashboard lists it again. The SessionView's mount respawn no longer
-/// touches a closed row (`ensure_session_started` refuses one), so this button
-/// is the ONLY way an archived session's participants come back.
+/// the dashboard lists it again (the bar refetches `get_session` itself so
+/// the live composer replaces it — round 11). The SessionView's mount respawn
+/// no longer touches a closed row (`ensure_session_started` refuses one), so
+/// this button is the ONLY way an archived session's participants come back.
+/// Idempotent: an already-open row is a success no-op, so a double click is
+/// harmless.
 #[tauri::command]
 #[specta::specta]
 pub async fn reopen_session(

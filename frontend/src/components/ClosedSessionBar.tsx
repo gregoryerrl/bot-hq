@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "./ui/Button";
 import { ErrorBanner } from "./ErrorBanner";
@@ -15,7 +16,10 @@ import { formatTimestamp } from "../lib/time";
  * way to bring the participants back is this button, which clears the row's
  * `closed_at` (and `archived`, so the dashboard lists it again), respawns the
  * roster via `--resume`, and hands the view back to the live composer through
- * the invalidated `get_session` read.
+ * a REFETCHED `get_session` read — which this bar asks for itself (round 11,
+ * issues.md 2026-08-18): the backend's `session:created` refreshed only the
+ * dashboard list, so the closed view stayed on screen after a successful
+ * reopen and the user's second click errored "already open".
  */
 export function ClosedSessionBar({
   sessionId,
@@ -26,6 +30,7 @@ export function ClosedSessionBar({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
   return (
     <div
       role="status"
@@ -46,6 +51,12 @@ export function ClosedSessionBar({
           setError(null);
           try {
             await invoke("reopen_session", { sessionId });
+            // The row moved: re-read it so the live composer replaces this
+            // bar, and the dashboard lists the session again.
+            await queryClient.invalidateQueries({
+              queryKey: ["get_session", { sessionId }],
+            });
+            await queryClient.invalidateQueries({ queryKey: ["list_sessions"] });
           } catch (e) {
             setError(errorMessage(e));
           } finally {

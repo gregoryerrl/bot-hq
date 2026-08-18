@@ -549,12 +549,21 @@ impl AppState {
     pub async fn reopen_session(&self, session_id: &str) -> Result<()> {
         let moved = self.storage.reopen_session(session_id).await?;
         if !moved {
-            anyhow::bail!("session {session_id} is not closed; nothing to reopen");
+            // Not closed (or unknown): a second click that beat the view's
+            // refetch, or a stale view of a row somebody else reopened. There
+            // is nothing to reopen and nothing to fail — the storage half
+            // returns `false` precisely so that this is harmless. Round 11:
+            // this used to return an error, and the bar rendered the user's
+            // double click as "Reopen failed: … not closed; nothing to reopen".
+            tracing::debug!(session_id, "reopen: the row is not closed; nothing to do");
+            return Ok(());
         }
         tracing::info!(session_id, "session reopened on the user's button; respawning its roster");
         let started = self.ensure_session_started(session_id).await;
-        // The row moved either way — say so even if the spawn failed, so the
-        // dashboard lists it and the SessionView's own retry banner takes over.
+        // The row moved either way, so the frontend is told BEFORE the spawn
+        // result is returned: the dashboard lists the session again, and a
+        // failed spawn still surfaces — as the bar's inline error here, and as
+        // the SessionView's own retry banner once its `get_session` refetches.
         self.notify_session_created(session_id);
         started
     }
@@ -3107,6 +3116,18 @@ mod tests {
             .find("notify_session_created(session_id)")
             .expect("the reopen tells the frontend the row is live again");
         assert!(clear < start && start < told, "clear the row → spawn → tell the UI");
+        // Round 11: an already-open row is a success no-op — the storage half
+        // returns `false` so a double click (or a stale view) is harmless, and
+        // this path used to turn that into an error the bar rendered as
+        // "Reopen failed". The no-op must return BEFORE the spawn.
+        assert!(
+            !reopen.contains("bail!"),
+            "a not-closed row is not an error: the reopen is idempotent"
+        );
+        let noop = reopen
+            .find("return Ok(());")
+            .expect("the not-closed row returns Ok without spawning");
+        assert!(clear < noop && noop < start, "read the row → no-op if open → spawn");
     }
 
     /// **An unreadable tray row keeps the halt** (round 10): the halt clears

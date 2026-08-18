@@ -155,8 +155,11 @@ function GlobalEventSync() {
   const onCl = useCallback(() => invalidate(CL_KEYS), [invalidate]);
   const onWorktree = useCallback(() => invalidate(WORKTREE_KEYS), [invalidate]);
   const onProject = useCallback(() => invalidate(PROJECT_KEYS), [invalidate]);
+  // `session:created` also fires for a REOPENED row (`AppState::reopen_session`),
+  // whose SessionView is usually already mounted — so the row itself refetches
+  // too, not only the list (round 11).
   const onSessionCreated = useCallback(
-    () => invalidate(SESSION_LIST_KEYS),
+    () => invalidate([...SESSION_LIST_KEYS, "get_session"]),
     [invalidate],
   );
   const onModel = useCallback(() => invalidate(MODEL_KEYS), [invalidate]);
