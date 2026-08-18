@@ -2044,6 +2044,15 @@ impl AppState {
     /// participant reads them off its own cursor (D19), so holding a copy bought
     /// nothing. The PAUSE still suppresses the release, which is the half that
     /// was doing the work.
+    /// Does answering THIS tray row clear the session's halt slot? Only a row
+    /// that was READ and is a question (rc3 D35: a gate answers its approval,
+    /// not the halt). `None` — the row could not be read, or is gone — clears
+    /// nothing: fail-closed, because a halt cleared by mistake is invisible
+    /// while a halt left standing is one message away from cleared.
+    fn tray_answer_clears_halt(row: Option<&crate::storage::SessionTrayEntry>) -> bool {
+        row.is_some_and(|r| !crate::storage::is_gate_row(&r.kind, r.options_json.as_deref()))
+    }
+
     fn tray_wake(holds_wakes: bool, recorded: bool, ring_running: bool) -> TrayWake {
         TrayWake {
             clear_halt: true,
@@ -2068,18 +2077,21 @@ impl AppState {
         // live smoke found tray-only input left the watchdog disarmed (only
         // `broadcast` bumped the counter). StaleGateNeedsConfirm is excluded:
         // nothing was flipped or delivered.
-        // Was the resolved row a GATE? Answering a gate answers that approval
-        // alone (rc3 D35): it lifts the latch and may wake an idle ring, but it
-        // must not clear the session's halt slot — the defect in `s-86a81478`
-        // was exactly that coupling.
-        let mut resolved_a_gate = false;
+        // Was the resolved row a QUESTION? Answering a gate answers that
+        // approval alone (rc3 D35): it lifts the latch and may wake an idle
+        // ring, but it must not clear the session's halt slot — the defect in
+        // `s-86a81478` was exactly that coupling. Fail-CLOSED on the read
+        // (round 10): a row that cannot be read is not known to be a question,
+        // so it clears nothing — the old `resolved_a_gate = false` default
+        // turned an unreadable row into a halt clear.
+        let mut answered_a_question = false;
         if matches!(
             outcome,
             ResolveOutcome::Delivered | ResolveOutcome::DeliveredOutOfBand { .. }
         ) {
-            if let Ok(Some(entry)) = self.storage.get_tray_entry(choice_id).await {
-                resolved_a_gate =
-                    crate::storage::is_gate_row(&entry.kind, entry.options_json.as_deref());
+            let row = self.storage.get_tray_entry(choice_id).await;
+            answered_a_question = Self::tray_answer_clears_halt(row.as_ref().ok().and_then(|r| r.as_ref()));
+            if let Ok(Some(entry)) = row {
                 let sessions = self.sessions.lock().await;
                 if let Some(handle) = sessions.get(&entry.session_id) {
                     handle
@@ -2145,7 +2157,7 @@ impl AppState {
                     // `user_responded`, the D28 single entry point; no mentions,
                     // because a pick from a list carries no `@` to honour (D17).
                     if step.release {
-                        self.user_responded(session_id, Vec::new(), true, !resolved_a_gate)
+                        self.user_responded(session_id, Vec::new(), true, answered_a_question)
                             .await;
                     }
                 }
@@ -3146,6 +3158,40 @@ mod tests {
         assert!(clear < start && start < told, "clear the row → spawn → tell the UI");
     }
 
+    /// **An unreadable tray row keeps the halt** (round 10): the halt clears
+    /// only for a row that was read and is a question — a gate never clears
+    /// it (D35), and neither does a read that failed or found nothing.
+    #[test]
+    fn only_a_read_question_row_clears_the_halt() {
+        let row = |kind: &str, options: Option<&str>, cmd: Option<&str>| {
+            crate::storage::SessionTrayEntry {
+                id: 1,
+                session_id: "s1".into(),
+                choice_id: "c".into(),
+                agent: "hands".into(),
+                kind: kind.into(),
+                prompt: "p".into(),
+                options_json: options.map(str::to_string),
+                status: "answered".into(),
+                picked_option: None,
+                asked_at: "2026-08-18T00:00:00Z".into(),
+                answered_at: None,
+                supersedes_id: None,
+                command_text: cmd.map(str::to_string),
+            }
+        };
+        let question = row("choice", Some(r#"["a","b"]"#), None);
+        let gate = row("approval", Some(crate::storage::GATE_OPTIONS_JSON), Some("echo"));
+        let legacy_gate = row("choice", Some(crate::storage::GATE_OPTIONS_JSON), None);
+        assert!(AppState::tray_answer_clears_halt(Some(&question)));
+        assert!(!AppState::tray_answer_clears_halt(Some(&gate)));
+        assert!(!AppState::tray_answer_clears_halt(Some(&legacy_gate)));
+        assert!(
+            !AppState::tray_answer_clears_halt(None),
+            "an unreadable or missing row clears nothing"
+        );
+    }
+
     /// **The epilogue's turn runs BEFORE anything is torn down.**
     ///
     /// The ordering was prose in a comment and control flow in one function, and
@@ -3275,11 +3321,17 @@ mod tests {
         // A gate answer is the one response that must NOT clear the halt slot
         // (rc3 D35, s-86a81478: approving an unrelated command wiped the HALT
         // the user was looking at). The OOB release site carries the
-        // distinction; losing the negation re-couples them.
+        // distinction through `tray_answer_clears_halt` — a row READ and found
+        // to be a question, and nothing else (round 10: an unreadable row used
+        // to default to "clear"). Losing the derivation re-couples them.
         assert!(
-            prod.contains("!resolved_a_gate"),
-            "the OOB release must pass clear_halt = !resolved_a_gate — a gate \
+            prod.contains("self.user_responded(session_id, Vec::new(), true, answered_a_question)"),
+            "the OOB release must pass clear_halt = answered_a_question — a gate \
              answer answers that gate, not the session's halt"
+        );
+        assert!(
+            prod.contains("answered_a_question = Self::tray_answer_clears_halt("),
+            "and that flag is derived from the READ row, so an unreadable row clears nothing"
         );
 
         // **And the phase paths must not both pass the same source.** The ring
