@@ -78,7 +78,7 @@ typography:
     letterSpacing: 0.05em
 rounded:
   sm: 0.125rem
-  DEFAULT: 0.25rem
+  DEFAULT: 0.125rem
   md: 0.375rem
   lg: 0.5rem
   xl: 0.75rem
@@ -144,11 +144,11 @@ Depth is achieved through **Tonal Layering** and **Low-Contrast Outlines** rathe
 
 ## Shapes
 
-The shape language is "Soft-Industrial." Components use a consistent **4px (0.25rem)** corner radius. This is enough to prevent the UI from feeling aggressive while remaining much sharper than consumer-facing applications. 
+The shape language is "Soft-Industrial." Components — chips, inputs, buttons, pills — share the house **2px (0.125rem, `rounded`)** corner radius; dialogs, session tiles and archive rows use `rounded-lg` (8px). Sharp enough to read as an instrument panel, not a consumer app. (The spec first said 4px; the shipped token is 2px and every component was built to it, so round 11 amended the number here rather than re-rounding the app — `Button` md/lg had drifted to 6px and were brought back to `rounded`.)
 
-- **Chips:** Small 4px radius containers for phases.
+- **Chips:** Small 2px radius containers for phases.
 - **Banners:** Full-width status indicators with 0px radius where they touch container edges.
-- **Inputs:** Squared-off with 2px radius for a more technical, "input-field" feel.
+- **Inputs:** Squared-off with 2px radius for a more technical, "input-field" feel — the same radius as the buttons beside them.
 
 ## Components
 

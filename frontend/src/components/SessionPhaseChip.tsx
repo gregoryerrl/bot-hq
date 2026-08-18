@@ -56,7 +56,7 @@ export function SessionPhaseChip({ phase, closed }: SessionPhaseChipProps) {
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded border px-2 py-0.5 font-label-caps text-label-caps",
+        "inline-flex items-center rounded border px-1.5 py-0.5 font-label-caps text-label-caps",
         t.bg,
         t.text,
         t.border,

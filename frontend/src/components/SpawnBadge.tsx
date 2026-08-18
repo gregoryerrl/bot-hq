@@ -84,7 +84,7 @@ export function SpawnBadge({
   return (
     <span
       className={cn(
-        "ml-1 rounded border px-1 py-0.5 font-label-caps text-label-caps",
+        "ml-1 rounded border px-1.5 py-0.5 font-label-caps text-label-caps",
         chosen
           ? "border-primary/50 bg-primary/15 text-primary"
           : "border-outline-variant text-on-surface-variant",

@@ -56,7 +56,7 @@ describe("Settings", () => {
 
     // rc3 D8: the tab is gone, not merely empty. Waiting on Roles first so the
     // absence is asserted against a rendered tab row, not an empty one.
-    expect(await screen.findByRole("heading", { name: /^roles$/i, level: 1 }))
+    expect(await screen.findByRole("heading", { name: /^roles$/i, level: 2 }))
       .toBeInTheDocument();
     expect(subtab(/^agents$/i)).not.toBeInTheDocument();
   });
@@ -68,7 +68,7 @@ describe("Settings", () => {
     // The inactive panels are hidden by a Tailwind class, and jsdom loads no
     // stylesheet — so "which panel is visible" is not observable here. The
     // active pill's own styling is, and it is what the user sees.
-    await screen.findByRole("heading", { name: /^roles$/i, level: 1 });
+    await screen.findByRole("heading", { name: /^roles$/i, level: 2 });
     expect(subtab(/^roles$/i)).toHaveClass("text-primary");
     expect(subtab(/^models$/i)).not.toHaveClass("text-primary");
   });

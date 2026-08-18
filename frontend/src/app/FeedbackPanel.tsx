@@ -72,7 +72,7 @@ export function FeedbackPanel() {
     });
 
   return (
-    <div className="h-full overflow-y-auto overflow-x-hidden px-4 py-3">
+    <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <p className="mb-3 font-body-md text-body-md text-on-surface-variant">
         Issues and ideas the agents raised about bot-hq itself, filed from
         whatever project they were working on. Work them from a bot-hq session.
@@ -123,7 +123,7 @@ export function FeedbackPanel() {
               <div className="flex items-center gap-2">
                 <span
                   className={cn(
-                    "rounded px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wide",
+                    "rounded px-1.5 py-0.5 font-label-caps text-label-caps",
                     f.kind === "issue"
                       ? "bg-error-container/40 text-on-error-container"
                       : "bg-secondary/20 text-secondary",

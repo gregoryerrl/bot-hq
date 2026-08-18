@@ -3,8 +3,10 @@ import { cn } from "../lib/cn";
 
 /**
  * Underline-style subtab pill shared by the Settings, Context Library and
- * Session pages. The pill row doubles as the page/section header — panels
- * under it must NOT repeat the label as a heading.
+ * Session pages. The pill row is the page's navigation; a panel under it may
+ * open with its own `<h2>` and a descriptive paragraph (the Shell's wordmark
+ * is the page's one `<h1>`) — round 11 retired the older "must not repeat the
+ * label" rule here, which six panels never followed.
  *
  * Rendered as `role="tab"` with `aria-selected` (round 10): the rows were
  * bare buttons whose active state was colour-only, next to `role="tabpanel"`

@@ -66,75 +66,132 @@ export function Settings() {
         aria-label="Settings tabs"
         className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4"
       >
-        <SubTabButton active={tab === "roles"} onClick={() => select("roles")}>
+        <SubTabButton
+          active={tab === "roles"}
+          controls="settings-tab-roles"
+          onClick={() => select("roles")}
+        >
           Roles
         </SubTabButton>
-        <SubTabButton active={tab === "models"} onClick={() => select("models")}>
+        <SubTabButton
+          active={tab === "models"}
+          controls="settings-tab-models"
+          onClick={() => select("models")}
+        >
           Models
         </SubTabButton>
-        <SubTabButton active={tab === "claude"} onClick={() => select("claude")}>
+        <SubTabButton
+          active={tab === "claude"}
+          controls="settings-tab-claude"
+          onClick={() => select("claude")}
+        >
           Claude Config
         </SubTabButton>
         <SubTabButton
           active={tab === "toolgate"}
+          controls="settings-tab-toolgate"
           onClick={() => select("toolgate")}
         >
           Tool Gate
         </SubTabButton>
-        <SubTabButton active={tab === "policy"} onClick={() => select("policy")}>
+        <SubTabButton
+          active={tab === "policy"}
+          controls="settings-tab-policy"
+          onClick={() => select("policy")}
+        >
           Policy
         </SubTabButton>
         <SubTabButton
           active={tab === "violations"}
+          controls="settings-tab-violations"
           onClick={() => select("violations")}
         >
           Violations
         </SubTabButton>
         <SubTabButton
           active={tab === "feedback"}
+          controls="settings-tab-feedback"
           onClick={() => select("feedback")}
         >
           Feedback
         </SubTabButton>
         <SubTabButton
           active={tab === "archive"}
+          controls="settings-tab-archive"
           onClick={() => select("archive")}
         >
           Archive
         </SubTabButton>
         <SubTabButton
           active={tab === "updates"}
+          controls="settings-tab-updates"
           onClick={() => select("updates")}
         >
           Updates
         </SubTabButton>
       </div>
       <div className="min-h-0 flex-1">
-        <div className={cn("h-full", tab !== "roles" && "hidden")}>
+        <div
+          id="settings-tab-roles"
+          role="tabpanel"
+          className={cn("h-full", tab !== "roles" && "hidden")}
+        >
           {visited.has("roles") && <RolesPanel />}
         </div>
-        <div className={cn("h-full", tab !== "models" && "hidden")}>
+        <div
+          id="settings-tab-models"
+          role="tabpanel"
+          className={cn("h-full", tab !== "models" && "hidden")}
+        >
           {visited.has("models") && <ModelsPanel />}
         </div>
-        <div className={cn("h-full", tab !== "claude" && "hidden")}>
+        <div
+          id="settings-tab-claude"
+          role="tabpanel"
+          className={cn("h-full", tab !== "claude" && "hidden")}
+        >
           {visited.has("claude") && <ClaudeConfigPanel />}
         </div>
-        <div className={cn("h-full", tab !== "toolgate" && "hidden")}>
+        <div
+          id="settings-tab-toolgate"
+          role="tabpanel"
+          className={cn("h-full", tab !== "toolgate" && "hidden")}
+        >
           {visited.has("toolgate") && <ToolGatePanel />}
         </div>
-        <div className={cn("h-full", tab !== "policy" && "hidden")}>
+        <div
+          id="settings-tab-policy"
+          role="tabpanel"
+          className={cn("h-full", tab !== "policy" && "hidden")}
+        >
           {visited.has("policy") && <GlobalPolicyPanel />}
         </div>
-        <div className={cn("h-full", tab !== "violations" && "hidden")}>
+        <div
+          id="settings-tab-violations"
+          role="tabpanel"
+          className={cn("h-full", tab !== "violations" && "hidden")}
+        >
           {visited.has("violations") && <ViolationsPanel />}
         </div>
-        <div className={cn("h-full", tab !== "feedback" && "hidden")}>
+        <div
+          id="settings-tab-feedback"
+          role="tabpanel"
+          className={cn("h-full", tab !== "feedback" && "hidden")}
+        >
           {visited.has("feedback") && <FeedbackPanel />}
         </div>
-        <div className={cn("h-full", tab !== "archive" && "hidden")}>
+        <div
+          id="settings-tab-archive"
+          role="tabpanel"
+          className={cn("h-full", tab !== "archive" && "hidden")}
+        >
           {visited.has("archive") && <ArchivePanel />}
         </div>
-        <div className={cn("h-full", tab !== "updates" && "hidden")}>
+        <div
+          id="settings-tab-updates"
+          role="tabpanel"
+          className={cn("h-full", tab !== "updates" && "hidden")}
+        >
           {visited.has("updates") && <UpdatesPanel />}
         </div>
       </div>
@@ -177,9 +234,9 @@ function GlobalPolicyPanel() {
     <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
-          <h1 className="font-headline-lg text-headline-lg text-on-surface">
+          <h2 className="font-headline-lg text-headline-lg text-on-surface">
             Global Policy
-          </h1>
+          </h2>
           <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
             The base policy every project and session inherits at spawn
             (<code>general-policy.yaml</code>). Projects can tighten it in the
@@ -254,9 +311,9 @@ function SessionDefaults() {
   );
   return (
     <section className="mt-gutter rounded-lg border border-outline-variant bg-surface-container p-4">
-      <h2 className="font-headline-md text-headline-md text-on-surface">
+      <h3 className="font-headline-md text-headline-md text-on-surface">
         Session defaults
-      </h2>
+      </h3>
       <label className="mt-3 flex items-center gap-2">
         <input
           type="checkbox"
@@ -352,9 +409,9 @@ function ArchivePanel() {
   return (
     <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <div className="mb-6">
-        <h1 className="font-headline-lg text-headline-lg text-on-surface">
+        <h2 className="font-headline-lg text-headline-lg text-on-surface">
           Archived Sessions
-        </h1>
+        </h2>
         <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
           Every closed session. Click one to review its history — read-only,
           nothing respawns. <strong>Reopen</strong> (in the session view)
@@ -429,9 +486,9 @@ function UpdatesPanel() {
     <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
-          <h1 className="font-headline-lg text-headline-lg text-on-surface">
+          <h2 className="font-headline-lg text-headline-lg text-on-surface">
             Updates
-          </h1>
+          </h2>
           <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
             bot-hq checks GitHub Releases for a newer version on launch. The
             install is manual — <span className="text-primary">Download</span>{" "}
@@ -531,9 +588,9 @@ function ToolGateSection() {
     <section className="mt-10 border-t border-outline-variant/30 pt-6">
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
-          <h2 className="font-headline-md text-headline-md text-on-surface">
+          <h3 className="font-headline-md text-headline-md text-on-surface">
             Gated Bash Keywords
-          </h2>
+          </h3>
           <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
             One global list for every session. When an agent's Bash command
             contains a keyword, <span className="text-primary">Gate</span> blocks

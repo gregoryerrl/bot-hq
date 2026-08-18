@@ -122,9 +122,9 @@ export function RolesPanel() {
     <div className="mx-auto flex h-full max-w-7xl flex-col overflow-hidden px-6 py-6">
       <div className="mb-4 flex shrink-0 items-start justify-between gap-4">
         <div>
-          <h1 className="font-headline-lg text-headline-lg text-on-surface">
+          <h2 className="font-headline-lg text-headline-lg text-on-surface">
             Roles
-          </h1>
+          </h2>
           <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
             A role is a template a session's participants are invited from: the
             instruction it runs with, what it is allowed to do, and the model it
@@ -415,9 +415,9 @@ function RoleForm({
     <div className="flex flex-col gap-5 px-5 py-5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h2 className="truncate font-headline-md text-headline-md text-on-surface">
+          <h3 className="truncate font-headline-md text-headline-md text-on-surface">
             {role ? role.display_name : "New role"}
-          </h2>
+          </h3>
           <p className="font-code-sm text-code-sm text-on-surface-variant">
             {role ? (
               <>

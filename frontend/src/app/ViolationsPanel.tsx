@@ -60,9 +60,9 @@ export function ViolationsPanel() {
     <div className="mx-auto h-full max-w-5xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
-          <h1 className="font-headline-lg text-headline-lg text-on-surface">
+          <h2 className="font-headline-lg text-headline-lg text-on-surface">
             Enforcement Log
-          </h1>
+          </h2>
           <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
             Every policy gate that fired — push / force-push approvals,
             commit-word blocks, gated commands, and policy-file changes. Read

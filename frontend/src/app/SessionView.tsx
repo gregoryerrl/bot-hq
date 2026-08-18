@@ -508,7 +508,7 @@ export function SessionView() {
       <header className="flex items-center justify-between border-b border-outline-variant px-4 py-3">
         <div className="min-w-0">
           {editingTitle === null ? (
-            <h1 className="group flex items-center gap-1 truncate font-headline-md text-headline-md tracking-tight">
+            <h2 className="group flex items-center gap-1 truncate font-headline-md text-headline-md tracking-tight">
               <span className="truncate">{session.title}</span>
               <button
                 type="button"
@@ -522,7 +522,7 @@ export function SessionView() {
               >
                 ✎
               </button>
-            </h1>
+            </h2>
           ) : (
             <input
               autoFocus
@@ -783,7 +783,7 @@ export function SessionView() {
       <nav
         role="tablist"
         aria-label="Session tabs"
-        className="flex shrink-0 items-center border-b border-outline-variant px-2"
+        className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4"
       >
         <SubTabButton
           active={tab === "workspace"}

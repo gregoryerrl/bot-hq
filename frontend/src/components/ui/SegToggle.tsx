@@ -43,7 +43,7 @@ export function SegToggle<T extends string>({
             disabled={disabled}
             onClick={() => onChange(o.value)}
             className={cn(
-              "px-3 py-1 font-label-caps text-label-caps transition-colors disabled:opacity-50",
+              "px-3 py-1 font-label-caps text-label-caps transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary",
               active
                 ? activeCls
                 : "bg-transparent text-on-surface-variant hover:text-on-surface",

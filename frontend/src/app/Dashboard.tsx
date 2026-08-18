@@ -21,6 +21,7 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { pickFolder } from "./contextLibraryShared";
 import { Skeleton } from "../components/ui/Skeleton";
+import { selectClass } from "../components/ui/Select";
 import {
   rosterAdvisory,
   EDIT_FILES,
@@ -481,7 +482,7 @@ export function Dashboard() {
     <div className="mx-auto h-full max-w-6xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="font-headline-lg text-headline-lg text-on-surface">Sessions</h1>
+          <h2 className="font-headline-lg text-headline-lg text-on-surface">Sessions</h2>
           <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
             {filter.trim()
               ? `${filteredSessions.length} of ${sessions.length} match`
@@ -549,10 +550,7 @@ export function Dashboard() {
                     setSelectedProject(e.target.value);
                     if (e.target.value) setAdHocRepo("");
                   }}
-                  className={cn(
-                    "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
-                    "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
-                  )}
+                  className={selectClass}
                 >
                   <option value="">(none — no working repo)</option>
                   {projects.map((p) => (
@@ -568,7 +566,7 @@ export function Dashboard() {
               </label>
               {/* Ad-hoc repo: pick a folder that isn't a registered project. */}
               {adHocRepo ? (
-                <div className="flex items-center justify-between gap-2 rounded-md border border-outline-variant bg-surface px-3 py-1.5">
+                <div className="flex items-center justify-between gap-2 rounded border border-outline-variant bg-surface-container-lowest px-3 py-1.5">
                   <span
                     className="truncate font-code-sm text-code-sm text-on-surface"
                     title={adHocRepo}
@@ -658,10 +656,7 @@ export function Dashboard() {
                                   : null,
                               })
                             }
-                            className={cn(
-                              "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
-                              "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
-                            )}
+                            className={selectClass}
                           >
                             <option value="">(choose a role)</option>
                             {invitableRoles.map((r) => (
@@ -681,10 +676,7 @@ export function Dashboard() {
                             onChange={(e) =>
                               patchParticipant(index, { modelId: e.target.value })
                             }
-                            className={cn(
-                              "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
-                              "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
-                            )}
+                            className={selectClass}
                           >
                             <option value="">(role default)</option>
                             {models.map((m) => (
@@ -714,10 +706,7 @@ export function Dashboard() {
                                   : {}),
                               })
                             }
-                            className={cn(
-                              "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
-                              "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
-                            )}
+                            className={selectClass}
                           >
                             <option value="">
                               Inherit

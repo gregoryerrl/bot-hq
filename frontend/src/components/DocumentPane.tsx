@@ -173,7 +173,7 @@ export const DocumentPane = memo(function DocumentPane({
   };
 
   return (
-    <div className="flex h-full min-w-0 flex-col border-l border-outline-variant bg-surface-container-lowest/50">
+    <div className="flex h-full min-w-0 flex-col bg-surface-container-lowest/50">
       {/* `flex-wrap`, never a horizontal scroller: custom tabs are as many as
           the session made, and the row grows DOWN. */}
       <div
@@ -296,7 +296,7 @@ function DocArticle({
             onClick={() => onSummarize(doc.slug)}
             disabled={loading}
             title="Summarize this document (TL;DR) with a background model"
-            className="rounded border border-outline-variant bg-transparent px-2 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
+            className="rounded border border-outline-variant bg-transparent px-2 py-0.5 font-label-caps text-label-caps text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
           >
             {loading ? "…" : "TL;DR"}
           </button>
@@ -388,7 +388,7 @@ function SummaryDialog({
           <h2 className="min-w-0 truncate text-base font-semibold text-on-surface">
             TL;DR — {slug}
           </h2>
-          <span className="shrink-0 text-[0.6rem] uppercase tracking-wide text-on-surface-variant">
+          <span className="shrink-0 font-label-caps text-label-caps text-on-surface-variant">
             summary
           </span>
         </div>
@@ -463,13 +463,13 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
     setClosed(allClosed ? new Set() : new Set(groups.map((_, i) => i)));
   return (
     <section className="mb-6 rounded border border-outline-variant bg-surface-container-lowest">
-      <header className="flex items-center justify-between gap-2 border-b border-outline-variant px-3 py-1.5 text-[0.65rem] uppercase tracking-wide text-on-surface-variant">
+      <header className="flex items-center justify-between gap-2 border-b border-outline-variant px-3 py-1.5 font-label-caps text-label-caps text-on-surface-variant">
         <span>git diff{diff.note ? ` — ${diff.note}` : ""}</span>
         {groups.length > 1 && (
           <button
             type="button"
             onClick={toggleAll}
-            className="shrink-0 rounded border border-outline-variant px-1.5 py-0.5 font-semibold uppercase tracking-wide text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+            className="shrink-0 rounded border border-outline-variant px-1.5 py-0.5 font-label-caps text-label-caps text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
             title={allClosed ? "Expand all files" : "Collapse all files"}
           >
             {allClosed ? "Expand all" : "Collapse all"}
@@ -746,7 +746,7 @@ function TrayChoice({
   return (
     <div>
       <div className="mb-1 flex items-center gap-2">
-        <span className="rounded bg-surface-container-high px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wide text-on-surface-variant">
+        <span className="rounded bg-surface-container-high px-1.5 py-0.5 font-label-caps text-label-caps text-on-surface-variant">
           {entry.kind}
         </span>
         <span className="text-[0.7rem] text-on-surface-variant">

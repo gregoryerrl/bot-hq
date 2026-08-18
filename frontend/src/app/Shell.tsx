@@ -92,7 +92,7 @@ export function Shell() {
           <h1 className="text-headline-lg font-headline-lg text-primary">
             bot-hq
           </h1>
-          <nav className="flex h-full items-center gap-4 pt-1">
+          <nav className="flex h-full items-center gap-4">
             <NavLink to="/" end className={navLinkClass}>
               Dashboard
             </NavLink>

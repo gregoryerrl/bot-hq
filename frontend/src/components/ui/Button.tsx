@@ -20,10 +20,13 @@ const variantClasses: Record<Variant, string> = {
   danger: "bg-error-container hover:bg-error-container/80 text-on-error-container",
 };
 
+// One radius for every size — the house `rounded` (2px, the Industrial
+// Terminal's squared-off input shape); md/lg used to be `rounded-md` (6px),
+// so a Save button and the input beside it never matched (round 11).
 const sizeClasses: Record<Size, string> = {
   sm: "px-2 py-1 text-xs rounded",
-  md: "px-3 py-1.5 text-sm rounded-md",
-  lg: "px-4 py-2 text-base rounded-md",
+  md: "px-3 py-1.5 text-sm rounded",
+  lg: "px-4 py-2 text-base rounded",
 };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
@@ -31,7 +34,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     <button
       ref={ref}
       className={cn(
-        "inline-flex items-center justify-center gap-2 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+        "inline-flex items-center justify-center gap-2 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary",
         variantClasses[variant],
         sizeClasses[size],
         className,

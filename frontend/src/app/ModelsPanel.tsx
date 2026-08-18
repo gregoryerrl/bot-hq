@@ -75,9 +75,9 @@ export function ModelsPanel() {
     <div className="mx-auto h-full max-w-7xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
-          <h1 className="font-headline-lg text-headline-lg text-on-surface">
+          <h2 className="font-headline-lg text-headline-lg text-on-surface">
             Models
-          </h1>
+          </h2>
           <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
             Saved LLM endpoints. Name one as a role's default on the Roles
             tab, or pick per participant when you create a session.

@@ -684,18 +684,34 @@ export function ContextLibrary() {
         aria-label="Context Library tabs"
         className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4"
       >
-        <SubTabButton active={tab === "tree"} onClick={() => select("tree")}>
+        <SubTabButton
+          active={tab === "tree"}
+          controls="cl-tab-tree"
+          onClick={() => select("tree")}
+        >
           Library Tree
         </SubTabButton>
-        <SubTabButton active={tab === "manager"} onClick={() => select("manager")}>
+        <SubTabButton
+          active={tab === "manager"}
+          controls="cl-tab-manager"
+          onClick={() => select("manager")}
+        >
           Context Manager
         </SubTabButton>
       </div>
       <div className="min-h-0 flex-1">
-        <div className={cn("h-full", tab !== "tree" && "hidden")}>
+        <div
+          id="cl-tab-tree"
+          role="tabpanel"
+          className={cn("h-full", tab !== "tree" && "hidden")}
+        >
           {visited.has("tree") && <LibraryTree />}
         </div>
-        <div className={cn("h-full", tab !== "manager" && "hidden")}>
+        <div
+          id="cl-tab-manager"
+          role="tabpanel"
+          className={cn("h-full", tab !== "manager" && "hidden")}
+        >
           {visited.has("manager") && <ContextManager />}
         </div>
       </div>

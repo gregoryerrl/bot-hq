@@ -501,7 +501,7 @@ describe("RolesPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /create role/i }));
 
     await waitFor(() =>
-      expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent(
+      expect(screen.getByRole("heading", { level: 3 })).toHaveTextContent(
         "Code Reviewer",
       ),
     );

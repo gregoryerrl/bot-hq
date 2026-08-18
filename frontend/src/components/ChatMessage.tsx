@@ -54,7 +54,7 @@ function MessageHeader({
     <header className="mb-1 flex items-center gap-2">
       <span
         className={cn(
-          "text-[0.65rem] font-semibold uppercase tracking-wide",
+          "font-label-caps text-label-caps",
           authorColorClass(shown, hues),
         )}
       >
