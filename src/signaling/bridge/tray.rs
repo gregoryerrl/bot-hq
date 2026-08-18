@@ -869,14 +869,26 @@ impl SignalingBridge {
                 // through here and was never recorded, while the descriptor
                 // told the agent every outcome is. The context is not on the
                 // row, so the KIND is reconstructed from the row's shape: a
-                // gated command is the Tool Gate's; any other Approve/Reject
-                // row is a generic approval (a push gate resolves in-band with
-                // its hook blocked on it, so it does not reach here).
-                if crate::storage::is_gate_row(&q.kind, q.options_json.as_deref()) {
+                // gated command is the Tool Gate's; any other gate row is a
+                // generic approval (a push gate resolves in-band with its hook
+                // blocked on it, so it does not reach here). **Only when the
+                // row FLIPPED** (round 11) — a repeat click on an answered gate
+                // flips nothing, runs nothing and lifts nothing, and used to
+                // append a second, possibly contradicting record. And the pick
+                // is read the way the live branch reads it: the fail-closed
+                // `gate_verdict` for the host's canonical menu, the label
+                // mapper for an agent's own menu (`request_approval`), which
+                // `gate_verdict` audited as Denied on an approving pick.
+                if flipped && crate::storage::is_gate_row(&q.kind, q.options_json.as_deref()) {
                     if let Some(log) = self.violations.as_ref() {
                         let (kind, action) = match q.command_text.as_deref() {
                             Some(cmd) => (crate::policy::ViolationKind::ToolBlocklist, cmd.to_string()),
                             None => (crate::policy::ViolationKind::GenericApproval, q.prompt.clone()),
+                        };
+                        let outcome = if crate::storage::is_gate_options(q.options_json.as_deref()) {
+                            gate_verdict(&picked)
+                        } else {
+                            outcome_from_picked(&picked)
                         };
                         let _ = log
                             .record(
@@ -884,7 +896,7 @@ impl SignalingBridge {
                                 q.agent.clone(),
                                 kind,
                                 action,
-                                gate_verdict(&picked),
+                                outcome,
                                 Some("resolved from the durable tray row (no live park)".to_string()),
                             )
                             .await;
@@ -2828,6 +2840,53 @@ mod tests {
         assert_eq!(recs[1].kind, ViolationKind::GenericApproval);
         assert_eq!(recs[1].action, "Query prod read-only?");
         assert_eq!(recs[1].outcome, ViolationOutcome::Approved);
+    }
+
+    /// **The durable-row audit is written once, and reads the pick the way the
+    /// live path does** (round 11). Two defects in the round-10 block: it was
+    /// not gated on `flipped`, so a second `resolve_choice` on an already
+    /// answered gate — which flips nothing, runs nothing and lifts nothing —
+    /// appended a second, possibly contradicting record; and it classified
+    /// every pick with the fail-closed `gate_verdict`, so a `request_approval`
+    /// with its own labels (a gate since 76cd7aa) audited an approving pick
+    /// as Denied, while the in-memory branch dispatches by menu.
+    #[tokio::test]
+    async fn the_durable_row_audit_is_written_once_and_reads_a_custom_menu() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = ViolationsLog::new(dir.path());
+        let bridge = SignalingBridge::with_violations_log(log.clone());
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage
+            .insert_tray_entry(
+                "s1",
+                "g-custom",
+                "hands",
+                crate::storage::QuestionKind::Approval,
+                "Query prod read-only?",
+                Some(&["Approve — read only".to_string(), "Deny with reason".to_string()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        bridge
+            .resolve_choice("g-custom", "Approve — read only".into())
+            .await
+            .unwrap();
+        // The second answer flips nothing: an already-answered row is not
+        // pending, so the UPDATE matches no row.
+        let _ = bridge.resolve_choice("g-custom", "Deny with reason".into()).await;
+
+        let recs = log.read_all().unwrap();
+        assert_eq!(recs.len(), 1, "one record for one gate, however often it is clicked: {recs:?}");
+        assert_eq!(recs[0].kind, ViolationKind::GenericApproval);
+        assert_eq!(
+            recs[0].outcome,
+            ViolationOutcome::Approved,
+            "an approving pick from the agent's own menu audits as approved"
+        );
     }
 
     #[tokio::test]
