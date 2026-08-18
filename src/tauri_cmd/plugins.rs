@@ -13,7 +13,7 @@ use crate::tauri_cmd::error::AppError;
 use crate::tauri_events::WatcherHandle;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Emitter;
 
@@ -392,7 +392,7 @@ pub(crate) async fn install_plugin_inner(
                 manifest.id
             )));
         }
-        std::fs::remove_dir_all(&plugin_dir).map_err(io_to_app)?;
+        remove_dir_all_blocking(plugin_dir.clone()).await.map_err(io_to_app)?;
     }
 
     let serve_root =
@@ -599,7 +599,7 @@ pub(crate) async fn reinstall_plugin_inner(
                 ));
             }
         }
-        std::fs::remove_dir_all(&plugin_dir).map_err(io_to_app)?;
+        remove_dir_all_blocking(plugin_dir.clone()).await.map_err(io_to_app)?;
     }
     let serve_root =
         materialize_serve_root(source, linked, &plugin_dir, &manifest, &manifest_json).await?;
@@ -690,9 +690,11 @@ pub(crate) async fn update_plugin_from_source_inner(
                 "recorded source is the installed copy itself — use Reinstall with the real source directory".into(),
             ));
         }
-        std::fs::remove_dir_all(&plugin_dir).map_err(io_to_app)?;
+        remove_dir_all_blocking(plugin_dir.clone()).await.map_err(io_to_app)?;
     }
-    copy_dir_all(Path::new(&source), &plugin_dir).map_err(io_to_app)?;
+    copy_dir_all_blocking(PathBuf::from(&source), plugin_dir.clone())
+        .await
+        .map_err(io_to_app)?;
 
     let row = storage
         .get_plugin(&plugin_id)
@@ -757,7 +759,7 @@ async fn uninstall_plugin_inner(
         // dir_path is the USER'S source repo — bot-hq never deletes or
         // modifies it. Only the registry row + KV rows go.
         tracing::info!(plugin_id = %plugin_id, dir = %row.dir_path, "linked uninstall leaves source directory untouched");
-    } else if let Err(e) = std::fs::remove_dir_all(&row.dir_path) {
+    } else if let Err(e) = remove_dir_all_blocking(PathBuf::from(&row.dir_path)).await {
         // Don't fail uninstall over a missing directory — DB is authoritative.
         tracing::warn!(
             ?e,
@@ -832,7 +834,9 @@ async fn materialize_serve_root(
         std::fs::write(plugin_dir.join(&manifest.entry), &body).map_err(io_to_app)?;
         Ok(plugin_dir.to_path_buf())
     } else {
-        copy_dir_all(Path::new(source), plugin_dir).map_err(io_to_app)?;
+        copy_dir_all_blocking(PathBuf::from(source), plugin_dir.to_path_buf())
+            .await
+            .map_err(io_to_app)?;
         Ok(plugin_dir.to_path_buf())
     }
 }
@@ -876,6 +880,10 @@ fn read_manifest_from_dir(dir: &Path) -> Result<(PluginManifest, String), AppErr
     Ok((manifest, body))
 }
 
+/// Copy a bundle tree. **Symlinks are skipped** (round 11): `is_dir()` follows
+/// them, so a bundle carrying a link to an ancestor recursed until the disk
+/// filled; `plugins/serve.rs` refuses symlinks at serve time and the install
+/// copy takes the same posture.
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)?.flatten() {
@@ -884,14 +892,36 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
             Some(n) => n.to_os_string(),
             None => continue,
         };
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            tracing::debug!(path = %src_path.display(), "plugin copy: skipping symlink");
+            continue;
+        }
         let dst_path = dst.join(&name);
-        if src_path.is_dir() {
+        if file_type.is_dir() {
             copy_dir_all(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
         }
     }
     Ok(())
+}
+
+/// [`copy_dir_all`] off the reactor (round 11): a bundle is a whole tree, and
+/// the 2-worker runtime also drives the bridge, storage and every agent pump —
+/// a synchronous walk inside an `async fn` stalls half of it. Same posture as
+/// `cl.rs` / `docs.rs` / `files.rs`.
+async fn copy_dir_all_blocking(src: PathBuf, dst: PathBuf) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || copy_dir_all(&src, &dst))
+        .await
+        .map_err(|e| std::io::Error::other(format!("copy task: {e}")))?
+}
+
+/// `remove_dir_all` off the reactor — see [`copy_dir_all_blocking`].
+async fn remove_dir_all_blocking(path: PathBuf) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&path))
+        .await
+        .map_err(|e| std::io::Error::other(format!("remove task: {e}")))?
 }
 
 fn emit_state_changed(app: &tauri::AppHandle, plugin_id: &str, enabled: bool) {
@@ -916,8 +946,31 @@ fn io_to_app(e: std::io::Error) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tempfile::TempDir;
+
+    /// **The install copy skips symlinks** (round 11). `is_dir()` follows a
+    /// link, so a bundle carrying a link to an ancestor recursed until the
+    /// disk filled; the serve path already refuses symlinks, and the copy now
+    /// takes the same posture — files and real dirs copy, links are left out.
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_all_skips_symlinks_and_never_recurses_into_them() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("bundle");
+        std::fs::create_dir_all(src.join("assets")).unwrap();
+        std::fs::write(src.join("index.html"), "<html>").unwrap();
+        std::fs::write(src.join("assets/a.js"), "1").unwrap();
+        // A link back to the bundle's own parent: following it recurses forever.
+        std::os::unix::fs::symlink(tmp.path(), src.join("loop")).unwrap();
+        // And a link to a plain file, which must not be copied either.
+        std::os::unix::fs::symlink(src.join("index.html"), src.join("alias.html")).unwrap();
+        let dst = tmp.path().join("installed");
+        copy_dir_all(&src, &dst).unwrap();
+        assert!(dst.join("index.html").is_file());
+        assert!(dst.join("assets/a.js").is_file());
+        assert!(!dst.join("loop").exists(), "the ancestor link is skipped, not followed");
+        assert!(!dst.join("alias.html").exists(), "a file link is skipped too");
+    }
 
     async fn fresh(tmp: &TempDir) -> (Arc<Storage>, Arc<PluginRegistry>) {
         let data_dir = tmp.path().to_path_buf();
