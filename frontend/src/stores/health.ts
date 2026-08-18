@@ -81,11 +81,19 @@ export function worstHealth(h: SessionHealth | undefined): AgentHealth | undefin
 }
 
 /** App-wide footer summary: the worst state across all sessions + how many
- *  sessions sit in it. `ok` when nothing is retrying or dead; `idle` when no
- *  agents are tracked at all (health is event-driven + in-memory, so it's empty
- *  after a fresh launch until a reopened session's agent emits — don't claim
- *  "OK" then). */
-export function appHealthSummary(bySession: Record<string, SessionHealth>): {
+ *  sessions sit in it. `ok` when nothing is retrying, stalled or dead; `idle`
+ *  when no session is LIVE at all.
+ *
+ *  `liveSessions` is the activity store's session count (seeded on mount from
+ *  `get_session_runtime`, cleared on close), NOT this map's size: health
+ *  entries exist only after a transition, so a fresh app whose sessions are
+ *  all healthy has an empty map — and read "Agents: idle" in the footer while
+ *  two agents were mid-turn (round 11, screenshot 2026-08-18T12:00Z). The map
+ *  says what is WRONG; liveness is the other store's to answer. */
+export function appHealthSummary(
+  bySession: Record<string, SessionHealth>,
+  liveSessions: number,
+): {
   state: "ok" | "retrying" | "stalled" | "dead" | "idle";
   count: number;
 } {
@@ -101,6 +109,8 @@ export function appHealthSummary(bySession: Record<string, SessionHealth>): {
   if (dead > 0) return { state: "dead", count: dead };
   if (stalled > 0) return { state: "stalled", count: stalled };
   if (retrying > 0) return { state: "retrying", count: retrying };
-  if (Object.keys(bySession).length === 0) return { state: "idle", count: 0 };
+  if (liveSessions === 0 && Object.keys(bySession).length === 0) {
+    return { state: "idle", count: 0 };
+  }
   return { state: "ok", count: 0 };
 }

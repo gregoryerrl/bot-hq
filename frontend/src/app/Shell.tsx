@@ -4,6 +4,7 @@ import { cn } from "../lib/cn";
 import { PendingTray } from "../components/PendingTray";
 import { UpdateBanner } from "../components/UpdateBanner";
 import { useHealthStore, appHealthSummary } from "../stores/health";
+import { useActivityStore } from "../stores/activity";
 import { useTauriQuery } from "../hooks/useInvoke";
 import type { InstalledPluginView } from "../lib/bindings";
 
@@ -30,17 +31,20 @@ function PluginNavTabs() {
 
 // B3: app-wide agent-health status in the footer (replaces the hardcoded green
 // "Online"). Worst-of all sessions from the B2 health store — green when all OK,
-// amber while any agent is recovering, red when any has stopped, grey when none
-// are tracked yet (e.g. a fresh launch before any session is reopened).
+// amber while any agent is recovering, red when any has stopped, grey when no
+// session is live. Liveness comes from the activity store (one entry per live
+// session, seeded on mount, cleared on close): the health map is transition-
+// only, so on its own it read "idle" over two working agents (round 11).
 function FooterStatus() {
   const bySession = useHealthStore((s) => s.bySession);
-  const { state, count } = appHealthSummary(bySession);
+  const liveSessions = useActivityStore((s) => Object.keys(s.bySession).length);
+  const { state, count } = appHealthSummary(bySession, liveSessions);
   const cfg = {
     ok: { dot: "bg-success", label: "Agents: OK" },
     retrying: { dot: "bg-warning animate-pulse", label: `${count} recovering` },
     stalled: { dot: "bg-error animate-pulse", label: `${count} stalled` },
     dead: { dot: "bg-error", label: `${count} stopped` },
-    idle: { dot: "bg-outline-variant", label: "Agents: idle" },
+    idle: { dot: "bg-outline-variant", label: "No live sessions" },
   }[state];
   return (
     <span
@@ -49,7 +53,7 @@ function FooterStatus() {
         state === "ok"
           ? "All agents running"
           : state === "idle"
-            ? "No agents running yet"
+            ? "No session is live"
             : `${count} session${count === 1 ? "" : "s"} with ${state === "dead" ? "a stopped" : state === "stalled" ? "a stalled" : "a recovering"} agent`
       }
     >

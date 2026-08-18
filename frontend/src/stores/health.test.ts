@@ -32,29 +32,42 @@ describe("worstHealth", () => {
 });
 
 describe("appHealthSummary", () => {
-  it("is idle when no agents are tracked", () => {
-    expect(appHealthSummary({})).toEqual({ state: "idle", count: 0 });
+  it("is idle when no session is live", () => {
+    expect(appHealthSummary({}, 0)).toEqual({ state: "idle", count: 0 });
+  });
+
+  // Round 11 (screenshot 2026-08-18T12:00Z: "Agents: idle" in the footer while
+  // two agents were mid-turn). Health entries exist only after a TRANSITION
+  // (retrying/stalled/dead, or the recovery back to running), so a fresh app
+  // with healthy sessions has an EMPTY health map for as long as nothing goes
+  // wrong — which is not "no agents running". Liveness comes from the live
+  // session count; the health map only ever says what is WRONG.
+  it("is ok when sessions are live and nothing is wrong, even with no health entries", () => {
+    expect(appHealthSummary({}, 2)).toEqual({ state: "ok", count: 0 });
   });
 
   it("is ok when something is running but nothing is retrying or dead", () => {
-    expect(appHealthSummary({ a: { brian: "running" } })).toEqual({
+    expect(appHealthSummary({ a: { brian: "running" } }, 1)).toEqual({
       state: "ok",
       count: 0,
     });
   });
 
   it("counts dead sessions and dead wins over retrying", () => {
-    const r = appHealthSummary({
-      a: { brian: "dead" },
-      b: { brian: "retrying" },
-      c: { brian: "running", rain: "dead" },
-    });
+    const r = appHealthSummary(
+      {
+        a: { brian: "dead" },
+        b: { brian: "retrying" },
+        c: { brian: "running", rain: "dead" },
+      },
+      3,
+    );
     expect(r).toEqual({ state: "dead", count: 2 });
   });
 
   it("reports retrying when no session is dead", () => {
     expect(
-      appHealthSummary({ a: { rain: "retrying" }, b: { brian: "running" } }),
+      appHealthSummary({ a: { rain: "retrying" }, b: { brian: "running" } }, 2),
     ).toEqual({ state: "retrying", count: 1 });
   });
 });
