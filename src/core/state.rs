@@ -59,6 +59,33 @@ pub enum CancelOutcome {
     Interrupting,
 }
 
+/// How long a cancel waits for an in-flight atomic op (git commit / push /
+/// migration) to clear before interrupting anyway. A hung op still gets
+/// cancelled — the SIGKILL fallback reaps it — but the working tree is given
+/// this long to not be left half-written.
+pub const ATOMIC_OP_DEFERRAL_CAP: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Wait for `flag` (the in-atomic-tool marker) to clear, polling lock-free every
+/// 100 ms, up to `cap`. Returns `(waited_ms, capped)` — `capped` when the op was
+/// still running at the deadline. Pure enough to test with a flag a task
+/// clears; the wait used to be inlined in the Tauri command (round 11).
+pub async fn await_atomic_op_or_cap(
+    flag: &std::sync::atomic::AtomicBool,
+    cap: std::time::Duration,
+) -> (u64, bool) {
+    let started = tokio::time::Instant::now();
+    let deadline = started + cap;
+    let mut capped = false;
+    while flag.load(std::sync::atomic::Ordering::Acquire) {
+        if tokio::time::Instant::now() >= deadline {
+            capped = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    (started.elapsed().as_millis() as u64, capped)
+}
+
 /// Outcome of a cancel's interrupt→SIGKILL escalation, decided AFTER the
 /// interrupt window. Pure (see [`AppState::escalation_outcome`]) so the
 /// honored > superseded > sigkill precedence is unit-tested without a live session.
@@ -684,6 +711,60 @@ impl AppState {
             }
         }
         self.broadcast(session_id, RESUME_NOTICE).await
+    }
+
+    /// **The Stop button, end to end** (round 11): decide with
+    /// [`cancel_session_turn`](Self::cancel_session_turn), then drive the
+    /// interrupt → SIGKILL escalation OFF-THREAD — including the atomic-op
+    /// deferral, which used to live in the Tauri command: the 8 s cap, the
+    /// 100 ms poll and the `deferred_ms` telemetry were policy no test could
+    /// reach and no non-Tauri caller could get right. Returns as soon as the
+    /// escalation is detached, so the command (and any other caller) returns
+    /// immediately and the UI keeps showing "Pausing…" for the window.
+    ///
+    /// `pressed_at` is stamped by the caller at the top, so `cancel_events.
+    /// pressed_at` is when the USER acted, not when the escalation finished —
+    /// the gap between the two is precisely what a user experiences as "Stop
+    /// didn't do anything".
+    pub async fn cancel_and_escalate(self: &Arc<Self>, session_id: &str, pressed_at: String) -> Result<()> {
+        match self.cancel_session_turn(session_id).await? {
+            CancelOutcome::Done => {}
+            CancelOutcome::Interrupting => {
+                // The common path: interrupt every agent and drive the ~2s
+                // SIGKILL escalation off-thread. Detached so this returns at
+                // once. An `Arc<Self>` (not `&self`) so the task can re-acquire
+                // `sessions` without holding it across the wait.
+                let this = Arc::clone(self);
+                let sid = session_id.to_string();
+                tokio::spawn(async move {
+                    this.interrupt_then_escalate(&sid, &pressed_at, 0, false).await;
+                });
+            }
+            CancelOutcome::Deferred(flag) => {
+                // An edit-capable participant is mid an atomic op. Poll the flag
+                // lock-free until it clears, THEN interrupt+escalate — with a
+                // hard cap so a hung op still gets cancelled (the SIGKILL
+                // fallback reaps it). Detached, like the common path.
+                let this = Arc::clone(self);
+                let sid = session_id.to_string();
+                tokio::spawn(async move {
+                    let (deferred_ms, capped) =
+                        await_atomic_op_or_cap(&flag, ATOMIC_OP_DEFERRAL_CAP).await;
+                    if capped {
+                        tracing::warn!(
+                            session_id = %sid,
+                            "cancel: atomic-op deferral hit the cap — interrupting now"
+                        );
+                    }
+                    // Recorded because this window is the leading candidate for
+                    // "Stop kept working": it delays the interrupt by up to the
+                    // cap before anything is even sent.
+                    this.interrupt_then_escalate(&sid, &pressed_at, deferred_ms, capped)
+                        .await;
+                });
+            }
+        }
+        Ok(())
     }
 
     /// The interrupt half of a cancel: send a `control_request` interrupt to both
@@ -3485,6 +3566,32 @@ mod tests {
     /// exists, since nothing in the crate can build an `AppState`. Asserted on
     /// BOTH halves the bump owes: the epoch moves, and the session's votes are
     /// cleared. Mutation-checked by deleting the bump from the seam.
+    /// **The atomic-op deferral waits for the flag, and caps** (round 11 —
+    /// this wait was inlined in the Tauri command, where no test could reach
+    /// it). A flag that clears ends the wait then, uncapped; one that never
+    /// clears ends it at the cap, flagged so the telemetry can say why the
+    /// interrupt was late.
+    #[tokio::test(start_paused = true)]
+    async fn the_atomic_op_deferral_waits_for_the_flag_and_caps() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = Arc::new(AtomicBool::new(true));
+        let clears = Arc::clone(&flag);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            clears.store(false, Ordering::Release);
+        });
+        let (waited_ms, capped) =
+            await_atomic_op_or_cap(&flag, std::time::Duration::from_secs(8)).await;
+        assert!(!capped, "the op cleared before the cap");
+        assert!((300..8000).contains(&waited_ms), "waited for the op, not the cap: {waited_ms}ms");
+
+        let stuck = AtomicBool::new(true);
+        let (waited_ms, capped) =
+            await_atomic_op_or_cap(&stuck, std::time::Duration::from_millis(500)).await;
+        assert!(capped, "a hung op is interrupted at the cap");
+        assert!(waited_ms >= 500, "the full cap was given: {waited_ms}ms");
+    }
+
     #[tokio::test]
     async fn a_phase_transition_invalidates_the_votes_cast_before_it() {
         let storage = Storage::memory().await.unwrap();

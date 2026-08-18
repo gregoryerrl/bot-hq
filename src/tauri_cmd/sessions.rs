@@ -1069,15 +1069,6 @@ pub async fn reopen_session(
     Ok(())
 }
 
-/// Cancel a session's in-flight turn (the Stop button — interrupt redesign,
-/// Batch 3 + 3.1, now interrupt-first). Sends a `control_request` interrupt to
-/// abort the turn while KEEPING the process alive (warm cache, no `--resume`
-/// respawn); if an agent doesn't honor it within ~2s it's SIGKILLed as a
-/// fallback. The session returns to `Idle` (the chat input unlocks). If HANDS is
-/// mid an atomic op (`git commit`/`git push`/migration), the interrupt is
-/// DEFERRED until the op completes (≤ ~8s cap) so the working tree isn't left
-/// half-written. The command returns immediately and a detached task drives the
-/// escalation. No-op if the session isn't live.
 /// Move a session's IPAV phase — **the user's own hand on the chip**.
 ///
 /// ## Why this did not exist until round 4
@@ -1122,62 +1113,27 @@ pub async fn advance_session_phase(
         .map_err(|e| AppError::Internal(e.to_string()))
 }
 
+/// Pause a session's in-flight turn — the **Pause** button, the one interrupt
+/// in the product (rc3 D33). Sends a `control_request` interrupt to abort the
+/// turn while KEEPING the process alive (warm cache, no `--resume` respawn); an
+/// agent that does not honor it within ~2s is SIGKILLed as a fallback. The
+/// session lands in `Paused` (the input unlocks; Resume / a steer / Close
+/// release it). If an edit-capable participant is mid an atomic op (`git
+/// commit` / `git push` / migration) the interrupt is DEFERRED until the op
+/// completes (≤ `ATOMIC_OP_DEFERRAL_CAP`) so the working tree is not left
+/// half-written. Returns immediately; a detached task drives the escalation.
+/// No-op if the session is not live. A thin wrapper (round 11): the deferral
+/// policy lives in `AppState::cancel_and_escalate`, where a test can reach it.
 #[tauri::command]
 #[specta::specta]
 pub async fn cancel_session_turn(
     core: tauri::State<'_, Arc<CoreAppState>>,
     session_id: String,
 ) -> Result<(), AppError> {
-    use crate::core::state::CancelOutcome;
     // Stamped at the top so `cancel_events.pressed_at` is when the USER acted,
-    // not when the escalation finished. The gap between the two is precisely
-    // what a user experiences as "Stop didn't do anything".
+    // not when the escalation finished.
     let pressed_at = crate::storage::now_utc();
-    match core.cancel_session_turn(&session_id).await? {
-        CancelOutcome::Done => {}
-        CancelOutcome::Interrupting => {
-            // The common path: interrupt every agent and drive the ~2s SIGKILL
-            // escalation off-thread. Detached so the command returns immediately
-            // and the UI shows "Cancelling…" for the window. We own an
-            // `Arc<CoreAppState>` (not the `&self` core method) so the task can
-            // re-acquire `sessions` without holding it across the wait.
-            let core = core.inner().clone();
-            tokio::spawn(async move {
-                core.interrupt_then_escalate(&session_id, &pressed_at, 0, false)
-                    .await;
-            });
-        }
-        CancelOutcome::Deferred(flag) => {
-            // HANDS is mid an atomic op. Poll the flag lock-free until it clears,
-            // THEN interrupt+escalate — with a hard ~8s cap so a hung op still
-            // gets cancelled (the SIGKILL fallback reaps it). Detached so the
-            // command returns immediately and the UI keeps showing "Cancelling…".
-            let core = core.inner().clone();
-            tokio::spawn(async move {
-                let started = tokio::time::Instant::now();
-                let deadline = started + std::time::Duration::from_secs(8);
-                let mut capped = false;
-                while flag.load(std::sync::atomic::Ordering::Acquire) {
-                    if tokio::time::Instant::now() >= deadline {
-                        tracing::warn!(
-                            %session_id,
-                            "cancel: atomic-op deferral hit ~8s cap — interrupting now"
-                        );
-                        capped = true;
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-                // Recorded because this window is the leading candidate for
-                // "Stop kept working": it is HANDS-only (the flag is set for
-                // git commit/push/migrate) and delays the interrupt by up to 8s
-                // before anything is even sent.
-                let deferred_ms = started.elapsed().as_millis() as u64;
-                core.interrupt_then_escalate(&session_id, &pressed_at, deferred_ms, capped)
-                    .await;
-            });
-        }
-    }
+    core.inner().cancel_and_escalate(&session_id, pressed_at).await?;
     Ok(())
 }
 
