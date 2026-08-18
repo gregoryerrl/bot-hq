@@ -54,22 +54,79 @@ pub struct GatedKeyword {
 /// enough that a command waiting on stdin can't hang the session forever.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Whether `bash` runs as a shell on PATH. Cached per process — the answer
-/// can't change mid-run in any way we care about. (Round 9: this took a
-/// `name` and memoised into ONE unkeyed cell, so a second caller with another
-/// name would have read bash's answer; the only caller ever asked for bash.)
-fn bash_present() -> bool {
-    use std::sync::OnceLock;
-    static PRESENT: OnceLock<bool> = OnceLock::new();
-    *PRESENT.get_or_init(|| {
-        std::process::Command::new("bash")
-            .arg("-c")
-            .arg("true")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    })
+/// Whether `shell` (a bare name or a path) runs `-c true` from here. Memoised
+/// per NAME for the life of the process — the answer can't change mid-run in
+/// any way we care about. (Round 9 found the earlier `bash_present()` memoised
+/// into ONE unkeyed cell under a `name` parameter; keyed now, because the
+/// shell choice below asks about more than one.)
+fn shell_present(shell: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static PRESENT: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let cache = PRESENT.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(&known) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(shell) {
+        return known;
+    }
+    let present = std::process::Command::new(shell)
+        .arg("-c")
+        .arg("true")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(shell.to_string(), present);
+    present
+}
+
+/// Shells `$SHELL` is allowed to nominate for a gated command: POSIX-family
+/// only. A fish / nu / csh login shell would break strictly more of the
+/// `$(…)` / heredoc shapes agents write than any of these do.
+const GATE_SHELL_ALLOWLIST: [&str; 5] = ["zsh", "bash", "sh", "dash", "ksh"];
+
+/// The shell an approved gated command runs under — **the shell the agent
+/// validated the command in**, as far as it can be known (round 10, B2).
+///
+/// claude-code's own Bash tool runs each command through the user's LOGIN
+/// shell (`/bin/zsh -c … eval '<cmd>'` on this Mac), so an agent's command has
+/// only ever been proven under `$SHELL`. Round 7 moved this from `sh` to `bash`
+/// for exactly the failure that came back in `s-766f4ab9`: a heredoc inside
+/// `$(…)` whose body carries an apostrophe (`Dependabot's`) is fine under zsh
+/// and dies under macOS's `/bin/bash` **3.2** with "unexpected EOF while
+/// looking for matching `''" — two APPROVED PR-creating gates ran, exited 2,
+/// created nothing, and their approvals were spent.
+///
+/// Order: `$SHELL` when its basename is on [`GATE_SHELL_ALLOWLIST`] and it
+/// runs from here; else `zsh`, `bash`, `sh` by presence. `SHELL` may be unset
+/// (a Finder-launched .app) or non-POSIX (fish), which is why the fallback
+/// chain and the allowlist are both here rather than a bare `$SHELL`.
+pub(crate) fn gate_shell() -> String {
+    gate_shell_for(std::env::var_os("SHELL").as_deref(), shell_present)
+}
+
+/// [`gate_shell`] with its two inputs injected, so the choice is a pure
+/// function a test can drive through every branch.
+fn gate_shell_for(
+    env_shell: Option<&std::ffi::OsStr>,
+    present: impl Fn(&str) -> bool,
+) -> String {
+    if let Some(shell) = env_shell.and_then(|s| s.to_str()) {
+        let allowed = std::path::Path::new(shell)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| GATE_SHELL_ALLOWLIST.contains(&name));
+        if allowed && present(shell) {
+            return shell.to_string();
+        }
+    }
+    for candidate in ["zsh", "bash", "sh"] {
+        if present(candidate) {
+            return candidate.to_string();
+        }
+    }
+    "sh".to_string()
 }
 
 /// Combined result of executing a command in the session's working repo.
@@ -175,11 +232,15 @@ pub fn match_keyword(
 /// expects input (e.g. `gh issue comment` with no `--body`) fails fast instead
 /// of hanging. On timeout the child is killed (kill-on-drop) and `code` is 124.
 pub async fn run_in_repo(command: &str, cwd: &Path, timeout: Duration) -> CommandOutput {
-    // bash, not sh: agents write bash-isms — an APPROVED `gh pr create` with a
-    // quoted heredoc inside `$(…)` died under sh with "unexpected EOF while
-    // looking for matching quote" and silently created nothing (archive study,
-    // s-06a3c60b). Fall back to sh only when bash isn't installed.
-    let shell = if bash_present() { "bash" } else { "sh" };
+    // The agent's own shell, not a fixed one — see `gate_shell`. (Round 7's
+    // sh→bash for s-06a3c60b was the same lesson one shell short: macOS's bash
+    // IS 3.2, and the command was proven under zsh.)
+    run_in_shell(&gate_shell(), command, cwd, timeout).await
+}
+
+/// [`run_in_repo`] with the shell named by the caller — the seam the
+/// heredoc test drives with `zsh` directly, so no test mutates `SHELL`.
+async fn run_in_shell(shell: &str, command: &str, cwd: &Path, timeout: Duration) -> CommandOutput {
     let mut cmd = tokio::process::Command::new(shell);
     cmd.arg("-c")
         .arg(command)
@@ -375,6 +436,59 @@ mod tests {
         let out = run_in_repo("sleep 5", dir.path(), Duration::from_millis(150)).await;
         assert_eq!(out.code, 124, "stderr: {:?}", out.stderr);
         assert!(out.stderr.contains("timed out"));
+    }
+
+    /// The gate runs the command in the AGENT's shell (round 10, B2). Every
+    /// branch of the choice, with presence injected.
+    #[test]
+    fn gate_shell_prefers_a_posix_login_shell_and_falls_back_by_presence() {
+        use std::ffi::OsStr;
+        let all = |_: &str| true;
+        // A POSIX login shell that runs from here is the shell — the command
+        // was proven under it by the agent's own Bash tool.
+        assert_eq!(gate_shell_for(Some(OsStr::new("/bin/zsh")), all), "/bin/zsh");
+        assert_eq!(gate_shell_for(Some(OsStr::new("/usr/bin/bash")), all), "/usr/bin/bash");
+        assert_eq!(gate_shell_for(Some(OsStr::new("dash")), all), "dash");
+        // A non-POSIX login shell is not nominated: fish would break strictly
+        // more `$()` / heredoc shapes than bash 3.2 does.
+        assert_eq!(gate_shell_for(Some(OsStr::new("/opt/homebrew/bin/fish")), all), "zsh");
+        assert_eq!(gate_shell_for(Some(OsStr::new("/usr/bin/nu")), all), "zsh");
+        // A login shell that is on the list but does not run from here (a
+        // stale SHELL after an uninstall) falls through too.
+        let no_login = |s: &str| s != "/opt/local/bin/ksh";
+        assert_eq!(gate_shell_for(Some(OsStr::new("/opt/local/bin/ksh")), no_login), "zsh");
+        // Unset (a Finder-launched .app inherits no login SHELL): by presence.
+        assert_eq!(gate_shell_for(None, all), "zsh");
+        let no_zsh = |s: &str| s != "zsh";
+        assert_eq!(gate_shell_for(None, no_zsh), "bash");
+        let only_sh = |s: &str| s == "sh";
+        assert_eq!(gate_shell_for(None, only_sh), "sh");
+        // Nothing answers — `sh` is still named, so the spawn error says why.
+        assert_eq!(gate_shell_for(None, |_: &str| false), "sh");
+    }
+
+    /// The exact shape that killed two approved gates in `s-766f4ab9`: a
+    /// heredoc inside `$(…)` whose body carries an apostrophe. macOS's
+    /// `/bin/bash` 3.2 dies on it ("unexpected EOF while looking for matching
+    /// `''"); zsh runs it. Skipped where no zsh is installed — the shell under
+    /// test is the one `gate_shell` resolves, and the assertion is that the
+    /// gate's shell agrees with the agent's.
+    #[tokio::test]
+    async fn run_in_repo_survives_a_heredoc_inside_command_substitution() {
+        if !shell_present("zsh") {
+            eprintln!("skipped: no zsh on this machine");
+            return;
+        }
+        // The shell the agent's Bash tool would have proven the command under.
+        let dir = tempdir().unwrap();
+        let command = "printf '%s' \"$(cat <<'BODY'\nDependabot's #507 was closed as \"no longer updatable\"\nBODY\n)\"";
+        let out = run_in_shell("zsh", command, dir.path(), Duration::from_secs(5)).await;
+        assert_eq!(out.code, 0, "stderr: {:?}", out.stderr);
+        assert!(
+            out.stdout.contains("Dependabot's #507"),
+            "the heredoc body must come through intact: {:?}",
+            out.stdout
+        );
     }
 
     #[test]
