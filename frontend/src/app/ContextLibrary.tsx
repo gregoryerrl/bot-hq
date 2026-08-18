@@ -679,7 +679,11 @@ export function ContextLibrary() {
 
   return (
     <div className="flex h-full flex-col bg-background">
-      <div className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4">
+      <div
+        role="tablist"
+        aria-label="Context Library tabs"
+        className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4"
+      >
         <SubTabButton active={tab === "tree"} onClick={() => select("tree")}>
           Library Tree
         </SubTabButton>

@@ -51,6 +51,17 @@ describe("SessionTile", () => {
     expect(screen.queryByText(/need user input/i)).not.toBeInTheDocument();
   });
 
+  it("carries the phase-tinted hover border as a literal class Tailwind can emit", () => {
+    // Round 10: the tint used to be built as `hover:${ring}` at the call site;
+    // Tailwind's scanner emits only class strings it can see in source, so the
+    // built form never reached the stylesheet and the hover tint was a no-op.
+    // The literal must be on the element (the CSS build then has it too).
+    renderTile({ phase: "apply" });
+    const tile = screen.getByRole("link", { name: /refactor auth flow/i });
+    expect(tile.className).toMatch(/hover:border-(primary|secondary|tertiary)\/60/);
+    expect(tile.className).not.toMatch(/hover:\$\{/);
+  });
+
   it("indicates pending input without an inline answer surface", () => {
     // The tile only INDICATES a count; the question + options live on the Tray tab.
     renderTile({ pendingCount: 1 });

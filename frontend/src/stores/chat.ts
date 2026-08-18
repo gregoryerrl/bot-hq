@@ -28,7 +28,7 @@ interface ChatState {
 }
 
 /** The `tool_use_id` a `tool_result` row answers, if the row parses. */
-export function toolResultId(m: AgentMessage): string | null {
+function toolResultId(m: AgentMessage): string | null {
   if (m.kind !== "tool_result") return null;
   try {
     const id = (JSON.parse(m.content) as { tool_use_id?: unknown }).tool_use_id;

@@ -328,7 +328,7 @@ describe("SessionView turn-status line (rc3 D10)", () => {
       busyBySession: { s1: { [slotKey(0)]: true } },
     });
     renderSessionView();
-    await screen.findByRole("button", { name: "Workspace" });
+    await screen.findByRole("tab", { name: "Workspace" });
 
     expect(workerLine()).toBe("EYES · Claude Opus 5is working");
   });
@@ -342,7 +342,7 @@ describe("SessionView turn-status line (rc3 D10)", () => {
       busyBySession: { s1: { brian: true } },
     });
     renderSessionView();
-    await screen.findByRole("button", { name: "Workspace" });
+    await screen.findByRole("tab", { name: "Workspace" });
 
     expect(workerLine()).toBe("Unknown participantis working");
     expect(workerLine()).not.toMatch(/brian/i);
@@ -374,7 +374,7 @@ describe("SessionView health dots + context meters (rc3 D10)", () => {
       },
     });
     renderSessionView();
-    await screen.findByRole("button", { name: "Workspace" });
+    await screen.findByRole("tab", { name: "Workspace" });
 
     expect(
       screen.getByLabelText(
@@ -396,7 +396,7 @@ describe("SessionView health dots + context meters (rc3 D10)", () => {
     // Slot 1 has no entry in either space; it must not inherit slot 0's.
     useHealthStore.setState({ bySession: { s1: { [slotKey(0)]: "dead" } } });
     renderSessionView();
-    await screen.findByRole("button", { name: "Workspace" });
+    await screen.findByRole("tab", { name: "Workspace" });
 
     expect(
       screen.getByLabelText("EYES · Claude Opus 5 stopped — gave up after errors"),
@@ -419,7 +419,7 @@ describe("SessionView health dots + context meters (rc3 D10)", () => {
     ];
     useHealthStore.setState({ bySession: { s1: { [slotKey(0)]: "dead" } } });
     renderSessionView();
-    await screen.findByRole("button", { name: "Workspace" });
+    await screen.findByRole("tab", { name: "Workspace" });
 
     expect(
       screen.getByLabelText("EYES-2 · DeepSeek R2 stopped — gave up after errors"),
@@ -437,7 +437,7 @@ describe("SessionView header roster (rc3 D10)", () => {
     // the session, so I forced closed the session." The composition has to be
     // legible from the header, not inferred from what the agents say.
     renderSessionView();
-    await screen.findByRole("button", { name: "Workspace" });
+    await screen.findByRole("tab", { name: "Workspace" });
 
     const header = screen.getByRole("banner");
     expect(header).toHaveTextContent("EYES · Claude Opus 5");
@@ -454,17 +454,17 @@ describe("SessionView subtabs", () => {
   it("renders the Workspace | Context | Terminal pill row", async () => {
     renderSessionView();
     expect(
-      await screen.findByRole("button", { name: "Workspace" }),
+      await screen.findByRole("tab", { name: "Workspace" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Context" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Context" })).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Terminal" }),
+      screen.getByRole("tab", { name: "Terminal" }),
     ).toBeInTheDocument();
   });
 
   it("shows Workspace by default and hides the other panels", async () => {
     renderSessionView();
-    await screen.findByRole("button", { name: "Workspace" });
+    await screen.findByRole("tab", { name: "Workspace" });
     expect(panel("Workspace").className).not.toContain("hidden");
     expect(panel("Context").className).toContain("hidden");
     expect(panel("Terminal").className).toContain("hidden");
@@ -477,7 +477,7 @@ describe("SessionView subtabs", () => {
 
   it("switches panels on pill click without unmounting the others", async () => {
     renderSessionView();
-    fireEvent.click(await screen.findByRole("button", { name: "Context" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Context" }));
     expect(panel("Context").className).not.toContain("hidden");
     expect(panel("Workspace").className).toContain("hidden");
     // Keep-mounted: the workspace chat input is still in the DOM while hidden.
@@ -485,11 +485,11 @@ describe("SessionView subtabs", () => {
       screen.getByPlaceholderText("Broadcast to every participant…"),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
     expect(panel("Terminal").className).not.toContain("hidden");
     expect(panel("Context").className).toContain("hidden");
 
-    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
     expect(panel("Workspace").className).not.toContain("hidden");
     expect(panel("Terminal").className).toContain("hidden");
   });
@@ -625,7 +625,7 @@ describe("SessionView context readings (rc3 P7)", () => {
     tray.rows = [APPROVAL_ROW];
     localStorage.setItem(draftKeyFor("s1"), "queued while they work");
     renderSessionView();
-    await screen.findByRole("button", { name: "Workspace" });
+    await screen.findByRole("tab", { name: "Workspace" });
     // The gate has the slot, so there is no composer to hear the tick.
     await waitFor(() =>
       expect(screen.queryByRole("textbox")).not.toBeInTheDocument(),
@@ -649,7 +649,7 @@ describe("SessionView context readings (rc3 P7)", () => {
     tray.rows = [APPROVAL_ROW];
     localStorage.setItem(draftKeyFor("s2"), "someone else's draft");
     renderSessionView();
-    await screen.findByRole("button", { name: "Workspace" });
+    await screen.findByRole("tab", { name: "Workspace" });
     const events = (await import("@tauri-apps/api/event")) as unknown as {
       __listeners: Map<string, (e: { payload: unknown }) => void>;
     };

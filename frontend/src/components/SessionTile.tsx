@@ -77,7 +77,7 @@ function SessionTileImpl({
         "transition-colors duration-150",
         needsInput
           ? "border-primary/60 hover:border-primary"
-          : cn("border-outline-variant", tint?.ring && `hover:${tint.ring}`),
+          : cn("border-outline-variant", tint?.hoverRing),
       )}
     >
       {/* Slot 1: top accent bar */}

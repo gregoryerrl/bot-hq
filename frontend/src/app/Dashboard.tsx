@@ -189,7 +189,8 @@ export function Dashboard() {
     includeArchived: false,
   });
   const invitableRoles = roles;
-  // Worktree isolation default (Settings → Agents → Session defaults).
+  // Worktree isolation default (Settings → Policy → Session defaults; the
+  // Agents tab that used to host it was retired by rc3 D8).
   // Anything but "0" means on.
   const { data: worktreeDefault } = useTauriQuery<string | null>(
     "get_app_setting",

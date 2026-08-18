@@ -10,9 +10,7 @@ import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
 import { SaveIcon } from "../components/icons";
 import type { ModelView, ValidateResult } from "../lib/bindings";
 import { invoke } from "@tauri-apps/api/core";
-
-const selectClass =
-  "w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary";
+import { selectClass } from "../components/ui/Select";
 
 const PROVIDERS = ["anthropic", "openai", "deepseek", "local"] as const;
 

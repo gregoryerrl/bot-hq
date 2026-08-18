@@ -1,6 +1,6 @@
 import { cn } from "../../lib/cn";
 
-export type SegTone = "good" | "warn" | "danger";
+type SegTone = "good" | "warn" | "danger";
 
 /**
  * Segmented two-or-more-button toggle. Each option declares its active `tone`

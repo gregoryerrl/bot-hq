@@ -254,7 +254,7 @@ export function HaltBanner({
           onClick={onOpenTray}
           className="mt-1 text-xs text-primary underline underline-offset-2"
         >
-          {`${choices.length} question${choices.length > 1 ? "s" : ""} waiting in the tray →`}
+          {`${choices.length} question${choices.length > 1 ? "s" : ""} in the tray →`}
         </button>
       )}
       <p className="mt-1 text-[0.7rem] text-on-surface-variant">

@@ -12,9 +12,7 @@ import type {
   RoleDraftInput,
   RoleView,
 } from "../lib/bindings";
-
-const selectClass =
-  "w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary";
+import { selectClass } from "../components/ui/Select";
 
 /**
  * The participation modes the picker OFFERS — **two, and both of them do

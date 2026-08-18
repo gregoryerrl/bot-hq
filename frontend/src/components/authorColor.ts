@@ -66,7 +66,7 @@ const RESERVED = new Map<string, string>([
  * no colour at all — invisible in review, obvious to the user, and the exact
  * "a typo emits no rule" failure the palette test exists for.
  */
-export type ParticipantColor = { name: string; token: string; swatch: string };
+type ParticipantColor = { name: string; token: string; swatch: string };
 
 /**
  * The palette, in rotation order.

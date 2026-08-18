@@ -95,6 +95,12 @@ const MODEL_KEYS = ["list_models"] as const;
 // EYES-sign-off findings — the session-header banner refetches when the bridge
 // fires `session:findings_changed` (eyes_flag / disposition_finding / approve_finding).
 const FINDINGS_KEYS = ["list_session_findings"] as const;
+// The roster read (round 10). Its rows change at SPAWN (`spawn_knobs_recorded`,
+// the effort/ultracode the reconciliation decided) — after a SessionView has
+// often already mounted and read them, so the SpawnBadge stayed blank for the
+// session. The spawn's first observable event is the agent's health flip, so
+// the roster refetches on `session:agent_health` and on the resync sweep.
+const ROSTER_KEYS = ["list_session_participants"] as const;
 // Plugin registry: install / enable / disable / uninstall / crash all change
 // `list_installed_plugins`, which the tab row (Shell) and the manager panel
 // share as one cache entry. Round 8: the two components each carried their own
@@ -119,6 +125,7 @@ export const RESYNC_KEYS = [
   ...MODEL_KEYS,
   ...FINDINGS_KEYS,
   ...PLUGIN_KEYS,
+  ...ROSTER_KEYS,
   "get_session_messages",
   "get_staged_response",
   "get_session",
@@ -196,8 +203,11 @@ function GlobalEventSync() {
   const onHealth = useCallback(
     (p: { session_id: string; agent: string; health: string }) => {
       setHealth(p.session_id, p.agent, p.health as AgentHealth);
+      // A health flip is the spawn's first observable edge: re-read the roster
+      // so spawn-time columns written after the mount read reach the view.
+      invalidate(ROSTER_KEYS);
     },
-    [setHealth],
+    [setHealth, invalidate],
   );
   const onAttention = useCallback(
     (p: { session_id: string; state: string | null }) => {

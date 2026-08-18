@@ -60,7 +60,11 @@ export function Settings() {
   };
   return (
     <div className="flex h-full flex-col bg-background">
-      <div className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4">
+      <div
+        role="tablist"
+        aria-label="Settings tabs"
+        className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4"
+      >
         <SubTabButton active={tab === "roles"} onClick={() => select("roles")}>
           Roles
         </SubTabButton>

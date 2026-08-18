@@ -39,11 +39,11 @@ function renderSettings() {
   );
 }
 
-const subtab = (name: RegExp) => screen.queryByRole("button", { name });
+const subtab = (name: RegExp) => screen.queryByRole("tab", { name });
 
 /** Opens Policy, where the session-create defaults live since rc3 D8. */
 async function openPolicy() {
-  fireEvent.click(screen.getByRole("button", { name: /^policy$/i }));
+  fireEvent.click(screen.getByRole("tab", { name: /^policy$/i }));
   return screen.findByRole("heading", { name: /session defaults/i });
 }
 

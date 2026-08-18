@@ -253,6 +253,7 @@ export function ChatPane({
       {!stuck && messages.length > 0 && (
         <div className="pointer-events-none sticky bottom-0 flex justify-end pr-1 pt-2">
           <button
+            type="button"
             onClick={scrollToBottom}
             className={cn(
               "pointer-events-auto inline-flex items-center gap-1 rounded-full",

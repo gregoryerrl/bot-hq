@@ -12,7 +12,7 @@ export type AgentHealth = "running" | "retrying" | "stalled" | "dead";
  * A map rather than two named fields because the roster is the session's, not
  * the product's: the header reads it by the slugs its roster actually has.
  */
-export type SessionHealth = Record<string, AgentHealth | undefined>;
+type SessionHealth = Record<string, AgentHealth | undefined>;
 
 interface HealthStore {
   /** session_id -> per-agent health. Populated live from the agent_health

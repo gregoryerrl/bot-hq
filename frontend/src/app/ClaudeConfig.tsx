@@ -3,6 +3,7 @@ import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvok
 import { useServerDraft } from "../hooks/useServerDraft";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
+import { selectClass as houseSelectClass } from "../components/ui/Select";
 import {
   GearIcon,
   McpIcon,
@@ -500,10 +501,9 @@ function PaneHeader({
   );
 }
 
-const selectClass = cn(
-  "rounded border border-outline-variant bg-surface-container-lowest px-2 py-1",
-  "font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none",
-);
+// The house select shape (`ui/Select`); this pane's selects are inline (not
+// full-width), so the sites below pair it with a width.
+const selectClass = cn(houseSelectClass, "w-auto");
 
 // ---------------------------------------------------------------------------
 // Panes

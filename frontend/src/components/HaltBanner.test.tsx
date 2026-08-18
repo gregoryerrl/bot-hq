@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from "@testing-library/react";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   HaltBanner,
   isApproval,
@@ -81,6 +81,28 @@ describe("HaltBanner", () => {
     expect(banner).toHaveTextContent("1 question in the tray — the session keeps working");
   });
 
+  it("the tray pointer is a real button — clicking it calls onOpenTray (both branches)", () => {
+    // Round 10: the pointer rendered as a button whose handler no site passed,
+    // so it looked clickable and did nothing. SessionView now bumps
+    // DocumentPane's open-tray signal through this prop; pin that the click
+    // reaches it, on the questions-only line AND under a halt — and that the
+    // halted branch does not say "waiting" about the tray either (the rule
+    // above holds for both).
+    const open = vi.fn();
+    const { unmount } = render(
+      <HaltBanner halt={null} rows={[row()]} onOpenTray={open} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /question in the tray/i }));
+    expect(open).toHaveBeenCalledTimes(1);
+    unmount();
+
+    render(<HaltBanner halt={halt()} rows={[row()]} onOpenTray={open} />);
+    const pointer = screen.getByRole("button", { name: /question.* in the tray/i });
+    expect(pointer).not.toHaveTextContent(/waiting/i);
+    fireEvent.click(pointer);
+    expect(open).toHaveBeenCalledTimes(2);
+  });
+
   it("renders NOTHING for approvals alone — the gate owns that fact", () => {
     // The gate replaces the input box AND halts the session (D35); a banner
     // narrating it on top would be a second surface for one fact.
@@ -136,10 +158,12 @@ describe("HaltBanner", () => {
     );
   });
 
-  it("points at the tray when a structured pick is waiting too", () => {
+  it("points at the tray when a structured pick is parked too", () => {
+    // "in the tray", never "waiting" — the tray is asynchronous on both
+    // branches (round 10 aligned the halted branch with the rule above).
     render(<HaltBanner halt={halt()} rows={[row()]} />);
     expect(
-      screen.getByRole("button", { name: /1 question waiting/i }),
+      screen.getByRole("button", { name: /1 question in the tray/i }),
     ).toBeInTheDocument();
   });
 

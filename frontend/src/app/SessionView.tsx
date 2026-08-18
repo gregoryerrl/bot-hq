@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
@@ -10,9 +10,16 @@ import { ContextMeter } from "../components/ContextMeter";
 import { useContextStore } from "../stores/context";
 import { useDragResize } from "../hooks/useDragResize";
 import { useChatStore } from "../stores/chat";
+import { formatTimestamp } from "../lib/time";
 import { ChatInput, draftKeyFor } from "../components/ChatInput";
 import { ClosedSessionBar } from "../components/ClosedSessionBar";
-import { HaltBanner, isApproval, type SessionHalt, type TrayRow } from "../components/HaltBanner";
+import {
+  HaltBanner,
+  isApproval,
+  isTrayItem,
+  type SessionHalt,
+  type TrayRow,
+} from "../components/HaltBanner";
 import { useTrayStaging, stagedFor } from "../stores/trayStaging";
 import { ApprovalGate } from "../components/ApprovalGate";
 import { ChatPane } from "../components/ChatPane";
@@ -80,7 +87,9 @@ function readingLine(r: ContextReadingView): string {
     r.used_tokens !== null && r.reported_window
       ? ` (${Math.floor((r.used_tokens / r.reported_window) * 100)}%)`
       : "";
-  return `${r.created_at}  ${r.verdict.padEnd(19)}${used} / ${window}${pct}${
+  // Local time like every other timestamp surface (round 10 — this printed
+  // the raw stored UTC string); zone-safe through `parseUtcMs`.
+  return `${formatTimestamp(r.created_at)}  ${r.verdict.padEnd(19)}${used} / ${window}${pct}${
     r.model ? `  ${r.model}` : ""
   }`;
 }
@@ -147,7 +156,7 @@ export function SessionView() {
     () =>
       trayRows.filter(
         (r) =>
-          r.status === "pending" && !isApproval(r) && stagedMap[r.choice_id],
+          r.status === "pending" && isTrayItem(r) && stagedMap[r.choice_id],
       ).length,
     [trayRows, stagedMap],
   );
@@ -167,6 +176,16 @@ export function SessionView() {
     { sessionId: string; target: string }
   >("advance_session_phase");
   const [respawnError, setRespawnError] = useState<AppError | null>(null);
+  // Bumped by the HaltBanner's tray pointer; DocumentPane opens its Tray tab
+  // on any change (round 10 — the pointer used to be a button wired to nothing).
+  const [openTraySignal, setOpenTraySignal] = useState(0);
+  const openTray = useCallback(() => setOpenTraySignal((n) => n + 1), []);
+  // Stable per session, so `memo(ChatMessage)` rows are not re-rendered by a
+  // fresh arrow on every SessionView render (round 10).
+  const onViewFile = useCallback(
+    (path: string) => setViewFile({ sessionId, path }),
+    [sessionId],
+  );
   // A refused phase advance (an open gate, unresolved findings, an invalid
   // target) used to snap the select back with no message — indistinguishable
   // from a mis-click (round 8). Rendered beside the select; cleared on the
@@ -443,7 +462,7 @@ export function SessionView() {
     const current = trayRows
       .filter(
         (r) =>
-          r.status === "pending" && !isApproval(r) && stagedMap[r.choice_id],
+          r.status === "pending" && isTrayItem(r) && stagedMap[r.choice_id],
       )
       .map((r) => ({ choice_id: r.choice_id, picked: stagedMap[r.choice_id]! }));
     if (
@@ -727,10 +746,14 @@ export function SessionView() {
       />
 
       {respawnError && (
-        <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 font-code-sm text-code-sm text-on-error-container">
+        <div
+          role="alert"
+          className="border-b border-outline-variant bg-error-container/30 px-4 py-2 font-code-sm text-code-sm text-on-error-container"
+        >
           <span className="font-semibold">Agent spawn failed:</span>{" "}
           {respawnError.message}{" "}
           <button
+            type="button"
             className="ml-2 underline hover:text-error"
             onClick={() => {
               setRespawnError(null);
@@ -746,9 +769,13 @@ export function SessionView() {
       )}
 
       {closeError && (
-        <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 font-code-sm text-code-sm text-on-error-container">
+        <div
+          role="alert"
+          className="border-b border-outline-variant bg-error-container/30 px-4 py-2 font-code-sm text-code-sm text-on-error-container"
+        >
           <span className="font-semibold">Close failed:</span> {closeError}
           <button
+            type="button"
             className="ml-2 underline hover:text-error"
             onClick={() => setCloseError(null)}
           >
@@ -758,9 +785,13 @@ export function SessionView() {
       )}
 
       {renameError && (
-        <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 font-code-sm text-code-sm text-on-error-container">
+        <div
+          role="alert"
+          className="border-b border-outline-variant bg-error-container/30 px-4 py-2 font-code-sm text-code-sm text-on-error-container"
+        >
           <span className="font-semibold">Rename failed:</span> {renameError}
           <button
+            type="button"
             className="ml-2 underline hover:text-error"
             onClick={() => setRenameError(null)}
           >
@@ -770,17 +801,20 @@ export function SessionView() {
       )}
 
       <nav
+        role="tablist"
         aria-label="Session tabs"
         className="flex shrink-0 items-center border-b border-outline-variant px-2"
       >
         <SubTabButton
           active={tab === "workspace"}
+          controls="session-tab-workspace"
           onClick={() => setTab("workspace")}
         >
           Workspace
         </SubTabButton>
         <SubTabButton
           active={tab === "context"}
+          controls="session-tab-context"
           onClick={() => {
             setTab("context");
             setContextMounted(true);
@@ -790,6 +824,7 @@ export function SessionView() {
         </SubTabButton>
         <SubTabButton
           active={tab === "terminal"}
+          controls="session-tab-terminal"
           onClick={() => {
             setTab("terminal");
             setTerminalMounted(true);
@@ -801,6 +836,7 @@ export function SessionView() {
 
       <div
         ref={splitContainerRef}
+        id="session-tab-workspace"
         role="tabpanel"
         aria-label="Workspace"
         className={cn(
@@ -815,10 +851,7 @@ export function SessionView() {
           {/* Chat history + live batches — virtualized, and a render boundary:
               per-batch re-renders stop inside ChatPane instead of re-rendering
               this whole view (header, subtabs, DocumentPane). */}
-          <ChatPane
-            sessionId={sessionId}
-            onViewFile={(path) => setViewFile({ sessionId, path })}
-          />
+          <ChatPane sessionId={sessionId} onViewFile={onViewFile} />
 
           <div className="border-t border-outline-variant">
             {/* Round 10 (B4): a closed session's history is read-only — the
@@ -834,6 +867,7 @@ export function SessionView() {
               rows={trayRows}
               label={(agent) => authorLabel(agent, labels)}
               hues={hues}
+              onOpenTray={openTray}
             />
             {/* rc3 D33: an approval TAKES the input slot. Something is
                 synchronously blocked on it — a pre-push hook, a gated command —
@@ -858,7 +892,7 @@ export function SessionView() {
                 onCancel={async () => {
                   await invoke("cancel_session_turn", { sessionId });
                 }}
-                onViewFile={(path) => setViewFile({ sessionId, path })}
+                onViewFile={onViewFile}
               />
             ) : (
             /* key remounts the input per session so the draft seed (a lazy
@@ -894,7 +928,7 @@ export function SessionView() {
                   .filter(
                     (r) =>
                       r.status === "pending" &&
-                      !isApproval(r) &&
+                      isTrayItem(r) &&
                       stagedMap[r.choice_id],
                   )
                   .map((r) => ({
@@ -919,7 +953,7 @@ export function SessionView() {
                   .filter(
                     (r) =>
                       r.status === "pending" &&
-                      !isApproval(r) &&
+                      isTrayItem(r) &&
                       stagedMap[r.choice_id],
                   )
                   .map((r) => ({
@@ -959,11 +993,16 @@ export function SessionView() {
         />
 
         <div className="min-h-0 min-w-0 flex-1">
-          <DocumentPane sessionId={sessionId} sessionPhase={phase} />
+          <DocumentPane
+            sessionId={sessionId}
+            sessionPhase={phase}
+            openTraySignal={openTraySignal}
+          />
         </div>
       </div>
 
       <div
+        id="session-tab-context"
         role="tabpanel"
         aria-label="Context"
         className={cn("min-h-0 flex-1", tab !== "context" && "hidden")}
@@ -972,6 +1011,7 @@ export function SessionView() {
       </div>
 
       <div
+        id="session-tab-terminal"
         role="tabpanel"
         aria-label="Terminal"
         className={cn("min-h-0 flex-1", tab !== "terminal" && "hidden")}

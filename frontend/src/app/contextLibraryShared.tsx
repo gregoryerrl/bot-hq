@@ -134,7 +134,7 @@ export function isInternalGlobalsPath(path: string): boolean {
   );
 }
 
-export interface GlobalsSplit {
+interface GlobalsSplit {
   system: { entries: ClIndexEntryView[]; folderPaths: string[] };
   global: { entries: ClIndexEntryView[]; folderPaths: string[] };
 }

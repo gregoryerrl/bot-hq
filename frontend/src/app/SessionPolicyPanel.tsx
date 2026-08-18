@@ -78,6 +78,7 @@ export function SessionPolicyPanel({
       ref={trapRef}
       tabIndex={-1}
       role="dialog"
+      aria-modal="true"
       aria-label="Session settings"
       className={cn(
         "fixed inset-y-0 right-0 z-30 flex w-full flex-col",

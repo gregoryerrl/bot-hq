@@ -420,12 +420,7 @@ export function ChatInput({
       )}
       {/* Unlocked but still working — the locked branch has its own TurnStatus. */}
       {!locked && (
-        <StillWorkingNotice
-          activity={activity}
-          busy={busy}
-          label={busyLabel}
-          hues={authorHues}
-        />
+        <StillWorkingNotice busy={busy} label={busyLabel} hues={authorHues} />
       )}
       <form onSubmit={handleSubmit} className="flex flex-col gap-1.5 p-3">
         {locked && (
@@ -687,38 +682,35 @@ function WorkerLine({
  * still unwinding, so the first reply may land a beat late.
  */
 function StillWorkingNotice({
-  activity,
   busy,
   label,
   hues,
 }: {
-  activity?: SessionActivity;
   busy?: AgentBusy;
   label?: (slug: string) => string;
   hues?: Record<string, string>;
 }) {
+  // Rendered only when the box is UNLOCKED and someone is busy — which
+  // `isLocked` allows for exactly one activity, `paused` (round 10: the
+  // former `awaiting_user` line and the "turn hasn't ended" arm were
+  // unreachable, and are gone).
   if (!anyBusy(busy)) return null;
-  const paused = activity === "paused";
   return (
     <div className="flex items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-1.5 text-xs text-on-surface-variant">
       <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-        {activity === "awaiting_user" && <span>Waiting on your answer ·</span>}
-        {paused && <span>Stopping ·</span>}
+        <span>Stopping ·</span>
         <WorkerLine busy={busy} label={label} hues={hues} />
-        <span>
-          {paused
-            ? "— finishing the current tool."
-            : "— the turn hasn't ended yet."}
-        </span>
+        <span>— finishing the current tool.</span>
       </span>
       <BouncingDots />
     </div>
   );
 }
 
-// Shown in place of the textarea while a turn is in flight: which participants
-// are working, with a little animated spice. The user Stops the turn to reclaim
-// the input.
+// Rendered above the composer while a turn is in flight (the textarea stays
+// mounted and writable under the lock since the Stage toggle, 2026-08-15):
+// which participants are working, with a little animated spice. The user
+// Pauses to interrupt.
 function TurnStatus({
   activity,
   busy,

@@ -17,8 +17,9 @@ interface PendingTrayRow {
 }
 
 /**
- * Topbar NOTIFIER for pending input across all open sessions — questions,
- * approval-gates, gated commands. Reads the durable `session_tray` (via
+ * Topbar NOTIFIER for pending QUESTIONS across all open sessions (rc3 D35: the
+ * bell counts questions; approvals take the input box and halts are session
+ * state, neither is a tray row). Reads the durable `session_tray` (via
  * `list_pending_tray`) so it reflects input that piled up while the user was
  * AFK and survives a restart, unlike the in-memory pending map. Grouped by
  * session: one row per session ("Session-X needs your input [N]"). Notify-only

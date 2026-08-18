@@ -308,12 +308,16 @@ export function PluginManager() {
           edits show on tab reload.
         </label>
         {installError && (
-          <div className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+          <div
+            role="alert"
+            className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
+          >
             <div>
               <span className="font-semibold">{installError.kind}:</span>{" "}
               {installError.message}
             </div>
             <button
+              type="button"
               className="underline"
               onClick={() => setInstallError(null)}
             >
@@ -322,23 +326,30 @@ export function PluginManager() {
           </div>
         )}
         {toggleError && (
-          <div className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+          <div
+            role="alert"
+            className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
+          >
             <div>
               <span className="font-semibold">{toggleError.kind}:</span>{" "}
               Enable/disable failed: {toggleError.message}
             </div>
-            <button className="underline" onClick={() => setToggleError(null)}>
+            <button type="button" className="underline" onClick={() => setToggleError(null)}>
               dismiss
             </button>
           </div>
         )}
         {uninstallError && (
-          <div className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+          <div
+            role="alert"
+            className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
+          >
             <div>
               <span className="font-semibold">{uninstallError.kind}:</span>{" "}
               Uninstall failed: {uninstallError.message}
             </div>
             <button
+              type="button"
               className="underline"
               onClick={() => setUninstallError(null)}
             >
@@ -347,12 +358,15 @@ export function PluginManager() {
           </div>
         )}
         {updateError && (
-          <div className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+          <div
+            role="alert"
+            className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
+          >
             <div>
               <span className="font-semibold">{updateError.kind}:</span>{" "}
               Update from source failed: {updateError.message}
             </div>
-            <button className="underline" onClick={() => setUpdateError(null)}>
+            <button type="button" className="underline" onClick={() => setUpdateError(null)}>
               dismiss
             </button>
           </div>

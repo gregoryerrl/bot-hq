@@ -75,17 +75,38 @@ export function SessionPhaseChip({ phase, closed }: SessionPhaseChipProps) {
 export function phaseTintClasses(
   phase: string | null,
   closed: boolean,
-): { bar: string; ring: string } | null {
+): { bar: string; ring: string; hoverRing: string } | null {
   const bucket = bucketFor(phase, closed);
   if (!bucket) return null;
+  // `hoverRing` is spelled out per bucket rather than built as
+  // `hover:${ring}` at the call site (round 10): Tailwind's scanner emits only
+  // class strings it can see in source, so the built form never reached the
+  // stylesheet and the tile's phase-tinted hover border was a no-op — the same
+  // scanner rule `authorColor.ts` documents for its own tokens.
   switch (bucket) {
     case "primary":
-      return { bar: "bg-primary", ring: "border-primary/60" };
+      return {
+        bar: "bg-primary",
+        ring: "border-primary/60",
+        hoverRing: "hover:border-primary/60",
+      };
     case "secondary":
-      return { bar: "bg-secondary", ring: "border-secondary/60" };
+      return {
+        bar: "bg-secondary",
+        ring: "border-secondary/60",
+        hoverRing: "hover:border-secondary/60",
+      };
     case "tertiary":
-      return { bar: "bg-tertiary", ring: "border-tertiary/60" };
+      return {
+        bar: "bg-tertiary",
+        ring: "border-tertiary/60",
+        hoverRing: "hover:border-tertiary/60",
+      };
     case "muted":
-      return { bar: "bg-outline-variant", ring: "border-outline-variant" };
+      return {
+        bar: "bg-outline-variant",
+        ring: "border-outline-variant",
+        hoverRing: "hover:border-outline-variant",
+      };
   }
 }

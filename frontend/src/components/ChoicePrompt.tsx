@@ -4,11 +4,11 @@ import { cn } from "../lib/cn";
 
 /** Shape ChoicePrompt renders — a pending question row. Hand-defined (not a
  *  generated binding) because it's built frontend-side from a durable
- *  SessionTrayView, not returned by any Tauri command. */
+ *  SessionTrayView, not returned by any Tauri command. Exactly the three
+ *  fields the card reads (round 10 dropped `session_id` / `agent`, which the
+ *  one render site fabricated to satisfy the type and nothing here used). */
 export interface ChoicePromptChoice {
   choice_id: string;
-  session_id: string;
-  agent: string;
   question: string;
   options: string[];
 }

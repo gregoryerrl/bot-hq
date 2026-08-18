@@ -42,6 +42,14 @@ interface DocumentPaneProps {
    * to peek; the view re-follows on the next phase change.
    */
   sessionPhase?: Phase | null;
+  /**
+   * A counter the parent bumps to say "show the Tray now" (round 10): the
+   * HaltBanner's "N questions in the tray →" pointer lives in SessionView,
+   * while the tray/phase tab is this pane's local state — the pointer was a
+   * button wired to nothing. Any change opens the tray; the user can click
+   * back to a phase as before.
+   */
+  openTraySignal?: number;
 }
 
 interface ComputeApplyDiffResult {
@@ -52,15 +60,21 @@ interface ComputeApplyDiffResult {
 export const DocumentPane = memo(function DocumentPane({
   sessionId,
   sessionPhase,
+  openTraySignal,
 }: DocumentPaneProps) {
   const [activePhase, setActivePhase] = useState<Phase>(
     sessionPhase ?? "investigate",
   );
   // The Tray tab sits before I/P/A/V and is phase-independent: it's the
-  // session's pending inbox — questions / approvals / gated commands awaiting
-  // the user's input, answered inline. A phase transition updates the
-  // underlying phase but does NOT yank the user off the Tray.
+  // session's inbox of parked QUESTIONS, answered inline (rc3 D35: approvals
+  // take the input box, a halt shows above it — neither is a tray row). A
+  // phase transition updates the underlying phase but does NOT yank the user
+  // off the Tray.
   const [showTray, setShowTray] = useState(false);
+  // The parent's "open the tray" signal (the HaltBanner pointer).
+  useEffect(() => {
+    if (openTraySignal) setShowTray(true);
+  }, [openTraySignal]);
 
   // Follow the session's phase whenever it changes (the fix for #3). Firing
   // only on sessionPhase change means a manual tab click still sticks until
@@ -431,7 +445,7 @@ function TrayPill({
             ? "border-primary/70 bg-primary/10 text-primary animate-pulse"
             : "border-transparent bg-transparent text-on-surface-variant hover:text-on-surface",
       )}
-      title="Session tray — pending questions, approvals & gated commands awaiting your input"
+      title="Session tray — questions awaiting your answer (an approval takes the input box; a halt shows above it)"
     >
       Tray
       {hasPending && (
@@ -564,7 +578,6 @@ function TrayList({ sessionId }: { sessionId: string }) {
         <li key={e.id}>
           <TrayChoice
             entry={e}
-            sessionId={sessionId}
             askedByLabel={authorLabel(e.agent, labels)}
             stagedOption={staged[e.choice_id]}
             onStage={(choiceId, picked) => stage(sessionId, choiceId, picked)}
@@ -585,7 +598,6 @@ function TrayList({ sessionId }: { sessionId: string }) {
 // approval, the gated command above the prompt for context.
 function TrayChoice({
   entry,
-  sessionId,
   askedByLabel,
   stagedOption,
   onStage,
@@ -595,7 +607,6 @@ function TrayChoice({
   onExpand,
 }: {
   entry: SessionTrayView;
-  sessionId: string;
   /** Who asked, as `ROLE · Model` — resolved by the list, which holds the
    *  roster. Never `entry.agent` itself (rc3 D10). */
   askedByLabel: string;
@@ -612,8 +623,6 @@ function TrayChoice({
 }) {
   const choice: ChoicePromptChoice = {
     choice_id: entry.choice_id,
-    session_id: sessionId,
-    agent: entry.agent,
     question: entry.prompt,
     options: entry.options,
   };
