@@ -189,7 +189,7 @@ the claude CLI is the only model connector, and the native connector
 returns later as a plugin built from `git show c7bba28:src/agents/native/`.
 See "Native agent loop — CLOSED by rc3 D9" below for what closed with it.
 
-Before that, the arc was duo-reliability + UX: the interrupt redesign
+Before that, the arc was peer-reliability + UX: the interrupt redesign
 (stdin `control_request` cancel + `SessionActivity`), the peer-forward
 router extraction (`core/router.rs`), `peer_ack` / `halt`, the
 EYES-sign-off commit gate, agent-health dots, and the event-driven

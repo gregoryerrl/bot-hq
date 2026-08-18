@@ -5,7 +5,7 @@ for driving AI-assisted coding sessions through an agent harness with
 policy enforcement.
 
 A session runs **N participants**, each playing a ROLE the user defined in
-Settings → Roles (dialog default 1, cap 4). A role owns its capabilities,
+Settings → Roles (dialog default 1, dialog cap 4, backend cap 8). A role owns its capabilities,
 its instruction prose, its participation mode and its default model. The
 seeded pair is HANDS (executes) and EYES (reviews adversarially) — that is
 the user's configuration, not bot-hq's furniture, and rc3 D10 retired the

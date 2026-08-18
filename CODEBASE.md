@@ -135,10 +135,10 @@ D15 epilogue, phase advance, tray answers, Stage.
 | path | role | size |
 |---|---|---|
 | `src/core/mod.rs` | module list + `post_system_notice` re-export | S |
-| `src/core/sequencer.rs` | the ring: `run_sequencer`, `SequencerCommand`, `advance_turn`, `start_turn`/`hand_turn_to`, `deliver_backlog`, consensus/spin/cap/all-pass/Stage yields, `TurnEnding` — the 600-line module doc is a design diary, not current behaviour | XL |
+| `src/core/sequencer.rs` | the ring: `run_sequencer`, `SequencerCommand`, `advance_turn`, `start_turn`/`hand_turn_to`, `deliver_backlog`, consensus/spin/cap/all-pass/Stage yields, `TurnEnding` — the long module doc is a design diary, not current behaviour | XL |
 | `src/core/pump.rs` | `pump_agent` + `PumpConfig`: rows, boot rows, provider-limit/error-streak halts, pass row, epoch bind + `TurnComplete` mint | XL |
 | `src/core/activity.rs` | `ActivityTracker` (per-slug busy map + latches) → `SessionActivity` + `session:activity` emit | L |
-| `src/core/state.rs` | `AppState`: open/ensure/restart, cancel→interrupt→SIGKILL, resume, `close_session` + epilogue + `teardown_session`, `broadcast`, `send_user_response`, Stage, `advance_phase`, `resolve_choice`, `halt_declared` | XL |
+| `src/core/state.rs` | `AppState`: open/ensure/restart/`reopen_session`, `cancel_and_escalate` (Pause: decide → interrupt → SIGKILL, atomic-op deferral via `await_atomic_op_or_cap`), resume, `close_session` + epilogue (join arm applies the archive) + `teardown_session`, `broadcast`, `send_user_response`, Stage, `advance_phase`, `resolve_choice`, `halt_declared` | XL |
 | `src/core/broadcast.rs` | `broadcast_user_message`: envelope + `post_to_channel("user")`; writes no stdin (D19) | S |
 | `src/core/mentions.rs` | `parse_mention_slugs` (D17) | S |
 | `src/core/ipav.rs` | `IpavPhase` chip/name/parse/transition notice | S |
@@ -195,8 +195,8 @@ check.
 
 | path | role | size |
 |---|---|---|
-| `src/core/session.rs` | `open_session`/`spawn_existing_session` → `spawn_session_handle` (the ~700-line glue); `compose_system_prompt`, `resolve_role_prose`, `resolve_roster_facts`, `read_system_prompt`, `participant_spawn_config`, `participant_capabilities`, `resolve_participant_overrides`, `mcp_config_json`; `resolve_participant_config` (model: explicit → role default → legacy `agent_configs` → hardcoded); `spawn_ring`, `boot_then_start`, `RingKick`; `SessionHandle` | XL |
-| `src/core/close_learnings.rs` | pure `decide`/`plan` for the D15 close-out epilogue | M |
+| `src/core/session.rs` | `open_session`/`spawn_existing_session` → `spawn_session_handle` (the big glue fn); `compose_system_prompt`, `resolve_role_prose`, `resolve_roster_facts`, `read_system_prompt`, `participant_spawn_config`, `participant_capabilities`, `resolve_participant_overrides`, `mcp_config_json`; `resolve_participant_config` (model: explicit → role default → legacy `agent_configs` → hardcoded); `spawn_ring`, `boot_then_start`, `RingKick`; `SessionHandle` | XL |
+| `src/core/close_learnings.rs` | pure `decide`/`plan(decision, claimed, in_flight)` for the D15 close-out epilogue (in-flight decides first, round 11), `outcome_notice` | M |
 | `src/core/watchdog.rs` | `run_stall_watchdog`: stall + idle-unflagged loop → `session:attention` chip / nudge / halt escalation | L |
 | `src/core/worktree.rs` | `ensure_worktree`/`remove_worktree_if_clean` (argv-array `git`, no shell) | M |
 | `src/core/terminal.rs` | `TerminalRegistry`/`SessionTerminal`: one PTY per session, bounded scrollback, `wait_settle` (Notify, not polling) | M |
@@ -306,7 +306,7 @@ lives in 14 registries on one struct (12 keyed by session id, 2 by `(session, ag
 | path | role | size |
 |---|---|---|
 | `src/signaling/bridge/mod.rs` | struct + 14 registries, `SignalingEvent` (17 variants), register/`unregister_session`, `notify_*` emitters, close-gate + retired-terms, policy resolution, reviewer-override request | XL |
-| `src/signaling/bridge/tray.rs` | `ask_user_choice_inner`, `request_approval(_parked)`, supersede/withdraw, `resolve_choice_confirmable`, `deliver_oob`, `emit_halt_row`/`mark_awaiting_user`, `request_phase_advance` | XL |
+| `src/signaling/bridge/tray.rs` | `ask_user_choice_inner` (`kind = approval` for every approval-context row = the ring's gate marker), `request_approval(_parked)`, supersede/withdraw (owner-scoped), `resolve_choice_confirmable`, `deliver_oob`, `emit_halt_row`/`mark_awaiting_user`, `request_phase_advance` | XL |
 | `src/signaling/bridge/action_gate.rs` | `park_gated_command` (dedupe) / `execute_gated` (`tool_gate::run_in_repo`), `gate_status` | L |
 | `src/signaling/bridge/findings.rs` | `eyes_flag`/`approve`/`disposition`/`check_open_findings` + reviewer-down gate + override | M |
 | `src/signaling/bridge/session_docs.rs` | doc write (phase-keyed, `-eyes` twin), search, read, archive-on-rewrite (cap 50) | M |
@@ -378,7 +378,7 @@ substring matcher over Bash calls.
 
 | path | role | size |
 |---|---|---|
-| `src/policy/mod.rs` | `Policy`, `resolve_at_root`/`merge`, `first_forbidden_word`/`contains_word` (one impl, word-boundary, case-insensitive), prompt block render | L |
+| `src/policy/mod.rs` | `Policy`, `resolve_at_root`/`merge`, `first_forbidden_word`/`contains_word` (one impl, word-boundary, case-insensitive), prompt block render, `write_config_atomically` (the one temp+rename config writer: policy YAMLs, `tool-gate.json`, the hash cache) | L |
 | `src/policy/hooks.rs` | `policy-check` CLI: commit-msg / pre-commit (forbidden words on added lines + immutable-migration guard + EYES findings gate) / post-commit / pre-push (`decide_push` HTTP round-trip; the prompt names the PUSHED refs from git's stdin lines — `parse_push_updates`/`pushed_ref_names`, read once and lazily — HEAD only as fallback) / tool-gate (PreToolUse → `park_gate`); `install_hooks`; `check_findings_gate` on its OWN read-only sqlite, over storage's `OPEN_BLOCKING_FOR_SESSION` predicate | XL |
 | `src/policy/tool_gate.rs` | keyword list resolution (session snapshot → global), `match_keyword` (substring, gate wins), `run_in_repo` in the AGENT's shell (`gate_shell`: `$SHELL` if POSIX-family, else zsh→bash→sh — macOS bash is 3.2 and dies on heredoc-in-`$()`) | M |
 | `src/policy/session_policy.rs` | `.local/session-policies/<sid>.yaml` snapshot write-if-absent (enforced by the caller) / read / purge at boot | S |
@@ -430,7 +430,7 @@ every write.
 | `src/storage/mod.rs` | `Storage::open`/`memory`, pool, `migrate!`, generic CL search | S |
 | `src/storage/row_types.rs` | shared `FromRow` structs/enums (Message, Session, Finding, …) | M |
 | `src/storage/time.rs` | `now_utc()` | S |
-| `src/storage/sessions.rs` | `sessions` CRUD, spawn-model/effort columns, halt slot (`declare_session_halt`/`clear_session_halt`), boot orphan sweep | M |
+| `src/storage/sessions.rs` | `sessions` CRUD, `reopen_session`/`archive_session`, spawn-model/effort columns, halt slot (`declare_session_halt`/`clear_session_halt`), boot orphan sweep | M |
 | `src/storage/participants.rs` | roles · session_participants (roster seed/invite, labels, colours) · turn cycle (`next_active_participant`, `set_current_turn`, done votes, `round_number`) · cursors + deliveries (`commit_delivery`, `unread_for_participant`/`channel_page`, `UNREAD_BATCH_LIMIT`) · channel wire (`post_to_channel`, envelope) — six clean extraction seams | XL |
 | `src/storage/messages.rs` | `messages` insert/read: since-id watermark (`messages_for_session`, unbounded), the chat's tail page (`messages_tail`), the spin-detection read (`participant_text_since`); the three production SQL strings are fns (`messages_since_sql`, `messages_tail_sql`, `participant_text_since_sql`) EXPLAINed by tests | M |
 | `src/storage/tray.rs` | `session_tray` (questions/approvals/gated commands), `pending_gate_ids`, purge, closed/orphan withdraw | M |
@@ -493,7 +493,7 @@ fs watcher (`cl:changed`, `session:worktree_changed`, `plugin:assets_changed`).
 
 | path | role | size |
 |---|---|---|
-| `src/main.rs` | boot, CLI arms, control-event consumer (`SessionCloseRequest`/`AwaitingUser`→`halt_declared`/`StagedDeliveryDue`→`deliver_staged`/`AgentAdvancePhase`), heartbeat sweep, logging | L |
+| `src/main.rs` | boot, CLI arms, control-event consumer (`SessionCloseRequest`/`HaltAcked`→`halt_declared`/`StagedDeliveryDue`→`deliver_staged`/`AgentAdvancePhase`), heartbeat sweep, logging | L |
 | `src/lib.rs` | crate root | S |
 | `src/paths.rs` | data-dir resolution, first-run init, legacy layout migrations (v0→v1→v2), `LockGuard` (PID, steals stale), legacy custom-instruction seeds | L |
 | `src/tauri_specta_gen.rs` | `collect_commands!` (the ONLY registration; an omitted command compiles but is unreachable) + TS export | S |
@@ -513,7 +513,7 @@ fs watcher (`cl:changed`, `session:worktree_changed`, `plugin:assets_changed`).
 | `src/tauri_events/mod.rs`, `src/tauri_events/types.rs` | event-name consts + payload structs (every emitted name has a const, incl. the subscriber's `SESSION_RESYNC` / `SESSION_HALT_CLEARED` / `SESSION_STAGE_DELIVERED`) | S / M |
 | `src/tauri_events/bridge_subscriber.rs` | `route()` SignalingEvent → emit; `Lagged` → `session:resync` | M |
 | `src/tauri_events/batch_emitter.rs` | message coalescing + per-session watermark | M |
-| `src/tauri_events/fs_watcher.rs` | notify watcher: CL dir + dynamic repo/plugin dirs, 500 ms debounce, one rescan per project | M |
+| `src/tauri_events/fs_watcher.rs` | notify watcher: CL dir + dynamic repo/plugin dirs (`WatchSet`: owner-keyed, one refcounted watch per root, every owner notified — round 11), 500 ms debounce, one rescan per project | M |
 
 **Entry points.** `main` boot order above · `builder()` in
 `src/tauri_specta_gen.rs` · `get_session_runtime` · `route()` · `flush_once` ·
@@ -628,7 +628,7 @@ without polling.
 | `frontend/src/components/ChatPane.tsx` | virtualised message list; owns `agent:messages:batch` | M |
 | `frontend/src/components/ChatInput.tsx` | compose / Stage / Send / Pause / Resume, `@`-mention picker | L |
 | `frontend/src/components/ChatMessage.tsx` | one row incl. tool_use/tool_result pills | M |
-| `frontend/src/components/DocumentPane.tsx` | I/P/A/V doc tabs + Apply-tab colored diff (memoised `groupDiffByFile`) + Tray tab | L |
+| `frontend/src/components/DocumentPane.tsx` | Tray tab + I/P/A/V doc tabs + custom-document tabs (untagged docs, round 11) + Apply-tab colored diff (memoised `groupDiffByFile`); `DocArticle` shared by phase and custom docs | L |
 | `frontend/src/components/HaltBanner.tsx` | HALT state + the SOLE `isApproval`/`isTrayItem` predicates; its tray pointer calls `onOpenTray` (SessionView → DocumentPane's `openTraySignal`) | M |
 | `frontend/src/components/ClosedSessionBar.tsx` | what a CLOSED session shows in place of its composer: read-only history + the **Reopen** button (`reopen_session`) — the only path that revives an archived roster (round 10) | S |
 | `frontend/src/components/ApprovalGate.tsx` | Approve/Reject gate replacing the input | M |
@@ -686,7 +686,7 @@ every other FE area imports.
 | `frontend/src/app/SessionPolicyPanel.tsx`, `frontend/src/components/PolicyForm.tsx`, `frontend/src/components/GatedKeywordList.tsx` | session gear drawer; shared policy editor; gated keyword rows | M / S / S |
 | `frontend/src/app/ViolationsPanel.tsx`, `frontend/src/app/FeedbackPanel.tsx`, `frontend/src/app/MeasurementView.tsx` | violations viewer; feedback triage; CL retrieval stats | M / S / S |
 | `frontend/src/components/UpdateBanner.tsx` | dismissible update banner | S |
-| `frontend/src/components/ui/Button.tsx`, `frontend/src/components/ui/Card.tsx`, `frontend/src/components/ui/Input.tsx`, `frontend/src/components/ui/Select.tsx`, `frontend/src/components/ui/SegToggle.tsx`, `frontend/src/components/ui/Textarea.tsx` | base atoms (`Select` since round 10: one house `selectClass` shared by Models/Roles/ClaudeConfig; the size-specific inline selects elsewhere still spell their own) | S |
+| `frontend/src/components/ui/Button.tsx`, `frontend/src/components/ui/Card.tsx`, `frontend/src/components/ui/Input.tsx`, `frontend/src/components/ui/Select.tsx`, `frontend/src/components/ui/SegToggle.tsx`, `frontend/src/components/ui/Skeleton.tsx`, `frontend/src/components/ui/Textarea.tsx` | base atoms (`Select.tsx` is the house `selectClass` — since round 11 applied by Models/Roles/ClaudeConfig/the New Session dialog with no wrapper component; `Skeleton` since round 11: the loading-rows idiom five panels spelled by hand; `Button` carries the house `rounded` and a focus-visible ring since round 11) | S |
 | `frontend/src/components/icons.tsx` | THE hand-rolled SVG icon set — two bases kept deliberately (attribute-sized stroke 1.75 `Svg`; class-sized stroke 2 `ClassSvg`, the family moved in from the CL module in round 9); the near-twins `MemoryIcon`/`FileIcon` and `RescanIcon`/`RefreshIcon` await a visual decision | S |
 | `frontend/src/components/Markdown.tsx`, `frontend/src/components/ErrorBanner.tsx`, `frontend/src/components/ConfirmDialog.tsx`, `frontend/src/components/SubTabButton.tsx` | shared atoms | S |
 | `frontend/src/components/authorColor.ts` | label → hue class; D20 8-hue palette named by colour | S |
@@ -827,10 +827,10 @@ half does not count. Details, evidence and the cheapest pins are in
 | 8 | ring step → deal → persist (F ↔ B1) | `next_active_participant` → `hand_turn_to` → `set_current_turn`/`set_round_number` | PINNED end to end |
 | 9 | deal → stdin → commit (B1 → A → F) | `deliver_backlog` → `deliver_batch` → `commit_delivery` | PINNED; failure path is `warn!` only (no event, no row) |
 | 10 | pump → row → UI (B1 → C2 → G → J) | `notify_persisted` → `route` → `BatchEmitter` → `agent:messages:batch` | pump→notify UNPINNED; downstream PINNED |
-| 11 | epoch cell shared by pump and ring (B2 wiring) | `deps.epochs[p.id]` vs `PumpConfig.turn_epoch` per slot | **UNPINNED join** — a mis-pairing wedges the ring after turn 1 |
+| 11 | epoch cell shared by pump and ring (B2 wiring) | `deps.epochs[p.id]` vs `PumpConfig.turn_epoch` per slot | publish PINNED (`the_epoch_is_published_to_the_holder_before_its_rows_go_out`); the `session.rs` slot pairing UNPINNED (the epoch test installs its own cells) — a mis-pairing wedges the ring after turn 1; since round 11 both cells are filled in ONE pass |
 | 12 | `ask_user_choice` park → answer → OOB row → ring (C1 → C2 → F → J → B1) | `ask_user_choice_inner`, `resolve_choice_confirmable`, `deliver_oob`, `user_responded` | PINNED at the bridge; core hop pinned by source-grep only |
 | 13 | halt declare/clear (C2 → F → G → J; clear in B1) | `emit_halt_row`, `declare_session_halt`, `halt_declared` (main.rs), `user_responded` | bridge→ring PINNED; main.rs interrupt hop UNPINNED; clear pinned by grep only |
-| 14 | approval gate latch/lift (C2 ↔ B1) | `notify_ring_gate(true/false)`, `Storage::pending_gate_ids` seed | open PINNED; **LIFT UNPINNED** — cut ⇒ ring deals nothing after the first approval |
+| 14 | approval gate latch/lift (C2 ↔ B1) | `notify_ring_gate(true/false)`, `Storage::pending_gate_ids` seed | PINNED end to end — `resolving_a_gate_lifts_the_latch_and_the_ring_deals_again` (durable row → latch → resolve → deal); the custom-menu lift by `a_custom_menu_approval_lifts_the_gate_it_latched` (round 11) |
 | 15 | tool-gate hook ↔ `/hooks/tool-gate` (E ↔ C1 ↔ C2) | `park_gate` ↔ `handle_tool_gate` (inline literals both sides) | halves PINNED; HTTP join UNPINNED |
 | 16 | `eyes_flag` → pre-commit gate (C2 → F → E) | `insert_finding` ↔ `query_open_blocking` (predicate restated 3×) | PINNED at the row; reviewer-down branch exists only in the MCP tool |
 | 17 | `check_commit_message` ↔ commit-msg hook (C1 ↔ E) | one fn `first_forbidden_word` | PINNED (compile-time) |

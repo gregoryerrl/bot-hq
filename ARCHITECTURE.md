@@ -135,12 +135,6 @@ provider, base URL and token (its `context_window` is copied into the spawn
 config but read by nothing — see the two-unread-columns note below; the live
 context meter divides by the window claude-code reports per turn).
 
-This paragraph used to say the pick came from `sessions.brian_model_id` /
-`rain_model_id`, which the Storage section below already described as unread —
-one document contradicting itself about where a load-bearing value comes from.
-Those columns were frozen legacy (rc3 D10) with no reader at spawn; migration
-0060 dropped them.
-
 `BOT_HQ_SESSION_ID` is also injected so git-hook subprocesses can read
 session-scoped state.
 
@@ -315,8 +309,13 @@ the round cap ends it.
    into the OLD turn — its answer comes back under the old epoch and the ring
    discards it (five live traces, ~95 s each until the idle nudge). A
    `UserMessage` arriving while `RingState::winding_down` names that holder
-   is stashed and replayed on its completion (live or discarded), on its
-   respawn, or after `HALT_WIND_DOWN_GRACE` (3 s) — whichever comes first.
+   is stashed (`RingState::stashed_release`; two in the window merge, in
+   order) and replayed through `release_ring` on its completion (live or
+   discarded), on its respawn, or after `HALT_WIND_DOWN_GRACE` (3 s) —
+   whichever comes first. The grace is a deadline armed at the first bounded
+   read after the stash (round 11), not an idle timeout re-armed by other
+   commands; it does not run under a pause — the ring's own flag OR the
+   activity tracker's latch — and re-arms in full when the pause lifts.
 2b. **The all-pass lap** — a full lap in which every dealt participant PASSED
    yields to the user with a visible notice (rc3 D27, `announce_all_passed`):
    nobody had anything to add, and the only party who can change that is the
@@ -330,10 +329,10 @@ the round cap ends it.
    invisible in normal use; firing posts a visible row (rc3 D7).
 
 **The bilateral router this replaced was deleted 2026-08-13** (task 14). It
-forwarded `Author::Brian ↔ Author::Rain` through a central task with a hold
-queue, a volley hard-cap and a convergence breaker, and had no third case — it
-was the last thing holding a session to two participants. Every behaviour it
-encoded carries a verdict in
+forwarded each of two participants' turns to the other through a central task
+with a hold queue, a volley hard-cap and a convergence breaker, and had no third
+case — it was the last thing holding a session to two participants. Every
+behaviour it encoded carries a verdict in
 [`docs/plans/2026-08-06-router-behaviour-inventory.md`](docs/plans/2026-08-06-router-behaviour-inventory.md):
 12 PRESERVED (each with a named test in `core::sequencer`), 6 DISSOLVED
 (structurally impossible without a hold queue), 2 DROPPED with stated reasons.
@@ -382,7 +381,13 @@ Context Library scoped to this session's project — tree + a lean editor —
 without leaving the session), **Terminal** (the session PTY). Header: title + back link, the
 live roster rendered `ROLE · Model`, the phase picker, and the gear button
 that opens the Session Settings panel (the per-session policy snapshot).
-Chronological chat: all messages (user, each participant, phase_change)
+A CLOSED session's view is read-only history (round 10): its mount respawns
+nothing (`ensure_session_started` refuses a closed row on every path), and the
+composer's slot shows a **Reopen** bar — the one control that applies — whose
+`reopen_session` clears `closed_at` / `archived` / the halt slot, respawns the
+roster via `--resume`, and refetches the row so the live composer replaces the
+bar (round 11; an already-open row is a success no-op). Chronological chat: all
+messages (user, each participant, phase_change)
 interleaved by `created_at`; each participant's colour is one of an 8-hue
 palette hashed on its `ROLE · Model` label, with a per-participant override
 chosen in the New Session dialog (rc3 D20, migration 0052); user = blue,
@@ -731,10 +736,13 @@ so it does not warn) but parses into nothing and is not enforced.
   allow (exit 0). `push_gate == ask` AND `BOT_HQ_SESSION_ID` is set →
   POST the running app's `/hooks/pre-push` route (addr read from
   `<data_dir>/.local/signaling-addr`), which surfaces a per-push
-  Approve/Reject prompt via `request_approval` and blocks on the user's
-  pick: approve → exit 0, reject → exit 1. Fail-closed (exit 1 + a
-  `PushGate`/Denied violation) if the app is unreachable; a push with no
-  session context is blocked with guidance.
+  Approve/Reject prompt via `request_approval` — naming the PUSHED refs
+  read (lazily, once) from git's stdin lines, HEAD only as the fallback
+  (round 10; before that it named the checked-out branch, which is not
+  always what is being pushed) — and blocks on the user's pick: approve →
+  exit 0, reject → exit 1. Fail-closed (exit 1 + a `PushGate`/Denied
+  violation) if the app is unreachable; a push with no session context is
+  blocked with guidance.
 
 **Audit:** `src/policy/audit.rs` hashes each policy file at hook fire.
 A hash change between fires logs a `PolicyMutation` violation
@@ -773,9 +781,11 @@ hold a reviewer more strictly belonged to the native loop and went with it (D9).
 - **Execute-on-approve:** `action_gate(command)`
   (`src/signaling/bridge/action_gate.rs`) re-classifies, surfaces
   Approve/Reject via the existing `request_approval` machinery, and on approve
-  runs the command itself in the session's `working_repo_path` (from storage),
-  returning combined output to the agent — an action request, not a permission
-  request. (There are no session push grants: a gate-run `git push` meets the
+  runs the command itself in the session's `working_repo_path` (from storage)
+  under the AGENT's shell (`tool_gate::gate_shell`: `$SHELL` when POSIX-family,
+  else zsh → bash → sh — macOS `/bin/bash` is 3.2 and choked on commands the
+  agent had proved under zsh; round 10), returning combined output to the agent
+  — an action request, not a permission request. (There are no session push grants: a gate-run `git push` meets the
   pre-push hook like any other push, and under `push_gate=ask` that hook is the
   gate.)
 

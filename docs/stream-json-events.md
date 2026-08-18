@@ -271,7 +271,8 @@ The agent-subprocess wiring (Phase 2) must at minimum parse and react to:
    metadata if we want stdout/stderr separately.
 4. **Turn-end signal** — `result` event (any subtype). This is the **only**
    reliable signal that the agent has finished; per-event `stop_reason`
-   stays `null`. Use this as the duo-coordination handoff in A/V mode.
+   stays `null`. This is the turn-completion signal the ring waits on
+   (`TurnComplete`) before it deals the next turn.
 5. **Errors** — three failure surfaces:
    - `result` with `is_error: true` or non-`success` `subtype` /
      `api_error_status` populated.

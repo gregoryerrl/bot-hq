@@ -322,6 +322,9 @@ Still open, and smaller: a fire-and-forget write that FAILS looks identical to
 one that correctly declined. Record the decision where session state already
 lives — a visible row, as the capped halt posts one — so the two are
 distinguishable without the Context Library carrying anything.
+**SHIPPED** — `close_learnings::outcome_notice` posts one `system_notice` row per
+outcome (wrote / declined / never started / timed out / failed), each its own
+sentence (`core/close_learnings.rs`; recorded here in round 11).
 
 ### D16 — `close_session` becomes a real capability, and the user is the fallback
 
@@ -579,7 +582,9 @@ Best-effort: a failed write costs a UI hint, never a turn.
 ### D20 — a participant's label is the user's, and colour rotates
 
 Deferred to a session, 2026-08-13. **FIRST HALF SHIPPED 2026-08-13** (`f3f4809`):
-the ordinal. The user-set label and its editor are still open.
+the ordinal. **SECOND HALF SHIPPED** (`4e531c8`, migration 0053): the user-set
+label (`session_participants.label`, `participant_display_name`) and its editor
+in the New Session dialog (`Dashboard.tsx`). Recorded here in round 11.
 
 **What shipped, and why it was enough to close the complaint.** The ordinal is
 read off the SLUG — `first_free_slug` already assigns `eyes`, `eyes-2`, `eyes-3`
@@ -610,9 +615,9 @@ constraint reads exactly like a claim that is correct.
 **Four frontend fixtures already modelled the exact case** (role `EYES`, slug
 `eyes-2`) and asserted the collision as correct. Their expectations were the bug.
 
-**Still open:** the user-set label that overrides the ordinal, and its editor in
-the New Session dialog. That half needs a column and UI; the ordinal is what the
-reported complaint was about. Reported from a live N=3 run: *"for the 2
+**Was still open, now SHIPPED (`4e531c8`, 0053):** the user-set label that
+overrides the ordinal, and its editor in the New Session dialog. That half needed
+a column and UI; the ordinal is what the reported complaint was about. Reported from a live N=3 run: *"for the 2
 reviewers, i don't know which is which."* Two participants of one role on one
 model render identically — `EYES · DeepSeek V4 Pro`, character for character —
 because the display rule has no ordinal and colour is keyed to the role.
@@ -780,10 +785,11 @@ an expectation written from observed output accepts a WRONG name as readily as a
 right one. The shared helper strips the prefix; the label is pinned where it is
 the subject.
 
-**Still open, and deliberately not bundled:** `deliver_backlog` writes one stdin
-message per row, so a turn's backlog is N writes and rows 2..N land inside the
-turn row 1 opened. With the speaker on every row this is much less confusing than
-it was, which is exactly why it should be measured before being changed.
+**Was still open, and deliberately not bundled — since SHIPPED (`7060d97`):**
+`deliver_backlog` wrote one stdin message per row, so a turn's backlog was N
+writes and rows 2..N landed inside the turn row 1 opened. It writes one stdin
+message per PAGE now (`PersistedMessage::wire_batch`, `agents/spawn.rs`);
+recorded here in round 11.
 
 ### D24 — a straggler must not bind the next turn's epoch
 
@@ -988,11 +994,14 @@ CLOSES its channel, so `recv` returns `None` immediately rather than timing out.
 `is_err()` passes for a merely-slow sender and fails for the behaviour being
 pinned.
 
-**Still open.** The general mid-turn input lock (`c13fcdb`) remains a band-aid:
-it closes the box whenever a turn is in flight, which is why Stop was the only
-way to speak. Buffering — hold the message, deliver it at the next turn boundary
-— gives the box back and removes the reason to press Stop at all. D29 removes the
-boot loop that made it painful; it does not make the lock right.
+**Was still open — SHIPPED 2026-08-15 as the Stage toggle** (migration 0058,
+`stage_user_response` / `deliver_staged` in `core/state.rs`; CODEBASE §14 seam
+18). The general mid-turn input lock (`c13fcdb`) was a band-aid: it closed the
+box whenever a turn was in flight, which is why Stop was the only way to speak.
+Buffering — hold the message, deliver it at the next turn boundary — gives the
+box back and removes the reason to press Stop at all; the box stays writable and
+the Send slot becomes Stage. D29 removed the boot loop that made it painful.
+Recorded here in round 11.
 
 ### D31–D33 — Pause is the only real interrupt
 
