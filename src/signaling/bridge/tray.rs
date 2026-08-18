@@ -40,6 +40,12 @@ pub enum Withdrawal {
     NotPending,
     /// The row is pending but was parked by another participant — untouched.
     NotYours,
+    /// The row's owner could not be READ (a storage error), so the "yours
+    /// only" scoping could not be applied — untouched (round 10). This is the
+    /// tool's one control (`withdraw_question` is deliberately ungated because
+    /// this scoping IS the gate), so a read failure refuses rather than
+    /// letting the withdrawal through against a row that may be a peer's.
+    Unverifiable,
 }
 
 impl SignalingBridge {
@@ -500,17 +506,27 @@ impl SignalingBridge {
     /// hold, when the bridge knew exactly why it refused.
     pub async fn withdraw_question_for(&self, choice_id: &str, asker: Option<&str>) -> Withdrawal {
         if let Some(asker) = asker {
-            let owner = {
-                let storage = self.storage.lock().await.clone();
-                match storage {
-                    Some(storage) => storage
-                        .get_tray_entry(choice_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|row| row.agent),
-                    None => None,
-                }
+            // "Yours only" — read the row's owner. A read ERROR is not "no
+            // owner": it refuses (round 10). `.ok().flatten()` used to fold the
+            // error into `None` and the withdrawal went ahead, which for the one
+            // control this ungated tool has is fail-OPEN. No storage at all
+            // (tests / bootstrap) and a row that does not exist still fall
+            // through: there is no owner to protect in either.
+            let storage = self.storage.lock().await.clone();
+            let owner = match storage {
+                Some(storage) => match storage.get_tray_entry(choice_id).await {
+                    Ok(row) => row.map(|row| row.agent),
+                    Err(e) => {
+                        tracing::warn!(
+                            ?e,
+                            choice_id,
+                            asker,
+                            "withdraw_question: the row's owner could not be read; refusing"
+                        );
+                        return Withdrawal::Unverifiable;
+                    }
+                },
+                None => None,
             };
             if let Some(owner) = owner {
                 if owner != asker {
@@ -1813,6 +1829,37 @@ mod tests {
         assert_eq!(
             storage.get_tray_entry("q-1").await.unwrap().unwrap().status,
             "withdrawn"
+        );
+    }
+
+    /// **The "yours only" scoping fails CLOSED on a storage error** (round 10).
+    /// The owner read used to fold `Err` into "no owner" and the withdrawal
+    /// went ahead — for an ungated tool whose only control is this scoping. A
+    /// real error is induced by dropping the table the read goes through; the
+    /// answer is `Unverifiable`, and nothing is touched.
+    #[tokio::test]
+    async fn a_withdrawal_whose_owner_cannot_be_read_is_refused() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        // A parked (in-memory) row too, so a fail-open path would have had
+        // something to remove.
+        let _ = bridge
+            .ask_user_choice("s1".into(), "hands".into(), "Which?".into(), vec!["a".into()])
+            .await;
+        sqlx::query("DROP TABLE session_tray")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            bridge.withdraw_question_for("anything", Some("eyes")).await,
+            Withdrawal::Unverifiable,
+            "an unreadable owner refuses instead of withdrawing"
+        );
+        assert!(
+            !bridge.pending.lock().await.is_empty(),
+            "and the in-memory park was left alone"
         );
     }
 

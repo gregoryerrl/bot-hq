@@ -864,7 +864,13 @@ async fn call_tool(
                 // Round 9: this used to read "not pending" — the row IS pending,
                 // it is just not this caller's to clear.
                 Withdrawal::NotYours => {
-                    "no-op: that question was parked by another participant — it is                      still pending and not yours to withdraw"
+                    "no-op: that question was parked by another participant — it is \
+                     still pending and not yours to withdraw"
+                }
+                Withdrawal::Unverifiable => {
+                    "no-op: the question's owner could not be read (storage error), so it \
+                     was NOT withdrawn — it may still be pending; retry, or leave it for \
+                     the user"
                 }
             };
             Ok(ToolCallResult::text(text))
