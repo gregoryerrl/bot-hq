@@ -391,13 +391,27 @@ pub fn read_policy_file(path: &Path) -> Result<Policy> {
 /// project); callers should follow with [`audit::record_policy_write`] so the
 /// write doesn't read back as an unauthorized mutation on the next audit.
 pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<()> {
+    let body = serde_yaml::to_string(policy).with_context(|| "serializing policy")?;
+    write_yaml_atomically(path, &body)
+}
+
+/// Write `body` to `path` — creating parent dirs — through a same-directory
+/// temp + rename, keeping an existing file's mode (round 10). The two policy
+/// writers (this file's and `session_policy.rs`'s) used a bare
+/// `std::fs::write`, which truncates the file before it fills it; a crash or a
+/// concurrent reader in that window sees an empty or torn YAML, and
+/// `Policy::resolve` fails OPEN on a malformed file — so a torn write of
+/// `policy.yaml` silently dropped the forbidden-word list, the push gate and
+/// the force-push block until the next save. `claude_config` already had the
+/// atomic primitive; both writers now share it.
+pub(crate) fn write_yaml_atomically(path: &Path, body: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating parent dir for {}", path.display()))?;
     }
-    let body = serde_yaml::to_string(policy).with_context(|| "serializing policy")?;
-    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    let mode = crate::claude_config::existing_mode_or(path, 0o644);
+    crate::claude_config::replace_file_atomically(path, body.as_bytes(), mode)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// True iff `needle` occurs in `haystack` bounded by non-word chars on both
@@ -488,6 +502,47 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(p, body).unwrap();
+    }
+
+    /// **Policy files are written atomically** (round 10): the write lands as a
+    /// rename (no truncate-then-fill window), keeps an existing file's mode,
+    /// creates missing parents, and leaves no temp behind. Round-tripped
+    /// through the real writer + loader.
+    #[test]
+    fn write_policy_file_is_atomic_and_keeps_the_mode() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested").join("policy.yaml");
+        let policy = Policy {
+            forbidden_in_commits: vec!["Foo-Bar-Baz".into()],
+            ..Policy::default()
+        };
+        write_policy_file(&path, &policy).unwrap();
+        assert_eq!(read_policy_file(&path).unwrap().forbidden_in_commits, vec!["Foo-Bar-Baz".to_string()]);
+        assert!(
+            !path.with_file_name("policy.yaml.tmp").exists(),
+            "the temp is renamed away, not left beside the file"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            write_policy_file(&path, &Policy::default()).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "a rewrite keeps the file's existing mode (rename replaces the inode)"
+            );
+        }
+        // And the session snapshot writer shares the same path.
+        let src = include_str!("session_policy.rs");
+        assert!(
+            src.contains("write_yaml_atomically(&path, &body)"),
+            "write_session_policy must go through the shared atomic writer"
+        );
+        assert!(
+            !src.split("pub fn write_session_policy").nth(1).unwrap().split("\n}\n").next().unwrap().contains("std::fs::write("),
+            "no bare std::fs::write left in write_session_policy"
+        );
     }
 
     #[test]

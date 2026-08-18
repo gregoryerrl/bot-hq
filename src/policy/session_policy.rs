@@ -54,13 +54,10 @@ pub fn write_session_policy(
         return Ok(());
     }
     let path = session_policy_path(data_dir, session_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating parent dir for {}", path.display()))?;
-    }
     let body = serde_yaml::to_string(policy).with_context(|| "serializing session policy")?;
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    // Atomic (temp + rename, mode kept) — see `policy::write_yaml_atomically`
+    // for why a bare `std::fs::write` here was a fail-open gate.
+    crate::policy::write_yaml_atomically(&path, &body)
 }
 
 /// Read the session's policy snapshot if one exists. Returns `Ok(None)` when
