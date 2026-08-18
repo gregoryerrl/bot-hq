@@ -1733,11 +1733,20 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
         // **The one place this loop waits with a clock** (round 10, B1): while a
         // release is held for a halted holder's completion, `recv` is bounded by
         // `HALT_WIND_DOWN_GRACE`. The completion is expected in milliseconds
-        // (the D35 interrupt fires on the halt's own ack), but a process that
-        // never completes and never dies would otherwise hold the user's answer
-        // forever; past the grace the release is dealt anyway — the pre-round-10
-        // behaviour, bounded — and the wait is logged.
-        let bounded = state.stashed_release.is_some();
+        // (the D35 interrupt fires on the halt's own ack; the live traces show
+        // ~21 ms), but a process that never completes and never dies would
+        // otherwise hold the user's answer forever. **Past the grace the release
+        // is dealt anyway** — that IS the pre-round-10 behaviour, and when the
+        // holder genuinely is still generating it reproduces the fold-in this
+        // deferral exists to avoid, deliberately: a bounded wedge is the lesser
+        // harm, and the `warn!` below is the record that the trade was taken,
+        // not a bug to fix. **Not while paused** (EYES, finding fd8cf6f3): the
+        // expiry arm below runs `release_ring` outside the read-loop pause gate;
+        // `advance_turn`'s pause backstop would refuse the deal, but the stash
+        // would already be consumed — nothing dealt, nothing held, and Resume
+        // would drain an empty queue. So the clock does not run under a pause;
+        // it re-arms the moment the pause lifts, and the release stays held.
+        let bounded = state.stashed_release.is_some() && !state.paused;
         let cmd = match state.deferred.pop_front() {
             Some(cmd) => cmd,
             None => match {
@@ -9215,6 +9224,54 @@ mod tests {
             .expect("the held release must be dealt once the grace has elapsed")
             .expect("the sequencer dropped A's stdin");
         assert_eq!(rows_of(m.message.content), vec!["the answer"]);
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **A pause during the wind-down keeps the held release** (EYES, finding
+    /// fd8cf6f3 on the first cut). The grace clock does not run under a pause:
+    /// the expiry arm runs `release_ring` outside the read-loop pause gate, and
+    /// while `advance_turn`'s pause backstop would refuse the deal, the stash
+    /// would already be consumed — nothing dealt, nothing held, and Resume
+    /// draining an empty queue is the B1 symptom by another route (trigger: the
+    /// user pauses within the 3 s grace after answering). Pinned by waiting the
+    /// grace out UNDER a pause and asserting the release still deals when the
+    /// pause lifts and the completion lands.
+    #[tokio::test]
+    async fn a_pause_during_the_wind_down_keeps_the_held_release() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        send(&tx, halt_by(a)).await;
+        post(&storage, "user", None, "the answer").await;
+        send(&tx, user_message()).await;
+        seats[0].quiet().await;
+        // The user pauses inside the grace, and the grace elapses under the
+        // pause: nothing may be dealt, and — the finding — nothing may be
+        // consumed either.
+        send(&tx, SequencerCommand::Pause).await;
+        tokio::time::sleep(HALT_WIND_DOWN_GRACE + Duration::from_millis(500)).await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        // Resume, then the halted turn's completion: the release is still
+        // held, and it deals now.
+        send(&tx, SequencerCommand::Resume).await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["the answer"],
+            "the release survived the pause and the grace, and dealt on the completion"
+        );
         drop(tx);
         assert!(exited(task).await);
     }
