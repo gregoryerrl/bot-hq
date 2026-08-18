@@ -8,6 +8,7 @@ import type {
 import { formatTimestamp } from "../lib/time";
 import { cn } from "../lib/cn";
 import { authorLabel, useParticipantLabels } from "../lib/participants";
+import { Skeleton } from "../components/ui/Skeleton";
 
 // Human labels for the snake_case wire kinds (mirrors policy/violations.rs).
 const KIND_LABELS: Record<ViolationKind, string> = {
@@ -119,14 +120,10 @@ export function ViolationsPanel() {
           Failed to read the enforcement log: {error.message}
         </p>
       ) : isLoading ? (
-        <div className="space-y-2">
-          {[0, 1, 2].map((i) => (
-            <div
-              key={i}
-              className="h-10 animate-pulse rounded border border-outline-variant bg-surface-container"
-            />
-          ))}
-        </div>
+        <Skeleton
+          className="space-y-2"
+          rowClassName="h-10 rounded border border-outline-variant bg-surface-container"
+        />
       ) : rows.length === 0 ? (
         <p className="rounded-lg border border-dashed border-outline-variant p-8 text-center font-code-sm text-code-sm text-on-surface-variant">
           {data && data.length > 0

@@ -20,6 +20,7 @@ import { RescanIcon, WarnIcon } from "../components/icons";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { pickFolder } from "./contextLibraryShared";
+import { Skeleton } from "../components/ui/Skeleton";
 import {
   rosterAdvisory,
   EDIT_FILES,
@@ -955,14 +956,10 @@ export function Dashboard() {
         </div>
       )}
       {isLoading ? (
-        <div className="grid grid-cols-1 gap-gutter md:grid-cols-2 xl:grid-cols-3">
-          {[0, 1, 2].map((i) => (
-            <div
-              key={i}
-              className="h-40 animate-pulse rounded-lg border border-outline-variant bg-surface"
-            />
-          ))}
-        </div>
+        <Skeleton
+          className="grid grid-cols-1 gap-gutter md:grid-cols-2 xl:grid-cols-3"
+          rowClassName="h-40 rounded-lg border border-outline-variant bg-surface"
+        />
       ) : sessions.length === 0 ? (
         <div className="rounded-lg border border-dashed border-outline-variant p-10 text-center">
           <p className="font-headline-md text-headline-md text-on-surface">

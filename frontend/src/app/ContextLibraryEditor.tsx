@@ -16,6 +16,7 @@ import { CloseIcon, FileIcon, FolderIcon, SaveIcon } from "../components/icons";
 import { FolderView } from "./ContextLibraryFolderView";
 import { PolicyForm } from "../components/PolicyForm";
 import { SegToggle } from "../components/ui/SegToggle";
+import { Button } from "../components/ui/Button";
 
 /** A CL file is a project policy blueprint when its basename is `policy.yaml`. */
 function isPolicyFile(filePath: string): boolean {
@@ -250,15 +251,16 @@ function ProjectPolicyForm({ project }: { project: string }) {
           on save — switch to Raw YAML to preserve comments or hand-edit.
         </p>
         {dirty && (
-          <button
+          <Button
             type="button"
+            variant="primary"
             onClick={onSave}
             disabled={save.isPending}
-            className="inline-flex shrink-0 items-center gap-2 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+            className="shrink-0"
           >
             <SaveIcon />
             {save.isPending ? "Saving…" : "Save policy"}
-          </button>
+          </Button>
         )}
       </div>
       {isLoading ? (
@@ -547,8 +549,9 @@ function EditorPane({
               />
             )}
           </button>
-          <button
+          <Button
             type="button"
+            variant="primary"
             disabled={!dirty || saving}
             onClick={handleSave}
             title={
@@ -558,11 +561,10 @@ function EditorPane({
                   ? "Save changes to disk"
                   : "No unsaved changes"
             }
-            className="inline-flex items-center gap-1.5 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:cursor-not-allowed disabled:opacity-40"
           >
             <SaveIcon />
             {saving ? "Saving…" : "Save Changes"}
-          </button>
+          </Button>
         </div>
       </header>
 

@@ -13,6 +13,7 @@ import { useChatStore } from "../stores/chat";
 import { formatTimestamp } from "../lib/time";
 import { ChatInput, draftKeyFor } from "../components/ChatInput";
 import { ClosedSessionBar } from "../components/ClosedSessionBar";
+import { ErrorBanner } from "../components/ErrorBanner";
 import {
   HaltBanner,
   isApproval,
@@ -746,58 +747,37 @@ export function SessionView() {
       />
 
       {respawnError && (
-        <div
-          role="alert"
-          className="border-b border-outline-variant bg-error-container/30 px-4 py-2 font-code-sm text-code-sm text-on-error-container"
-        >
-          <span className="font-semibold">Agent spawn failed:</span>{" "}
-          {respawnError.message}{" "}
-          <button
-            type="button"
-            className="ml-2 underline hover:text-error"
-            onClick={() => {
-              setRespawnError(null);
-              respawn.mutate(
-                { sessionId },
-                { onError: (err) => setRespawnError(err) },
-              );
-            }}
-          >
-            retry
-          </button>
-        </div>
+        <ErrorBanner
+          edge
+          label="Agent spawn failed:"
+          message={respawnError.message}
+          dismissLabel="retry"
+          onDismiss={() => {
+            setRespawnError(null);
+            respawn.mutate(
+              { sessionId },
+              { onError: (err) => setRespawnError(err) },
+            );
+          }}
+        />
       )}
 
       {closeError && (
-        <div
-          role="alert"
-          className="border-b border-outline-variant bg-error-container/30 px-4 py-2 font-code-sm text-code-sm text-on-error-container"
-        >
-          <span className="font-semibold">Close failed:</span> {closeError}
-          <button
-            type="button"
-            className="ml-2 underline hover:text-error"
-            onClick={() => setCloseError(null)}
-          >
-            dismiss
-          </button>
-        </div>
+        <ErrorBanner
+          edge
+          label="Close failed:"
+          message={closeError}
+          onDismiss={() => setCloseError(null)}
+        />
       )}
 
       {renameError && (
-        <div
-          role="alert"
-          className="border-b border-outline-variant bg-error-container/30 px-4 py-2 font-code-sm text-code-sm text-on-error-container"
-        >
-          <span className="font-semibold">Rename failed:</span> {renameError}
-          <button
-            type="button"
-            className="ml-2 underline hover:text-error"
-            onClick={() => setRenameError(null)}
-          >
-            dismiss
-          </button>
-        </div>
+        <ErrorBanner
+          edge
+          label="Rename failed:"
+          message={renameError}
+          onDismiss={() => setRenameError(null)}
+        />
       )}
 
       <nav

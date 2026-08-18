@@ -290,15 +290,15 @@ export function ClaudeConfigPanel() {
             <Button variant="ghost" size="sm" onClick={onReset}>
               Reset
             </Button>
-            <button
+            <Button
               type="button"
+              variant="primary"
               onClick={onSave}
               disabled={saving}
-              className="inline-flex items-center gap-2 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary hover:bg-primary-fixed disabled:opacity-50"
             >
               <SaveIcon />
               {saving ? "Saving…" : "Save changes"}
-            </button>
+            </Button>
           </div>
         </div>
       ) : showRestart ? (

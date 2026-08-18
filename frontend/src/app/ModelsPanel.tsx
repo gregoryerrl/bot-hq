@@ -11,6 +11,7 @@ import { SaveIcon } from "../components/icons";
 import type { ModelView, ValidateResult } from "../lib/bindings";
 import { invoke } from "@tauri-apps/api/core";
 import { selectClass } from "../components/ui/Select";
+import { Skeleton } from "../components/ui/Skeleton";
 
 const PROVIDERS = ["anthropic", "openai", "deepseek", "local"] as const;
 
@@ -88,14 +89,10 @@ export function ModelsPanel() {
       </div>
 
       {isLoading ? (
-        <div className="space-y-1">
-          {[0, 1, 2].map((i) => (
-            <div
-              key={i}
-              className="h-11 animate-pulse rounded border border-outline-variant bg-surface-container"
-            />
-          ))}
-        </div>
+        <Skeleton
+          className="space-y-1"
+          rowClassName="h-11 rounded border border-outline-variant bg-surface-container"
+        />
       ) : models.length === 0 ? (
         <p className="font-body-md text-body-md text-on-surface-variant">
           No saved models yet. Add one to assign it to an agent.
@@ -293,7 +290,7 @@ function ModelDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       role="dialog"
       aria-modal="true"
       aria-label={title}
@@ -302,7 +299,7 @@ function ModelDialog({
       <div
         ref={trapRef}
         tabIndex={-1}
-        className="w-full max-w-md rounded border border-outline-variant bg-surface-container p-4 shadow-lg focus:outline-none"
+        className="w-full max-w-md rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="mb-4 font-headline-md text-headline-md text-on-surface">
@@ -446,22 +443,18 @@ function ModelDialog({
         )}
 
         <div className="mt-5 flex items-center justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-outline-variant bg-transparent px-3 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
-          >
+          <Button type="button" variant="ghost" onClick={onClose}>
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="primary"
             disabled={!canSave}
             onClick={submit}
-            className="inline-flex items-center gap-1.5 rounded border border-primary bg-primary px-3 py-1 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
           >
             <SaveIcon />
             {upsert.isPending ? "Saving…" : "Save"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

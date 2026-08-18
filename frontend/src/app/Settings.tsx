@@ -23,6 +23,7 @@ import type {
   UpdateInfo,
 } from "../lib/bindings";
 import { shortSessionId } from "../lib/sessionId";
+import { Skeleton } from "../components/ui/Skeleton";
 
 type SettingsSubTab =
   | "roles"
@@ -186,15 +187,16 @@ function GlobalPolicyPanel() {
           </p>
         </div>
         {dirty && (
-          <button
+          <Button
             type="button"
+            variant="primary"
             onClick={onSave}
             disabled={save.isPending}
-            className="inline-flex shrink-0 items-center gap-2 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+            className="shrink-0"
           >
             <SaveIcon />
             {save.isPending ? "Saving…" : "Save policy"}
-          </button>
+          </Button>
         )}
       </div>
       {isLoading ? (
@@ -362,14 +364,10 @@ function ArchivePanel() {
         </p>
       </div>
       {isLoading ? (
-        <div className="space-y-2">
-          {[0, 1, 2].map((i) => (
-            <div
-              key={i}
-              className="h-14 animate-pulse rounded-lg border border-outline-variant bg-surface-container"
-            />
-          ))}
-        </div>
+        <Skeleton
+          className="space-y-2"
+          rowClassName="h-14 rounded-lg border border-outline-variant bg-surface-container"
+        />
       ) : sessions.length === 0 ? (
         <p className="rounded-lg border border-outline-variant bg-surface-container px-4 py-6 text-center font-code-sm text-code-sm text-on-surface-variant">
           No closed sessions yet.
@@ -546,15 +544,16 @@ function ToolGateSection() {
           </p>
         </div>
         {dirty && (
-          <button
+          <Button
             type="button"
+            variant="primary"
             onClick={onSave}
             disabled={save.isPending}
-            className="inline-flex shrink-0 items-center gap-2 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+            className="shrink-0"
           >
             <SaveIcon />
             {save.isPending ? "Saving…" : "Save keywords"}
-          </button>
+          </Button>
         )}
       </div>
 

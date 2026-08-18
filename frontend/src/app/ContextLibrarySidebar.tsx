@@ -1,6 +1,7 @@
 import { memo, useMemo, type MouseEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "../lib/cn";
+import { Skeleton } from "../components/ui/Skeleton";
 import type {
   ClIndexEntryView,
   ClRescanReportView,
@@ -262,14 +263,10 @@ export function WorkspaceSidebar({
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden px-1 py-1">
         {isLoading ? (
-          <div className="space-y-1 px-2 py-2">
-            {[0, 1, 2].map((i) => (
-              <div
-                key={i}
-                className="h-6 animate-pulse rounded bg-surface-container-high"
-              />
-            ))}
-          </div>
+          <Skeleton
+            className="space-y-1 px-2 py-2"
+            rowClassName="h-6 rounded bg-surface-container-high"
+          />
         ) : projectCount === 0 ? (
           <p className="px-2 py-3 font-code-sm text-code-sm text-on-surface-variant">
             {query.trim() ? "No matches." : "Empty. Use Rescan to populate."}

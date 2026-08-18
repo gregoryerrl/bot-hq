@@ -716,15 +716,15 @@ function RoleForm({
           >
             {role ? "Reset" : "Cancel"}
           </Button>
-          <button
+          <Button
             type="button"
+            variant="primary"
             disabled={pending || !capsReady || !draft.display_name.trim()}
             onClick={submit}
-            className="inline-flex items-center gap-1.5 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
           >
             <SaveIcon />
             {pending ? "Saving…" : role ? "Save role" : "Create role"}
-          </button>
+          </Button>
         </div>
       </div>
 

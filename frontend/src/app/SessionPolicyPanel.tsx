@@ -9,6 +9,7 @@ import type {
 import { PolicyForm } from "../components/PolicyForm";
 import { GatedKeywordList } from "../components/GatedKeywordList";
 import { CloseIcon, SaveIcon } from "../components/icons";
+import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
@@ -102,15 +103,15 @@ export function SessionPolicyPanel({
           )}
         </div>
         <div className="flex items-center gap-2">
-          <button
+          <Button
             type="button"
+            variant="primary"
             disabled={!dirty || save.isPending}
             onClick={onSave}
-            className="inline-flex items-center gap-1.5 rounded border border-primary bg-primary px-3 py-1 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
           >
             <SaveIcon />
             {save.isPending ? "Saving…" : "Save"}
-          </button>
+          </Button>
           <button
             type="button"
             onClick={onClose}
@@ -287,15 +288,15 @@ function SessionToolGateSection({ sessionId }: { sessionId: string }) {
             </span>
           )}
           {dirty && (
-            <button
+            <Button
               type="button"
+              variant="primary"
               onClick={onSave}
               disabled={save.isPending}
-              className="inline-flex items-center gap-1.5 rounded border border-primary bg-primary px-3 py-1 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
             >
               <SaveIcon />
               {save.isPending ? "Saving…" : "Save keywords"}
-            </button>
+            </Button>
           )}
         </div>
       </div>

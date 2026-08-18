@@ -113,7 +113,7 @@ export function RegisterProjectModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       role="dialog"
       aria-modal="true"
       aria-label="New project"
@@ -122,7 +122,7 @@ export function RegisterProjectModal({
       <div
         ref={trapRef}
         tabIndex={-1}
-        className="w-full max-w-md rounded border border-outline-variant bg-surface-container p-4 shadow-lg focus:outline-none"
+        className="w-full max-w-md rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="font-headline-md text-headline-md text-on-surface">
