@@ -773,14 +773,17 @@ const MAX_TURN_BATCHES: usize = 32;
 /// `0` means the cap is OFF — a deliberate unattended run. Per-session
 /// override: `round_cap` in [`crate::policy::Policy`], inherited
 /// general → project → session and editable in the gear tab.
+pub const DEFAULT_ROUND_CAP_LAPS: u32 = 500;
+
 /// How long a release held for a halted holder's completion waits before it is
 /// dealt regardless (round 10, B1 — see `RingState::winding_down`). The
 /// completion follows the halt's own tool-result ack and the D35 interrupt on it,
 /// so the wait is milliseconds in the ordinary case; this bounds the wedge a
-/// hung process would otherwise be.
+/// hung process would otherwise be. A DEADLINE measured from the stash (round
+/// 11), not an idle timeout re-armed by every command that happens to arrive in
+/// the window; it does not run under a pause and re-arms in full when the pause
+/// lifts.
 const HALT_WIND_DOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
-
-pub const DEFAULT_ROUND_CAP_LAPS: u32 = 500;
 
 /// The cap in force for this session RIGHT NOW, in laps.
 ///
@@ -1729,6 +1732,10 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
             "sequencer: started with approval gate(s) already pending; dealing no turns until they resolve"
         );
     }
+    // The wind-down grace's deadline (round 11): `Some` only while a held
+    // release is being timed — armed at the first bounded read after the
+    // stash, cleared by a pause (either reading) or by the stash leaving.
+    let mut grace_deadline: Option<tokio::time::Instant> = None;
     loop {
         // **The one place this loop waits with a clock** (round 10, B1): while a
         // release is held for a halted holder's completion, `recv` is bounded by
@@ -1746,12 +1753,28 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
         // would already be consumed — nothing dealt, nothing held, and Resume
         // would drain an empty queue. So the clock does not run under a pause;
         // it re-arms the moment the pause lifts, and the release stays held.
-        let bounded = state.stashed_release.is_some() && !state.paused;
+        // **Both pause readings** (round 11): the ring's own flag AND the
+        // tracker's latch, for the reason `advance_turn`'s backstop reads the
+        // latter — `notify_ring_pause` is a droppable `try_send`, and
+        // `cancel_session_turn` sets the latch before it notifies — so a pause
+        // the ring never heard about could not expire the stash either.
+        // **A deadline, not an idle timeout** (round 11): armed once from the
+        // stash and read with `timeout_at`, so a command that arrives in the
+        // window — a gate resolve, another completion, a join — does not
+        // re-arm the full grace; cleared while paused and re-armed in full
+        // when the pause lifts.
+        let tracker_paused = deps.activity.as_ref().is_some_and(|a| a.is_paused());
+        let bounded = state.stashed_release.is_some() && !state.paused && !tracker_paused;
+        if !bounded {
+            grace_deadline = None;
+        }
+        let deadline =
+            *grace_deadline.get_or_insert_with(|| tokio::time::Instant::now() + HALT_WIND_DOWN_GRACE);
         let cmd = match state.deferred.pop_front() {
             Some(cmd) => cmd,
             None => match {
                 if bounded {
-                    tokio::time::timeout(HALT_WIND_DOWN_GRACE, rx.recv())
+                    tokio::time::timeout_at(deadline, rx.recv())
                         .await
                         .map_err(|_| ())
                 } else {
@@ -1759,6 +1782,15 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 }
             } {
                 Err(()) => {
+                    grace_deadline = None;
+                    // The clock was armed BEFORE this pause landed on the
+                    // tracker (a pause the ring is never told about arrives
+                    // between two reads): expiring now would consume the stash
+                    // into a deal the pause backstop refuses. Hold; the next
+                    // read sees the latch and stops timing.
+                    if state.paused || deps.activity.as_ref().is_some_and(|a| a.is_paused()) {
+                        continue;
+                    }
                     warn!(
                         session = %deps.session_id,
                         winding_down = ?state.winding_down,
@@ -4030,8 +4062,9 @@ mod tests {
     ///
     /// So it is stripped here and pinned where it is the subject:
     /// `a_delivered_row_says_who_wrote_it` below (end to end, including a peer's
-    /// slug), `the_wire_is_the_row_plus_its_envelope` in `agents::spawn` (what
-    /// reaches stdin), and `render_wire`'s own tests in `storage` (the format).
+    /// slug), `a_receipt_from_another_session_never_reaches_stdin` in
+    /// `agents::spawn` (what reaches stdin), and `render_wire`'s own tests in
+    /// `storage` (the format).
     ///
     /// Only a LEADING `[word] ` goes; `[PHASE: Apply]` survives, because the
     /// speaker is always first and a phase tag has a space inside the brackets.
@@ -4990,10 +5023,11 @@ mod tests {
         let task = tokio::spawn(run_sequencer(deps, rx));
 
         // The gate is open — seeded from the durable row at ring start, which is
-        // how a session that restarts under a pending gate stays held. (An extra
-        // `notify_ring_gate(true)` here would count the same gate twice and the
-        // single lift below could never clear it: the latch is a COUNT, which is
-        // the identity defect C2-2 tracks.)
+        // how a session that restarts under a pending gate stays held. (Since
+        // C2-2 the latch is a SET keyed by choice_id, so an extra
+        // `notify_ring_gate(true)` here would be a no-op and the single lift
+        // below still clears it — under the old COUNT it doubled the latch and
+        // nothing could clear it, which is what C2-2 fixed.)
         send(&tx, user_message()).await;
         seats[0].quiet().await;
 
@@ -9272,6 +9306,150 @@ mod tests {
             vec!["the answer"],
             "the release survived the pause and the grace, and dealt on the completion"
         );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **The grace clock reads the tracker's pause latch too** (round 11,
+    /// additive to c2d52b5). `advance_turn`'s pause backstop reads
+    /// `ActivityTracker::is_paused` because `notify_ring_pause` is a droppable
+    /// `try_send` and `cancel_session_turn` sets the latch BEFORE it notifies;
+    /// the grace guard read only the ring's own `paused` flag, so under a
+    /// dropped (or not-yet-arrived) Pause the expiry arm consumed the stash,
+    /// `release_ring` → `advance_turn` refused the deal on the latch, and
+    /// Resume drained an empty queue — fd8cf6f3 through the one path the
+    /// backstop exists for. Pinned by latching the tracker with NO Pause
+    /// command, waiting the grace out, and asserting the release still deals
+    /// once the latch lifts and the completion lands.
+    #[tokio::test]
+    async fn a_dropped_pause_still_keeps_the_held_release_past_the_grace() {
+        let (deps, storage, mut seats, activity) =
+            ring_with_activity(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        send(&tx, halt_by(a)).await;
+        post(&storage, "user", None, "the answer").await;
+        send(&tx, user_message()).await;
+        seats[0].quiet().await;
+        // The pause reached the tracker and never the ring: no Pause command.
+        activity.set_paused(true);
+        tokio::time::sleep(HALT_WIND_DOWN_GRACE + Duration::from_millis(500)).await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        // The latch lifts (a steer would clear it the same way), then the
+        // halted turn's completion: the release must still be held, and deal.
+        activity.set_paused(false);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["the answer"],
+            "the release survived a pause the ring never heard about"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **The grace is a deadline, not an idle timeout** (round 11). The wait
+    /// was rebuilt around `rx.recv()` on every loop iteration, so every command
+    /// that arrived during the window — a gate resolve, another participant's
+    /// completion, a join — re-armed the full 3 s while the stash stayed held;
+    /// the comment claimed it "bounds the wedge", and a chatty session could
+    /// hold the user's answer for as long as the chatter lasted. Pinned by
+    /// keeping a harmless command arriving every second and asserting the
+    /// release still deals within the grace of the STASH, not of the last
+    /// command.
+    #[tokio::test]
+    async fn chatter_during_the_wind_down_does_not_extend_the_grace() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        send(&tx, halt_by(a)).await;
+        post(&storage, "user", None, "the answer").await;
+        send(&tx, user_message()).await;
+        let stashed_at = tokio::time::Instant::now();
+        // Chatter: a resolve for a gate this ring never saw open is a no-op arm.
+        let chatter_tx = tx.clone();
+        let chatter = tokio::spawn(async move {
+            for _ in 0..8 {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                if chatter_tx
+                    .send(SequencerCommand::GateResolved { choice_id: "never-opened".into() })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let m = tokio::time::timeout(HALT_WIND_DOWN_GRACE + Duration::from_millis(1500), seats[0].rx.recv())
+            .await
+            .expect("the held release must be dealt within the grace of the STASH, chatter or not")
+            .expect("the sequencer dropped A's stdin");
+        assert_eq!(rows_of(m.message.content), vec!["the answer"]);
+        assert!(
+            stashed_at.elapsed() >= HALT_WIND_DOWN_GRACE - Duration::from_millis(200),
+            "…and not before the grace either"
+        );
+        chatter.abort();
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **Two releases in the window merge, in order** (round 11 — the MERGE arm
+    /// of `stash_release` was the one branch of the round-10 change no test
+    /// reached: an overwrite stayed green because every test sent one release
+    /// with no mentions). Two answers naming different participants → the
+    /// replay honours BOTH summonses, first named first.
+    #[tokio::test]
+    async fn two_releases_during_the_wind_down_merge_their_summonses_in_order() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        send(&tx, halt_by(a)).await;
+        post(&storage, "user", None, "answer one, for b").await;
+        send(&tx, summoning(&[b])).await;
+        post(&storage, "user", None, "answer two, for a").await;
+        send(&tx, summoning(&[a])).await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+
+        // The completion ends the wait: the merged summons queue is [b, a], so
+        // B is dealt first and reads its whole backlog — the opening row it
+        // never saw (A held the first turn) and both answers; A waits its
+        // summons.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(
+            seats[1].expect(3).await,
+            vec!["go", "answer one, for b", "answer two, for a"],
+            "the first-named participant is dealt first, with every held row"
+        );
+        seats[0].quiet().await;
         drop(tx);
         assert!(exited(task).await);
     }
