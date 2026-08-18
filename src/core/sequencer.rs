@@ -1768,12 +1768,20 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
         if !bounded {
             grace_deadline = None;
         }
-        let deadline =
-            *grace_deadline.get_or_insert_with(|| tokio::time::Instant::now() + HALT_WIND_DOWN_GRACE);
         let cmd = match state.deferred.pop_front() {
             Some(cmd) => cmd,
             None => match {
                 if bounded {
+                    // Armed HERE, on a bounded read only (EYES, e4daf94f):
+                    // arming it on every iteration set a deadline at the top
+                    // of an UNBOUNDED read — the one that then blocks for as
+                    // long as the session is idle — so the first bounded read
+                    // after a stash created minutes later found it already
+                    // expired and dealt the release on the spot: the round-10
+                    // fold-in restored, and every existing test green because
+                    // its commands are milliseconds apart.
+                    let deadline = *grace_deadline
+                        .get_or_insert_with(|| tokio::time::Instant::now() + HALT_WIND_DOWN_GRACE);
                     tokio::time::timeout_at(deadline, rx.recv())
                         .await
                         .map_err(|_| ())
@@ -9354,6 +9362,50 @@ mod tests {
             seats[0].expect(1).await,
             vec!["the answer"],
             "the release survived a pause the ring never heard about"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **The grace is measured from the STASH, not from whenever the loop last
+    /// went to sleep** (EYES, e4daf94f on the first cut of round 11). Arming the
+    /// deadline on every iteration armed it at the top of an unbounded read —
+    /// the read that blocks for as long as the session is idle — so a release
+    /// that arrived minutes later met a deadline that had expired long ago and
+    /// was dealt on the spot, before the halted holder's completion: the
+    /// round-10 fold-in restored. Every other test here sends its commands
+    /// milliseconds apart, so none could see it. Pinned by idling past the
+    /// grace BEFORE the release, then asserting it is held until the
+    /// completion.
+    #[tokio::test]
+    async fn a_release_after_a_long_idle_is_still_held_for_the_completion() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+
+        send(&tx, halt_by(a)).await;
+        // The session idles past the grace with nothing held: the loop sits in
+        // an unbounded read the whole time.
+        tokio::time::sleep(HALT_WIND_DOWN_GRACE + Duration::from_millis(500)).await;
+        post(&storage, "user", None, "the answer").await;
+        send(&tx, user_message()).await;
+        // Held — NOT dealt on the spot by a deadline armed before the idle.
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["the answer"],
+            "the release waited for the completion, grace measured from the stash"
         );
         drop(tx);
         assert!(exited(task).await);
