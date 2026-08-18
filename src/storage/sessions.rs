@@ -215,6 +215,23 @@ impl Storage {
         Ok(())
     }
 
+    /// **Archive an already-closed row** (round 11). `close_session` applies
+    /// `archive` only on the close itself (`WHERE closed_at IS NULL`), so a
+    /// later "close and archive" that JOINS an in-flight epilogue — whose
+    /// winner closed the row unarchived — has no way to honour the archive
+    /// half without this. Returns whether a row moved (`false` for unknown or
+    /// still-open).
+    pub async fn archive_session(&self, id: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE sessions SET archived = 1 WHERE id = ? AND closed_at IS NOT NULL",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("archiving session {id}"))?;
+        Ok(res.rows_affected() > 0)
+    }
+
     /// **Reopen a closed row** (round 10, B4 — the user's pick: "a Reopen button
     /// for closed sessions"). Clears `closed_at` AND `archived` (the dashboard
     /// filters on both), and empties the halt slot — the halt a session closed
@@ -434,6 +451,23 @@ mod tests {
         // A second click, or a reopen of an open row, moves nothing.
         assert!(!s.reopen_session("s1").await.unwrap());
         assert!(!s.reopen_session("nope").await.unwrap());
+    }
+
+    /// **A closed row can be archived after the fact** (round 11). The
+    /// "close and archive" that joins an in-flight epilogue arrives after the
+    /// winner closed the row unarchived; `close_session` cannot re-apply the
+    /// flag (`closed_at IS NULL`), so this is the archive half of a join.
+    /// A still-open row is not archived — closing is the other path's job.
+    #[tokio::test]
+    async fn archive_session_flags_a_closed_row_and_leaves_an_open_one() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        assert!(!s.archive_session("s1").await.unwrap(), "open: not archived here");
+        assert_eq!(s.get_session("s1").await.unwrap().unwrap().archived, 0);
+        s.close_session("s1", false).await.unwrap();
+        assert!(s.archive_session("s1").await.unwrap(), "closed unarchived → archived");
+        assert_eq!(s.get_session("s1").await.unwrap().unwrap().archived, 1);
+        assert!(!s.archive_session("nope").await.unwrap());
     }
 
     /// **The staged message survives the process** (B1-F11, migration 0058).

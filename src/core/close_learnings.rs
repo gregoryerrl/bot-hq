@@ -155,17 +155,25 @@ pub enum ClosePlan {
     JoinInFlight,
 }
 
-/// [`decide`]'s answer plus whether this call actually won the epilogue claim.
+/// [`decide`]'s answer, whether this call won the epilogue claim, and whether
+/// another close is ALREADY mid-epilogue for the session.
 ///
-/// `claimed` is false when another close is already mid-epilogue for the same
-/// session — a double-clicked Close, or the epilogue's own agent calling the
-/// `close_session` tool on the turn it was just given. A second close means
-/// finish the job, so it tears down.
-pub fn plan(decision: Epilogue, claimed: bool) -> ClosePlan {
+/// `in_flight` is the fact that decides first (round 11): a second close for a
+/// session whose learnings turn is running joins it — a double-clicked Close,
+/// or the epilogue's own agent calling `close_session` on the turn it was just
+/// given, which decides `SkipBusy` (the turn is in flight) or
+/// `SkipAlreadyHandled` (A3b nudged it and it wrote), never `Run`. Keying the
+/// join on `(Run, !claimed)` alone made the arm unreachable for exactly that
+/// case, so the agent's own close tore the epilogue down mid-turn — the defect
+/// the arm was written for.
+pub fn plan(decision: Epilogue, claimed: bool, in_flight: bool) -> ClosePlan {
+    if in_flight {
+        return ClosePlan::JoinInFlight;
+    }
     match (decision, claimed) {
         (Epilogue::Run, true) => ClosePlan::RunEpilogueFirst,
-        // Wanted the epilogue and did not get the claim ⇒ somebody else is
-        // running it right now. The only way to reach this pair.
+        // Wanted the epilogue and did not get the claim ⇒ somebody else holds
+        // it (a race between two `Run`s inside the claim window).
         (Epilogue::Run, false) => ClosePlan::JoinInFlight,
         _ => ClosePlan::TearDownNow,
     }
@@ -384,7 +392,7 @@ mod tests {
 
     #[test]
     fn only_a_run_that_won_its_claim_gets_the_epilogue_arm() {
-        assert_eq!(plan(Epilogue::Run, true), ClosePlan::RunEpilogueFirst);
+        assert_eq!(plan(Epilogue::Run, true, false), ClosePlan::RunEpilogueFirst);
         // **A second close for a session already mid-epilogue waits.** It used
         // to tear down — "finish the job" — which SIGKILLed the agents in the
         // middle of the turn the first close had just started, so the epilogue
@@ -393,16 +401,34 @@ mod tests {
         // turn it was given arrives here every time it happens. Nothing leaks by
         // waiting — the winner closed the row before the turn and tears down
         // after it.
-        assert_eq!(plan(Epilogue::Run, false), ClosePlan::JoinInFlight);
+        assert_eq!(plan(Epilogue::Run, false, false), ClosePlan::JoinInFlight);
         for skip in [
             Epilogue::SkipNoWriter,
             Epilogue::SkipAlreadyHandled,
             Epilogue::SkipBusy,
         ] {
-            assert_eq!(plan(skip, false), ClosePlan::TearDownNow);
+            assert_eq!(plan(skip, false, false), ClosePlan::TearDownNow);
             // A claim can't be won without a Run decision, but if the call site
             // ever inverted the two, this is where it shows.
-            assert_eq!(plan(skip, true), ClosePlan::TearDownNow);
+            assert_eq!(plan(skip, true, false), ClosePlan::TearDownNow);
+        }
+    }
+
+    /// **The in-flight fact decides first** (round 11). The epilogue's own
+    /// agent calling `close_session` on the turn it was just given decides
+    /// `SkipBusy` (its turn is in flight) or `SkipAlreadyHandled` (A3b nudged
+    /// it and it wrote) — never `Run` — so keying the join on `(Run, !claimed)`
+    /// left that close, the case the arm names as routine, tearing the
+    /// epilogue down mid-turn.
+    #[test]
+    fn any_close_during_an_in_flight_epilogue_joins_it() {
+        for decision in [
+            Epilogue::Run,
+            Epilogue::SkipNoWriter,
+            Epilogue::SkipAlreadyHandled,
+            Epilogue::SkipBusy,
+        ] {
+            assert_eq!(plan(decision, false, true), ClosePlan::JoinInFlight, "{decision:?}");
         }
     }
 

@@ -240,8 +240,10 @@ pub struct AppState {
     /// `close_session` in that window still finds a live session and would
     /// otherwise start a second epilogue — a double-clicked Close button, or
     /// the epilogue's own agent calling the `close_session` MCP tool on the
-    /// turn we just gave it, which is the likely one. A session in this set
-    /// skips straight to teardown.
+    /// turn we just gave it, which is the likely one. A close for a session in
+    /// this set JOINS the running epilogue (`ClosePlan::JoinInFlight` — it
+    /// tears nothing down; the winner does, after the turn) and applies only
+    /// the archive half of its own request (round 11).
     epilogue_in_flight: Mutex<HashSet<String>>,
     /// Sessions whose [`teardown_session`](Self::teardown_session) is between
     /// its guard block and the end of its cleanup tail.
@@ -888,28 +890,52 @@ impl AppState {
         path: close_learnings::ClosePath,
     ) -> Result<()> {
         let decision = self.close_epilogue_decision(id, path).await;
-        // Claim only when the decision wants a turn. `insert` returns false
-        // when the id is already there, so the claim is atomic in one short
-        // hold and the decision runs outside it — no `epilogue_in_flight` →
+        // One short hold decides both facts: is an epilogue ALREADY in flight
+        // for this session (round 11 — asked for every decision, because the
+        // epilogue's own agent closing on the turn it was given decides
+        // SkipBusy/SkipAlreadyHandled, never Run), and — only when the decision
+        // wants a turn — did this call win the claim. `insert` returns false
+        // when the id is already there, so the claim is atomic, and the
+        // decision runs outside the hold — no `epilogue_in_flight` →
         // `sessions` lock nesting.
-        let claimed = decision == close_learnings::Epilogue::Run
-            && self
-                .epilogue_in_flight
-                .lock()
-                .await
-                .insert(id.to_string());
+        let (claimed, in_flight) = {
+            let mut set = self.epilogue_in_flight.lock().await;
+            if set.contains(id) {
+                (false, true)
+            } else if decision == close_learnings::Epilogue::Run {
+                (set.insert(id.to_string()), false)
+            } else {
+                (false, false)
+            }
+        };
         // Exhaustive on purpose — see `ClosePlan`. Deleting the epilogue arm
         // has to be a compile error, not a silently inert feature.
-        match close_learnings::plan(decision, claimed) {
+        match close_learnings::plan(decision, claimed, in_flight) {
             close_learnings::ClosePlan::TearDownNow => {
                 self.teardown_session(id, Some(archive)).await
             }
             close_learnings::ClosePlan::JoinInFlight => {
                 // The other close owns the teardown; doing it here kills the
                 // learnings turn it just started (B2-5). The row is already
-                // closed by that path, so the user's Close has taken effect.
+                // closed by that path, so the user's Close has taken effect —
+                // except the ARCHIVE half (round 11): the winner may have closed
+                // unarchived (the agent's tool passes `archive = false`), and
+                // `close_session` cannot re-apply the flag on a closed row, so
+                // a "close and archive" that joins applies it here.
+                if archive {
+                    match self.storage.archive_session(id).await {
+                        Ok(true) => {
+                            self.bridge.notify_session_closed(id.to_string());
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(?e, session_id = %id, "close: archive on join failed");
+                        }
+                    }
+                }
                 tracing::debug!(
                     session_id = %id,
+                    archive,
                     "close: an epilogue is already in flight; leaving the teardown to it"
                 );
                 Ok(())
