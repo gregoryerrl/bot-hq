@@ -404,7 +404,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "check_open_findings",
-            description: "Check whether any EYES `blocking` findings are still unresolved for this session. Returns 'ok' if clear, or 'blocked: <N> unresolved blocking finding(s)' plus the list (each with its finding id). ALWAYS call this BEFORE `git commit`: if it's not 'ok', resolve each finding via `disposition_finding` (fix or rebut) first. The pre-commit / pre-push git hooks enforce this mechanically too, but checking here lets you resolve cleanly instead of hitting a blocked commit.",
+            description: "Check whether this session is clear to commit. Returns 'ok' if clear; 'blocked: <N> unresolved blocking finding(s)' plus the list (each with its finding id) when the reviewer has filed `blocking` findings you have not dispositioned — the pre-commit / pre-push git hooks enforce THAT verdict mechanically too; or 'blocked: reviewer down — …' when the session's reviewer is Stalled/Dead and nothing has been reviewed recently — an ADVISORY verdict (the hooks cannot see liveness), lifted by a user-approved `override_reviewer_block` ('ok (reviewer-down overridden: …)'). ALWAYS call this BEFORE `git commit`: if it's not 'ok', resolve each finding via `disposition_finding` (fix or rebut) first. Checking here lets you resolve cleanly instead of hitting a blocked commit.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -413,7 +413,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "override_reviewer_block",
-            description: gated_by("override_reviewer_block", "REQUEST an override of a 'reviewer down' commit block when this session's reviewer is Stalled/Dead and you've confirmed the change is safe to ship unreviewed. It does NOT lift the block itself: it parks an Approve/Reject decision for the user (returns at once with the gate id) and the block lifts only on their Approve — the user decides, you do not. `reason` is REQUIRED and is shown to them beside the decision (the fail-closed escape valve). An approved override auto-clears when the reviewer recovers — and a request still parked when it recovers is voided. Only needed when check_open_findings returns 'blocked: reviewer down'."),
+            description: gated_by("override_reviewer_block", "REQUEST an override of the 'reviewer down' verdict `check_open_findings` returns when this session's reviewer is Stalled/Dead and you've confirmed the change is safe to ship unreviewed (the verdict is the tool's — the git hooks enforce open blocking findings, not liveness — and you honour it by not committing until it lifts). It does NOT lift the verdict itself: it parks an Approve/Reject decision for the user (returns at once with the gate id) and the block lifts only on their Approve — the user decides, you do not. `reason` is REQUIRED and is shown to them beside the decision (the fail-closed escape valve). An approved override auto-clears when the reviewer recovers — and a request still parked when it recovers is voided. Only needed when check_open_findings returns 'blocked: reviewer down'."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1020,7 +1020,7 @@ mod tests {
     /// spawned agent does. One list is all that remains to cover.
     ///
     /// **It now runs with NO exemptions at all.** The only ones it ever had were
-    /// `external_jsonrpc::wire`'s frozen identifiers — keys an external driver
+    /// the deleted `external_jsonrpc::wire`'s frozen identifiers — keys an external driver
     /// sent or the server returned — and the external driver was removed when
     /// the user demoted it to a future plugin. Deleting a published wire deleted
     /// the reason its agent-named keys had to be tolerated, so this sweep got

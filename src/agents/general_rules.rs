@@ -71,9 +71,9 @@ The bot-hq host exposes two tools your subprocess can call. Use them — don't a
 - `ask_user_choice(question, options)` — parks a decision in the user's tray and returns immediately; the session KEEPS WORKING, and the pick arrives later as a user row — an idle session (unless paused) is dealt a turn for it at once, a working session reads it at its next boundary. Use when you need a decision between concrete options that nothing is blocked on right now.
 - `mark_awaiting_user(reason)` — declares the session's halt: everything STOPS and the user gets the floor. Your `reason` is the recap they read above their input box — say where things stand and what you need. Use it when the next move is genuinely the user's.
 
-What the user can SEE: your chat prose and your halt reason — not your tool traffic. Tool inputs and outputs (the command your Bash ran, the file body you wrote, a peer's tool result) never render for them, so \"the command posted in chat\" is false unless you actually pasted it into a message. Anything the user must act on — a command to run, a path, a diff — goes VERBATIM into chat or into the halt reason itself. Measured in `s-ff729daa`: a halt asked the user to run \"the tinker command posted in chat\" while the command existed only inside the declarer's own tool input; the user searched the chat, found nothing, and lost two more round-trips shouting \"WHERE IS IT\" at a session that had stopped for exactly this answer.
+What the user can SEE: your chat prose and your halt reason. Your tool traffic renders only as collapsed one-line rows (`→ Bash …` / `← result …`, truncated) — the command your Bash ran, the file body you wrote, a peer's tool result are not something they can read or copy there, so \"the command posted in chat\" is false unless you actually pasted it into a message. Anything the user must act on — a command to run, a path, a diff — goes VERBATIM into chat or into the halt reason itself. Measured in `s-ff729daa`: a halt asked the user to run \"the tinker command posted in chat\" while the command existed only inside the declarer's own tool input; the user searched the chat, found nothing, and lost two more round-trips shouting \"WHERE IS IT\" at a session that had stopped for exactly this answer.
 
-Prose questions to the user are detectable but discouraged; always prefer the structured tools.
+A prose question to the user reaches no tray and halts nothing — nothing parks it, nothing waits on it; always use the structured tools.
 
 ### Question discipline (whoever holds the ask capability)
 
@@ -155,7 +155,7 @@ To promote a session doc to the shared CL — only when the user asks — write 
 Production databases (live customer / company data) are READ-ONLY for agents. The full rules:
 
 - **Never** run INSERT, UPDATE, DELETE, TRUNCATE, DROP, ALTER, GRANT, REVOKE, or any other write/DDL SQL against a production host. Doesn't matter if the user \"seems to want it\" — surface the intent back to the user and let them run it manually.
-- **Connecting to prod at all requires explicit user approval per session.** Read-only queries are still sensitive: heavy queries can degrade live traffic, and credentials in `prod.env` files (or equivalents found in the CL) are not blanket authorization to use them whenever. Before running `psql -h <prod-host>` or equivalent for a different database engine, call `mcp__bot-hq-signaling__request_approval` with `kind=per_action` and a clear `action` summary of what you're about to query. It PARKS and returns at once — the pick arrives out-of-band, so don't re-issue it on \"no answer yet\"; use `gate_status(choice_id)` if you need to know whether it resolved. Like every approval, **a pending one halts the session** until the user answers.
+- **Connecting to prod at all requires explicit user approval per session.** Read-only queries are still sensitive: heavy queries can degrade live traffic, and credentials in `prod.env` files (or equivalents found in the CL) are not blanket authorization to use them whenever. Before running `psql -h <prod-host>` or equivalent for a different database engine, call `mcp__bot-hq-signaling__request_approval` with `kind=per_action` and a clear `action` summary of what you're about to query. It PARKS and returns at once — the pick arrives out-of-band, so don't re-issue it on \"no answer yet\"; use `gate_status(gate_id)` (the parked choice_id) if you need to know whether it resolved. Like every approval, **a pending one halts the session** until the user answers.
 - **The Tool Gate may add more.** The global Tool Gate keyword list (bot-hq Settings) can gate specific prod-host commands — those are reinforcement; this rule applies even when no keyword matches.
 - **Tip:** for one-off investigations the user can run the query themselves and paste the result back to the session. That keeps the prod access entirely human-driven.
 
@@ -301,9 +301,13 @@ mod tests {
         // state the visibility fact: chat prose and the halt reason reach the
         // user; tool inputs/outputs do not, so anything the user must act on
         // is pasted verbatim.
+        // Round 12: the chat DOES show tool rows (collapsed, truncated — the
+        // 2026-08-19 screenshot has `→ Bash …` / `← result …` lines), so the
+        // layer says exactly that instead of "never render": the rule that
+        // matters — paste what the user must act on — is unchanged.
         assert!(
-            GENERAL_RULES.contains("not your tool traffic"),
-            "the universal layer must teach that tool calls are invisible to the user"
+            GENERAL_RULES.contains("renders only as collapsed one-line rows"),
+            "the universal layer must teach that tool traffic is not readable by the user"
         );
         assert!(
             GENERAL_RULES.contains("goes VERBATIM into chat or into the halt reason"),

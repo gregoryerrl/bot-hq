@@ -102,7 +102,19 @@ pub async fn start_signaling_server(bridge: Arc<SignalingBridge>) -> Result<Sign
                                     async move { handle_request(req, bridge).await }
                                 });
                                 if let Err(err) = http1::Builder::new().serve_connection(io, svc).await {
-                                    warn!(?err, "signaling connection error");
+                                    // A client that simply went away — a pre-push
+                                    // hook killed with its `git push` mid-wait, a
+                                    // tool call timed out — closes the socket mid
+                                    // message; hyper reports that as an error on
+                                    // OUR side. A client fact, not a server fault
+                                    // (round 12 — the one WARN in a clean day's
+                                    // log), so it stays at debug; anything else is
+                                    // still loud.
+                                    if err.is_incomplete_message() || err.is_canceled() || err.is_closed() {
+                                        debug!(?err, "signaling connection closed by the client mid-request");
+                                    } else {
+                                        warn!(?err, "signaling connection error");
+                                    }
                                 }
                             });
                         }
@@ -137,7 +149,7 @@ async fn handle_request(
 
     // Dedicated route for the git pre-push hook subprocess (push_gate=ask). It
     // is NOT an agent and has no per-(session,agent) MCP identity, so it bypasses
-    // the JSON-RPC + HANDS-only tool gate and calls `request_approval` directly.
+    // the JSON-RPC + capability gate and calls `request_approval` directly.
     if path == "/hooks/pre-push" {
         return Ok(handle_pre_push(req.into_body(), bridge).await);
     }
