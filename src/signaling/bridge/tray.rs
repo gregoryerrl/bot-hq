@@ -55,7 +55,10 @@ pub enum Withdrawal {
 fn executable_command(ctx: &super::ApprovalContext) -> Option<String> {
     match ctx.kind {
         crate::policy::ViolationKind::ToolBlocklist => Some(ctx.action.clone()),
-        _ => ctx.command.clone(),
+        // Explicit, not a catch-all (EYES, round 12): a future kind that sets
+        // `command` must opt in here — nothing becomes executable by default.
+        crate::policy::ViolationKind::PushGate => ctx.command.clone(),
+        _ => None,
     }
 }
 
@@ -2059,6 +2062,28 @@ mod tests {
         // (2) The hook is DEAD: the parked shape drops its receiver at park
         // time, exactly like a hook killed before the answer. The branch
         // moves on after the park; the approve still ships sha A, pinned.
+        //
+        // **The WIRE, not the halves** (EYES fd17516b): a plain shell pre-push
+        // hook in `work` records what the re-run's child environment carries
+        // — the minted nonce and the session id — so mint → env → child →
+        // hook is one observation, not three tests that each trust the next.
+        let hook_env = tmp.path().join("hook-env.txt");
+        let hooks_dir = work.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hook = hooks_dir.join("pre-push");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nprintf '%s %s' \"$BOT_HQ_PUSH_NONCE\" \"$BOT_HQ_SESSION_ID\" > '{}'\nexit 0\n",
+                hook_env.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let ack = bridge
             .request_approval_parked(
                 "s1".into(),
@@ -2087,6 +2112,18 @@ mod tests {
         assert!(body.contains("Late approval"), "{body}");
         assert!(body.contains("600 s"), "{body}");
         assert!(body.contains("exit") || body.contains("main"), "{body}");
+        // The re-run's hook saw the session id AND a nonce — the join pinned.
+        let seen = std::fs::read_to_string(&hook_env).expect("the re-run ran the repo's pre-push hook");
+        let (nonce, sid) = seen.split_once(' ').expect("nonce and session id");
+        assert_eq!(sid, "s1", "the child carried BOT_HQ_SESSION_ID: {seen:?}");
+        assert_eq!(nonce.len(), 32, "the child carried the minted nonce: {seen:?}");
+        assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()), "{nonce}");
+        // And it was discarded after the run: nothing redeems it later.
+        let refspecs = crate::policy::push_rerun_refspecs(&command).unwrap();
+        assert!(
+            bridge.redeem_push_nonce("s1", nonce, &refspecs).is_err(),
+            "a nonce the run did not redeem is discarded, not left redeemable"
+        );
     }
 
     /// A session with no ring registered must not panic or block — the bridge is

@@ -1073,4 +1073,31 @@ mod tests {
         }
         assert!(!marker2.exists(), "old gate must not run without confirm");
     }
+
+    /// Round 12 (EYES fd17516b): `execute_gated_with` PASSES the session's
+    /// identity and the caller's extra envs to the child — the join between
+    /// `session_envs` and `run_in_repo`, which `run_in_repo_sets_the_envs_it_is_given`
+    /// does not reach. Delete the `session_envs`/`extend_from_slice` lines and
+    /// this goes red with every gated command silently losing `BOT_HQ_SESSION_ID`.
+    #[tokio::test]
+    async fn execute_gated_with_passes_the_session_identity_and_extra_envs() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        let dir = tempfile::tempdir().unwrap();
+        storage
+            .create_session("s-env", "t", Some(dir.path().to_str().unwrap()))
+            .await
+            .unwrap();
+        let out = bridge
+            .execute_gated_with(
+                "s-env",
+                "printf 'sid=%s extra=%s' \"$BOT_HQ_SESSION_ID\" \"$EXTRA_ENV\"",
+                std::time::Duration::from_secs(5),
+                &[("EXTRA_ENV", "ride-along")],
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("sid=s-env extra=ride-along"), "{out}");
+    }
 }
