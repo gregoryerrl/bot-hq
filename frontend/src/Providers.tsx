@@ -231,6 +231,7 @@ function GlobalEventSync() {
       state: string;
       slot0_busy: boolean;
       slot1_busy: boolean;
+      busy_slots: number[];
     }) => {
       // `slot0_busy` / `slot1_busy` name TURN SLOTS 0 and 1, not agents —
       // `src/core/activity.rs` fills them from `slugs.get(0)` / `.get(1)`.

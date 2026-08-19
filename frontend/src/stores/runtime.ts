@@ -14,6 +14,8 @@ export interface SessionRuntime {
   activity: string;
   slot0_busy: boolean;
   slot1_busy: boolean;
+  /** Every busy turn slot (round 12) — the pair above stops at slot 1. */
+  busy_slots: number[];
   slot0_health: string | null;
   slot1_health: string | null;
   attention: string | null;
@@ -43,8 +45,14 @@ export interface SessionRuntime {
 export function busyBySlot(p: {
   slot0_busy: boolean;
   slot1_busy: boolean;
+  busy_slots?: number[];
 }): AgentBusy {
-  return { [slotKey(0)]: p.slot0_busy, [slotKey(1)]: p.slot1_busy };
+  // The pair names slots 0 and 1; `busy_slots` (round 12) names every busy
+  // slot, so a roster of three or more shows its later participants working.
+  // Both are read — a payload from an older producer carries only the pair.
+  const out: AgentBusy = { [slotKey(0)]: p.slot0_busy, [slotKey(1)]: p.slot1_busy };
+  for (const slot of p.busy_slots ?? []) out[slotKey(slot)] = true;
+  return out;
 }
 
 /** Seed the event-driven activity + health stores from a one-shot runtime

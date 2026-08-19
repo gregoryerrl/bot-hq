@@ -178,6 +178,9 @@ pub struct SessionActivityEvent {
     pub state: String,
     pub slot0_busy: bool,
     pub slot1_busy: bool,
+    /// Every busy turn slot (round 12) — the pair above stops at slot 1, so a
+    /// roster of three or more never showed its later participants working.
+    pub busy_slots: Vec<u32>,
 }
 
 impl SessionActivityEvent {

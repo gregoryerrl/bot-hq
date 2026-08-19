@@ -194,12 +194,14 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             state,
             slot0_busy,
             slot1_busy,
+            busy_slots,
         } => {
             let payload = SessionActivityEvent {
                 session_id,
                 state,
                 slot0_busy,
                 slot1_busy,
+                busy_slots,
             };
             emit_event(
                 SessionActivityEvent::EVENT_NAME,

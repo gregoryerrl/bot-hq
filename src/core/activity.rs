@@ -167,7 +167,8 @@ pub struct ActivityTracker {
     /// the router; `set_busy_slug` is the only busy setter now.)
     ///
     /// A session with one participant has one entry and a session with three has
-    /// three; only the first two reach the wire.
+    /// three; the frozen pair carries the first two, `busy_slots` (round 12)
+    /// carries every busy one.
     slugs: Vec<String>,
 }
 
@@ -432,11 +433,21 @@ impl ActivityTracker {
                     .is_some_and(|s| g.busy_of(s))
             };
             let (slot0_busy, slot1_busy) = (slot(0), slot(1));
+            // Every busy slot (round 12): the frozen pair reaches slots 0 and
+            // 1; a roster of three or more carries the rest here.
+            let busy_slots: Vec<u32> = self
+                .slugs
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| g.busy_of(s))
+                .map(|(i, _)| i as u32)
+                .collect();
             self.bridge.notify_session_activity(
                 self.session_id.clone(),
                 next.as_str(),
                 slot0_busy,
                 slot1_busy,
+                busy_slots,
             );
         }
     }
@@ -521,6 +532,42 @@ mod tests {
                 ..
             } => Some((state, *slot0_busy, *slot1_busy)),
             _ => None,
+        }
+    }
+
+    /// Round 12: a roster of three. The frozen pair names slots 0 and 1; the
+    /// third participant's busy edge used to leave the wire unchanged (both
+    /// booleans already false) — and on a live session it re-emitted with the
+    /// pair unchanged, so the UI never learnt who at slot 2 was working.
+    /// `busy_slots` carries every busy slot.
+    #[tokio::test]
+    async fn a_third_participants_busy_edge_reaches_the_wire() {
+        let bridge = SignalingBridge::new();
+        let mut rx = bridge.subscribe();
+        let awaiting = Arc::new(AtomicBool::new(false));
+        let t = ActivityTracker::new(
+            "s1",
+            awaiting,
+            bridge.clone(),
+            vec!["hands".into(), "eyes".into(), "hands-2".into()],
+        );
+        t.set_busy_slug("hands-2", true);
+        let ev = next_event(&mut rx).await;
+        match &ev {
+            SignalingEvent::SessionActivity { state, slot0_busy, slot1_busy, busy_slots, .. } => {
+                assert_eq!(state, "busy");
+                assert!(!slot0_busy && !slot1_busy, "the pair cannot name slot 2");
+                assert_eq!(busy_slots, &vec![2u32], "busy_slots names it");
+            }
+            other => panic!("expected SessionActivity, got {other:?}"),
+        }
+        t.set_busy_slug("hands", true);
+        match &next_event(&mut rx).await {
+            SignalingEvent::SessionActivity { busy_slots, slot0_busy, .. } => {
+                assert!(slot0_busy);
+                assert_eq!(busy_slots, &vec![0u32, 2u32]);
+            }
+            other => panic!("expected SessionActivity, got {other:?}"),
         }
     }
 

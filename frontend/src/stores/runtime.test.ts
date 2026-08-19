@@ -56,6 +56,36 @@ describe("busyBySlot — the frozen pair, unpacked once", () => {
     expect(Object.keys(busy)).not.toContain("rain");
   });
 
+  it("names every busy slot, not only the frozen pair (round 12)", () => {
+    // A roster of three: the third participant's busy edge is invisible to
+    // the pair and used to be invisible to the UI.
+    const busy = busyBySlot({ slot0_busy: false, slot1_busy: false, busy_slots: [2] });
+    expect(busy).toEqual({ "#slot0": false, "#slot1": false, "#slot2": true });
+    // An older payload without the list still unpacks the pair.
+    expect(busyBySlot({ slot0_busy: true, slot1_busy: false })).toEqual({
+      "#slot0": true,
+      "#slot1": false,
+    });
+    // …and the third slot resolves to its participant on the status line, the
+    // same way slots 0 and 1 do — three working participants, three names.
+    const third: ParticipantView = {
+      ...ROSTER[1]!,
+      id: 3,
+      slug: "hands-2",
+      role_display_name: "HANDS",
+      model_display_name: "Claude Fable 5",
+      turn_position: 2,
+    };
+    const labels = participantLabelIndex([...ROSTER, third]);
+    const all = busyBySlot({ slot0_busy: true, slot1_busy: true, busy_slots: [0, 1, 2] });
+    const working = Object.keys(all).filter((k) => all[k]);
+    expect(working.map((k) => authorLabel(k, labels))).toEqual([
+      "EYES · Claude Opus 5",
+      "EYES-2 · DeepSeek R2",
+      "HANDS-2 · Claude Fable 5",
+    ]);
+  });
+
   it("lands under keys the turn-status line resolves to a participant", () => {
     // The wire, end to end: the event payload goes in, and the label the status
     // line prints comes out — via the same index the chat byline uses. Cutting
@@ -82,6 +112,7 @@ describe("seedRuntimeStores", () => {
         activity: "busy",
         slot0_busy: true,
         slot1_busy: false,
+        busy_slots: [0],
         slot0_health: "running",
         slot1_health: "retrying",
         attention: "idle_unflagged",
@@ -91,6 +122,7 @@ describe("seedRuntimeStores", () => {
         activity: "awaiting_user",
         slot0_busy: false,
         slot1_busy: false,
+        busy_slots: [],
         slot0_health: "dead",
         slot1_health: null,
         attention: null,
@@ -143,6 +175,7 @@ describe("seedRuntimeStores", () => {
           activity: "busy",
           slot0_busy: true,
           slot1_busy: false,
+          busy_slots: [0],
           slot0_health: "stalled",
           slot1_health: "dead",
           attention: null,

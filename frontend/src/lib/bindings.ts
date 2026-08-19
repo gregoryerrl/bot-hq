@@ -2097,7 +2097,14 @@ export type SessionRuntime = { session_id: string; activity: string;
  * They were `brian_*` / `rain_*` until the D10 hard retirement (migration
  * 0060), which is what the names had always meant.
  */
-slot0_busy: boolean; slot1_busy: boolean; slot0_health: string | null; slot1_health: string | null; 
+slot0_busy: boolean; slot1_busy: boolean; 
+/**
+ * Every busy turn slot (round 12): the pair above stops at slot 1, and
+ * this seed is what the UI reads on mount/refetch — so a participant at
+ * slot 2 or 3 read idle until its next transition. Same shape as the
+ * live `session:activity` payload.
+ */
+busy_slots: number[]; slot0_health: string | null; slot1_health: string | null; 
 /**
  * Idle-unflagged attention state ("idle_unflagged" or None = clear).
  * Seeds the "needs direction" chip on mount; live updates arrive via

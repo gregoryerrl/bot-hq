@@ -229,6 +229,11 @@ pub enum SignalingEvent {
         state: String,
         slot0_busy: bool,
         slot1_busy: bool,
+        /// Every busy TURN SLOT (round 12) — the two booleans above reach
+        /// slots 0 and 1 only, so a roster of three or more never showed its
+        /// later participants working. Additive: the pair stays for the
+        /// telemetry table and the older readers; this is what the UI keys on.
+        busy_slots: Vec<u32>,
     },
     /// Session-level attention flag from the idle-unflagged watchdog.
     /// `state=Some("idle_unflagged")` when the session sat Idle past grace with
@@ -1767,6 +1772,7 @@ impl SignalingBridge {
         state: &str,
         slot0_busy: bool,
         slot1_busy: bool,
+        busy_slots: Vec<u32>,
     ) {
         self.persist_activity_event(&session_id, state, slot0_busy, slot1_busy);
         let _ = self.event_tx.send(SignalingEvent::SessionActivity {
@@ -1774,6 +1780,7 @@ impl SignalingBridge {
             state: state.to_string(),
             slot0_busy,
             slot1_busy,
+            busy_slots,
         });
     }
 

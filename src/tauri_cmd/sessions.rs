@@ -904,6 +904,11 @@ pub struct SessionRuntime {
     /// 0060), which is what the names had always meant.
     pub slot0_busy: bool,
     pub slot1_busy: bool,
+    /// Every busy turn slot (round 12): the pair above stops at slot 1, and
+    /// this seed is what the UI reads on mount/refetch — so a participant at
+    /// slot 2 or 3 read idle until its next transition. Same shape as the
+    /// live `session:activity` payload.
+    pub busy_slots: Vec<u32>,
     pub slot0_health: Option<String>,
     pub slot1_health: Option<String>,
     /// Idle-unflagged attention state ("idle_unflagged" or None = clear).
@@ -925,11 +930,19 @@ pub async fn get_session_runtime(
         // would match nothing and every backfill would report both agents idle
         // and healthless.
         let slot = |i: usize| handle.participants.get(i).map(|a| a.slug.as_str());
+        let busy_slots: Vec<u32> = handle
+            .participants
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| handle.activity.is_busy_slug(&a.slug))
+            .map(|(i, _)| i as u32)
+            .collect();
         out.push(SessionRuntime {
             session_id: id.clone(),
             activity: handle.activity.current().as_str().to_string(),
             slot0_busy: slot(0).is_some_and(|s| handle.activity.is_busy_slug(s)),
             slot1_busy: slot(1).is_some_and(|s| handle.activity.is_busy_slug(s)),
+            busy_slots,
             slot0_health: slot(0).and_then(|s| core.bridge.current_agent_health(id, s)),
             slot1_health: slot(1).and_then(|s| core.bridge.current_agent_health(id, s)),
             attention: core.bridge.current_session_attention(id),
