@@ -208,13 +208,20 @@ async fn handle_request(
 }
 
 /// Handle `POST /hooks/pre-push` from the git pre-push hook subprocess. Body:
-/// `{ "session_id": "...", "agent": "<slug>", "branch": "..."? }`. Surfaces a
-/// `request_approval` (kind=push_gate) prompt and blocks until the user picks,
-/// then replies `{ "approved": <bool> }`. The hook maps `approved` → exit 0
-/// (push proceeds) / not-approved → exit 1 (blocked). Reuses the same
-/// `PendingChoice` → `resolve_choice` → `PushGate` violation path as the
-/// agent-facing `request_approval` MCP tool, but without the HANDS-only gate
-/// (the hook isn't an agent).
+/// `{ "session_id", "agent", "branch"?, "remote"?, "updates"?: [PushRef],
+/// "nonce"? }`. Surfaces a `request_approval` (kind=push_gate) prompt and
+/// blocks until the user picks, then replies `{ "approved": <bool> }`. The
+/// hook maps `approved` → exit 0 (push proceeds) / not-approved → exit 1
+/// (blocked). Reuses the same `PendingChoice` → `resolve_choice` → `PushGate`
+/// violation path as the agent-facing `request_approval` MCP tool, without its
+/// capability gate (the hook isn't an agent).
+///
+/// Round 12: `remote` + `updates` let the app rebuild the push for a LATE
+/// approve (the hook died before the answer — the agent's Bash timeout killed
+/// `git push`); the rebuilt, sha-pinned command rides the tray row and runs
+/// through `maybe_run_gated` only when the hook's waiter is gone. A re-run the
+/// app started presents `nonce` and gets redeem-or-refuse at once, never a
+/// prompt.
 async fn handle_pre_push(body: Incoming, bridge: Arc<SignalingBridge>) -> Response<Full<Bytes>> {
     let bytes = match body.collect().await {
         Ok(c) => c.to_bytes(),
@@ -241,16 +248,53 @@ async fn handle_pre_push(body: Incoming, bridge: Arc<SignalingBridge>) -> Respon
         .and_then(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    // Round 12: the ref updates git handed the hook, and the remote NAME —
+    // what the app needs to rebuild this push for a late approve — and, on a
+    // re-run the app itself started, the nonce it redeems.
+    let updates: Vec<crate::policy::PushRef> = v
+        .get("updates")
+        .cloned()
+        .and_then(|u| serde_json::from_value(u).ok())
+        .unwrap_or_default();
+    let remote = v
+        .get("remote")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty());
+    if let Some(nonce) = v.get("nonce").and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
+        // **Redeem or refuse, never ask** (EYES F9): a re-run presenting a
+        // nonce gets an answer at once. The refspecs must be the approved set
+        // (`redeem_push_nonce` compares `<oid>:<ref>` pairs, order-free) —
+        // `push_refspecs` yields None for a shape that cannot be compared
+        // (a delete, a non-token), which is a refusal too.
+        let presented = crate::policy::push_refspecs(&updates).unwrap_or_default();
+        let approved = match bridge.redeem_push_nonce(session_id, nonce, &presented) {
+            Ok(pre) => {
+                info!(%session_id, choice_id = %pre.choice_id, "pre-push: re-run nonce redeemed");
+                true
+            }
+            Err(reason) => {
+                warn!(%session_id, %reason, "pre-push: re-run nonce refused");
+                false
+            }
+        };
+        return text_response(StatusCode::OK, &json!({ "approved": approved }).to_string());
+    }
 
     let action = crate::policy::push_gate_action(branch.as_deref());
     let question = match &branch {
         Some(b) => format!("Allow `git push` to `{b}` in this session's repo?"),
         None => "Allow `git push` in this session's repo?".to_string(),
     };
+    // The command the app runs if this hook dies before the answer —
+    // sha-pinned to what git reported, over the remote name. None when the
+    // push cannot be rebuilt faithfully (an old hook body forwards no remote;
+    // a delete) — then a late approve simply runs nothing, as before.
+    let command = remote.and_then(|r| crate::policy::push_rerun_command(r, &updates));
     let ctx = ApprovalContext {
         kind: ViolationKind::PushGate,
         action,
         detail: branch,
+        command,
     };
 
     let approved = match bridge
@@ -562,6 +606,76 @@ mod tests {
         bridge.resolve_choice(&cid, "Reject".into()).await.unwrap();
         let resp = call.await.unwrap();
         assert_eq!(resp["approved"], json!(false), "reject → approved:false");
+    }
+
+    /// Round 12: a re-run's hook presents its nonce and gets redeem-or-refuse
+    /// AT ONCE — no tray row, no waiting (EYES F9) — and the same nonce a
+    /// second time is refused; so is a body whose refspecs are not the approved
+    /// set. The first-time push path (no nonce) still parks a prompt with the
+    /// rebuilt, sha-pinned command on its row.
+    #[tokio::test]
+    async fn pre_push_route_redeems_a_rerun_nonce_once_and_never_asks() {
+        use crate::policy::ViolationsLog;
+        use crate::signaling::SignalingEvent;
+        let data = tempfile::tempdir().unwrap();
+        let bridge = SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "t", None).await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
+        let url = format!("http://{}/hooks/pre-push", server.local_addr);
+        let client = reqwest::Client::new();
+        let updates = json!([{
+            "local_ref": "refs/heads/x", "local_oid": "1111aaaa",
+            "remote_ref": "refs/heads/x", "remote_oid": "0000000000000000000000000000000000000000"
+        }]);
+        let post = |body: serde_json::Value| {
+            let client = client.clone();
+            let url = url.clone();
+            async move {
+                let resp = client
+                    .post(&url)
+                    .header("content-type", "application/json")
+                    .body(body.to_string())
+                    .send()
+                    .await
+                    .unwrap();
+                serde_json::from_str::<serde_json::Value>(&resp.text().await.unwrap()).unwrap()
+            }
+        };
+
+        // A nonce minted for these refspecs: redeemed once, refused the second time.
+        let nonce = bridge.mint_push_nonce("s1", "c1", vec!["1111aaaa:refs/heads/x".into()]);
+        let mut sub = bridge.subscribe();
+        let resp = post(json!({ "session_id": "s1", "agent": "hands", "nonce": nonce, "updates": updates })).await;
+        assert_eq!(resp["approved"], json!(true), "first presentation redeems");
+        let resp = post(json!({ "session_id": "s1", "agent": "hands", "nonce": nonce, "updates": updates })).await;
+        assert_eq!(resp["approved"], json!(false), "second presentation is refused");
+        // Wrong refspecs: refused.
+        let other = bridge.mint_push_nonce("s1", "c2", vec!["9999ffff:refs/heads/x".into()]);
+        let resp = post(json!({ "session_id": "s1", "agent": "hands", "nonce": other, "updates": updates })).await;
+        assert_eq!(resp["approved"], json!(false), "refspecs differ from what was approved");
+        // And none of that parked a prompt: no PendingChoice was published.
+        assert!(
+            matches!(sub.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)),
+            "a nonce presentation must never park a gate"
+        );
+
+        // The first-time path (no nonce) parks the prompt with the rebuilt
+        // command on the durable row — sha-pinned over the remote name.
+        let call = tokio::spawn(post(json!({
+            "session_id": "s1", "agent": "hands", "branch": "x", "remote": "origin", "updates": updates
+        })));
+        let cid = loop {
+            match sub.recv().await.unwrap() {
+                SignalingEvent::PendingChoice(p) => break p.choice_id,
+                _ => continue,
+            }
+        };
+        let row = storage.get_tray_entry(&cid).await.unwrap().unwrap();
+        assert_eq!(row.command_text.as_deref(), Some("git push origin 1111aaaa:refs/heads/x"));
+        bridge.resolve_choice(&cid, "Reject".into()).await.unwrap();
+        assert_eq!(call.await.unwrap()["approved"], json!(false));
     }
 
     #[tokio::test]

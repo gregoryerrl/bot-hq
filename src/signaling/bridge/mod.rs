@@ -262,6 +262,28 @@ pub struct ApprovalContext {
     pub kind: ViolationKind,
     pub action: String,
     pub detail: Option<String>,
+    /// The command the app RUNS on a late approve — one the asker itself can
+    /// no longer run (round 12). `Some` for a push gate whose hook may die
+    /// before the user answers: `git push <remote> <local_oid>:<remote_ref> …`,
+    /// sha-pinned so what was approved is what ships. A Tool-Gate command rides
+    /// `action` as it always did; `None` for every other approval. It becomes
+    /// the durable row's `command_text` and runs through `maybe_run_gated`
+    /// only when the hook's waiter is gone (the live-hook path runs nothing —
+    /// the hook proceeds with its own push).
+    pub command: Option<String>,
+}
+
+/// A push re-run the app itself started on a late approve (round 12): the
+/// pre-push hook inside that `git push` presents this nonce instead of asking
+/// again, and `redeem_push_nonce` lets it through ONCE — provided the session
+/// and the pushed refspecs are the ones that were approved. In-memory only: an
+/// approval is redeemed by the process that minted it or not at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreApprovedPush {
+    pub session_id: String,
+    pub choice_id: String,
+    /// `<local_oid>:<remote_ref>` per ref, as the re-run command pushes them.
+    pub refspecs: Vec<String>,
 }
 
 /// Parked state for a pending choice. The oneshot resolves the agent's wait;
@@ -391,6 +413,11 @@ pub struct SignalingBridge {
     /// `resolve_choice_confirmable` (Approve → the reason moves into
     /// `reviewer_override`; Reject → dropped), voided by reviewer recovery.
     pub(super) pending_override_requests: std::sync::Mutex<HashMap<String, (String, String)>>,
+    /// nonce → the push the app is re-running on a late approve (round 12).
+    /// Minted by `maybe_run_gated` right before the re-run, redeemed ONCE by
+    /// the re-run's own pre-push hook through `/hooks/pre-push`, discarded
+    /// after the run either way. See [`PreApprovedPush`].
+    push_nonces: std::sync::Mutex<HashMap<String, PreApprovedPush>>,
     /// session_id → reason. Set by the USER approving an override request
     /// (`resolve_choice_confirmable` consumes `pending_override_requests`),
     /// honored by `check_open_findings`, auto-cleared when the reviewer
@@ -517,6 +544,7 @@ impl SignalingBridge {
             agent_rpc_seen: std::sync::Mutex::new(HashMap::new()),
             reviewer_override: std::sync::Mutex::new(HashMap::new()),
             pending_override_requests: std::sync::Mutex::new(HashMap::new()),
+            push_nonces: std::sync::Mutex::new(HashMap::new()),
             session_reviewers: std::sync::Mutex::new(HashMap::new()),
             session_attention: std::sync::Mutex::new(HashMap::new()),
             turn_passes: std::sync::Mutex::new(HashMap::new()),
@@ -640,6 +668,72 @@ impl SignalingBridge {
                 );
             }
         }
+    }
+
+    /// Mint the single-use nonce a push re-run carries (round 12). Random
+    /// (a v4 UUID — 122 bits, the same source as every choice id), held only
+    /// in memory, bound to the session and the exact refspecs being pushed.
+    pub fn mint_push_nonce(&self, session_id: &str, choice_id: &str, refspecs: Vec<String>) -> String {
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        self.push_nonces
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                nonce.clone(),
+                PreApprovedPush {
+                    session_id: session_id.to_string(),
+                    choice_id: choice_id.to_string(),
+                    refspecs,
+                },
+            );
+        nonce
+    }
+
+    /// Redeem a push nonce presented by a re-run's pre-push hook. **Remove
+    /// first, then validate** (EYES F10): the entry leaves the map under the
+    /// lock before anything is compared, so a second presentation — racing or
+    /// later — finds nothing, and a mismatch is refused WITHOUT re-inserting.
+    /// `refspecs` are the `<local_oid>:<remote_ref>` pairs the hook read off
+    /// its stdin; they must equal the approved set exactly (order-free).
+    pub fn redeem_push_nonce(
+        &self,
+        session_id: &str,
+        nonce: &str,
+        refspecs: &[String],
+    ) -> std::result::Result<PreApprovedPush, String> {
+        let entry = self
+            .push_nonces
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(nonce);
+        let Some(entry) = entry else {
+            return Err("unknown or already-redeemed push nonce".to_string());
+        };
+        if entry.session_id != session_id {
+            return Err("push nonce belongs to another session".to_string());
+        }
+        let mut approved = entry.refspecs.clone();
+        let mut presented = refspecs.to_vec();
+        approved.sort();
+        presented.sort();
+        if approved != presented {
+            return Err(format!(
+                "push nonce was minted for {} but the hook presents {}",
+                approved.join(" "),
+                presented.join(" ")
+            ));
+        }
+        Ok(entry)
+    }
+
+    /// Drop an unredeemed nonce once its re-run has finished (the run failed
+    /// before the hook ran, or the repo has no hook): nothing may redeem it
+    /// later.
+    pub fn discard_push_nonce(&self, nonce: &str) {
+        self.push_nonces
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(nonce);
     }
 
     /// Mint-and-remember the secret one agent's mcp-config will carry (C1-1).
@@ -967,6 +1061,12 @@ impl SignalingBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .retain(|k, _| !k.starts_with(&format!("{session_id}:")));
+        // A push re-run's nonce (round 12) is consumed within its own run; a
+        // closed session's leftover must not stay redeemable.
+        self.push_nonces
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|_, pre| pre.session_id != session_id);
     }
 
     /// A3b: record that the agent ran `cl_rescan` or `cl_write_file` this
@@ -1606,6 +1706,7 @@ impl SignalingBridge {
                     kind: crate::policy::ViolationKind::GenericApproval,
                     action: format!("override reviewer-down block: {reason}"),
                     detail: Some("reviewer-override".to_string()),
+                    command: None,
                 }),
                 None,
                 false,
@@ -2219,5 +2320,44 @@ mod tests {
             Some(crate::core::ipav::IpavPhase::Verify)
         );
         assert!(Arc::strong_count(&ipav) > 0, "the live Arc is untouched");
+    }
+
+    /// Round 12: a push re-run's nonce is single-use and bound to the session
+    /// and the approved refspecs — removed under the lock BEFORE it is
+    /// compared (EYES F10), so a second presentation finds nothing and a
+    /// mismatch is refused without re-inserting.
+    #[test]
+    fn a_push_nonce_redeems_once_for_its_session_and_refspecs() {
+        let bridge = SignalingBridge::new();
+        let spec = vec!["1111aaaa:refs/heads/x".to_string(), "2222bbbb:refs/heads/y".to_string()];
+        let nonce = bridge.mint_push_nonce("s1", "c1", spec.clone());
+        assert!(nonce.len() >= 32, "random, not guessable: {nonce}");
+        // Wrong session: refused, and the entry is GONE (not re-inserted).
+        let other = bridge.mint_push_nonce("s1", "c2", spec.clone());
+        assert!(bridge.redeem_push_nonce("s2", &other, &spec).is_err());
+        assert!(
+            bridge.redeem_push_nonce("s1", &other, &spec).is_err(),
+            "a refused nonce is spent, not returned to the map"
+        );
+        // Refspecs differ (the branch moved, or a different push): refused.
+        let moved = bridge.mint_push_nonce("s1", "c3", spec.clone());
+        assert!(bridge
+            .redeem_push_nonce("s1", &moved, &["3333cccc:refs/heads/x".to_string()])
+            .is_err());
+        // The right session + the same set, order-free: redeemed exactly once.
+        let mut reversed = spec.clone();
+        reversed.reverse();
+        let pre = bridge.redeem_push_nonce("s1", &nonce, &reversed).expect("first use redeems");
+        assert_eq!(pre.choice_id, "c1");
+        assert!(
+            bridge.redeem_push_nonce("s1", &nonce, &spec).is_err(),
+            "second presentation of the same nonce is refused"
+        );
+        // Unknown nonce: refused.
+        assert!(bridge.redeem_push_nonce("s1", "nope", &spec).is_err());
+        // Discard drops an unredeemed one.
+        let n = bridge.mint_push_nonce("s1", "c4", spec.clone());
+        bridge.discard_push_nonce(&n);
+        assert!(bridge.redeem_push_nonce("s1", &n, &spec).is_err());
     }
 }

@@ -361,6 +361,81 @@ pub fn push_gate_action(branch: Option<&str>) -> String {
     }
 }
 
+/// One ref update of a push as git hands it to the pre-push hook on stdin
+/// (`<local ref> <local oid> <remote ref> <remote oid>`), in the shape the hook
+/// POSTs to `/hooks/pre-push` and the app re-runs from (round 12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushRef {
+    pub local_ref: String,
+    pub local_oid: String,
+    pub remote_ref: String,
+    pub remote_oid: String,
+}
+
+/// git's all-zero object id — the remote side of a ref create, the local side
+/// of a delete.
+pub fn is_zero_oid(oid: &str) -> bool {
+    !oid.is_empty() && oid.bytes().all(|b| b == b'0')
+}
+
+/// The refspecs a late re-run pushes: `<local_oid>:<remote_ref>` per update —
+/// **sha-pinned** (EYES F2), so the commit the user approved is the commit
+/// that ships even if the branch moved on after the park. `None` when nothing
+/// can be re-run faithfully: no updates, a delete (`:ref` — not re-issued on
+/// the user's behalf), or a component that is not a plain ref/oid token.
+pub fn push_refspecs(updates: &[PushRef]) -> Option<Vec<String>> {
+    if updates.is_empty() {
+        return None;
+    }
+    let safe = |s: &str| {
+        !s.is_empty()
+            && s
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+' | '@'))
+    };
+    updates
+        .iter()
+        .map(|u| {
+            if is_zero_oid(&u.local_oid) || !safe(&u.local_oid) || !safe(&u.remote_ref) {
+                None
+            } else {
+                Some(format!("{}:{}", u.local_oid, u.remote_ref))
+            }
+        })
+        .collect()
+}
+
+/// The command a late approve re-runs on the agent's behalf: `git push
+/// <remote> <local_oid>:<remote_ref> …` — plain, never `--force` (a
+/// non-fast-forward original re-runs as a rejected push, loudly), over the
+/// remote NAME git handed the hook. `None` when the push cannot be rebuilt
+/// faithfully (see [`push_refspecs`]) or the remote name is not a plain token.
+pub fn push_rerun_command(remote: &str, updates: &[PushRef]) -> Option<String> {
+    let remote_ok = !remote.is_empty()
+        && remote
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':' | '@'));
+    if !remote_ok {
+        return None;
+    }
+    let refspecs = push_refspecs(updates)?;
+    Some(format!("git push {remote} {}", refspecs.join(" ")))
+}
+
+/// The refspecs a re-run command pushes, read back off the command
+/// [`push_rerun_command`] built (the tray row carries only the command).
+/// Tokens after the remote that carry a `:`; `None` for any other command.
+pub fn push_rerun_refspecs(command: &str) -> Option<Vec<String>> {
+    let rest = command.strip_prefix("git push ")?;
+    let mut parts = rest.split_whitespace();
+    let _remote = parts.next()?;
+    let refspecs: Vec<String> = parts.map(str::to_string).collect();
+    if refspecs.is_empty() || refspecs.iter().any(|r| !r.contains(':')) {
+        return None;
+    }
+    Some(refspecs)
+}
+
 fn load_one(path: &Path) -> Result<Option<Policy>> {
     let body = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -850,5 +925,43 @@ mod tests {
         let block = p.render_system_prompt_block();
         assert!(block.contains("Force-push"));
         assert!(block.contains("BLOCKED"));
+    }
+
+    #[test]
+    fn push_rerun_command_is_sha_pinned_and_refuses_what_it_cannot_rebuild() {
+        let up = |l: &str, lo: &str, r: &str, ro: &str| PushRef {
+            local_ref: l.into(),
+            local_oid: lo.into(),
+            remote_ref: r.into(),
+            remote_oid: ro.into(),
+        };
+        let a = up("refs/heads/a", "1111aaaa", "refs/heads/a", "0000");
+        let b = up("refs/heads/b", "2222bbbb", "refs/heads/b", "3333cccc");
+        // Two refs: each pinned to the oid git reported, never the ref name.
+        assert_eq!(
+            push_rerun_command("origin", &[a.clone(), b.clone()]).as_deref(),
+            Some("git push origin 1111aaaa:refs/heads/a 2222bbbb:refs/heads/b")
+        );
+        assert_eq!(
+            push_refspecs(&[a.clone()]),
+            Some(vec!["1111aaaa:refs/heads/a".to_string()])
+        );
+        // Nothing to push, a delete, or a remote/ref that is not a plain token.
+        assert_eq!(push_rerun_command("origin", &[]), None);
+        let del = up("(delete)", "0000000000000000000000000000000000000000", "refs/heads/x", "4444");
+        assert_eq!(push_rerun_command("origin", &[a.clone(), del]), None);
+        assert_eq!(push_rerun_command("origin; rm -rf /", &[a.clone()]), None);
+        let bad = up("refs/heads/a", "1111aaaa", "refs/heads/a b", "0000");
+        assert_eq!(push_rerun_command("origin", &[bad]), None);
+        // The refspecs read back off the command round-trip.
+        assert_eq!(
+            push_rerun_refspecs("git push origin 1111aaaa:refs/heads/a 2222bbbb:refs/heads/b"),
+            Some(vec!["1111aaaa:refs/heads/a".to_string(), "2222bbbb:refs/heads/b".to_string()])
+        );
+        assert_eq!(push_rerun_refspecs("gh pr create"), None);
+        assert_eq!(push_rerun_refspecs("git push origin main"), None);
+        assert!(is_zero_oid("0000000000000000000000000000000000000000"));
+        assert!(!is_zero_oid("0000a"));
+        assert!(!is_zero_oid(""));
     }
 }

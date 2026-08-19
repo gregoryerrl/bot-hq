@@ -52,6 +52,16 @@ fn hook_session_id() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// The single-use nonce a push RE-RUN carries (round 12): set by the app on
+/// the `git push` it starts for a late approve, redeemed once by the app when
+/// this hook presents it. Absent on every push an agent or a human runs.
+fn hook_push_nonce() -> Option<String> {
+    std::env::var("BOT_HQ_PUSH_NONCE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// CLI entrypoint. Dispatches `bot-hq policy-check <sub> ...`.
 /// Returns the desired process exit code.
 pub fn run_cli(args: &[String]) -> Result<i32> {
@@ -121,6 +131,10 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
     // suite, and passing anyway.
     let env_sid = hook_session_id();
     let sid = session.as_deref().or(env_sid.as_deref());
+    // A push RE-RUN the app started on a late approve carries its nonce here
+    // (round 12); read once, beside the session id, and passed down — the
+    // hook never reads the environment below this point.
+    let push_nonce = hook_push_nonce();
     match sub.as_str() {
         "commit-msg" => {
             let path = msg_file
@@ -133,7 +147,13 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
         // `"."` — every hook git invokes runs with the repo root as its CWD.
         "pre-commit" => run_pre_commit(&data_dir, project.as_deref(), Path::new("."), sid),
         "post-commit" => run_post_commit(&data_dir, project.as_deref(), sid),
-        "pre-push" => run_pre_push(&data_dir, project.as_deref(), sid),
+        // git passes the remote NAME as $1 (and its URL as $2, not forwarded);
+        // the re-run command is `git push <remote> <oid>:<ref>`, so the name
+        // travels to the app with the ref updates.
+        "pre-push" => {
+            let remote = positional.first().map(String::as_str);
+            run_pre_push(&data_dir, project.as_deref(), remote, push_nonce.as_deref(), sid)
+        }
         "tool-gate" => run_tool_gate(&data_dir, sid),
         other => Err(anyhow!("unknown subcommand {other}")),
     }
@@ -409,10 +429,9 @@ fn hook_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 }
 
 /// True for git's all-zero object id (the remote side of a ref create / the
-/// local side of a delete).
-fn is_zero_oid(oid: &str) -> bool {
-    !oid.is_empty() && oid.bytes().all(|b| b == b'0')
-}
+/// local side of a delete). One definition, shared with the app's re-run
+/// builder (round 12).
+use crate::policy::is_zero_oid;
 
 /// Classify one parsed pre-push update as a non-fast-forward (force) update,
 /// given an ancestry oracle `is_ancestor(remote_oid, local_oid)`. Creates
@@ -437,13 +456,9 @@ fn update_is_force(u: &PushUpdate, is_ancestor: impl Fn(&str, &str) -> bool) -> 
 /// of `527-…` asked the user to "Allow `git push` to `527-…`" (`s-766f4ab9`,
 /// trays b8725c80 / 66a2b6e2 — the user approved a push labelled with the
 /// wrong branch, and the violations log carries the same wrong action).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PushUpdate {
-    local_ref: String,
-    local_oid: String,
-    remote_ref: String,
-    remote_oid: String,
-}
+/// The same shape the hook POSTs to `/hooks/pre-push` (round 12): the app
+/// rebuilds the push from it for a late approve.
+type PushUpdate = crate::policy::PushRef;
 
 /// Parse git's pre-push stdin lines. Malformed lines are dropped rather than
 /// failing the whole read — the force check and the naming both degrade to
@@ -569,7 +584,13 @@ fn log_push_denial(
 /// the app can't be reached. A push with no `BOT_HQ_SESSION_ID` (e.g. a human
 /// pushing from a terminal) is blocked with guidance — `ask` only prompts a
 /// session's user.
-fn run_pre_push(data_dir: &Path, project: Option<&str>, session_id: Option<&str>) -> Result<i32> {
+fn run_pre_push(
+    data_dir: &Path,
+    project: Option<&str>,
+    remote: Option<&str>,
+    push_nonce: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<i32> {
     audit_at_hook(data_dir, project, "pre-push");
     // EYES-sign-off backstop: a push must not carry unresolved blocking findings
     // (catches a commit created before the finding was filed, an --amend, or a
@@ -679,16 +700,6 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>, session_id: Option<&str>
     let agent = hook_agent();
     let branch = label(updates.get_or_init(read_push_updates));
 
-    // One non-alarming line so the agent doesn't mistake the wait for a block and
-    // try to work around it. Silent until the user answers.
-    eprintln!(
-        "bot-hq pre-push: awaiting user approval for `git push`{} (session {session_id})…",
-        branch
-            .as_deref()
-            .map(|b| format!(" to `{b}`"))
-            .unwrap_or_default()
-    );
-
     // The hook is a fresh subprocess that can't reach the running app's bridge
     // directly — POST `/hooks/pre-push` and block on the user's pick. One
     // current-thread runtime drives the HTTP call (the fail-closed violation
@@ -707,11 +718,58 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>, session_id: Option<&str>
         }
     };
 
+    // **A re-run the app started presents its nonce and asks nothing** (round
+    // 12, EYES F9): nonce present ⇒ redeem-or-exit-1, never the approval
+    // prompt — a re-run whose nonce the app refuses must not park a SECOND
+    // gate behind a push nobody is waiting on. Everything above still ran
+    // (findings gate, policy, the force check), so a pre-approved re-run
+    // cannot smuggle what the first push could not.
+    if let Some(nonce) = push_nonce {
+        return Ok(match rt.block_on(redeem_push_nonce(
+            data_dir,
+            &session_id,
+            &agent,
+            nonce,
+            updates.get_or_init(read_push_updates),
+        )) {
+            PushDecision::Approved => {
+                eprintln!("bot-hq pre-push: pre-approved re-run (gate redeemed once); pushing.");
+                0
+            }
+            PushDecision::Rejected | PushDecision::Blocked(_) => {
+                eprintln!(
+                    "{}",
+                    blocked_banner(
+                        "pre-push",
+                        "Push blocked: this re-run's approval could not be redeemed (already \
+                         used, another session's, or the refs differ from what was approved). \
+                         Nothing was pushed; the user can approve a fresh gate.\n"
+                    )
+                );
+                1
+            }
+        });
+    }
+
+    // One non-alarming line so the agent doesn't mistake the wait for a block and
+    // try to work around it. Silent until the user answers.
+    eprintln!(
+        "bot-hq pre-push: awaiting user approval for `git push`{} (session {session_id})… \
+         (if this process is killed before the answer, the approval still runs the push — \
+         check `gate_status`)",
+        branch
+            .as_deref()
+            .map(|b| format!(" to `{b}`"))
+            .unwrap_or_default()
+    );
+
     match rt.block_on(decide_push(
         data_dir,
         &session_id,
         &agent,
         branch.as_deref(),
+        remote,
+        updates.get_or_init(read_push_updates),
     )) {
         PushDecision::Approved => Ok(0),
         PushDecision::Rejected => {
@@ -777,24 +835,68 @@ async fn decide_push(
     session_id: &str,
     agent: &str,
     branch: Option<&str>,
+    remote: Option<&str>,
+    updates: &[PushUpdate],
+) -> PushDecision {
+    let body = pre_push_request_body(session_id, agent, branch, remote, updates, None);
+    post_pre_push(data_dir, body, std::time::Duration::from_secs(1800)).await
+}
+
+/// A re-run's hook presents its nonce (round 12): same route, same answer
+/// shape, no wait — the app redeems at once or refuses. 30 s is plenty for a
+/// localhost round trip; a re-run must never sit on a prompt.
+async fn redeem_push_nonce(
+    data_dir: &Path,
+    session_id: &str,
+    agent: &str,
+    nonce: &str,
+    updates: &[PushUpdate],
+) -> PushDecision {
+    let body = pre_push_request_body(session_id, agent, None, None, updates, Some(nonce));
+    post_pre_push(data_dir, body, std::time::Duration::from_secs(30)).await
+}
+
+/// The JSON the hook POSTs to `/hooks/pre-push`: the session + agent + prompt
+/// label as before, plus (round 12) the remote name and the ref updates the
+/// app needs to rebuild the push for a late approve, and — on a re-run — the
+/// nonce it redeems. Pure, so the shape is unit-testable.
+fn pre_push_request_body(
+    session_id: &str,
+    agent: &str,
+    branch: Option<&str>,
+    remote: Option<&str>,
+    updates: &[PushUpdate],
+    nonce: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "session_id": session_id,
+        "agent": agent,
+        "branch": branch,
+        "remote": remote,
+        "updates": updates,
+        "nonce": nonce,
+    })
+    .to_string()
+}
+
+/// POST `body` to the running app's `/hooks/pre-push` route and map the reply
+/// (or the transport failure) to a decision. Distinct `Blocked` reasons so the
+/// audit trail separates "app down" from "timeout" from "bad response".
+/// reqwest here lacks the `json` feature, so the body is sent raw and the
+/// response parsed from text.
+async fn post_pre_push(
+    data_dir: &Path,
+    body: String,
+    timeout: std::time::Duration,
 ) -> PushDecision {
     let Some(addr) = crate::paths::read_signaling_addr(data_dir) else {
         return PushDecision::Blocked("bot-hq is not running (no signaling address)".into());
     };
     let url = format!("http://{addr}/hooks/pre-push");
-    let body = serde_json::json!({
-        "session_id": session_id,
-        "agent": agent,
-        "branch": branch,
-    })
-    .to_string();
 
     // Generous timeout — the user may take minutes to decide; a push isn't
     // time-critical.
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(1800))
-        .build()
-    {
+    let client = match reqwest::Client::builder().timeout(timeout).build() {
         Ok(c) => c,
         Err(e) => return PushDecision::Blocked(format!("approval client init failed: {e}")),
     };
@@ -1185,10 +1287,12 @@ impl HookKind {
             HookKind::PrePush => "pre-push",
         }
     }
-    /// commit-msg gets the message file path passed as $1 from git. Others
-    /// receive no positional args.
+    /// commit-msg gets the message file path passed as $1 from git; pre-push
+    /// gets the remote NAME as $1 (its URL as $2 is not forwarded) — the app
+    /// rebuilds a late-approved push over that name (round 12). Others receive
+    /// no positional args.
     fn passes_dollar_one(self) -> bool {
-        matches!(self, HookKind::CommitMsg)
+        matches!(self, HookKind::CommitMsg | HookKind::PrePush)
     }
 }
 
@@ -2189,7 +2293,7 @@ mod tests {
     fn run_pre_push_exits_zero_when_mode_auto() {
         let data = tempdir().unwrap();
         // No policy file → default policy → mode=auto → exit 0
-        let code = run_pre_push(data.path(), Some("nope"), None).unwrap();
+        let code = run_pre_push(data.path(), Some("nope"), None, None, None).unwrap();
         assert_eq!(code, 0);
     }
 
@@ -2205,7 +2309,7 @@ mod tests {
         // No session context (passed explicitly — the test process itself DOES
         // carry a real BOT_HQ_SESSION_ID whenever an agent runs the suite) →
         // blocked with guidance (exit 1) before any HTTP call.
-        let code = run_pre_push(data.path(), Some("foo"), None).unwrap();
+        let code = run_pre_push(data.path(), Some("foo"), None, None, None).unwrap();
         assert_eq!(code, 1);
     }
 
@@ -2229,7 +2333,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            run_pre_push(data.path(), Some("foo"), None).unwrap(),
+            run_pre_push(data.path(), Some("foo"), None, None, None).unwrap(),
             1,
             "an unreadable policy let the push through — `push_gate` and \
              `force_push` both silently stopped applying"
@@ -2241,7 +2345,7 @@ mod tests {
         // No signaling-addr file → the app isn't reachable → fail-closed Blocked,
         // with a reason naming the cause (no network call attempted).
         let data = tempdir().unwrap();
-        match decide_push(data.path(), "s1", "hands", Some("main")).await {
+        match decide_push(data.path(), "s1", "hands", Some("main"), Some("origin"), &[]).await {
             PushDecision::Blocked(reason) => {
                 assert!(reason.contains("not running"), "reason: {reason}");
             }
@@ -2313,6 +2417,49 @@ mod tests {
                 "status={status} body={body} must not approve"
             );
         }
+    }
+
+    /// Round 12: the pre-push hook forwards git's `$1` (the remote name) — the
+    /// app rebuilds a late-approved push as `git push <remote> <oid>:<ref>` and
+    /// needs the name the hook was invoked for; commit-msg keeps forwarding
+    /// its message-file path; the other hooks stay positional-free.
+    #[test]
+    fn pre_push_hook_forwards_the_remote_name() {
+        let body = |kind| render_hook_body(kind, "/usr/local/bin/bot-hq", Path::new("/d"), None);
+        assert!(body(HookKind::PrePush).contains("policy-check pre-push --data-dir /d \"$1\""));
+        assert!(body(HookKind::CommitMsg).contains("policy-check commit-msg --data-dir /d \"$1\""));
+        assert!(!body(HookKind::PreCommit).contains("$1"));
+        assert!(!body(HookKind::PostCommit).contains("$1"));
+    }
+
+    /// Round 12: the body the hook POSTs carries what the app needs to rebuild
+    /// the push for a late approve — the remote name and the ref updates as
+    /// git reported them — and, on a re-run, the nonce it redeems. The field
+    /// names are the route's contract (`server.rs::handle_pre_push`).
+    #[test]
+    fn pre_push_request_body_carries_remote_updates_and_nonce() {
+        let u = PushUpdate {
+            local_ref: "refs/heads/x".into(),
+            local_oid: "1111aaaa".into(),
+            remote_ref: "refs/heads/x".into(),
+            remote_oid: "0000000000000000000000000000000000000000".into(),
+        };
+        let body = pre_push_request_body("s1", "hands", Some("x"), Some("origin"), &[u.clone()], None);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["session_id"], "s1");
+        assert_eq!(v["agent"], "hands");
+        assert_eq!(v["branch"], "x");
+        assert_eq!(v["remote"], "origin");
+        assert_eq!(v["updates"][0]["local_oid"], "1111aaaa");
+        assert_eq!(v["updates"][0]["remote_ref"], "refs/heads/x");
+        assert!(v["nonce"].is_null(), "a first-time push presents no nonce");
+        // The round trip the app makes: the same struct parses back.
+        let back: Vec<PushUpdate> = serde_json::from_value(v["updates"].clone()).unwrap();
+        assert_eq!(back, vec![u.clone()]);
+        let body = pre_push_request_body("s1", "hands", None, None, &[u], Some("n0nce"));
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["nonce"], "n0nce");
+        assert!(v["remote"].is_null() && v["branch"].is_null());
     }
 
     #[test]

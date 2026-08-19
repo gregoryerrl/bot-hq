@@ -97,6 +97,7 @@ impl SignalingBridge {
                     kind: ViolationKind::ToolBlocklist,
                     action: command.to_string(),
                     detail: Some("tool-gate".to_string()),
+                    command: None,
                 }),
                 None,
                 false,
@@ -206,6 +207,20 @@ impl SignalingBridge {
     /// agent's `action_gate` tool call timed out client-side, its request future
     /// (which would have called this in-band) was already cancelled.
     pub(super) async fn execute_gated(&self, session_id: &str, command: &str) -> Result<String> {
+        self.execute_gated_with(session_id, command, tool_gate::DEFAULT_TIMEOUT, &[])
+            .await
+    }
+
+    /// [`execute_gated`] with the caller's bound and extra env pairs — the
+    /// push re-run (round 12) needs both: a network-sized timeout and the
+    /// single-use nonce its own pre-push hook redeems.
+    pub(super) async fn execute_gated_with(
+        &self,
+        session_id: &str,
+        command: &str,
+        timeout: std::time::Duration,
+        extra_envs: &[(&str, &str)],
+    ) -> Result<String> {
         let cwd = self.session_working_repo(session_id).await.ok_or_else(|| {
             anyhow::anyhow!(
                 "action_gate: session {session_id} has no working_repo_path — cannot execute `{command}`"
@@ -214,9 +229,10 @@ impl SignalingBridge {
 
         // The child carries the session's identity (round 12): the git hooks
         // inside a gated `git commit` / `git push` read `BOT_HQ_SESSION_ID`.
-        let envs = tool_gate::session_envs(session_id);
-        let envs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let out = tool_gate::run_in_repo(command, &cwd, tool_gate::DEFAULT_TIMEOUT, &envs).await;
+        let session = tool_gate::session_envs(session_id);
+        let mut envs: Vec<(&str, &str)> = session.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        envs.extend_from_slice(extra_envs);
+        let out = tool_gate::run_in_repo(command, &cwd, timeout, &envs).await;
         Ok(format_command_output(&out))
     }
 
@@ -579,6 +595,7 @@ mod tests {
                     kind: ViolationKind::PerAction,
                     action: "bq query --project_id=prod ...".into(),
                     detail: None,
+                    command: None,
                 },
             )
             .await

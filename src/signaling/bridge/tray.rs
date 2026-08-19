@@ -48,6 +48,23 @@ pub enum Withdrawal {
     Unverifiable,
 }
 
+/// The command the app RUNS for an approved gate whose asker can no longer run
+/// it: a Tool-Gate command (`action` — the agent's blocked Bash), or a push
+/// gate's rebuilt `git push` (`ApprovalContext::command`, round 12). `None` for
+/// every other approval — nothing executes on a generic yes.
+fn executable_command(ctx: &super::ApprovalContext) -> Option<String> {
+    match ctx.kind {
+        crate::policy::ViolationKind::ToolBlocklist => Some(ctx.action.clone()),
+        _ => ctx.command.clone(),
+    }
+}
+
+/// Bound for a late-approved push re-run: a network push of a real branch,
+/// not a local command — `DEFAULT_TIMEOUT` (120 s) is the action_gate bound
+/// and too short for the first network op to ride `command_text` (EYES F11).
+/// Stated in the OOB row that carries the output.
+const PUSH_RERUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 impl SignalingBridge {
     /// Flag the session as awaiting the user, and — for a park that YIELDS the
     /// session — tell the ring who is now blocked.
@@ -386,10 +403,10 @@ impl SignalingBridge {
         // Persist the command for an action_gate (ToolBlocklist) approval so it
         // can still execute on approve after the in-memory oneshot is gone
         // (client timeout / restart). Extracted before `approval` moves into
-        // PendingChoice below.
-        let command_text = approval.as_ref().and_then(|a| {
-            matches!(a.kind, crate::policy::ViolationKind::ToolBlocklist).then(|| a.action.clone())
-        });
+        // PendingChoice below. Round 12: a push gate carries its rebuilt,
+        // sha-pinned `git push` the same way (`ApprovalContext::command`), for
+        // the late approve whose hook has died.
+        let command_text = approval.as_ref().and_then(executable_command);
         // Captured before `approval` moves into the park below: the gate latch
         // keys on this (rc3 D35).
         let is_approval = approval.is_some();
@@ -833,10 +850,12 @@ impl SignalingBridge {
                         // means the client-side MCP timeout beat the pick. Either
                         // way the answer becomes the user's row; the gated command,
                         // if any, comes from the in-memory approval ctx.
-                        let command = p.choice.approval.as_ref().and_then(|c| {
-                            matches!(c.kind, crate::policy::ViolationKind::ToolBlocklist)
-                                .then_some(c.action.as_str())
-                        });
+                        // Round 12: a push gate's rebuilt command runs HERE
+                        // and only here — the `Ok(())` arm above means the
+                        // hook is alive and proceeds with its own push, so
+                        // running it there too would push twice (EYES F3).
+                        let command = p.choice.approval.as_ref().and_then(executable_command);
+                        let command = command.as_deref();
                         // Age-stamp from the durable row (the in-memory park
                         // carries no ask-time); a miss just omits the line.
                         let asked_at = {
@@ -909,6 +928,11 @@ impl SignalingBridge {
                 if flipped && crate::storage::is_gate_row(&q.kind, q.options_json.as_deref()) {
                     if let Some(log) = self.violations.as_ref() {
                         let (kind, action) = match q.command_text.as_deref() {
+                            // A push gate's row carries its rebuilt `git push`
+                            // (round 12) — the audit names the gate it is.
+                            Some(cmd) if crate::policy::push_rerun_refspecs(cmd).is_some() => {
+                                (crate::policy::ViolationKind::PushGate, cmd.to_string())
+                            }
                             Some(cmd) => (crate::policy::ViolationKind::ToolBlocklist, cmd.to_string()),
                             None => (crate::policy::ViolationKind::GenericApproval, q.prompt.clone()),
                         };
@@ -996,7 +1020,7 @@ impl SignalingBridge {
             &mooting,
         );
         if flipped {
-            self.maybe_run_gated(&session_id, command_text, &picked, &mut body)
+            self.maybe_run_gated(&session_id, choice_id, command_text, &picked, &mut body)
                 .await;
         }
         // The phase is read HERE, not in `CoreAppState::resolve_choice` where it
@@ -1135,6 +1159,7 @@ impl SignalingBridge {
     async fn maybe_run_gated(
         &self,
         session_id: &str,
+        choice_id: &str,
         command: Option<&str>,
         picked: &str,
         body: &mut String,
@@ -1143,6 +1168,36 @@ impl SignalingBridge {
         // Only the LISTED Approve runs a parked command (`gate_verdict`): the
         // user's own words are carried to the agent, never executed as a yes.
         if !matches!(gate_verdict(picked), crate::policy::ViolationOutcome::Approved) {
+            return;
+        }
+        // **A push re-run** (round 12): the command is the sha-pinned `git push`
+        // the hook's death left unrun. It gets a single-use nonce its own
+        // pre-push hook redeems (instead of parking a second gate), a bound
+        // sized for a network push rather than a local command (EYES F11), and
+        // one line saying so — the agent reads the OOB row.
+        if let Some(refspecs) = crate::policy::push_rerun_refspecs(command) {
+            let nonce = self.mint_push_nonce(session_id, choice_id, refspecs);
+            body.push_str(
+                "Late approval: the hook that asked had already gone (the agent's \
+                 `git push` was killed before you answered), so bot-hq re-ran the \
+                 push it approved — the same commit, pinned by sha — with a \
+                 600 s bound.\nOutput:\n",
+            );
+            let out = self
+                .execute_gated_with(
+                    session_id,
+                    command,
+                    PUSH_RERUN_TIMEOUT,
+                    &[("BOT_HQ_PUSH_NONCE", nonce.as_str())],
+                )
+                .await;
+            // Redeemed by the hook, or never presented (no hook, or the run died
+            // first): either way nothing may redeem it later.
+            self.discard_push_nonce(&nonce);
+            match out {
+                Ok(output) => body.push_str(&output),
+                Err(e) => body.push_str(&format!("bot-hq could not re-run `{command}`: {e}")),
+            }
             return;
         }
         // The verdict line above already says "approved" and names the command;
@@ -1621,6 +1676,7 @@ mod tests {
                         kind: crate::policy::ViolationKind::PushGate,
                         action: "git push".into(),
                         detail: None,
+                        command: None,
                     }),
                     None,
                     true,
@@ -1648,6 +1704,7 @@ mod tests {
                     kind: crate::policy::ViolationKind::ToolBlocklist,
                     action: "rm -rf build".into(),
                     detail: None,
+                    command: None,
                 }),
                 None,
                 false,
@@ -1709,6 +1766,7 @@ mod tests {
                     kind: crate::policy::ViolationKind::PerAction,
                     action: "psql -h prod …".into(),
                     detail: None,
+                    command: None,
                 },
             )
             .await
@@ -1767,6 +1825,7 @@ mod tests {
             kind: crate::policy::ViolationKind::PushGate,
             action: "git push origin main".into(),
             detail: None,
+            command: None,
         };
         let prompt = "Allow `git push` to `main` in this session's repo?";
 
@@ -1854,6 +1913,7 @@ mod tests {
                     kind: crate::policy::ViolationKind::PerAction,
                     action: "psql -h prod …".into(),
                     detail: None,
+                    command: None,
                 },
             )
             .await
@@ -1885,6 +1945,139 @@ mod tests {
             1,
             "no new question row was parked"
         );
+    }
+
+    /// Round 12: a push gate answered AFTER its hook died re-runs the push it
+    /// approved — sha-pinned — and a push gate answered while its hook is alive
+    /// runs nothing (the hook proceeds with its own push). Real git, temp
+    /// repos: `work` pushes to the bare `origin`. No bot-hq hook is installed
+    /// in `work`, so the re-run's nonce is minted, never presented, and
+    /// discarded — the redemption round trip is pinned separately
+    /// (`a_push_nonce_redeems_once_for_its_session_and_refspecs`, and the
+    /// route test in `server.rs`).
+    #[tokio::test]
+    async fn a_late_approved_push_gate_re_runs_the_push_it_approved() {
+        use std::process::Command;
+        fn git(dir: &std::path::Path, args: &[&str]) -> String {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = tmp.path().join("origin.git");
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        git(&bare, &["init", "--bare", "-q", "-b", "main"]);
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        std::fs::write(work.join("a.txt"), "a\n").unwrap();
+        git(&work, &["add", "a.txt"]);
+        git(&work, &["commit", "-q", "-m", "a"]);
+        let sha_a = git(&work, &["rev-parse", "HEAD"]);
+
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage
+            .create_session("s1", "t", Some(work.to_str().unwrap()))
+            .await
+            .unwrap();
+        bridge
+            .register_session_awaiting(
+                "s1".into(),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .await;
+        let refs = vec![crate::policy::PushRef {
+            local_ref: "refs/heads/main".into(),
+            local_oid: sha_a.clone(),
+            remote_ref: "refs/heads/main".into(),
+            remote_oid: "0000000000000000000000000000000000000000".into(),
+        }];
+        let command = crate::policy::push_rerun_command("origin", &refs).expect("rebuildable");
+        let ctx = || super::super::ApprovalContext {
+            kind: crate::policy::ViolationKind::PushGate,
+            action: crate::policy::push_gate_action(Some("main")),
+            detail: Some("main".into()),
+            command: Some(command.clone()),
+        };
+
+        // (1) The hook is ALIVE: `request_approval` (blocking) is what the route
+        // awaits; the answer reaches it and the app runs nothing.
+        let b2 = Arc::clone(&bridge);
+        let c2 = ctx();
+        let live = tokio::spawn(async move {
+            b2.request_approval(
+                "s1".into(),
+                "hands".into(),
+                "Allow `git push` to `main` in this session's repo?".into(),
+                vec!["Approve".into(), "Reject".into()],
+                c2,
+            )
+            .await
+            .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let rows = storage.tray_entries_for_session("s1").await.unwrap();
+        let live_id = rows.last().unwrap().choice_id.clone();
+        assert_eq!(rows.last().unwrap().command_text.as_deref(), Some(command.as_str()));
+        bridge.resolve_choice(&live_id, "Approve".into()).await.unwrap();
+        assert_eq!(live.await.unwrap(), "Approve");
+        let remote_main = Command::new("git")
+            .args(["rev-parse", "--verify", "-q", "refs/heads/main"])
+            .current_dir(&bare)
+            .output()
+            .unwrap();
+        assert!(
+            !remote_main.status.success(),
+            "a live hook means the app pushed NOTHING — the hook does its own push"
+        );
+
+        // (2) The hook is DEAD: the parked shape drops its receiver at park
+        // time, exactly like a hook killed before the answer. The branch
+        // moves on after the park; the approve still ships sha A, pinned.
+        let ack = bridge
+            .request_approval_parked(
+                "s1".into(),
+                "hands".into(),
+                "Allow `git push` to `main` in this session's repo?".into(),
+                vec!["Approve".into(), "Reject".into()],
+                ctx(),
+            )
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        let dead_id = v["choice_id"].as_str().unwrap().to_string();
+        std::fs::write(work.join("b.txt"), "b\n").unwrap();
+        git(&work, &["add", "b.txt"]);
+        git(&work, &["commit", "-q", "-m", "b"]);
+        let sha_b = git(&work, &["rev-parse", "HEAD"]);
+        assert_ne!(sha_a, sha_b);
+
+        let outcome = bridge.resolve_choice(&dead_id, "Approve".into()).await.unwrap();
+        let ResolveOutcome::DeliveredOutOfBand { body, .. } = &outcome else {
+            panic!("the dead-waiter path delivers out of band: {outcome:?}");
+        };
+        let remote_main = git(&bare, &["rev-parse", "refs/heads/main"]);
+        assert_eq!(remote_main, sha_a, "the approved commit shipped — not the branch tip");
+        // The answer row says what happened, names the bound, carries the output.
+        assert!(body.contains("Late approval"), "{body}");
+        assert!(body.contains("600 s"), "{body}");
+        assert!(body.contains("exit") || body.contains("main"), "{body}");
     }
 
     /// A session with no ring registered must not panic or block — the bridge is
@@ -2751,6 +2944,7 @@ mod tests {
                         kind: ViolationKind::PushGate,
                         action: "git push".into(),
                         detail: None,
+                        command: None,
                     },
                 )
                 .await
@@ -2789,6 +2983,7 @@ mod tests {
                     kind: ViolationKind::PerAction,
                     action: "bq query ...".into(),
                     detail: None,
+                    command: None,
                 },
             )
             .await
@@ -2834,6 +3029,7 @@ mod tests {
                         kind: ViolationKind::PushGate,
                         action: "git push".into(),
                         detail: None,
+                        command: None,
                     },
                 )
                 .await
@@ -2881,6 +3077,7 @@ mod tests {
                         kind: ViolationKind::PushGate,
                         action: "git push origin main".into(),
                         detail: Some("per_branch_approval".into()),
+                        command: None,
                     },
                 )
                 .await
@@ -2926,6 +3123,7 @@ mod tests {
                         kind: ViolationKind::ForcePush,
                         action: "git push --force origin main".into(),
                         detail: None,
+                        command: None,
                     },
                 )
                 .await

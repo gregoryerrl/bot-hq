@@ -648,6 +648,7 @@ async fn call_tool(
                 kind,
                 action,
                 detail,
+                command: None,
             };
             // PARKED, not blocking: the blocking twin is reserved for the
             // pre-push hook, which needs a synchronous bool for its exit code.
