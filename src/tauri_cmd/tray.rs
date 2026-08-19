@@ -340,8 +340,14 @@ mod tests {
     async fn discard_drops_the_row_without_answering_the_agent() {
         // The user's trash button must not look like an answer. A parked
         // question's agent already has its ack, so discarding delivers nothing
-        // — assert no ChoiceResolved event escapes and the row stops being
-        // pending.
+        // TO THE AGENT: no pick is recorded and no user row is written. What a
+        // discard DOES emit (round 12) is the UI-only `ChoiceResolved` with the
+        // `(withdrawn)` marker — the same event the supersede paths send with
+        // `(superseded)` — because `session:choice_resolved` is what refreshes
+        // the bell and the dashboard badges (`Providers.tsx` → TRAY_KEYS);
+        // without it a discarded question stayed counted until the next
+        // unrelated tray event. Nothing in core or the agent path consumes that
+        // event, so it cannot read as an answer.
         let bridge = SignalingBridge::new();
         let storage = crate::storage::Storage::memory().await.unwrap();
         bridge.set_storage(storage.clone()).await;
@@ -364,10 +370,19 @@ mod tests {
         let mut sub = bridge.subscribe();
         assert!(bridge.withdraw_question(&cid, None).await, "row was pending");
 
-        // Nothing resolution-shaped may be emitted by a discard.
-        match sub.try_recv() {
-            Err(_) => {}
-            Ok(ev) => panic!("discard must not emit a resolution event, got {ev:?}"),
+        // The only event a discard emits is the UI refresh carrying the
+        // withdrawn marker — never a pick.
+        let mut events = Vec::new();
+        while let Ok(ev) = sub.try_recv() {
+            events.push(ev);
+        }
+        assert_eq!(events.len(), 1, "exactly the UI refresh: {events:?}");
+        match &events[0] {
+            crate::signaling::SignalingEvent::ChoiceResolved { choice_id, picked } => {
+                assert_eq!(choice_id, &cid);
+                assert_eq!(picked, "(withdrawn)", "a marker, not a pick");
+            }
+            other => panic!("discard emits the UI refresh only, got {other:?}"),
         }
         let rows = bridge.list_questions_for_session("s1").await.unwrap();
         let row = rows.iter().find(|r| r.choice_id == cid).expect("row exists");
