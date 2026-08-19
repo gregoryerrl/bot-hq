@@ -165,9 +165,12 @@ async respawnSession(sessionId: string) : Promise<Result<null, AppError>> {
  * **Reopen a closed session** (round 10, B4 — the user's pick: "a Reopen
  * button for closed sessions"). Clears `closed_at` / `archived` / the halt
  * slot, respawns the roster via `--resume`, and fires `session:created` so
- * the dashboard lists it again. The SessionView's mount respawn no longer
- * touches a closed row (`ensure_session_started` refuses one), so this button
- * is the ONLY way an archived session's participants come back.
+ * the dashboard lists it again (the bar refetches `get_session` itself so
+ * the live composer replaces it — round 11). The SessionView's mount respawn
+ * no longer touches a closed row (`ensure_session_started` refuses one), so
+ * this button is the ONLY way an archived session's participants come back.
+ * Idempotent: an already-open row is a success no-op, so a double click is
+ * harmless.
  */
 async reopenSession(sessionId: string) : Promise<Result<null, AppError>> {
     try {
@@ -192,15 +195,6 @@ async restartSession(sessionId: string) : Promise<Result<null, AppError>> {
 }
 },
 /**
- * Cancel a session's in-flight turn (the Stop button — interrupt redesign,
- * Batch 3 + 3.1, now interrupt-first). Sends a `control_request` interrupt to
- * abort the turn while KEEPING the process alive (warm cache, no `--resume`
- * respawn); if an agent doesn't honor it within ~2s it's SIGKILLed as a
- * fallback. The session returns to `Idle` (the chat input unlocks). If HANDS is
- * mid an atomic op (`git commit`/`git push`/migration), the interrupt is
- * DEFERRED until the op completes (≤ ~8s cap) so the working tree isn't left
- * half-written. The command returns immediately and a detached task drives the
- * escalation. No-op if the session isn't live.
  * Move a session's IPAV phase — **the user's own hand on the chip**.
  * 
  * ## Why this did not exist until round 4
@@ -240,6 +234,19 @@ async advanceSessionPhase(sessionId: string, target: string) : Promise<Result<nu
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Pause a session's in-flight turn — the **Pause** button, the one interrupt
+ * in the product (rc3 D33). Sends a `control_request` interrupt to abort the
+ * turn while KEEPING the process alive (warm cache, no `--resume` respawn); an
+ * agent that does not honor it within ~2s is SIGKILLed as a fallback. The
+ * session lands in `Paused` (the input unlocks; Resume / a steer / Close
+ * release it). If an edit-capable participant is mid an atomic op (`git
+ * commit` / `git push` / migration) the interrupt is DEFERRED until the op
+ * completes (≤ `ATOMIC_OP_DEFERRAL_CAP`) so the working tree is not left
+ * half-written. Returns immediately; a detached task drives the escalation.
+ * No-op if the session is not live. A thin wrapper (round 11): the deferral
+ * policy lives in `AppState::cancel_and_escalate`, where a test can reach it.
+ */
 async cancelSessionTurn(sessionId: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cancel_session_turn", { sessionId }) };
