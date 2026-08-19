@@ -312,8 +312,12 @@ fn peer_shaped_reason(reason: &str) -> Option<&'static str> {
             if !(before_ok && after_ok) {
                 return false;
             }
+            // The last real WORD before the slug — trimmed of every non-word
+            // char, not only whitespace, so "all-hands" / "four-eyes" see
+            // `all` / `four` and not the empty string `rsplit` yields after a
+            // trailing hyphen (EYES, round 12).
             let prev_word = lower[..i]
-                .trim_end()
+                .trim_end_matches(|c: char| !is_word_char(c))
                 .rsplit(|c: char| !is_word_char(c))
                 .next()
                 .unwrap_or("");
@@ -3348,6 +3352,9 @@ mod tests {
         assert_eq!(peer_shaped_reason("need more eyes on it before I continue"), None);
         assert_eq!(peer_shaped_reason("the work is in my hands now; waiting for your console read"), None);
         assert_eq!(peer_shaped_reason("all hands on deck until the deploy lands"), None);
+        // Hyphenated: the word before the slug is still the word, not the hyphen.
+        assert_eq!(peer_shaped_reason("all-hands meeting until Friday"), None);
+        assert_eq!(peer_shaped_reason("a four-eyes check is pending on your side"), None);
     }
 
 }
