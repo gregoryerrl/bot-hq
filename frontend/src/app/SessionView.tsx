@@ -22,6 +22,7 @@ import {
   type TrayRow,
 } from "../components/HaltBanner";
 import { useTrayStaging, stagedFor } from "../stores/trayStaging";
+import { picksDiffer, stagedKey } from "../lib/staging";
 import { ApprovalGate } from "../components/ApprovalGate";
 import { ChatPane } from "../components/ChatPane";
 import { DocumentPane } from "../components/DocumentPane";
@@ -446,14 +447,20 @@ export function SessionView() {
   // snapshot always equals what the tray shows as staged.
   //
   // **A DELIVERY also changes the pick set, and must not re-stage.** Delivery
-  // calls `clearStaged`, which empties `stagedMap` and moves this counter — so
+  // calls `clearStaged`, which empties `stagedMap` and moves the key — so
   // this effect ran, saw the pick set shrink to zero beside a `stagedResp` the
   // refetch had not yet nulled, and re-staged the message that had just been
   // sent. That is why the composer would not stay clear: the box was not
   // refilling itself, the message was genuinely being put back. Guarded on the
   // tick rather than on `stagedResp` alone, so it does not depend on the
   // delivery handler's cache write winning a race with this render.
-  const stagedPickCount = Object.keys(stagedMap).length;
+  //
+  // **Keyed on the picks' VALUES, not their count** (round 12). The key used
+  // to be `Object.keys(stagedMap).length`, so changing an already-staged
+  // answer (option A, then B on the same row) never re-ran this — the backend
+  // kept A and delivered A. `stagedKey` moves on add, remove AND change;
+  // `picksDiffer` is the comparison (`lib/staging.ts`, tested).
+  const stagedPicksKey = stagedKey(stagedMap);
   const deliveredAtRef = useRef(deliveredTick);
   useEffect(() => {
     const justDelivered = deliveredAtRef.current !== deliveredTick;
@@ -466,14 +473,7 @@ export function SessionView() {
           r.status === "pending" && isTrayItem(r) && stagedMap[r.choice_id],
       )
       .map((r) => ({ choice_id: r.choice_id, picked: stagedMap[r.choice_id]! }));
-    if (
-      current.length !== stagedResp.picks.length ||
-      current.some(
-        (p, i) =>
-          stagedResp.picks[i]?.choice_id !== p.choice_id ||
-          stagedResp.picks[i]?.picked !== p.picked,
-      )
-    ) {
+    if (picksDiffer(current, stagedResp.picks)) {
       void invoke("stage_user_response", {
         sessionId,
         text: stagedResp.text,
@@ -481,7 +481,7 @@ export function SessionView() {
       }).then(() => refetchStaged());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stagedPickCount, deliveredTick]);
+  }, [stagedPicksKey, deliveredTick]);
 
   if (!session) {
     return (
