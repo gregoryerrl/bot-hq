@@ -212,7 +212,11 @@ impl SignalingBridge {
             )
         })?;
 
-        let out = tool_gate::run_in_repo(command, &cwd, tool_gate::DEFAULT_TIMEOUT).await;
+        // The child carries the session's identity (round 12): the git hooks
+        // inside a gated `git commit` / `git push` read `BOT_HQ_SESSION_ID`.
+        let envs = tool_gate::session_envs(session_id);
+        let envs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let out = tool_gate::run_in_repo(command, &cwd, tool_gate::DEFAULT_TIMEOUT, &envs).await;
         Ok(format_command_output(&out))
     }
 

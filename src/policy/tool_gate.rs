@@ -230,16 +230,44 @@ pub fn match_keyword(
 /// exit code, bounded by `timeout`. stdin is `/dev/null` so a command that
 /// expects input (e.g. `gh issue comment` with no `--body`) fails fast instead
 /// of hanging. On timeout the child is killed (kill-on-drop) and `code` is 124.
-pub async fn run_in_repo(command: &str, cwd: &Path, timeout: Duration) -> CommandOutput {
+///
+/// `envs` are set on the child on top of the app's own environment. **The
+/// session's identity rides here** (round 12): the agent subprocess
+/// (`spawn.rs`) and the session PTY (`terminal.rs`) both export
+/// `BOT_HQ_SESSION_ID`, and the git hooks read it to find whose session a
+/// commit or push belongs to — a gated `git commit` run from here with the
+/// APP's bare environment skipped the findings gate (fail-open on no session)
+/// and resolved the blueprint policy instead of the session's snapshot, and a
+/// gated `git push` was refused as "no session context". Callers pass the
+/// session id; the tests pass nothing.
+pub async fn run_in_repo(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    envs: &[(&str, &str)],
+) -> CommandOutput {
     // The agent's own shell, not a fixed one — see `gate_shell`. (Round 7's
     // sh→bash for s-06a3c60b was the same lesson one shell short: macOS's bash
     // IS 3.2, and the command was proven under zsh.)
-    run_in_shell(&gate_shell(), command, cwd, timeout).await
+    run_in_shell(&gate_shell(), command, cwd, timeout, envs).await
+}
+
+/// Env pairs for a gated command run on behalf of `session_id` — the one
+/// place the gate runner's child environment is decided, so every caller
+/// (`execute_gated`, the late re-run) sets the same identity.
+pub fn session_envs(session_id: &str) -> Vec<(&'static str, String)> {
+    vec![("BOT_HQ_SESSION_ID", session_id.to_string())]
 }
 
 /// [`run_in_repo`] with the shell named by the caller — the seam the
 /// heredoc test drives with `zsh` directly, so no test mutates `SHELL`.
-async fn run_in_shell(shell: &str, command: &str, cwd: &Path, timeout: Duration) -> CommandOutput {
+async fn run_in_shell(
+    shell: &str,
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    envs: &[(&str, &str)],
+) -> CommandOutput {
     let mut cmd = tokio::process::Command::new(shell);
     cmd.arg("-c")
         .arg(command)
@@ -248,6 +276,9 @@ async fn run_in_shell(shell: &str, command: &str, cwd: &Path, timeout: Duration)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -427,7 +458,7 @@ mod tests {
     #[tokio::test]
     async fn run_in_repo_captures_stdout_and_zero_code() {
         let dir = tempdir().unwrap();
-        let out = run_in_repo("echo hello-gate", dir.path(), Duration::from_secs(5)).await;
+        let out = run_in_repo("echo hello-gate", dir.path(), Duration::from_secs(5), &[]).await;
         assert_eq!(out.code, 0);
         assert!(out.stdout.contains("hello-gate"), "stdout: {:?}", out.stdout);
     }
@@ -435,7 +466,7 @@ mod tests {
     #[tokio::test]
     async fn run_in_repo_propagates_nonzero_code() {
         let dir = tempdir().unwrap();
-        let out = run_in_repo("exit 3", dir.path(), Duration::from_secs(5)).await;
+        let out = run_in_repo("exit 3", dir.path(), Duration::from_secs(5), &[]).await;
         assert_eq!(out.code, 3);
     }
 
@@ -444,7 +475,7 @@ mod tests {
         // action_gate returns stderr to the agent, so confirm it's captured
         // independently of stdout (Rain's A1 review gap).
         let dir = tempdir().unwrap();
-        let out = run_in_repo("echo oops 1>&2; exit 1", dir.path(), Duration::from_secs(5)).await;
+        let out = run_in_repo("echo oops 1>&2; exit 1", dir.path(), Duration::from_secs(5), &[]).await;
         assert_eq!(out.code, 1);
         assert!(out.stderr.contains("oops"), "stderr: {:?}", out.stderr);
         assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
@@ -454,14 +485,35 @@ mod tests {
     async fn run_in_repo_runs_in_cwd() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("marker.txt"), "x").unwrap();
-        let out = run_in_repo("ls", dir.path(), Duration::from_secs(5)).await;
+        let out = run_in_repo("ls", dir.path(), Duration::from_secs(5), &[]).await;
         assert!(out.stdout.contains("marker.txt"), "stdout: {:?}", out.stdout);
+    }
+
+    /// Round 12: the gate runner's child carries the session's identity. Delete
+    /// the `cmd.env(k, v)` loop in `run_in_shell` and this goes red — which is
+    /// the mutation that reproduces the hole: the git hooks inside a gated
+    /// `git commit` / `git push` read `BOT_HQ_SESSION_ID`, and the app's bare
+    /// environment has none.
+    #[tokio::test]
+    async fn run_in_repo_sets_the_envs_it_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let envs = session_envs("s-test-env");
+        let envs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let out = run_in_repo(
+            "printf 'sid=%s' \"$BOT_HQ_SESSION_ID\"",
+            dir.path(),
+            Duration::from_secs(5),
+            &envs,
+        )
+        .await;
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+        assert_eq!(out.stdout, "sid=s-test-env");
     }
 
     #[tokio::test]
     async fn run_in_repo_times_out() {
         let dir = tempdir().unwrap();
-        let out = run_in_repo("sleep 5", dir.path(), Duration::from_millis(150)).await;
+        let out = run_in_repo("sleep 5", dir.path(), Duration::from_millis(150), &[]).await;
         assert_eq!(out.code, 124, "stderr: {:?}", out.stderr);
         assert!(out.stderr.contains("timed out"));
     }
@@ -510,7 +562,7 @@ mod tests {
         // The shell the agent's Bash tool would have proven the command under.
         let dir = tempdir().unwrap();
         let command = "printf '%s' \"$(cat <<'BODY'\nDependabot's #507 was closed as \"no longer updatable\"\nBODY\n)\"";
-        let out = run_in_shell("zsh", command, dir.path(), Duration::from_secs(5)).await;
+        let out = run_in_shell("zsh", command, dir.path(), Duration::from_secs(5), &[]).await;
         assert_eq!(out.code, 0, "stderr: {:?}", out.stderr);
         assert!(
             out.stdout.contains("Dependabot's #507"),
