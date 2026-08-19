@@ -93,6 +93,10 @@ canonical docs (findings gate on pre-push, layer 7, the D15 epilogue section,
 four CLOSED handoffs). B16 `3248982` the unused `regex` dep. B17 `b2c61f3`
 reseed 0068 — the HANDS untagged-docs sentence and the EYES two-participant
 sentence, guarded on 0067's seed. `fe47832` one test reconciled with B5.
+After the gates, EYES's F14 on B6: `1eca358` the peer-guard reads the
+lowercase slug too unless a possessive/quantity precedes it ("waiting on
+hands to finish" trips again; "in your hands" does not), and `cc99361` its
+hyphen nit ("all-hands meeting" reads `all`, not the empty string).
 
 **Gates (all bare, exit 0):** `cargo test` 1333 passed (1291 lib, 42
 integration), 1 ignored; vitest 51 files / 475 tests; `tsc --noEmit` clean;
