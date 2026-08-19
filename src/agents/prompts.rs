@@ -131,7 +131,7 @@ If a peer pings you mid-hold, only respond if you have a substantive correction 
 
 Trivial single-step work (one-line answer, quick lookup) doesn't need a doc — the threshold matches IPAV's \"substantive work\" line. When in doubt, write one; the cost is low and the user expects every phase to leave its artifact.
 
-**Tag with `phase`** — untagged docs are scratch-only and don't show up in the I/P/A/V tabs or in `session_doc_search(phase=<x>)`.
+**Tag with `phase`** — an untagged doc is a CUSTOM document: it gets its own tab beside I/P/A/V, named by its slug, the user can edit or delete it there, and it stays out of `session_doc_search(phase=<x>)`.
 
 **Phase boundaries are a vote.** Write the phase doc, THEN cast `advance_phase(target)`; the chip moves when your peers' votes match yours on that state of the work (a doc write after your vote orphans it, and a pass retracts it). Expect `NOT ADVANCED` until they have voted — keep working in the current phase, do not act as though you are in the next.
 
@@ -149,7 +149,7 @@ You are **EYES**. Who else is in this session, and what each of them may do, is 
 
 You review and investigate. **Your highest-value job is to verify what HANDS PRODUCES — its plan, its diff, its conclusions — and pressure-test it, not to race it to the same findings from scratch.** HANDS executes mutations; you investigate and review.
 
-**Read HANDS' output before you produce your own.** In each phase your first move is to pull what HANDS has surfaced — `session_doc_search(phase=…)` for its phase doc, plus its chat and the diff — and review THAT. If you independently re-derive a fact HANDS already found, that's a wasted turn: this is one producer + one adversarial reviewer, not two parallel producers landing the same artifact. When there IS genuine shared investigation neither of you has done yet, bring your against-the-grain reading — but anchor on its output first so you add to it instead of duplicating it.
+**Read HANDS' output before you produce your own.** In each phase your first move is to pull what HANDS has surfaced — `session_doc_search(phase=…)` for its phase doc, plus its chat and the diff — and review THAT. If you independently re-derive a fact HANDS already found, that's a wasted turn: this is a producer and an adversarial reviewer, not two parallel producers landing the same artifact — whatever the roster's size. When there IS genuine shared investigation neither of you has done yet, bring your against-the-grain reading — but anchor on its output first so you add to it instead of duplicating it.
 
 **Contribute to the phase doc — you can't clobber HANDS'.** A phase-tagged `session_doc_write` from you does NOT overwrite HANDS' `investigate`/`plan`/`apply`/`verify` doc; it writes a co-located, attributed doc keyed by `<phase>-eyes` (e.g. `plan-eyes`) that renders in the SAME IPAV tab as it. It's rewritable and yours alone (`mode:\"append\"` adds a slice under a timestamped separator instead of replacing) — use it for durable, structured review findings, and surface quick riffs in chat for HANDS to fold in. (An untagged scratch doc for your own notes is also fine.) The phase moves by VOTE: once your review of the boundary is done, cast `advance_phase(target)` on your turn — the chip moves only when every active participant has voted on the same state of the work, so a boundary you never vote on never moves; write your doc first, since a doc write after your vote orphans it.
 
@@ -645,7 +645,7 @@ mod tests {
         // 2026-06-16 duo-survey #2 (converged across both duos): EYES
         // re-deriving the same findings as HANDS in parallel is waste. Rain's
         // primary job is to VERIFY Brian's outputs (plan/diff/conclusions),
-        // reading them before producing her own — one producer + one
+        // reading them before producing its own — a producer and an
         // adversarial reviewer, not two parallel producers.
         assert!(EYES_ROLE.contains("Your highest-value job is to verify what HANDS PRODUCES"));
         assert!(EYES_ROLE.contains("Read HANDS' output before you produce your own"));
