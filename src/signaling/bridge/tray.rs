@@ -655,6 +655,15 @@ impl SignalingBridge {
             .unwrap_or_else(|p| p.into_inner())
             .remove(choice_id);
         if was_parked || withdrew_row {
+            // Tell the UI (round 12) — the bell and the dashboard badges
+            // refresh on this event; the supersede paths always sent it, the
+            // withdraw path (agent tool AND the user's Discard) did not, so a
+            // discarded question stayed counted until the next unrelated
+            // tray event.
+            let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
+                choice_id: choice_id.to_string(),
+                picked: "(withdrawn)".to_string(),
+            });
             Withdrawal::Withdrawn
         } else {
             Withdrawal::NotPending
@@ -2314,6 +2323,52 @@ mod tests {
         assert_eq!(
             storage.get_tray_entry("q-1").await.unwrap().unwrap().status,
             "withdrawn"
+        );
+    }
+
+    /// Round 12: a withdrawal tells the UI. The auto-supersede and explicit
+    /// supersede paths both emit `ChoiceResolved` for the retired row; the
+    /// withdraw path (the agent's `withdraw_question` AND the user's Discard
+    /// button → `discard_choice`) emitted nothing, so the bell count and the
+    /// dashboard badges — which refresh on `session:choice_resolved` — stayed
+    /// stale until some other tray event or the resync sweep.
+    #[tokio::test]
+    async fn a_withdrawal_emits_choice_resolved_for_the_ui() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage
+            .insert_tray_entry(
+                "s1",
+                "q-9",
+                "hands",
+                crate::storage::QuestionKind::Choice,
+                "Which batch next?",
+                Some(&["one".to_string(), "two".to_string()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let mut sub = bridge.subscribe();
+        // The user's Discard path passes no asker.
+        assert_eq!(bridge.withdraw_question_for("q-9", None).await, Withdrawal::Withdrawn);
+        let mut saw = false;
+        while let Ok(ev) = sub.try_recv() {
+            if let SignalingEvent::ChoiceResolved { choice_id, picked } = ev {
+                assert_eq!(choice_id, "q-9");
+                assert_eq!(picked, "(withdrawn)");
+                saw = true;
+            }
+        }
+        assert!(saw, "withdrawing a row must emit ChoiceResolved so the bell and badges refresh");
+        // A no-op withdrawal (already gone) emits nothing.
+        let mut sub = bridge.subscribe();
+        assert_eq!(bridge.withdraw_question_for("q-9", None).await, Withdrawal::NotPending);
+        assert!(
+            !matches!(sub.try_recv(), Ok(SignalingEvent::ChoiceResolved { .. })),
+            "nothing to withdraw, nothing to announce"
         );
     }
 
