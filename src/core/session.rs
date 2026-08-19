@@ -941,6 +941,7 @@ async fn spawn_session_handle(
             // rc3 D21 — orientation is not a turn. See `PumpConfig::booting`.
             booting: Some(Arc::clone(&booting)),
             boot_done: Some(boot_done_tx.clone()),
+            retry_ladder: crate::core::pump::RETRY_LADDER.to_vec(),
             // The pump identifies its participant by `slug`, and always did
             // (rc3 D10). This used to also pass a two-party `Author`
             // discriminant — slot 0 the `Brian` side of `core::router`'s

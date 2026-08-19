@@ -167,6 +167,12 @@ pub struct PumpConfig {
     /// exactly this signal — *"when every participant has finished orienting …
     /// the ring starts"*.
     pub boot_done: Option<tokio::sync::mpsc::Sender<i64>>,
+    /// The transient-error retry ladder (round 12): how long to wait before
+    /// re-dealing this participant after an errored turn whose last line is a
+    /// transient network/upstream failure — one entry per attempt, then the
+    /// back-to-back halt. Production passes [`RETRY_LADDER`]; tests pass
+    /// milliseconds.
+    pub retry_ladder: Vec<std::time::Duration>,
 }
 
 impl PumpConfig {
@@ -188,6 +194,7 @@ impl PumpConfig {
             )),
             booting: None,
             boot_done: None,
+            retry_ladder: RETRY_LADDER.to_vec(),
         }
     }
 
@@ -303,6 +310,60 @@ fn is_pass_turn_tool(name: &str) -> bool {
 /// author header above it names them.
 const PASS_NOTICE: &str = "(passed — nothing to add this round)";
 
+/// The transient-error retry ladder — 30 s, 2 min, 10 min (round 12): an
+/// errored turn whose last line names a transient network / upstream failure
+/// is re-dealt after these waits, one per attempt, instead of counting toward
+/// the back-to-back halt; the failure after the third halts as before, with
+/// the banner saying the retries happened. Sized for an internet blip or an
+/// overloaded upstream to clear; bounded so a dead link still halts in ~13 min.
+pub const RETRY_LADDER: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(120),
+    std::time::Duration::from_secs(600),
+];
+
+/// Is `last_line` (an errored turn's last non-empty line) a TRANSIENT failure
+/// worth retrying? Specific tokens only (EYES F17): the socket-level errnos and
+/// undici's `fetch failed`, the upstream's `overloaded`, and the HTTP codes
+/// 502/503/504/529 — the codes on WORD boundaries (`policy::contains_word`) AND
+/// only beside an HTTP shape (`status`/`http`/`upstream`/`api error`/`service
+/// unavailable`/`bad gateway`/`gateway timeout` — not a bare "error"), so a sha
+/// prefix `529a…`, a port, or "compilation failed: 503 errors" do not retry
+/// (EYES F20). Bare "timed out" / "network" are deliberately NOT here:
+/// a permanent failure that merely mentions one would burn the whole ladder
+/// before the halt the user gets today on strike two.
+pub fn transient_error(last_line: &str) -> bool {
+    let lower = last_line.to_lowercase();
+    const TOKENS: &[&str] = &[
+        "econnreset",
+        "econnrefused",
+        "econnaborted",
+        "enotfound",
+        "etimedout",
+        "eai_again",
+        "fetch failed",
+        "overloaded",
+    ];
+    if TOKENS.iter().any(|t| lower.contains(t)) {
+        return true;
+    }
+    const CODES: &[&str] = &["502", "503", "504", "529"];
+    // The HTTP shape beside the code: not a bare "error" (which "compilation
+    // failed: 503 errors" also carries) but the words an upstream status line
+    // actually uses.
+    const HTTP_SHAPE: &[&str] = &[
+        "status",
+        "http",
+        "upstream",
+        "api error",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+    ];
+    CODES.iter().any(|c| crate::policy::contains_word(&lower, c))
+        && HTTP_SHAPE.iter().any(|w| lower.contains(w))
+}
+
 /// Provider quota/limit phrases, matched case-insensitively against each text
 /// chunk. Deliberately a plain substring net over ALL provider eras: the
 /// archive study found these render as ordinary agent speech — Brian sat dead
@@ -401,6 +462,10 @@ pub async fn pump_agent(
     // bot-hq interrupted itself (Pause, preempt, the agent's own halt) is NOT
     // an errored turn and does not count — see `cfg.interrupted_epoch`.
     let mut consecutive_errored_turns: usize = 0;
+    // Round 12: the transient-error retry ladder's position for THIS pump —
+    // reset by a clean turn, advanced by each transient errored turn; past the
+    // ladder's end the next transient failure halts like any other.
+    let mut retry_attempt: usize = 0;
     // B5: the epoch of the turn in flight, snapshotted from `cfg.turn_epoch` on
     // this turn's FIRST event and cleared when it completes. See the field's doc
     // for why reading it at completion time instead would defeat the guard it
@@ -830,29 +895,108 @@ pub async fn pump_agent(
                         .load(std::sync::atomic::Ordering::Acquire);
                     let host_interrupted =
                         stamp != crate::agents::NO_INTERRUPT_EPOCH && Some(stamp) == this_turn;
+                    // The errored turn's last line — what the halt banner
+                    // quotes, and (round 12) what the retry ladder classifies.
+                    let last_line: String = buffer
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("unknown error")
+                        .chars()
+                        .take(200)
+                        .collect();
+                    let mut retried = false;
                     if host_interrupted {
                         debug!(
                             agent = %cfg.slug,
                             epoch = ?this_turn,
                             "interrupted turn (bot-hq's own interrupt); not counted as an error"
                         );
+                    } else if transient_error(&last_line) && retry_attempt < cfg.retry_ladder.len() {
+                        // **A transient failure retries before it halts** (round
+                        // 12, the user's Q3). Not counted toward the two-strike
+                        // halt: the ring steps past this turn as before, a
+                        // notice says what happens next, and after the ladder's
+                        // wait the pump posts a nudge row and SUMMONS this
+                        // participant (no ring reset; `SequencerCommand::Summon`)
+                        // so it gets a fresh turn with the backlog it failed on.
+                        // Only for a LIVE process that reported an errored
+                        // result — a process that died is the supervisor's
+                        // (the event channel closing), never this ladder's.
+                        let delay = cfg.retry_ladder[retry_attempt];
+                        retry_attempt += 1;
+                        retried = true;
+                        let attempt = retry_attempt;
+                        let total = cfg.retry_ladder.len();
+                        let notice = format!(
+                            "⚠ transient error on {}'s turn ({last_line}) — retrying in {}s \
+                             (attempt {attempt}/{total}; halting after the {}).",
+                            cfg.slug,
+                            delay.as_secs(),
+                            match total { 1 => "first", 2 => "second", 3 => "third", _ => "last" }
+                        );
+                        warn!(agent = %cfg.slug, attempt, %last_line, "transient errored turn; retry scheduled");
+                        if crate::core::post_system_notice(
+                            &storage,
+                            cfg.bridge.as_deref(),
+                            &cfg.session_id,
+                            MessageKind::SystemNotice,
+                            notice,
+                            None,
+                        )
+                        .await
+                        .is_none()
+                        {
+                            warn!(agent = %cfg.slug, "the retry notice was not posted");
+                        }
+                        if let (Some(seq), Some(pid)) = (cfg.sequencer_tx.clone(), cfg.participant_id) {
+                            let storage = storage.clone();
+                            let bridge = cfg.bridge.clone();
+                            let session_id = cfg.session_id.clone();
+                            let slug = cfg.slug.clone();
+                            let line = last_line.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(delay).await;
+                                let nudge = format!(
+                                    "[System: {slug}'s previous turn failed with a transient \
+                                     error ({line}) — attempt {attempt}/{total}. The backlog \
+                                     above still stands; continue where you left off.]"
+                                );
+                                let _ = crate::core::post_system_notice(
+                                    &storage,
+                                    bridge.as_deref(),
+                                    &session_id,
+                                    MessageKind::SystemNotice,
+                                    nudge,
+                                    None,
+                                )
+                                .await;
+                                if seq
+                                    .send(crate::core::sequencer::SequencerCommand::Summon {
+                                        participant_id: pid,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    warn!(agent = %slug, "retry summons did not reach the ring (session gone)");
+                                }
+                            });
+                        }
                     } else {
                         debug!(agent = %cfg.slug, "errored turn; draining buffer, nothing handed on");
                         consecutive_errored_turns += 1;
+                        if transient_error(&last_line) {
+                            // The ladder is spent: this transient failure halts
+                            // like any other, now — not after a second strike.
+                            consecutive_errored_turns = consecutive_errored_turns.max(2);
+                        }
                     }
-                    if consecutive_errored_turns >= 2 {
-                        // Read before the buffer is cleared below: the error
-                        // line is the turn's tail, and it is what the banner
-                        // must say — a stop with no reason is the silence the
-                        // repeat-net's halt already taught us not to repeat.
-                        let last_line: String = buffer
-                            .lines()
-                            .rev()
-                            .find(|l| !l.trim().is_empty())
-                            .unwrap_or("unknown error")
-                            .chars()
-                            .take(200)
-                            .collect();
+                    if !retried && consecutive_errored_turns >= 2 {
+                        // `last_line` was read above, before the buffer is
+                        // cleared below: the error line is the turn's tail, and
+                        // it is what the banner must say — a stop with no reason
+                        // is the silence the repeat-net's halt already taught us
+                        // not to repeat.
                         warn!(
                             agent = %cfg.slug,
                             %last_line,
@@ -865,13 +1009,21 @@ pub async fn pump_agent(
                                     cfg.slug.to_string(),
                                     format!(
                                         "⚠ {}'s turns are failing back-to-back \
-                                         (last error: \"{last_line}\"). The session \
+                                         (last error: \"{last_line}\"{}). The session \
                                          stopped so you can steer. If the error is \
                                          about prompt/context size, this \
                                          participant's context is likely \
                                          unrecoverable — close the session and \
                                          open a fresh one.",
-                                        &cfg.slug
+                                        &cfg.slug,
+                                        if retry_attempt > 0 {
+                                            format!(
+                                                "; {retry_attempt} transient-error retr{} already made",
+                                                if retry_attempt == 1 { "y" } else { "ies" }
+                                            )
+                                        } else {
+                                            String::new()
+                                        }
                                     ),
                                 )
                                 .await;
@@ -884,6 +1036,7 @@ pub async fn pump_agent(
                     buffer.clear();
                 } else {
                     consecutive_errored_turns = 0;
+                    retry_attempt = 0;
                     // The turn's prose is already posted as rows by the pump
                     // above; the ring delivers those to every peer off its
                     // cursor. Nothing extra to hand anywhere — the router that
@@ -1175,6 +1328,7 @@ mod tests {
             )),
             booting: None,
             boot_done: None,
+            retry_ladder: vec![std::time::Duration::from_millis(30); 3],
         }
     }
 
@@ -1748,6 +1902,174 @@ mod tests {
             "the error halt writes no tray rows: {tray:?}"
         );
 
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    /// Round 12 (the user's Q3): the transient-error classifier — specific
+    /// tokens, word-bounded codes beside an HTTP shape, and nothing that a
+    /// permanent failure merely mentions (EYES F17/F20).
+    #[test]
+    fn transient_error_matches_network_failures_and_not_their_look_alikes() {
+        for yes in [
+            "fetch failed",
+            "API Error: 503 Service Unavailable",
+            "Error: upstream returned HTTP 529",
+            "request to https://api.anthropic.com failed, reason: ECONNRESET",
+            "getaddrinfo ENOTFOUND api.anthropic.com",
+            "connect ETIMEDOUT 1.2.3.4:443",
+            "the upstream is overloaded right now",
+            "error: status 502 from the gateway",
+        ] {
+            assert!(transient_error(yes), "should retry: {yes:?}");
+        }
+        for no in [
+            "Prompt is too long",
+            "compilation failed: 503 errors",
+            "at commit 529a1b2c the build broke",
+            "listening on port 5030",
+            "the request timed out waiting for the user",
+            "network share unmounted",
+            "Error 4043: bad request",
+            "",
+        ] {
+            assert!(!transient_error(no), "must not retry: {no:?}");
+        }
+    }
+
+    /// Round 12 (the user's Q3): a transient errored turn RETRIES instead of
+    /// counting toward the two-strike halt — a notice row at once, then after
+    /// the ladder's wait a nudge row and a `Summon` for this participant; the
+    /// ring still sees the turn end. After the ladder is spent the next
+    /// transient failure halts, and the banner says the retries happened.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_transient_errored_turn_retries_before_it_halts() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        let send_error_turn = |ev_tx: mpsc::Sender<AgentEvent>| async move {
+            ev_tx
+                .send(AgentEvent::Text("API Error: 503 Service Unavailable".into()))
+                .await
+                .unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: Some("error_during_execution".into()),
+                    is_error: true,
+                    api_error_status: None,
+                    context: ContextReport::none(ContextVerdict::NoWindow),
+                })
+                .await
+                .unwrap();
+        };
+
+        for attempt in 1..=3usize {
+            send_error_turn(ev_tx.clone()).await;
+            // The turn still ends ring-side.
+            match next_wire(&mut ring_rx).await {
+                crate::core::sequencer::SequencerCommand::TurnComplete { .. } => {}
+                other => panic!("expected TurnComplete, got {other:?}"),
+            }
+            // …and after the (30 ms test) ladder wait, the retry: a Summon.
+            match next_wire(&mut ring_rx).await {
+                crate::core::sequencer::SequencerCommand::Summon { participant_id } => {
+                    assert_eq!(participant_id, 1)
+                }
+                other => panic!("attempt {attempt}: expected Summon, got {other:?}"),
+            }
+            assert!(
+                storage.session_halt("s1").await.unwrap().is_none(),
+                "attempt {attempt}: a transient error retries, it does not halt"
+            );
+        }
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        let notices: Vec<&str> = rows
+            .iter()
+            .filter(|m| m.kind == "system_notice")
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(
+            notices.iter().filter(|n| n.contains("retrying")).count(),
+            3,
+            "one notice per retry: {notices:?}"
+        );
+        assert!(
+            notices.iter().any(|n| n.contains("attempt 1/3") && n.contains("halting after the third")),
+            "the notice names the ladder position: {notices:?}"
+        );
+        assert_eq!(
+            notices.iter().filter(|n| n.contains("still stands")).count(),
+            3,
+            "one nudge row per retry, for the summoned participant to read: {notices:?}"
+        );
+
+        // The ladder is spent: the fourth transient failure halts, saying so.
+        send_error_turn(ev_tx.clone()).await;
+        match next_wire(&mut ring_rx).await {
+            crate::core::sequencer::SequencerCommand::TurnComplete { .. } => {}
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+        let halt = storage.session_halt("s1").await.unwrap();
+        assert!(
+            halt.as_ref().is_some_and(|(_, reason, _)| {
+                reason.contains("failing back-to-back") && reason.contains("3 transient-error retries")
+            }),
+            "after the ladder the transient failure halts, and the banner says the retries happened: {halt:?}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), ring_rx.recv()).await.is_err(),
+            "no fourth Summon — the ladder is spent"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    /// A clean turn resets the ladder: after one transient retry and a good
+    /// turn, the count starts over (three more retries before the halt).
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_clean_turn_resets_the_retry_ladder() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+        let error_turn = |ev_tx: mpsc::Sender<AgentEvent>| async move {
+            ev_tx.send(AgentEvent::Text("fetch failed".into())).await.unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: Some("error_during_execution".into()),
+                    is_error: true,
+                    api_error_status: None,
+                    context: ContextReport::none(ContextVerdict::NoWindow),
+                })
+                .await
+                .unwrap();
+        };
+        // Three retries, then a clean turn, then three MORE retries before a halt.
+        for _ in 0..3 {
+            error_turn(ev_tx.clone()).await;
+            assert!(matches!(next_wire(&mut ring_rx).await, crate::core::sequencer::SequencerCommand::TurnComplete { .. }));
+            assert!(matches!(next_wire(&mut ring_rx).await, crate::core::sequencer::SequencerCommand::Summon { .. }));
+        }
+        ev_tx.send(AgentEvent::Text("ok, continuing".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert!(matches!(next_wire(&mut ring_rx).await, crate::core::sequencer::SequencerCommand::TurnComplete { .. }));
+        for _ in 0..3 {
+            error_turn(ev_tx.clone()).await;
+            assert!(matches!(next_wire(&mut ring_rx).await, crate::core::sequencer::SequencerCommand::TurnComplete { .. }));
+            assert!(matches!(next_wire(&mut ring_rx).await, crate::core::sequencer::SequencerCommand::Summon { .. }));
+            assert!(storage.session_halt("s1").await.unwrap().is_none(), "the ladder restarted after the clean turn");
+        }
         drop(ev_tx);
         task.await.unwrap();
     }

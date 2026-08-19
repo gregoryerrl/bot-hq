@@ -501,7 +501,7 @@ pub(crate) fn write_config_atomically(path: &Path, body: &str) -> Result<()> {
 /// `idx + needle.len()` are both on char boundaries (the start and end of a
 /// matched substring), so the slices below are always valid even when the
 /// surrounding chars are multi-byte.
-fn contains_word(haystack: &str, needle: &str) -> bool {
+pub fn contains_word(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
     }

@@ -1185,6 +1185,17 @@ pub enum SequencerCommand {
     /// existing release (`user_responded` → [`UserMessage`](SequencerCommand::UserMessage)) or the asker's own
     /// completion, so there is no second path onto a turn.
     GateResolved { choice_id: String },
+    /// Put `participant_id` at the head of the turn order WITHOUT a ring reset
+    /// (round 12 — the transient-error retry ladder's wake). A summons in rc3
+    /// D17's sense: it takes the next turn INSTEAD of the ring step and the
+    /// rotation resumes from the anchor afterwards; nothing resets the tally or
+    /// the laps, nothing clears a halt. Dealt at once when the ring is idle and
+    /// free (no holder, not paused, no open gate, not halted on the user);
+    /// otherwise it sits in the summons queue and takes the turn after the
+    /// current one — or after the user's release, if the session is halted.
+    /// The pump sends it after the backoff, having posted the nudge row the
+    /// summoned participant will read.
+    Summon { participant_id: i64 },
     /// Stop: hold the cycle where it stands, hand out no further turns.
     ///
     /// **The turn in flight stays in flight.** This is not [`halt`] and must not
@@ -2072,6 +2083,28 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // the release the resolve path already fires
                 // (`user_responded` → `UserMessage`). Dealing here would be a
                 // second path onto a turn.
+            }
+            SequencerCommand::Summon { participant_id } => {
+                // Queued like a mention; dealt now only if the ring is idle.
+                // `advance_turn(user_spoke = false)` is the summons path —
+                // `hand_to_summoned` pre-empts the ring step — and its D35
+                // checks (halted / gated / paused) refuse the deal and leave
+                // the entry queued for the release, so this is safe to call
+                // whenever no turn is in flight. A winding-down holder still
+                // owes a completion: queue only, the replay advances later.
+                state.summons.queue.push_back(participant_id);
+                let idle = state.holder.is_none() && state.winding_down.is_none();
+                debug!(
+                    session = %deps.session_id,
+                    participant_id,
+                    idle,
+                    queued = state.summons.queue.len(),
+                    "sequencer: participant summoned (retry wake)"
+                );
+                if idle {
+                    state.reseed_gates_if_needed(&deps).await;
+                    advance_turn(&deps, &mut rx, &mut state, false).await;
+                }
             }
             SequencerCommand::Pause => {
                 // **Not [`halt`], and the difference is the whole command.**
@@ -5728,6 +5761,46 @@ mod tests {
         let prod = &src[..src.find("#[cfg(test)]").expect("tests follow production")];
         let calls = prod.matches("hand_turn_to(deps, ").count();
         assert_eq!(calls, 1, "hand_turn_to is called from start_turn and nowhere else (calls, not the declaration): {calls}");
+    }
+
+    /// Round 12: `Summon` (the transient-retry wake) — no ring reset. Queued
+    /// like a mention: dealt at once when the ring is idle, after the current
+    /// turn when one is live; the rotation resumes from the anchor afterwards.
+    #[tokio::test]
+    async fn a_summons_command_deals_at_once_when_idle_and_after_the_turn_when_live() {
+        // Idle: nothing dealt yet, the summoned participant takes a turn now
+        // with its whole backlog.
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let b = seats[1].id;
+        post(&storage, "user", None, "hello").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::Summon { participant_id: b }).await;
+        assert_eq!(seats[1].expect(1).await, vec!["hello"], "idle ring: the summons deals now");
+        seats[0].quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+
+        // Live: A holds; a summons for C waits for A's completion, pre-empts
+        // the step to B, and the rotation then resumes from A's place (B).
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active"), ("c", "active")]).await;
+        let (a, c) = (seats[0].id, seats[2].id);
+        post(&storage, "user", None, "go").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        send(&tx, SequencerCommand::Summon { participant_id: c }).await;
+        seats[2].quiet().await;
+        assert!(seats[1].drain().is_empty(), "nothing dealt while A holds");
+        post(&storage, "participant", Some("a"), "a spoke").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE }).await;
+        assert_eq!(seats[2].expect(2).await, vec!["go", "a spoke"], "the summons pre-empts the step to B");
+        post(&storage, "participant", Some("c"), "c spoke").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: c, epoch: 2, ending: SPOKE }).await;
+        assert_eq!(seats[1].expect(3).await, vec!["go", "a spoke", "c spoke"], "then the rotation resumes at B");
+        drop(tx);
+        assert!(exited(task).await);
     }
 
     /// rc3 **D17**, the whole of it: a mention hands the next turn to the named

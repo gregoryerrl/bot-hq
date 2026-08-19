@@ -331,6 +331,18 @@ the round cap ends it.
 4. **Round cap** — a crude backstop at 500 LAPS (one lap = one full pass of the
    ring), `0` = off, per-session override on the policy chain. High enough to be
    invisible in normal use; firing posts a visible row (rc3 D7).
+5. **Errored turns** — a turn claude-code ends `is_error:true` (an API failure;
+   a turn bot-hq itself interrupted is excluded) steps the ring like any other,
+   and TWO in a row from one pump fill the halt slot with the error line as the
+   banner. Round 12 put a retry ladder in front of that halt for TRANSIENT
+   failures (`core/pump.rs::transient_error` — the socket errnos, `fetch
+   failed`, `overloaded`, HTTP 502/503/504/529 beside an HTTP word): the pump
+   posts a notice, waits 30 s → 2 min → 10 min (`RETRY_LADDER`), posts a nudge
+   row and sends `SequencerCommand::Summon` — a D17 summons with no ring reset,
+   dealt at once if the ring is idle, after the current turn otherwise; the
+   fourth transient failure halts, the banner saying the retries happened, and
+   a clean turn resets the ladder. A process that DIES is the supervisor's
+   (`spawn.rs::supervise` respawns with `--resume`), never this ladder's.
 
 **The bilateral router this replaced was deleted 2026-08-13** (task 14). It
 forwarded each of two participants' turns to the other through a central task
