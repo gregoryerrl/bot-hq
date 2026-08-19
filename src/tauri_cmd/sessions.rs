@@ -693,8 +693,8 @@ pub async fn create_session(
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?
         .ok_or_else(|| AppError::DbError("session vanished after create".into()))?;
-    // Spawn the roster in the background so the session primes (CL-opener nudge)
-    // without the user having to open it. Not awaited: worktree
+    // Spawn the roster in the background so the session primes (boot,
+    // orientation) without the user having to open it. Not awaited: worktree
     // materialization can take seconds and the create dialog shouldn't block
     // on it. `ensure_session_started` is idempotent + spawn-gate-serialized,
     // so the SessionView mount's `respawn_session` stays a harmless no-op and

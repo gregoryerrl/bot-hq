@@ -300,9 +300,10 @@ function SessionDefaults() {
     { key: "worktree_default" },
   );
   // `adherence_nudges` (storage/models.rs): the opt-out for the Track-A
-  // nudges — the CL-opener nudge at first spawn, the pre-Apply mutation
-  // reminder, the Plan→Apply nudge and the close-out learnings ask. Read in
-  // four places and, until round 8, settable nowhere but SQLite.
+  // nudges — the pre-Apply mutation reminder, the Plan→Apply nudge and the
+  // close-out learnings ask (the CL-opener nudge at first spawn was dead since
+  // D29 and removed in round 12). Read in three places and, until round 8,
+  // settable nowhere but SQLite.
   const { data: adherenceNudges, refetch: refetchNudges } = useTauriQuery<
     string | null
   >("get_app_setting", { key: "adherence_nudges" });

@@ -140,7 +140,7 @@ describe("Settings", () => {
   });
 
   it("offers the adherence-nudges opt-out, keyed on its own setting (round 8)", async () => {
-    // `adherence_nudges` was read in four places and settable nowhere but
+    // `adherence_nudges` was read in four places (three since round 12) and settable nowhere but
     // SQLite. Opt-OUT like worktrees: unset reads as on, "0" as off, and the
     // write goes to ITS key, not the worktree one.
     mockBackend({ adherence_nudges: "0" });

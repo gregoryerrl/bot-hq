@@ -12,7 +12,7 @@ use crate::paths::Paths;
 use crate::signaling::{
     default_user_settings_paths, load_user_mcp_servers, mcp_config_json, SignalingBridge,
 };
-use crate::storage::{AgentConfig, ClIndexEntry, Envelope, MessageKind, Session, Storage};
+use crate::storage::{AgentConfig, ClIndexEntry, Session, Storage};
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -648,8 +648,12 @@ async fn spawn_session_handle(
     if live.is_empty() {
         warn!(session_id = %session.id, "session has no spawnable participant");
     }
-    // A1 (adherence): a FIRST spawn (nobody has a stored claude session id yet)
-    // gets the one-shot CL-opener nudge below; a `--resume` reopen does not.
+    // A FIRST spawn (nobody has a stored claude session id yet) boots —
+    // orientation before the ring starts (rc3 D21/D29); a `--resume` reopen
+    // does not re-boot. (The one-shot CL-opener nudge that used to hang off
+    // this flag was removed in round 12: D29 made boot unconditional on a
+    // first spawn, so `!booted && is_first_spawn` was unsatisfiable and the
+    // nudge had been dead since — the boot primer is what pages the CL.)
     let is_first_spawn = live.iter().all(|p| p.claude_session_id.is_none());
 
     // Second element: the prompt file this slot spawned with, kept because the
@@ -971,9 +975,7 @@ async fn spawn_session_handle(
     // ~60k tokens per participant, and the session never got past orienting.
     // Measured in `s-8ac0d2d0`: three boots in four minutes, and the user
     // force-closed asking "what, its still on boot phase?"
-    let mut booted = false;
     if let Some(kick) = ring_kick.filter(|_| is_first_spawn) {
-        booted = true;
         // **The input is locked while anyone is still orienting** (rc3 D29).
         //
         // Marked busy here and cleared by each pump as it finishes its boot
@@ -1083,48 +1085,6 @@ async fn spawn_session_handle(
         idle_watch,
     ));
 
-    // A1 (adherence): one-shot session-start CL-opener nudge. Mechanically pages
-    // the agent toward `cl_index_search` so a model that doesn't reliably follow
-    // the prompt-side opener still gets nudged. Fires only on a FIRST spawn (not
-    // a `--resume` reopen), only for a real project (skips `_globals`/repo-less),
-    // and only when nudges are enabled. Delivered before the user's first task —
-    // the agent opens the CL during the user's think-time, so the task lands
-    // with conventions already loaded.
-    // **Skipped when boot ran** (rc3 D29). The primer already says this, says it
-    // better, and hands it over directly — so on a booted session this is a
-    // duplicate instruction the participants have already carried out.
-    //
-    // It is also the row that seeded the volley. Boot ends with no task, the ring
-    // hands turn one to the front, and this is the whole of its backlog: an
-    // instruction it had already followed. It reports "CL loaded", that report is
-    // a row, the next participant reads it and has nothing to add, and every pass
-    // from there feeds the next.
-    if !booted && is_first_spawn && storage.adherence_nudges_enabled().await {
-        if let Some(nudge) = cl_opener_nudge(project.as_deref()) {
-            // One row, every participant. `Investigate` is the same constant this
-            // site always wrapped the nudge in — it runs only on a first spawn,
-            // which is a session's first phase by definition — so the wire is
-            // unchanged; what is new is that the tag is part of the row the
-            // user can see, rather than something added on the way out.
-            // No fan-out (rc3 D19). The row is persisted and the ring delivers
-            // it off each participant's cursor. Writing every stdin here is
-            // what woke all participants at session START, before a turn
-            // existed — so each snapshotted epoch 0 and every completion it
-            // ever sent was discarded. The nudge is a convenience — the
-            // prompt-side opener still pages the CL — so a lost row (the
-            // helper warns) must not fail a session open.
-            crate::core::post_system_notice(
-                &storage,
-                Some(&bridge),
-                session.id.as_str(),
-                MessageKind::SystemNotice,
-                nudge,
-                Some(Envelope::phase(IpavPhase::Investigate.name())),
-            )
-            .await;
-        }
-    }
-
     info!(session_id = %session.id, title = %session.title, "session opened");
 
     Ok(SessionHandle {
@@ -1159,23 +1119,6 @@ async fn spawn_session_handle(
         cancel_superseded,
         _mcp_temp: mcp_temp,
     })
-}
-
-/// A1 (adherence): the one-shot session-start CL-opener nudge text for a
-/// session targeting `project`, or `None` for a repo-less / `_globals` session
-/// (no project conventions to page in). Distinct from the system-prompt CL
-/// INDEX primer (layer 2b, `render_cl_primer`) — this is a runtime row, posted
-/// once as a `system` message carrying the phase envelope; the ring delivers it
-/// off each participant's cursor (rc3 D19 — no stdin fan-out). Pure so it's
-/// unit-testable.
-fn cl_opener_nudge(project: Option<&str>) -> Option<String> {
-    let name = project.filter(|p| !p.is_empty() && *p != "_globals")?;
-    Some(format!(
-        "🔔 Session start — project `{name}`. Before the user's first task, call \
-         `cl_index_search(project=\"{name}\")` to load this project's conventions \
-         (formatter, test commands, gates) — they live in the Context Library, not \
-         the repo. Then wait for the user's task; take no other action yet."
-    ))
 }
 
 /// This participant's user-editable role prose (`roles.description_prompt`), or
@@ -4472,18 +4415,6 @@ mod tests {
         let prompt =
             read_system_prompt(&paths, "hands", Some("foo"), None, None, None, None).unwrap();
         assert!(!prompt.contains("Project CL — files available"));
-    }
-
-    #[test]
-    fn cl_opener_nudge_fires_for_real_project_only() {
-        // A1: the session-start nudge pages the agent at cl_index_search for a
-        // real project, and is absent for repo-less / _globals / empty sessions
-        // (no project conventions to load).
-        let nudge = cl_opener_nudge(Some("bot-hq")).expect("real project gets a nudge");
-        assert!(nudge.contains("cl_index_search(project=\"bot-hq\")"));
-        assert_eq!(cl_opener_nudge(None), None, "repo-less session: no nudge");
-        assert_eq!(cl_opener_nudge(Some("_globals")), None, "_globals: no nudge");
-        assert_eq!(cl_opener_nudge(Some("")), None, "empty project: no nudge");
     }
 
     #[test]
