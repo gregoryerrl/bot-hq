@@ -242,6 +242,31 @@ fn with_repeat_halt_note(base: &str, prior: Option<&str>) -> String {
     )
 }
 
+/// `wake_after_secs` on `mark_awaiting_user` / `halt` (round 12 — a TEMPORARY
+/// halt): absent = an ordinary halt; present = a wake in 10…3600 s, else
+/// INVALID_PARAMS — an out-of-range wait is a typo, not a request.
+fn parse_wake_after(args: &Value) -> Result<Option<std::time::Duration>, JsonRpcError> {
+    let Some(v) = args.get("wake_after_secs") else {
+        return Ok(None);
+    };
+    if v.is_null() {
+        return Ok(None);
+    }
+    let secs = v.as_u64().ok_or_else(|| {
+        JsonRpcError::new(
+            JsonRpcError::INVALID_PARAMS,
+            "wake_after_secs must be an integer number of seconds (10..=3600)",
+        )
+    })?;
+    if !(10..=3600).contains(&secs) {
+        return Err(JsonRpcError::new(
+            JsonRpcError::INVALID_PARAMS,
+            "wake_after_secs must be between 10 and 3600 (an hour); re-declare when the wait continues",
+        ));
+    }
+    Ok(Some(std::time::Duration::from_secs(secs)))
+}
+
 /// Does a halt `reason` read as waiting on a PEER rather than on the user?
 ///
 /// The shape it refuses (the `s-96fda118` deadlock): both agents marked
@@ -538,13 +563,30 @@ async fn call_tool(
                      ask the user a concrete question via ask_user_choice."
                 )));
             }
-            let prior = bridge
-                .mark_awaiting_user(caller.session_id.clone(), caller.agent.clone(), reason)
-                .await;
-            Ok(ToolCallResult::text(with_repeat_halt_note(
-                "ok",
-                prior.as_deref(),
-            )))
+            // Round 12: a TEMPORARY halt when `wake_after_secs` is given — the
+            // session wakes the declarer when the countdown ends.
+            let wake_after = parse_wake_after(&args)?;
+            let prior = match wake_after {
+                Some(d) => {
+                    bridge
+                        .mark_temporary_halt(caller.session_id.clone(), caller.agent.clone(), reason, d)
+                        .await
+                }
+                None => {
+                    bridge
+                        .mark_awaiting_user(caller.session_id.clone(), caller.agent.clone(), reason)
+                        .await
+                }
+            };
+            let ack = match wake_after {
+                Some(d) => format!(
+                    "ok — TEMPORARY halt: the session wakes you in {}s (a turn dealt to you with a \
+                     system row); re-declare if the wait continues",
+                    d.as_secs()
+                ),
+                None => "ok".to_string(),
+            };
+            Ok(ToolCallResult::text(with_repeat_halt_note(&ack, prior.as_deref())))
         }
         "peer_ack" => {
             // The effect is realized in the PUMP, which is the only place that
@@ -612,13 +654,28 @@ async fn call_tool(
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or("Agent yielded — your move.")
                 .to_string();
-            let prior = bridge
-                .mark_awaiting_user(caller.session_id.clone(), caller.agent.clone(), reason)
-                .await;
-            Ok(ToolCallResult::text(with_repeat_halt_note(
-                "halted — yielded to the user; input unlocked.",
-                prior.as_deref(),
-            )))
+            let wake_after = parse_wake_after(&args)?;
+            let prior = match wake_after {
+                Some(d) => {
+                    bridge
+                        .mark_temporary_halt(caller.session_id.clone(), caller.agent.clone(), reason, d)
+                        .await
+                }
+                None => {
+                    bridge
+                        .mark_awaiting_user(caller.session_id.clone(), caller.agent.clone(), reason)
+                        .await
+                }
+            };
+            let ack = match wake_after {
+                Some(d) => format!(
+                    "halted — TEMPORARY: the session wakes you in {}s (a turn dealt to you with a \
+                     system row); input unlocked meanwhile.",
+                    d.as_secs()
+                ),
+                None => "halted — yielded to the user; input unlocked.".to_string(),
+            };
+            Ok(ToolCallResult::text(with_repeat_halt_note(&ack, prior.as_deref())))
         }
         "advance_phase" => {
             let target = arg_required_str(&args, "target")?;
@@ -2057,6 +2114,81 @@ mod tests {
         );
         let ev = sub.recv().await.unwrap();
         assert!(matches!(ev, SignalingEvent::AwaitingUser { reason: r, .. } if r == reason));
+    }
+
+    /// Round 12 Q2 — a TEMPORARY halt at the wire: `wake_after_secs` inside
+    /// 10…3600 declares the halt with a wake instant (the ack says so, and the
+    /// `AwaitingUser` event still fires — the banner is the same slot); outside
+    /// the range, or not an integer, it is INVALID_PARAMS and NO halt is
+    /// declared — an out-of-range wait is a typo, and a halt declared on a typo
+    /// would wedge the session on the wrong clock. Both tools take it.
+    #[tokio::test]
+    async fn wake_after_secs_makes_a_temporary_halt_and_an_out_of_range_value_declares_nothing() {
+        let bridge = SignalingBridge::new();
+        let mut sub = bridge.subscribe();
+        for (tool, secs) in [("mark_awaiting_user", 10u64), ("halt", 3600)] {
+            let res = dispatch(
+                req(
+                    "tools/call",
+                    json!({"name": tool, "arguments": {"reason": "CI on PR #531", "wake_after_secs": secs}}),
+                    1,
+                ),
+                &caller(),
+                &bridge,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let v = serde_json::to_value(&res).unwrap();
+            let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
+            assert!(
+                text.contains("TEMPORARY") && text.contains(&format!("{secs}s")),
+                "{tool}: the ack names the temporary halt and its wait: {v}"
+            );
+            let ev = sub.recv().await.unwrap();
+            assert!(
+                matches!(ev, SignalingEvent::AwaitingUser { reason, .. } if reason == "CI on PR #531"),
+                "{tool}: a temporary halt is still a declared halt"
+            );
+        }
+        for (tool, bad) in [
+            ("mark_awaiting_user", json!(5)),
+            ("halt", json!(7200)),
+            ("mark_awaiting_user", json!("soon")),
+        ] {
+            let err = dispatch(
+                req(
+                    "tools/call",
+                    json!({"name": tool, "arguments": {"reason": "CI", "wake_after_secs": bad}}),
+                    2,
+                ),
+                &caller(),
+                &bridge,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, JsonRpcError::INVALID_PARAMS, "{tool} {bad}");
+            assert!(err.message.contains("wake_after_secs"), "{tool}: {}", err.message);
+            assert!(sub.try_recv().is_err(), "{tool}: a refused wait declares no halt");
+        }
+        // `null` is "no wait": an ordinary halt.
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "halt", "arguments": {"reason": "plain", "wake_after_secs": null}}),
+                3,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert!(
+            !v["result"]["content"][0]["text"].as_str().unwrap_or("").contains("TEMPORARY"),
+            "null is an ordinary halt: {v}"
+        );
     }
 
     /// rc3 **P4**: the staleness report is reachable as a tool, and it reports

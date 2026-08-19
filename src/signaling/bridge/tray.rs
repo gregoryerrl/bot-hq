@@ -1310,6 +1310,7 @@ impl SignalingBridge {
         agent: String,
         text: String,
         halt_ring: bool,
+        wake_at: Option<String>,
     ) {
         // **A halt is SESSION state, not a tray row (rc3 D35).** The user:
         // "halt should be complete different, and not even remotely close to
@@ -1329,10 +1330,16 @@ impl SignalingBridge {
         let recorded = {
             let storage = self.storage.lock().await.clone();
             match storage {
-                Some(storage) => match storage
-                    .declare_session_halt(&session_id, &agent, &text)
-                    .await
-                {
+                Some(storage) => match match wake_at.as_deref() {
+                    // A TEMPORARY halt (round 12) carries its wake instant in
+                    // the same slot; the banner counts down to it.
+                    Some(wake) => {
+                        storage
+                            .declare_temporary_session_halt(&session_id, &agent, &text, wake)
+                            .await
+                    }
+                    None => storage.declare_session_halt(&session_id, &agent, &text).await,
+                } {
                     Ok(()) => true,
                     Err(e) => {
                         tracing::warn!(?e, session_id, "declare_session_halt failed");
@@ -1391,8 +1398,188 @@ impl SignalingBridge {
         reason: String,
     ) -> Option<String> {
         let prior = self.pending_halt_prompt(&session_id, &agent).await;
-        self.emit_halt_row(session_id, agent, reason, true).await;
+        self.emit_halt_row(session_id, agent, reason, true, None).await;
         prior
+    }
+
+    /// **A TEMPORARY HALT** (round 12, the user's Q2: "add a temporary halt …
+    /// TEMPORARY HALT 00:03:57"): the same slot, banner and ring stop as
+    /// [`Self::mark_awaiting_user`], plus a wake instant `wake_after` from now.
+    /// The banner counts down to it; when it passes, [`Self::fire_temporary_halt`]
+    /// clears the halt, posts a row saying so and SUMMONS the declarer for a turn
+    /// (the D17 release with a mention) — so an agent waiting on CI, a deploy or
+    /// a cron declares the wait, the UI shows the countdown, and the session
+    /// wakes itself. A user message before the instant cancels it (the release
+    /// clears the slot); a paused session or one with a gate open does not
+    /// wake. Timers are in-memory; [`Self::rearm_temporary_halts`] re-arms them
+    /// at boot.
+    pub async fn mark_temporary_halt(
+        self: &Arc<Self>,
+        session_id: String,
+        agent: String,
+        reason: String,
+        wake_after: std::time::Duration,
+    ) -> Option<String> {
+        let prior = self.pending_halt_prompt(&session_id, &agent).await;
+        let wake_at = (chrono::Utc::now() + chrono::Duration::from_std(wake_after).unwrap_or_default())
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.emit_halt_row(
+            session_id.clone(),
+            agent.clone(),
+            reason,
+            true,
+            Some(wake_at.clone()),
+        )
+        .await;
+        self.arm_temporary_halt(session_id, agent, wake_at);
+        prior
+    }
+
+    /// Spawn the timer for a temporary halt: sleep until `wake_at` (or fire now
+    /// if it is past), then [`Self::fire_temporary_halt`]. Keyed by the instant,
+    /// not the session — a later declaration writes a different instant, and
+    /// the fire re-reads the slot and no-ops on a mismatch, so a replaced halt
+    /// simply lets its old timer expire into nothing.
+    fn arm_temporary_halt(self: &Arc<Self>, session_id: String, agent: String, wake_at: String) {
+        let bridge = Arc::clone(self);
+        let Some(handle) = tokio::runtime::Handle::try_current().ok() else {
+            tracing::warn!(session_id, "temporary halt armed outside a runtime; it will not wake");
+            return;
+        };
+        handle.spawn(async move {
+            let delay = chrono::DateTime::parse_from_rfc3339(&wake_at)
+                .ok()
+                .map(|t| t.with_timezone(&chrono::Utc))
+                .and_then(|t| (t - chrono::Utc::now()).to_std().ok())
+                .unwrap_or_default();
+            tokio::time::sleep(delay).await;
+            bridge.fire_temporary_halt(&session_id, &agent, &wake_at).await;
+        });
+    }
+
+    /// The temporary halt's wake. Re-reads the slot first: if the session's
+    /// `halt_wake_at` is no longer THIS instant (the halt was replaced, or the
+    /// user's message cleared it) nothing happens. A paused session does not
+    /// wake (the pause is the user's). A session with an approval gate pending
+    /// does not wake yet either (EYES F18 — clearing the slot would leave a
+    /// stopped session bannerless): it re-checks every 30 s, up to ten times,
+    /// then leaves the halt standing and says so in a row. Otherwise: a system
+    /// row, the slot cleared, the awaiting flag dropped, and the ring released
+    /// WITH A SUMMONS for the declarer — the next turn is theirs, the rotation
+    /// resumes from where it was (rc3 D17).
+    pub async fn fire_temporary_halt(&self, session_id: &str, agent: &str, wake_at: &str) {
+        let Some(storage) = self.storage.lock().await.clone() else {
+            return;
+        };
+        // No ring registered = the session is not live (closed, or not yet
+        // respawned after a relaunch): nothing to deal to, so the halt stands
+        // and `register_session_sequencer` re-arms it when the ring comes up.
+        if !self.session_sequencer.lock().await.contains_key(session_id) {
+            tracing::debug!(session_id, wake_at, "temporary halt expired on a session with no ring; it re-arms when one registers");
+            return;
+        }
+        let mut gate_waits = 0u32;
+        loop {
+            match storage.session_halt_wake_at(session_id).await {
+                Ok(Some(current)) if current == wake_at => {}
+                _ => {
+                    tracing::debug!(session_id, wake_at, "temporary halt no longer current; no wake");
+                    return;
+                }
+            }
+            let paused = self
+                .session_activity
+                .lock()
+                .await
+                .get(session_id)
+                .and_then(|w| w.upgrade())
+                .is_some_and(|t| t.is_paused());
+            if paused {
+                tracing::debug!(session_id, "temporary halt expired on a PAUSED session; the pause is the user's — no wake");
+                return;
+            }
+            let gates = storage.pending_gate_ids(session_id).await.unwrap_or_default();
+            if gates.is_empty() {
+                break;
+            }
+            gate_waits += 1;
+            if gate_waits > 10 {
+                crate::core::post_system_notice(
+                    &storage,
+                    Some(self),
+                    session_id,
+                    crate::storage::MessageKind::SystemNotice,
+                    format!(
+                        "[System: {agent}'s temporary halt expired, but an approval gate has been                          pending for five minutes — the wake was skipped; the halt stands until                          the gate is answered.]"
+                    ),
+                    None,
+                )
+                .await;
+                return;
+            }
+            tracing::debug!(session_id, gate_waits, "temporary halt expired behind an open gate; re-checking in 30 s");
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+        let declared = storage
+            .session_halt(session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, reason, at)| (reason, at))
+            .unwrap_or_default();
+        let now = crate::storage::now_utc();
+        crate::core::post_system_notice(
+            &storage,
+            Some(self),
+            session_id,
+            crate::storage::MessageKind::SystemNotice,
+            format!(
+                "[System: temporary halt ended — {} (declared {}, woke {now}). {agent} takes the next turn.]",
+                declared.0, declared.1
+            ),
+            None,
+        )
+        .await;
+        match storage.clear_session_halt(session_id).await {
+            Ok(true) => self.notify_halts_cleared(session_id.to_string()),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(?e, session_id, "clear_session_halt failed on a temporary halt's wake"),
+        }
+        self.clear_session_awaiting(session_id).await;
+        let mentions = match storage.participant_by_slug(session_id, agent).await {
+            Ok(Some(p)) => vec![p.id],
+            _ => Vec::new(),
+        };
+        tracing::info!(session_id, agent, wake_at, "temporary halt ended; waking the declarer");
+        self.notify_ring_user_message(session_id, mentions).await;
+    }
+
+    /// Re-arm ONE session's temporary halt when its ring registers (timers are
+    /// in-memory; the session may have been relaunched, respawned or
+    /// reopened): a past instant fires at once, a future one sleeps, no wake
+    /// instant → nothing. Called from `register_session_sequencer`, so a wake
+    /// always has a ring to deal to.
+    pub async fn rearm_temporary_halt_for(self: &Arc<Self>, session_id: &str) {
+        let Some(storage) = self.storage.lock().await.clone() else {
+            return;
+        };
+        let wake_at = match storage.session_halt_wake_at(session_id).await {
+            Ok(Some(w)) => w,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(?e, session_id, "could not read the session's temporary halt");
+                return;
+            }
+        };
+        let agent = storage
+            .session_halt(session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(by, _, _)| by)
+            .unwrap_or_else(|| "system".to_string());
+        tracing::info!(session_id, %wake_at, "re-arming a temporary halt for a ring that came up");
+        self.arm_temporary_halt(session_id.to_string(), agent, wake_at);
     }
 
     /// **A halt the HOST declares under an agent's slug** — the provider-limit
@@ -1433,7 +1620,7 @@ impl SignalingBridge {
     /// Same slot, same banner, same durable row — without the trip through a
     /// participant that does not exist.
     pub async fn declare_host_halt(&self, session_id: &str, reason: String) {
-        self.emit_halt_row(session_id.to_string(), "system".to_string(), reason, false)
+        self.emit_halt_row(session_id.to_string(), "system".to_string(), reason, false, None)
             .await;
     }
 
@@ -1519,7 +1706,7 @@ impl SignalingBridge {
                 }
             }
         }
-        self.emit_halt_row(session_id, agent, body, true).await;
+        self.emit_halt_row(session_id, agent, body, true, None).await;
     }
 }
 
@@ -2187,6 +2374,188 @@ mod tests {
             bridge.redeem_push_nonce("s1", nonce, &refspecs).is_err(),
             "a nonce the run did not redeem is discarded, not left redeemable"
         );
+    }
+
+    /// Round 12 (the user's Q2): a TEMPORARY halt fills the slot with a wake
+    /// instant, and when it passes the bridge clears the halt, posts a row and
+    /// releases the ring WITH A SUMMONS for the declarer — the session wakes
+    /// itself. A halt declared over it, or a user's release before the
+    /// instant, makes the timer a no-op; a pending gate defers the wake; a
+    /// session with no ring leaves the halt for the ring that comes up.
+    #[tokio::test]
+    async fn a_temporary_halt_counts_down_and_wakes_its_declarer() {
+        use crate::core::sequencer::SequencerCommand;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage.ensure_session_roster("s1", 2).await.unwrap();
+        let hands_id = storage.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
+        let awaiting = Arc::new(AtomicBool::new(false));
+        bridge
+            .register_session_awaiting("s1".into(), Arc::clone(&awaiting))
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        let mut events = bridge.subscribe();
+
+        bridge
+            .mark_temporary_halt(
+                "s1".into(),
+                "hands".into(),
+                "CI on PR #531".into(),
+                std::time::Duration::from_millis(200),
+            )
+            .await;
+        // Declared: the slot carries the reason AND the wake instant; the ring
+        // was told to halt (the ordinary halt machinery).
+        let (by, reason, _) = storage.session_halt("s1").await.unwrap().expect("halted");
+        assert_eq!((by.as_str(), reason.as_str()), ("hands", "CI on PR #531"));
+        let wake = storage.session_halt_wake_at("s1").await.unwrap().expect("a wake instant");
+        assert!(wake.ends_with('Z'), "RFC3339-Z: {wake}");
+        assert!(awaiting.load(Ordering::SeqCst), "a temporary halt halts");
+        assert!(matches!(rx.try_recv(), Ok(SequencerCommand::HaltDeclared { .. })));
+
+        // It expires: the slot clears, a row says so, the ring is released with
+        // the declarer summoned, the awaiting flag drops.
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        assert!(storage.session_halt("s1").await.unwrap().is_none(), "the halt ended on its own");
+        assert_eq!(storage.session_halt_wake_at("s1").await.unwrap(), None);
+        assert!(!awaiting.load(Ordering::SeqCst));
+        let released = loop {
+            match rx.try_recv() {
+                Ok(SequencerCommand::UserMessage { mentions }) => break mentions,
+                Ok(_) => continue,
+                Err(_) => panic!("the wake must release the ring"),
+            }
+        };
+        assert_eq!(released, vec![hands_id], "the declarer is summoned for the next turn");
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(
+            rows.iter().any(|m| m.kind == "system_notice" && m.content.contains("temporary halt ended") && m.content.contains("CI on PR #531")),
+            "a row records the wake: {:?}",
+            rows.iter().map(|m| m.content.as_str()).collect::<Vec<_>>()
+        );
+        let mut cleared = false;
+        while let Ok(ev) = events.try_recv() {
+            if matches!(ev, SignalingEvent::HaltsCleared { .. }) {
+                cleared = true;
+            }
+        }
+        assert!(cleared, "the UI is told the halt cleared");
+    }
+
+    #[tokio::test]
+    async fn a_temporary_halt_replaced_or_released_before_its_instant_does_not_wake() {
+        use crate::core::sequencer::SequencerCommand;
+        use std::sync::atomic::AtomicBool;
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage.ensure_session_roster("s1", 2).await.unwrap();
+        bridge
+            .register_session_awaiting("s1".into(), Arc::new(AtomicBool::new(false)))
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+
+        // Replaced: an ordinary halt declared over the temporary one owns the
+        // slot; the old timer finds a different slot and does nothing.
+        bridge
+            .mark_temporary_halt("s1".into(), "hands".into(), "CI".into(), std::time::Duration::from_millis(150))
+            .await;
+        bridge.mark_awaiting_user("s1".into(), "hands".into(), "plain halt, yours".into()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let (_, reason, _) = storage.session_halt("s1").await.unwrap().expect("the ordinary halt stands");
+        assert_eq!(reason, "plain halt, yours");
+        assert!(storage.session_halt_wake_at("s1").await.unwrap().is_none());
+        while let Ok(cmd) = rx.try_recv() {
+            assert!(!matches!(cmd, SequencerCommand::UserMessage { .. }), "no wake: {cmd:?}");
+        }
+
+        // Released by the user before the instant: the slot is empty when the
+        // timer fires — nothing happens.
+        storage.clear_session_halt("s1").await.unwrap();
+        bridge
+            .mark_temporary_halt("s1".into(), "hands".into(), "CI again".into(), std::time::Duration::from_millis(150))
+            .await;
+        storage.clear_session_halt("s1").await.unwrap(); // the user's message, in effect
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(storage.session_halt("s1").await.unwrap().is_none());
+        while let Ok(cmd) = rx.try_recv() {
+            assert!(!matches!(cmd, SequencerCommand::UserMessage { .. }), "no wake after a release: {cmd:?}");
+        }
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(
+            !rows.iter().any(|m| m.content.contains("temporary halt ended")),
+            "no wake row was posted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_temporary_halt_does_not_wake_behind_an_open_gate_or_without_a_ring() {
+        use crate::core::sequencer::SequencerCommand;
+        use std::sync::atomic::AtomicBool;
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage.ensure_session_roster("s1", 2).await.unwrap();
+        bridge
+            .register_session_awaiting("s1".into(), Arc::new(AtomicBool::new(false)))
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        // A gate is pending (a parked Tool-Gate command).
+        bridge
+            .ask_user_choice_inner(
+                "s1".into(),
+                "hands".into(),
+                "Run gated command?".into(),
+                vec!["Approve".into(), "Reject".into()],
+                Some(super::super::ApprovalContext {
+                    kind: crate::policy::ViolationKind::ToolBlocklist,
+                    action: "rm -rf build".into(),
+                    detail: None,
+                    command: None,
+                }),
+                None,
+                false,
+                true,
+            )
+            .await
+            .unwrap();
+        bridge
+            .mark_temporary_halt("s1".into(), "hands".into(), "CI".into(), std::time::Duration::from_millis(100))
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        // Expired behind the gate: the halt stands (the wake is deferred; it
+        // re-checks every 30 s, past this test's patience).
+        assert!(storage.session_halt("s1").await.unwrap().is_some(), "the halt stands behind an open gate");
+        while let Ok(cmd) = rx.try_recv() {
+            assert!(!matches!(cmd, SequencerCommand::UserMessage { .. }), "no wake behind a gate: {cmd:?}");
+        }
+
+        // No ring at all (a closed / not-yet-respawned session): the halt
+        // stands for the ring that comes up.
+        let b2 = SignalingBridge::new();
+        let s2 = crate::storage::Storage::memory().await.unwrap();
+        b2.set_storage(s2.clone()).await;
+        s2.create_session("s9", "t", None).await.unwrap();
+        b2.register_session_awaiting("s9".into(), Arc::new(AtomicBool::new(false))).await;
+        b2.mark_temporary_halt("s9".into(), "hands".into(), "deploy".into(), std::time::Duration::from_millis(100))
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(s2.session_halt("s9").await.unwrap().is_some(), "no ring, no wake — the halt stands");
+        assert!(s2.session_halt_wake_at("s9").await.unwrap().is_some());
+        // …and registering a ring re-arms it: a past instant fires now.
+        let (tx9, mut rx9) = tokio::sync::mpsc::channel(8);
+        b2.register_session_sequencer("s9".into(), tx9).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(s2.session_halt("s9").await.unwrap().is_none(), "the ring that came up took the wake");
+        assert!(matches!(rx9.try_recv(), Ok(SequencerCommand::UserMessage { .. })));
     }
 
     /// A session with no ring registered must not panic or block — the bridge is

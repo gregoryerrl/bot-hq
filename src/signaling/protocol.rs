@@ -178,11 +178,12 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "mark_awaiting_user",
-            description: gated_by("mark_awaiting_user", "Declare the session's HALT: the ring stops where it stands, the session's single halt slot is filled with your reason (a later declaration replaces it), your own in-flight generation is interrupted so the declaration is true, and the user gets the floor. `reason` is the recap the user reads above their input box — say where things stand and what resumes it (a wake time, a command pasted verbatim, a tray answer). Cleared by the user's next message. Use it when the next move is genuinely the user's; a question that blocks nothing is `ask_user_choice`. REFUSED (no halt declared, an error returned) when `reason` reads as waiting on a PEER — a role name as the roster writes it (`HANDS`, `EYES`, `@slug`) or the word `peer` in the same sentence as a wait (waiting/pending/until/blocked/needs … to review) — because waiting on a peer is not waiting on the user; a reason that merely mentions a role, or uses `hands`/`eyes` as English, passes. When a legitimate user-wait must still read that way, declare it through `halt`, which carries no such filter."),
+            description: gated_by("mark_awaiting_user", "Declare the session's HALT: the ring stops where it stands, the session's single halt slot is filled with your reason (a later declaration replaces it), your own in-flight generation is interrupted so the declaration is true, and the user gets the floor. `reason` is the recap the user reads above their input box — say where things stand and what resumes it (a wake time, a command pasted verbatim, a tray answer). Cleared by the user's next message — or, with `wake_after_secs`, a TEMPORARY HALT that the session ends itself: the banner counts down and you are dealt a turn when it expires (waiting on CI / a deploy / a cron is THIS, never a pass). Use it when the next move is genuinely the user's or the wait is on something external; a question that blocks nothing is `ask_user_choice`. REFUSED (no halt declared, an error returned) when `reason` reads as waiting on a PEER — a role name as the roster writes it (`HANDS`, `EYES`, `@slug`) or the word `peer` in the same sentence as a wait (waiting/pending/until/blocked/needs … to review) — because waiting on a peer is not waiting on the user; a reason that merely mentions a role, or uses `hands`/`eyes` as English, passes. When a legitimate user-wait must still read that way, declare it through `halt`, which carries no such filter."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "reason": { "type": "string", "description": "Short reason why we're waiting on the user." }
+                    "reason": { "type": "string", "description": "Short reason why we're waiting on the user." },
+                    "wake_after_secs": { "type": "integer", "minimum": 10, "maximum": 3600, "description": "Optional — makes this a TEMPORARY HALT: you are waiting on something external with a known ETA (CI, a deploy, a cron tick). The banner shows the countdown (`TEMPORARY HALT · wakes in mm:ss`), and when it expires the session wakes YOU — a turn dealt to you with a system row — so nothing waits on the user for an external event. Re-declare if the wait continues. A user message before the instant cancels it; a paused session does not wake." }
                 },
                 "required": ["reason"]
             }),
@@ -214,7 +215,8 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "reason": { "type": "string", "description": "Optional short note on why you're yielding — it fills the session's halt slot and shows in the halt banner above the input (a halt is not a tray row)." }
+                    "reason": { "type": "string", "description": "Optional short note on why you're yielding — it fills the session's halt slot and shows in the halt banner above the input (a halt is not a tray row)." },
+                    "wake_after_secs": { "type": "integer", "minimum": 10, "maximum": 3600, "description": "Optional — a TEMPORARY HALT (same as on mark_awaiting_user): the banner counts down and the session wakes you with a turn when it expires; for waits on something external with a known ETA." }
                 }
             }),
         },

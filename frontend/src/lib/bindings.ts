@@ -1567,8 +1567,8 @@ keyword: string; mode: GateMode }
 /**
  * Which agents pick up a given config surface from `~/.claude` at spawn, and
  * which don't. Drives the per-surface inheritance badges in the UI. This is
- * the canonical mapping derived from `spawn.rs::build_command` behavior: both
- * agents run full claude-code and inherit skills/plugins/hooks/CLAUDE.md
+ * the canonical mapping derived from `spawn.rs::build_command` behavior: every
+ * participant runs full claude-code and inherits skills/plugins/hooks/CLAUDE.md
  * (a read-only participant's tool access is gated server-side, not by skipping inheritance);
  * model/permissions are overridden per-agent by bot-hq.
  */
@@ -2068,7 +2068,12 @@ export type SessionDocumentView = { id: number; session_id: string; slug: string
  * `None` = not halted. One slot by construction; the freshest declaration is
  * the one the user reads.
  */
-export type SessionHaltView = { declared_by: string; reason: string; declared_at: string }
+export type SessionHaltView = { declared_by: string; reason: string; declared_at: string; 
+/**
+ * A TEMPORARY halt's wake instant (RFC3339-Z; round 12) — the banner
+ * counts down to it. `None` = an ordinary halt, until the user's message.
+ */
+wake_at: string | null }
 export type SessionInfo = { id: string; title: string; working_repo_path: string | null; 
 /**
  * Set when the session runs in an isolated git worktree —
@@ -2084,9 +2089,9 @@ base_repo_path: string | null; archived: boolean; created_at: string; closed_at:
 multi_participant: boolean; 
 /**
  * First line preview of the latest text message + its author, for the
- * dashboard Quickview. Both None on the closed-session and external
- * JSON-RPC paths — only the dashboard `list_sessions` command populates
- * them (via `list_active_sessions_with_preview`).
+ * dashboard Quickview. Both None on the closed-session and plugin-API
+ * paths — only the dashboard `list_sessions` command populates them
+ * (via `list_active_sessions_with_preview`).
  */
 last_message: string | null; last_author: string | null }
 export type SessionProjectInfo = { 

@@ -2,6 +2,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import {
   HaltBanner,
+  countdownLabel,
   isApproval,
   isTrayItem,
   type SessionHalt,
@@ -186,6 +187,41 @@ describe("HaltBanner", () => {
     expect(
       screen.getByRole("button", { name: /1 question in the tray/i }),
     ).toBeInTheDocument();
+  });
+
+  it("counts a TEMPORARY halt down, in the user's own shape (round 12)", () => {
+    // The user: "TEMPORARY HALT 00:03:57". A halt with a wake instant shows
+    // the label, the countdown, and that the session resumes on its own; an
+    // ordinary halt keeps the plain HALT header.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-19T12:00:00.000Z"));
+      const { unmount } = render(
+        <HaltBanner
+          halt={halt({ reason: "CI on PR #531", wake_at: "2026-08-19T12:03:57.000Z" })}
+          rows={[]}
+        />,
+      );
+      expect(screen.getByTestId("temporary-halt")).toHaveTextContent("TEMPORARY HALT");
+      expect(screen.getByText(/wakes in 03:57/)).toBeInTheDocument();
+      expect(screen.getByText(/resumes on its own/)).toBeInTheDocument();
+      expect(screen.queryByText(/the session is waiting on you/)).toBeNull();
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+    // Plain halt: no countdown, the old header.
+    render(<HaltBanner halt={halt()} rows={[]} />);
+    expect(screen.getByText(/the session is waiting on you/)).toBeInTheDocument();
+    expect(screen.queryByTestId("temporary-halt")).toBeNull();
+  });
+
+  it("formats the countdown as mm:ss, h:mm:ss past an hour, floored at zero", () => {
+    const t0 = Date.parse("2026-08-19T12:00:00Z");
+    expect(countdownLabel(t0 + 237_000, t0)).toBe("03:57");
+    expect(countdownLabel(t0 + 3_661_000, t0)).toBe("1:01:01");
+    expect(countdownLabel(t0 + 900, t0)).toBe("00:00");
+    expect(countdownLabel(t0 - 5_000, t0)).toBe("00:00");
   });
 
   it("points a halted session at the approval that took its input box", () => {

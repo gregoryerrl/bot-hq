@@ -78,8 +78,9 @@ impl Storage {
         agent: &str,
         reason: &str,
     ) -> Result<()> {
+        // An ordinary halt replaces a temporary one's wake time too: one slot.
         sqlx::query(
-            "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ? WHERE id = ?",
+            "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ?, halt_wake_at = NULL WHERE id = ?",
         )
         .bind(agent)
         .bind(reason)
@@ -90,6 +91,42 @@ impl Storage {
         .with_context(|| format!("declaring halt for session {session_id}"))?;
         Ok(())
     }
+
+    /// A TEMPORARY halt (round 12, migration 0069): the same slot, plus the
+    /// RFC3339-Z instant the host wakes the declarer at. The banner counts
+    /// down to `wake_at`; `clear_session_halt` clears it with the rest.
+    pub async fn declare_temporary_session_halt(
+        &self,
+        session_id: &str,
+        agent: &str,
+        reason: &str,
+        wake_at: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ?, halt_wake_at = ? WHERE id = ?",
+        )
+        .bind(agent)
+        .bind(reason)
+        .bind(now_utc())
+        .bind(wake_at)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("declaring temporary halt for session {session_id}"))?;
+        Ok(())
+    }
+
+    /// The wake instant of the session's TEMPORARY halt, or `None` for no halt
+    /// / an ordinary one.
+    pub async fn session_halt_wake_at(&self, session_id: &str) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT halt_wake_at FROM sessions WHERE id = ?")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|(w,)| w))
+    }
+
 
     /// Persist (or clear) this session's staged message — the Stage slot
     /// (rc3 B1-F11).
@@ -127,7 +164,7 @@ impl Storage {
     /// caller's cue to tell the UI the state changed.
     pub async fn clear_session_halt(&self, session_id: &str) -> Result<bool> {
         let res = sqlx::query(
-            "UPDATE sessions SET halt_declared_by = NULL, halt_reason = NULL,              halt_declared_at = NULL WHERE id = ? AND halt_reason IS NOT NULL",
+            "UPDATE sessions SET halt_declared_by = NULL, halt_reason = NULL,              halt_declared_at = NULL, halt_wake_at = NULL              WHERE id = ? AND halt_reason IS NOT NULL",
         )
         .bind(session_id)
         .execute(&self.pool)
@@ -250,7 +287,8 @@ impl Storage {
     pub async fn reopen_session(&self, id: &str) -> Result<bool> {
         let res = sqlx::query(
             "UPDATE sessions SET closed_at = NULL, archived = 0, \
-                 halt_declared_by = NULL, halt_reason = NULL, halt_declared_at = NULL \
+                 halt_declared_by = NULL, halt_reason = NULL, halt_declared_at = NULL, \
+                 halt_wake_at = NULL \
              WHERE id = ? AND closed_at IS NOT NULL",
         )
         .bind(id)
@@ -711,5 +749,42 @@ mod tests {
         let s = Storage::memory().await.unwrap();
         assert!(s.get_session("emma").await.unwrap().is_none());
         assert!(s.get_agent_config("emma").await.unwrap().is_none());
+    }
+
+    /// Round 12 (migration 0069): a TEMPORARY halt carries its wake instant in
+    /// the same slot; an ordinary halt declared over it drops the instant; the
+    /// clear drops everything; the boot re-arm sees only open sessions.
+    #[tokio::test]
+    async fn a_temporary_halt_carries_a_wake_instant_in_the_slot() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.create_session("s2", "t", None).await.unwrap();
+        assert_eq!(s.session_halt_wake_at("s1").await.unwrap(), None);
+        s.declare_temporary_session_halt("s1", "hands", "CI on #531", "2026-08-19T13:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(
+            s.session_halt_wake_at("s1").await.unwrap().as_deref(),
+            Some("2026-08-19T13:00:00.000Z")
+        );
+        let (by, reason, _) = s.session_halt("s1").await.unwrap().unwrap();
+        assert_eq!((by.as_str(), reason.as_str()), ("hands", "CI on #531"));
+        // The wake instant is read per session, by the ring that comes up.
+        s.declare_temporary_session_halt("s2", "eyes", "deploy", "2026-08-19T13:05:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(
+            s.session_halt_wake_at("s2").await.unwrap().as_deref(),
+            Some("2026-08-19T13:05:00.000Z")
+        );
+        // An ordinary halt over it is one slot: the wake instant goes.
+        s.declare_session_halt("s1", "hands", "plain halt").await.unwrap();
+        assert_eq!(s.session_halt_wake_at("s1").await.unwrap(), None);
+        s.declare_temporary_session_halt("s1", "hands", "again", "2026-08-19T14:00:00.000Z")
+            .await
+            .unwrap();
+        assert!(s.clear_session_halt("s1").await.unwrap());
+        assert_eq!(s.session_halt_wake_at("s1").await.unwrap(), None);
+        assert!(s.session_halt("s1").await.unwrap().is_none());
     }
 }

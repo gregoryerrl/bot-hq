@@ -632,11 +632,16 @@ impl SignalingBridge {
     /// `SequencerCommand::HaltDeclared` was written, documented and tested for
     /// exactly this, and had no production sender until now.
     pub async fn register_session_sequencer(
-        &self,
+        self: &Arc<Self>,
         session_id: String,
         tx: tokio::sync::mpsc::Sender<crate::core::sequencer::SequencerCommand>,
     ) {
-        self.session_sequencer.lock().await.insert(session_id, tx);
+        self.session_sequencer.lock().await.insert(session_id.clone(), tx);
+        // Round 12: a TEMPORARY halt's timer is in-memory. A session that
+        // comes (back) up with a wake instant in its slot — after a relaunch,
+        // a respawn, a reopen — re-arms it here, the moment it has a ring to
+        // deal to: a past instant fires at once, a future one sleeps.
+        self.rearm_temporary_halt_for(&session_id).await;
     }
 
     /// Tell the ring an approval gate opened (`opened = true`) or resolved

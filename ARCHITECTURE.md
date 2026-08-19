@@ -320,6 +320,22 @@ the round cap ends it.
    read after the stash (round 11), not an idle timeout re-armed by other
    commands; it does not run under a pause — the ring's own flag OR the
    activity tracker's latch — and re-arms in full when the pause lifts.
+   **A TEMPORARY halt** (round 12, the user's 2026-08-19 shape: *"HALT;
+   TEMPORARY HALT 00:03:57"*) is the same slot with `halt_wake_at` set
+   (migration 0069): `mark_awaiting_user` / `halt` with `wake_after_secs`
+   (10–3600) — for a wait on something EXTERNAL with an ETA (CI, a deploy),
+   so an AFK user never holds the floor for an event that already happened
+   (`s-1c29c521`: two agents halted on CI, nobody awake when it finished).
+   The banner counts down (`HaltBanner`, `TEMPORARY HALT · wakes in mm:ss`);
+   at the instant the bridge (`fire_temporary_halt`) re-reads the slot — a
+   newer halt, an answer or a close before then cancels the wake — skips
+   under a pause, defers behind an open gate (re-checks every 30 s, up to 10,
+   then gives up with a notice), then posts a system row, clears the slot and
+   SUMMONS the declarer (`notify_ring_user_message` with that one id) for a
+   turn. Armed in-process by the declaring tool and RE-ARMED from the slot
+   when a ring registers (`register_session_sequencer` → `rearm_temporary_halt_for`),
+   so a relaunch or lazy respawn honours a pending wake without a boot-time
+   sweep over ringless sessions.
 2b. **The all-pass lap** — a full lap in which every dealt participant PASSED
    yields to the user with a visible notice (rc3 D27, `announce_all_passed`):
    nobody had anything to add, and the only party who can change that is the
@@ -940,7 +956,8 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   **`ipav_phase`** (0063; see "IPAV state") beside **`phase_epoch`** (0062), a
   monotonic counter bumped on every transition, which is what stops a stale
   phase vote matching again after the phase runs backward and returns.
-  `halt_*` (0054) is the single halt slot; `staged_message` (0058) the
+  `halt_*` (0054) + `halt_wake_at` (0069, a TEMPORARY halt's wake instant) is
+  the single halt slot; `staged_message` (0058) the
   durable half of the Stage toggle; `current_turn_participant_id` and
   `round_number` (0044) are written by the ring and read by nothing in
   production (tests only) — cleared on close since round 7.

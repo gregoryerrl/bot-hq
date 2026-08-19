@@ -47,6 +47,9 @@ pub struct SessionHaltView {
     pub declared_by: String,
     pub reason: String,
     pub declared_at: String,
+    /// A TEMPORARY halt's wake instant (RFC3339-Z; round 12) — the banner
+    /// counts down to it. `None` = an ordinary halt, until the user's message.
+    pub wake_at: Option<String>,
 }
 
 #[tauri::command]
@@ -58,13 +61,16 @@ pub async fn get_session_halt(
     let Some(storage) = bridge.storage_handle().await else {
         return Ok(None);
     };
-    Ok(storage.session_halt(&session_id).await?.map(
-        |(declared_by, reason, declared_at)| SessionHaltView {
-            declared_by,
-            reason,
-            declared_at,
-        },
-    ))
+    let Some((declared_by, reason, declared_at)) = storage.session_halt(&session_id).await? else {
+        return Ok(None);
+    };
+    let wake_at = storage.session_halt_wake_at(&session_id).await?;
+    Ok(Some(SessionHaltView {
+        declared_by,
+        reason,
+        declared_at,
+        wake_at,
+    }))
 }
 
 /// One staged tray pick, as the composer's Send hands it over (rc3 D34).

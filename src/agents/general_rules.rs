@@ -95,7 +95,7 @@ If you receive the **idle nudge** (\"[System: this session went idle with no que
 
 **The nudge is not a mandate to invent work** (user clarification, 2026-08-05, same day the watchdog shipped). Continue only work the user already directed. If no user-given direction exists, do NOT self-assign a task, resume banked work uninvited, or manufacture activity to look busy — the correct declaration IS the question. Ground it: `ask_user_choice(\"Which direction?\", …)` when real options exist (backlog items, close), with your recommendation; `halt(\"Task complete — which direction?\")` when even a menu would be guesswork. Inventing a mandate to satisfy a nudge is the fabricated-instruction failure mode (2026-05-29) wearing a new trigger.
 
-**Every stop is a HALT, and the recap is the state** (the user, 2026-08-15: \"HALT means the floor is the user's\"). While you hold a turn you are working; the moment you stop — for ANY reason — declare the halt with a recap naming why and what resumes it: *waiting for the 03:15Z sweep (timer wakes me 03:42Z)* · *please run this command on Laravel Cloud (pasted below)* · *waiting on your tray answers* · *task done — next-move suggestions in the tray* · *provider limit reached*. Two rules make it work. **(1) The ring stays frozen until the USER's next message** — a self-wake (a background timer, a finished watcher) may post findings and RE-declare a fresher halt, but it cannot start a lap; if what it found needs peers, say so in the recap and wait for the user. **(2) An external-wait halt ALWAYS names its wake time** — nothing expires a halt, so the timestamp is what lets the user spot a dead timer at a glance (\"wakes 03:42Z\" read at 04:10 is its own alarm). The all-pass yield, the round cap and consensus fill the halt slot mechanically as backstops with generic reasons — yours is better: declare before drifting into a lap of passes. (`declare_working` and the WORKING badge are RETIRED: \"working\" is holding a turn, nothing else.)
+**Every stop is a HALT, and the recap is the state** (the user, 2026-08-15: \"HALT means the floor is the user's\"). While you hold a turn you are working; the moment you stop — for ANY reason — declare the halt with a recap naming why and what resumes it: *please run this command on Laravel Cloud (pasted below)* · *waiting on your tray answers* · *task done — next-move suggestions in the tray* · *provider limit reached*. **A wait on something EXTERNAL with a known ETA — CI, a deploy, a cron tick — is a TEMPORARY HALT: `mark_awaiting_user(reason, wake_after_secs)` (or `halt`, 10–3600 s).** The banner shows the countdown (`TEMPORARY HALT · wakes in mm:ss`) and the session wakes YOU when it expires — a turn dealt to you with a system row — so nothing waits on the user for an external event; re-declare if the wait continues (the user, 2026-08-19: \"Imagine if I was AFK for 2 hours but the session is still HALTED even if the CI got completed after a few minutes\"). Never pass or sit idle on such a wait. Two rules make the rest work. **(1) The ring stays frozen until the USER's next message or your own temporary halt's expiry** — a claude-code background task re-invoking you (a finished watcher) may post findings and RE-declare a fresher halt, but it cannot start a lap; if what it found needs peers, declare a short temporary halt or say so in the recap. **(2) An external-wait halt ALWAYS names its wake time** — pass it as `wake_after_secs` so the countdown is the timestamp, not prose. The all-pass yield, the round cap and consensus fill the halt slot mechanically as backstops with generic reasons — yours is better: declare before drifting into a lap of passes. (`declare_working` and the WORKING badge are RETIRED: \"working\" is holding a turn, nothing else.)
 
 ## Gated Bash commands (Tool Gate)
 
@@ -352,7 +352,17 @@ mod tests {
         );
         assert!(
             GENERAL_RULES.contains("it cannot start a lap"),
-            "self-wakes post and re-declare; only the user releases the ring"
+            "self-wakes post and re-declare; the user or a temporary halt's expiry releases the ring"
+        );
+        // Round 12: an external wait is a TEMPORARY HALT the session ends
+        // itself — the layer must teach the knob, not only the timestamp.
+        assert!(
+            GENERAL_RULES.contains("is a TEMPORARY HALT: `mark_awaiting_user(reason, wake_after_secs)`"),
+            "the layer must teach the temporary halt for external waits"
+        );
+        assert!(
+            GENERAL_RULES.contains("Never pass or sit idle on such a wait"),
+            "and that a pass is not the answer to a CI wait"
         );
         assert!(
             !GENERAL_RULES.contains("declare_working("),

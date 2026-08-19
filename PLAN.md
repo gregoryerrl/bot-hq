@@ -262,17 +262,26 @@ should pick unilaterally:
 - **Solo sessions for non-adversarial tasks** — already possible; a
   one-participant roster runs without review laps.
 
-### Park on external signal — RESOLVED by the halt model (2026-08-15)
+### Park on external signal — RESOLVED twice: the halt model (2026-08-15), then the TEMPORARY HALT (2026-08-19)
 
-Raised 2026-08-14 after `s-f6a441ff` burned pass-laps watching CI. Answered
-by the user's state-model decree, not by new machinery: **every stop is a
-HALT, and an external wait is a halt whose recap names the signal and the
-wake time** ("waiting for the 03:15Z sweep — timer wakes me 03:42Z"). The
-self-wake is the ghost mechanism claude-code already provides (a background
-timer/watcher re-invokes its subprocess; it posts findings and re-declares a
-fresher halt), and the ring stays frozen until the USER's message — release
-is theirs by decree, so there is no auto-resuming park state to design.
-Lived end-to-end in `s-d6352684` the same night. Nothing left to build.
+Raised 2026-08-14 after `s-f6a441ff` burned pass-laps watching CI. First
+answered by the user's state-model decree: **every stop is a HALT, and an
+external wait is a halt whose recap names the signal and the wake time**
+("waiting for the 03:15Z sweep — timer wakes me 03:42Z"), the self-wake being
+whatever claude-code background task re-invokes the subprocess, the ring frozen
+until the USER's message. Lived in `s-d6352684` — and then `s-1c29c521`
+(round 12's dissection) showed the cost of a wake that cannot lift the ring:
+two agents halted "waiting for CI" with nobody awake to notice CI finish, the
+user's `issues.md`: *"Imagine if I was AFK for 2 hours but the session is still
+HALTED even if the CI got completed."* The user's answer (2026-08-19, tray):
+*"add a temporary halt … and that's where we can add the self-wake … (HALT;
+TEMPORARY HALT 00:03:57)"*. Built as round-12 Q2: `mark_awaiting_user` /
+`halt` take `wake_after_secs` (10–3600); the halt slot carries `halt_wake_at`
+(migration 0069); the banner reads `TEMPORARY HALT · wakes in mm:ss`; when the
+instant arrives the bridge clears the slot, posts a system row and SUMMONS the
+declarer for one turn (deferred while a gate is open; re-armed when the ring
+re-registers after a relaunch; a newer halt or an answer before the instant
+cancels it). The user's answer still cuts it short. Nothing left to build.
 
 ### Release-autonomy gate profile (raised 2026-08-14, release-scoped)
 

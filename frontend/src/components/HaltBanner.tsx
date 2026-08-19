@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "../lib/cn";
+import { parseUtcMs } from "../lib/time";
 import { authorColorClass } from "./authorColor";
 
 /** One pending tray row, as `list_session_tray` returns it. */
@@ -138,7 +139,37 @@ export type SessionHalt = {
   declared_by: string;
   reason: string;
   declared_at: string;
+  /** A TEMPORARY halt's wake instant (RFC3339-Z; round 12). When set, the
+   *  banner counts down to it and the session wakes the declarer at zero —
+   *  the user's own words: "TEMPORARY HALT 00:03:57". Null/absent = an
+   *  ordinary halt, until the user's next message. */
+  wake_at?: string | null;
 };
+
+/** `mm:ss` (or `h:mm:ss` past an hour) until `wakeAtMs`, floored at zero. */
+export function countdownLabel(wakeAtMs: number, nowMs: number): string {
+  const total = Math.max(0, Math.floor((wakeAtMs - nowMs) / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mm = String(m).padStart(2, "0");
+  const ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+/** A one-second tick while a temporary halt is on screen, so the countdown
+ *  moves without a store. Returns the current time in ms; `null` when there is
+ *  nothing to count down to (no interval runs). */
+function useCountdown(wakeAt: string | null | undefined): number | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!wakeAt) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [wakeAt]);
+  return wakeAt ? now : null;
+}
 
 export function HaltBanner({
   halt,
@@ -161,6 +192,9 @@ export function HaltBanner({
   onOpenTray?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const wakeAt = halt && typeof halt.reason === "string" ? (halt.wake_at ?? null) : null;
+  const now = useCountdown(wakeAt);
+  const wakeAtMs = wakeAt ? parseUtcMs(wakeAt) : null;
   const pending = rows.filter((r) => r.status === "pending");
   const approvals = pending.filter(isApproval);
   const choices = pending.filter(isTrayItem);
@@ -221,14 +255,35 @@ export function HaltBanner({
       className="border-b border-outline-variant bg-surface-container-low px-3 py-2"
     >
       <div className="flex items-baseline gap-2">
-        <span className="font-label-caps text-label-caps text-primary">
-          ⏸ HALT
-        </span>
-        <span className="text-xs text-on-surface-variant">
-          {/* rc3 D35 made "waiting on you" literal: a declared halt stops the
-              ring where it stands — nobody keeps working under this header. */}
-          the session is waiting on you
-        </span>
+        {wakeAtMs !== null && now !== null ? (
+          <>
+            {/* Round 12 — the user's words: "TEMPORARY HALT 00:03:57". The
+                session ends this halt itself: at zero the declarer is dealt a
+                turn. The user may still answer and cut it short. */}
+            <span
+              className="font-label-caps text-label-caps text-primary"
+              data-testid="temporary-halt"
+            >
+              ⏸ TEMPORARY HALT
+            </span>
+            <span className="text-xs text-on-surface-variant">
+              {wakeAtMs - now > 0
+                ? `wakes in ${countdownLabel(wakeAtMs, now)} — the session resumes on its own; answer to cut it short`
+                : "waking…"}
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="font-label-caps text-label-caps text-primary">
+              ⏸ HALT
+            </span>
+            <span className="text-xs text-on-surface-variant">
+              {/* rc3 D35 made "waiting on you" literal: a declared halt stops the
+                  ring where it stands — nobody keeps working under this header. */}
+              the session is waiting on you
+            </span>
+          </>
+        )}
       </div>
       {/* ONE halt line, because the session holds exactly one halt slot (rc3
           D35) — a later declaration replaces the earlier, so the freshest recap
