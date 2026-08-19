@@ -43,7 +43,13 @@ pub fn is_gate_options(options_json: Option<&str>) -> bool {
 /// slot choice — goes through this pair, so a gate cannot be recognised on one
 /// path and missed on another (which reads as a stuck latch).
 pub fn is_gate_row(kind: &str, options_json: Option<&str>) -> bool {
-    kind == QuestionKind::Approval.as_str() || is_gate_options(options_json)
+    // The menu fallback is for the LEGACY kind only (round 12, EYES F15): a
+    // `request` row may carry the canonical ["Approve","Reject"] menu — the
+    // shape the descriptor's convention produces — and is still a tray item;
+    // testing the menu independently of kind dragged it into the gate slot
+    // as a gate that blocked nothing.
+    kind == QuestionKind::Approval.as_str()
+        || (kind == QuestionKind::Choice.as_str() && is_gate_options(options_json))
 }
 
 impl Storage {
@@ -436,8 +442,13 @@ mod tests {
         assert_eq!(kind_row.options_json.as_deref(), Some(GATE_OPTIONS_JSON));
 
         assert!(is_gate_row("approval", None), "the kind alone is enough");
-        assert!(is_gate_row("choice", Some(GATE_OPTIONS_JSON)), "the legacy menu alone is enough");
+        assert!(is_gate_row("choice", Some(GATE_OPTIONS_JSON)), "the legacy menu on a legacy row is enough");
         assert!(!is_gate_row("choice", Some(r#"["A","B"]"#)), "a question is neither");
+        // Round 12 (EYES F15): an agent's REQUEST is a tray item whatever its
+        // menu — the canonical pair on a `request` row must not read as a gate.
+        assert!(!is_gate_row("request", Some(GATE_OPTIONS_JSON)), "a request with the canonical menu is not a gate");
+        assert!(!is_gate_row("request", Some(r#"["Approve — run it","Deny — wait"]"#)));
+        assert_eq!(QuestionKind::Request.as_str(), "request");
 
         let mut ids = s.pending_gate_ids("s-1").await.unwrap();
         ids.sort();

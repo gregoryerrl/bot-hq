@@ -27,7 +27,21 @@ impl SignalingBridge {
         session_id: String,
         agent: String,
         command: String,
+        require_approval: bool,
     ) -> Result<String> {
+        // **`require_approval` parks unconditionally** (round 12, EYES F19):
+        // the keyword resolve below runs an unmatched / auto_allow command
+        // outright, which is right for a command the Tool Gate blocked and
+        // wrong for one the AGENT decided must not run unapproved — a prod
+        // query on a machine with no prod-host keyword configured would have
+        // executed with no approval at all. This is the same unconditional
+        // park the `/hooks/tool-gate` route uses, for the same reason.
+        if require_approval {
+            let (gate_id, existing) = self
+                .park_gated_command(&session_id, &agent, &command)
+                .await?;
+            return Ok(parked_gate_text(&gate_id, &command, existing));
+        }
         // Two-tier resolve (session snapshot → global fallback) — previously
         // this read only the global list, so a gear-tab session override was
         // invisible to a direct action_gate call.
@@ -101,6 +115,7 @@ impl SignalingBridge {
                 }),
                 None,
                 false,
+                true,
             )
             .await?;
         let gate_id = serde_json::from_str::<serde_json::Value>(&parked)
@@ -335,11 +350,45 @@ mod tests {
         )
         .await;
         let out = bridge
-            .action_gate("s1".into(), "hands".into(), "echo hi-there".into())
+            .action_gate("s1".into(), "hands".into(), "echo hi-there".into(), false)
             .await
             .unwrap();
         assert!(out.contains("hi-there"), "out: {out}");
         assert!(out.contains("exit 0"), "out: {out}");
+    }
+
+    /// Round 12 (EYES F19): `require_approval` parks whatever the keyword
+    /// list says — the agent's own "this must not run unapproved" (the prod
+    /// rule). With NO keyword configured an unmatched command would otherwise
+    /// run outright; here it parks, latches the ring and executes nothing
+    /// until the user's Approve.
+    #[tokio::test]
+    async fn require_approval_parks_with_no_keyword_and_runs_nothing() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        let marker = repo.path().join("ran.txt");
+        let cmd = format!("touch {}", marker.display());
+        let out = bridge
+            .action_gate("s1".into(), "hands".into(), cmd.clone(), true)
+            .await
+            .unwrap();
+        assert!(out.contains("PARKED") || out.contains("parked"), "parked, not run: {out}");
+        assert!(!marker.exists(), "nothing executed before the user's Approve");
+        assert!(
+            matches!(rx.try_recv(), Ok(crate::core::sequencer::SequencerCommand::GateOpened { .. })),
+            "a forced park is a real gate — the ring latches"
+        );
+        // The same command without the flag (no keyword) runs at once — the
+        // default the Tool-Gate route relies on is unchanged.
+        let out = bridge
+            .action_gate("s1".into(), "hands".into(), cmd, false)
+            .await
+            .unwrap();
+        assert!(out.contains("exit 0"), "{out}");
+        assert!(marker.exists());
     }
 
     #[tokio::test]
@@ -348,7 +397,7 @@ mod tests {
         let repo = tempdir().unwrap();
         let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
         let out = bridge
-            .action_gate("s1".into(), "hands".into(), "echo loose".into())
+            .action_gate("s1".into(), "hands".into(), "echo loose".into(), false)
             .await
             .unwrap();
         assert!(out.contains("loose"), "out: {out}");
@@ -364,7 +413,7 @@ mod tests {
         bridge.set_storage(storage.clone()).await;
         storage.create_session("s-norepo", "t", None).await.unwrap();
         let err = bridge
-            .action_gate("s-norepo".into(), "hands".into(), "echo x".into())
+            .action_gate("s-norepo".into(), "hands".into(), "echo x".into(), false)
             .await
             .unwrap_err();
         assert!(
@@ -388,7 +437,7 @@ mod tests {
         .await;
         // Park contract: the call returns immediately with a gate_id.
         let parked = bridge
-            .action_gate("s1".into(), "hands".into(), cmd)
+            .action_gate("s1".into(), "hands".into(), cmd, false)
             .await
             .unwrap();
         assert!(parked.contains("parked"), "got: {parked}");
@@ -435,7 +484,7 @@ mod tests {
             )
             .await;
             let parked = bridge
-                .action_gate("s1".into(), "hands".into(), cmd)
+                .action_gate("s1".into(), "hands".into(), cmd, false)
                 .await
                 .unwrap();
             let cid = parked
@@ -487,7 +536,7 @@ mod tests {
         )
         .await;
         let parked = bridge
-            .action_gate("s1".into(), "hands".into(), "touch nothing".into())
+            .action_gate("s1".into(), "hands".into(), "touch nothing".into(), false)
             .await
             .unwrap();
         let cid = parked
@@ -521,7 +570,7 @@ mod tests {
         .await;
         // Park contract: the call returns immediately with a gate_id.
         let parked = bridge
-            .action_gate("s1".into(), "hands".into(), cmd)
+            .action_gate("s1".into(), "hands".into(), cmd, false)
             .await
             .unwrap();
         assert!(parked.contains("parked"), "got: {parked}");
@@ -641,7 +690,7 @@ mod tests {
         .await;
         let mut sub = bridge.subscribe();
         let b2 = Arc::clone(&bridge);
-        let call = tokio::spawn(async move { b2.action_gate("s1".into(), "hands".into(), cmd).await });
+        let call = tokio::spawn(async move { b2.action_gate("s1".into(), "hands".into(), cmd, false).await });
         let cid = loop {
             match sub.recv().await.unwrap() {
                 SignalingEvent::PendingChoice(p) => break p.choice_id,
@@ -938,7 +987,7 @@ mod tests {
         .await;
 
         let first = bridge
-            .action_gate("s1".into(), "hands".into(), "echo hi".into())
+            .action_gate("s1".into(), "hands".into(), "echo hi".into(), false)
             .await
             .unwrap();
         assert!(first.contains("parked for the user's approval"), "got: {first}");
@@ -956,7 +1005,7 @@ mod tests {
 
         // Identical command re-parked → the SAME gate, flagged as existing.
         let dup = bridge
-            .action_gate("s1".into(), "hands".into(), "echo hi".into())
+            .action_gate("s1".into(), "hands".into(), "echo hi".into(), false)
             .await
             .unwrap();
         assert!(dup.contains("ALREADY parked"), "got: {dup}");
@@ -980,7 +1029,7 @@ mod tests {
         // A rejected re-fire parks FRESH (pending-only dedupe): reject the new
         // gate and confirm its status carries the user's reasoning.
         let refire = bridge
-            .action_gate("s1".into(), "hands".into(), "echo hi".into())
+            .action_gate("s1".into(), "hands".into(), "echo hi".into(), false)
             .await
             .unwrap();
         assert!(refire.contains("parked for the user's approval"), "post-resolve re-fire is a fresh gate: {refire}");
@@ -1017,7 +1066,7 @@ mod tests {
         .await;
 
         let parked = bridge
-            .action_gate("s1".into(), "hands".into(), cmd.clone())
+            .action_gate("s1".into(), "hands".into(), cmd.clone(), false)
             .await
             .unwrap();
         let gate_id = parked
@@ -1042,7 +1091,7 @@ mod tests {
         let marker2 = repo.path().join("old.txt");
         let cmd2 = format!("touch {}", marker2.display());
         let parked2 = bridge
-            .action_gate("s1".into(), "hands".into(), cmd2.clone())
+            .action_gate("s1".into(), "hands".into(), cmd2.clone(), false)
             .await
             .unwrap();
         let gate_id2 = parked2

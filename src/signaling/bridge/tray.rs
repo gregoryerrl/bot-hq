@@ -175,7 +175,7 @@ impl SignalingBridge {
             .auto_supersede_prior_pending(&session_id, &agent, &question)
             .await;
         self.ask_user_choice_inner(
-            session_id, agent, question, options, None, supersedes_id, false,
+            session_id, agent, question, options, None, supersedes_id, false, false,
         )
         .await
     }
@@ -199,16 +199,21 @@ impl SignalingBridge {
         options: Vec<String>,
         ctx: ApprovalContext,
     ) -> Result<String> {
-        self.request_approval_inner(session_id, agent, question, options, ctx, true)
+        // A host GATE: it blocks the session (latch + gate slot).
+        self.request_approval_inner(session_id, agent, question, options, ctx, true, true)
             .await
     }
 
-    /// Policy-initiated approval request, PARKED — the agent-facing path.
-    ///
-    /// Same violation-recording machinery as [`Self::request_approval`], but
-    /// returns the `{"status":"parked","choice_id":…}` acknowledgment at once
-    /// and delivers the pick out-of-band: the contract `ask_user_choice` and
-    /// `action_gate` already use.
+    /// An AGENT's approval request, PARKED — the agent-facing path, and since
+    /// round 12 a TRAY item, not a gate (the user's split: "request_approval
+    /// is tray parkable, approval_gates are session blockers"). Same
+    /// violation-recording machinery as [`Self::request_approval`], any menu
+    /// (the agent's own labels), returns the `{"status":"parked","choice_id":…}`
+    /// acknowledgment at once and delivers the pick out-of-band as a user row
+    /// — exactly like `ask_user_choice`, which is what it now is plus an audit
+    /// record. It latches NOTHING: the session keeps working and the agent
+    /// waits for the answer row before acting. The host's gates (`action_gate`,
+    /// the push hook, the reviewer-down override) are the session blockers.
     pub async fn request_approval_parked(
         &self,
         session_id: String,
@@ -217,12 +222,13 @@ impl SignalingBridge {
         options: Vec<String>,
         ctx: ApprovalContext,
     ) -> Result<String> {
-        self.request_approval_inner(session_id, agent, question, options, ctx, false)
+        self.request_approval_inner(session_id, agent, question, options, ctx, false, false)
             .await
     }
 
-    /// Shared body of the two entry points above. `blocking` is the ONLY
-    /// difference between them — see their docs for which caller gets which.
+    /// Shared body of the two entry points above. `blocking` and `gate` are
+    /// the differences between them — see their docs for which caller gets
+    /// which: the hook route blocks AND gates; the agent tool parks a request.
     async fn request_approval_inner(
         &self,
         session_id: String,
@@ -231,6 +237,7 @@ impl SignalingBridge {
         options: Vec<String>,
         ctx: ApprovalContext,
         blocking: bool,
+        gate: bool,
     ) -> Result<String> {
         let supersedes_id = self
             .auto_supersede_prior_pending(&session_id, &agent, &question)
@@ -243,6 +250,7 @@ impl SignalingBridge {
             Some(ctx),
             supersedes_id,
             blocking,
+            gate,
         )
         .await
     }
@@ -331,6 +339,7 @@ impl SignalingBridge {
             None,
             stale_internal_id,
             false,
+            false,
         )
         .await
     }
@@ -403,6 +412,12 @@ impl SignalingBridge {
         // park and return immediately (ask_user_choice / supersede); the answer
         // arrives out-of-band. See the branch at the end of this fn.
         blocking: bool,
+        // `true` = a session-blocking GATE (the host's: a Tool-Gate park, the
+        // push hook, the reviewer-down override): `kind = approval`, the ring
+        // latches, the gate slot renders it. `false` with an approval context
+        // = an agent's `request_approval` (round 12): `kind = request`, a tray
+        // item, audited, latching nothing. Ignored when `approval` is None.
+        gate: bool,
     ) -> Result<String> {
         let choice_id = Uuid::new_v4().to_string();
         // Persist the command for an action_gate (ToolBlocklist) approval so it
@@ -413,8 +428,12 @@ impl SignalingBridge {
         // the late approve whose hook has died.
         let command_text = approval.as_ref().and_then(executable_command);
         // Captured before `approval` moves into the park below: the gate latch
-        // keys on this (rc3 D35).
+        // keys on this (rc3 D35) — AND on `gate` (round 12): an approval
+        // context makes the row AUDITED; `gate` makes it a BLOCKER. The host's
+        // gates pass true; an agent's `request_approval` passes false and
+        // parks a `request` row in the tray.
         let is_approval = approval.is_some();
+        let is_gate = is_approval && gate;
         let (tx, rx) = oneshot::channel::<String>();
         let choice = PendingChoice {
             choice_id: choice_id.clone(),
@@ -429,6 +448,7 @@ impl SignalingBridge {
             Parked {
                 tx,
                 choice: choice.clone(),
+                gate: is_gate,
             },
         );
 
@@ -449,8 +469,12 @@ impl SignalingBridge {
         // menu is the one-click Approve/Reject gate, a custom menu shows its
         // own labels there. Readers still accept the pre-round-8 shape
         // (`choice` + gate menu) through `is_gate_row`.
-        let kind = if is_approval {
+        // Round 12: an agent's `request_approval` is a `request` — audited
+        // like an approval, parked like a question, latching nothing.
+        let kind = if is_gate {
             crate::storage::QuestionKind::Approval
+        } else if is_approval {
+            crate::storage::QuestionKind::Request
         } else {
             crate::storage::QuestionKind::Choice
         };
@@ -479,7 +503,10 @@ impl SignalingBridge {
         //   parked gate: the ring never latched, the session never stopped,
         //   and the user never got the floor. The asker's CURRENT turn is not
         //   cut either way; the latch stops the next deal.
-        if is_approval {
+        // - An agent's REQUEST (round 12) parks like a question: no awaiting
+        //   flag, no latch — the user's split between "tray parkable" and
+        //   "session blockers".
+        if is_gate {
             self.set_session_awaiting(&session_id, &agent, false).await;
             self.notify_ring_gate(&session_id, &choice_id, true).await;
         }
@@ -884,7 +911,7 @@ impl SignalingBridge {
                                 None => None,
                             }
                         };
-                        let is_gate = p.choice.approval.is_some();
+                        let is_gate = p.gate;
                         Ok(self
                             .deliver_oob(
                                 choice_id,
@@ -941,7 +968,10 @@ impl SignalingBridge {
                 // `gate_verdict` for the host's canonical menu, the label
                 // mapper for an agent's own menu (`request_approval`), which
                 // `gate_verdict` audited as Denied on an approving pick.
-                if flipped && crate::storage::is_gate_row(&q.kind, q.options_json.as_deref()) {
+                let is_request = q.kind == crate::storage::QuestionKind::Request.as_str();
+                if flipped
+                    && (is_request || crate::storage::is_gate_row(&q.kind, q.options_json.as_deref()))
+                {
                     if let Some(log) = self.violations.as_ref() {
                         let (kind, action) = match q.command_text.as_deref() {
                             // A push gate's row carries its rebuilt `git push`
@@ -1702,6 +1732,7 @@ mod tests {
                     }),
                     None,
                     true,
+                    true,
                 )
                 .await;
         });
@@ -1730,6 +1761,7 @@ mod tests {
                 }),
                 None,
                 false,
+                true,
             )
             .await;
         assert!(
@@ -1755,72 +1787,77 @@ mod tests {
         );
     }
 
-    /// **The latch and the lift read the same marker** (round 11). A
-    /// `request_approval` carries the agent's OWN menu — the tool schema even
-    /// suggests one starting "Approve" and one "Deny" — and it must latch the
-    /// ring (D35: an approval halts) AND lift it when answered. Before this the
-    /// insert stamped `kind = approval` only for the exact `["Approve","Reject"]`
-    /// menu while the latch fired on the approval context alone; every lift path
-    /// (`resolve`, `withdraw`, the respawn reseed) keyed on `is_gate_row`, so a
-    /// custom-labelled approval parked the ring for the process lifetime. Both
-    /// older latch tests use the canonical menu, which is why nothing caught it.
+    /// **An agent's `request_approval` is a TRAY item** (round 12 — the user's
+    /// split: "request_approval is tray parkable, approval_gates are session
+    /// blockers"). It carries the agent's OWN menu — here the canonical pair,
+    /// the shape the descriptor's convention produces — parks a `request` row,
+    /// latches NOTHING (no `GateOpened`, no awaiting flag), and the pick comes
+    /// back as the agent's label, audited. (Round 11 had made the same call
+    /// latch and render as a gate — "a custom-labelled approval latched a gate
+    /// nothing could lift" — which is the behaviour the user reported as issue
+    /// #1: a question on the input box. The host's gates keep the latch:
+    /// `any_approval_opens_a_gate_blocking_or_parked`.)
     #[tokio::test]
-    async fn a_custom_menu_approval_lifts_the_gate_it_latched() {
-        use crate::core::sequencer::SequencerCommand;
-        use std::sync::atomic::AtomicBool;
+    async fn an_agents_request_parks_in_the_tray_and_latches_nothing() {
+        use std::sync::atomic::{AtomicBool, Ordering};
         let bridge = SignalingBridge::new();
         let storage = crate::storage::Storage::memory().await.unwrap();
         bridge.set_storage(storage.clone()).await;
         storage.create_session("s1", "t", None).await.unwrap();
+        let awaiting = Arc::new(AtomicBool::new(false));
         bridge
-            .register_session_awaiting("s1".into(), Arc::new(AtomicBool::new(false)))
+            .register_session_awaiting("s1".into(), Arc::clone(&awaiting))
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         bridge.register_session_sequencer("s1".into(), tx).await;
 
-        let ack = bridge
-            .request_approval_parked(
-                "s1".into(),
-                "hands".into(),
-                "Query prod read-only?".into(),
-                vec!["Approve — read only".into(), "Deny with reason".into()],
-                super::super::ApprovalContext {
-                    kind: crate::policy::ViolationKind::PerAction,
-                    action: "psql -h prod …".into(),
-                    detail: None,
-                    command: None,
-                },
-            )
-            .await
-            .unwrap();
-        let v: serde_json::Value = serde_json::from_str(&ack).unwrap();
-        let choice_id = v["choice_id"].as_str().unwrap().to_string();
-        assert!(
-            matches!(rx.try_recv(), Ok(SequencerCommand::GateOpened { .. })),
-            "an approval with a custom menu still latches the ring"
-        );
-        // The durable row says what it is: policy-initiated, so a gate — the
-        // marker every lift path reads.
-        let row = storage.get_tray_entry(&choice_id).await.unwrap().unwrap();
-        assert_eq!(row.kind, "approval", "the row carries the gate marker, not the menu");
-        assert!(
-            crate::storage::is_gate_row(&row.kind, row.options_json.as_deref()),
-            "is_gate_row must recognise the row the latch was opened for"
-        );
-
-        // The user answers with one of the agent's OWN labels.
-        bridge
-            .resolve_choice(&choice_id, "Approve — read only".into())
-            .await
-            .unwrap();
-        assert!(
-            matches!(rx.try_recv(), Ok(SequencerCommand::GateResolved { .. })),
-            "the answer must LIFT the latch it opened — otherwise the ring is parked \
-             until the process restarts"
-        );
-        // And the pick recorded is the label the agent offered, untouched.
-        let row = storage.get_tray_entry(&choice_id).await.unwrap().unwrap();
-        assert_eq!(row.picked_option.as_deref(), Some("Approve — read only"));
+        for (prompt, menu) in [
+            ("Commit the #494 work?", vec!["Approve".to_string(), "Reject".to_string()]),
+            (
+                "Commit T4 (#516)?",
+                vec![
+                    "Approve — commit it".to_string(),
+                    "Approve, and push + open the PR too".to_string(),
+                    "Deny — I want to read the diff first".to_string(),
+                    "Deny — change the commit message".to_string(),
+                ],
+            ),
+        ] {
+            let ack = bridge
+                .request_approval_parked(
+                    "s1".into(),
+                    "hands".into(),
+                    prompt.into(),
+                    menu.clone(),
+                    super::super::ApprovalContext {
+                        kind: crate::policy::ViolationKind::PerAction,
+                        action: format!("git commit — {prompt}"),
+                        detail: None,
+                        command: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&ack).unwrap();
+            assert_eq!(v["status"], "parked");
+            let choice_id = v["choice_id"].as_str().unwrap().to_string();
+            assert!(rx.try_recv().is_err(), "a request latches nothing: no ring command for {prompt:?}");
+            assert!(!awaiting.load(Ordering::SeqCst), "a request sets no awaiting flag");
+            let row = storage.get_tray_entry(&choice_id).await.unwrap().unwrap();
+            assert_eq!(row.kind, "request", "the row says what it is");
+            assert!(
+                !crate::storage::is_gate_row(&row.kind, row.options_json.as_deref()),
+                "a request is not a gate — whatever its menu ({menu:?})"
+            );
+            // The user answers in the tray with one of the agent's own labels;
+            // nothing lifts (nothing latched) and the pick is recorded verbatim.
+            let pick = menu[0].clone();
+            let outcome = bridge.resolve_choice(&choice_id, pick.clone()).await.unwrap();
+            assert!(matches!(outcome, ResolveOutcome::DeliveredOutOfBand { .. }), "{outcome:?}");
+            assert!(rx.try_recv().is_err(), "no GateResolved for a row that opened no gate");
+            let row = storage.get_tray_entry(&choice_id).await.unwrap().unwrap();
+            assert_eq!(row.picked_option.as_deref(), Some(pick.as_str()));
+        }
     }
 
     /// Round 12: a re-ask that SUPERSEDES a pending approval must release the
@@ -1851,13 +1888,18 @@ mod tests {
         };
         let prompt = "Allow `git push` to `main` in this session's repo?";
 
+        // The push-gate shape: a HOST gate (gate = true), parked so the test
+        // does not block — the hook route's blocking twin goes through the
+        // same `request_approval_inner` and the same auto-supersede.
         let ack = bridge
-            .request_approval_parked(
+            .request_approval_inner(
                 "s1".into(),
                 "hands".into(),
                 prompt.into(),
                 vec!["Approve".into(), "Reject".into()],
                 ctx(),
+                false,
+                true,
             )
             .await
             .unwrap();
@@ -1871,12 +1913,14 @@ mod tests {
         // The same agent re-parks the same prompt while the first is pending:
         // the first is auto-superseded.
         let ack = bridge
-            .request_approval_parked(
+            .request_approval_inner(
                 "s1".into(),
                 "hands".into(),
                 prompt.into(),
                 vec!["Approve".into(), "Reject".into()],
                 ctx(),
+                false,
+                true,
             )
             .await
             .unwrap();
@@ -1925,18 +1969,22 @@ mod tests {
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         bridge.register_session_sequencer("s1".into(), tx).await;
+        // A host GATE (the Tool-Gate park shape), parked.
         let ack = bridge
-            .request_approval_parked(
+            .ask_user_choice_inner(
                 "s1".into(),
                 "hands".into(),
-                "Query prod read-only?".into(),
+                "Run gated command?".into(),
                 vec!["Approve".into(), "Reject".into()],
-                super::super::ApprovalContext {
-                    kind: crate::policy::ViolationKind::PerAction,
+                Some(super::super::ApprovalContext {
+                    kind: crate::policy::ViolationKind::ToolBlocklist,
                     action: "psql -h prod …".into(),
                     detail: None,
                     command: None,
-                },
+                }),
+                None,
+                false,
+                true,
             )
             .await
             .unwrap();
@@ -2094,13 +2142,18 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        // The push gate is a HOST gate (gate = true), parked here so the test
+        // does not block — the shape the hook route leaves behind when its
+        // process dies.
         let ack = bridge
-            .request_approval_parked(
+            .request_approval_inner(
                 "s1".into(),
                 "hands".into(),
                 "Allow `git push` to `main` in this session's repo?".into(),
                 vec!["Approve".into(), "Reject".into()],
                 ctx(),
+                false,
+                true,
             )
             .await
             .unwrap();

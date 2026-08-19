@@ -752,8 +752,19 @@ async fn call_tool(
         }
         "action_gate" => {
             let command = arg_required_str(&args, "command")?;
+            // Round 12: the agent may force the park — a command that must not
+            // run unapproved regardless of the Tool Gate keyword list.
+            let require_approval = args
+                .get("require_approval")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let output = bridge
-                .action_gate(caller.session_id.clone(), caller.agent.clone(), command)
+                .action_gate(
+                    caller.session_id.clone(),
+                    caller.agent.clone(),
+                    command,
+                    require_approval,
+                )
                 .await
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(output))

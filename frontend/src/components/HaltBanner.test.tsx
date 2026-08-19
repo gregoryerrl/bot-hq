@@ -145,6 +145,27 @@ describe("HaltBanner", () => {
     expect(isApproval({ kind: "choice", options: ["a", "b"] })).toBe(false);
   });
 
+  it("keeps an agent's request in the tray whatever its menu (round 12)", () => {
+    // The user's split: request_approval is tray parkable, approval_gates are
+    // session blockers. A `request` row with the canonical pair — the shape the
+    // descriptor's convention produces — must NOT take the gate slot (it
+    // latches nothing, so a gate card there would be a blocker that blocks
+    // nothing: issue #1 inverted). The legacy fallback is for the legacy kind.
+    expect(isApproval({ kind: "request", options: ["Approve", "Reject"] })).toBe(false);
+    expect(isTrayItem({ kind: "request", options: ["Approve", "Reject"] })).toBe(true);
+    expect(
+      isApproval({
+        kind: "request",
+        options: ["Approve — commit it", "Approve, and push too", "Deny — read the diff first", "Deny — change the message"],
+      }),
+    ).toBe(false);
+    expect(
+      isTrayItem({ kind: "request", options: ["Approve — commit it", "Deny — wait"] }),
+    ).toBe(true);
+    // The legacy pre-round-8 shape is still a gate.
+    expect(isApproval({ kind: "choice", options: ["Approve", "Reject"] })).toBe(true);
+  });
+
   it("sorts rows into exactly one surface each (rc3 D35)", () => {
     // A halt is the banner (session state), an approval is the gate, a
     // question is the tray — and every tray count goes through isTrayItem, so

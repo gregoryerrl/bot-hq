@@ -290,7 +290,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "request_approval",
-            description: gated_by("request_approval", "Request user approval for a policy-gated action (push_gate, force_push, per_action). PARKS and returns IMMEDIATELY with a parked acknowledgment carrying a choice_id — it does NOT block waiting for the answer, but the park LATCHES the ring: finish your turn normally, then nobody is dealt another until the user answers. The user's pick arrives later as an out-of-band message, so do not re-issue on no answer yet; call `gate_status` with the choice_id if you need to know whether it resolved. The outcome is written to violations.jsonl. Call this BEFORE running the action (e.g., before a prod query). For a Tool-Gate-blocked Bash command, use `action_gate` instead."),
+            description: gated_by("request_approval", "Ask the user's yes/no (or a choice between ways) on an action of YOURS — a commit, a merge, a risky edit, a design fork. It PARKS IN THE TRAY like a question and returns IMMEDIATELY with a parked acknowledgment carrying a choice_id: it halts NOTHING — the session keeps working, the card sits in the user's tray with your own labels, and the pick arrives later as a user row you read at your next dealt turn. Do not run the action until that row lands, and do not re-issue on no answer yet (`gate_status` with the choice_id says whether it resolved). The outcome is written to violations.jsonl. NOT the tool for prod access or for a command that must not run unapproved — those are `action_gate(command, require_approval: true)`, a GATE that blocks the session until the user answers and runs the command on their Approve; the host's gates (action_gate, the push gate) are the session blockers, a request is not."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -328,13 +328,17 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "action_gate",
-            description: gated_by("action_gate", "Route a Bash command that the bot-hq Tool Gate blocked (the PreToolUse hook told you to call this). An `auto_allow`/unmatched command runs immediately and you get its output back. A `gate` command PARKS for the user's approval and this call returns AT ONCE with `gate_id` — it does not block, so there is nothing to time out — but the park LATCHES the ring: finish your turn, then nobody is dealt another until the user answers. On approve bot-hq executes the command in your working repo and the stdout/stderr/exit code arrives as an out-of-band message; on reject you get a rejection notice (any text beyond 'Reject' is the user's reasoning — read it). NEVER re-issue a parked command or assume it ran; call gate_status(gate_id) to check. Re-parking an identical command while one is pending returns the existing gate instead of stacking a duplicate prompt. Prefer `--body-file /tmp/x.md` over inline heredocs for long bodies."),
+            description: gated_by("action_gate", "Route a Bash command that the bot-hq Tool Gate blocked (the PreToolUse hook told you to call this), or one you want approved first (`require_approval: true` parks it whatever the keyword list says — the one approval that BLOCKS the session; use it for prod access). Otherwise an `auto_allow`/unmatched command runs immediately and you get its output back. A `gate` command PARKS for the user's approval and this call returns AT ONCE with `gate_id` — it does not block, so there is nothing to time out — but the park LATCHES the ring: finish your turn, then nobody is dealt another until the user answers. On approve bot-hq executes the command in your working repo and the stdout/stderr/exit code arrives as an out-of-band message; on reject you get a rejection notice (any text beyond 'Reject' is the user's reasoning — read it). NEVER re-issue a parked command or assume it ran; call gate_status(gate_id) to check. Re-parking an identical command while one is pending returns the existing gate instead of stacking a duplicate prompt. Prefer `--body-file /tmp/x.md` over inline heredocs for long bodies."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
                         "description": "The exact Bash command the gate blocked (e.g., 'gh issue comment 41 --body-file /tmp/x'). bot-hq runs it verbatim in your working repo on approval."
+                    },
+                    "require_approval": {
+                        "type": "boolean",
+                        "description": "Park for the user's approval REGARDLESS of the Tool Gate keyword list (default false = the keyword resolve decides, and an unmatched/auto_allow command runs at once). Pass true for a command YOU judge must not run unapproved — the prod-access rule: every read-only query against a production host goes through here with require_approval=true, so the user sees the exact command and nothing runs before their Approve."
                     }
                 },
                 "required": ["command"]

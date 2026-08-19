@@ -48,11 +48,19 @@ export function isApproval(r: {
   kind?: string;
   options: readonly string[];
 }): boolean {
+  // The menu fallback is for the LEGACY shape only (round 12): a row with no
+  // kind, or the pre-round-8 `choice` + gate menu. An agent's `request`
+  // (round 12 — "request_approval is tray parkable, approval_gates are
+  // session blockers") may carry the canonical Approve/Reject pair and is
+  // still a tray item; testing the menu independently of kind dragged it into
+  // the gate slot as a gate that blocked nothing — the user's issue #1
+  // inverted.
+  if (r.kind === "approval") return true;
+  if (r.kind !== undefined && r.kind !== "choice") return false;
   return (
-    r.kind === "approval" ||
-    (r.options.length === 2 &&
-      r.options[0] === "Approve" &&
-      r.options[1] === "Reject")
+    r.options.length === 2 &&
+    r.options[0] === "Approve" &&
+    r.options[1] === "Reject"
   );
 }
 

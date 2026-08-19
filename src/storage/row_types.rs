@@ -179,9 +179,17 @@ pub enum QuestionKind {
     /// approval latched a gate nothing could lift). Written at insert since
     /// round 8; rows parked before that carry `choice` with the gate menu, which
     /// is why every reader goes through
-    /// [`is_gate_row`](crate::storage::is_gate_row) (kind OR menu), not the
-    /// kind alone.
+    /// [`is_gate_row`](crate::storage::is_gate_row) (kind, or the legacy
+    /// `choice` + menu shape), not the kind alone.
     Approval,
+    /// An agent's `request_approval` (round 12 — the user's split: "request_approval
+    /// is tray parkable, approval_gates are session blockers"): an approval
+    /// CONTEXT at insert (so the pick is audited in violations.jsonl) but a
+    /// TRAY item — any menu, the agent's own labels, answered in the Tray tab
+    /// like a question, latching nothing. Distinct from [`Self::Approval`] by
+    /// ORIGIN: the host's gates (a Tool-Gate park, the push hook, the
+    /// reviewer-down override) block the session; an agent's request does not.
+    Request,
     // Round 11 removed two variants nothing produced or consumed: `OpenAsk`
     // (`"open_ask"` — never written), and `Halt` (`"halt"` — a
     // `mark_awaiting_user` row until rc3 D35 moved the halt to the session
@@ -196,6 +204,7 @@ impl QuestionKind {
         match self {
             QuestionKind::Choice => "choice",
             QuestionKind::Approval => "approval",
+            QuestionKind::Request => "request",
         }
     }
 }

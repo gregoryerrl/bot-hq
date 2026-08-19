@@ -295,10 +295,14 @@ the round cap ends it.
    halt is a halt"*). If the declarer holds the turn, that turn ends; a
    non-holder's declaration latches the next deal. The declarer's own
    generation is interrupted so the declaration is true. An **approval gate**
-   (`request_approval`, `action_gate`, the pre-push hook) latches the ring the
-   same way through `GateOpened`/`GateResolved`. An ordinary **question**
+   (`action_gate` — a Tool-Gate park or `require_approval: true` — the
+   pre-push hook, the reviewer-down override) latches the ring the same way
+   through `GateOpened`/`GateResolved`. An ordinary **question**
    (`ask_user_choice`) touches NONE of this: it parks in the tray, the session
-   keeps working, and the answer arrives as a user row at the next boundary.
+   keeps working, and the answer arrives as a user row at the next boundary —
+   and since round 12 so does an agent's **`request_approval`** (a `request`
+   row: the user's split, "request_approval is tray parkable, approval_gates
+   are session blockers"; it is audited in violations.jsonl but latches nothing).
    (D22's lap existed because halting at a first-turn park made a participant
    that asks every turn unreachable to its peers — `s-e8a20797`; a question no
    longer reaches the ring at all, so that failure cannot come back this way.)
@@ -1267,8 +1271,9 @@ removal above.
   the Session Settings panel (the gear button in the session header). Push/force-push are pure toggles — no agent-side grants.
 - **Awaiting flag:** per-session `Arc<AtomicBool>` set by the halt-declaring
   tools (`mark_awaiting_user` / `halt`, `request_phase_advance`) and by
-  approvals (`request_approval`, `action_gate`, the pre-push gate) — NOT by
-  `ask_user_choice`, which parks a question and stops nothing (rc3 D35). It
+  the host's gates (`action_gate`, the pre-push gate, the override) — NOT by
+  `ask_user_choice` or an agent's `request_approval`, which park and stop
+  nothing (rc3 D35; round 12). It
   drives the input-lock activity state; the ring stop itself is
   `SequencerCommand::HaltDeclared` / `GateOpened`, and a halt stops the ring
   where it stands.

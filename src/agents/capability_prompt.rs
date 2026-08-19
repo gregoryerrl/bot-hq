@@ -95,8 +95,10 @@ pub fn phrasing(cap: Capability) -> Phrasing {
             peer: "asks the user questions",
         },
         ParkApproval => Phrasing {
-            grant: "park a per-action approval with `request_approval(kind, action)` before a \
-                    sensitive action",
+            grant: "ask the user's yes/no on an action of yours with `request_approval(kind, \
+                    action, question, options)` — it parks in the tray and blocks nothing; a \
+                    command that must not run unapproved goes through `action_gate(command, \
+                    require_approval: true)`, the gate that blocks",
             deny: "park an approval — `request_approval` is refused for you",
             peer: "parks approvals",
         },

@@ -298,6 +298,10 @@ pub struct PreApprovedPush {
 struct Parked {
     tx: oneshot::Sender<String>,
     choice: PendingChoice,
+    /// Whether this park is a session-blocking GATE (latched the ring, renders
+    /// in the gate slot) or an agent's tray-parked request / question (round
+    /// 12). Read by the resolve path to shape the answer row.
+    gate: bool,
 }
 
 /// A3b: per-session state for the close-delta soft-gate.
@@ -1713,6 +1717,7 @@ impl SignalingBridge {
                 }),
                 None,
                 false,
+                true,
             )
             .await
         {
@@ -2025,6 +2030,7 @@ mod tests {
                         options: vec!["a".into()],
                         approval: None,
                     },
+                    gate: false,
                 },
             );
             b.agent_health
