@@ -250,16 +250,28 @@ fn pack_blocks(blocks: Vec<String>) -> Vec<String> {
 }
 
 /// Map a picked option string to an outcome enum for a `request_approval`
-/// row with CUSTOM option labels. Anything that starts with "approve"
-/// (case-insensitive) counts as Approved; everything else Denied. Abandoned
-/// isn't reachable via resolve_choice (that path requires a pick).
+/// row with CUSTOM option labels — the AUDIT verdict (violations.jsonl), not
+/// an execution decision. A label that OPENS with an approving word —
+/// `approve…`, `yes…`, `ok…`, `allow…` (case-insensitive) — is Approved;
+/// everything else is Denied (the safe default). Abandoned isn't reachable
+/// via resolve_choice (that path requires a pick).
 ///
-/// NOT the verdict for an Approve/Reject GATE — see [`gate_verdict`]. (A
-/// custom-labelled approval whose approving option reads "Yes, deploy" maps
-/// to Denied here; recorded round 8, unchanged.)
+/// Round 12: `yes` and `ok` were matched as whole strings only, so an
+/// agent's own approving label "Yes, deploy" audited as Denied after the
+/// user approved it and the latch lifted (round 8 recorded the quirk and
+/// left it). Prefixes now; the agent is still told to lead approving labels
+/// with "Approve" (the descriptor's convention).
+///
+/// NOT the verdict for an Approve/Reject GATE — see [`gate_verdict`].
 pub(super) fn outcome_from_picked(picked: &str) -> ViolationOutcome {
-    let lower = picked.to_lowercase();
-    if lower.starts_with("approve") || lower == "ok" || lower == "yes" {
+    let lower = picked.trim().to_lowercase();
+    // `approve` as any prefix (approve / approved / approving — the round-8
+    // rule); `yes` / `ok` / `allow` as a WORD that opens the label, so
+    // "yesterday's build" and "okay" stay Denied.
+    let opens_with_word = |w: &str| {
+        lower.strip_prefix(w).is_some_and(|rest| !rest.chars().next().is_some_and(|c| c.is_alphanumeric()))
+    };
+    if lower.starts_with("approve") || ["yes", "ok", "allow"].iter().any(|w| opens_with_word(w)) {
         ViolationOutcome::Approved
     } else {
         ViolationOutcome::Denied
@@ -471,10 +483,16 @@ mod tests {
         for typed in ["approve but dry-run first", "approved", "approved?", "ok", "yes", "Reject", "sure", ""] {
             assert!(matches!(gate_verdict(typed), Denied), "{typed:?} is not the listed Approve");
         }
-        // The custom-label map is unchanged.
+        // The custom-label map: an approving word opens the label.
         assert!(matches!(outcome_from_picked("approved"), Approved));
         assert!(matches!(outcome_from_picked("Approve — proceed"), Approved));
+        assert!(matches!(outcome_from_picked("Yes, deploy"), Approved), "round 12: was Denied");
+        assert!(matches!(outcome_from_picked("OK — run it"), Approved));
+        assert!(matches!(outcome_from_picked("Allow: read only"), Approved));
         assert!(matches!(outcome_from_picked("sure"), Denied));
+        assert!(matches!(outcome_from_picked("Deny — read the diff first"), Denied));
+        assert!(matches!(outcome_from_picked("yesterday's build"), Denied), "a prefix is a word, not a substring");
+        assert!(matches!(outcome_from_picked("okay"), Denied));
     }
 
     use super::{split_into_atoms, walk_cl_dir, WalkedFile};

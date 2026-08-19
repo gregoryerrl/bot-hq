@@ -882,6 +882,7 @@ impl SignalingBridge {
                                 None => None,
                             }
                         };
+                        let is_gate = p.choice.approval.is_some();
                         Ok(self
                             .deliver_oob(
                                 choice_id,
@@ -892,6 +893,7 @@ impl SignalingBridge {
                                 command,
                                 flipped,
                                 asked_at,
+                                is_gate,
                             )
                             .await)
                     }
@@ -965,6 +967,7 @@ impl SignalingBridge {
                             .await;
                     }
                 }
+                let is_gate = crate::storage::is_gate_row(&q.kind, q.options_json.as_deref());
                 Ok(self
                     .deliver_oob(
                         choice_id,
@@ -975,6 +978,7 @@ impl SignalingBridge {
                         q.command_text.as_deref(),
                         flipped,
                         Some(q.asked_at.clone()),
+                        is_gate,
                     )
                     .await)
             }
@@ -1004,6 +1008,7 @@ impl SignalingBridge {
         command_text: Option<&str>,
         flipped: bool,
         asked_at: Option<String>,
+        is_gate: bool,
     ) -> ResolveOutcome {
         // The "approved since you asked" block decorates QUESTIONS only (round
         // 10, B5). A gate is not a premise that a later gate can overtake — and
@@ -1012,10 +1017,13 @@ impl SignalingBridge {
         // the same batch ("… merge 528 (8m later) … whether it succeeded is not
         // recorded", `s-766f4ab9`), telling the agent nothing it did not already
         // have and warning it about a premise a gate does not carry.
-        let is_gate = command_text.is_some()
-            || crate::storage::is_gate_options(
-                serde_json::to_string(options).ok().as_deref(),
-            );
+        //
+        // `is_gate` comes from the CALLER (round 12): the parked approval
+        // context on the live path, `is_gate_row` on the durable-row path —
+        // the same predicate every latch path reads. This used to re-derive
+        // it from `command_text || canonical menu`, which missed an agent's
+        // `request_approval` with its own labels, so that gate got the
+        // mooting block its doc excludes.
         let mooting = if is_gate {
             Vec::new()
         } else {
