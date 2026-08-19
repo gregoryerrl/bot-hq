@@ -13,11 +13,15 @@
  * This sweeps the tree; `overflow.ts` holds the pure detection, exactly as
  * `framing.ts` does for retired framing.
  *
- * **No CONTAINER is exempt.** `DocumentPane`'s pre element cannot overflow
- * (`whitespace-pre-wrap` + `[overflow-wrap:anywhere]`), so it is the obvious
- * carve-out — and it is paired anyway. The retired-identifier guard's exemption
- * list only stayed honest because it was forced to shrink; a guard that ships
- * with an exemption ships with somewhere for the next violation to live.
+ * **No CONTAINER is exempt by name.** `DocumentPane`'s pre element cannot
+ * overflow (`whitespace-pre-wrap` + `[overflow-wrap:anywhere]`), so it is the
+ * obvious carve-out — and it is paired anyway. The retired-identifier guard's
+ * exemption list only stayed honest because it was forced to shrink; a guard
+ * that ships with an exemption ships with somewhere for the next violation to
+ * live. The ONE sanctioned sideways scroller (round 12, the user's decision:
+ * the custom document tab strip scrolls "like browser tabs") declares itself
+ * AT THE SITE with `data-overflow-x-ok="<reason>"` on the same line — and the
+ * sweep below counts those declarations and refuses a second.
  *
  * `overflow.ts` itself is excluded, and that is a different thing from a
  * container carve-out: it DEFINES the class list, so it necessarily spells the
@@ -28,8 +32,10 @@
 import { describe, expect, it } from "vitest";
 import {
   HORIZONTAL_CLIP,
+  HORIZONTAL_SCROLL_OK,
   SCROLL_AXIS_CLASSES,
   findBareScrollContainers,
+  findSanctionedScrollers,
 } from "./overflow";
 
 /**
@@ -140,6 +146,25 @@ describe("no horizontal scrolling, ever", () => {
       "overflow.ts is exempt only because it defines the class list",
     ).toBe(true);
     expect(EXEMPT_FILES).toEqual(["overflow.ts"]);
+  });
+
+  /**
+   * Round 12: exactly ONE sanctioned sideways scroller in the tree — the custom
+   * document tab strip in `DocumentPane.tsx` — and it carries its reason. A
+   * second site needs a second user decision and a change to this number; an
+   * empty reason is not a reason.
+   */
+  it("has exactly one sanctioned sideways scroller, with its reason at the site", () => {
+    const sites = Object.entries(SOURCES)
+      .filter(([p]) => !isExempt(p))
+      .flatMap(([p, body]) => findSanctionedScrollers(body).map((h) => ({ p, ...h })));
+    expect(sites.map((s) => s.p.replace("../", ""))).toEqual([
+      "components/DocumentPane.tsx",
+    ]);
+    const [site] = sites;
+    expect(site!.text).toContain("overflow-x-auto");
+    expect(site!.text).toMatch(new RegExp(`${HORIZONTAL_SCROLL_OK}"[^"]{20,}"`));
+    expect(site!.text).toContain("the user's decision");
   });
 
   /** The sweep must actually be reading files, not an empty directory. */

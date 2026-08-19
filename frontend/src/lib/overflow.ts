@@ -54,6 +54,18 @@ export const SCROLL_AXIS_CLASSES = [
 /** The class that must accompany any of the above. */
 export const HORIZONTAL_CLIP = "overflow-x-hidden";
 
+/**
+ * The ONE sanctioned sideways scroller, and how it declares itself (round 12).
+ * The user's decision (ideas.md, 2026-08-19): the custom session-document tab
+ * strip may scroll horizontally "like horizontal scroll on browser tabs". A
+ * container that is allowed to scroll carries this attribute ON THE SAME LINE
+ * as its overflow class, with the reason as its value — so the exception is
+ * attributable at the site, not a name on a list somewhere else, and the
+ * test that sweeps the tree can count the sanctioned sites (one) and refuse
+ * a second without a second decision.
+ */
+export const HORIZONTAL_SCROLL_OK = "data-overflow-x-ok=";
+
 /** A container that can scroll sideways: its 1-based line and the text. */
 interface BareScrollContainer {
   line: number;
@@ -94,7 +106,20 @@ export function findBareScrollContainers(source: string): BareScrollContainer[] 
     .forEach((text, i) => {
       if (!SCROLL_AXIS_CLASSES.some((c) => text.includes(c))) return;
       if (text.includes(HORIZONTAL_CLIP)) return;
+      if (text.includes(HORIZONTAL_SCROLL_OK)) return;
       hits.push({ line: i + 1, text: text.trim() });
+    });
+  return hits;
+}
+
+/** Every line of `source` that declares itself a sanctioned sideways
+ *  scroller (see [`HORIZONTAL_SCROLL_OK`]). The sweep counts these. */
+export function findSanctionedScrollers(source: string): BareScrollContainer[] {
+  const hits: BareScrollContainer[] = [];
+  stripComments(source)
+    .split("\n")
+    .forEach((text, i) => {
+      if (text.includes(HORIZONTAL_SCROLL_OK)) hits.push({ line: i + 1, text: text.trim() });
     });
   return hits;
 }

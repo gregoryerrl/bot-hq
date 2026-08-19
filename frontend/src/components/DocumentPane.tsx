@@ -92,18 +92,16 @@ export const DocumentPane = memo(function DocumentPane({
     if (sessionPhase) setActivePhase(sessionPhase);
   }, [sessionPhase]);
 
-  const { data: docs = [], error: docsError } = useTauriQuery<
+  // ONE query for every document (round 12 — the phase-scoped one was a
+  // second IPC for a subset of this): the `session:doc_changed` invalidation
+  // (DOC_KEYS, prefix-matched) refreshes it. The phase tab filters it below;
+  // the custom tabs are the untagged docs that are not archived phase
+  // versions — a phase REPLACE parks the previous body as an untagged
+  // `<slug>@<n>` doc, which is history to read via `session_doc_search`, not
+  // a document to tab.
+  const { data: allDocs = [], error: docsError } = useTauriQuery<
     SessionDocumentView[]
-  >("session_doc_search", { sessionId, phase: activePhase });
-  // Every doc, unfiltered, for the custom tabs — same query family, so the
-  // `session:doc_changed` invalidation (DOC_KEYS, prefix-matched) refreshes
-  // it too. Custom = untagged AND not an archived phase version: a phase
-  // REPLACE parks the previous body as an untagged `<slug>@<n>` doc, which is
-  // history to read via `session_doc_search`, not a document to tab.
-  const { data: allDocs = [] } = useTauriQuery<SessionDocumentView[]>(
-    "session_doc_search",
-    { sessionId },
-  );
+  >("session_doc_search", { sessionId });
   const customDocs = useMemo(
     () =>
       allDocs
@@ -130,9 +128,60 @@ export const DocumentPane = memo(function DocumentPane({
   // Stable ref across unrelated re-renders (Tray toggle, TL;DR state) so the
   // memoized <Markdown> children below aren't needlessly reconciled (O7).
   const activeDocs = useMemo(
-    () => docs.filter((d) => d.phase === activePhase),
-    [docs, activePhase],
+    () => allDocs.filter((d) => d.phase === activePhase),
+    [allDocs, activePhase],
   );
+
+  // The user's own hand on CUSTOM documents (round 12 — the user's ideas.md:
+  // custom session documents are editable, deletable and creatable by the
+  // user; the I/P/A/V documents stay the participants'). `session_doc_save`
+  // / `session_doc_delete` refuse phase docs and reserved names; the error
+  // text is shown inline. The backend emits `session:doc_changed` on every
+  // write, and the query is invalidated here too so the pane moves at once.
+  const queryClient = useQueryClient();
+  const refreshDocs = () =>
+    queryClient.invalidateQueries({ queryKey: ["session_doc_search"] });
+  const [creating, setCreating] = useState(false);
+  const [newSlug, setNewSlug] = useState("");
+  const [docError, setDocError] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const createDoc = async () => {
+    const slug = newSlug.trim();
+    if (!slug) return;
+    setDocError(null);
+    try {
+      await invoke("session_doc_save", { sessionId, slug, body: "" });
+      setCreating(false);
+      setNewSlug("");
+      setShowTray(false);
+      setCustomSlug(slug);
+      void refreshDocs();
+    } catch (e) {
+      setDocError(errorMessage(e));
+    }
+  };
+  const saveDoc = async (slug: string, body: string) => {
+    setDocError(null);
+    try {
+      await invoke("session_doc_save", { sessionId, slug, body });
+      void refreshDocs();
+      return true;
+    } catch (e) {
+      setDocError(errorMessage(e));
+      return false;
+    }
+  };
+  const deleteDoc = async (slug: string) => {
+    setDeleteTarget(null);
+    setDocError(null);
+    try {
+      await invoke("session_doc_delete", { sessionId, slug });
+      if (customSlug === slug) setCustomSlug(null);
+      void refreshDocs();
+    } catch (e) {
+      setDocError(errorMessage(e));
+    }
+  };
 
   // Pending count for the Tray pill badge — shows even on the I/P/A/V tabs so
   // accumulated input is visible without opening the Tray. Shares the
@@ -174,8 +223,11 @@ export const DocumentPane = memo(function DocumentPane({
 
   return (
     <div className="flex h-full min-w-0 flex-col bg-surface-container-lowest/50">
-      {/* `flex-wrap`, never a horizontal scroller: custom tabs are as many as
-          the session made, and the row grows DOWN. */}
+      {/* The Tray + phase pills wrap; the CUSTOM segment below is the one
+          container in the app allowed to scroll sideways — the user's call
+          (ideas.md, 2026-08-19: "like horizontal scroll on browser tabs"),
+          carried on the element as `data-overflow-x-ok` so the overflow guard
+          knows it is sanctioned rather than bare. */}
       <div
         role="tablist"
         aria-label="Session documents"
@@ -198,21 +250,77 @@ export const DocumentPane = memo(function DocumentPane({
             setActivePhase(p);
           }}
         />
-        {customDocs.length > 0 && (
-          <span className="mx-1 h-4 w-px bg-outline-variant" aria-hidden />
-        )}
-        {customDocs.map((d) => (
-          <CustomDocPill
-            key={d.id}
-            slug={d.slug}
-            selected={!showTray && customDoc?.slug === d.slug}
-            onSelect={() => {
-              setShowTray(false);
-              setCustomSlug(d.slug);
+        <span className="mx-1 h-4 w-px bg-outline-variant" aria-hidden />
+        {/* The overflow class and its sanction share ONE line: the guard is
+            line-scoped, and the reason belongs beside the thing it permits. */}
+        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden" data-overflow-x-ok="custom document tabs scroll sideways like browser tabs — the user's decision (ideas.md, 2026-08-19)" data-testid="custom-doc-strip">
+          {customDocs.map((d) => (
+            <CustomDocPill
+              key={d.id}
+              slug={d.slug}
+              selected={!showTray && customDoc?.slug === d.slug}
+              onSelect={() => {
+                setShowTray(false);
+                setCustomSlug(d.slug);
+              }}
+            />
+          ))}
+          <button
+            type="button"
+            onClick={() => {
+              setCreating((c) => !c);
+              setDocError(null);
             }}
-          />
-        ))}
+            title="New custom document"
+            aria-label="New custom document"
+            className="inline-flex shrink-0 items-center rounded border border-dashed border-outline-variant px-2 py-0.5 text-xs font-semibold text-on-surface-variant hover:text-on-surface"
+          >
+            +
+          </button>
+        </div>
       </div>
+      {creating && (
+        <form
+          className="flex items-center gap-2 border-b border-outline-variant px-3 py-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void createDoc();
+          }}
+        >
+          <input
+            autoFocus
+            value={newSlug}
+            onChange={(e) => setNewSlug(e.target.value)}
+            placeholder="document name"
+            aria-label="New document name"
+            className="min-w-0 flex-1 rounded border border-outline-variant bg-surface-container px-2 py-1 text-xs text-on-surface"
+          />
+          <Button type="submit" size="sm" disabled={!newSlug.trim()}>
+            Create
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              setCreating(false);
+              setNewSlug("");
+              setDocError(null);
+            }}
+          >
+            Cancel
+          </Button>
+        </form>
+      )}
+      {docError && (
+        <div className="px-3 pt-2">
+          <ErrorBanner
+            label="Document"
+            message={docError}
+            onDismiss={() => setDocError(null)}
+          />
+        </div>
+      )}
       {/* min-w-0: without it a flex item's `min-width:auto` refuses to shrink
           below its content, so a long gated command pushes the pane wider than
           its parent and overflow-x-hidden clips it out of reach. */}
@@ -220,7 +328,14 @@ export const DocumentPane = memo(function DocumentPane({
         {showTray ? (
           <TrayList sessionId={sessionId} />
         ) : customDoc ? (
-          <DocArticle doc={customDoc} summary={summary} onSummarize={runSummary} />
+          <DocArticle
+            key={customDoc.slug}
+            doc={customDoc}
+            summary={summary}
+            onSummarize={runSummary}
+            onSave={(body) => saveDoc(customDoc.slug, body)}
+            onDelete={() => setDeleteTarget(customDoc.slug)}
+          />
         ) : (
           <>
             {activePhase === "apply" &&
@@ -254,6 +369,22 @@ export const DocumentPane = memo(function DocumentPane({
           </>
         )}
       </div>
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete this document?"
+        message={
+          <>
+            <span className="font-semibold">{deleteTarget}</span> is a custom
+            document of this session. Deleting it cannot be undone.
+          </>
+        }
+        confirmLabel="Delete"
+        confirmVariant="danger"
+        onConfirm={() => {
+          if (deleteTarget) void deleteDoc(deleteTarget);
+        }}
+        onCancel={() => setDeleteTarget(null)}
+      />
       <SummaryDialog
         open={summary !== null}
         slug={summary?.slug ?? ""}
@@ -278,12 +409,24 @@ function DocArticle({
   doc,
   summary,
   onSummarize,
+  onSave,
+  onDelete,
 }: {
   doc: SessionDocumentView;
   summary: { slug: string; status: "loading" | "done" | "error" } | null;
   onSummarize: (slug: string) => void;
+  /** Present for a CUSTOM document only (round 12): the user may edit it. */
+  onSave?: (body: string) => Promise<boolean>;
+  /** Present for a CUSTOM document only (round 12): the user may delete it. */
+  onDelete?: () => void;
 }) {
   const loading = summary?.slug === doc.slug && summary.status === "loading";
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(doc.body);
+  const [saving, setSaving] = useState(false);
+  const editable = !!onSave;
+  const pill =
+    "rounded border border-outline-variant bg-transparent px-2 py-0.5 font-label-caps text-label-caps text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50";
   return (
     <article className="mb-6">
       <header className="mb-2 flex items-center justify-between gap-2">
@@ -296,10 +439,34 @@ function DocArticle({
             onClick={() => onSummarize(doc.slug)}
             disabled={loading}
             title="Summarize this document (TL;DR) with a background model"
-            className="rounded border border-outline-variant bg-transparent px-2 py-0.5 font-label-caps text-label-caps text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
+            className={pill}
           >
             {loading ? "…" : "TL;DR"}
           </button>
+          {editable && !editing && (
+            <button
+              type="button"
+              onClick={() => {
+                setDraft(doc.body);
+                setEditing(true);
+              }}
+              title="Edit this document"
+              className={pill}
+            >
+              Edit
+            </button>
+          )}
+          {onDelete && !editing && (
+            <button
+              type="button"
+              onClick={onDelete}
+              title="Delete this document"
+              aria-label={`Delete ${doc.slug}`}
+              className={cn(pill, "hover:text-on-error-container")}
+            >
+              <TrashIcon className="h-3 w-3" />
+            </button>
+          )}
           <span
             className="text-[0.65rem] text-on-surface-variant"
             title={doc.updated_at}
@@ -308,7 +475,47 @@ function DocArticle({
           </span>
         </div>
       </header>
-      <Markdown>{doc.body}</Markdown>
+      {editing && onSave ? (
+        <div className="flex flex-col gap-2">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            aria-label={`Edit ${doc.slug}`}
+            rows={Math.min(24, Math.max(6, draft.split("\n").length + 1))}
+            className="w-full resize-y rounded border border-outline-variant bg-surface-container px-2 py-1 font-mono text-xs text-on-surface"
+          />
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              disabled={saving}
+              onClick={() => {
+                setSaving(true);
+                void onSave(draft).then((ok) => {
+                  setSaving(false);
+                  if (ok) setEditing(false);
+                });
+              }}
+            >
+              {saving ? "Saving…" : "Save"}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={saving}
+              onClick={() => {
+                setDraft(doc.body);
+                setEditing(false);
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <Markdown>{doc.body}</Markdown>
+      )}
     </article>
   );
 }

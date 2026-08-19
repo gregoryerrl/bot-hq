@@ -403,4 +403,81 @@ describe("custom document tabs", () => {
     );
     expect(await screen.findByText("apply doc")).toBeInTheDocument();
   });
+
+  // Round 12 — the user's ideas.md: custom documents are the user's to edit,
+  // delete and create; the I/P/A/V documents stay the participants'.
+  it("lets the user edit a custom document, and offers no editor on a phase doc", async () => {
+    renderDocs();
+    // Phase doc: TL;DR only.
+    expect(await screen.findByText("apply doc")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+    // Custom doc: Edit → textarea → Save calls session_doc_save with the body.
+    fireEvent.click(screen.getByRole("tab", { name: "tasks.md" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const box = screen.getByRole("textbox", { name: "Edit tasks.md" });
+    fireEvent.change(box, { target: { value: "- [x] first task" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("session_doc_save", {
+        sessionId: "s1",
+        slug: "tasks.md",
+        body: "- [x] first task",
+      }),
+    );
+  });
+
+  it("deletes a custom document only after the confirm", async () => {
+    renderDocs();
+    fireEvent.click(await screen.findByRole("tab", { name: "tasks.md" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete tasks.md" }));
+    // Nothing yet — the dialog asks.
+    expect(mockInvoke).not.toHaveBeenCalledWith("session_doc_delete", expect.anything());
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("session_doc_delete", {
+        sessionId: "s1",
+        slug: "tasks.md",
+      }),
+    );
+  });
+
+  it("creates a custom document from the + pill and opens it", async () => {
+    renderDocs();
+    fireEvent.click(await screen.findByRole("button", { name: "New custom document" }));
+    const name = screen.getByRole("textbox", { name: "New document name" });
+    fireEvent.change(name, { target: { value: "checklist" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("session_doc_save", {
+        sessionId: "s1",
+        slug: "checklist",
+        body: "",
+      }),
+    );
+  });
+
+  it("shows the backend's refusal instead of a silent no-op", async () => {
+    renderDocs();
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "session_doc_save")
+        return Promise.reject(new Error("`plan` is a phase name — the I/P/A/V documents are the participants'"));
+      if (cmd === "session_doc_search") return Promise.resolve(docs);
+      if (cmd === "compute_apply_diff") return Promise.resolve({ lines: [], note: null });
+      return Promise.resolve([]);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "New custom document" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "New document name" }), {
+      target: { value: "plan" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(await screen.findByText(/is a phase name/)).toBeInTheDocument();
+  });
+
+  it("scrolls the custom tab strip sideways — the user's one sanctioned scroller", async () => {
+    renderDocs();
+    await screen.findByRole("tab", { name: "tasks.md" });
+    const strip = screen.getByTestId("custom-doc-strip");
+    expect(strip.className).toContain("overflow-x-auto");
+    expect(strip.getAttribute("data-overflow-x-ok")).toMatch(/user's decision/);
+  });
 });
