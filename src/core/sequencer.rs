@@ -3231,7 +3231,11 @@ async fn hand_to_summoned(deps: &SequencerDeps, queue: &mut VecDeque<i64>) -> Op
                     queued = queue.len(),
                     "sequencer: the user summoned this participant; it takes the next turn"
                 );
-                hand_turn_to(deps, Some(&p)).await;
+                // COMPUTE only (round 12): the deal — the holder column + the
+                // busy mark — happens in `start_turn`, which the caller runs
+                // on the participant returned here. This used to deal as well,
+                // so a summoned turn wrote the column twice and marked busy
+                // twice (the eager placement `hand_over` also shed, s-f6a441ff).
                 return Some(p);
             }
             // Every remaining case is "the summons cannot be honoured": no such
@@ -3308,9 +3312,10 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Hando
 /// the chat input's lock. They were separate once and only one of them existed —
 /// `set_current_turn` was written and the busy flag was not, which is the whole
 /// of the input-unlocks-mid-cycle defect. The CL's remedy for a two-halves join
-/// is to extract it somewhere a test can call, and this is that place: both call
-/// sites (the summons, the ring step) are now one line each, so a future edit
-/// cannot move one half without the other.
+/// is to extract it somewhere a test can call, and this is that place: the one
+/// call site (`start_turn` — the summons and the ring step both flow into it
+/// since round 12) is one line, so a future edit cannot move one half without
+/// the other. `the_deal_has_exactly_one_site` pins the count.
 ///
 /// `None` marks nobody, deliberately — but **be exact about when it is
 /// reached**, because an earlier draft of this comment was not. It said `None`
@@ -5708,6 +5713,20 @@ mod tests {
             nothing(),
             "the summonable one sits between A and B in ring order and must not be woken"
         );
+    }
+
+    /// Round 12: the deal (`hand_turn_to` — holder column + busy mark) has
+    /// exactly ONE production call site, `start_turn`. The summons path used
+    /// to deal eagerly in `hand_to_summoned` and then again in `start_turn`:
+    /// two column writes and two busy marks per summoned turn. A second site
+    /// is also how the s-f6a441ff orphan (a mark before the checks that can
+    /// refuse the turn) came back once; this keeps it out.
+    #[test]
+    fn the_deal_has_exactly_one_site() {
+        let src = include_str!("sequencer.rs");
+        let prod = &src[..src.find("#[cfg(test)]").expect("tests follow production")];
+        let calls = prod.matches("hand_turn_to(deps, ").count();
+        assert_eq!(calls, 1, "hand_turn_to is called from start_turn and nowhere else (calls, not the declaration): {calls}");
     }
 
     /// rc3 **D17**, the whole of it: a mention hands the next turn to the named
