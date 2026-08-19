@@ -1073,6 +1073,31 @@ async sessionDocSearch(sessionId: string, query: string | null, phase: string | 
 }
 },
 /**
+ * The user's save of a CUSTOM session document (round 12 — `ideas.md`):
+ * create or edit the untagged doc `slug` in this session. Phase documents and
+ * the reserved names are refused by the bridge; the pane shows the error.
+ */
+async sessionDocSave(sessionId: string, slug: string, body: string) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("session_doc_save", { sessionId, slug, body }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The user's delete of a CUSTOM session document (round 12). `true` when a
+ * row went; a phase document is refused.
+ */
+async sessionDocDelete(sessionId: string, slug: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("session_doc_delete", { sessionId, slug }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Run `git diff --no-color <session_start_sha>` (falling back to
  * `git diff HEAD` if the anchor was never captured) inside the session's
  * `working_repo_path`, then classify each line via [`parse_diff_lines`].

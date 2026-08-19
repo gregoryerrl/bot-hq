@@ -48,6 +48,32 @@ pub async fn session_doc_search(
     Ok(docs.into_iter().map(Into::into).collect())
 }
 
+/// The user's save of a CUSTOM session document (round 12 — `ideas.md`):
+/// create or edit the untagged doc `slug` in this session. Phase documents and
+/// the reserved names are refused by the bridge; the pane shows the error.
+#[tauri::command]
+#[specta::specta]
+pub async fn session_doc_save(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    session_id: String,
+    slug: String,
+    body: String,
+) -> Result<i64, AppError> {
+    Ok(bridge.session_doc_save_custom(&session_id, &slug, &body).await?)
+}
+
+/// The user's delete of a CUSTOM session document (round 12). `true` when a
+/// row went; a phase document is refused.
+#[tauri::command]
+#[specta::specta]
+pub async fn session_doc_delete(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    session_id: String,
+    slug: String,
+) -> Result<bool, AppError> {
+    Ok(bridge.session_doc_delete_custom(&session_id, &slug).await?)
+}
+
 /// One classified line of a unified `git diff`. `kind` is one of
 /// `"add" | "remove" | "hunk" | "file" | "context"` — order-sensitive
 /// classification per [`parse_diff_lines`].

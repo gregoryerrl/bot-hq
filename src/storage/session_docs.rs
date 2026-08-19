@@ -138,6 +138,24 @@ impl Storage {
         Ok(slots)
     }
 
+    /// Delete a CUSTOM (untagged) document by (session_id, slug). Returns
+    /// whether a row went. A phase-tagged doc never matches — the I/P/A/V docs
+    /// are the agents' and the UI's delete button exists for custom documents
+    /// only (round 12, the user's `ideas.md` entry); the `phase IS NULL` in the
+    /// WHERE is that rule in SQL, so no caller can delete a phase doc by
+    /// mistake.
+    pub async fn delete_session_document(&self, session_id: &str, slug: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "DELETE FROM session_documents WHERE session_id = ? AND slug = ? AND phase IS NULL",
+        )
+        .bind(session_id)
+        .bind(slug)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("delete session_documents session={session_id} slug={slug}"))?;
+        Ok(res.rows_affected() > 0)
+    }
+
     /// Fetch one document by (session_id, slug). None when not found.
     pub async fn session_document_by_slug(
         &self,
@@ -159,6 +177,26 @@ impl Storage {
 #[cfg(test)]
 mod session_doc_tests {
     use super::*;
+
+    /// Round 12: the delete reaches custom (untagged) docs only. A phase doc
+    /// asked for by slug is left alone and the call says so (`false`).
+    #[tokio::test]
+    async fn delete_session_document_removes_custom_docs_and_never_phase_docs() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.upsert_session_document("s1", "checklist", "- [ ] a", None).await.unwrap();
+        s.upsert_session_document("s1", "plan", "the plan", Some("plan")).await.unwrap();
+        assert!(s.delete_session_document("s1", "checklist").await.unwrap());
+        assert!(s.session_document_by_slug("s1", "checklist").await.unwrap().is_none());
+        assert!(!s.delete_session_document("s1", "plan").await.unwrap(), "phase docs are not deletable");
+        assert!(s.session_document_by_slug("s1", "plan").await.unwrap().is_some());
+        assert!(!s.delete_session_document("s1", "checklist").await.unwrap(), "gone is gone");
+        // Scoped to the session.
+        s.create_session("s2", "t", None).await.unwrap();
+        s.upsert_session_document("s2", "checklist", "other", None).await.unwrap();
+        assert!(!s.delete_session_document("s1", "checklist").await.unwrap());
+        assert!(s.session_document_by_slug("s2", "checklist").await.unwrap().is_some());
+    }
 
     /// The archive-slot read is one query and reads only THIS slug's numbered
     /// archives (round 10): a slug with a LIKE metacharacter is matched

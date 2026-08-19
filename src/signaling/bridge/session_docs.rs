@@ -10,6 +10,36 @@ use super::*;
 /// overwrites the single `plan` doc rather than accumulating versions.
 /// Untagged scratch docs keep their caller-chosen slug (many allowed per
 /// session).
+/// Is `slug` a name a CUSTOM document may carry? The names the pane gives
+/// other kinds of document are reserved: the four phase names, the `@<n>`
+/// archive slots, the `<phase>-eyes` reviewer co-docs. Length bounded so a tab
+/// label stays a label.
+fn custom_slug_check(slug: &str) -> Result<()> {
+    let s = slug.trim();
+    if s.is_empty() || s != slug {
+        anyhow::bail!("a document name cannot be empty or padded with spaces");
+    }
+    if s.chars().count() > 64 {
+        anyhow::bail!("a document name is at most 64 characters");
+    }
+    let is_phase_name =
+        |n: &str| matches!(n.to_ascii_lowercase().as_str(), "investigate" | "plan" | "apply" | "verify");
+    if is_phase_name(s) {
+        anyhow::bail!("`{s}` is a phase name — the I/P/A/V documents are the participants'");
+    }
+    if let Some((_, n)) = s.rsplit_once('@') {
+        if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+            anyhow::bail!("`{s}` looks like an archived version (`name@<n>`); pick another name");
+        }
+    }
+    if let Some(base) = s.strip_suffix("-eyes") {
+        if is_phase_name(base) {
+            anyhow::bail!("`{s}` is a reviewer co-document name; pick another name");
+        }
+    }
+    Ok(())
+}
+
 fn effective_slug<'a>(slug: &'a str, phase: Option<&'a str>) -> &'a str {
     phase.unwrap_or(slug)
 }
@@ -143,6 +173,70 @@ impl SignalingBridge {
             session_id: session_id.to_string(),
         });
         Ok(id)
+    }
+
+    /// The USER's save of a CUSTOM document (round 12 — `ideas.md`: custom
+    /// session documents editable and creatable by the user; the I/P/A/V docs
+    /// stay the agents'). Creates or replaces the untagged doc `slug`. Refused
+    /// for a slug that is, or would collide with, something that is not a
+    /// custom document: empty / over 64 chars, a phase name, an archive slot
+    /// (`name@3`), a reviewer co-doc (`plan-eyes`), or an existing PHASE-tagged
+    /// doc under that slug — an upsert would silently turn a phase doc into a
+    /// custom one. Emits `DocChanged` like every other write.
+    pub async fn session_doc_save_custom(
+        &self,
+        session_id: &str,
+        slug: &str,
+        body: &str,
+    ) -> Result<i64> {
+        custom_slug_check(slug)?;
+        let id = {
+            let Some(storage) = self.storage.lock().await.clone() else {
+                return Err(anyhow::anyhow!("storage not configured"));
+            };
+            if let Some(existing) = storage.session_document_by_slug(session_id, slug).await? {
+                if existing.phase.is_some() {
+                    anyhow::bail!(
+                        "`{slug}` is a phase document ({}); phase documents are written by the \
+                         participants, not edited here",
+                        existing.phase.as_deref().unwrap_or("?")
+                    );
+                }
+            }
+            storage
+                .upsert_session_document(session_id, slug, body, None)
+                .await?
+        };
+        let _ = self.event_tx.send(SignalingEvent::DocChanged {
+            session_id: session_id.to_string(),
+        });
+        Ok(id)
+    }
+
+    /// The USER's delete of a CUSTOM document (round 12). A phase doc is
+    /// refused with a reason; an unknown slug is a no-op `false`. Emits
+    /// `DocChanged` when a row went.
+    pub async fn session_doc_delete_custom(&self, session_id: &str, slug: &str) -> Result<bool> {
+        let deleted = {
+            let Some(storage) = self.storage.lock().await.clone() else {
+                return Err(anyhow::anyhow!("storage not configured"));
+            };
+            if let Some(existing) = storage.session_document_by_slug(session_id, slug).await? {
+                if existing.phase.is_some() {
+                    anyhow::bail!(
+                        "`{slug}` is a phase document ({}); phase documents cannot be deleted",
+                        existing.phase.as_deref().unwrap_or("?")
+                    );
+                }
+            }
+            storage.delete_session_document(session_id, slug).await?
+        };
+        if deleted {
+            let _ = self.event_tx.send(SignalingEvent::DocChanged {
+                session_id: session_id.to_string(),
+            });
+        }
+        Ok(deleted)
     }
 
     /// Reviewer-callable: contribute findings to a phase WITHOUT clobbering the
@@ -557,5 +651,50 @@ mod tests {
         assert_eq!(doc.phase.as_deref(), Some("investigate"));
         // An append supersedes nothing — no archive row.
         assert!(bridge.session_doc_read("s1", "investigate-eyes@1").await.unwrap().is_none());
+    }
+
+    /// Round 12: the user's save/delete of CUSTOM documents. The reserved
+    /// names are refused, a phase doc under the slug is neither overwritten
+    /// nor deleted, and every real write/delete tells the UI.
+    #[tokio::test]
+    async fn the_user_saves_and_deletes_custom_documents_only() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage.upsert_session_document("s1", "plan", "the plan", Some("plan")).await.unwrap();
+        let mut sub = bridge.subscribe();
+
+        // Reserved names.
+        for bad in ["", "  ", "plan", "Apply", "notes@3", "plan-eyes", &"x".repeat(65)] {
+            assert!(
+                bridge.session_doc_save_custom("s1", bad, "body").await.is_err(),
+                "`{bad}` must be refused"
+            );
+        }
+        // A phase doc under the slug is not silently converted.
+        assert!(bridge.session_doc_save_custom("s1", "plan", "hijack").await.is_err());
+        assert_eq!(
+            storage.session_document_by_slug("s1", "plan").await.unwrap().unwrap().body,
+            "the plan"
+        );
+        assert!(!matches!(sub.try_recv(), Ok(SignalingEvent::DocChanged { .. })), "refusals emit nothing");
+
+        // Create, then edit, then delete — each a DocChanged.
+        bridge.session_doc_save_custom("s1", "checklist", "- [ ] a").await.unwrap();
+        assert!(matches!(sub.try_recv(), Ok(SignalingEvent::DocChanged { .. })));
+        bridge.session_doc_save_custom("s1", "checklist", "- [x] a").await.unwrap();
+        assert!(matches!(sub.try_recv(), Ok(SignalingEvent::DocChanged { .. })));
+        let doc = storage.session_document_by_slug("s1", "checklist").await.unwrap().unwrap();
+        assert_eq!(doc.body, "- [x] a");
+        assert!(doc.phase.is_none(), "a custom doc stays untagged");
+        assert!(bridge.session_doc_delete_custom("s1", "checklist").await.unwrap());
+        assert!(matches!(sub.try_recv(), Ok(SignalingEvent::DocChanged { .. })));
+        assert!(storage.session_document_by_slug("s1", "checklist").await.unwrap().is_none());
+        // Deleting again: no-op, no event. Deleting a phase doc: refused.
+        assert!(!bridge.session_doc_delete_custom("s1", "checklist").await.unwrap());
+        assert!(!matches!(sub.try_recv(), Ok(SignalingEvent::DocChanged { .. })));
+        assert!(bridge.session_doc_delete_custom("s1", "plan").await.is_err());
+        assert!(storage.session_document_by_slug("s1", "plan").await.unwrap().is_some());
     }
 }

@@ -132,6 +132,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         findings::list_session_findings,
         // Session documents
         docs::session_doc_search,
+        docs::session_doc_save,
+        docs::session_doc_delete,
         docs::compute_apply_diff,
         docs::summarize_session_doc,
         docs::validate_model,
