@@ -29,10 +29,10 @@ Mandate: audit again (messes, staleness, redundancies, mis/missed
 implementations, refactors/optimizations), use the round-11 binary as live
 evidence, and work the user's `issues.md` (three entries from the real
 ad-manager session `s-1c29c521` that ran on this build) and `ideas.md`
-(custom session documents). Twenty-two commits `d6dc394..fe47832` (this
-changelog commit follows), one logical change per commit, every batch
-reviewed by EYES, every defect fix RED-then-green in the session's `apply`
-doc. Gates auto-allowed by the user from the first turn.
+(custom session documents). Twenty-six commits `d6dc394..eaf4f03` pushed,
+then Q1–Q3 (`c9477ac`, `9c0c4ba`, `454f174`) — one logical change per
+commit, every batch reviewed by EYES, every defect fix RED-then-green in the
+session's `apply` doc. Gates auto-allowed by the user from the first turn.
 
 **Live evidence (the round-11 build, relaunched 22:06Z 08-18).** Zero ERROR
 in two days of logs; the footer read "Agents: OK" over live sessions and the
@@ -102,14 +102,43 @@ hyphen nit ("all-hands meeting" reads `all`, not the empty string).
 integration), 1 ignored; vitest 51 files / 475 tests; `tsc --noEmit` clean;
 `npm run build` (41 KB CSS); `cargo build --release` + the debug build.
 
-**Pending the tray:** Q1 binary approvals, Q2 `schedule_wake` + self-wake
-adoption (and PLAN.md's decree paragraph), Q3 the transient-retry ladder —
-each a planned batch in the session's `plan` doc. **Live confirmation waits
-for the relaunch:** migration 0068 moves the untouched roles' prose; hook
+**The tray answered, and Q1–Q3 shipped the same day** (three commits after
+the push of `d6dc394..eaf4f03`; the user's words are the spec):
+- **Q1 `c9477ac`** — *"request_approval is tray parkable, approval_gates are
+  session blockers."* An agent's `request_approval` is now a `request` row: it
+  parks in the tray with whatever menu it carries, the session keeps working,
+  the pick arrives as a user row (still audited in `violations.jsonl`). Only
+  `action_gate` — a Tool-Gate park or the new `require_approval: true` — and
+  the host's gates (pre-push, reviewer-down override) latch the ring; the prod
+  rule points at `action_gate(command, require_approval: true)`. `HaltBanner`
+  renders the slot by `kind`, not by menu shape.
+- **Q3 `9c0c4ba`** — a turn that dies on a transient error (`fetch failed`,
+  `ECONN*`, `ENOTFOUND`, `ETIMEDOUT`, `overloaded`, 502/503/504/529 in an
+  HTTP shape — word-bounded) is re-dealt to the same participant on a
+  30 s → 2 m → 10 m ladder (`pump::RETRY_LADDER`; a notice, then a nudge row +
+  `SequencerCommand::Summon`), and halts after the third with the count in the
+  reason; a clean turn resets it. A non-transient error halts on the second in
+  a row, as before.
+- **Q2 `454f174`** — *"add a temporary halt … and that's where we can add the
+  self-wake … (HALT; TEMPORARY HALT 00:03:57)."* `mark_awaiting_user` / `halt`
+  take `wake_after_secs` (10–3600); the halt slot carries `halt_wake_at`
+  (migration 0069); the banner reads `⏸ TEMPORARY HALT · wakes in mm:ss`; at
+  the instant the bridge re-reads the slot (a newer halt or an answer cancels),
+  skips under a pause, defers behind an open gate, then posts a system row,
+  clears the slot and summons the declarer for a turn. Re-armed from the slot
+  when a ring registers, so a relaunch honours a pending wake and a ringless
+  session never fires. The general rules now say: an external wait with an
+  ETA is a temporary halt, never a pass; PLAN.md's decree paragraph records
+  the second resolution. Gates re-run on the final tree: `cargo test` 1301 lib
+  + 8 integration targets, vitest 478, tsc, `npm run build`, release + debug.
+
+**Live confirmation waits for the relaunch:** migrations 0068 + 0069; hook
 bodies rewrite at the next session open (pre-push forwards `$1` — B2 is inert
 until relaunch AND a new session); custom-doc Edit/Delete/`+`; a changed
 staged pick delivers; a ≥3-participant roster names every busy participant;
-unselected phase pills are muted; the bell after a Discard.
+unselected phase pills are muted; the bell after a Discard; a `request_approval`
+in the Tray; the TEMPORARY HALT countdown and wake; the transient retry
+notices. The session's `verify` doc carries the eyeball list with commands.
 
 ## 2026-08-18 (round 11) — the round the user's own entries were read, s-021aa8ee
 
