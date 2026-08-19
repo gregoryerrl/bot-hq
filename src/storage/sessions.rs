@@ -91,8 +91,6 @@ impl Storage {
         Ok(())
     }
 
-    /// Clear the session's halt slot. Returns whether one was set — the
-    /// caller's cue to tell the UI the state changed.
     /// Persist (or clear) this session's staged message — the Stage slot
     /// (rc3 B1-F11).
     ///
@@ -125,6 +123,8 @@ impl Storage {
         Ok(row.and_then(|(text,)| text))
     }
 
+    /// Clear the session's halt slot. Returns whether one was set — the
+    /// caller's cue to tell the UI the state changed.
     pub async fn clear_session_halt(&self, session_id: &str) -> Result<bool> {
         let res = sqlx::query(
             "UPDATE sessions SET halt_declared_by = NULL, halt_reason = NULL,              halt_declared_at = NULL WHERE id = ? AND halt_reason IS NOT NULL",

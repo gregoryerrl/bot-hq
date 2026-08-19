@@ -271,8 +271,8 @@ impl ViolationsLog {
     /// that shipped to *preserve* one generation of history made that history
     /// unreachable instead. Nothing else in the tree ever opened `.jsonl.1`, and
     /// both consumers of this method at the time — the Violations panel
-    /// (`tauri_cmd/policy.rs`) and the external driver (`external_jsonrpc.rs`,
-    /// deleted 2026-08-17) — went through here, so a rotation emptied the audit
+    /// (`tauri_cmd/policy.rs`) and the external driver (`external_jsonrpc.rs`, deleted 2026-08-17)
+    /// — went through here, so a rotation emptied the audit
     /// trail from every surface a user or driver had. That was strictly worse
     /// than the no-rotation state it replaced. The panel is the only consumer
     /// now, and the argument holds for it alone.
@@ -280,8 +280,8 @@ impl ViolationsLog {
     /// **Rolled generation first.** Rotation renames the live file aside *after*
     /// the append, so `.jsonl.1` holds the OLDER records and chronological order
     /// needs them ahead of the fresh file. Both consumers reverse before capping
-    /// (`ViolationsPanel.tsx` reverses the whole list; the deleted
-    /// `external_jsonrpc.rs` reversed then truncated to `limit`), so older records land
+    /// (`ViolationsPanel.tsx` reverses the whole list; the deleted `external_jsonrpc.rs`
+    /// reversed then truncated to `limit`), so older records land
     /// where a truncate drops them rather than at the head of the panel.
     ///
     /// Cost: a panel open now parses up to `2 * ROTATE_BYTES` instead of

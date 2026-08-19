@@ -136,7 +136,7 @@ async fn server_rejects_get() {
 }
 
 /// Posts a request and returns the (status_line, body) split. Mirrors the
-/// pattern in `external_mcp_test::http_post` so notification (202) tests can
+/// pattern the deleted `external_mcp_test::http_post` used, so notification (202) tests can
 /// observe the status line, not just the body.
 async fn http_post_with_status(
     addr: std::net::SocketAddr,

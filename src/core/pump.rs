@@ -716,9 +716,9 @@ pub async fn pump_agent(
                 }
                 // Provider limit hit this turn: surface it as a real state
                 // instead of letting it pass as agent speech. Peer notice FIRST
-                // (the awaiting flag set below suppresses later forwards — this
-                // one wake is deliberate, so the reviewer stops reviewing into
-                // the void), then health + a tray halt so the user sees a
+                // (the awaiting flag set below latches the ring — this one row
+                // is deliberate, so the reviewer stops reviewing into the void
+                // when it next reads the channel), then health + a tray halt so the user sees a
                 // needs-input signal instead of a merely-quiet session.
                 if let Some(line) = limit_line.take() {
                     let deduped = last_limit_notice
@@ -2913,7 +2913,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn the_provider_limit_notice_is_a_host_row_that_names_the_agent_and_quotes_the_line() {
-        // B5 Task 2's remaining gap: this was the one `RouterCommand::Forward`
+        // B5 Task 2's remaining gap: this was the one (deleted) `RouterCommand::Forward`
         // producer whose text existed nowhere but the wire — an inline `format!`
         // straight onto a peer's stdin. It now posts a row of its own.
         //

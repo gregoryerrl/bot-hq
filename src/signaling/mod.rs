@@ -1,13 +1,13 @@
-//! Embedded MCP servers for agent ↔ host signaling.
+//! The embedded MCP server for agent ↔ host signaling.
 //!
-//! Two in-process HTTP MCP servers live under this module: the **internal**
-//! server (UI-signaling tools served to spawned claude-code agents) and the
-//! **external** driver server (session-management tools for outside MCP
-//! clients). The internal tool surface — `ask_user_choice`, `advance_phase`,
+//! ONE in-process HTTP MCP server lives under this module: the UI-signaling
+//! tools served to spawned claude-code agents. (A second, the **external**
+//! driver server for outside MCP clients, lived here until it was deleted
+//! with the driver on 2026-08-17.) The tool surface — `ask_user_choice`, `advance_phase`,
 //! `request_approval`, `check_commit_message`, `cl_index_search`,
 //! `session_doc_*`, `action_gate`, `webview_*`, and more — is defined by the
 //! descriptors in `protocol.rs`; see ARCHITECTURE.md and README.md for the
-//! full list. (`external_jsonrpc.rs` held the second list until the external
+//! full list. (The deleted `external_jsonrpc.rs` held the second list until the external
 //! driver was removed, 2026-08-17.) Counts
 //! drift on every tool add — read them from the descriptor lists, not here.
 //!
@@ -35,7 +35,7 @@ mod tool_args;
 pub mod web_search;
 mod webview_js;
 
-pub use bridge::{gate_age_secs, PendingChoice, ResolveOutcome, SignalingBridge, SignalingEvent, STALE_GATE_MAX_AGE_SECS};
+pub use bridge::{gate_age_secs, PendingChoice, ResolveOutcome, SignalingBridge, SignalingEvent, RETIREMENT_MARKERS, STALE_GATE_MAX_AGE_SECS};
 
 /// MCP server keys bot-hq strips from a spawned agent's forwarded
 /// `--mcp-config`. `bot-hq`: would create a recursive driver loop (the agent

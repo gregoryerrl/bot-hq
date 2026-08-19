@@ -247,7 +247,8 @@ export function Dashboard() {
       // 10-arg limit).
       options: {
         // Slot projections of `participants[0]` / `participants[1]`, kept
-        // because they are the columns spawn reads TODAY. Not a second source
+        // because they were the columns spawn read until migration 0060 (see
+        // the note below). Not a second source
         // — nothing writes them but the projection in `handleCreate`, so they
         // cannot disagree with the roster they are derived from.
         slot0Effort: string | null;

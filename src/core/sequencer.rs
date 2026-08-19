@@ -52,10 +52,12 @@
 //! fan-out. Receipt-gated is not scope-gated, and those two were receipt-gated
 //! only.
 //!
-//! Both routes END at
+//! Both routes ended at
 //! [`ParticipantInput::deliver`](crate::agents::ParticipantInput::deliver), so
 //! the compare moved down to that one point: the input now carries its session
-//! id and checks every receipt against it. This loop holds
+//! id and checks every receipt against it — and its page-shaped sibling
+//! [`deliver_batch`](crate::agents::ParticipantInput::deliver_batch), the one
+//! this loop actually calls, checks each receipt the same way. This loop holds
 //! [`ParticipantInput`] clones and therefore inherits the check rather than
 //! restating it — which is also why [`SequencerDeps`] carries inputs and not a
 //! [`SessionHandle`](crate::core::SessionHandle). Handles live in
@@ -1008,12 +1010,13 @@ pub enum SequencerCommand {
     /// replayed `UserMessage` instead. That is no longer reachable — a user
     /// message is a RELEASE and is never held.)
     ///
-    /// **Where a sender gets the epoch is not solved here.** The sequencer
-    /// mints it at handover, and it has to travel out with the turn and come
-    /// back on the completion. Nothing spawns this loop yet, so nothing carries
-    /// it yet; the tests below are the only senders, and wiring the round trip
-    /// belongs with the task that spawns the loop. `done` now rides the same
-    /// unsolved round trip, so the task that carries the epoch OUT is the one
+    /// **Where a sender gets the epoch is solved OUTSIDE this loop.** The
+    /// sequencer mints it at handover and publishes it to the holder's epoch
+    /// cell (`start_turn`); the pump snapshots the cell on its turn's first
+    /// event and carries it back on the completion (`core/pump.rs` — the
+    /// sender since `session.rs` spawned this loop; the paragraph below this
+    /// one used to say "nothing spawns this loop yet"). `done` rides the same
+    /// round trip, so the task that carries the epoch OUT is the one
     /// that has to carry the vote back. A participant that arrives by
     /// [`ParticipantJoined`](Self::ParticipantJoined) is the sharpest case:
     /// that command hands the loop an stdin and gets nothing back, so a late
@@ -1130,10 +1133,10 @@ pub enum SequencerCommand {
     /// a flag is only ever seen wherever the loop happens to look, and it has no
     /// defined order against [`UserMessage`](Self::UserMessage) — the one pair
     /// whose ordering decides whether the release restarts the cycle or a `true`
-    /// that has not been cleared yet re-halts it on the spot. "Nothing mints
-    /// commands yet" does not tell the two apart either: nothing mints
-    /// `TurnComplete` or `UserMessage` yet either, and the same task owes all
-    /// three.
+    /// that has not been cleared yet re-halts it on the spot. (The pump mints
+    /// `TurnComplete`, the bridge's release mints `UserMessage`, and the halt
+    /// tools mint this — "nothing mints commands yet" was true of this doc's
+    /// first draft only.)
     ///
     /// **Released by [`UserMessage`](Self::UserMessage)**, like the consensus
     /// halt — see "the second halt reason" in the module doc for why there is no
@@ -1655,16 +1658,9 @@ impl RingState {
                         .await;
                     }
                 }
-            } else {
-                debug!(
-                    session = %deps.session_id,
-                    participant_id,
-                    completed,
-                    self.epoch,
-                    holder = ?self.holder.as_ref().map(|h| h.id),
-                    "sequencer: completion does not name the turn in flight; discarded"
-                );
             }
+            // (The discard itself is logged once, above — `!live` — with the
+            // carried and live epochs; a second line here said the same thing.)
     }
 }
 
@@ -2585,10 +2581,13 @@ async fn advance_turn(
                         //
                         // The two sets coincide EXACTLY, which is what makes
                         // this "by construction" rather than "in practice":
-                        // `:1423` sets `spoke_this_lap` for anything that is not
-                        // `Passed` — `Done` included — so `!spoke_this_lap` holds
-                        // if and only if every participant ended `Passed`, and
-                        // `:2845` retracts on exactly `Passed`. A mixed lap
+                        // the completion handler sets `spoke_this_lap` for
+                        // anything that is not `Passed` — `Done` included — so
+                        // `!spoke_this_lap` holds if and only if every
+                        // participant ended `Passed`, and the vote-retraction in
+                        // `halted_on_consensus` retracts on exactly `Passed`
+                        // (named, not line-cited: this file's own doc bans line
+                        // numbers, and the two it carried here had rotted). A mixed lap
                         // (one `Done`, one `Passed`) would leave a vote standing
                         // and is the obvious counterexample; it cannot produce a
                         // silent lap, because the `Done` marks it spoken.
@@ -2915,7 +2914,7 @@ async fn pass_empty_turn(
     });
 }
 
-/// Post [`round_cap_notice`] into the channel and tell the UI it landed.
+/// Post the all-passed notice into the channel and tell the UI it landed.
 ///
 /// **The post is the contract; the notification is the nicety.** D7 asks for a
 /// row, and a row is what a reopened session, a scrollback and an agent's next
@@ -3336,7 +3335,9 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Hando
 /// every flag is clear, the session derives `Idle`, and the input unlocks. That
 /// is the unlock condition and it needs no code of its own —
 /// `a_halt_leaves_nobody_busy` pins it. (True only because this function is the
-/// ONE busy-true writer: `AppState::broadcast` used to pre-mark every agent, and
+/// ONE busy-true writer on the TURN path — the boot lock in `session.rs` marks
+/// participants busy while they orient, and each pump clears its own at boot end
+/// (rc3 D29) — `AppState::broadcast` used to pre-mark every agent, and
 /// a pre-mark on a participant a halt stopped the ring before reaching had no
 /// turn end to clear it — s-ff729daa, the input locked under the HALT banner.
 /// `broadcast_marks_nobody_busy` in core::state pins that loop deleted.)
@@ -3642,7 +3643,7 @@ async fn deliver_backlog(
                     participant_id = to.id,
                     delivered = landed.len(),
                     of = total,
-                    "sequencer: a parked question halted this turn mid-drain"
+                    "sequencer: a declared halt stopped this turn mid-drain"
                 );
                 return Dealt::Live;
             }

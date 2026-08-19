@@ -29,9 +29,9 @@ pub struct SessionInfo {
     /// count of `session_participants` and went with the D10 retirement (0060).
     pub multi_participant: bool,
     /// First line preview of the latest text message + its author, for the
-    /// dashboard Quickview. Both None on the closed-session and external
-    /// JSON-RPC paths — only the dashboard `list_sessions` command populates
-    /// them (via `list_active_sessions_with_preview`).
+    /// dashboard Quickview. Both None on the closed-session and plugin-API
+    /// paths — only the dashboard `list_sessions` command populates them
+    /// (via `list_active_sessions_with_preview`).
     pub last_message: Option<String>,
     pub last_author: Option<String>,
 }

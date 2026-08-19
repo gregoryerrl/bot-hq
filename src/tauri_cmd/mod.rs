@@ -17,7 +17,11 @@
 //! - [`tool_gate`] — global + per-session Tool Gate keyword lists
 //! - [`plugins`] — plugin install/enable/disable
 //! - [`updates`] — GitHub-release update check (check-and-notify)
-//! - [`screenshot`] — webview capture for agent-driven UI testing
+//! - [`terminal`] — the session terminal (PTY) commands
+//! - [`feedback`] — agent feedback rows
+//! - [`findings`] — the reviewer's findings (EYES sign-off gate)
+//! - [`plugin_api`] — the plugin runtime's single enforcement point
+//! - [`screenshot`] — webview capture helpers (no commands of its own)
 //! - [`error`] — the shared [`error::AppError`] type
 //!
 //! `tauri_specta_gen::builder()` wires the full set into the Tauri builder's

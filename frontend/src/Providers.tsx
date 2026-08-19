@@ -235,7 +235,7 @@ function GlobalEventSync() {
     }) => {
       // `slot0_busy` / `slot1_busy` name TURN SLOTS 0 and 1, not agents —
       // `src/core/activity.rs` fills them from `slugs.get(0)` / `.get(1)`.
-      // They were `brian_busy` / `rain_busy` until the D10 hard retirement, and
+      // They were the retired `brian_busy` / `rain_busy` until the D10 hard retirement, and
       // the names now say what they always meant. Keying them by literal slugs
       // is what made the
       // turn-status line print "brian is working": no rc3 roster has that

@@ -415,6 +415,13 @@ async fn every_session_projection_executes_after_0060() {
     let preview = s.list_active_sessions_with_preview().await.unwrap();
     assert!(preview.iter().any(|x| x.session.id == "s-proj"), "previewed");
 
+    // 4. The closed-sessions list — the fourth `SESSION_COLUMNS` site (round
+    // 12: this test's name promised every projection and ran three).
+    s.create_session("s-closed", "t", None).await.unwrap();
+    s.close_session("s-closed", false).await.unwrap();
+    let closed = s.list_closed_sessions().await.unwrap();
+    assert!(closed.iter().any(|x| x.id == "s-closed"), "the closed list projects too");
+
     // The derived column tracks the ROSTER, which is the whole reason
     // `rain_enabled` was dropped rather than renamed: seed participants and the
     // same query answers differently, with nothing to write and nothing to

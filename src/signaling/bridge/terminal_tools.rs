@@ -45,7 +45,8 @@ fn capped_tail(output: String) -> String {
 }
 
 impl SignalingBridge {
-    /// HANDS-only (enforced at the dispatch layer). Runs `command` in the
+    /// Gated on the `run_terminal` capability (enforced at the dispatch layer;
+    /// any role may hold it). Runs `command` in the
     /// session's terminal and — unless `block` is false — returns the output
     /// captured until settle.
     pub async fn terminal_exec(

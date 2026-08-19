@@ -54,7 +54,7 @@ impl SessionActivity {
     /// the commanded state is Paused); `awaiting` wins over `busy` so a parked
     /// question re-opens input even though a turn is technically still in flight.
     ///
-    /// B4b: took `brian_busy, rain_busy` before the participant rekey (those
+    /// B4b: took the retired `brian_busy, rain_busy` before the participant rekey (those
     /// were the field names then; they are `slot0_busy`/`slot1_busy` now). The
     /// collapse to `any_busy` is what makes this N-participant-shaped — and it
     /// is also why per-participant edges must be tracked separately (see
@@ -80,7 +80,7 @@ impl SessionActivity {
 /// `Busy` and the next's during a hand-off).
 struct Inner {
     /// Per-participant busy, keyed by participant **slug**. B4b: was
-    /// `brian_busy` / `rain_busy` — the names of the day, now `slot0_busy` /
+    /// `brian_busy` / `rain_busy` — the retired names of the day, now `slot0_busy` /
     /// `slot1_busy`.
     ///
     /// Slug, not `participant_id`, on purpose: `set_busy` is slug-keyed and runs
@@ -117,7 +117,7 @@ impl Inner {
     /// Did any participant's busy flag change since the last emit?
     ///
     /// Compared by EFFECTIVE value (absent == `false`) in both directions, not
-    /// by map equality: `set_busy(x, false)` on a participant that was never
+    /// by map equality: `set_busy_slug(x, false)` on a participant that was never
     /// registered inserts a `false` where `last_busy` holds no key at all, and
     /// structural inequality there would emit a spurious transition that the
     /// two-bool version never emitted.
@@ -197,7 +197,8 @@ impl ActivityTracker {
 
     /// Participant-keyed busy setter, and now the only form — the two-party
     /// `Author` discriminant it was named against was deleted in the D10
-    /// retirement. `"user"` cannot enter the map: `set_busy` early-returns on it.
+    /// retirement. `"user"` is never passed here: every caller hands a roster
+    /// slug (the deleted `set_busy` early-returned on it; this does not need to).
     pub fn set_busy_slug(&self, slug: &str, busy: bool) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.busy.insert(slug.to_string(), busy);
@@ -364,7 +365,7 @@ impl ActivityTracker {
         }
     }
 
-    /// Poll (50ms) until NEITHER agent is busy, or `deadline` elapses; returns
+    /// Poll (50ms) until NO participant is busy, or `deadline` elapses; returns
     /// whether they went idle in time. The cancel interrupt-escalation uses this:
     /// after a `control_request` interrupt, the turn's `result` event clears the
     /// agent's `busy` flag (and auto-clears Cancelling→Idle). If that doesn't land
@@ -683,7 +684,7 @@ mod tests {
 
     #[tokio::test]
     async fn clearing_an_unregistered_participant_emits_nothing() {
-        // `set_busy(x, false)` on a participant that never took a turn inserts a
+        // `set_busy_slug(x, false)` on a participant that never took a turn inserts a
         // `false` where the last-emitted map holds no key at all. Comparing the
         // maps structurally would emit a spurious transition here; comparing by
         // effective value (absent == false) does not. The two-bool tracker was

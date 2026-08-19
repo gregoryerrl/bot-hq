@@ -342,7 +342,7 @@ mod tests {
             // `EditFiles` covers this but is forbidden from naming it. Asserted
             // as the whole bullet, not as three bare tool names: `Edit` and
             // `Write` also appear in `## Re-sync from the tree`, describing what
-            // EYES cannot SEE of her peer's calls, so bare names would pass on
+            // EYES cannot SEE of its peer's calls, so bare names would pass on
             // a prompt whose deny-list no longer refuses them.
             "- **`Edit`, `Write`, `NotebookEdit`** — file writes.",
             // The heuristic, the posture, and the push-is-a-toggle fact.

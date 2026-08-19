@@ -39,6 +39,7 @@ mod cl_push;
 pub use cl_push::{scan_then_push, PushOutcome};
 mod cl_refs;
 mod cl_staleness;
+pub use cl_staleness::RETIREMENT_MARKERS;
 mod cl_write;
 mod feedback;
 mod findings;
@@ -634,21 +635,6 @@ impl SignalingBridge {
         self.session_sequencer.lock().await.insert(session_id, tx);
     }
 
-    /// **Tell the ring the user spoke.** This is the RELEASE for a halt — the
-    /// only one the sequencer has — and without it a parked question stops the
-    /// cycle permanently.
-    ///
-    /// Shipped broken on 2026-08-13 for about two hours: `HaltDeclared` was
-    /// wired with no release path, so the first `mark_awaiting_user` of a session
-    /// halted the ring and nothing could restart it. The participants then ran
-    /// on their initial prompt with no turn-taking and no delivery at all — 105
-    /// messages and zero `participant_deliveries` rows in the session that caught
-    /// it. Halting and releasing are two halves of one mechanism; ship them
-    /// together or neither.
-    ///
-    /// **`mentions` is who the user named** (rc3 D17), already resolved to
-    /// participant ids by the caller — the only caller that can, since it is the
-    /// one holding the text and the session. Empty is the ordinary case.
     /// Tell the ring an approval gate opened (`opened = true`) or resolved
     /// (`false`) — rc3 **D35**: while any gate is open the ring deals no turns.
     /// `try_send` like every ring notify: this runs inside tool calls and
@@ -762,7 +748,7 @@ impl SignalingBridge {
     /// a secret is checked strictly, and that is every live session after the
     /// next relaunch.
     ///
-    /// Constant-time compare, mirroring `external_server`: a timing oracle on a
+    /// Constant-time compare (mirroring the deleted `external_server`): a timing oracle on a
     /// localhost secret is a stretch, but the cost of using the right primitive
     /// is nothing.
     ///
@@ -878,6 +864,23 @@ impl SignalingBridge {
         }
     }
 
+    /// **Tell the ring the user spoke.** This is the RELEASE for a halt — the
+    /// only one the sequencer has — and without it a parked question stops the
+    /// cycle permanently.
+    ///
+    /// Shipped broken on 2026-08-13 for about two hours: `HaltDeclared` was
+    /// wired with no release path, so the first `mark_awaiting_user` of a session
+    /// halted the ring and nothing could restart it. The participants then ran
+    /// on their initial prompt with no turn-taking and no delivery at all — 105
+    /// messages and zero `participant_deliveries` rows in the session that caught
+    /// it. Halting and releasing are two halves of one mechanism; ship them
+    /// together or neither.
+    ///
+    /// **`mentions` is who the user named** (rc3 D17), already resolved to
+    /// participant ids by the caller — the only caller that can, since it is the
+    /// one holding the text and the session. Empty is the ordinary case.
+    /// (This block sat on `notify_ring_gate` until round 12 — a merge put one
+    /// function's doc on the other.)
     pub async fn notify_ring_user_message(&self, session_id: &str, mentions: Vec<i64>) {
         let seq = self.session_sequencer.lock().await.get(session_id).cloned();
         if let Some(tx) = seq {
@@ -963,11 +966,6 @@ impl SignalingBridge {
         Some(phase)
     }
 
-    /// Register a session's open-blocking-findings count cache and return the
-    /// shared `Arc` (the deleted router read it per forward; the ring reads the
-    /// count from storage when it builds a user row's envelope). Seeds from storage so a
-    /// re-spawned session with pre-existing findings starts at the right value (not
-    /// 0). Mirrors `register_session_awaiting`.
     /// Record which participants of a session can file findings — the reviewers
     /// the commit gate watches. Called once per spawn with the roster's own
     /// answer; an empty list means this session has no reviewer at all.
@@ -1761,7 +1759,7 @@ impl SignalingBridge {
             .cloned()
     }
 
-    /// Publish a session's duo-activity change (idle / busy / awaiting-user /
+    /// Publish a session's activity change (idle / busy / awaiting-user /
     /// cancelling). Fire-and-forget; the UI subscriber maps it to a
     /// `session:activity` event that gates the chat input + Cancel button.
     /// `state` is the `SessionActivity::as_str` string; `slot0_busy`/`slot1_busy`

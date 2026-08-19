@@ -59,7 +59,7 @@ pub(super) fn json_response<T: serde::Serialize>(
 /// `Response` ready to bubble out of the handler — either a 400 for body-read
 /// errors or a 200 wrapping a JSON-RPC PARSE_ERROR (-32700) envelope.
 ///
-/// Extracted at F4 because `signaling::server` and `signaling::external_server`
+/// Extracted at F4 because `signaling::server` and the since-deleted `signaling::external_server`
 /// held identical copies. `external_server` was deleted with the external
 /// driver (2026-08-17), so `signaling::server` is the only caller now.
 pub(super) async fn decode_jsonrpc_body(

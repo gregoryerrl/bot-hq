@@ -49,7 +49,7 @@ impl Storage {
     ) -> Result<Vec<ActivityEvent>> {
         // Column and struct field agree again. They did not for one commit:
         // the Rust side was renamed first and bridged with
-        // `brian_busy AS slot0_busy` until 0060 caught up, because renaming a
+        // `brian_busy AS slot0_busy` (the legacy name) until 0060 caught up, because renaming a
         // SQL literal ahead of its column turned four tests red. The schema and
         // its readers have to move together — that is why the migration was its
         // own batch, and the alias is what made the intermediate state legal.

@@ -1,7 +1,10 @@
 //! Global **Tool Gate** keyword config + matcher + executor.
 //!
-//! A single, GLOBAL keyword list (one for every session/project) that decides
-//! how an agent's Bash tool calls are handled. Each entry is a `{keyword,
+//! A single, GLOBAL keyword list (one for every session/project; a session
+//! snapshot may override it — `resolve_keywords`) that decides how an
+//! edit-capable participant's Bash tool calls are handled (the PreToolUse hook
+//! is injected only for roles holding `edit_files`; a read-only participant's
+//! Bash is bounded by `--disallowedTools` instead). Each entry is a `{keyword,
 //! mode}`: a `gate` keyword makes the command require an Approve/Reject
 //! round-trip (surfaced via the `action_gate` MCP tool, which then EXECUTES
 //! the command on approval), while an `auto_allow` keyword lets a matching

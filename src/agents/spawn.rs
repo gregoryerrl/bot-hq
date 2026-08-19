@@ -445,7 +445,7 @@ impl ParticipantInput {
     /// with one copy of the comparison. (`send_to_all` and `SessionAgent::deliver`
     /// were deleted in round 7 as callerless; every remaining route is this one.)
     ///
-    /// Be exact about the size of the claim. Within this type there are three
+    /// Be exact about the size of the claim. Within this type there are four
     /// writes to `tx` — this one, [`deliver_batch`](Self::deliver_batch) and
     /// the private [`relay`](Self::relay) (`send_unrouted`, the fourth, went
     /// with the router) — so what holds is: **every write to a participant's

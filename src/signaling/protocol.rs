@@ -760,7 +760,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         // Webview automation — agents test the bot-hq UI on their own.
-        // These mirrored external_jsonrpc.rs's equivalents until the external
+        // These mirrored the deleted external_jsonrpc.rs's equivalents until the external
         // driver was deleted (2026-08-17); this is the only copy now.
         ToolDescriptor {
             name: "webview_screenshot",

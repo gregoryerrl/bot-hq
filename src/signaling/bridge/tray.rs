@@ -1,6 +1,8 @@
 //! Signaling tools that park a tray entry: `ask_user_choice` (non-blocking —
 //! parks and returns a `{parked}` ack; the pick arrives out-of-band) and
-//! `request_approval` (blocking — awaits the user's oneshot), plus their
+//! `request_approval` (the agent-facing path parks too and latches the ring;
+//! the blocking form awaits the user's oneshot and is what the pre-push hook
+//! route uses), plus their
 //! supersede + resolve machinery, `mark_awaiting_user`,
 //! `request_phase_advance`, and the pending-choice snapshots. This is the
 //! biggest slice of the bridge — everything that parks a oneshot, mirrors a

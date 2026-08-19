@@ -577,7 +577,7 @@ pub(crate) async fn dispatch(
 /// Block until the session has at least one message past `since_id`, or
 /// `timeout_ms` elapses (then an empty Vec).
 ///
-/// Lived in `signaling/external_jsonrpc.rs` until the external driver was
+/// Lived in the deleted `signaling/external_jsonrpc.rs` until the external driver was
 /// removed (demoted to a future plugin). It has exactly one caller — the plugin
 /// proxy below — so it moved here rather than to a shared module: its inputs are
 /// `CoreAppState`'s storage and bridge, which this file already holds.

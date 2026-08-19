@@ -28,8 +28,8 @@ fn main() -> Result<()> {
 
     // Chain a panic hook that SIGKILLs every registered claude-code child
     // BEFORE the original hook prints the panic + unwind reaches the FFI
-    // barrier and aborts. Without this, a panic leaves brian/rain
-    // orphaned to launchd (the ghost-Brian incident).
+    // barrier and aborts. Without this, a panic leaves every participant's
+    // claude-code orphaned to launchd (the 2026-05-22 ghost-agent incident).
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         bot_hq::agents::spawn::reap_all_children();

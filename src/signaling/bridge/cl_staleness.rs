@@ -7,9 +7,9 @@
 //! **deleted that day** — written in confident present tense. An outsider
 //! caught it, which is the part that does not scale.
 //!
-//! That class is mechanically detectable: `strip_claude_code_tool_inventory`,
-//! `may_run_native`, `models.native`, `AgentRole` were all named in CL prose and
-//! none exists in the tree. This module finds them.
+//! That class is mechanically detectable: the deleted `strip_claude_code_tool_inventory`,
+//! the deleted `may_run_native`, `models.native`, `AgentRole` were all named in
+//! CL prose and none exists in the tree. This module finds them.
 //!
 //! # It REPORTS. It never edits.
 //!
@@ -74,7 +74,7 @@ pub struct StaleClaim {
 /// Phrases that mark a line as *about* a retirement. A line carrying one is
 /// skipped: naming a deleted symbol is what such a line is for, and flagging it
 /// would bury the real hits under the library's own history.
-const RETIREMENT_MARKERS: [&str; 14] = [
+pub const RETIREMENT_MARKERS: [&str; 14] = [
     "deleted",
     "removed",
     "retired",
@@ -227,8 +227,8 @@ fn repo_has_path(repo_root: &Path, tracked: &[String], rel: &str) -> bool {
 /// reader to skim the report.
 ///
 /// The test is whether the path's FIRST segment names a directory the repo
-/// actually has. `core/router.rs` passes (there is a `core/`, the file is
-/// gone — a real hit); `Casks/bot-hq.rb` does not.
+/// actually has. The deleted `core/router.rs` passes (there is a `core/`, the
+/// file is gone — a real hit); `Casks/bot-hq.rb` does not.
 fn names_this_repo(tracked: &[String], rel: &str) -> bool {
     let Some(first) = rel.split('/').next() else {
         return false;

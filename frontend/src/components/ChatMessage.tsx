@@ -319,7 +319,8 @@ function formatPreview(value: unknown, fallback: string): string {
 /**
  * The file a tool call's input names, if any — the same shapes `formatPreview`
  * already understands, plus the command's file argument via `fileArgInCommand`.
- * Exported for the test; the button above is its only render site.
+ * Module-local; the button above is its only render site and the test drives
+ * it through the UI.
  */
 function toolFilePath(input: unknown): string | null {
   if (typeof input !== "object" || input === null) return null;

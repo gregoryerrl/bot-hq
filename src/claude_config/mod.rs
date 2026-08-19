@@ -92,8 +92,8 @@ use specta::Type;
 
 /// Which agents pick up a given config surface from `~/.claude` at spawn, and
 /// which don't. Drives the per-surface inheritance badges in the UI. This is
-/// the canonical mapping derived from `spawn.rs::build_command` behavior: both
-/// agents run full claude-code and inherit skills/plugins/hooks/CLAUDE.md
+/// the canonical mapping derived from `spawn.rs::build_command` behavior: every
+/// participant runs full claude-code and inherits skills/plugins/hooks/CLAUDE.md
 /// (a read-only participant's tool access is gated server-side, not by skipping inheritance);
 /// model/permissions are overridden per-agent by bot-hq.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]

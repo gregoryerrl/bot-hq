@@ -2,8 +2,11 @@
 //! sqlx. The query methods are split across per-table submodules, each
 //! contributing its own `impl Storage` block:
 //!
-//! - [`sessions`], [`messages`], [`agent_config`], [`tray`],
-//!   [`projects`], [`cl_index`], [`session_docs`], [`plugins`]
+//! - one per table family: `sessions`, `messages`, `participants` (the
+//!   roster, cursors, deliveries, phase votes), `tray`, `findings`,
+//!   `session_docs`, `projects`, `cl_index` / `cl_atoms`, `models` /
+//!   `agent_config`, `plugins`, `context_readings`, `retrieval_events`,
+//!   `gc`, … — read the `mod` list below, not this sentence, for the set
 //!
 //! This module keeps the `Storage` struct, the `open`/`memory` constructors,
 //! the pool accessor, and the shared `cl_search_table` generic used by the

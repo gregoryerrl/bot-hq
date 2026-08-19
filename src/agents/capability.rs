@@ -1,10 +1,10 @@
 //! Capabilities — what a participant may do, as DATA rather than as an
 //! agent-name comparison.
 //!
-//! Batch B2 of the session-focused redesign. Today authorization is
-//! `caller.agent != "brian"` against three hardcoded lists
-//! (`signaling/jsonrpc.rs`); here it becomes a set carried by the participant,
-//! snapshotted from its role at invite time.
+//! Batch B2 of the session-focused redesign. Authorization used to be
+//! `caller.agent != "brian"` against three hardcoded lists in
+//! `signaling/jsonrpc.rs` (deleted with the name gate, rc3 D16); here it is a
+//! set carried by the participant, snapshotted from its role at invite time.
 //!
 //! Three rules from the design, encoded here rather than in prose:
 //! 1. **Grants only.** There are no "prohibitions" — a deny-list is derived
@@ -213,8 +213,8 @@ impl Capability {
 
 /// Which capability a tool call requires. `None` = ungated (both roles today).
 ///
-/// This is the single mapping that replaces `HANDS_ONLY_TOOLS`,
-/// `EYES_ONLY_TOOLS` and `CL_MUTATE_TOOLS`. The parity oracle
+/// This is the single mapping that replaced the deleted `HANDS_ONLY_TOOLS`,
+/// the deleted `EYES_ONLY_TOOLS` and `CL_MUTATE_TOOLS`. The parity oracle
 /// (`signaling::parity`) is what proves the replacement is faithful.
 pub fn required_for(tool: &str) -> Option<Capability> {
     use Capability::*;

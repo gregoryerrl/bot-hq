@@ -649,7 +649,8 @@ async fn call_tool(
             ))
         }
         "file_feedback" => {
-            // Deliberately NOT in HANDS_ONLY_TOOLS: filing is not a repo
+            // Deliberately NOT capability-gated (nor was it in the pre-rc3,
+            // deleted HANDS_ONLY_TOOLS): filing is not a repo
             // mutation and never reaches the user mid-session, and EYES hits
             // bot-hq friction as often as HANDS does.
             let kind = arg_required_str(&args, "kind")?;
@@ -1630,7 +1631,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eyes_rejected_from_hands_only_tools() {
+    async fn eyes_is_refused_a_tool_its_capabilities_do_not_grant() {
         let bridge = SignalingBridge::new();
         for tool in &[
             "mark_awaiting_user",
@@ -1773,7 +1774,8 @@ mod tests {
 
     #[tokio::test]
     async fn eyes_rejected_from_disposition_finding() {
-        // disposition_finding joins HANDS_ONLY_TOOLS — EYES (rain) is rejected.
+        // disposition_finding needs a capability EYES does not hold (pre-rc3 it
+        // sat in the deleted HANDS_ONLY_TOOLS) — EYES is rejected.
         let bridge = SignalingBridge::new();
         let res = dispatch(
             req(

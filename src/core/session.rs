@@ -271,8 +271,8 @@ fn resolve_spawn_roster<'a>(
 /// Seed the default roster and lay the caller's PER-SLOT picks onto it.
 ///
 /// **The bridge from the pre-rc3 create arguments to the roster.** Every
-/// creation path that has no participant list — the external driver's
-/// `open_session`, `create_session` called without `participants`,
+/// creation path that has no participant list — the deleted external driver's
+/// `open_session` (gone 2026-08-17), `create_session` called without `participants`,
 /// `dispatch_session_inner` — used to hand spawn its picks through
 /// `sessions.slot0_model_id` / `slot1_effort` / …, and spawn no longer reads
 /// those columns. `models[i]` / `knobs[i]` therefore belong to TURN SLOT `i` and

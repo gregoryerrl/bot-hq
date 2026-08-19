@@ -277,7 +277,7 @@ mod tests {
         hands.skills.insert("b".into(), SkillVisibility::NameOnly);
         let merged = resolve_agent_overrides(&store, Some("hands"));
         assert_eq!(merged.effort.as_deref(), Some("xhigh"));
-        // _all's skill "a" survives; brian's "b" is layered on.
+        // _all's skill "a" survives; hands' "b" is layered on.
         assert_eq!(merged.skills.get("a"), Some(&SkillVisibility::Off));
         assert_eq!(merged.skills.get("b"), Some(&SkillVisibility::NameOnly));
     }
