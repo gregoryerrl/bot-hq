@@ -264,6 +264,19 @@ impl SignalingBridge {
                              (or in another session); you can only supersede your own questions"
                         );
                     }
+                    // A GATE is not a question (round 12): it latched the ring
+                    // when it opened, and retiring it here would leave that
+                    // latch with no lift — the same leak the auto-supersede
+                    // path had. An approval is answered in the gate, or
+                    // withdrawn with `withdraw_question` (which does release
+                    // the latch); it is never replaced by a question.
+                    if crate::storage::is_gate_row(&row.kind, row.options_json.as_deref()) {
+                        anyhow::bail!(
+                            "not superseded: {stale_choice_id} is an approval gate, not a \
+                             question — it is answered in the gate (or withdrawn with \
+                             withdraw_question); park your new question with ask_user_choice"
+                        );
+                    }
                     Some(row.id)
                 }
                 Ok(None) => None,
@@ -325,6 +338,8 @@ impl SignalingBridge {
             .find(|q| q.agent == agent && q.status == "pending" && q.prompt == prompt)?;
         let stale_choice_id = latest.choice_id.clone();
         let stale_internal_id = latest.id;
+        let stale_was_gate =
+            crate::storage::is_gate_row(&latest.kind, latest.options_json.as_deref());
         // Mark in storage first so the UI tray drops it on its next poll.
         if let Err(e) = storage.supersede_tray_entry(&stale_choice_id).await {
             tracing::warn!(?e, %stale_choice_id, "supersede (auto) storage update failed");
@@ -332,6 +347,18 @@ impl SignalingBridge {
         // Drop the parked oneshot so any (rare) still-listening client gets
         // the standard cancellation.
         self.pending.lock().await.remove(&stale_choice_id);
+        // **A retired GATE releases the latch it opened** (round 12). The ring
+        // drops an id from `open_gates` only on `GateResolved`, and this path
+        // used to retire the row, the oneshot and the UI state without sending
+        // one — so a byte-identical re-park from the same agent (the pre-push
+        // prompt, re-pushed after a client-timeout kill) left the stale id
+        // latched: answering the NEW gate lifted nothing and the session read
+        // "dealing is parked" until restart. Sent BEFORE the new row's
+        // `GateOpened`, so the ring's set never holds a dead id beside a live
+        // one. `superseding_a_pending_approval_releases_its_gate_latch` pins it.
+        if stale_was_gate {
+            self.notify_ring_gate(session_id, &stale_choice_id, false).await;
+        }
         // Tell the UI to clear its inline state for this choice.
         let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
             choice_id: stale_choice_id,
@@ -1714,6 +1741,150 @@ mod tests {
         // And the pick recorded is the label the agent offered, untouched.
         let row = storage.get_tray_entry(&choice_id).await.unwrap().unwrap();
         assert_eq!(row.picked_option.as_deref(), Some("Approve — read only"));
+    }
+
+    /// Round 12: a re-ask that SUPERSEDES a pending approval must release the
+    /// latch the old gate opened. `auto_supersede_prior_pending` retired the old
+    /// row (status, oneshot, UI event) but never told the ring, and the ring
+    /// drops an id from `open_gates` only on `GateResolved` — so a byte-identical
+    /// re-park from the same agent (the pre-push prompt after a client-timeout
+    /// kill, re-pushed) left the stale id latched: answering the NEW gate lifted
+    /// nothing and the session stayed "dealing is parked" until restart.
+    #[tokio::test]
+    async fn superseding_a_pending_approval_releases_its_gate_latch() {
+        use crate::core::sequencer::SequencerCommand;
+        use std::sync::atomic::AtomicBool;
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        bridge
+            .register_session_awaiting("s1".into(), Arc::new(AtomicBool::new(false)))
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        let ctx = || super::super::ApprovalContext {
+            kind: crate::policy::ViolationKind::PushGate,
+            action: "git push origin main".into(),
+            detail: None,
+        };
+        let prompt = "Allow `git push` to `main` in this session's repo?";
+
+        let ack = bridge
+            .request_approval_parked(
+                "s1".into(),
+                "hands".into(),
+                prompt.into(),
+                vec!["Approve".into(), "Reject".into()],
+                ctx(),
+            )
+            .await
+            .unwrap();
+        let first: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        let first_id = first["choice_id"].as_str().unwrap().to_string();
+        match rx.try_recv() {
+            Ok(SequencerCommand::GateOpened { choice_id }) => assert_eq!(choice_id, first_id),
+            other => panic!("expected GateOpened for the first gate, got {other:?}"),
+        }
+
+        // The same agent re-parks the same prompt while the first is pending:
+        // the first is auto-superseded.
+        let ack = bridge
+            .request_approval_parked(
+                "s1".into(),
+                "hands".into(),
+                prompt.into(),
+                vec!["Approve".into(), "Reject".into()],
+                ctx(),
+            )
+            .await
+            .unwrap();
+        let second: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        let second_id = second["choice_id"].as_str().unwrap().to_string();
+        assert_ne!(first_id, second_id);
+        let first_row = storage.get_tray_entry(&first_id).await.unwrap().unwrap();
+        assert_eq!(first_row.status, "superseded");
+
+        // The ring must hear the OLD gate close before (or beside) the new one
+        // opening — otherwise its `open_gates` keeps the dead id for ever.
+        let mut resolved_first = false;
+        let mut opened_second = false;
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                SequencerCommand::GateResolved { choice_id } if choice_id == first_id => {
+                    resolved_first = true
+                }
+                SequencerCommand::GateOpened { choice_id } if choice_id == second_id => {
+                    opened_second = true
+                }
+                other => panic!("unexpected ring command {other:?}"),
+            }
+        }
+        assert!(
+            resolved_first,
+            "superseding a pending APPROVAL must send GateResolved for the retired id"
+        );
+        assert!(opened_second, "the new gate still opens");
+    }
+
+    /// The question-supersede tool cannot retire an approval: a gate is answered
+    /// in the gate or withdrawn, never replaced by a question — and an agent that
+    /// tried would leave the ring latched on the retired id (same leak as above,
+    /// through the explicit path).
+    #[tokio::test]
+    async fn supersede_question_refuses_to_retire_an_approval_gate() {
+        use crate::core::sequencer::SequencerCommand;
+        use std::sync::atomic::AtomicBool;
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        bridge
+            .register_session_awaiting("s1".into(), Arc::new(AtomicBool::new(false)))
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        let ack = bridge
+            .request_approval_parked(
+                "s1".into(),
+                "hands".into(),
+                "Query prod read-only?".into(),
+                vec!["Approve".into(), "Reject".into()],
+                super::super::ApprovalContext {
+                    kind: crate::policy::ViolationKind::PerAction,
+                    action: "psql -h prod …".into(),
+                    detail: None,
+                },
+            )
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        let gate_id = v["choice_id"].as_str().unwrap().to_string();
+        assert!(matches!(rx.try_recv(), Ok(SequencerCommand::GateOpened { .. })));
+
+        let err = bridge
+            .supersede_question_with_new(
+                "s1".into(),
+                "hands".into(),
+                gate_id.clone(),
+                "Which table first?".into(),
+                vec!["users".into(), "orders".into()],
+            )
+            .await
+            .expect_err("a gate id must be refused by the question-supersede tool");
+        assert!(
+            err.to_string().contains("approval gate"),
+            "the refusal names what the id is: {err}"
+        );
+        // Untouched: still pending, still latched, nothing new parked.
+        let row = storage.get_tray_entry(&gate_id).await.unwrap().unwrap();
+        assert_eq!(row.status, "pending");
+        assert!(rx.try_recv().is_err(), "no ring command for a refused supersede");
+        assert_eq!(
+            storage.tray_entries_for_session("s1").await.unwrap().len(),
+            1,
+            "no new question row was parked"
+        );
     }
 
     /// A session with no ring registered must not panic or block — the bridge is
