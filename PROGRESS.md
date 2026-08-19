@@ -23,6 +23,90 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-19 (round 12) — the round the live session was dissected, s-73825e99
+
+Mandate: audit again (messes, staleness, redundancies, mis/missed
+implementations, refactors/optimizations), use the round-11 binary as live
+evidence, and work the user's `issues.md` (three entries from the real
+ad-manager session `s-1c29c521` that ran on this build) and `ideas.md`
+(custom session documents). Twenty-two commits `d6dc394..fe47832` (this
+changelog commit follows), one logical change per commit, every batch
+reviewed by EYES, every defect fix RED-then-green in the session's `apply`
+doc. Gates auto-allowed by the user from the first turn.
+
+**Live evidence (the round-11 build, relaunched 22:06Z 08-18).** Zero ERROR
+in two days of logs; the footer read "Agents: OK" over live sessions and the
+composer's footer row was where round 11 put it (screenshot 10:13Z); the
+custom-doc tabs were used in anger (`tasklist-2026-08-19`, `for-user`); a
+custom-menu approval answered in the gate slot lifted the ring — and was the
+user's issue #1. Reopen and the wind-down grace went unexercised.
+
+**The session dissected (`s-1c29c521`, 32 tray rows, 1,000+ message rows,
+the raw claude-code transcript beside them).** Issue #1 — the "tray question
+on the input box" — was `request_approval(kind=per_action, options=[4 custom])`
+both times: the tool's schema invites a multi-way DECISION to ride a blocking
+approval (decision Q1, parked in the tray). Issue #2 — "HALTED while waiting
+for CI" — was the all-pass yield freezing the ring while HANDS had a
+claude-code background CI watcher armed; the watcher did self-wake and post,
+but an out-of-turn completion is discarded and the halt slot clears only on
+user input, by the 2026-08-15 decree (PLAN.md:270) — reopened as decision Q2.
+Issue #3 — external errors — found no API failure at all; the one incident
+was the PUSH GATE outliving the agent's 5-minute Bash timeout (02:00→02:09Z:
+hook killed, row pending, late approve ran nothing, second gate), which became
+B2; a transient-retry ladder is decision Q3. Also found: a latent wedge — a
+byte-identical re-ask (exactly the re-push prompt) auto-superseded a pending
+approval without releasing the ring's latch (B1); the halt peer-guard refusing
+"Two things in your hands." (B6); 22 `undefined` text rows that are the served
+model emitting the word after every HANDS pass (a quirk, recorded, left).
+
+**The fixes.** B1 `d641178` the supersede latch leak (+ the question tool
+refuses a gate id). B3 `3dfab23` gated commands carry `BOT_HQ_SESSION_ID`
+(the findings gate and the session policy were invisible to an
+`action_gate` child). B2 `73b9512` + `2954e49`: a push gate approved after
+its hook died re-runs the push — sha-pinned (`git push <remote>
+<local_oid>:<remote_ref>`, `policy::push_rerun_command`), dead-waiter paths
+only, a 600 s bound, and a single-use in-memory nonce its own pre-push hook
+redeems (remove-first under the lock, session + refspecs bound; nonce present
+⇒ redeem-or-exit-1, never the prompt) — EYES's F1–F3/F9–F11, and the wire
+(mint → env → child → hook) pinned with a real shell hook in a real git repo.
+B4 `5f62104` changing a staged tray answer's VALUE re-stages it (the effect
+was keyed on the count). B5 `63f181d` a discard refreshes the bell (the
+withdraw path emitted no event). B6 `2fad47e` the peer-guard needs a role
+token (`HANDS`/`EYES`/`@slug`/`peer`) AND a wait shape in one sentence. B7
+`9e86252` the A1 CL-opener nudge, unreachable since D29, removed. B8
+`3878a27` every stop delivers a pending staged message (the spin arm did not).
+B9 `13ff032` a summoned turn is dealt once. B10 `5b29e7c` `busy_slots` on
+the activity event AND the runtime seed (a third participant never showed as
+working). B11 `96bb582` + `f706daf` custom documents: `session_doc_save` /
+`session_doc_delete` (phase docs refused at three layers), Edit / Delete /
+`+` in the pane, the custom tab strip scrolling sideways — the user's one
+sanctioned horizontal scroller, declared at the site with
+`data-overflow-x-ok` and counted by the overflow guard. B12 `727a087` phase
+pills tint only when selected. B13 `4b557f3` + `9cdf567` approving labels
+audited by their opening word, `deliver_oob` told what is a gate, descriptors
+and rules text say what the code does (tool rows DO render; reviewer-down is
+advisory; `gate_status(gate_id)`), client disconnects at debug. B14 `238f17a`
+the comment sweep (~45 sites) plus `tests/retired_symbol_prose_test.rs` — the
+CL's `RETIREMENT_MARKERS` rule applied to the tree's comments, so the class
+three rounds re-edited by hand cannot regenerate silently. B15 `c7a71c0`
+canonical docs (findings gate on pre-push, layer 7, the D15 epilogue section,
+four CLOSED handoffs). B16 `3248982` the unused `regex` dep. B17 `b2c61f3`
+reseed 0068 — the HANDS untagged-docs sentence and the EYES two-participant
+sentence, guarded on 0067's seed. `fe47832` one test reconciled with B5.
+
+**Gates (all bare, exit 0):** `cargo test` 1333 passed (1291 lib, 42
+integration), 1 ignored; vitest 51 files / 475 tests; `tsc --noEmit` clean;
+`npm run build` (41 KB CSS); `cargo build --release` + the debug build.
+
+**Pending the tray:** Q1 binary approvals, Q2 `schedule_wake` + self-wake
+adoption (and PLAN.md's decree paragraph), Q3 the transient-retry ladder —
+each a planned batch in the session's `plan` doc. **Live confirmation waits
+for the relaunch:** migration 0068 moves the untouched roles' prose; hook
+bodies rewrite at the next session open (pre-push forwards `$1` — B2 is inert
+until relaunch AND a new session); custom-doc Edit/Delete/`+`; a changed
+staged pick delivers; a ≥3-participant roster names every busy participant;
+unselected phase pills are muted; the bell after a Discard.
+
 ## 2026-08-18 (round 11) — the round the user's own entries were read, s-021aa8ee
 
 Mandate: audit again (messes, staleness, redundancies, mis/missed
