@@ -1533,12 +1533,7 @@ impl RingState {
                     // response pending: deliver it now — it is the
                     // user's queued next message, and a yielded ring is
                     // exactly the boundary it was waiting for.
-                    if self.staged_pending {
-                        self.staged_pending = false;
-                        if let Some(bridge) = deps.bridge.as_ref() {
-                            bridge.notify_staged_delivery_due(&deps.session_id);
-                        }
-                    }
+                    deliver_staged_if_pending(deps, &mut self.staged_pending).await;
                 } else {
                     // Spin is a property of SUBSTANTIVE output. A `done`
                     // vote is a participant saying it has nothing left to
@@ -1628,6 +1623,10 @@ impl RingState {
                                 )
                                 .await;
                         }
+                        // A stage pending at a spin halt delivers (round 12):
+                        // the staged send is the user's message, which is
+                        // also what breaks the spin.
+                        deliver_staged_if_pending(deps, &mut self.staged_pending).await;
                     } else if self.staged_pending {
                         // The boundary the Stage toggle was waiting for:
                         // PARK instead of dealing (the same yield a halt
@@ -1637,16 +1636,13 @@ impl RingState {
                         // the staged send lands between turns, exactly
                         // like a typed one, and no holder's work is ever
                         // superseded by it.
-                        self.staged_pending = false;
                         halt(deps, &mut self.holder, &mut self.epoch).await;
                         debug!(
                             session = %deps.session_id,
                             "sequencer: staged response pending at the boundary; \
                              parking and handing delivery to the app"
                         );
-                        if let Some(bridge) = deps.bridge.as_ref() {
-                            bridge.notify_staged_delivery_due(&deps.session_id);
-                        }
+                        deliver_staged_if_pending(deps, &mut self.staged_pending).await;
                     } else {
                         self.reseed_gates_if_needed(deps)
                             .await;
@@ -2048,12 +2044,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // A staged response delivers AS THE RELEASE: the halt asked
                 // for the user's next message and one is already queued. The
                 // delivery clears the halt exactly as a typed answer would.
-                if state.staged_pending {
-                    state.staged_pending = false;
-                    if let Some(bridge) = deps.bridge.as_ref() {
-                        bridge.notify_staged_delivery_due(&deps.session_id);
-                    }
-                }
+                deliver_staged_if_pending(&deps, &mut state.staged_pending).await;
             }
             SequencerCommand::GateOpened { choice_id } => {
                 state.open_gates.insert(choice_id);
@@ -2302,6 +2293,7 @@ async fn advance_turn(
         spoke_this_lap,
         halted_pending_user,
         open_gates,
+        staged_pending,
         ..
     } = state;
     // **rc3 D35: nothing is dealt while the session is halted or gated.**
@@ -2619,6 +2611,8 @@ async fn advance_turn(
                         laps = *laps,
                         "sequencer: a full lap of passes; the cycle yields to the user"
                     );
+                    // A stop with a stage pending delivers it (round 12).
+                    deliver_staged_if_pending(deps, staged_pending).await;
                     return;
                 }
                 // A new lap begins: whether anyone speaks in THIS one is a
@@ -2688,6 +2682,8 @@ async fn advance_turn(
                         "sequencer: the round cap was reached; the cycle halts and yields to \
                          the user"
                     );
+                    // A stop with a stage pending delivers it (round 12).
+                    deliver_staged_if_pending(deps, staged_pending).await;
                     return;
                 }
             }
@@ -3133,6 +3129,33 @@ async fn halted_on_consensus(
 ///   the test's last completion names a turn that was never handed out. A real
 ///   failure, but an arithmetic one; do not read it as the guard being pinned
 ///   from both sides.
+/// The boundary a staged message was waiting for has arrived: hand its
+/// delivery to the app layer (it comes back as an ordinary `UserMessage`
+/// milliseconds later and deals to the front). `false` when nothing is staged
+/// — nothing fires.
+///
+/// **Every STOP the ring takes routes through here** (round 12): the consensus
+/// arrival, the staged boundary itself, the spin halt, the all-pass yield, the
+/// round cap, and the user-message reset. Until round 12 the spin halt did
+/// not — it is the `if` and the staged boundary the `else if` of one chain —
+/// so a participant that tripped the detector while the user had a message
+/// staged left the flag set and the message stranded until the user typed
+/// again, with the composer reading "Staged". The all-pass and cap arms are
+/// reached from `advance_turn`, which the completion handler enters only
+/// after its own staged check; they carry the call anyway, because a stop
+/// that strands a staged send is the same defect whichever arm takes it.
+/// `a_spin_halt_with_a_stage_pending_delivers_the_stage` pins the spin arm.
+async fn deliver_staged_if_pending(deps: &SequencerDeps, staged_pending: &mut bool) -> bool {
+    if !*staged_pending {
+        return false;
+    }
+    *staged_pending = false;
+    if let Some(bridge) = deps.bridge.as_ref() {
+        bridge.notify_staged_delivery_due(&deps.session_id);
+    }
+    true
+}
+
 async fn halt(deps: &SequencerDeps, holder: &mut Option<Participant>, epoch: &mut u64) {
     *holder = None;
     *epoch += 1;
@@ -9118,6 +9141,51 @@ mod tests {
         let task = tokio::spawn(run_sequencer(deps, rx));
         send(&tx, SequencerCommand::MessageStaged).await;
         assert_eq!(next_due(&mut events).await.as_deref(), Some("s1"));
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// Round 12: a SPIN halt with a stage pending delivers the stage. The
+    /// spin arm is the `if` and the staged boundary the `else if` of one
+    /// chain, so a participant that tripped the detector while the user had a
+    /// message staged left `staged_pending` set and the message stranded
+    /// until the user typed again — while the composer read "Staged". The
+    /// staged send is the user's message, which is also what breaks the spin.
+    #[tokio::test]
+    async fn a_spin_halt_with_a_stage_pending_delivers_the_stage() {
+        const SAME: &str = "still waiting on the parser fix before i can continue";
+        let (mut deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        let a = seats[0].id;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        let mut events = bridge.subscribe();
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        for (epoch, tick) in [(1u64, "tick one"), (2, "tick two")] {
+            post(&storage, "participant", Some("a"), SAME).await;
+            post(&storage, "system", None, tick).await;
+            send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch, ending: SPOKE })
+                .await;
+            assert_eq!(seats[0].expect(1).await, vec![tick]);
+        }
+        // The user stages while A holds its third turn; A repeats a third time
+        // — the streak reaches two and the spin arm halts the cycle.
+        send(&tx, SequencerCommand::MessageStaged).await;
+        assert!(next_due_quick(&mut events).await.is_none(), "mid-turn: nothing fires");
+        post(&storage, "participant", Some("a"), SAME).await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 3, ending: SPOKE })
+            .await;
+        assert_eq!(
+            next_due(&mut events).await.as_deref(),
+            Some("s1"),
+            "the spin halt hands the staged message to the app instead of stranding it"
+        );
+        seats[0].quiet().await;
         drop(tx);
         assert!(exited(task).await);
     }
