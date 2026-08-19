@@ -253,9 +253,10 @@ fn with_repeat_halt_note(base: &str, prior: Option<&str>) -> String {
 /// English nouns `eyes`/`hands` (and the retired names) word-matched anywhere.
 ///
 /// Now two conditions, both in ONE sentence: a peer TOKEN — a role name as
-/// the roster renders it (`HANDS`, `EYES`: uppercase, case-sensitive — how a
-/// participant writes a peer, never how English writes a body part), the
-/// summons form `@hands`/`@eyes`, or the word `peer(s)` — AND a WAIT shape
+/// the roster renders it (`HANDS`, `EYES`), the lowercase slug when the word
+/// before it is not a possessive or a quantity ("waiting on hands" yes, "in
+/// your hands" / "more eyes on it" no — EYES F14), the summons form
+/// `@hands`/`@eyes`, or the word `peer(s)` — AND a WAIT shape
 /// (`wait`/`awaiting`, `pending`, `until`, `blocked`, `handed`/`hand off`,
 /// `need(s)`, `to review/answer/respond/confirm/verify/reply/sign`). Word
 /// boundaries are `[A-Za-z0-9_]` (the same rule as `policy::contains_word`,
@@ -294,12 +295,39 @@ fn peer_shaped_reason(reason: &str) -> Option<&'static str> {
             before_ok && after_ok
         })
     }
+    /// The lowercase slugs count too — "waiting on hands to finish" is the
+    /// deadlock shape in lowercase (EYES F14: the uppercase-only rule bought
+    /// precision by giving up that recall) — but NOT when the word before
+    /// them is a possessive or a quantity, which is what separates the
+    /// English noun ("in your hands", "needs more eyes on it") from the role.
+    fn lowercase_slug(lower: &str, slug: &str) -> bool {
+        const NOT_A_ROLE_BEFORE: &[&str] = &[
+            "your", "my", "our", "their", "his", "her", "its", "the", "more", "extra",
+            "fresh", "many", "two", "four", "all", "both", "own", "some", "no", "of",
+        ];
+        lower.match_indices(slug).any(|(i, _)| {
+            let before_ok = i == 0 || !lower[..i].chars().next_back().is_some_and(is_word_char);
+            let after = i + slug.len();
+            let after_ok = after >= lower.len() || !lower[after..].chars().next().is_some_and(is_word_char);
+            if !(before_ok && after_ok) {
+                return false;
+            }
+            let prev_word = lower[..i]
+                .trim_end()
+                .rsplit(|c: char| !is_word_char(c))
+                .next()
+                .unwrap_or("");
+            !NOT_A_ROLE_BEFORE.contains(&prev_word)
+        })
+    }
     for sentence in reason.split(['.', '!', '?', '\n', ';']) {
         let lower = sentence.to_lowercase();
         let token = ROLE_TOKENS
             .iter()
             .find(|(t, _)| has_word(sentence, t))
             .map(|(_, label)| *label)
+            .or_else(|| lowercase_slug(&lower, "hands").then_some("hands"))
+            .or_else(|| lowercase_slug(&lower, "eyes").then_some("eyes"))
             .or_else(|| (has_word(&lower, "peer") || has_word(&lower, "peers")).then_some("peer"));
         let Some(token) = token else { continue };
         if WAIT_SHAPES.iter().any(|w| lower.contains(w)) {
@@ -3311,9 +3339,15 @@ mod tests {
         assert_eq!(peer_shaped_reason("waiting for you to approve the eyes_flag finding"), None);
         // The wait shape in ANOTHER sentence does not reach across.
         assert_eq!(peer_shaped_reason("EYES reviewed the plan. Waiting for your console read."), None);
-        // Uppercase is how a participant writes a peer; lowercase is English.
-        assert_eq!(peer_shaped_reason("waiting on hands to finish"), None);
+        // Uppercase is how a participant writes a peer; the lowercase slug
+        // counts too (F14 — the deadlock shape in lowercase) unless a
+        // possessive or a quantity precedes it, which is the English noun.
+        assert_eq!(peer_shaped_reason("waiting on hands to finish"), Some("hands"));
         assert_eq!(peer_shaped_reason("waiting on HANDS to finish"), Some("hands"));
+        assert_eq!(peer_shaped_reason("blocked until eyes answers"), Some("eyes"));
+        assert_eq!(peer_shaped_reason("need more eyes on it before I continue"), None);
+        assert_eq!(peer_shaped_reason("the work is in my hands now; waiting for your console read"), None);
+        assert_eq!(peer_shaped_reason("all hands on deck until the deploy lands"), None);
     }
 
 }
