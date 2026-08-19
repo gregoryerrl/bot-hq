@@ -37,10 +37,14 @@ export function PhasePill({ phase, selected, onSelect }: PhasePillProps) {
       className={cn(
         "inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold uppercase",
         "border-t-2",
+        // The accent is the SELECTED pill's (round 12). `cn` is clsx, not
+        // tailwind-merge: with the tint and `text-on-surface-variant` both on
+        // an unselected pill, whichever rule the stylesheet emits later won —
+        // and that was the tint, so every unselected pill kept its phase
+        // colour. Branching here leaves no pair to resolve.
         // `phase` is always one of the 4 IPAV phases, so the bucket is non-null.
-        pillTint[phaseBucket(phase)!],
         selected
-          ? "bg-surface-container-high/80"
+          ? cn(pillTint[phaseBucket(phase)!], "bg-surface-container-high/80")
           : "bg-transparent border-transparent text-on-surface-variant hover:text-on-surface",
       )}
       title={phase}
