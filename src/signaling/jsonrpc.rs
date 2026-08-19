@@ -242,30 +242,71 @@ fn with_repeat_halt_note(base: &str, prior: Option<&str>) -> String {
     )
 }
 
-/// Case-insensitive word-boundary scan for a peer/agent name in an
-/// awaiting-user reason. Returns the offending word for the error message.
+/// Does a halt `reason` read as waiting on a PEER rather than on the user?
+///
+/// The shape it refuses (the `s-96fda118` deadlock): both agents marked
+/// themselves awaiting-user over work each thought was the OTHER's, and the
+/// session sat dead 100 minutes. Round 12 narrowed it after it refused
+/// legitimate halts four times out of five real hits — "Two things in your
+/// **hands**." (s-1c29c521, 00:20:01Z), "EYES F1–F5 folded in, no rebuttals",
+/// "EYES awake and passing" — because the old vocabulary was the lowercase
+/// English nouns `eyes`/`hands` (and the retired names) word-matched anywhere.
+///
+/// Now two conditions, both in ONE sentence: a peer TOKEN — a role name as
+/// the roster renders it (`HANDS`, `EYES`: uppercase, case-sensitive — how a
+/// participant writes a peer, never how English writes a body part), the
+/// summons form `@hands`/`@eyes`, or the word `peer(s)` — AND a WAIT shape
+/// (`wait`/`awaiting`, `pending`, `until`, `blocked`, `handed`/`hand off`,
+/// `need(s)`, `to review/answer/respond/confirm/verify/reply/sign`). Word
+/// boundaries are `[A-Za-z0-9_]` (the same rule as `policy::contains_word`,
+/// so `eyes_flag` is one word). Returns the token that tripped it, for the
+/// refusal text. Heuristic vocabulary, not an identity check — nothing is
+/// keyed on a participant being called any of these.
 fn peer_shaped_reason(reason: &str) -> Option<&'static str> {
-    // Heuristic VOCABULARY, not an identity check — nothing is keyed on a
-    // participant being called any of these. `eyes` / `hands` are the role slugs
-    // an agent writes today; the two person names stay because a user may still
-    // name a MODEL that way (rc3 D10 leaves display names theirs), and a reason
-    // that mentions one is peer-shaped either way. Word-boundary matched below,
-    // so `constraint` does not trip `rain`.
-    const PEER_WORDS: &[&str] = &["rain", "brian", "peer", "eyes", "hands"];
-    let lower = reason.to_lowercase();
-    PEER_WORDS.iter().copied().find(|w| {
-        lower.match_indices(w).any(|(i, _)| {
-            let before_ok = i == 0
-                || !lower[..i]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| c.is_alphanumeric());
-            let after = i + w.len();
-            let after_ok = after >= lower.len()
-                || !lower[after..].chars().next().is_some_and(|c| c.is_alphanumeric());
+    const ROLE_TOKENS: &[(&str, &str)] =
+        &[("HANDS", "hands"), ("EYES", "eyes"), ("@hands", "hands"), ("@eyes", "eyes")];
+    const WAIT_SHAPES: &[&str] = &[
+        "wait",
+        "pending",
+        "until",
+        "blocked",
+        "handed",
+        "hand off",
+        "need",
+        "to review",
+        "to answer",
+        "to respond",
+        "to confirm",
+        "to verify",
+        "to reply",
+        "to sign",
+    ];
+    fn is_word_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_'
+    }
+    /// `needle` occurs in `hay` on word boundaries (`[A-Za-z0-9_]`), matched
+    /// exactly as given (the caller decides the case).
+    fn has_word(hay: &str, needle: &str) -> bool {
+        hay.match_indices(needle).any(|(i, _)| {
+            let before_ok = i == 0 || !hay[..i].chars().next_back().is_some_and(is_word_char);
+            let after = i + needle.len();
+            let after_ok = after >= hay.len() || !hay[after..].chars().next().is_some_and(is_word_char);
             before_ok && after_ok
         })
-    })
+    }
+    for sentence in reason.split(['.', '!', '?', '\n', ';']) {
+        let lower = sentence.to_lowercase();
+        let token = ROLE_TOKENS
+            .iter()
+            .find(|(t, _)| has_word(sentence, t))
+            .map(|(_, label)| *label)
+            .or_else(|| (has_word(&lower, "peer") || has_word(&lower, "peers")).then_some("peer"));
+        let Some(token) = token else { continue };
+        if WAIT_SHAPES.iter().any(|w| lower.contains(w)) {
+            return Some(token);
+        }
+    }
+    None
 }
 
 /// The refusal a gated tool returns when the caller's set does not admit it.
@@ -3236,16 +3277,41 @@ mod tests {
         use super::peer_shaped_reason;
         // The s-96fda118 deadlock reason shape: parking on the peer.
         assert_eq!(
-            peer_shaped_reason("Handed the six refusal probes to Rain — they can only run natively"),
-            Some("rain")
+            peer_shaped_reason("Handed the six refusal probes to EYES — they can only run natively"),
+            Some("eyes")
         );
         assert_eq!(peer_shaped_reason("waiting for my peer to review"), Some("peer"));
         assert_eq!(peer_shaped_reason("EYES review pending"), Some("eyes"));
+        assert_eq!(peer_shaped_reason("blocked until @hands answers"), Some("hands"));
+        assert_eq!(peer_shaped_reason("Peers need to confirm the plan first"), Some("peer"));
         // Word boundaries: substrings inside real words must not trip it.
         assert_eq!(peer_shaped_reason("waiting for the rainbow deploy window"), None);
         assert_eq!(peer_shaped_reason("user must restrain the migration"), None);
         assert_eq!(peer_shaped_reason("need the user's Clockify token"), None);
         assert_eq!(peer_shaped_reason(""), None);
+    }
+
+    /// Round 12: the guard refused legitimate user-waits that merely MENTIONED
+    /// a role, or used `hands`/`eyes` as the English nouns they are — four of
+    /// the five real hits in the archive. A peer token without a wait shape,
+    /// or a wait shape with only lowercase English, is not a peer-wait.
+    #[test]
+    fn peer_guard_needs_a_role_token_and_a_wait_shape_in_one_sentence() {
+        use super::peer_shaped_reason;
+        // s-1c29c521 00:20:01Z — refused, then rephrased: English noun.
+        assert_eq!(peer_shaped_reason("All work that doesn't need you is done. Two things in your hands."), None);
+        assert_eq!(peer_shaped_reason("needs your eyes on the design before I continue"), None);
+        assert_eq!(peer_shaped_reason("rain check on the deploy until you say"), None);
+        // s-cf106858 / s-0d063183 — descriptive mentions, no wait on the peer.
+        assert_eq!(peer_shaped_reason("Plan complete and reviewed (EYES F1–F5 folded in, no rebuttals)"), None);
+        assert_eq!(peer_shaped_reason("Conversational turn — floor is yours; EYES awake and passing, no work queued."), None);
+        // A snake_case identifier is one word.
+        assert_eq!(peer_shaped_reason("waiting for you to approve the eyes_flag finding"), None);
+        // The wait shape in ANOTHER sentence does not reach across.
+        assert_eq!(peer_shaped_reason("EYES reviewed the plan. Waiting for your console read."), None);
+        // Uppercase is how a participant writes a peer; lowercase is English.
+        assert_eq!(peer_shaped_reason("waiting on hands to finish"), None);
+        assert_eq!(peer_shaped_reason("waiting on HANDS to finish"), Some("hands"));
     }
 
 }
