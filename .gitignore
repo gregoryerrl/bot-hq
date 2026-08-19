@@ -49,3 +49,5 @@ bot-hq.db
 # Tauri
 /gen/
 /capabilities/gen/
+# leftover of the deleted bench/ Python harnesses (2026-08-17)
+.pytest_cache/

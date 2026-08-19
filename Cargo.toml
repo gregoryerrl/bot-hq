@@ -30,9 +30,9 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 bytes = "1"
 tempfile = "3"
-# Both already present transitively (via sqlx/hyper), so declaring them direct
-# adds no compilation cost.
-regex = "1"
+# Already present transitively (via sqlx/hyper), so declaring it direct adds no
+# compilation cost. (`regex` sat beside it with zero uses in the tree — two
+# sites even say they hand-rolled to avoid it; dropped in round 12.)
 subtle = "2"
 # Content hashing for the policy-mutation audit (policy/audit.rs): a stable,
 # collision-resistant hash (vs the non-cryptographic, toolchain-unstable
