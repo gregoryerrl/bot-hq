@@ -1,5 +1,7 @@
 # 0044 restart checklist — do this, in this order
 
+> **CLOSED — 0044 ran on 2026-08-06; the tree is at migration 0067+ (round 12).** Kept as the operational record of that restart; nothing below is pending. Banner added in round 12 (2026-08-19).
+
 Standalone, copy-pasteable. Full reasoning lives in
 [`2026-08-06-session-participants-runbook.md`](2026-08-06-session-participants-runbook.md);
 this is the operational sequence only.

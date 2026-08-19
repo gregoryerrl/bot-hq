@@ -1,5 +1,7 @@
 # Dogfood queue — make bot-hq observable from inside itself
 
+> **CLOSED 2026-08-13 — every item shipped** (P1, P2, P4, P6, P7 landed the same day; see PROGRESS.md's 2026-08-13 entries). Kept as the record of why each was needed; nothing below is a live task. Banner added in round 12 (2026-08-19).
+
 **This document is the task.** Work it top to bottom. Everything here came out of
 running bot-hq on its own codebase on 2026-08-12/13 and watching what it could
 not tell us.

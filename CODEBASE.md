@@ -1,6 +1,6 @@
 # bot-hq — Codebase Map
 
-**What this is.** The repository split into fifteen self-contained AREAS so that
+**What this is.** The repository split into fourteen live AREAS (plus one recorded as REMOVED) so that
 exploring, studying, auditing or fixing bot-hq can happen one area at a time
 instead of hopping across the tree. For each area: what it does, its files and
 their roles, its entry points, its SEAMS (the joins that cross into other areas —
@@ -34,7 +34,7 @@ M <600, L <1500, XL ≥1500 (a bucket does not go stale every commit). Rust file
 carry their `#[cfg(test)]` module inline — an XL file is often half tests.
 "Tests" name what the important tests PIN, not how many there are. Paths are
 repo-relative; frontend test files (`X.test.tsx`) belong wherever `X.tsx` is
-listed. `PINNED`/`UNPINNED` verdicts are as of HEAD `f8127b0` (2026-08-15).
+listed. `PINNED`/`UNPINNED` verdicts are as of HEAD `f8127b0` (2026-08-15); later rounds re-verified the ones they touched (the round-12 joins — the push re-run wire, the gate runner's env, the summons deal — are pinned by the tests named in their commits).
 
 ---
 
@@ -379,7 +379,7 @@ substring matcher over Bash calls.
 | path | role | size |
 |---|---|---|
 | `src/policy/mod.rs` | `Policy`, `resolve_at_root`/`merge`, `first_forbidden_word`/`contains_word` (one impl, word-boundary, case-insensitive), prompt block render, `write_config_atomically` (the one temp+rename config writer: policy YAMLs, `tool-gate.json`, the hash cache) | L |
-| `src/policy/hooks.rs` | `policy-check` CLI: commit-msg / pre-commit (forbidden words on added lines + immutable-migration guard + EYES findings gate) / post-commit / pre-push (`decide_push` HTTP round-trip; the prompt names the PUSHED refs from git's stdin lines — `parse_push_updates`/`pushed_ref_names`, read once and lazily — HEAD only as fallback) / tool-gate (PreToolUse → `park_gate`); `install_hooks`; `check_findings_gate` on its OWN read-only sqlite, over storage's `OPEN_BLOCKING_FOR_SESSION` predicate | XL |
+| `src/policy/hooks.rs` | `policy-check` CLI: commit-msg / pre-commit (forbidden words on added lines + immutable-migration guard + EYES findings gate) / post-commit / pre-push (the EYES findings gate again, then `decide_push` HTTP round-trip; the prompt names the PUSHED refs from git's stdin lines — `parse_push_updates`/`pushed_ref_names`, read once and lazily — HEAD only as fallback) / tool-gate (PreToolUse → `park_gate`); `install_hooks`; `check_findings_gate` on its OWN read-only sqlite, over storage's `OPEN_BLOCKING_FOR_SESSION` predicate | XL |
 | `src/policy/tool_gate.rs` | keyword list resolution (session snapshot → global), `match_keyword` (substring, gate wins), `run_in_repo` in the AGENT's shell (`gate_shell`: `$SHELL` if POSIX-family, else zsh→bash→sh — macOS bash is 3.2 and dies on heredoc-in-`$()`) | M |
 | `src/policy/session_policy.rs` | `.local/session-policies/<sid>.yaml` snapshot write-if-absent (enforced by the caller) / read / purge at boot | S |
 | `src/policy/violations.rs` | append-only `violations.jsonl` (unbounded) | M |
@@ -755,7 +755,7 @@ to `isPolicyFile` → branch in `EditorAreaImpl`.
 | `tests/phase_vote_wiring_test.rs` | every storage method the D37 phase-advance vote needs has a caller OUTSIDE its defining file — round 5's E1, where `bump_phase_epoch` was defined, tested seven times and called by nothing, leaving the epoch at 0 through 114 live transitions. A `pub` method on a `pub struct` is never `dead_code`, and a test that calls it does not pin its mount |
 | `examples/dump_role_prose.rs` | LIVE: generator for the role-prose reseed migrations |
 | (deleted) the two native-loop research spikes (native_loop, subscription_loop) rc3 D9 closed — removed 2026-08-17 (round 7); recoverable from git history at a1475e7 | historical |
-| `scripts/`, `packaging/`, `site/`, `templates/`, `start` | turn-latency tool · Homebrew cask · landing page · CL seeds · dev launcher |
+| `scripts/`, `packaging/`, `site/`, `templates/`, `start`, `frontend/scripts/check-import-cycles.mjs` | turn-latency tool · Homebrew cask · landing page · CL seeds · dev launcher · the import-cycle gate `start` runs |
 | `Cargo.toml`, `frontend/package.json`, `.gitignore`, `.env` | deps + config |
 
 **Where to add X.** New canonical fact → update the ARCHITECTURE.md H2 AND grep

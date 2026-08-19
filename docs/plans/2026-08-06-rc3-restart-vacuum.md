@@ -1,5 +1,7 @@
 # rc3 restart + VACUUM — do this, in this order
 
+> **CLOSED — the restart happened and B4a.1/B4b have been live since 2026-08-07; the VACUUM note stands as a next-restart chore, recorded in the CL (`notes.md`).** Nothing below is pending. Banner added in round 12 (2026-08-19).
+
 Standalone, copy-pasteable. Sibling of
 [`2026-08-06-0044-restart-checklist.md`](2026-08-06-0044-restart-checklist.md),
 which covered the migration restart; this one covers the restart that puts

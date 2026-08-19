@@ -216,7 +216,7 @@ pull. The index is fetched once in `spawn_session_handle`
 (`storage.cl_index_search_agent`, the agent-visibility-filtered read) and
 threaded into `read_system_prompt`;
 `policy.yaml` is omitted from the primer (it's already rendered as the
-policy block in layer 6).
+policy block in layer 7).
 
 ---
 
@@ -590,8 +590,9 @@ in-memory only (200 KB ring).
 `disposition_finding` / `check_open_findings` / `override_reviewer_block` /
 `approve_finding` (+ the pre-commit `check_commit_message`) implement the
 reviewer sign-off gate: a `blocking` finding filed via `eyes_flag` gates
-`git commit` (mechanically, via the pre-commit hook) until it is resolved with
-`disposition_finding` (fixed / rebutted). The gate is fail-CLOSED when the
+`git commit` AND `git push` (mechanically, via the pre-commit and pre-push
+hooks — `hooks.rs::check_findings_gate` runs on both) until it is resolved
+with `disposition_finding` (fixed / rebutted). The gate is fail-CLOSED when the
 reviewer is down — the reviewers it watches are the participants holding
 `file_finding`, registered at spawn. `override_reviewer_block` is the explicit
 escape valve. Backed by the `findings` table.
@@ -773,7 +774,8 @@ hold a reviewer more strictly belonged to the native loop and went with it (D9).
   Matching is case-insensitive substring against the tool name or command;
   `gate` wins over `auto_allow` on conflict.
 - **Tripwire:** the PreToolUse Bash hook (`policy-check tool-gate`, injected
-  into HANDS at spawn via `--settings` — `src/policy/hooks.rs`
+  at spawn via `--settings` into every participant whose role holds
+  `edit_files` — `src/policy/hooks.rs`
   `run_tool_gate`) blocks a `gate`-matched command with **exit 2** and routes
   the agent to the `action_gate` MCP tool; `auto_allow`/no-match exits 0 (runs
   normally). Exit 2 is the only block form honored under
@@ -820,6 +822,28 @@ snapshot first, so editing the global `tool-gate.json` only affects NEW
 sessions.
 
 ---
+
+## The close-out learnings epilogue (rc3 **D15**)
+
+A session that ends before anyone wrote anything down is D15's gap. The
+agent's own `close_session` tool is soft-gated with a write-the-delta nudge
+(A3b, `jsonrpc.rs`); the user's Close button reached `AppState::close_session`
+directly and killed every subprocess without anyone being asked. The epilogue
+closes that: `core/close_learnings.rs::decide` (pure, four arms — `Run`,
+`SkipNoWriter`, `SkipBusy`, `SkipAlreadyHandled`) says whether a closing
+session gets a learnings turn; `AppState::run_close_epilogue` is the live half —
+close the row and release the UI FIRST, broadcast `CLOSE_LEARNINGS_PROMPT` to
+the roster, wait bounded (`CLOSE_EPILOGUE_ARM_TIMEOUT` 15 s to be dealt,
+`CLOSE_EPILOGUE_TIMEOUT` 180 s to finish), post one outcome row (`Wrote` /
+`Declined` / `TimedOut` / `Failed` — a failed write never looks like a decline),
+then tear down. A second close for a session whose epilogue is running
+(`ClosePlan::JoinInFlight` — a double-clicked Close, or the epilogue's own agent
+closing on the turn it was given) joins rather than tearing it down. Silence is
+the documented expected outcome: an empty-handed session writes nothing.
+Observed shape: an agent-path close (the agent calling `close_session` mid-turn)
+decides `SkipBusy` by construction — the agent is expected to have written its
+delta before calling; the epilogue exists for the USER's Close on an idle
+session.
 
 ## Session worktrees
 

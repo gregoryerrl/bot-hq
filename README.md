@@ -203,7 +203,7 @@ The original rebuild design + roadmap are preserved under
 ```
 bot-hq/
 ├── Cargo.toml / tauri.conf.json / build.rs
-├── CLAUDE.md / ARCHITECTURE.md / PLAN.md / PROGRESS.md   ← canonical docs
+├── CLAUDE.md / ARCHITECTURE.md / PLAN.md / PROGRESS.md / CODEBASE.md   ← canonical docs (CODEBASE.md = the area map)
 ├── frontend/              React 18 + TypeScript + Tailwind UI (Vite)
 │   └── src/{app,components,hooks,stores,lib}/   pages, components, hooks, zustand stores, tauri bindings
 ├── src/
@@ -283,7 +283,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `request_approval(kind, action, …)` | Per-action approval gate. Used by push gate, force-push, per-action approval. |
 | `action_gate(command)` | Run a Bash command the Tool Gate blocked: bot-hq surfaces Approve/Reject and, on approve, executes it in the session repo and returns the output. |
 | `check_commit_message(message)` | Pre-commit grep of a proposed message against the project's forbidden-words policy. Returns `ok` or `forbidden_word:<w>`. |
-| `eyes_flag(severity, summary, …)` | Needs `file_finding`. File a review finding; a `blocking` one gates the executor's next `git commit` until resolved. |
+| `eyes_flag(severity, summary, …)` | Needs `file_finding`. File a review finding; a `blocking` one gates the executor's next `git commit` and `git push` until resolved. |
 | `disposition_finding(finding_id, status, reason)` | Needs `disposition_finding`. Resolve a finding (`fixed` / `rebutted`), clearing the commit gate. |
 | `check_open_findings()` | Check for unresolved blocking findings before committing. Returns `ok` or the blocking list. |
 | `override_reviewer_block()` | Needs `override_reviewer_block`. Escape valve for the fail-closed "reviewer is down" commit block. |

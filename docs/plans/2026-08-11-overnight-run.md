@@ -1,5 +1,7 @@
 # Overnight autonomous run — state, authorisations, queue
 
+> **CLOSED — the run finished and its one remaining item (delete `core/router.rs`) shipped 2026-08-13.** This was the source of truth for a single overnight run; it is history now, and its authorisations do not carry forward. Banner added in round 12 (2026-08-19).
+
 **This file is the source of truth for the overnight run.** It exists because a
 context compaction would otherwise lose the queue and the user's authorisations.
 **Re-read it at the top of every wakeup, and update the log at the bottom after
