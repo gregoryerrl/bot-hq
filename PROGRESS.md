@@ -88,11 +88,13 @@ before it kills, both declare fns carry `closed_at IS NULL` — and, per the
 review's catch, they REPORT the refusal (`Result<bool>` from rows_affected)
 so `emit_halt_row` treats a refused declare as a hard no-op instead of a
 runtime ghost (awaiting flipped + banner + no slot). The suppression halt
-reads also fail TOWARD the standing halt now, on both halves. Finding 2 (the
-close-out staleness sweep flagging generic English — "duplication",
-"permission", "half" — every mechanical tightening reddens the deliberate
-"duo" pins) is parked as the user's pick. `ba79599` `bdd4933` `a3e5d8a`;
-suite 1308/0.
+reads also fail TOWARD the standing halt now, on both halves. Finding 2 — the
+close-out staleness sweep flagging generic English ("duplication",
+"permission", "half") — went to the user because every tightening reddens
+the deliberate "duo" pins; they picked **distinctive-only everywhere**, so a
+term now reports only when code-shaped or structurally marked in the old
+body, at any edit size, and the four seeding pins were updated to cite the
+pick (a9f8c705). `ba79599` `bdd4933` `a3e5d8a` `f78576a`; suite 1308/0.
 
 ---
 
