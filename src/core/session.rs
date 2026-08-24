@@ -1850,18 +1850,22 @@ fn push_section(out: &mut String, s: &str) {
     }
 }
 
-/// Last-resort spawn config when an agent has neither a chosen saved model nor
-/// a stored `agent_config` row (near-unreachable — agent configs seed in
-/// migration 0001). Intentionally Anthropic for EVERY agent: at this tier we
-/// hold no gateway credentials (`base_url`/`auth_token`), and Anthropic's
-/// ambient auth is the only provider that works without them. Labeling a
-/// non-Anthropic agent here (e.g. a reviewer on a DeepSeek gateway) would ship a
-/// dead, unreachable config, so the universal Anthropic default is deliberate.
+/// TRUE last-resort spawn config — an EMPTY model registry and no other
+/// resolution (1.0.0 Batch 5). The old comment called this "near-unreachable —
+/// agent configs seed in migration 0001", which stopped being true when 0060
+/// dropped `agent_configs` and 0044 seeded role defaults NULL: on a fresh
+/// install where the user skipped Settings → Models, EVERY spawn landed here,
+/// on a hardcoded two-generation-old id. The chain now tries the registry's
+/// newest row first (`resolve_spawn_config`), so this constant only fires
+/// with zero model rows — and it names the current default generation.
+/// Intentionally Anthropic for EVERY agent: at this tier we hold no gateway
+/// credentials (`base_url`/`auth_token`), and Anthropic's ambient auth is the
+/// only provider that works without them.
 fn default_agent_config(name: &str) -> AgentConfig {
     AgentConfig {
         agent_name: name.to_string(),
         provider: "anthropic".into(),
-        model_name: "claude-opus-4-7".into(),
+        model_name: "claude-opus-5".into(),
         base_url: None,
         auth_token: None,
         updated_at: String::new(),
@@ -2240,16 +2244,64 @@ pub(crate) async fn resolve_spawn_config(
             "chosen model not found; falling back to agent config"
         );
     }
-    storage
-        .get_agent_config(agent_name)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| default_agent_config(agent_name))
+    if let Ok(Some(cfg)) = storage.get_agent_config(agent_name).await {
+        return cfg;
+    }
+    // The registry's newest row before the compiled constant (Batch 5): a
+    // fresh install whose user skipped Settings → Models still spawns on
+    // whatever the current seed carries (0073) instead of a hardcoded id
+    // that goes stale between releases. Only an EMPTY registry falls to the
+    // constant.
+    if let Ok(Some(m)) = storage.newest_model().await {
+        return AgentConfig {
+            agent_name: agent_name.to_string(),
+            provider: m.provider,
+            model_name: m.model_name,
+            base_url: m.base_url,
+            auth_token: m.auth_token,
+            updated_at: m.updated_at,
+            context_window: m.context_window,
+        };
+    }
+    default_agent_config(agent_name)
 }
 
 #[cfg(test)]
 mod tests {
+    /// **The registry outranks the compiled constant in the spawn fallback**
+    /// (1.0.0 Batch 5 — the wire). A fresh install whose user skipped
+    /// Settings → Models used to spawn EVERY agent on a hardcoded
+    /// two-generation-old id ("near-unreachable" said the old comment; 0060
+    /// made it the certainty). Delete the `newest_model` arm in
+    /// `resolve_spawn_config` and this goes red instead of the fallback
+    /// silently going stale again.
+    #[tokio::test]
+    async fn the_spawn_fallback_reads_the_registry_before_the_constant() {
+        let s = crate::storage::Storage::memory_bare().await.unwrap();
+        // Fresh world: 0073 seeded the current generation. No participant
+        // model, no role default, no agent_configs row → the registry answers.
+        let cfg = super::resolve_spawn_config(&s, "agent", None).await;
+        let seeded: Vec<String> = sqlx::query_scalar("SELECT model_name FROM models")
+            .fetch_all(s.pool())
+            .await
+            .unwrap();
+        assert!(
+            seeded.contains(&cfg.model_name),
+            "the fallback model ({}) must come FROM the registry, not a constant",
+            cfg.model_name
+        );
+        assert!(
+            cfg.context_window.is_some(),
+            "0073 seeds windows, so the meter has a denominator out of the box"
+        );
+
+        // Only an EMPTY registry falls to the compiled constant — and that
+        // constant names the current generation.
+        sqlx::query("DELETE FROM models").execute(s.pool()).await.unwrap();
+        let cfg = super::resolve_spawn_config(&s, "agent", None).await;
+        assert_eq!(cfg.model_name, "claude-opus-5");
+    }
+
     /// **The restore stays mounted.** The third wire round 5 added, guarded the
     /// same way as the other two.
     ///

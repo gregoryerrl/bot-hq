@@ -360,7 +360,7 @@ function ModelDialog({
               onChange={(e) =>
                 setDraft({ ...draft, model_name: e.target.value })
               }
-              placeholder="claude-opus-4-8"
+              placeholder="claude-opus-5"
               className={terminalInputClass}
             />
           </label>

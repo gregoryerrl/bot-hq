@@ -89,6 +89,20 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
+    /// The most recently added model row — the spawn chain's registry-wide
+    /// fallback (1.0.0 Batch 5). "Newest" because the registry is
+    /// user-curated: the row added last is the closest thing to "what the
+    /// user considers current". `None` only when the registry is empty, which
+    /// is when the compiled last-resort constant applies.
+    pub async fn newest_model(&self) -> Result<Option<Model>> {
+        let row = sqlx::query_as::<_, Model>(
+            "SELECT * FROM models ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
     // ---- app_settings (key/value) ---------------------------------------
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<String>> {
