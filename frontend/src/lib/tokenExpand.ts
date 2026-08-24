@@ -50,8 +50,15 @@ export type TokenSegment = {
  * Split composer text into display segments for the highlight backdrop
  * (round 13, "make them prettier in the input box"). Same walk as
  * [`expandComposerTokens`] — same boundaries, same backtick escape, same
- * trailing-punctuation shedding — so what the chips mark is precisely what
- * Send will expand (and `@` what the backend will summon).
+ * trailing-punctuation shedding — so a `#`/`/` chip marks precisely what
+ * Send will expand (pinned by the reconstruction test in
+ * `tokenExpand.test.ts`, a872dee4 — the parity is a test, not this comment).
+ *
+ * `@` chips a strict SUBSET of what the backend summons (a872dee4): the Rust
+ * parser stops at the first non-`[a-zA-Z0-9-]` and trims trailing `-`, so
+ * `@eyes.foo` / `@eyes-` summon chip-less here, and the label-alias path is
+ * invisible to this segmenter. Every divergence is the safe direction — a
+ * missing chip on a working mention, never a lying chip.
  */
 export function tokenSegments(
   text: string,

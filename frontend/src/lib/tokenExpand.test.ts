@@ -119,6 +119,45 @@ describe("tokenSegments", () => {
   });
 });
 
+describe("segments ↔ expansion parity (a872dee4)", () => {
+  // The round's third hand-mirror, pinned like the other two: rebuild the
+  // Send-time expansion FROM the display segments and require byte-equality
+  // with expandComposerTokens over a table that exercises every family,
+  // escapes, boundaries, punctuation tails and dead tokens. A walk change in
+  // either function that the other doesn't mirror reddens here.
+  const SLUGS = ["eyes", "hands"];
+  const TABLE = [
+    "ask @eyes about #doc/investigate then /n-verify",
+    "dead: #gone.png and /nope stay",
+    "`/n-verify` cd ./n-verify ~/n-verify",
+    "(/n-verify.) and /n-verify. at large",
+    "#bot-hq/conventions.md. tail",
+    "plain prose only",
+    "` unclosed /n-verify #doc/investigate",
+    "@eyes.foo @eyes- @nobody",
+  ];
+
+  function rebuild(text: string): string {
+    return tokenSegments(text, SLUGS, DOCS, CODES)
+      .map((seg) => {
+        if (seg.kind === "plain" || seg.kind === "mention") return seg.text;
+        if (seg.kind === "doc") {
+          const item = DOCS.find((d) => `#${d.key}` === seg.text)!;
+          return `\`${item.insert}\``;
+        }
+        const code = CODES.find((c) => `/${c.code}` === seg.text)!;
+        return `\n> ${code.prompt.split("\n").join("\n> ")}\n\n`;
+      })
+      .join("");
+  }
+
+  it("the expansion is exactly the segments, re-expanded", () => {
+    for (const text of TABLE) {
+      expect(rebuild(text), text).toBe(expandComposerTokens(text, DOCS, CODES));
+    }
+  });
+});
+
 describe("insideBacktickSpan", () => {
   it("odd count before the index means inside", () => {
     const t = "a `b` c";

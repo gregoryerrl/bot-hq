@@ -792,6 +792,7 @@ export function ChatInput({
               "pointer-events-none absolute inset-0 overflow-hidden",
               "whitespace-pre-wrap break-words rounded border border-transparent",
               "bg-surface-container px-2.5 py-1.5 text-sm text-transparent",
+              staged && "opacity-80",
             )}
           >
             {displaySegments.map((seg, idx) =>
