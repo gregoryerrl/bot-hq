@@ -47,11 +47,11 @@ const EYES = role({ id: 2, slug: "eyes", display_name: "EYES" });
 
 /**
  * Wires every read the dashboard makes; `roles` overrides the role list and
- * `claude` the effort-inheritance sources (override store + settings.json knob).
+ * `overrides` the store the "Default (…)" labels read role defaults from.
  */
 function mockBackend(
   roles: RoleView[] = [role(), EYES],
-  claude: { overrides?: ClaudeOverrides; knob?: string | null } = {},
+  overrides: ClaudeOverrides | Record<string, never> = {},
 ) {
   mockInvoke.mockImplementation(async (cmd: string) => {
     switch (cmd) {
@@ -68,27 +68,7 @@ function mockBackend(
       case "get_app_setting":
         return null;
       case "get_claude_overrides":
-        return claude.overrides ?? {};
-      case "claude_config_read":
-        return {
-          core_knobs:
-            claude.knob === undefined
-              ? []
-              : [
-                  {
-                    key: "env.CLAUDE_CODE_EFFORT_LEVEL",
-                    label: "Effort level",
-                    value: claude.knob,
-                    source: "~/.claude/settings.json",
-                    inheritance: {
-                      inherited_by: [],
-                      skipped_by: [],
-                      note: "",
-                      overridable: true,
-                    },
-                  },
-                ],
-        };
+        return overrides;
       case "create_session":
         return { id: "s-new" };
       default:
@@ -121,13 +101,17 @@ const modelSelect = (n: number) =>
   screen.getByRole("combobox", { name: `Participant ${n} model` });
 const effortSelect = (n: number) =>
   screen.getByRole("combobox", { name: `Participant ${n} effort` });
-const ultracodeBox = (n: number) =>
-  screen.getByRole("checkbox", { name: `Participant ${n} ultracode` });
+/** The ultracode OPTION in the row's one effort select (no checkbox since
+ *  no-inherit folded the pair into a single control). */
+const ultracodeOption = (n: number) =>
+  effortSelect(n).querySelector(
+    'option[value="ultracode"]',
+  ) as HTMLOptionElement;
 const createButton = () =>
   screen.getByRole("button", { name: /create session/i });
 
-/** The row's "Inherit (…)" option text — what its effort resolves to today. */
-const inheritOption = (n: number) =>
+/** The row's "Default (…)" option text — what its effort resolves to today. */
+const defaultOption = (n: number) =>
   effortSelect(n).querySelector('option[value=""]')!.textContent;
 
 /** The options object the dialog actually sent. */
@@ -314,9 +298,11 @@ describe("New session dialog — per-participant effort (D12)", () => {
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("create_session", expect.anything()),
     );
+    // A concrete pick carries an explicit `ultracode: false` — the shape that
+    // clears a role-default ultracode at reconcile (no-inherit, 2026-08-25).
     expect(sentOptions().participants).toEqual([
-      { roleId: 1, modelId: null, effort: "max", ultracode: null, color: null, label: null },
-      { roleId: 2, modelId: null, effort: "low", ultracode: null, color: null, label: null },
+      { roleId: 1, modelId: null, effort: "max", ultracode: false, color: null, label: null },
+      { roleId: 2, modelId: null, effort: "low", ultracode: false, color: null, label: null },
     ]);
     // The per-slot columns spawn still reads are a projection of those same
     // rows, so they cannot disagree with the roster they came from.
@@ -324,7 +310,7 @@ describe("New session dialog — per-participant effort (D12)", () => {
     expect(sentOptions().slot1Effort).toBe("low");
   });
 
-  it("carries a row's ultracode tick into that row's payload entry", async () => {
+  it("carries a row's ultracode choice into that row's payload entry", async () => {
     mockBackend();
     await openDialog();
     fireEvent.change(screen.getByPlaceholderText(/refactor auth flow/i), {
@@ -333,19 +319,23 @@ describe("New session dialog — per-participant effort (D12)", () => {
     await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
 
     fireEvent.change(roleSelect(1), { target: { value: "1" } });
-    fireEvent.click(ultracodeBox(1));
+    fireEvent.change(effortSelect(1), { target: { value: "ultracode" } });
 
     fireEvent.click(createButton());
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("create_session", expect.anything()),
     );
+    // The choice decomposes to the stored pair: xhigh is ultracode's implied
+    // level, recorded explicitly so a role that never receives `--settings`
+    // still spawns at a truthful CLAUDE_CODE_EFFORT_LEVEL.
     expect(sentOptions().participants).toEqual([
-      { roleId: 1, modelId: null, effort: null, ultracode: true, color: null, label: null },
+      { roleId: 1, modelId: null, effort: "xhigh", ultracode: true, color: null, label: null },
     ]);
     expect(sentOptions().slot0Ultracode).toBe(true);
+    expect(sentOptions().slot0Effort).toBe("xhigh");
   });
 
-  it("offers ultracode only to a role that can edit files", async () => {
+  it("offers ultracode only to a role that can edit files, and drops the pick on a switch away", async () => {
     // Ultracode rides in on `--settings`, which spawn injects only on the
     // `edit_files` branch. Gating on the ticked box rather than on slot
     // position is the same rule D11 uses: capability, never role meaning.
@@ -354,28 +344,56 @@ describe("New session dialog — per-participant effort (D12)", () => {
       role({ id: 9, slug: "watcher", display_name: "WATCHER", capabilities: ["read_channel"] }),
     ]);
     await openDialog();
+    fireEvent.change(screen.getByPlaceholderText(/refactor auth flow/i), {
+      target: { value: "a task" },
+    });
     await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
 
     fireEvent.change(roleSelect(1), { target: { value: "1" } });
-    expect(ultracodeBox(1)).toBeEnabled();
+    expect(ultracodeOption(1).disabled).toBe(false);
 
+    // With ultracode picked, switching the row to a role that can't take it
+    // resets the pick to Default — not just the flag: leaving the paired
+    // `xhigh` behind would ship a level the user never chose for that role.
+    fireEvent.change(effortSelect(1), { target: { value: "ultracode" } });
     fireEvent.change(roleSelect(1), { target: { value: "9" } });
-    expect(ultracodeBox(1)).toBeDisabled();
+    expect(ultracodeOption(1).disabled).toBe(true);
+    expect(effortSelect(1)).toHaveValue("");
+
+    fireEvent.click(createButton());
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("create_session", expect.anything()),
+    );
+    expect(sentOptions().participants).toEqual([
+      { roleId: 9, modelId: null, effort: null, ultracode: null, color: null, label: null },
+    ]);
   });
 
   it("keeps max and ultracode mutually exclusive within a row", async () => {
+    // One select holds one value, so the exclusion is structural now — what's
+    // left to pin is that swapping ultracode → max ships max WITH the explicit
+    // ultracode clear, never the pair.
     mockBackend();
     await openDialog();
+    fireEvent.change(screen.getByPlaceholderText(/refactor auth flow/i), {
+      target: { value: "a task" },
+    });
     await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
 
     fireEvent.change(roleSelect(1), { target: { value: "1" } });
-    fireEvent.click(ultracodeBox(1));
-    expect(ultracodeBox(1)).toBeChecked();
+    fireEvent.change(effortSelect(1), { target: { value: "ultracode" } });
+    expect(effortSelect(1)).toHaveValue("ultracode");
 
-    // Picking `max` clears the conflicting tick rather than sending both.
     fireEvent.change(effortSelect(1), { target: { value: "max" } });
-    expect(ultracodeBox(1)).not.toBeChecked();
-    expect(ultracodeBox(1)).toBeDisabled();
+    expect(effortSelect(1)).toHaveValue("max");
+
+    fireEvent.click(createButton());
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("create_session", expect.anything()),
+    );
+    expect(sentOptions().participants).toEqual([
+      { roleId: 1, modelId: null, effort: "max", ultracode: false, color: null, label: null },
+    ]);
   });
 });
 
@@ -489,42 +507,55 @@ describe("New session dialog — capability warning (D11)", () => {
 });
 
 // ===========================================================================
-// rc3 D10 — the effort hint reads the override store by ROLE SLUG
+// rc3 D10 — the effort default reads the override store by ROLE SLUG
 // ===========================================================================
 
-describe("New session dialog — inherited effort", () => {
+describe("New session dialog — role-default effort", () => {
   beforeEach(() => mockInvoke.mockReset());
 
-  it("hints the effort the row's ROLE inherits, and re-resolves when the role changes", async () => {
+  it("labels Default with the ROLE's configured effort, floors everything else to medium", async () => {
     // One chain: the row's picked role → its slug → that slug's entry in
-    // `claude-overrides.json`. The store used to be keyed by two agent names,
-    // which no role slug matches, so the hint silently showed `_all` for
-    // everyone — the same miss `resolve_agent_overrides` had.
+    // `claude-overrides.json`, else the medium floor. `_all` carries a
+    // DIFFERENT value on purpose: since no-inherit (2026-08-25) it must reach
+    // nobody — a role without its own entry shows the floor, never `_all`.
     mockBackend([role(), EYES], {
-      overrides: { _all: { effort: "medium" }, per_role: { eyes: { effort: "max" } } },
+      _all: { effort: "low" },
+      per_role: { eyes: { effort: "max" } },
     });
     await openDialog();
     await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
 
-    // No role picked yet → nothing role-specific to resolve, so `_all`.
-    expect(inheritOption(1)).toBe("Inherit (medium)");
+    // No role picked yet → the floor, NOT `_all`'s low.
+    expect(defaultOption(1)).toBe("Default (medium)");
 
     fireEvent.change(roleSelect(1), { target: { value: "2" } });
-    expect(inheritOption(1)).toBe("Inherit (max)");
+    expect(defaultOption(1)).toBe("Default (max)");
 
-    // The role with no entry of its own falls back to `_all`, exactly as
-    // `resolve_agent_overrides` does for an unconfigured role.
+    // A role with no entry of its own floors, exactly as spawn does.
     fireEvent.change(roleSelect(1), { target: { value: "1" } });
-    expect(inheritOption(1)).toBe("Inherit (medium)");
+    expect(defaultOption(1)).toBe("Default (medium)");
   });
 
-  it("falls through to the settings.json knob when the store says nothing", async () => {
-    mockBackend([role(), EYES], { overrides: {}, knob: "high" });
+  it("shows medium when nothing is configured anywhere — nothing falls through", async () => {
+    // The settings.json knob used to be the last fall-through; the dialog no
+    // longer reads it at all.
+    mockBackend([role(), EYES], {});
     await openDialog();
     await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
 
     fireEvent.change(roleSelect(1), { target: { value: "1" } });
-    await waitFor(() => expect(inheritOption(1)).toBe("Inherit (high)"));
+    await waitFor(() => expect(defaultOption(1)).toBe("Default (medium)"));
+  });
+
+  it("labels Default 'ultracode' when that is the role's configured default", async () => {
+    mockBackend([role(), EYES], {
+      per_role: { hands: { effort: "xhigh", ultracode: true } },
+    });
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+    expect(defaultOption(1)).toBe("Default (ultracode)");
   });
 });
 

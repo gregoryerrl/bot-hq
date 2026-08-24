@@ -8,13 +8,20 @@ import { SaveIcon } from "../components/icons";
 import type {
   AppError,
   CapabilityView,
-  ClaudeConfigView,
   ClaudeOverrides,
   ModelView,
   RoleDraftInput,
   RoleView,
 } from "../lib/bindings";
 import { selectClass } from "../components/ui/Select";
+import {
+  DEFAULT_EFFORT,
+  EFFORT_LEVELS,
+  ULTRACODE,
+  pickToFields,
+  roleDefaultEffort,
+} from "../lib/effort";
+import { EDIT_FILES } from "../lib/participants";
 
 /**
  * The participation modes the picker OFFERS — **two, and both of them do
@@ -360,36 +367,29 @@ function RoleForm({
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  // Default effort (hotfix 2026-08-25): a Roles-tab surface over the per-role
-  // Claude-Config override — the slot spawn resolves and the dialog's
-  // "Inherit (…)" already reads. Read-modify-write of the whole store via the
-  // existing set_claude_overrides; refetch keeps every other reader in sync.
+  // Default effort (no-inherit, 2026-08-25): a Roles-tab surface over the
+  // per-role slot spawn resolves — the SINGLE editor of a role's default now.
+  // No Inherit option: an unconfigured role displays the same medium floor
+  // spawn applies, so display and resolution cannot disagree. Read-modify-write
+  // of the whole store via the existing set_claude_overrides; refetch keeps
+  // every other reader in sync.
   const { data: claudeOverrides, refetch: refetchOverrides } =
     useTauriQuery<ClaudeOverrides>("get_claude_overrides");
-  const { data: claudeConfig } =
-    useTauriQuery<ClaudeConfigView>("claude_config_read");
   const setOverrides = useTauriMutation<null, { overrides: ClaudeOverrides }>(
     "set_claude_overrides",
   );
   const [savingEffort, setSavingEffort] = useState(false);
   const roleEffort = role
-    ? (claudeOverrides?.per_role?.[role.slug]?.effort ?? null)
-    : null;
-  // What Inherit falls to — _all's effort, else the settings.json env knob —
-  // mirroring resolve_agent_overrides + the spawn env fall-through.
-  const inheritedEffortNote =
-    claudeOverrides?._all?.effort ??
-    claudeConfig?.core_knobs.find(
-      (k) => k.key === "env.CLAUDE_CODE_EFFORT_LEVEL",
-    )?.value ??
-    null;
-  const saveRoleEffort = async (value: string | null) => {
+    ? roleDefaultEffort(claudeOverrides?.per_role?.[role.slug])
+    : DEFAULT_EFFORT;
+  const saveRoleEffort = async (value: string) => {
     if (!role) return;
     setSavingEffort(true);
     try {
       const perRole = { ...(claudeOverrides?.per_role ?? {}) };
-      const entry = { ...(perRole[role.slug] ?? {}) };
-      entry.effort = value;
+      // A choice decomposes to the stored pair: "ultracode" →
+      // {effort:"xhigh", ultracode:true}; a level → {effort, ultracode:false}.
+      const entry = { ...(perRole[role.slug] ?? {}), ...pickToFields(value) };
       perRole[role.slug] = entry;
       const store: ClaudeOverrides = {
         ...(claudeOverrides ?? {}),
@@ -610,37 +610,43 @@ function RoleForm({
           </span>
         </label>
 
-        {/* Default EFFORT (hotfix, user 2026-08-25). This is a surface over
-            the SAME slot spawn already resolves — `claude-overrides.json`
-            per_role[slug].effort — not a new roles column, so the New-session
-            dialog's "Inherit (…)" label, the spawn chain, and the Claude
-            Config tab all agree by construction. Written on change (it's a
-            settings knob, not part of the role-row draft); hidden on the
-            create form until the role exists to key the slot. */}
+        {/* Default EFFORT (no-inherit, 2026-08-25). A surface over the SAME
+            slot spawn resolves — `claude-overrides.json` per_role[slug] — not
+            a new roles column, so the New-session dialog's "Default (…)"
+            label and the spawn chain agree by construction. No Inherit
+            option: an unconfigured role shows the medium floor spawn applies.
+            Written on change (it's a settings knob, not part of the role-row
+            draft); hidden on the create form until the role exists to key the
+            slot. */}
         {role && (
           <label className="block">
             <FieldLabel>Default effort</FieldLabel>
             <select
-              value={roleEffort ?? ""}
+              value={roleEffort}
               disabled={savingEffort}
-              onChange={(e) => void saveRoleEffort(e.target.value || null)}
+              onChange={(e) => void saveRoleEffort(e.target.value)}
               className={selectClass}
               aria-label="Default effort"
             >
-              <option value="">
-                Inherit{inheritedEffortNote ? ` (${inheritedEffortNote})` : ""}
-              </option>
-              {["low", "medium", "high", "xhigh", "max"].map((v) => (
+              {EFFORT_LEVELS.map((v) => (
                 <option key={v} value={v}>
                   {v}
                 </option>
               ))}
+              {/* Ultracode reaches a child via `--settings`, which spawn
+                  injects only for a role holding edit_files — a default this
+                  role cannot take is not offered. */}
+              <option
+                value={ULTRACODE}
+                disabled={!role.capabilities.includes(EDIT_FILES)}
+              >
+                {ULTRACODE}
+              </option>
             </select>
             <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
               What this role's participants spawn with unless the New-session
-              dialog picks otherwise. Stored in Claude Config's per-role
-              overrides; sessions record the resolved value on their spawn
-              badge.
+              dialog picks otherwise. New roles start at {DEFAULT_EFFORT};
+              sessions record the resolved value on their spawn badge.
             </span>
           </label>
         )}

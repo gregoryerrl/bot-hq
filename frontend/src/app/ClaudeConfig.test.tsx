@@ -198,124 +198,55 @@ describe("Claude Config panel", () => {
     });
   });
 
-  it("renders one override block per role, enumerated from list_roles", async () => {
-    // The blocks are the ROLES the store is keyed by — not two fixed turn
-    // slots. A third role gets a third block for free; the old panel could not
-    // address one at all.
-    mockBackend({}, [...ROLES, role({ id: 3, slug: "scribe", display_name: "SCRIBE" })]);
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: /core knobs/i }));
-
-    for (const name of ["HANDS", "EYES", "SCRIBE"]) {
-      expect(
-        await screen.findByRole("combobox", { name: `${name} effort level` }),
-      ).toBeInTheDocument();
-    }
-    // …and nothing is offered under an agent's name or a turn slot.
-    const pane = screen.getByText("Agent runtime overrides").parentElement!;
-    expect(pane.textContent).not.toMatch(/\bbrian\b/i);
-    expect(pane.textContent).not.toMatch(/\brain\b/i);
-    expect(pane.textContent).not.toMatch(/turn 1/i);
-  });
-
-  it("writes an effort override under the ROLE SLUG spawn resolves, not another role's", async () => {
-    // The whole point of the panel: land the value where
-    // `resolve_agent_overrides` will look for it. `eyes` is deliberately the
-    // SECOND role, so a block that wrote a fixed key would land on `hands`.
-    mockBackend();
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: /core knobs/i }));
-
-    fireEvent.change(
-      await screen.findByRole("combobox", { name: "EYES effort level" }),
-      { target: { value: "max" } },
-    );
-    fireEvent.click(await screen.findByRole("button", { name: /save changes/i }));
-
-    await waitFor(() =>
-      expect(mockInvoke).toHaveBeenCalledWith(
-        "set_claude_overrides",
-        expect.objectContaining({
-          overrides: expect.objectContaining({
-            per_role: { eyes: expect.objectContaining({ effort: "max" }) },
-          }),
-        }),
-      ),
-    );
-  });
-
-  it("keeps two same-named roles apart, and writes each under its own slug", async () => {
-    // `roles.display_name` carries no UNIQUE constraint (only `roles.slug`
-    // does), so the title alone cannot say which entry a block writes.
-    mockBackend({}, [
-      role({ id: 1, slug: "hands", display_name: "HANDS" }),
-      role({ id: 2, slug: "hands-review", display_name: "HANDS" }),
-    ]);
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: /core knobs/i }));
-
-    // The slug is what tells them apart on screen.
-    expect(await screen.findByText("hands-review")).toBeInTheDocument();
-
-    const efforts = await screen.findAllByRole("combobox", {
-      name: "HANDS effort level",
-    });
-    expect(efforts).toHaveLength(2);
-    fireEvent.change(efforts[1], { target: { value: "low" } });
-    fireEvent.click(await screen.findByRole("button", { name: /save changes/i }));
-
-    await waitFor(() =>
-      expect(mockInvoke).toHaveBeenCalledWith(
-        "set_claude_overrides",
-        expect.objectContaining({
-          overrides: expect.objectContaining({
-            per_role: { "hands-review": expect.objectContaining({ effort: "low" }) },
-          }),
-        }),
-      ),
-    );
-  });
-
-  it("shows a stored per-role override in that role's block, and only there", async () => {
+  it("offers no per-role effort editor — the Roles tab owns a role's default now", async () => {
+    // No-inherit (2026-08-25): the per-role effort/ultracode blocks left this
+    // tab. What remains on Core knobs is the user's OWN settings.json effort
+    // row, whose note points at the Roles tab instead of claiming agents
+    // inherit it.
     mockBackend({ per_role: { eyes: { effort: "low" } } });
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /core knobs/i }));
 
+    expect(await screen.findByText("Effort level")).toBeInTheDocument();
+    expect(screen.queryByText(/agent runtime overrides/i)).toBeNull();
     expect(
-      await screen.findByRole("combobox", { name: "EYES effort level" }),
-    ).toHaveValue("low");
-    expect(
-      screen.getByRole("combobox", { name: "HANDS effort level" }),
-    ).toHaveValue("");
+      screen.queryByRole("combobox", { name: /effort level$/i }),
+    ).toBeNull();
+    // Both the pane blurb and the knob note point at the Roles tab.
+    expect(screen.getAllByText(/settings → roles/i).length).toBeGreaterThan(0);
   });
 
-  it("says so when nothing is stored per role, rather than showing blank as your config", async () => {
-    // An override written before the re-key was keyed by agent name; serde drops
-    // the unknown field on read, so the panel would otherwise render the loss as
-    // an ordinary all-inherited state.
-    mockBackend({ _all: { effort: "high" } });
+  it("carries per_role entries through a save untouched", async () => {
+    // The section that edited per_role is gone, but the store it edited is
+    // shared with the Roles tab — a save from THIS tab (which only patches
+    // `_all`) must not drop the role defaults stored beside it.
+    mockBackend({
+      per_role: { hands: { effort: "xhigh", ultracode: true } },
+    });
     renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: /core knobs/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /skills/i }));
 
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      /no per-role override is stored/i,
+    const select = await screen.findByRole("combobox");
+    fireEvent.change(select, { target: { value: "user-invocable-only" } });
+    fireEvent.click(await screen.findByRole("button", { name: /save changes/i }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "set_claude_overrides",
+        expect.objectContaining({
+          overrides: expect.objectContaining({
+            _all: expect.objectContaining({
+              skills: { "my-skill": "user-invocable-only" },
+            }),
+            per_role: {
+              hands: expect.objectContaining({
+                effort: "xhigh",
+                ultracode: true,
+              }),
+            },
+          }),
+        }),
+      ),
     );
-  });
-
-  it("drops the notice once a role is configured", async () => {
-    mockBackend({ per_role: { hands: { effort: "low" } } });
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: /core knobs/i }));
-
-    await screen.findByRole("combobox", { name: "HANDS effort level" });
-    expect(screen.queryByRole("status")).toBeNull();
-  });
-
-  it("points at the Roles tab when there are no roles to configure", async () => {
-    mockBackend({}, []);
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: /core knobs/i }));
-
-    expect(await screen.findByText(/no roles yet/i)).toBeInTheDocument();
   });
 });

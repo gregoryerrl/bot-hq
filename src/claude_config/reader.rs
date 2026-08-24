@@ -119,7 +119,7 @@ fn core_knobs(settings: &Map<String, Value>) -> Vec<SettingItem> {
             label: "Effort level".into(),
             value: effort_value,
             source: effort_source.into(),
-            inheritance: inheritance(Surface::CoreKnobs),
+            inheritance: inheritance(Surface::Effort),
         },
         knob(settings, "model", "Model (default)", Surface::Model),
         knob(settings, "editorMode", "Editor mode", Surface::CoreKnobs),

@@ -517,8 +517,8 @@ describe("RolesPanel", () => {
   });
 });
 
-describe("default effort (hotfix 2026-08-25)", () => {
-  it("shows the role's stored default, falls back to the inherit note, and writes the per-role slot", async () => {
+describe("default effort (no-inherit, 2026-08-25)", () => {
+  it("shows the role's stored default with no Inherit option, and writes the decomposed pair", async () => {
     mockBackend();
     renderPanel();
     await screen.findByText("HANDS");
@@ -527,13 +527,17 @@ describe("default effort (hotfix 2026-08-25)", () => {
     const select = (await screen.findByLabelText(
       "Default effort",
     )) as HTMLSelectElement;
-    expect(select.value).toBe("max");
-    // The Inherit option names what clearing would fall to (_all's high).
+    // waitFor: the select renders (showing the floor) before the overrides
+    // query lands the stored value.
+    await waitFor(() => expect(select.value).toBe("max"));
+    // No Inherit anywhere: concrete choices only.
     expect(
-      Array.from(select.options).map((o) => o.textContent),
-    ).toContain("Inherit (high)");
+      Array.from(select.options).map((o) => o.textContent ?? ""),
+    ).not.toContainEqual(expect.stringMatching(/inherit/i));
 
-    // Changing writes the WHOLE store back with only this slug's slot moved.
+    // Changing writes the WHOLE store back with only this slug's slot moved —
+    // a level pick carries the explicit ultracode:false half of the pair, and
+    // `_all` (dead for effort, still real for its other keys) rides through.
     fireEvent.change(select, { target: { value: "low" } });
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith(
@@ -541,9 +545,66 @@ describe("default effort (hotfix 2026-08-25)", () => {
         expect.objectContaining({
           overrides: expect.objectContaining({
             per_role: expect.objectContaining({
-              hands: expect.objectContaining({ effort: "low" }),
+              hands: expect.objectContaining({ effort: "low", ultracode: false }),
             }),
             _all: expect.objectContaining({ effort: "high" }),
+          }),
+        }),
+      ),
+    );
+  });
+
+  it("shows the medium floor for an unconfigured role, and gates ultracode on edit_files", async () => {
+    mockBackend();
+    renderPanel();
+    // EYES has no per_role entry and no edit_files capability.
+    fireEvent.click(await screen.findByText("EYES"));
+
+    const select = (await screen.findByLabelText(
+      "Default effort",
+    )) as HTMLSelectElement;
+    // Display mirrors the spawn floor — never `_all`'s high, never blank.
+    await waitFor(() => expect(select.value).toBe("medium"));
+    const ultracode = select.querySelector(
+      'option[value="ultracode"]',
+    ) as HTMLOptionElement;
+    expect(ultracode).not.toBeNull();
+    // A default this role cannot take is not offered: ultracode rides in on
+    // `--settings`, which spawn injects only for a role holding edit_files.
+    expect(ultracode.disabled).toBe(true);
+  });
+
+  it("stores an ultracode default as the xhigh+ultracode pair", async () => {
+    // A HANDS that can edit files — the capability the ultracode option keys on.
+    mockBackend([
+      role({ capabilities: ["read_channel", "edit_files"] }),
+      EYES,
+    ]);
+    renderPanel();
+    await screen.findByText("HANDS");
+
+    const select = (await screen.findByLabelText(
+      "Default effort",
+    )) as HTMLSelectElement;
+    const ultracode = select.querySelector(
+      'option[value="ultracode"]',
+    ) as HTMLOptionElement;
+    expect(ultracode.disabled).toBe(false);
+
+    fireEvent.change(select, { target: { value: "ultracode" } });
+    // xhigh is ultracode's implied level, stored explicitly so even a spawn
+    // that skips `--settings` emits a truthful CLAUDE_CODE_EFFORT_LEVEL.
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "set_claude_overrides",
+        expect.objectContaining({
+          overrides: expect.objectContaining({
+            per_role: expect.objectContaining({
+              hands: expect.objectContaining({
+                effort: "xhigh",
+                ultracode: true,
+              }),
+            }),
           }),
         }),
       ),

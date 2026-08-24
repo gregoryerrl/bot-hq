@@ -72,9 +72,9 @@ describe("SpawnBadge — what a participant was actually spawned with", () => {
       expect(screen.getByTitle(/picked for this session/i)).toBeInTheDocument();
     });
 
-    it("marks the same value as inherited when nothing was picked", () => {
+    it("marks the same value as the role's default when nothing was picked", () => {
       render(<SpawnBadge participant={knobs({ effort: null, effort_at_spawn: "high" })} />);
-      expect(screen.getByTitle(/inherited from Claude Config/i)).toBeInTheDocument();
+      expect(screen.getByTitle(/the role's default/i)).toBeInTheDocument();
     });
   });
 });

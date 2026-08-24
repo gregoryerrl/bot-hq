@@ -22,23 +22,26 @@ import type {
   Inheritance,
   McpServerItem,
   PluginItem,
-  RoleView,
   SessionInfo,
   SettingItem,
   SkillItem,
   SkillVisibility,
 } from "../lib/bindings";
+import { EFFORT_LEVELS } from "../lib/effort";
 
 // ============================================================================
 // Claude Config — the Settings subtab that surfaces the Claude Code config the
-// bot-hq agents inherit, with a per-agent override layer.
+// bot-hq agents inherit, with an override layer.
 //
 // 2-pane: left = surface nav (reuses the Context Library shell's visual idiom);
 // right = structured detail with an INHERITANCE LENS (which agents pick up the
 // surface) + override controls that write `<data_dir>/claude-overrides.json`.
 // Both layers write back: global `~/.claude` edits go through
 // `claude_config_set_string/_bool/_plugin_enabled` (`claude_config/writer.rs`),
-// and the override layer is per ROLE (`ClaudeOverrides { all, per_role }`).
+// and the override layer edits the `_all` fan-out (`ClaudeOverrides`). The
+// store's `per_role` entries hold each role's default effort/ultracode, edited
+// in Settings → Roles since no-inherit (2026-08-25) — a save from this tab
+// carries them through untouched.
 // ============================================================================
 
 type SurfaceId =
@@ -69,43 +72,6 @@ function emptyAll(): AgentOverride {
   return {};
 }
 
-/**
- * One role's entry in the override store, or the all-inherited baseline.
- *
- * The key is `roles.slug` — the same string `resolve_participant_overrides`
- * (`src/core/session.rs`) hands to `resolve_agent_overrides` after walking
- * participant → role. Reading and writing by any other key would store settings
- * spawn never looks up, which is the exact failure rc3 D10 closed.
- */
-function roleOverride(
-  store: ClaudeOverrides,
-  roleSlug: string,
-): AgentOverride {
-  return store.per_role?.[roleSlug] ?? emptyAll();
-}
-
-/**
- * `store` with `patch` merged into one role's entry, leaving every other role
- * and the `_all` fan-out untouched.
- *
- * Pure so the key it writes under is pinnable without a save round-trip: the
- * panel's whole job is putting a value where spawn will find it, and an editor
- * that writes the wrong key looks identical on screen.
- */
-function patchRoleOverride(
-  store: ClaudeOverrides,
-  roleSlug: string,
-  patch: Partial<AgentOverride>,
-): ClaudeOverrides {
-  return {
-    ...store,
-    per_role: {
-      ...(store.per_role ?? {}),
-      [roleSlug]: { ...roleOverride(store, roleSlug), ...patch },
-    },
-  };
-}
-
 export function ClaudeConfigPanel() {
   const {
     data: config,
@@ -114,13 +80,6 @@ export function ClaudeConfigPanel() {
   } = useTauriQuery<ClaudeConfigView>("claude_config_read");
   const { data: serverOverrides, refetch: refetchOverrides } =
     useTauriQuery<ClaudeOverrides>("get_claude_overrides");
-  // The roles the override store is keyed by (rc3 D10). Same read the Roles tab
-  // uses, so the blocks below are exactly the roles a session can invite —
-  // archived ones are excluded by the backend and cannot be invited, so an
-  // override block for one would configure a spawn that never happens.
-  const { data: roles = [] } = useTauriQuery<RoleView[]>("list_roles", {
-    includeArchived: false,
-  });
   const save = useTauriMutation<void, { overrides: ClaudeOverrides }>(
     "set_claude_overrides",
   );
@@ -196,12 +155,11 @@ export function ClaudeConfigPanel() {
   const all: AgentOverride = draft._all ?? emptyAll();
 
   // ---- override mutators (all write the `_all` fan-out: applies to every
-  // agent). ----
+  // agent). Per-ROLE effort/ultracode left this tab with the no-inherit change
+  // (2026-08-25) — the Roles tab is the single editor of a role's default now,
+  // and `per_role` entries in the draft ride through a save untouched. ----
   const patchAll = (patch: Partial<AgentOverride>) =>
     setDraft((d) => ({ ...d, _all: { ...(d._all ?? {}), ...patch } }));
-  // Per-ROLE effort/ultracode overrides (layered over `_all` at resolve time).
-  const patchRole = (roleSlug: string, patch: Partial<AgentOverride>) =>
-    setDraft((d) => patchRoleOverride(d, roleSlug, patch));
 
   const setSkill = (name: string, vis: SkillVisibility | null) =>
     setDraft((d) => {
@@ -375,10 +333,6 @@ export function ClaudeConfigPanel() {
           {surface === "core" && (
             <CorePane
               config={config}
-              all={all}
-              roles={roles}
-              overrides={draft}
-              patchRole={patchRole}
               pendingStrings={pendingStrings}
               pendingBools={pendingBools}
               stageString={stageString}
@@ -597,25 +551,15 @@ function Row({
   );
 }
 
-/** Effort levels offered to agents + the global env-routed knob. `max` is
- *  session-only in claude-code and only persists via CLAUDE_CODE_EFFORT_LEVEL. */
-const EFFORT_OPTS = ["low", "medium", "high", "xhigh", "max"];
-
-/** Minimal shape `AgentEffortOverride` reads/writes — lets callers drive it from
- *  either the override store (`AgentOverride`) or plain local state (the dialog). */
-type EffortOverrideValue = {
-  effort?: string | null;
-  ultracode?: boolean | null;
-};
-
 /** Lightweight schema registry: how to edit each global core knob. */
 const KNOB_EDITORS: Record<
   string,
   { type: "enum" | "bool" | "text"; options?: string[] }
 > = {
   // Effort routes through the env var (the only persistent lever that accepts
-  // `max`); the writer drops the legacy `effortLevel` field on change.
-  "env.CLAUDE_CODE_EFFORT_LEVEL": { type: "enum", options: EFFORT_OPTS },
+  // `max`); the writer drops the legacy `effortLevel` field on change. Levels
+  // only — `ultracode` is a dropdown choice elsewhere, never a legal env value.
+  "env.CLAUDE_CODE_EFFORT_LEVEL": { type: "enum", options: [...EFFORT_LEVELS] },
   model: { type: "text" },
   editorMode: { type: "enum", options: ["normal", "vim"] },
   alwaysThinkingEnabled: { type: "bool" },
@@ -626,40 +570,27 @@ const KNOB_EDITORS: Record<
 /** Per-knob explanatory note rendered under the row (optional). */
 const KNOB_NOTES: Record<string, string> = {
   "env.CLAUDE_CODE_EFFORT_LEVEL":
-    "max is session-only in claude-code; bot-hq persists it via the CLAUDE_CODE_EFFORT_LEVEL env var (which overrides effortLevel).",
+    "Your own claude only: agents resolve effort from the New-session pick, else the role's default (Settings → Roles), else medium — never from this knob (no-inherit, 2026-08-25).",
 };
 
 function CorePane({
   config,
-  all,
-  roles,
-  overrides,
-  patchRole,
   pendingStrings,
   pendingBools,
   stageString,
   stageBool,
 }: {
   config: ClaudeConfigView;
-  all: AgentOverride;
-  roles: RoleView[];
-  overrides: ClaudeOverrides;
-  patchRole: (roleSlug: string, p: Partial<AgentOverride>) => void;
   pendingStrings: Record<string, string | null>;
   pendingBools: Record<string, boolean>;
   stageString: (key: string, value: string | null) => void;
   stageBool: (key: string, value: boolean) => void;
 }) {
-  // Nothing configured under the ROLE key. Distinguishes "you have set no
-  // per-role override" from "your per-agent overrides no longer exist", which
-  // the panel otherwise renders identically — see the notice below.
-  const noRoleOverrides =
-    Object.keys(overrides.per_role ?? {}).length === 0;
   return (
     <div>
       <PaneHeader
         title="Core knobs"
-        blurb="Edit your settings.json (applies to your own Claude AND the agents that inherit it) — staged until you Save. The agent runtime overrides below apply on the next agent spawn only."
+        blurb="Edit your settings.json — staged until you Save. Each row's chip says whether agents inherit it; effort is the exception agents never read (a role's default lives in Settings → Roles)."
       />
       <ul className="flex flex-col gap-2">
         {config.core_knobs.map((k: SettingItem) => {
@@ -695,159 +626,10 @@ function CorePane({
         })}
       </ul>
 
-      <h3 className="mb-2 mt-6 font-headline-sm text-headline-sm text-on-surface">
-        Agent runtime overrides
-      </h3>
-      <p className="mb-2 max-w-prose font-body-md text-body-md text-on-surface-variant">
-        Defaults by ROLE, applied on the next agent spawn. Set each role
-        independently so a deep-reasoning effort isn&apos;t pushed blindly onto
-        a non-Anthropic model. A session&apos;s own New Session dialog overrides
-        these per participant.
-      </p>
-      {/* rc3 D10: one block per ROLE, because the role slug is the key
-          `resolve_agent_overrides` matches. Not the participant slug — those
-          are per-session and gain numeric suffixes (`hands-2`), so this tab
-          could neither enumerate nor address them; and not a turn slot, which
-          this tab cannot know the occupant of. */}
-      {noRoleOverrides && (
-        <p
-          role="status"
-          className="mb-2 max-w-prose rounded border border-warning/50 bg-warning/15 px-3 py-2 font-code-sm text-code-sm text-warning"
-        >
-          No per-role override is stored. These blocks are keyed by role — an
-          override entered before that change was keyed by agent name and no
-          longer applies, so re-enter anything you had set here.
-        </p>
-      )}
-      {roles.length === 0 ? (
-        <p className="max-w-prose font-code-sm text-code-sm text-on-surface-variant">
-          No roles yet — add one in Settings → Roles and its override block
-          appears here.
-        </p>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {roles.map((r) => (
-            <AgentEffortOverride
-              key={r.slug}
-              title={r.display_name}
-              subtitle={r.slug}
-              ov={roleOverride(overrides, r.slug)}
-              patch={(p) => patchRole(r.slug, p)}
-              inheritedEffort={all.effort}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** One agent's effort + ultracode override. Narrow write-coupling keeps `max`
- *  and ultracode mutually exclusive while preserving the valid `xhigh`+ultracode
- *  pair (ultracode IS xhigh + dynamic workflows). */
-function AgentEffortOverride({
-  title,
-  subtitle,
-  ov,
-  patch,
-  inheritedEffort,
-}: {
-  title: string;
-  /** Secondary identifying line, e.g. the role's slug. */
-  subtitle?: string;
-  ov: EffortOverrideValue;
-  patch: (p: EffortOverrideValue) => void;
-  inheritedEffort?: string | null;
-}) {
-  const ultracodeOn = ov.ultracode === true;
-  const effortMax = ov.effort === "max";
-  // Conflict-aware disabling: never disable BOTH at once, so a pre-existing
-  // (e.g. legacy) override that set max + ultracode together stays escapable.
-  const effortDisabled = ultracodeOn && !effortMax;
-  // Only the max/ultracode conflict disables the box now. It used to also be
-  // disabled for the second slot, which encoded "slot 2 is the reviewer" — a
-  // claim rc3 D10/D11 removes: which role fills a slot is chosen per session,
-  // and whether ultracode lands is decided by that role's `edit_files` box (see
-  // the note below), not by position.
-  const ultracodeDisabled = effortMax && !ultracodeOn;
-  const onEffort = (val: string | undefined) => {
-    // Selecting `max` clears ultracode (they conflict); other values are kept
-    // as-is — `xhigh` + ultracode is the intended pair.
-    if (val === "max") patch({ effort: "max", ultracode: undefined });
-    else patch({ effort: val });
-  };
-  const onUltracode = (on: boolean) => {
-    // Turning ultracode on only drops a conflicting `max` effort; `xhigh`/etc.
-    // survive so toggling ultracode off restores the prior value.
-    if (on) patch({ ultracode: true, ...(effortMax ? { effort: undefined } : {}) });
-    else patch({ ultracode: undefined });
-  };
-  // While ultracode is on, effort is pinned to xhigh at runtime — show that and
-  // disable the select (the stored value is untouched, so it returns on toggle-off).
-  const effortValue = effortDisabled ? "xhigh" : ov.effort ?? "";
-  return (
-    <div className="flex flex-col gap-2 rounded-lg border border-outline-variant bg-surface-container p-3">
-      <div className="flex items-center justify-between">
-        <span className="min-w-0">
-          <span className="block truncate font-code-sm text-code-sm text-on-surface">
-            {title}
-          </span>
-          {/* `roles.display_name` is not unique — only `roles.slug` is — so two
-              roles can be named the same and the title alone would not say
-              which block writes which entry. Same title-over-slug idiom the
-              Roles tab lists them with. */}
-          {subtitle && (
-            <span className="block truncate font-label-caps text-label-caps text-on-surface-variant">
-              {subtitle}
-            </span>
-          )}
-        </span>
-      </div>
-      <label className="flex items-center justify-between gap-3">
-        <span className="font-code-sm text-code-sm text-on-surface">
-          Effort level
-        </span>
-        <select
-          // The visible "Effort level" text repeats in every block, so the
-          // accessible name has to carry the title to say WHOSE effort this is.
-          aria-label={`${title} effort level`}
-          className={selectClass}
-          value={effortValue}
-          disabled={effortDisabled}
-          onChange={(e) => onEffort(e.target.value || undefined)}
-        >
-          <option value="">
-            Inherit{inheritedEffort ? ` (${inheritedEffort})` : " (default)"}
-          </option>
-          {EFFORT_OPTS.map((v) => (
-            <option key={v} value={v}>
-              {v}
-            </option>
-          ))}
-        </select>
-      </label>
-      {ultracodeOn && (
-        <p className="font-label-caps text-label-caps text-on-surface-variant">
-          ultracode pins effort to xhigh.
-        </p>
-      )}
-      <ToggleRow
-        label="Ultracode"
-        checked={ultracodeOn}
-        onChange={onUltracode}
-        disabled={ultracodeDisabled}
-      />
-      {effortMax && (
-        <p className="font-label-caps text-label-caps text-on-surface-variant">
-          max can&apos;t combine with ultracode.
-        </p>
-      )}
-      <p className="font-label-caps text-label-caps text-on-surface-variant">
-        ultracode = xhigh + dynamic workflows (Opus 4.8/4.7); higher token use.
-        It rides in on <code>--settings</code>, which spawn injects only for a
-        role that can edit files — a role without that box ignores it. Effort
-        may have limited effect on non-Anthropic models.
-      </p>
+      {/* The per-role effort/ultracode blocks that used to render here left
+          with the no-inherit change (2026-08-25): a role's default effort is
+          edited in Settings → Roles — the single owner — and nothing inherits
+          from `_all` or this file's knob any more. */}
     </div>
   );
 }

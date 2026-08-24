@@ -6,7 +6,6 @@ import { isTrayItem } from "../components/HaltBanner";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import type {
-  ClaudeConfigView,
   ClaudeOverrides,
   ModelView,
   ProjectView,
@@ -14,6 +13,12 @@ import type {
   SessionInfo,
   SessionTrayView,
 } from "../lib/bindings";
+import {
+  EFFORT_LEVELS,
+  ULTRACODE,
+  pickToFields,
+  roleDefaultEffort,
+} from "../lib/effort";
 import { cn } from "../lib/cn";
 import { PARTICIPANT_COLORS } from "../components/authorColor";
 import { RescanIcon, WarnIcon } from "../components/icons";
@@ -45,20 +50,21 @@ import {
  */
 export const MAX_PARTICIPANTS = 4;
 
-/** Effort levels claude-code accepts. Mirrors `EFFORT_OPTS` in ClaudeConfig. */
-const EFFORT_OPTS = ["low", "medium", "high", "xhigh", "max"];
-
 /** One row of the dialog's participant list. */
 type ParticipantRow = {
   /** Stable React key — rows are added, removed and reordered by index. */
   key: number;
   /** `null` until a role is chosen; Create stays disabled until it is not. */
   roleId: number | null;
-  /** `""` = inherit the role's default model (rc3 D8). */
+  /** `""` = the role's default model (rc3 D8). */
   modelId: string;
-  /** rc3 **D12**: effort is per participant. `null` = inherit the default. */
+  /** rc3 **D12**: effort is per participant. `null` = the Default choice —
+   *  spawn resolves the role's configured default, else the medium floor.
+   *  An ultracode pick stores `"xhigh"` here (see `lib/effort.ts`). */
   effort: string | null;
-  /** rc3 **D12**: ultracode is per participant. `null` = inherit. */
+  /** rc3 **D12**: ultracode is per participant. `null` = Default; a concrete
+   *  level pick stores an explicit `false` so it clears a role-default
+   *  ultracode. */
   ultracode: boolean | null;
   /** rc3 **D20**: the palette entry by NAME, or `null` to take the rotation —
    *  which already guarantees no two participants share a hue. */
@@ -199,36 +205,30 @@ export function Dashboard() {
     { key: "worktree_default" },
   );
 
-  // Persistent effort defaults, so a row's "Inherit" option can show what it
-  // resolves to (e.g. "Inherit (max)") rather than a bare "(default)".
-  // Mirrors the spawn fall-through: per-slot override > _all > settings.json
-  // env. Called exactly as ClaudeConfig does (no args) so the React Query cache
-  // is shared — a cache-hit if the Settings → Claude Config tab was opened.
+  // Role defaults, so a row's "Default (…)" option shows what it resolves to.
+  // Called exactly as the Roles tab does (no args) so the React Query cache is
+  // shared — a cache-hit if Settings → Roles was opened.
   const { data: claudeOverrides } =
     useTauriQuery<ClaudeOverrides>("get_claude_overrides");
-  const { data: claudeConfig } =
-    useTauriQuery<ClaudeConfigView>("claude_config_read");
   /**
-   * What a row's effort inherits if left alone, given the ROLE it picked.
+   * What a row spawns with if left on Default, given the ROLE it picked.
    *
-   * `claude-overrides.json` keys its per-agent scopes by role slug — the same
-   * string `resolve_participant_overrides` (`src/core/session.rs`) walks
-   * participant → role to produce — so this reads the entry spawn will actually
-   * resolve. A row with no role yet, and a role with no entry, both fall
-   * through to `_all`, matching `resolve_agent_overrides`.
+   * `claude-overrides.json` keys its scopes by role slug — the same string
+   * `resolve_participant_overrides` (`src/core/session.rs`) walks participant →
+   * role to produce — so this reads the entry spawn will actually resolve.
+   * `roleDefaultEffort` mirrors the spawn floor: a row with no role yet and a
+   * role with no entry both show the medium floor, never `_all` or the
+   * settings.json knob (no-inherit, 2026-08-25).
    */
-  const inheritedEffortFor = useMemo(() => {
-    const knob =
-      claudeConfig?.core_knobs.find(
-        (k) => k.key === "env.CLAUDE_CODE_EFFORT_LEVEL",
-      )?.value ?? null;
+  const defaultEffortFor = useMemo(() => {
     return (roleId: number | null) => {
       const slug =
         roleId === null ? null : roles.find((r) => r.id === roleId)?.slug ?? null;
-      const perRole = slug ? claudeOverrides?.per_role?.[slug] : undefined;
-      return perRole?.effort ?? claudeOverrides?._all?.effort ?? knob ?? null;
+      return roleDefaultEffort(
+        slug ? claudeOverrides?.per_role?.[slug] : undefined,
+      );
     };
-  }, [claudeOverrides, claudeConfig, roles]);
+  }, [claudeOverrides, roles]);
 
   // Drag-to-SWAP (ideas.md 2026-08-24, tray c38a216b): dropping tile A on
   // tile B exchanges exactly those two slots server-side; the refetch
@@ -356,7 +356,7 @@ export function Dashboard() {
     setSelectedProject("");
     setAdHocRepo("");
     // Each row's effort/ultracode reset with it — `emptyParticipant()` opens
-    // them on Inherit, so there is nothing else to clear here.
+    // them on Default, so there is nothing else to clear here.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [creating]);
 
@@ -696,13 +696,30 @@ export function Dashboard() {
                           <select
                             aria-label={`Participant ${index + 1} role`}
                             value={row.roleId ?? ""}
-                            onChange={(e) =>
+                            onChange={(e) => {
+                              const roleId = e.target.value
+                                ? Number(e.target.value)
+                                : null;
+                              const incoming = roles.find(
+                                (r) => r.id === roleId,
+                              );
+                              // An ultracode pick cannot follow the row to a
+                              // role that can't take it (no edit_files): the
+                              // option would grey out while the row still
+                              // shipped {effort:"xhigh", ultracode:true} — a
+                              // posture the user never picked for THAT role.
+                              // Reset the whole pick to Default, not just the
+                              // flag, so no phantom xhigh survives either.
+                              const dropUltracode =
+                                row.ultracode === true &&
+                                !incoming?.capabilities.includes(EDIT_FILES);
                               patchParticipant(index, {
-                                roleId: e.target.value
-                                  ? Number(e.target.value)
-                                  : null,
-                              })
-                            }
+                                roleId,
+                                ...(dropUltracode
+                                  ? { effort: null, ultracode: null }
+                                  : {}),
+                              });
+                            }}
                             className={selectClass}
                           >
                             <option value="">(choose a role)</option>
@@ -734,64 +751,50 @@ export function Dashboard() {
                           </select>
                         </label>
                         {/* rc3 D12: effort belongs to the PARTICIPANT, next to
-                            the role and model it applies to — not to a fixed
-                            block named after an agent. */}
+                            the role and model it applies to. One select since
+                            no-inherit (2026-08-25): ultracode is a choice in
+                            it, not a sibling checkbox — a pick decomposes to
+                            the stored pair via `pickToFields`, and picking any
+                            concrete level explicitly clears a role-default
+                            ultracode. */}
                         <label className="block">
                           <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
                             Effort
                           </span>
                           <select
                             aria-label={`Participant ${index + 1} effort`}
-                            value={row.effort ?? ""}
+                            value={
+                              row.ultracode === true
+                                ? ULTRACODE
+                                : row.effort ?? ""
+                            }
                             onChange={(e) =>
-                              patchParticipant(index, {
-                                effort: e.target.value || null,
-                                // `max` and ultracode are mutually exclusive in
-                                // claude-code, so picking `max` clears it.
-                                ...(e.target.value === "max"
-                                  ? { ultracode: null }
-                                  : {}),
-                              })
+                              patchParticipant(index, pickToFields(e.target.value))
                             }
                             className={selectClass}
                           >
                             <option value="">
-                              Inherit
-                              {inheritedEffortFor(row.roleId)
-                                ? ` (${inheritedEffortFor(row.roleId)})`
-                                : " (default)"}
+                              Default ({defaultEffortFor(row.roleId)})
                             </option>
-                            {EFFORT_OPTS.map((v) => (
+                            {EFFORT_LEVELS.map((v) => (
                               <option key={v} value={v}>
                                 {v}
                               </option>
                             ))}
+                            {/* Ultracode rides in on `--settings`, which spawn
+                                injects only for a role holding `edit_files` —
+                                offering it to any other role would be a choice
+                                that changes nothing. Capability, not role name:
+                                bot-hq does not know what a role means. */}
+                            <option
+                              value={ULTRACODE}
+                              disabled={
+                                !roleAt(row)?.capabilities.includes(EDIT_FILES)
+                              }
+                            >
+                              {ULTRACODE}
+                            </option>
                           </select>
-                        </label>
-                        {/* Ultracode rides in on `--settings`, which spawn
-                            injects only for a role holding `edit_files` — so
-                            offering it to a role without that box would be a
-                            control that changes nothing. Capability, not role
-                            name: bot-hq does not know what a role means. */}
-                        <label className="flex items-end gap-2 pb-1.5">
-                          <input
-                            type="checkbox"
-                            aria-label={`Participant ${index + 1} ultracode`}
-                            checked={row.ultracode === true}
-                            disabled={
-                              !roleAt(row)?.capabilities.includes(EDIT_FILES) ||
-                              row.effort === "max"
-                            }
-                            onChange={(e) =>
-                              patchParticipant(index, {
-                                ultracode: e.target.checked ? true : null,
-                              })
-                            }
-                            className="size-4 accent-primary"
-                          />
-                          <span className="font-code-sm text-code-sm text-on-surface">
-                            Ultracode
-                          </span>
                         </label>
                         {/* rc3 D20's other half (migration 0053): the NAME
                             this participant goes by. Empty takes the ordinal,
@@ -879,8 +882,8 @@ export function Dashboard() {
                 )}
                 <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
                   Row order sets each participant's turn slot. Effort applies to
-                  this session only — leave it on Inherit to use your configured
-                  defaults.
+                  this session only — Default uses the role's configured effort
+                  (Settings → Roles).
                 </p>
                 {/* rc3 D11. Advisory, never blocking: it names a gap in what
                     the roster's ticked boxes allow, and the user decides

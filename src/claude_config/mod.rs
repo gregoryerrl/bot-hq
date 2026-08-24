@@ -116,6 +116,11 @@ pub enum Surface {
     Hooks,
     Memory,
     CoreKnobs,
+    /// The `env.CLAUDE_CODE_EFFORT_LEVEL` knob specifically — split from
+    /// [`Surface::CoreKnobs`] when the no-inherit floor landed (2026-08-25):
+    /// agents no longer read the user's settings.json effort, so the shared
+    /// every-agent chip became a false claim on that one row.
+    Effort,
     Model,
     Permissions,
 }
@@ -163,7 +168,13 @@ pub fn inheritance(surface: Surface) -> Inheritance {
         Surface::CoreKnobs => Inheritance {
             inherited_by: agents(&[EVERY_AGENT]),
             skipped_by: agents(&[]),
-            note: "Read from settings.json by every agent (effort, thinking, output tokens, …).".into(),
+            note: "Read from settings.json by every agent (thinking, output tokens, …).".into(),
+            overridable: true,
+        },
+        Surface::Effort => Inheritance {
+            inherited_by: agents(&[]),
+            skipped_by: agents(&[EVERY_AGENT]),
+            note: "Overridden by bot-hq via CLAUDE_CODE_EFFORT_LEVEL — every spawn resolves the participant's pick, else its role's default (Roles tab), else medium. This knob applies to your own claude only.".into(),
             overridable: true,
         },
         Surface::Model => Inheritance {
