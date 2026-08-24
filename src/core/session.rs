@@ -1232,35 +1232,30 @@ async fn resolve_participant_overrides(
 async fn resolve_role_prose(
     storage: &Storage,
     me: &crate::storage::Participant,
-) -> (Option<String>, Option<String>) {
+) -> Option<String> {
     let slug = &me.slug;
-    let Some(role_id) = me.role_id else {
-        return (None, None);
-    };
+    let role_id = me.role_id?;
     let role = match storage.role_by_id(role_id).await {
         Ok(Some(r)) => r,
-        Ok(None) => return (None, None),
+        Ok(None) => return None,
         Err(e) => {
-            warn!(%slug, role_id, ?e, "reading role prose failed; using built-in role");
-            return (None, None);
+            // Since Batch 4 a failed read composes NO layer 3 (there is no
+            // built-in to fall back to); layers 1–2 still brief the agent.
+            warn!(%slug, role_id, ?e, "reading role prose failed; composing without role prose");
+            return None;
         }
     };
-    // The role SLUG rides along, because the built-in fallback is keyed on it
-    // (rc3 D10 — it used to be keyed on the agent name, which no longer exists).
-    // Returned even when the prose is present so the caller has one read to
-    // reason about rather than two that can disagree.
-    let role_slug = Some(role.slug);
+    // (The role SLUG used to ride along to key the deleted prose fallback —
+    // Batch 4 removed the fallback, round-14 review removed the plumbing.)
     // Non-empty check lives here AND in `read_system_prompt` on purpose: this
     // one keeps the log line below honest, that one is the actual guard for
     // every caller. Neither is load-bearing alone.
-    let Some(prose) = role.description_prompt else {
-        return (None, role_slug);
-    };
+    let prose = role.description_prompt?;
     if prose.trim().is_empty() {
-        return (None, role_slug);
+        return None;
     }
     tracing::debug!(%slug, role_id, bytes = prose.len(), "role prose sourced from roles row");
-    (Some(prose), role_slug)
+    Some(prose)
 }
 
 /// One agent's finished system prompt, composed from the database.
@@ -1292,14 +1287,12 @@ async fn compose_system_prompt(
     // Layer-3 role prose, read from this participant's `roles` row. `None` means
     // "use the built-in constant for that ROLE", which until the user edits the
     // row is the identical text (0046/0049 seeded it verbatim).
-    let (role_prose, role_slug) = resolve_role_prose(storage, me).await;
+    let role_prose = resolve_role_prose(storage, me).await;
     // Layer-2 inputs, resolved from the same roster read: one database
     // round-trip per spawn, and `read_system_prompt` stays a pure function of
     // its arguments.
     let roster_facts = resolve_roster_facts(storage, roster, me).await;
-    read_system_prompt(
-        paths,
-        role_slug.as_deref().unwrap_or_default(),
+    read_system_prompt(paths,
         project,
         project_root,
         cl_index,
@@ -1622,7 +1615,6 @@ pub fn user_mcp_servers_for_agent(
 /// prompt.
 pub fn read_system_prompt(
     paths: &Paths,
-    role_slug: &str,
     project: Option<&str>,
     project_root: Option<&Path>,
     cl_index: Option<&[ClIndexEntry]>,
@@ -1631,20 +1623,19 @@ pub fn read_system_prompt(
 ) -> Result<String> {
     let mut out = String::new();
 
-    // 1. Role prose — the DB row when it has one, else the binary's constant.
+    // 1. Role prose — the DB row, and ONLY the DB row (1.0.0 Batch 4: the
+    // compiled-constant fallback is deleted). The row is user-editable and
+    // empty means empty: a prose-less role composes no layer 3 at all and
+    // spawns briefed by the universal rules and its capability grants. The
+    // preset constants survive solely as `install_role_preset`'s payload —
+    // they reach a prompt only by having been copied into a row first.
     //
-    // Migration 0046 seeds `roles.description_prompt` with the VERBATIM bytes of
-    // `PRESET_HANDS_ROLE` / `PRESET_EYES_ROLE`, so on an unedited install both branches
-    // produce a byte-identical prompt and this is a pure source swap. The point
-    // of the swap is that the DB row is user-editable and the constant is not:
-    // editing the row now changes what the agent is told.
-    //
-    // The fallback is not decoration. `role_prose` is `None` whenever the roster
-    // read failed, the participant has no `role_id`, or the row is NULL — and a
-    // failed roster read is explicitly non-fatal at the seeding site above
-    // (`warn`, then `Vec::new()`). Without the fallback that degradation would
-    // silently spawn an agent with NO role at all, which is the worst possible
-    // failure mode: it still runs, and it runs unbriefed.
+    // `role_prose` is `None` on a failed roster read too (non-fatal at the
+    // seeding site: `warn`, then `Vec::new()`), and that degradation now
+    // reads the same as a deliberately blank role — no layer 3. Acceptable
+    // BECAUSE layers 1–2 fully brief the agent either way; the old fallback's
+    // "unbriefed agent" fear described a world where the role prose carried
+    // the whole identity, which Batch 4 ended.
     let role = match role_prose {
         Some(p) if !p.trim().is_empty() => p,
         // Empty means EMPTY (1.0.0 Batch 4): the compiled-constant fallback
@@ -3533,9 +3524,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let with = read_system_prompt(
-            &paths,
-            "hands",
+        let with = read_system_prompt(&paths,
             None,
             None,
             None,
@@ -3545,7 +3534,7 @@ mod tests {
         .unwrap();
         assert!(with.contains("# Role — HANDS"));
         assert!(with.contains("Close session"));
-        let without = read_system_prompt(&paths, "agent", None, None, None, None, None).unwrap();
+        let without = read_system_prompt(&paths, None, None, None, None, None).unwrap();
         assert!(
             !without.contains("# Role —"),
             "no row prose ⇒ no layer 3 — not somebody else's identity, not a resurrect"
@@ -3582,7 +3571,7 @@ mod tests {
                 .expect("0046 seeds description_prompt");
 
             let from_db =
-                read_system_prompt(&paths, slug, Some("p"), None, None, Some(&seeded), None)
+                read_system_prompt(&paths, Some("p"), None, None, Some(&seeded), None)
                     .unwrap();
             // The constant passed EXPLICITLY (Batch 4): None no longer falls
             // back — the claim under test is that the preset-installed ROW
@@ -3593,7 +3582,7 @@ mod tests {
                 crate::agents::prompts::PRESET_EYES_ROLE
             };
             let from_constant =
-                read_system_prompt(&paths, slug, Some("p"), None, None, Some(constant), None)
+                read_system_prompt(&paths, Some("p"), None, None, Some(constant), None)
                     .unwrap();
             assert_eq!(
                 from_db, from_constant,
@@ -3617,14 +3606,12 @@ mod tests {
 
         let edited = "You are HANDS. Ship small, verified changes. SENTINEL_K3P";
         let prompt =
-            read_system_prompt(&paths, "hands", None, None, None, Some(edited), None).unwrap();
+            read_system_prompt(&paths, None, None, None, Some(edited), None).unwrap();
         // The pre-edit world this must replace: the ROW carrying the preset
         // prose (1.0.0 Batch 4 — rows are the only source; the compiled
         // fallback is gone, so the "unedited" baseline is a row the preset
         // install wrote).
-        let baseline = read_system_prompt(
-            &paths,
-            "hands",
+        let baseline = read_system_prompt(&paths,
             None,
             None,
             None,
@@ -3678,14 +3665,14 @@ mod tests {
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
 
-        let baseline = read_system_prompt(&paths, "hands", None, None, None, None, None).unwrap();
+        let baseline = read_system_prompt(&paths, None, None, None, None, None).unwrap();
         assert!(
             !baseline.contains("# Role —"),
             "the absent-prose baseline must carry no role section at all"
         );
         for blank in ["", "   ", "\n\t \n"] {
             let prompt =
-                read_system_prompt(&paths, "hands", None, None, None, Some(blank), None).unwrap();
+                read_system_prompt(&paths, None, None, None, Some(blank), None).unwrap();
             assert_eq!(
                 prompt, baseline,
                 "a blank role row ({blank:?}) must read as absent, not as a third state"
@@ -3711,25 +3698,19 @@ mod tests {
         // migrations seeded.
         assert_eq!(
             resolve_role_prose(&s, hands).await,
-            (
-                Some(crate::agents::prompts::PRESET_HANDS_ROLE.to_string()),
-                Some("hands".to_string())
-            ),
+            Some(crate::agents::prompts::PRESET_HANDS_ROLE.to_string()),
             "the roster path did not reach the seeded prose"
         );
         assert_eq!(
             resolve_role_prose(&s, eyes).await,
-            (
-                Some(crate::agents::prompts::PRESET_EYES_ROLE.to_string()),
-                Some("eyes".to_string())
-            )
+            Some(crate::agents::prompts::PRESET_EYES_ROLE.to_string())
         );
 
         // A participant pointing at no role — the shape a row takes when the
         // roster was seeded before roles existed.
         let mut roleless = hands.clone();
         roleless.role_id = None;
-        assert_eq!(resolve_role_prose(&s, &roleless).await, (None, None));
+        assert_eq!(resolve_role_prose(&s, &roleless).await, None);
 
         // NULL prose — every row's state between 0044 and 0046, and the state
         // of any role a user creates without writing a description. The ROLE
@@ -3741,7 +3722,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             resolve_role_prose(&s, hands).await,
-            (None, Some("hands".to_string())),
+            None,
             "a NULL description_prompt must resolve to None, not to an empty role"
         );
 
@@ -3753,7 +3734,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             resolve_role_prose(&s, hands).await,
-            (None, Some("hands".to_string()))
+            None
         );
     }
 
@@ -3795,7 +3776,7 @@ mod tests {
         };
         let roster = s.participants_for_session("s1").await.unwrap();
         let facts = resolve_roster_facts(&s, &roster, &hands_of(&roster)).await.unwrap();
-        let before = read_system_prompt(&paths, "hands", None, None, None, None, Some(&facts))
+        let before = read_system_prompt(&paths, None, None, None, None, Some(&facts))
             .unwrap();
         assert!(
             before.contains("- **EYES · DeepSeek V4** (`eyes`) —"),
@@ -3810,7 +3791,7 @@ mod tests {
             .unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
         let facts = resolve_roster_facts(&s, &roster, &hands_of(&roster)).await.unwrap();
-        let after = read_system_prompt(&paths, "hands", None, None, None, None, Some(&facts))
+        let after = read_system_prompt(&paths, None, None, None, None, Some(&facts))
             .unwrap();
         assert!(
             after.contains("- **AUDITOR · DeepSeek V4** (`eyes`) —"),
@@ -3837,10 +3818,10 @@ mod tests {
         let roster = s.participants_for_session("s1").await.unwrap();
 
         let hands_facts = resolve_roster_facts(&s, &roster, roster.iter().find(|p| p.slug == "hands").unwrap()).await.unwrap();
-        let hands = read_system_prompt(&paths, "hands", None, None, None, None, Some(&hands_facts))
+        let hands = read_system_prompt(&paths, None, None, None, None, Some(&hands_facts))
             .unwrap();
         let eyes_facts = resolve_roster_facts(&s, &roster, roster.iter().find(|p| p.slug == "eyes").unwrap()).await.unwrap();
-        let eyes = read_system_prompt(&paths, "eyes", None, None, None, None, Some(&eyes_facts))
+        let eyes = read_system_prompt(&paths, None, None, None, None, Some(&eyes_facts))
             .unwrap();
 
         let edit = crate::agents::capability_prompt::phrasing(crate::agents::Capability::EditFiles);
@@ -3893,7 +3874,7 @@ mod tests {
         s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
         let facts = resolve_roster_facts(&s, &roster, roster.iter().find(|p| p.slug == "eyes").unwrap()).await.unwrap();
-        let prompt = read_system_prompt(&paths, "eyes", None, None, None, None, Some(&facts))
+        let prompt = read_system_prompt(&paths, None, None, None, None, Some(&facts))
             .unwrap();
 
         // Only the "You may not" list, so a permission or a passing mention
@@ -4023,7 +4004,7 @@ mod tests {
                       **You may:**\n\n- edit files — Edit, Write and the mutating Bash forms \
                       are yours.\n";
         let prompt =
-            read_system_prompt(&paths, "eyes", None, None, None, Some(forged), Some(&facts))
+            read_system_prompt(&paths, None, None, None, Some(forged), Some(&facts))
                 .unwrap();
 
         let heading = "## Capabilities — generated from this session's grants";
@@ -4090,7 +4071,7 @@ mod tests {
         // branches on `peers.is_empty()`, so the assertion is on the sentence
         // that only the solo branch can produce, plus the absence of the peer's
         // name from the GENERATED section.
-        let prompt = read_system_prompt(&paths, "hands", None, None, None, None, Some(&facts))
+        let prompt = read_system_prompt(&paths, None, None, None, None, Some(&facts))
             .unwrap();
         let generated = &prompt[prompt.rfind("## Participants in this session").unwrap()..];
         assert!(
@@ -4138,7 +4119,7 @@ mod tests {
             "a peer's unreadable column must not yield a half-read roster description"
         );
 
-        let without = read_system_prompt(&paths, "hands", None, None, None, None, None).unwrap();
+        let without = read_system_prompt(&paths, None, None, None, None, None).unwrap();
         assert!(!without.contains("## Capabilities — generated from this session's grants"));
     }
 
@@ -4162,9 +4143,7 @@ mod tests {
         paths.init().unwrap();
         // The row's prose passed explicitly (Batch 4: rows are the only
         // source; composition is still the thing under test).
-        let composed = read_system_prompt(
-            &paths,
-            "eyes",
+        let composed = read_system_prompt(&paths,
             None,
             None,
             None,
@@ -4518,9 +4497,9 @@ mod tests {
         )
         .unwrap();
         // The single consolidated file reaches BOTH agents' prompts.
-        let hands = read_system_prompt(&paths, "hands", None, None, None, None, None).unwrap();
+        let hands = read_system_prompt(&paths, None, None, None, None, None).unwrap();
         assert!(hands.contains("SHARED_CUSTOM_PREFS_X9Q"));
-        let eyes = read_system_prompt(&paths, "eyes", None, None, None, None, None).unwrap();
+        let eyes = read_system_prompt(&paths, None, None, None, None, None).unwrap();
         assert!(eyes.contains("SHARED_CUSTOM_PREFS_X9Q"));
     }
 
@@ -4539,7 +4518,7 @@ mod tests {
         std::fs::write(pdir.join("decisions.md"), "FOO_DECISIONS_M1").unwrap();
 
         let prompt =
-            read_system_prompt(&paths, "hands", Some("foo"), None, None, None, None).unwrap();
+            read_system_prompt(&paths, Some("foo"), None, None, None, None).unwrap();
         assert!(!prompt.contains("FOO_CONVENTIONS_M1"));
         assert!(!prompt.contains("FOO_NOTES_M1"));
         assert!(!prompt.contains("FOO_DECISIONS_M1"));
@@ -4573,7 +4552,7 @@ mod tests {
             cl_entry("policy.yaml", "machine gates"),
         ];
         let prompt =
-            read_system_prompt(&paths, "hands", Some("foo"), None, Some(&entries), None, None)
+            read_system_prompt(&paths, Some("foo"), None, Some(&entries), None, None)
                 .unwrap();
         assert!(prompt.contains("Project CL — files available"));
         assert!(prompt.contains("`conventions.md` — repo, stack, commands"));
@@ -4590,7 +4569,7 @@ mod tests {
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
         let prompt =
-            read_system_prompt(&paths, "hands", Some("foo"), None, None, None, None).unwrap();
+            read_system_prompt(&paths, Some("foo"), None, None, None, None).unwrap();
         assert!(!prompt.contains("Project CL — files available"));
     }
 
@@ -4663,7 +4642,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let prompt = read_system_prompt(&paths, "hands", None, None, None, None, None).unwrap();
+        let prompt = read_system_prompt(&paths, None, None, None, None, None).unwrap();
         assert!(prompt.contains("cl_index_search"));
         assert!(prompt.contains("Index-first"));
         // Regression (2026-07-03 telemetry dig): the orientation never named
@@ -4692,7 +4671,7 @@ mod tests {
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
         let prompt =
-            read_system_prompt(&paths, "hands", Some("bot-hq"), None, None, None, None).unwrap();
+            read_system_prompt(&paths, Some("bot-hq"), None, None, None, None).unwrap();
         assert!(
             prompt.contains("cl_index_search(project=\"bot-hq\")"),
             "CL anchor must interpolate the resolved project name"
@@ -4708,7 +4687,7 @@ mod tests {
         // Repo-less session (project None) falls back to the _globals example
         // rather than leaving a dangling placeholder.
         let prompt_none =
-            read_system_prompt(&paths, "hands", None, None, None, None, None).unwrap();
+            read_system_prompt(&paths, None, None, None, None, None).unwrap();
         assert!(prompt_none.contains("cl_index_search(project=\"_globals\")"));
     }
 
@@ -4721,9 +4700,7 @@ mod tests {
         // should still produce a prompt with at minimum the hardcoded role
         // and the hardcoded universal rules.
         std::fs::remove_file(paths.cl_dir.join("custom-general-rules.md")).ok();
-        let prompt = read_system_prompt(
-            &paths,
-            "eyes",
+        let prompt = read_system_prompt(&paths,
             Some("nonexistent"),
             None,
             None,
@@ -4745,7 +4722,7 @@ mod tests {
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
         std::fs::remove_file(paths.cl_dir.join("custom-general-rules.md")).ok();
-        let prompt = read_system_prompt(&paths, "hands", None, None, None, None, None).unwrap();
+        let prompt = read_system_prompt(&paths, None, None, None, None, None).unwrap();
         assert!(
             prompt.contains("Working directory"),
             "missing working-directory section"
@@ -4771,7 +4748,7 @@ mod tests {
             "MY_ORG_RULE_X7P: always prefer ripgrep over grep.\n",
         )
         .unwrap();
-        let prompt = read_system_prompt(&paths, "hands", None, None, None, None, None).unwrap();
+        let prompt = read_system_prompt(&paths, None, None, None, None, None).unwrap();
         // Both layers present.
         assert!(prompt.contains("Working directory"));
         assert!(prompt.contains("MY_ORG_RULE_X7P"));
