@@ -139,9 +139,11 @@ enum DeliverStep {
 /// wake, or the answer sits unread forever.
 #[derive(Debug, PartialEq, Eq)]
 struct TrayWake {
-    /// Lift the awaiting-user halt. Always — the user answered, and that stays
-    /// true whatever happened to the row afterwards.
-    clear_halt: bool,
+    /// Lift the tracker's awaiting flag (`clear_awaiting`, the input-lock
+    /// driver — NOT the session's halt slot, which `user_responded` owns).
+    /// Always — the user answered, and that stays true whatever happened to
+    /// the row afterwards.
+    clear_awaiting: bool,
     /// Wake an idle ring so the answer is read (`user_responded`, the D28 single
     /// entry point). Needs a receipt — waking with nothing behind it hands out a
     /// turn over an empty backlog — and needs the ring NOT running: waking a
@@ -1393,30 +1395,36 @@ impl AppState {
     ///
     /// `mentions` rides along because the ring release already carries it (D17);
     /// a tray answer passes none.
+    ///
+    /// **There is no `clear_halt` flag any more (2026-08-24, issues.md round
+    /// 13).** It existed for one caller: the gate-answer resolve passed
+    /// `false` so approving a command would not wipe an unrelated HALT (rc3
+    /// D35, `s-86a81478`). But that same call RELEASED the ring — so the slot
+    /// survived over a running session, the banner said "waiting on you" above
+    /// participants visibly working (`s-b1d2591b`, 08-20 01:29Z), and the
+    /// stale slot suppressed the idle watchdog. The invariant now: **whoever
+    /// releases (or answers) also clears — a responded-to session holds no
+    /// halt.** Whether an AGENT-declared halt should instead suppress the
+    /// release for gate answers (running the command without waking the ring)
+    /// is the user's parked pick, tray question `12951cc3`; an option-1 answer
+    /// reintroduces the row-kind read as a suppression predicate BEFORE this
+    /// call — never as a second clear-or-not path inside it.
     async fn user_responded(
         &self,
         session_id: &str,
         mentions: Vec<i64>,
         release_ring: bool,
-        clear_halt: bool,
     ) {
-        // The halt row FIRST. If the ring release panicked or the process died
-        // between the two, a cleared row and a halted ring is a session the next
-        // message fixes; a released ring and a pending row is the bug above, and
-        // it is invisible.
-        // `clear_halt = false` is the GATE-ANSWER case (rc3 D35, found live in
-        // `s-86a81478`): approving a parked command is answering THAT approval,
-        // not the session's halt — the first cut cleared the slot on any
-        // resolve, so the one HALT the user saw was wiped by them approving an
-        // unrelated gate, and the ring released straight back into work.
-        if clear_halt {
-            match self.storage.clear_session_halt(session_id).await {
-                Ok(true) => {
-                    self.bridge.notify_halts_cleared(session_id.to_string());
-                }
-                Ok(false) => {}
-                Err(e) => tracing::warn!(?e, session_id, "clear_session_halt failed"),
+        // The halt slot FIRST. If the ring release panicked or the process died
+        // between the two, a cleared slot and a halted ring is a session the
+        // next message fixes; a released ring and a standing slot is the
+        // invisible half.
+        match self.storage.clear_session_halt(session_id).await {
+            Ok(true) => {
+                self.bridge.notify_halts_cleared(session_id.to_string());
             }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(?e, session_id, "clear_session_halt failed"),
         }
         // `advance_phase` is the one caller that does NOT release: a phase
         // self-advance answers the halt without being a message anyone reads,
@@ -1634,7 +1642,7 @@ impl AppState {
         // to drain. Reversing these two hands out a turn over an empty backlog
         // and the message lands a turn late. Both halves of "the user responded"
         // ride this one call (rc3 D28).
-        self.user_responded(session_id, mentions, true, true).await;
+        self.user_responded(session_id, mentions, true).await;
         // A user prompt re-arms the idle-unflagged watchdog's once-per-window
         // nudge (and its >0 count marks the session as having a task at all).
         handle
@@ -1748,7 +1756,7 @@ impl AppState {
                 handle.activity.set_paused(false);
             }
         }
-        self.user_responded(session_id, Vec::new(), true, true).await;
+        self.user_responded(session_id, Vec::new(), true).await;
         Ok(())
     }
 
@@ -1971,7 +1979,7 @@ impl AppState {
         // elapses. Found in review before it shipped; the premise in the
         // paragraph above is stated as a fact about the CALLER, and this path
         // is a caller it was never true for.
-        self.user_responded(session_id, Vec::new(), source.releases_ring(), true)
+        self.user_responded(session_id, Vec::new(), source.releases_ring())
             .await;
 
         // The in-memory move AND the epoch bump, together. Both callers of this
@@ -2170,18 +2178,9 @@ impl AppState {
     /// was doing the work.
     fn tray_wake(holds_wakes: bool, recorded: bool, ring_running: bool) -> TrayWake {
         TrayWake {
-            clear_halt: true,
+            clear_awaiting: true,
             release: !holds_wakes && recorded && !ring_running,
         }
-    }
-
-    /// Does answering THIS tray row clear the session's halt slot? Only a row
-    /// that was READ and is a question (rc3 D35: a gate answers its approval,
-    /// not the halt). `None` — the row could not be read, or is gone — clears
-    /// nothing: fail-closed, because a halt cleared by mistake is invisible
-    /// while a halt left standing is one message away from cleared.
-    fn tray_answer_clears_halt(row: Option<&crate::storage::SessionTrayEntry>) -> bool {
-        row.is_some_and(|r| !crate::storage::is_gate_row(&r.kind, r.options_json.as_deref()))
     }
 
     pub async fn resolve_choice(
@@ -2201,20 +2200,11 @@ impl AppState {
         // live smoke found tray-only input left the watchdog disarmed (only
         // `broadcast` bumped the counter). StaleGateNeedsConfirm is excluded:
         // nothing was flipped or delivered.
-        // Was the resolved row a QUESTION? Answering a gate answers that
-        // approval alone (rc3 D35): it lifts the latch and may wake an idle
-        // ring, but it must not clear the session's halt slot — the defect in
-        // `s-86a81478` was exactly that coupling. Fail-CLOSED on the read
-        // (round 10): a row that cannot be read is not known to be a question,
-        // so it clears nothing — the old `resolved_a_gate = false` default
-        // turned an unreadable row into a halt clear.
-        let mut answered_a_question = false;
         if matches!(
             outcome,
             ResolveOutcome::Delivered | ResolveOutcome::DeliveredOutOfBand { .. }
         ) {
             let row = self.storage.get_tray_entry(choice_id).await;
-            answered_a_question = Self::tray_answer_clears_halt(row.as_ref().ok().and_then(|r| r.as_ref()));
             if let Ok(Some(entry)) = row {
                 let sessions = self.sessions.lock().await;
                 if let Some(handle) = sessions.get(&entry.session_id) {
@@ -2249,7 +2239,7 @@ impl AppState {
                     receipt.is_some(),
                     handle.activity.any_busy(),
                 );
-                if step.clear_halt {
+                if step.clear_awaiting {
                     self.clear_awaiting(handle, session_id).await;
                 }
                 // `receipt.is_some()` is already folded into `step` by
@@ -2281,8 +2271,14 @@ impl AppState {
                     // `user_responded`, the D28 single entry point; no mentions,
                     // because a pick from a list carries no `@` to honour (D17).
                     if step.release {
-                        self.user_responded(session_id, Vec::new(), true, answered_a_question)
-                            .await;
+                        // Release implies clear (2026-08-24): the row's KIND no
+                        // longer decides the halt slot — a released ring with a
+                        // standing slot was the `s-b1d2591b` lying banner. The
+                        // suppression fork (should an AGENT-declared halt keep
+                        // a gate answer from releasing at all?) is the user's
+                        // parked pick, tray `12951cc3`; until it lands, a gate
+                        // answer resumes AND clears, mechanically coherent.
+                        self.user_responded(session_id, Vec::new(), true).await;
                     }
                 }
             }
@@ -2531,24 +2527,24 @@ mod tests {
         // no release — the exact case that used to abort the holder's turn.
         assert_eq!(
             AppState::tray_wake(false, true, true),
-            TrayWake { clear_halt: true, release: false }
+            TrayWake { clear_awaiting: true, release: false }
         );
         // Idle + recorded: the one case that needs waking — nothing else will
         // ever drain the row. Through `user_responded`, the D28 entry point.
         assert_eq!(
             AppState::tray_wake(false, true, false),
-            TrayWake { clear_halt: true, release: true }
+            TrayWake { clear_awaiting: true, release: true }
         );
         // Paused + recorded: no release. A tray answer must not lift a pause the
         // user deliberately set — whatever the busy flags say mid-drain. (There
         // is nothing to stash: the row is in the channel already.)
         assert_eq!(
             AppState::tray_wake(true, true, false),
-            TrayWake { clear_halt: true, release: false }
+            TrayWake { clear_awaiting: true, release: false }
         );
         assert_eq!(
             AppState::tray_wake(true, true, true),
-            TrayWake { clear_halt: true, release: false }
+            TrayWake { clear_awaiting: true, release: false }
         );
         // Unrecorded — the regression the flags exist for. The insert failing
         // gates the wake and nothing else: the halt still lifts, because that
@@ -2557,11 +2553,11 @@ mod tests {
         // an empty backlog.
         assert_eq!(
             AppState::tray_wake(false, false, false),
-            TrayWake { clear_halt: true, release: false }
+            TrayWake { clear_awaiting: true, release: false }
         );
         assert_eq!(
             AppState::tray_wake(true, false, true),
-            TrayWake { clear_halt: true, release: false }
+            TrayWake { clear_awaiting: true, release: false }
         );
     }
 
@@ -3237,40 +3233,6 @@ mod tests {
         assert!(clear < noop && noop < start, "read the row → no-op if open → spawn");
     }
 
-    /// **An unreadable tray row keeps the halt** (round 10): the halt clears
-    /// only for a row that was read and is a question — a gate never clears
-    /// it (D35), and neither does a read that failed or found nothing.
-    #[test]
-    fn only_a_read_question_row_clears_the_halt() {
-        let row = |kind: &str, options: Option<&str>, cmd: Option<&str>| {
-            crate::storage::SessionTrayEntry {
-                id: 1,
-                session_id: "s1".into(),
-                choice_id: "c".into(),
-                agent: "hands".into(),
-                kind: kind.into(),
-                prompt: "p".into(),
-                options_json: options.map(str::to_string),
-                status: "answered".into(),
-                picked_option: None,
-                asked_at: "2026-08-18T00:00:00Z".into(),
-                answered_at: None,
-                supersedes_id: None,
-                command_text: cmd.map(str::to_string),
-            }
-        };
-        let question = row("choice", Some(r#"["a","b"]"#), None);
-        let gate = row("approval", Some(crate::storage::GATE_OPTIONS_JSON), Some("echo"));
-        let legacy_gate = row("choice", Some(crate::storage::GATE_OPTIONS_JSON), None);
-        assert!(AppState::tray_answer_clears_halt(Some(&question)));
-        assert!(!AppState::tray_answer_clears_halt(Some(&gate)));
-        assert!(!AppState::tray_answer_clears_halt(Some(&legacy_gate)));
-        assert!(
-            !AppState::tray_answer_clears_halt(None),
-            "an unreadable or missing row clears nothing"
-        );
-    }
-
     /// **The epilogue's turn runs BEFORE anything is torn down.**
     ///
     /// The ordering was prose in a comment and control flow in one function, and
@@ -3397,20 +3359,28 @@ mod tests {
             "the ring is released in exactly one place, for the same reason"
         );
 
-        // A gate answer is the one response that must NOT clear the halt slot
-        // (rc3 D35, s-86a81478: approving an unrelated command wiped the HALT
-        // the user was looking at). The OOB release site carries the
-        // distinction through `tray_answer_clears_halt` — a row READ and found
-        // to be a question, and nothing else (round 10: an unreadable row used
-        // to default to "clear"). Losing the derivation re-couples them.
+        // Release implies clear (2026-08-24, superseding the rc3 D35 shape
+        // this guard used to pin). The old rule — a gate answer must not clear
+        // the halt — kept the s-86a81478 recap alive, but the SAME call
+        // released the ring, so the slot stood over a running session: the
+        // `s-b1d2591b` lying banner, plus the watchdog's nudge suppressed by
+        // a slot nobody was waiting on. `user_responded` therefore lost its
+        // `clear_halt` flag: every responder clears. The remaining fork —
+        // whether an AGENT-declared halt should suppress the RELEASE for gate
+        // answers instead (command runs, ring stays down) — is the user's
+        // parked tray pick `12951cc3`; option 1 adds a suppression predicate
+        // BEFORE the call, never a second clear-or-not path inside it.
         assert!(
-            prod.contains("self.user_responded(session_id, Vec::new(), true, answered_a_question)"),
-            "the OOB release must pass clear_halt = answered_a_question — a gate \
-             answer answers that gate, not the session's halt"
+            !prod.contains("clear_halt: bool"),
+            "user_responded takes no clear_halt flag — release implies clear; \
+             a per-caller opt-out is how a released ring kept a standing halt \
+             (s-b1d2591b)"
         );
         assert!(
-            prod.contains("answered_a_question = Self::tray_answer_clears_halt("),
-            "and that flag is derived from the READ row, so an unreadable row clears nothing"
+            !prod.contains("answered_a_question"),
+            "the row-kind derivation is gone with the flag; if the 12951cc3 \
+             pick reintroduces a row-kind read it is a RELEASE-suppression \
+             predicate, not a clear-or-not argument"
         );
 
         // **And the phase paths must not both pass the same source.** The ring
