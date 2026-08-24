@@ -102,6 +102,21 @@ export function isTrayItem(r: {
 const RECAP_CLAMP_CHARS = 200;
 
 /**
+ * Would the collapsed clamp visually cut this reason?
+ *
+ * Char count alone lied (issues.md 2026-08-24): the clamp is
+ * `line-clamp-3`, so a SUB-200-char reason with 4+ newlines — the bulleted
+ * shape agents actually write — rendered truncated with NO toggle at all,
+ * and the rest of the recap was unreachable by any interaction. Rendered
+ * line count and char count are different quantities; this gates the
+ * toggle on either. (>= 3 newlines = 4+ lines, one past the clamp.)
+ */
+export function recapOverflows(reason: string): boolean {
+  const newlines = (reason.match(/\n/g) ?? []).length;
+  return reason.length > RECAP_CLAMP_CHARS || newlines >= 3;
+}
+
+/**
  * **Why the session has stopped, above the box where you answer it.**
  *
  * A halt is the session saying it needs the user. Until now it said so in the
@@ -304,11 +319,23 @@ export function HaltBanner({
           <span className="text-on-surface-variant"> — </span>
           {/* Clamped, not truncated: the full text is in the DOM and one click
               away. A recap the user cannot finish reading is the same failure
-              the banner was built to fix. */}
-          <span className={cn("whitespace-pre-wrap", !expanded && "line-clamp-3")}>
+              the banner was built to fix. EXPANDED, the reason scrolls inside
+              its own capped block (issues.md 2026-08-24): rendered whole it
+              collapsed ChatPane to zero and pushed the composer — and the
+              "show less" toggle itself — off a region with no scroll. The
+              toggle lives OUTSIDE the scroller, so it is reachable at any
+              recap length. overflow-x-hidden rides along per the
+              no-horizontal-scroll mandate. */}
+          <span
+            className={cn(
+              "whitespace-pre-wrap break-words",
+              !expanded && "line-clamp-3",
+              expanded && "block max-h-[45vh] overflow-y-auto overflow-x-hidden",
+            )}
+          >
             {activeHalt.reason}
           </span>
-          {activeHalt.reason.length > RECAP_CLAMP_CHARS && (
+          {recapOverflows(activeHalt.reason) && (
             <button
               type="button"
               onClick={() => setExpanded((v) => !v)}

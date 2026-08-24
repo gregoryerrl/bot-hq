@@ -280,6 +280,36 @@ describe("HaltBanner", () => {
     expect(screen.queryByRole("button", { name: /full recap/i })).toBeNull();
   });
 
+  it("offers the toggle for a SHORT but MULTI-LINE recap (issues.md 2026-08-24)", () => {
+    // The fixture-shape rule bites here: the old gate compared char count
+    // (200) while the clamp is line-clamp-3, so this exact shape — a
+    // sub-200-char bulleted recap, the shape agents actually write —
+    // rendered visually cut at 3 lines with NO toggle, and the rest was
+    // unreachable by any interaction. 4 lines / 5 newlines, 97 chars.
+    const recap = "done:\n- suite green\n- PR open\nwaiting on you:\n- merge or hold?\n- staging creds";
+    render(<HaltBanner halt={halt({ reason: recap })} rows={[]} />);
+    expect(
+      screen.getByRole("button", { name: /show the full recap/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("scrolls the EXPANDED recap inside a capped block — the composer survives", () => {
+    // Rendered whole, a long recap collapsed ChatPane to zero and pushed the
+    // approval gate + composer (and "show less" itself) off a region with no
+    // scroll. Expanded now = an internal scroller; the toggle sits OUTSIDE it.
+    const recap = Array.from({ length: 60 }, (_, i) => `line ${i}: state`).join("\n");
+    render(<HaltBanner halt={halt({ reason: recap })} rows={[]} />);
+    fireEvent.click(screen.getByRole("button", { name: /show the full recap/i }));
+    const text = screen.getByText(/line 0: state/);
+    expect(text.className).toContain("max-h-[45vh]");
+    expect(text.className).toContain("overflow-y-auto");
+    // The pair, not the bare one — the no-horizontal-scroll mandate.
+    expect(text.className).toContain("overflow-x-hidden");
+    // The toggle is a SIBLING after the scroller, so it never scrolls away.
+    const toggle = screen.getByRole("button", { name: /show less/i });
+    expect(text.contains(toggle)).toBe(false);
+  });
+
   it("tells the user what clears it", () => {
     // "Sending a message clears the halt" is the semantic (one entry point,
     // D28); saying so turns a stopped session from a mystery into an
