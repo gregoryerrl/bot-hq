@@ -96,6 +96,20 @@ term now reports only when code-shaped or structurally marked in the old
 body, at any edit size, and the four seeding pins were updated to cite the
 pick (a9f8c705). `ba79599` `bdd4933` `a3e5d8a` `f78576a`; suite 1308/0.
 
+**Dissection 2** (user: "another — until we find a real issue, or find
+nothing"): the two died-young sessions (`s-674e817e`, 11 s; `s-58f9a790`,
+10 min — both respawned as "re:" titles) were PROVIDER-LIMIT deaths, not
+harness defects — but the second exposed a real one: the close epilogue
+dealt its learnings turn to the credit-dead writer, read the error text back
+as a decline, and recorded "the session had nothing worth recording" over a
+session that had read fifteen dossiers. `decide` now takes `writer_unwell`
+(the pump's provider-limit / error-streak halt markers, owned by
+`close_learnings` and interpolated at both mint sites so detector and text
+cannot drift) and skips with an honest posted row (`ab925e5`, suite 1311/0).
+The 15-hour overnight session (`s-1c6db975`) came back CLEAN — 25/25 gates,
+8 temporary halts used as designed, transient stalls self-healed, empty halt
+slot at close — the harness working as built.
+
 ---
 
 ## 2026-08-19 (round 12) — the round the live session was dissected, s-73825e99
