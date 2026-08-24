@@ -1474,6 +1474,15 @@ async fn participant_spawn_config(
     {
         warn!(participant = %p.slug, ?e, "recording the spawn knobs failed");
     }
+    // Persist the COMPOSED prompt on the row (1.0.0 Batch 7 P3, dissect #27):
+    // the schema promised "stored so what the agent actually ran with is
+    // inspectable" since 0044 and nothing ever wrote it — 0 of 158 rows on
+    // the live DB. It also becomes the measurement rail for the prompt-size
+    // work: real spawns report real bytes. Same non-fatal posture as the
+    // knobs above — an audit value must not fail a spawn.
+    if let Err(e) = storage.store_participant_prompt(p.id, &system_prompt).await {
+        warn!(participant = %p.slug, ?e, "persisting the composed prompt failed");
+    }
     // The assembled prompt is multi-KB. Hand it to claude-code via a file
     // (`--append-system-prompt-file`) rather than an inline arg so the command
     // line stays under Windows' 32,767-char `CreateProcessW` limit. Co-located
@@ -3313,6 +3322,21 @@ mod tests {
             after,
             (Some("high".to_string()), None, 1),
             "the spawn must record what it resolved, and flag the row as recorded"
+        );
+
+        // And the COMPOSED prompt persists on the same row (Batch 7 P3 — the
+        // 0044 schema comment's promise, 0/158 rows on the live DB until now).
+        // Deleting the store_participant_prompt call turns this red.
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT prompt FROM session_participants WHERE id = ?")
+                .bind(me.id)
+                .fetch_one(s.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            stored.as_deref(),
+            Some("prompt"),
+            "the exact composed string the spawn received is inspectable on the row"
         );
     }
 

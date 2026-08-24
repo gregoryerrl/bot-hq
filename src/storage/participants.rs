@@ -1461,6 +1461,20 @@ impl Storage {
     /// NULL` is what a SUCCESSFUL record looks like. Without the flag it would be
     /// indistinguishable from a row that predates 0061, and a UI cannot honestly
     /// render "no override in force" for one and "unknown" for the other.
+    /// Persist the fully composed system prompt on the participant row
+    /// (1.0.0 Batch 7 P3). The column shipped in 0044 with its purpose in the
+    /// schema comment and no writer; `participant_spawn_config` is the one
+    /// caller, right where the composed string exists.
+    pub async fn store_participant_prompt(&self, participant_id: i64, prompt: &str) -> Result<()> {
+        sqlx::query("UPDATE session_participants SET prompt = ? WHERE id = ?")
+            .bind(prompt)
+            .bind(participant_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("storing composed prompt for participant {participant_id}"))?;
+        Ok(())
+    }
+
     pub async fn set_spawn_knobs(
         &self,
         participant_id: i64,
