@@ -151,6 +151,31 @@ mod tests {
     }
 
     #[test]
+    fn the_two_backtick_heuristics_share_one_fixture_table() {
+        // `frontend/src/lib/backtickFixtures.json` is read by BOTH this test
+        // and `tokenExpand.test.ts` — the odd-backtick rule is implemented
+        // twice (here for `@` parsing, in TS for the pickers/expander), and
+        // this shared table is what reddens if the two hand-mirrors diverge
+        // (review note on 2f7a511). `inside == true` at the index of an `@`
+        // means the mention must NOT parse.
+        let raw = include_str!("../../frontend/src/lib/backtickFixtures.json");
+        let fixtures: Vec<serde_json::Value> =
+            serde_json::from_str(raw).expect("the fixture table parses");
+        assert!(fixtures.len() >= 5, "the table is non-trivial");
+        for f in fixtures {
+            let text = f["text"].as_str().unwrap();
+            let index = f["index"].as_u64().unwrap() as usize;
+            let inside = f["inside"].as_bool().unwrap();
+            let counted =
+                text.as_bytes()[..index].iter().filter(|b| **b == b'`').count() % 2 == 1;
+            assert_eq!(
+                counted, inside,
+                "heuristic disagrees with the shared table: {text:?} @ {index}"
+            );
+        }
+    }
+
+    #[test]
     fn a_mention_inside_a_word_or_a_path_is_not_one() {
         assert!(parse_mention_slugs("src/foo@v2/bar").is_empty());
         assert!(parse_mention_slugs("v1.2@beta").is_empty());

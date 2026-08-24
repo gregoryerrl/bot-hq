@@ -899,6 +899,22 @@ describe("ChatInput promptcode picker", () => {
     expect(screen.queryByRole("listbox")).toBeNull();
   });
 
+  it("does not open after ./ or ~/ either (e052ae77 — a path stays a path)", () => {
+    render(
+      <ChatInput
+        onSend={() => {}}
+        promptcodes={[{ code: "test", prompt: "EXPANDED" }]}
+      />,
+    );
+    type("run ./te");
+    expect(screen.queryByRole("listbox")).toBeNull();
+    type("cd ~/te");
+    expect(screen.queryByRole("listbox")).toBeNull();
+    // After whitespace it is a token and the picker serves it.
+    type("say /te");
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+  });
+
   it("stays out of the way with no codes configured", () => {
     render(<ChatInput onSend={() => {}} />);
     type("/anything");

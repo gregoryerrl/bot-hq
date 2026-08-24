@@ -54,7 +54,16 @@ function activeToken(
     const ch = text[i - 1];
     if (sigils.includes(ch)) {
       const before = i >= 2 ? text[i - 2] : undefined;
-      if (before !== undefined && /[a-zA-Z0-9]/.test(before)) return null;
+      // `/` opens only at start-of-text or after whitespace (e052ae77): the
+      // not-alphanumeric rule admitted `.`/`~`/`(`, so typing a path like
+      // `./test` opened the picker over a segment that must stay a path.
+      // Mirrors `expandComposerTokens` exactly — picker and expander must
+      // agree on what is a token.
+      if (ch === "/") {
+        if (before !== undefined && !/\s/.test(before)) return null;
+      } else if (before !== undefined && /[a-zA-Z0-9]/.test(before)) {
+        return null;
+      }
       return { sigil: ch, start: i - 1, query: text.slice(i, caret) };
     }
     if (/\s/.test(ch)) return null;

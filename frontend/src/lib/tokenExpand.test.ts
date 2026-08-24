@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { expandComposerTokens, insideBacktickSpan } from "./tokenExpand";
+import backtickFixtures from "./backtickFixtures.json";
 
 const DOCS = [
   { key: "doc/investigate", insert: "(session doc: investigate)" },
@@ -26,8 +27,23 @@ describe("expandComposerTokens", () => {
   });
 
   it("sheds trailing punctuation before matching", () => {
-    expect(expandComposerTokens("(/n-verify.)", DOCS, CODES)).toBe(
-      "(Do n rounds of verification..)",
+    expect(expandComposerTokens("/n-verify.", DOCS, CODES)).toBe(
+      "Do n rounds of verification..",
+    );
+  });
+
+  it("a path segment can NEVER trigger a promptcode (e052ae77)", () => {
+    // The user's own live code is named `test` — `./test` must stay a path.
+    const codes = [{ code: "test", prompt: "EXPANDED" }];
+    expect(expandComposerTokens("run ./test now", DOCS, codes)).toBe(
+      "run ./test now",
+    );
+    expect(expandComposerTokens("cd ~/test", DOCS, codes)).toBe("cd ~/test");
+    expect(expandComposerTokens("see (/test)", DOCS, codes)).toBe("see (/test)");
+    // `/` opens only at start or after whitespace.
+    expect(expandComposerTokens("/test", DOCS, codes)).toBe("EXPANDED");
+    expect(expandComposerTokens("say /test now", DOCS, codes)).toBe(
+      "say EXPANDED now",
     );
   });
 
@@ -62,5 +78,18 @@ describe("insideBacktickSpan", () => {
     const t = "a `b` c";
     expect(insideBacktickSpan(t, 3)).toBe(true);
     expect(insideBacktickSpan(t, 6)).toBe(false);
+  });
+
+  it("agrees with the Rust mention parser on the SHARED fixture table", () => {
+    // `backtickFixtures.json` is read by BOTH this test and
+    // `core/mentions.rs::the_two_backtick_heuristics_share_one_fixture_table`
+    // — the two implementations of the odd-backtick rule are hand-mirrored
+    // (TS guards the pickers/expander, Rust guards `@` parsing), and this
+    // table is what reddens if they diverge (review note on 2f7a511).
+    for (const f of backtickFixtures) {
+      expect(insideBacktickSpan(f.text, f.index), `${f.text} @ ${f.index}`).toBe(
+        f.inside,
+      );
+    }
   });
 });

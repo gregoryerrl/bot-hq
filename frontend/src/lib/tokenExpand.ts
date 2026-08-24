@@ -39,7 +39,15 @@ export function expandComposerTokens(
   let i = 0;
   while (i < text.length) {
     const ch = text[i];
-    const boundaryOk = i === 0 || !/[a-zA-Z0-9]/.test(text[i - 1]);
+    // `/` opens ONLY at start-of-text or after whitespace (e052ae77): the
+    // looser not-alphanumeric rule admitted `.` and `~`, so `run ./test`
+    // silently expanded a path segment into the user's `test` promptcode at
+    // Send while the box still showed the path. claude-code's own rule.
+    // `#` keeps the not-alphanumeric boundary — it has no path-segment shape.
+    const boundaryOk =
+      ch === "/"
+        ? i === 0 || /\s/.test(text[i - 1])
+        : i === 0 || !/[a-zA-Z0-9]/.test(text[i - 1]);
     if ((ch === "#" || ch === "/") && boundaryOk && !insideBacktickSpan(text, i)) {
       let end = i + 1;
       while (end < text.length && !/\s/.test(text[end])) end += 1;
