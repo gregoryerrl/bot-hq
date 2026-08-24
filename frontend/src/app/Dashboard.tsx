@@ -230,6 +230,30 @@ export function Dashboard() {
     };
   }, [claudeOverrides, claudeConfig, roles]);
 
+  // Drag-to-SWAP (ideas.md 2026-08-24, tray c38a216b): dropping tile A on
+  // tile B exchanges exactly those two slots server-side; the refetch
+  // re-renders the grid in the stored order. `dragId` doubles as the "a drag
+  // is live" flag; `dropTarget` only ever names a DIFFERENT tile, so the
+  // ring highlight cannot appear on the tile being dragged.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const swapOrder = useTauriMutation<boolean, { a: string; b: string }>(
+    "swap_session_order",
+  );
+  const handleTileDrop = useCallback(
+    (targetId: string) => {
+      const from = dragId;
+      setDragId(null);
+      setDropTarget(null);
+      if (!from || from === targetId) return;
+      swapOrder.mutate(
+        { a: from, b: targetId },
+        { onSettled: () => void refetch() },
+      );
+    },
+    [dragId, swapOrder, refetch],
+  );
+
   const createSession = useTauriMutation<
     SessionInfo,
     {
@@ -1027,11 +1051,43 @@ export function Dashboard() {
       ) : (
         <div className="grid grid-cols-1 gap-gutter md:grid-cols-2 xl:grid-cols-3">
           {filteredSessions.map((s) => (
-            <SessionTileLoader
+            <div
               key={s.id}
-              session={s}
-              pendingCount={pendingBySession[s.id] ?? 0}
-            />
+              draggable
+              data-testid={`tile-wrap-${s.id}`}
+              onDragStart={(e) => {
+                setDragId(s.id);
+                e.dataTransfer.effectAllowed = "move";
+                // Some WebViews cancel the drag without payload data.
+                e.dataTransfer.setData("text/plain", s.id);
+              }}
+              onDragEnd={() => {
+                setDragId(null);
+                setDropTarget(null);
+              }}
+              onDragOver={(e) => {
+                // preventDefault is what makes this a legal drop target.
+                e.preventDefault();
+                if (dragId && dragId !== s.id) setDropTarget(s.id);
+              }}
+              onDragLeave={() =>
+                setDropTarget((t) => (t === s.id ? null : t))
+              }
+              onDrop={(e) => {
+                e.preventDefault();
+                handleTileDrop(s.id);
+              }}
+              className={cn(
+                "rounded-lg",
+                dragId === s.id && "opacity-60",
+                dropTarget === s.id && "ring-2 ring-primary/60",
+              )}
+            >
+              <SessionTileLoader
+                session={s}
+                pendingCount={pendingBySession[s.id] ?? 0}
+              />
+            </div>
           ))}
         </div>
       )}

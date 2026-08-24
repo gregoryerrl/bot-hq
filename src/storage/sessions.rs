@@ -12,21 +12,41 @@ const SESSION_COLUMNS: &str = "id, title, working_repo_path, created_at, closed_
     (SELECT COUNT(*) > 1 FROM session_participants p \
      WHERE p.session_id = sessions.id AND p.enabled <> 0) AS multi_participant";
 
+/// The ONE dashboard ordering, prefix-parameterized for the two SQL shapes
+/// that must never disagree (1.0.0 Batch 3, tray c38a216b — the user:
+/// "first create - first on list", plus drag-to-SWAP).
+///
+/// Last-activity DESC was the old order, and it is exactly why "the cards
+/// switch all over the place": any session speaking re-sorted the grid.
+/// `sort_key` (migration 0071, seeded from creation order, exchanged by
+/// [`Storage::swap_session_order`]) is the order now; the NULL clause sinks a
+/// key-less row to the END (SQLite would otherwise sort NULLs FIRST and a
+/// stray unkeyed session would squat the top slot), where created-order
+/// tiebreaks keep it stable.
+///
+/// Expressed ONCE because the review that scoped this batch found the old
+/// ORDER BY duplicated across both strings with only one of them test-pinned —
+/// drift between them was green. Both builders call this; the test pins both.
+fn session_order_by(prefix: &str) -> String {
+    format!(
+        "ORDER BY ({prefix}sort_key IS NULL) ASC, {prefix}sort_key ASC, \
+         {prefix}created_at ASC, {prefix}id ASC"
+    )
+}
+
 /// The Dashboard's active-sessions read with the Quickview preview — a
 /// function so a test can EXPLAIN the production string (see
 /// [`Storage::list_active_sessions_with_preview`]).
 fn list_active_sessions_with_preview_sql() -> String {
+    let order = session_order_by("s.");
     format!(
         "SELECT s.*, substr(m.content, 1, 200) AS last_message, m.author AS last_author \
-         FROM (SELECT {SESSION_COLUMNS} FROM sessions \
+         FROM (SELECT {SESSION_COLUMNS}, sort_key FROM sessions \
                WHERE archived = 0 AND closed_at IS NULL) AS s \
          LEFT JOIN messages m ON m.id = \
              (SELECT MAX(m2.id) FROM messages m2 \
                WHERE m2.session_id = s.id AND m2.kind = 'text') \
-         ORDER BY COALESCE(\
-             (SELECT MAX(m3.created_at) FROM messages m3 WHERE m3.session_id = s.id), \
-             s.created_at) DESC, \
-             s.id ASC"
+         {order}"
     )
 }
 
@@ -42,8 +62,13 @@ impl Storage {
         // path hard-errors action_gate / hook install. Migration 0019 repaired
         // pre-guard rows.
         let working_repo_path = working_repo_path.filter(|p| !p.trim().is_empty());
+        // sort_key = MAX+1: a new session takes the END of the user's
+        // arrangement (Batch 3) — created-order by default, never displacing
+        // an explicit swap. The subselect sees the pre-insert table, which is
+        // exactly the "everything already there" the new row appends to.
         sqlx::query(
-            "INSERT INTO sessions (id, title, working_repo_path, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO sessions (id, title, working_repo_path, created_at, sort_key) \
+             VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(sort_key), 0) + 1 FROM sessions))",
         )
         .bind(id)
         .bind(title)
@@ -328,6 +353,59 @@ impl Storage {
         Ok(res.rows_affected() > 0)
     }
 
+    /// SWAP two sessions' dashboard positions — the user's literal pick
+    /// (tray c38a216b: "Swap (literal exchange of two slots)", over both
+    /// reviewers' move recommendation): dragging tile A onto tile B exchanges
+    /// exactly those two `sort_key`s and nothing else shifts.
+    ///
+    /// One transaction. A NULL key (a row that somehow missed 0071's backfill
+    /// and the create-time MAX+1) is assigned an end-of-list key first —
+    /// backfill-on-touch — so the exchange is always between two real
+    /// integers. Returns false when either id is unknown, leaving both rows
+    /// untouched.
+    pub async fn swap_session_order(&self, a: &str, b: &str) -> Result<bool> {
+        if a == b {
+            return Ok(false);
+        }
+        let mut tx = self.pool.begin().await?;
+        let mut keys = Vec::with_capacity(2);
+        for id in [a, b] {
+            let row: Option<Option<i64>> =
+                sqlx::query_scalar("SELECT sort_key FROM sessions WHERE id = ?")
+                    .bind(id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let Some(key) = row else {
+                // Unknown id: the tx drops unchanged.
+                return Ok(false);
+            };
+            let key = match key {
+                Some(k) => k,
+                None => {
+                    let assigned: i64 = sqlx::query_scalar(
+                        "UPDATE sessions \
+                         SET sort_key = (SELECT COALESCE(MAX(sort_key), 0) + 1 FROM sessions) \
+                         WHERE id = ? RETURNING sort_key",
+                    )
+                    .bind(id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    assigned
+                }
+            };
+            keys.push((id, key));
+        }
+        for (id, new_key) in [(keys[0].0, keys[1].1), (keys[1].0, keys[0].1)] {
+            sqlx::query("UPDATE sessions SET sort_key = ? WHERE id = ?")
+                .bind(new_key)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// The session's persisted diff anchor (migration 0070). `None` until the
     /// first spawn over a git repo captures one.
     pub async fn session_start_sha(&self, id: &str) -> Result<Option<String>> {
@@ -356,20 +434,17 @@ impl Storage {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Active sessions: not archived, not closed. Ordered by LAST ACTIVITY —
-    /// the newest message timestamp, falling back to `created_at` for
-    /// message-less (just-created) sessions — so the dashboard surfaces the
-    /// session you (or an agent) touched most recently first. `id ASC` is the
-    /// tiebreaker so equal timestamps can't make tiles swap places between
-    /// refreshes.
+    /// Active sessions: not archived, not closed. Ordered by the USER'S
+    /// arrangement — `sort_key` seeded from creation order, exchanged by
+    /// [`Self::swap_session_order`] (Batch 3; see [`session_order_by`]). The
+    /// old last-activity order made tiles trade places whenever any session
+    /// spoke.
     pub async fn list_active_sessions(&self) -> Result<Vec<Session>> {
+        let order = session_order_by("");
         let rows = sqlx::query_as::<_, Session>(&format!(
             "SELECT {SESSION_COLUMNS} FROM sessions \
              WHERE archived = 0 AND closed_at IS NULL \
-             ORDER BY COALESCE(\
-                 (SELECT MAX(m.created_at) FROM messages m WHERE m.session_id = sessions.id), \
-                 created_at) DESC, \
-                 id ASC"
+             {order}"
         ))
         .fetch_all(&self.pool)
         .await?;
@@ -510,7 +585,8 @@ impl Storage {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::Storage;
+    use super::{list_active_sessions_with_preview_sql, session_order_by};
+    use crate::storage::{MessageKind, Storage};
 
     /// **A closed session refuses a halt declaration** (round 13). The ghost
     /// specimen: the close path's kill raced ahead of the row close, and the
@@ -761,6 +837,82 @@ mod tests {
         assert_eq!(closed.iter().find(|x| x.id == "s-b").unwrap().archived, 0);
     }
 
+    /// **The dashboard order is the user's arrangement, not activity**
+    /// (1.0.0 Batch 3, ideas.md 2026-08-24 + tray c38a216b). Creation order
+    /// seeds it; a message in an OLD session must not move its tile; SWAP
+    /// exchanges exactly two slots. Asserted through BOTH SQL shapes — the
+    /// preview path is the one the dashboard actually calls
+    /// (`tauri_cmd/sessions.rs::list_sessions`), and the review that scoped
+    /// this batch found the old order duplicated with only the other one
+    /// pinned.
+    #[tokio::test]
+    async fn dashboard_order_is_the_users_arrangement_not_activity() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-1", "first", None).await.unwrap();
+        s.create_session("s-2", "second", None).await.unwrap();
+        s.create_session("s-3", "third", None).await.unwrap();
+        // The OLD order's trigger: the oldest session speaks last.
+        s.post_to_channel("s-1", "user", None, MessageKind::Text.as_str(), "hi", None)
+            .await
+            .unwrap();
+
+        let plain: Vec<String> = s
+            .list_active_sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|x| x.id)
+            .collect();
+        assert_eq!(plain, vec!["s-1", "s-2", "s-3"], "creation order, whatever spoke");
+        let preview: Vec<String> = s
+            .list_active_sessions_with_preview()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|x| x.session.id)
+            .collect();
+        assert_eq!(preview, vec!["s-1", "s-2", "s-3"], "the dashboard's own path agrees");
+
+        // SWAP is a literal two-slot exchange: 1<->3, 2 untouched.
+        assert!(s.swap_session_order("s-1", "s-3").await.unwrap());
+        let swapped: Vec<String> = s
+            .list_active_sessions_with_preview()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|x| x.session.id)
+            .collect();
+        assert_eq!(swapped, vec!["s-3", "s-2", "s-1"]);
+
+        // Unknown id / self-swap: false, nothing moves.
+        assert!(!s.swap_session_order("s-1", "s-nope").await.unwrap());
+        assert!(!s.swap_session_order("s-1", "s-1").await.unwrap());
+        let unchanged: Vec<String> = s
+            .list_active_sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|x| x.id)
+            .collect();
+        assert_eq!(unchanged, vec!["s-3", "s-2", "s-1"]);
+    }
+
+    /// The two SQL builders carry the SAME order expression — the drift the
+    /// scoping review caught (only one of the two old strings was pinned).
+    #[test]
+    fn both_session_lists_share_the_one_order_expression() {
+        assert!(
+            list_active_sessions_with_preview_sql().contains(&session_order_by("s.")),
+            "the preview SQL orders by the shared expression"
+        );
+        // The plain list builds its string inline; pin the expression itself
+        // so a reorder there must go THROUGH session_order_by.
+        assert!(
+            session_order_by("").starts_with("ORDER BY (sort_key IS NULL) ASC, sort_key ASC"),
+            "explicit arrangement first, key-less rows sink to the end"
+        );
+    }
+
     /// A closed session holds no turn. `set_current_turn` is written by the ring
     /// at every handover and cleared by `halt`, but a session closed mid-turn
     /// kept its holder forever — 27 closed rows named one on 2026-08-17.
@@ -786,38 +938,14 @@ mod tests {
         assert_eq!(holder.0, None, "closing clears the holder");
     }
 
-    #[tokio::test]
-    async fn active_sessions_order_by_last_activity() {
-        use crate::storage::{MessageKind};
-        let s = Storage::memory().await.unwrap();
-        s.create_session("s-old", "Older", None).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        s.create_session("s-new", "Newer", None).await.unwrap();
-
-        // No messages anywhere → creation order, newest first.
-        let ids: Vec<String> = s
-            .list_active_sessions()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|x| x.id)
-            .collect();
-        assert_eq!(ids, vec!["s-new", "s-old"]);
-
-        // Activity on the older session bumps it to the top.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        s.insert_user_message("s-old", MessageKind::Text, "hi")
-            .await
-            .unwrap();
-        let ids: Vec<String> = s
-            .list_active_sessions()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|x| x.id)
-            .collect();
-        assert_eq!(ids, vec!["s-old", "s-new"]);
-    }
+    // `active_sessions_order_by_last_activity` was DELETED here on purpose
+    // (1.0.0 Batch 3): it pinned the last-activity-DESC order the user
+    // explicitly retired (ideas.md 2026-08-24: "Make the order permanent,
+    // first create - first on list"; tray c38a216b picked swap on top). Its
+    // successor is `dashboard_order_is_the_users_arrangement_not_activity`,
+    // which asserts the SAME trigger (a message in an old session) now moves
+    // NOTHING — a sanctioned behavior change with the user's decision cited,
+    // not a green-up.
 
     #[tokio::test]
     async fn preview_carries_latest_text_message() {

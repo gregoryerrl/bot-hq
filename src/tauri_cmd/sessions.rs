@@ -1083,6 +1083,20 @@ pub async fn reopen_session(
     Ok(())
 }
 
+/// SWAP two dashboard tiles — the user's drag (1.0.0 Batch 3, tray c38a216b:
+/// a literal two-slot exchange, nothing else shifts). Returns whether anything
+/// moved; the Dashboard refetches on true and leaves the grid alone on false
+/// (unknown id / self-drop).
+#[tauri::command]
+#[specta::specta]
+pub async fn swap_session_order(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    a: String,
+    b: String,
+) -> Result<bool, AppError> {
+    Ok(core.storage.swap_session_order(&a, &b).await?)
+}
+
 /// Move a session's IPAV phase — **the user's own hand on the chip**.
 ///
 /// ## Why this did not exist until round 4

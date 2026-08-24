@@ -759,3 +759,85 @@ describe("New session dialog — participant colour (D20)", () => {
     }
   });
 });
+
+describe("Dashboard tiles — drag to SWAP (ideas.md 2026-08-24, tray c38a216b)", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  function session(id: string, title: string) {
+    return {
+      id,
+      title,
+      working_repo_path: null,
+      base_repo_path: null,
+      archived: false,
+      created_at: "2026-08-12T00:00:00Z",
+      closed_at: null,
+      slot0_model_at_spawn: null,
+      slot1_model_at_spawn: null,
+      multi_participant: false,
+      last_message: null,
+      last_author: null,
+    };
+  }
+
+  function mockTwoTiles() {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "list_sessions":
+          return [session("s-1", "First"), session("s-2", "Second")];
+        case "swap_session_order":
+          return true;
+        case "list_session_participants":
+        case "list_pending_tray":
+        case "list_projects":
+        case "list_models":
+        case "list_roles":
+          return [];
+        case "get_claude_overrides":
+          return {};
+        case "claude_config_read":
+          return { core_knobs: [] };
+        default:
+          return null;
+      }
+    });
+  }
+
+  /** jsdom fires drag events without a native dataTransfer — supply one. */
+  function dt() {
+    return {
+      effectAllowed: "",
+      setData: () => {},
+      getData: () => "",
+    };
+  }
+
+  it("dropping tile A on tile B invokes the swap with exactly those ids", async () => {
+    mockTwoTiles();
+    renderDashboard();
+    const a = await screen.findByTestId("tile-wrap-s-1");
+    const b = await screen.findByTestId("tile-wrap-s-2");
+    fireEvent.dragStart(a, { dataTransfer: dt() });
+    fireEvent.dragOver(b, { dataTransfer: dt() });
+    fireEvent.drop(b, { dataTransfer: dt() });
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("swap_session_order", {
+        a: "s-1",
+        b: "s-2",
+      }),
+    );
+  });
+
+  it("a self-drop swaps nothing", async () => {
+    mockTwoTiles();
+    renderDashboard();
+    const a = await screen.findByTestId("tile-wrap-s-1");
+    fireEvent.dragStart(a, { dataTransfer: dt() });
+    fireEvent.drop(a, { dataTransfer: dt() });
+    // The list read happened; the swap never did.
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("list_sessions", {}));
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "swap_session_order"),
+    ).toHaveLength(0);
+  });
+});
