@@ -99,9 +99,10 @@ export function PromptcodesPanel() {
           Promptcodes
         </h2>
         <p className="mt-1 text-sm text-on-surface-variant">
-          Type <code className="font-mono">/code</code> in a session composer
-          and the picker replaces it with the full prompt — the box always
-          shows exactly what will send.
+          Type <code className="font-mono">/code</code> in a session composer —
+          the token stays visible in the box and expands to the full prompt
+          when the message sends. Backticks escape it:{" "}
+          <code className="font-mono">`/code`</code> sends literally.
         </p>
 
         {error && (
