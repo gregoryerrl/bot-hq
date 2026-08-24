@@ -509,7 +509,7 @@ export function Dashboard() {
             aria-modal="true"
             aria-label="New session"
             className={cn(
-              "fixed left-1/2 top-1/2 z-50 w-[min(480px,90vw)] max-h-[90vh] -translate-x-1/2 -translate-y-1/2 overflow-y-auto overflow-x-hidden",
+              "fixed left-1/2 top-1/2 z-50 w-[min(880px,92vw)] max-h-[90vh] -translate-x-1/2 -translate-y-1/2 overflow-y-auto overflow-x-hidden",
               "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
             )}
           >
@@ -526,7 +526,12 @@ export function Dashboard() {
                 ×
               </button>
             </div>
-            <div className="space-y-4">
+            {/* Two columns (ideas.md 2026-08-24): the session's SCOPE — title,
+                project, repo, worktree — on the left; the ROSTER on the right.
+                The thin single-stack window wasted the width and scrolled
+                instead. Collapses back to one column below md. */}
+            <div className="grid grid-cols-1 items-start gap-x-6 gap-y-4 md:grid-cols-2">
+              <div className="space-y-4">
               <label className="block">
                 <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
                   Title
@@ -608,6 +613,23 @@ export function Dashboard() {
                   the general policy tier.
                 </p>
               )}
+              {(projects.find((p) => p.name === selectedProject)
+                ?.working_repo_path ||
+                adHocRepo.trim()) && (
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={useWorktree}
+                    onChange={(e) => setUseWorktree(e.target.checked)}
+                    className="size-4 accent-primary"
+                  />
+                  <span className="font-body-md text-body-md text-on-surface">
+                    Isolated git worktree (parallel-safe, branch{" "}
+                    <code className="font-code-sm text-code-sm">bothq/…</code>)
+                  </span>
+                </label>
+              )}
+              </div>
               <div>
                 <div className="mb-1 flex items-center justify-between">
                   <span className="font-label-caps text-label-caps text-on-surface-variant">
@@ -874,22 +896,6 @@ export function Dashboard() {
                   </p>
                 )}
               </div>
-              {(projects.find((p) => p.name === selectedProject)
-                ?.working_repo_path ||
-                adHocRepo.trim()) && (
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={useWorktree}
-                    onChange={(e) => setUseWorktree(e.target.checked)}
-                    className="size-4 accent-primary"
-                  />
-                  <span className="font-body-md text-body-md text-on-surface">
-                    Isolated git worktree (parallel-safe, branch{" "}
-                    <code className="font-code-sm text-code-sm">bothq/…</code>)
-                  </span>
-                </label>
-              )}
             </div>
             {createError && (
               <p className="mt-4 rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
