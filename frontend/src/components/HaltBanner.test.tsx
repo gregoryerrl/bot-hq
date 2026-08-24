@@ -310,6 +310,30 @@ describe("HaltBanner", () => {
     expect(text.contains(toggle)).toBe(false);
   });
 
+  it("offers the toggle when the RENDERED clamp overflows, whatever the char count (EYES B1)", () => {
+    // A narrow user-resized pane wraps a 190-char SINGLE-LINE recap to 5
+    // rendered lines — under the static gate alone that clamped with no
+    // toggle. jsdom does no layout, so the measured path is exercised by
+    // mocking the height getters the hook reads: scrollHeight > clientHeight
+    // is the clamped element saying "I am visually cut".
+    const sh = vi
+      .spyOn(Element.prototype, "scrollHeight", "get")
+      .mockReturnValue(100);
+    const ch = vi
+      .spyOn(Element.prototype, "clientHeight", "get")
+      .mockReturnValue(40);
+    try {
+      const shortSingleLine = "a".repeat(150); // static gate says NO toggle
+      render(<HaltBanner halt={halt({ reason: shortSingleLine })} rows={[]} />);
+      expect(
+        screen.getByRole("button", { name: /show the full recap/i }),
+      ).toBeInTheDocument();
+    } finally {
+      sh.mockRestore();
+      ch.mockRestore();
+    }
+  });
+
   it("tells the user what clears it", () => {
     // "Sending a message clears the halt" is the semantic (one entry point,
     // D28); saying so turns a stopped session from a mystery into an

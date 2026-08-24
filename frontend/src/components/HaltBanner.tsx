@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { parseUtcMs } from "../lib/time";
 import { authorColorClass } from "./authorColor";
@@ -117,6 +117,42 @@ export function recapOverflows(reason: string): boolean {
 }
 
 /**
+ * The RENDERED half of the overflow question (EYES B1, advisory 74113c5f).
+ *
+ * {@link recapOverflows} is a static floor, and any static rule is a proxy:
+ * the left panel is user-resizable, so a 190-char single-line recap wraps to
+ * 5 lines in a narrow pane, clamps at 3, and the static gate shows no toggle
+ * — the user's filed bug back again through a different door. Layout is the
+ * only authority on layout: while the recap is COLLAPSED, compare
+ * `scrollHeight` to `clientHeight` on the clamped element and re-measure on
+ * resize. The measurement can only ADD the toggle, never remove it, and it
+ * keeps its last value while expanded so "show less" cannot vanish. In jsdom
+ * both heights are 0, so tests exercise the static floor; the measured path
+ * is covered by mocking the height getters.
+ */
+function useMeasuredClampOverflow(
+  reason: string,
+  expanded: boolean,
+): [React.RefObject<HTMLSpanElement>, boolean] {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    // Measure the CLAMPED rendering only — expanded, scrollHeight measures
+    // the internal scroller instead, which says nothing about the clamp.
+    if (!el || expanded) return;
+    // +1: fractional line-height rounding must not flicker the toggle.
+    const measure = () => setOverflows(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [reason, expanded]);
+  return [ref, overflows];
+}
+
+/**
  * **Why the session has stopped, above the box where you answer it.**
  *
  * A halt is the session saying it needs the user. Until now it said so in the
@@ -209,6 +245,8 @@ export function HaltBanner({
   const [expanded, setExpanded] = useState(false);
   const wakeAt = halt && typeof halt.reason === "string" ? (halt.wake_at ?? null) : null;
   const now = useCountdown(wakeAt);
+  const reasonText = halt && typeof halt.reason === "string" ? halt.reason : "";
+  const [reasonRef, measuredOverflow] = useMeasuredClampOverflow(reasonText, expanded);
   const wakeAtMs = wakeAt ? parseUtcMs(wakeAt) : null;
   const pending = rows.filter((r) => r.status === "pending");
   const approvals = pending.filter(isApproval);
@@ -327,6 +365,7 @@ export function HaltBanner({
               recap length. overflow-x-hidden rides along per the
               no-horizontal-scroll mandate. */}
           <span
+            ref={reasonRef}
             className={cn(
               "whitespace-pre-wrap break-words",
               !expanded && "line-clamp-3",
@@ -335,7 +374,7 @@ export function HaltBanner({
           >
             {activeHalt.reason}
           </span>
-          {recapOverflows(activeHalt.reason) && (
+          {(recapOverflows(activeHalt.reason) || measuredOverflow) && (
             <button
               type="button"
               onClick={() => setExpanded((v) => !v)}
