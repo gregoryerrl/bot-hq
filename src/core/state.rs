@@ -3830,16 +3830,20 @@ mod tests {
             "the tally that authorized this transition can no longer authorize \
              another one"
         );
+        // 0076 (Batch 9 T6c): the rows survive the transition as AUDIT
+        // history — the correctness property is entirely the epoch key above
+        // (the pinned stale-epoch test), and the count below now proves the
+        // history is KEPT rather than that it was wiped.
         let left: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM phase_votes WHERE session_id = 's1'")
                 .fetch_one(storage.pool())
                 .await
                 .unwrap();
         assert_eq!(
-            left.0, 0,
-            "the session's votes are cleared too — 0062's 'deletion, not \
-             accumulation' half, which was equally inert while nothing called \
-             the bump"
+            left.0, 2,
+            "both ballots survive as history (0076) — what 0062 called \
+             'deletion, not accumulation' is now carried by the epoch key \
+             alone, and the audit rows are the accumulation we chose"
         );
         // 0063: the same transition is what makes the phase survive a restart.
         assert_eq!(

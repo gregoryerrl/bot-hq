@@ -300,10 +300,10 @@ async fn a_blocking_finding_gates_the_commit_and_advisory_does_not() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        bridge.check_open_findings("s1").await.unwrap(),
-        "ok",
-        "an advisory finding must not gate the commit"
+    let verdict = bridge.check_open_findings("s1").await.unwrap();
+    assert!(
+        verdict.starts_with("ok"),
+        "an advisory finding must not gate the commit: {verdict}"
     );
 
     // Blocking: gates, and names the finding so HANDS can act on it.
@@ -347,7 +347,7 @@ async fn both_dispositions_clear_the_gate() {
         assert!(bridge.check_open_findings("s1").await.unwrap().starts_with("blocked:"));
 
         bridge
-            .disposition_finding(uid, status, "because".into(), "brian".into())
+            .disposition_finding("s1".into(), uid, status, "because".into(), "brian".into())
             .await
             .unwrap();
         assert_eq!(

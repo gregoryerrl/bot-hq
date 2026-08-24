@@ -6435,17 +6435,31 @@ mod tests {
             !storage.all_active_voted_to_advance("s1", "Plan", "fp1", 0).await.unwrap(),
             "A passed, so A's vote is withdrawn and the phase must not advance"
         );
-        let left: Vec<(i64,)> =
-            sqlx::query_as("SELECT participant_id FROM phase_votes WHERE session_id = 's1'")
-                .fetch_all(storage.pool())
-                .await
-                .unwrap();
+        // 0076 (Batch 9 T6c): a retraction MARKS its row instead of deleting
+        // it — the audit question "voted, then passed?" is answerable now. The
+        // property this test pins is unchanged: only A's OWN vote leaves the
+        // live tally; B's stands.
+        let live: Vec<(i64,)> = sqlx::query_as(
+            "SELECT participant_id FROM phase_votes \
+             WHERE session_id = 's1' AND retracted_at IS NULL",
+        )
+        .fetch_all(storage.pool())
+        .await
+        .unwrap();
         assert_eq!(
-            left,
+            live,
             vec![(b,)],
             "its OWN only — clearing the session would let a participant with \
              nothing to say wipe everyone else's converged votes"
         );
+        let retracted: Vec<(i64,)> = sqlx::query_as(
+            "SELECT participant_id FROM phase_votes \
+             WHERE session_id = 's1' AND retracted_at IS NOT NULL",
+        )
+        .fetch_all(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(retracted, vec![(a,)], "A's row survives as the audit record of the pass");
 
         drop(tx);
         assert!(exited(task).await);

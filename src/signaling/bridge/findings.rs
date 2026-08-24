@@ -71,13 +71,44 @@ impl SignalingBridge {
         Ok(uid)
     }
 
+    /// Resolve a caller-supplied finding id within `session_id` or bail with
+    /// the actionable error (T1's three arms, shared by disposition AND
+    /// approve so the two paths cannot disagree about what a bad id means —
+    /// approve briefly swallowed these and answered a 6-char id with the
+    /// success-shaped "not found" this whole fix exists to kill).
+    async fn resolve_finding_or_bail(
+        storage: &Storage,
+        session_id: &str,
+        input: &str,
+    ) -> Result<String> {
+        match storage.resolve_finding_uid(session_id, input).await? {
+            crate::storage::FindingUidResolution::Exact(uid)
+            | crate::storage::FindingUidResolution::UniquePrefix(uid) => Ok(uid),
+            crate::storage::FindingUidResolution::Ambiguous(matches) => anyhow::bail!(
+                "finding id prefix '{input}' matches {} findings ({}) — use more characters",
+                matches.len(),
+                matches.join(", ")
+            ),
+            crate::storage::FindingUidResolution::TooShort => anyhow::bail!(
+                "finding id '{input}' is shorter than 8 characters — pass the id \
+                 from flag_finding / check_open_findings (a unique prefix of 8+ \
+                 characters works)"
+            ),
+            crate::storage::FindingUidResolution::Unknown => anyhow::bail!(
+                "no finding matches '{input}' — call check_open_findings for \
+                 the open list and pass one of its ids"
+            ),
+        }
+    }
+
     /// The reviewer (`ApproveFinding`) confirms an escalated finding's resolution — clears the
     /// escalation "awaiting reviewer confirm" signal (sets `reviewer_approved`). NON-
     /// gating: the commit gate is already open once HANDS dispositioned, so this
     /// only closes the soft-escalation loop. Returns a human-readable result.
-    pub async fn approve_finding(&self, finding_uid: String) -> Result<String> {
+    pub async fn approve_finding(&self, session_id: String, finding_uid: String) -> Result<String> {
         let storage = self.findings_storage().await?;
-        let affected = storage.approve_finding(&finding_uid).await?;
+        let finding_uid = Self::resolve_finding_or_bail(&storage, &session_id, &finding_uid).await?;
+        let affected = storage.approve_finding(&session_id, &finding_uid).await?;
         if affected == 0 {
             return Ok(format!("no-op: finding '{finding_uid}' not found"));
         }
@@ -98,18 +129,26 @@ impl SignalingBridge {
     /// layer (required for both statuses).
     pub async fn disposition_finding(
         &self,
+        session_id: String,
         finding_uid: String,
         status: FindingStatus,
         reason: String,
         disposed_by: String,
     ) -> Result<String> {
         let storage = self.findings_storage().await?;
+        // Unique-PREFIX resolution, >= 8 chars (1.0.0 Batch 9 T1, dissect #5):
+        // reviewers cite findings by short id everywhere humans read them, and
+        // the old exact-match answered a truncated id with a success-shaped
+        // "no-op … already resolved" — a silent miss on a BLOCKER-clearing
+        // call, reproduced live twice during this very run. An ambiguous or
+        // unknown id is now an ERROR that lists what is actually open.
+        let finding_uid = Self::resolve_finding_or_bail(&storage, &session_id, &finding_uid).await?;
         let affected = storage
-            .disposition_finding(&finding_uid, status, Some(&reason), &disposed_by)
+            .disposition_finding(&session_id, &finding_uid, status, Some(&reason), &disposed_by)
             .await?;
         if affected == 0 {
             return Ok(format!(
-                "no-op: finding '{finding_uid}' is not open (unknown id, or already resolved)"
+                "no-op: finding '{finding_uid}' is not open (already resolved)"
             ));
         }
         // Refresh the banner — the disposed finding stops gating, so the count
@@ -159,7 +198,15 @@ impl SignalingBridge {
                 return Ok(verdict);
             }
         }
-        Ok("ok".to_string())
+        // T13: advisories don't gate, but a clean "ok" that never names them
+        // is how open nits vanish at close. Visibility only — the verdict is
+        // still ok and nothing blocks.
+        match storage.open_advisory_count(session_id).await {
+            Ok(n) if n > 0 => Ok(format!(
+                "ok — {n} advisory finding(s) open (non-blocking; visible in the findings list)"
+            )),
+            _ => Ok("ok".to_string()),
+        }
     }
 
     /// All findings for a session — backs the `list_session_findings` Tauri
@@ -455,7 +502,7 @@ mod tests {
         assert!(blocked.contains(&uid), "block message lists the uid: {blocked}");
 
         let res = bridge
-            .disposition_finding(uid, FindingStatus::Fixed, "fixed in abc123".into(), "hands".into())
+            .disposition_finding("s1".into(), uid, FindingStatus::Fixed, "fixed in abc123".into(), "hands".into())
             .await
             .unwrap();
         assert!(res.contains("fixed"), "got: {res}");
@@ -475,21 +522,93 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            bridge.check_open_findings("s1").await.unwrap(),
-            "ok",
-            "advisory findings never gate"
+        // T13: still ok (nothing gates), and the advisory is now VISIBLE in
+        // the verdict instead of vanishing behind a bare ok — three open
+        // advisories once sailed silently through a close.
+        let verdict = bridge.check_open_findings("s1").await.unwrap();
+        assert!(verdict.starts_with("ok"), "advisories never gate: {verdict}");
+        assert!(
+            verdict.contains("1 advisory finding(s) open"),
+            "…but they are named: {verdict}"
         );
     }
 
+    /// T1 (dissect #5): a truncated id used to answer with a success-shaped
+    /// "no-op … already resolved" while the finding stayed open and blocking —
+    /// reproduced live twice during the run that fixed it. Short input, an
+    /// unknown full-length id, and a UNIQUE 8-char prefix each answer
+    /// distinctly now.
     #[tokio::test]
-    async fn disposition_unknown_uid_is_noop() {
+    async fn disposition_resolves_prefixes_and_errors_on_unknowns() {
         let bridge = bridge_with_session("s1").await;
-        let res = bridge
-            .disposition_finding("nope".into(), FindingStatus::Fixed, "x".into(), "hands".into())
+        let err = bridge
+            .disposition_finding("s1".into(), "nope".into(), FindingStatus::Fixed, "x".into(), "hands".into())
+            .await
+            .expect_err("a 4-char id is an error, not a silent no-op");
+        assert!(err.to_string().contains("shorter than 8"), "got: {err}");
+
+        let err = bridge
+            .disposition_finding(
+                "s1".into(),
+                "0123456789abcdef-not-a-real-finding".into(),
+                FindingStatus::Fixed,
+                "x".into(),
+                "hands".into(),
+            )
+            .await
+            .expect_err("an unknown id is an error naming the next move");
+        assert!(err.to_string().contains("no finding matches"), "got: {err}");
+
+        let uid = bridge
+            .eyes_flag(
+                "s1".into(),
+                "eyes".into(),
+                FindingSeverity::Blocking,
+                "real bug".into(),
+                None,
+            )
             .await
             .unwrap();
-        assert!(res.contains("no-op"), "got: {res}");
+        let res = bridge
+            .disposition_finding("s1".into(), uid[..8].to_string(), FindingStatus::Fixed, "fixed at HEAD".into(), "hands".into())
+            .await
+            .unwrap();
+        assert!(res.contains("marked fixed"), "an 8-char unique prefix resolves: {res}");
+        assert_eq!(bridge.check_open_findings("s1").await.unwrap(), "ok");
+    }
+
+    /// **The disposition path is SESSION-SCOPED** (EYES blocking 6f774d93).
+    /// The prefix resolution made cross-session clears reachable with exactly
+    /// the 8-char ids transcripts quote — a participant "tidying up" findings
+    /// from a dissect report must not open ANOTHER session's commit gate.
+    #[tokio::test]
+    async fn a_disposition_cannot_reach_another_sessions_finding() {
+        let bridge = bridge_with_session("s1").await;
+        {
+            let storage = bridge.storage.lock().await.clone().unwrap();
+            storage.create_session("s2", "other", None).await.unwrap();
+        }
+        let uid = bridge
+            .eyes_flag(
+                "s2".into(),
+                "eyes".into(),
+                FindingSeverity::Blocking,
+                "s2's blocker".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        // Full uuid AND 8-char prefix, both from the wrong session: refused.
+        for id in [uid.clone(), uid[..8].to_string()] {
+            let err = bridge
+                .disposition_finding("s1".into(), id, FindingStatus::Fixed, "x".into(), "hands".into())
+                .await
+                .expect_err("another session's finding must be unreachable");
+            assert!(err.to_string().contains("no finding matches"), "got: {err}");
+        }
+        // s2's gate still holds.
+        let verdict = bridge.check_open_findings("s2").await.unwrap();
+        assert!(verdict.starts_with("blocked"), "s2's blocker survives: {verdict}");
     }
 
     #[test]
@@ -556,12 +675,12 @@ mod tests {
             .unwrap();
         // HANDS fixes (gate clears); escalation still awaits EYES confirm.
         bridge
-            .disposition_finding(uid.clone(), FindingStatus::Fixed, "fixed".into(), "hands".into())
+            .disposition_finding("s1".into(), uid.clone(), FindingStatus::Fixed, "fixed".into(), "hands".into())
             .await
             .unwrap();
         assert_eq!(storage.get_finding(&uid).await.unwrap().unwrap().reviewer_approved, 0);
         // EYES approves → escalation cleared.
-        let res = bridge.approve_finding(uid.clone()).await.unwrap();
+        let res = bridge.approve_finding("s1".into(), uid.clone()).await.unwrap();
         assert!(res.contains("approved"), "got: {res}");
         assert_eq!(storage.get_finding(&uid).await.unwrap().unwrap().reviewer_approved, 1);
     }

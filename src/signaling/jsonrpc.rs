@@ -970,7 +970,7 @@ async fn call_tool(
                 })?;
             let reason = arg_required_str(&args, "reason")?;
             let result = bridge
-                .disposition_finding(finding_id, status, reason, caller.agent.clone())
+                .disposition_finding(caller.session_id.clone(), finding_id, status, reason, caller.agent.clone())
                 .await
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(result))
@@ -992,7 +992,7 @@ async fn call_tool(
         "approve_finding" => {
             let finding_id = arg_required_str(&args, "finding_id")?;
             let result = bridge
-                .approve_finding(finding_id)
+                .approve_finding(caller.session_id.clone(), finding_id)
                 .await
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(result))

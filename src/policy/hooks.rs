@@ -2248,6 +2248,7 @@ mod tests {
             .unwrap();
         storage
             .disposition_finding(
+                "s1",
                 "f3",
                 crate::storage::FindingStatus::Fixed,
                 Some("done"),

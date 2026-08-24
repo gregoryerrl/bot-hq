@@ -1625,11 +1625,11 @@ impl Storage {
             .execute(&mut *tx)
             .await
             .context("bumping phase epoch")?;
-        sqlx::query("DELETE FROM phase_votes WHERE session_id = ?")
-            .bind(session_id)
-            .execute(&mut *tx)
-            .await
-            .context("clearing phase votes for the new epoch")?;
+        // History KEPT since 0076 (Batch 9 T6c): the delete this replaced was
+        // hygiene, not correctness — a stale-epoch row can never match a live
+        // tally (`a_stale_epoch_vote_is_ignored_even_when_the_row_survives`) —
+        // and it erased the only record of who voted for what. Growth is
+        // participants x transitions: negligible, and it IS the audit trail.
         let (epoch,): (i64,) = sqlx::query_as("SELECT phase_epoch FROM sessions WHERE id = ?")
             .bind(session_id)
             .fetch_one(&mut *tx)
@@ -1699,7 +1699,7 @@ impl Storage {
         let voters: Vec<(i64,)> = sqlx::query_as(
             "SELECT participant_id FROM phase_votes \
              WHERE session_id = ? AND target_phase = ? AND artifact_fingerprint = ? \
-               AND phase_epoch = ?",
+               AND phase_epoch = ? AND retracted_at IS NULL",
         )
         .bind(session_id)
         .bind(target_phase)
@@ -1747,7 +1747,8 @@ impl Storage {
         let fingerprint = self.phase_artifact_fingerprint(session_id).await?;
         let targets: Vec<(String,)> = sqlx::query_as(
             "SELECT DISTINCT target_phase FROM phase_votes \
-             WHERE session_id = ? AND phase_epoch = ? AND artifact_fingerprint = ?",
+             WHERE session_id = ? AND phase_epoch = ? AND artifact_fingerprint = ? \
+               AND retracted_at IS NULL",
         )
         .bind(session_id)
         .bind(epoch)
@@ -1766,6 +1767,36 @@ impl Storage {
             }
         }
         Ok(None)
+    }
+
+    /// This participant's own LIVE ballot for `target` cast on a DIFFERENT
+    /// state of the work (fingerprint or epoch differs) — the ballot the vote
+    /// being cast right now supersedes (1.0.0 Batch 9 T6b, dissect #6). The
+    /// caller says so aloud instead of leaving the replacement silent.
+    pub async fn latest_differently_fingerprinted_vote(
+        &self,
+        session_id: &str,
+        participant_id: i64,
+        target_phase: &str,
+        fingerprint: &str,
+        epoch: i64,
+    ) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT created_at FROM phase_votes \
+             WHERE session_id = ? AND participant_id = ? AND target_phase = ? \
+               AND (artifact_fingerprint != ? OR phase_epoch != ?) \
+               AND retracted_at IS NULL \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(participant_id)
+        .bind(target_phase)
+        .bind(fingerprint)
+        .bind(epoch)
+        .fetch_optional(&self.pool)
+        .await
+        .context("looking for a superseded phase ballot")?;
+        Ok(row.map(|(t,)| t))
     }
 
     /// Record one participant's vote to advance.
@@ -1822,11 +1853,19 @@ impl Storage {
     /// if concurrent targets ever become reachable, this is the line that
     /// silently withdraws votes for a question nobody asked about.
     pub async fn retract_phase_votes(&self, participant_id: i64) -> Result<()> {
-        sqlx::query("DELETE FROM phase_votes WHERE participant_id = ?")
-            .bind(participant_id)
-            .execute(&self.pool)
-            .await
-            .with_context(|| format!("retracting phase votes for participant {participant_id}"))?;
+        // MARK, don't delete (0076): the retraction is itself audit-worthy —
+        // "voted, then passed" and "never voted" were indistinguishable when
+        // this row vanished. Every tally filters retracted rows out; a re-vote
+        // lands on the same PK via INSERT OR REPLACE, which rewrites
+        // retracted_at to its NULL default — an un-retraction, exactly right.
+        sqlx::query(
+            "UPDATE phase_votes SET retracted_at = ?              WHERE participant_id = ? AND retracted_at IS NULL",
+        )
+        .bind(now_utc())
+        .bind(participant_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("retracting phase votes for participant {participant_id}"))?;
         Ok(())
     }
 
@@ -1851,6 +1890,17 @@ impl Storage {
         fingerprint: &str,
         epoch: i64,
     ) -> Result<bool> {
+        // **The live-epoch guard IS the race closure** (0076): the caller read
+        // `epoch` before casting, and a transition can commit between that
+        // read and this check — the stale key then matches the RETAINED
+        // historical tally and authorizes a second advance. The old
+        // epoch-bump DELETE closed that race as a side effect (its own doc
+        // called it hygiene); with history kept for audit, the closure is
+        // explicit: a key that is not the session's live epoch authorizes
+        // nothing, ever.
+        if self.phase_epoch(session_id).await? != epoch {
+            return Ok(false);
+        }
         let roster = self.participants_for_session(session_id).await?;
         let electorate: Vec<i64> = roster
             .iter()
@@ -1863,7 +1913,7 @@ impl Storage {
         let voters: Vec<(i64,)> = sqlx::query_as(
             "SELECT participant_id FROM phase_votes \
              WHERE session_id = ? AND target_phase = ? AND artifact_fingerprint = ? \
-               AND phase_epoch = ?",
+               AND phase_epoch = ? AND retracted_at IS NULL",
         )
         .bind(session_id)
         .bind(target_phase)
@@ -3084,10 +3134,23 @@ mod tests {
             "a vote from a spent epoch must not count, and the query alone must \
              be what excludes it"
         );
+        // The control keeps this test non-vacuous WITHOUT re-opening the race
+        // the live-epoch guard closes (0076): a stale KEY answers false by
+        // design now — even for the epoch its row was cast under — because a
+        // late consensus check with a pre-bump key re-authorizing a transition
+        // was exactly the double-advance the old DELETE incidentally
+        // prevented. Non-vacuity is proven with a CURRENT-epoch ballot
+        // instead: the same query, a live key, a real count.
         assert!(
-            s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap(),
-            "control: the same row DOES answer the question it was cast for — \
-             without this the assertion above passes on an empty table"
+            !s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap(),
+            "a spent-epoch KEY authorizes nothing either — the stale-key race \
+             closure (see all_active_voted_to_advance's guard)"
+        );
+        s.cast_phase_vote("s1", me, "plan", "fp1", now).await.unwrap();
+        assert!(
+            s.all_active_voted_to_advance("s1", "plan", "fp1", now).await.unwrap(),
+            "control: a live-epoch ballot answers true — the exclusions above \
+             are the query's doing, not an empty table's"
         );
     }
 
@@ -3113,11 +3176,14 @@ mod tests {
             !s.all_active_voted_to_advance("s1", "plan", "fp1", 0).await.unwrap(),
             "the reviewer withdrew; the tally must reopen"
         );
-        let left: Vec<(i64,)> =
-            sqlx::query_as("SELECT participant_id FROM phase_votes WHERE session_id = 's1'")
-                .fetch_all(s.pool())
-                .await
-                .unwrap();
+        // Live ballots only (0076: retraction marks, never deletes).
+        let left: Vec<(i64,)> = sqlx::query_as(
+            "SELECT participant_id FROM phase_votes \
+             WHERE session_id = 's1' AND retracted_at IS NULL",
+        )
+        .fetch_all(s.pool())
+        .await
+        .unwrap();
         assert_eq!(
             left,
             vec![(hands.id,)],
@@ -3161,6 +3227,9 @@ mod tests {
 
         s.bump_phase_epoch("s1").await.unwrap();
 
+        // 0076: the bump deletes nothing anywhere — the property this test
+        // exists for (one session's transition cannot invalidate another's
+        // tally) is now carried by the EPOCH keys, asserted directly below.
         let survivors: Vec<(i64,)> =
             sqlx::query_as("SELECT participant_id FROM phase_votes ORDER BY participant_id")
                 .fetch_all(s.pool())
@@ -3168,9 +3237,9 @@ mod tests {
                 .unwrap();
         assert_eq!(
             survivors,
-            vec![(b,)],
-            "s1's transition must take s1's votes and NOTHING else — an unscoped \
-             DELETE here wipes every session in the database and the suite stays green"
+            vec![(a,), (b,)],
+            "both sessions' ballots persist as history; scoping now lives in \
+             the epoch keys, not in a DELETE"
         );
         assert!(
             s.all_active_voted_to_advance("s2", "plan", "fp1", 0).await.unwrap(),

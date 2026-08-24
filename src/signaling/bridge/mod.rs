@@ -486,8 +486,11 @@ pub enum PhaseAdvanceOutcome {
     /// Every active participant voted; the phase moved. The only variant that
     /// reads like success.
     Advanced { target: String },
-    /// The vote is recorded and **the phase has not moved**.
-    VoteRecorded { target: String, voted: usize, of: usize },
+    /// The vote is recorded and **the phase has not moved**. `superseded`
+    /// carries the timestamp of this participant's own earlier ballot that
+    /// this vote replaced (the work changed under it) — said aloud because
+    /// the silent replacement cost a session four detective-work votes.
+    VoteRecorded { target: String, voted: usize, of: usize, superseded: Option<String> },
     /// The caller is outside the electorate, so its vote would count toward
     /// nothing while appearing to advance the phase.
     Refused { reason: String },
@@ -505,8 +508,8 @@ impl PhaseAdvanceOutcome {
     pub fn message(&self, current_phase: &str) -> String {
         match self {
             Self::Advanced { target } => format!("ADVANCED — the session is now in {target}."),
-            Self::VoteRecorded { target, voted, of } => format!(
-                "NOT ADVANCED — the session is still in {current_phase}.\n\
+            Self::VoteRecorded { target, voted, of, superseded } => format!(
+                "NOT ADVANCED — the session is still in {current_phase}.\n{}\
                  Your vote to advance to {target} is recorded ({voted} of {of} participants).\n\
                  The phase moves only when every active participant has voted for this same \
                  state of the work. Do NOT act as though you are in {target}: no {target}-phase \
@@ -514,13 +517,18 @@ impl PhaseAdvanceOutcome {
                  ring hands them their next turn; expect their votes then. If a peer posts \
                  findings, address them — changing the work (including a phase-doc write) \
                  invalidates the votes cast on the old state, including your own, and everyone \
-                 re-votes."
+                 re-votes.",
+                match superseded {
+                    Some(t) => format!(
+                        "(Your earlier ballot from {t} was cast on a previous state of the \
+                         work and no longer counts — this vote replaces it.)\n"
+                    ),
+                    None => String::new(),
+                }
             ),
             Self::Refused { reason } => format!(
                 "REFUSED — your vote was not recorded, and the session is still in \
-                 {current_phase}. Reason: {reason}. Participants outside the voting roster \
-                 cannot move the phase; ask an active participant to call `advance_phase`, or \
-                 raise it in the channel."
+                 {current_phase}. Reason: {reason}"
             ),
         }
     }
@@ -1483,10 +1491,28 @@ impl SignalingBridge {
         if me.participation_mode != crate::storage::MODE_ACTIVE || !me.enabled {
             return PhaseAdvanceOutcome::Refused {
                 reason: format!(
-                    "you are `{}` in this session, which is outside the voting roster",
+                    "you are `{}` in this session, which is outside the voting roster. \
+                     Ask an active participant to call `advance_phase`, or raise it in \
+                     the channel.",
                     me.participation_mode
                 ),
             };
+        }
+
+        // A vote for the phase the session is ALREADY in moves nothing and
+        // used to be recorded anyway ("your vote to advance to Verify is
+        // recorded" — while in Verify; dissect #7). Refuse with the next move
+        // named instead of banking a meaningless ballot.
+        if let Some(current) = self.current_session_phase(&session_id).await {
+            if current.name() == target {
+                return PhaseAdvanceOutcome::Refused {
+                    reason: format!(
+                        "the session is already in {target} — a vote for the current \
+                         phase moves nothing. Vote for the NEXT phase when your work \
+                         crosses its boundary."
+                    ),
+                };
+            }
         }
 
         let epoch = storage.phase_epoch(&session_id).await.unwrap_or(0);
@@ -1494,6 +1520,15 @@ impl SignalingBridge {
             .phase_artifact_fingerprint(&session_id)
             .await
             .unwrap_or_default();
+        // T6b: a re-vote on CHANGED work replaces an earlier ballot silently —
+        // the agents inferred the invalidation by detective work (dissect #6:
+        // four Plan votes, each discarded by the voter's own doc write, never
+        // told). Detect the superseded ballot before casting and SAY so.
+        let invalidated_prior = storage
+            .latest_differently_fingerprinted_vote(&session_id, me.id, &target, &fingerprint, epoch)
+            .await
+            .ok()
+            .flatten();
         if let Err(e) = storage
             .cast_phase_vote(&session_id, me.id, &target, &fingerprint, epoch)
             .await
@@ -1517,10 +1552,10 @@ impl SignalingBridge {
                 });
                 PhaseAdvanceOutcome::Advanced { target }
             }
-            Ok(false) => PhaseAdvanceOutcome::VoteRecorded { target, voted, of },
+            Ok(false) => PhaseAdvanceOutcome::VoteRecorded { target, voted, of, superseded: invalidated_prior.clone() },
             Err(e) => {
                 tracing::warn!(?e, %session_id, "reading the phase tally failed");
-                PhaseAdvanceOutcome::VoteRecorded { target, voted, of }
+                PhaseAdvanceOutcome::VoteRecorded { target, voted, of, superseded: invalidated_prior }
             }
         }
     }
@@ -1890,7 +1925,7 @@ mod phase_vote_tests {
             .await;
         assert_eq!(
             out,
-            PhaseAdvanceOutcome::VoteRecorded { target: "Plan".into(), voted: 1, of: 2 }
+            PhaseAdvanceOutcome::VoteRecorded { target: "Plan".into(), voted: 1, of: 2, superseded: None }
         );
         let msg = out.message("Investigate");
         assert!(msg.starts_with("NOT ADVANCED"), "the refusal must be the first token: {msg}");
@@ -1969,7 +2004,7 @@ mod phase_vote_tests {
             .await;
         assert_eq!(
             out,
-            PhaseAdvanceOutcome::VoteRecorded { target: "Plan".into(), voted: 1, of: 2 },
+            PhaseAdvanceOutcome::VoteRecorded { target: "Plan".into(), voted: 1, of: 2, superseded: None },
             "the reviewer's vote was cast on work that has since changed, so only \
              the fresh vote counts and the tally reopens"
         );

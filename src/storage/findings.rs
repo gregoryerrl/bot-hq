@@ -6,6 +6,17 @@
 
 use super::*;
 
+/// How a caller-supplied finding id resolved — see `resolve_finding_uid`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FindingUidResolution {
+    Exact(String),
+    UniquePrefix(String),
+    Ambiguous(Vec<String>),
+    TooShort,
+    Unknown,
+}
+
+
 /// Full column projection for a `Finding` — shared by every read so they can't
 /// drift (mirrors `tray.rs::TRAY_COLUMNS`).
 /// The one predicate that decides "an open blocking finding gates this
@@ -58,21 +69,25 @@ impl Storage {
     /// requiredness for fixed/rebutted is enforced at the bridge layer.
     pub async fn disposition_finding(
         &self,
+        session_id: &str,
         finding_uid: &str,
         status: FindingStatus,
         reason: Option<&str>,
         disposed_by: &str,
     ) -> Result<u64> {
+        // SESSION-SCOPED (EYES 6f774d93): this write opens a commit gate;
+        // scoping is defense in depth under the scoped resolver above.
         let res = sqlx::query(
             "UPDATE findings \
              SET status = ?, disposition_reason = ?, disposed_by = ?, updated_at = ? \
-             WHERE finding_uid = ? AND status = 'open'",
+             WHERE finding_uid = ? AND session_id = ? AND status = 'open'",
         )
         .bind(status.as_str())
         .bind(reason)
         .bind(disposed_by)
         .bind(now_utc())
         .bind(finding_uid)
+        .bind(session_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("dispositioning finding {finding_uid}"))?;
@@ -121,6 +136,10 @@ impl Storage {
     }
 
     /// Look up a single finding by its public uid. None when absent.
+    /// UNSCOPED by session — safe only because every caller reaches it AFTER
+    /// a session-scoped mutation reported `affected != 0` (EYES 6f774d93:
+    /// this module's isolation now lives in its callers; new callers must
+    /// scope first or thread a session id here).
     pub async fn get_finding(&self, finding_uid: &str) -> Result<Option<Finding>> {
         let row = sqlx::query_as::<_, Finding>(&format!(
             "SELECT {FINDING_COLUMNS} FROM findings WHERE finding_uid = ?"
@@ -152,6 +171,9 @@ impl Storage {
 
     /// Bump a finding's `raise_count` (a genuine, turn-guarded re-raise) and
     /// touch `updated_at`. Returns rows affected (0 if the uid is unknown).
+    /// UNSCOPED by session — safe only because its one caller resolves the
+    /// uid through the session-scoped `latest_open_finding_by_summary` first
+    /// (EYES 6f774d93; same caveat as `get_finding`).
     pub async fn increment_raise_count(&self, finding_uid: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE findings SET raise_count = raise_count + 1, updated_at = ? \
@@ -166,14 +188,79 @@ impl Storage {
     }
 
     /// EYES confirms a finding's resolution (`approve_finding`): set
+    /// Open ADVISORY findings for a session (1.0.0 Batch 9 T13): advisory-
+    /// open-at-close is specified behavior, but a bare "ok" that never
+    /// mentions them is how three open advisories sailed silently through a
+    /// close in the dissected session.
+    pub async fn open_advisory_count(&self, session_id: &str) -> Result<i64> {
+        let (n,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM findings \
+             WHERE session_id = ? AND status = 'open' AND severity = 'advisory'",
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n)
+    }
+
+    /// Resolve a possibly-truncated finding id (1.0.0 Batch 9 T1). Exact hit
+    /// wins; otherwise a UNIQUE prefix of >= 8 chars resolves; shorter input,
+    /// several matches, or none each get their own answer so the caller can
+    /// say something actionable instead of the old success-shaped no-op.
+    pub async fn resolve_finding_uid(
+        &self,
+        session_id: &str,
+        input: &str,
+    ) -> Result<FindingUidResolution> {
+        // SESSION-SCOPED on every branch (EYES blocking 6f774d93): the
+        // resolution feeds the commit gate, and an unscoped prefix would let
+        // any participant clear ANOTHER session's blocking finding with an
+        // 8-char id quoted in a transcript — exactly the ids reports quote.
+        let exact: Option<(String,)> = sqlx::query_as(
+            "SELECT finding_uid FROM findings WHERE finding_uid = ? AND session_id = ?",
+        )
+        .bind(input)
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some((uid,)) = exact {
+            return Ok(FindingUidResolution::Exact(uid));
+        }
+        if input.len() < 8 {
+            return Ok(FindingUidResolution::TooShort);
+        }
+        // ESCAPE the LIKE metacharacters: a uuid prefix never contains them,
+        // but the input is caller-supplied text.
+        let pat = format!("{}%", input.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT finding_uid FROM findings \
+             WHERE finding_uid LIKE ? ESCAPE '\\' AND session_id = ? LIMIT 5",
+        )
+        .bind(&pat)
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        match rows.len() {
+            0 => Ok(FindingUidResolution::Unknown),
+            1 => Ok(FindingUidResolution::UniquePrefix(rows[0].0.clone())),
+            _ => Ok(FindingUidResolution::Ambiguous(
+                rows.into_iter().map(|(u,)| u).collect(),
+            )),
+        }
+    }
+
     /// `reviewer_approved = 1`, clearing the escalation signal. Returns rows
     /// affected (0 if the uid is unknown). Non-gating — purely signal-clearing.
-    pub async fn approve_finding(&self, finding_uid: &str) -> Result<u64> {
+    pub async fn approve_finding(&self, session_id: &str, finding_uid: &str) -> Result<u64> {
+        // Same session scope as disposition (EYES 6f774d93) — non-gating, but
+        // the cross-session reach was identical.
         let res = sqlx::query(
-            "UPDATE findings SET reviewer_approved = 1, updated_at = ? WHERE finding_uid = ?",
+            "UPDATE findings SET reviewer_approved = 1, updated_at = ? \
+             WHERE finding_uid = ? AND session_id = ?",
         )
         .bind(now_utc())
         .bind(finding_uid)
+        .bind(session_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("approving finding {finding_uid}"))?;
@@ -222,7 +309,7 @@ mod tests {
 
         // Dispositioning the blocking one clears the gate.
         let n = s
-            .disposition_finding("f1", FindingStatus::Fixed, Some("fixed in abc123"), "hands")
+            .disposition_finding("s1", "f1", FindingStatus::Fixed, Some("fixed in abc123"), "hands")
             .await
             .unwrap();
         assert_eq!(n, 1);
@@ -234,7 +321,7 @@ mod tests {
 
         // Idempotent: a second disposition of the same uid is a no-op.
         assert_eq!(
-            s.disposition_finding("f1", FindingStatus::Fixed, Some("x"), "hands")
+            s.disposition_finding("s1", "f1", FindingStatus::Fixed, Some("x"), "hands")
                 .await
                 .unwrap(),
             0,
@@ -279,6 +366,7 @@ mod tests {
             .await
             .unwrap();
         s.disposition_finding(
+            "s1",
             "f1",
             FindingStatus::Rebutted,
             Some("tests prove the path is unreachable"),
@@ -306,7 +394,7 @@ mod tests {
         assert_eq!(found.raise_count, 1);
         assert_eq!(found.reviewer_approved, 0);
         // A disposed finding is NOT a dedup target (a re-flag becomes a fresh one).
-        s.disposition_finding("f1", FindingStatus::Fixed, Some("done"), "hands")
+        s.disposition_finding("s1", "f1", FindingStatus::Fixed, Some("done"), "hands")
             .await
             .unwrap();
         assert!(s
@@ -317,7 +405,7 @@ mod tests {
         // increment + approve mechanics.
         assert_eq!(s.increment_raise_count("f1").await.unwrap(), 1);
         assert_eq!(s.get_finding("f1").await.unwrap().unwrap().raise_count, 2);
-        assert_eq!(s.approve_finding("f1").await.unwrap(), 1);
+        assert_eq!(s.approve_finding("s1", "f1").await.unwrap(), 1);
         assert_eq!(s.get_finding("f1").await.unwrap().unwrap().reviewer_approved, 1);
     }
 
