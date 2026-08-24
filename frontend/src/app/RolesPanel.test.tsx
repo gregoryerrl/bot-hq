@@ -95,6 +95,10 @@ function mockBackend(roles: RoleView[] = [role(), EYES]) {
     if (cmd === "create_role") return role({ id: 9, slug: "code-reviewer" });
     if (cmd === "update_role") return roles[0];
     if (cmd === "archive_role") return null;
+    if (cmd === "get_claude_overrides")
+      return { per_role: { hands: { effort: "max" } }, _all: { effort: "high" } };
+    if (cmd === "claude_config_read") return { core_knobs: [] };
+    if (cmd === "set_claude_overrides") return null;
     return undefined;
   });
 }
@@ -510,5 +514,39 @@ describe("RolesPanel", () => {
     );
     fireEvent.click(screen.getByRole("checkbox", { name: /run bash/i }));
     expect(await screen.findByText(/needs run_bash/i)).toBeInTheDocument();
+  });
+});
+
+describe("default effort (hotfix 2026-08-25)", () => {
+  it("shows the role's stored default, falls back to the inherit note, and writes the per-role slot", async () => {
+    mockBackend();
+    renderPanel();
+    await screen.findByText("HANDS");
+
+    // HANDS carries a stored per-role effort.
+    const select = (await screen.findByLabelText(
+      "Default effort",
+    )) as HTMLSelectElement;
+    expect(select.value).toBe("max");
+    // The Inherit option names what clearing would fall to (_all's high).
+    expect(
+      Array.from(select.options).map((o) => o.textContent),
+    ).toContain("Inherit (high)");
+
+    // Changing writes the WHOLE store back with only this slug's slot moved.
+    fireEvent.change(select, { target: { value: "low" } });
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "set_claude_overrides",
+        expect.objectContaining({
+          overrides: expect.objectContaining({
+            per_role: expect.objectContaining({
+              hands: expect.objectContaining({ effort: "low" }),
+            }),
+            _all: expect.objectContaining({ effort: "high" }),
+          }),
+        }),
+      ),
+    );
   });
 });

@@ -8,6 +8,8 @@ import { SaveIcon } from "../components/icons";
 import type {
   AppError,
   CapabilityView,
+  ClaudeConfigView,
+  ClaudeOverrides,
   ModelView,
   RoleDraftInput,
   RoleView,
@@ -358,6 +360,50 @@ function RoleForm({
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [saved, setSaved] = useState(false);
 
+  // Default effort (hotfix 2026-08-25): a Roles-tab surface over the per-role
+  // Claude-Config override — the slot spawn resolves and the dialog's
+  // "Inherit (…)" already reads. Read-modify-write of the whole store via the
+  // existing set_claude_overrides; refetch keeps every other reader in sync.
+  const { data: claudeOverrides, refetch: refetchOverrides } =
+    useTauriQuery<ClaudeOverrides>("get_claude_overrides");
+  const { data: claudeConfig } =
+    useTauriQuery<ClaudeConfigView>("claude_config_read");
+  const setOverrides = useTauriMutation<null, { overrides: ClaudeOverrides }>(
+    "set_claude_overrides",
+  );
+  const [savingEffort, setSavingEffort] = useState(false);
+  const roleEffort = role
+    ? (claudeOverrides?.per_role?.[role.slug]?.effort ?? null)
+    : null;
+  // What Inherit falls to — _all's effort, else the settings.json env knob —
+  // mirroring resolve_agent_overrides + the spawn env fall-through.
+  const inheritedEffortNote =
+    claudeOverrides?._all?.effort ??
+    claudeConfig?.core_knobs.find(
+      (k) => k.key === "env.CLAUDE_CODE_EFFORT_LEVEL",
+    )?.value ??
+    null;
+  const saveRoleEffort = async (value: string | null) => {
+    if (!role) return;
+    setSavingEffort(true);
+    try {
+      const perRole = { ...(claudeOverrides?.per_role ?? {}) };
+      const entry = { ...(perRole[role.slug] ?? {}) };
+      entry.effort = value;
+      perRole[role.slug] = entry;
+      const store: ClaudeOverrides = {
+        ...(claudeOverrides ?? {}),
+        per_role: perRole,
+      };
+      await setOverrides.mutateAsync({ overrides: store });
+      await refetchOverrides();
+    } catch (e) {
+      setError(e as AppError);
+    } finally {
+      setSavingEffort(false);
+    }
+  };
+
   const create = useTauriMutation<RoleView, { draft: RoleDraftInput }>(
     "create_role",
   );
@@ -563,6 +609,41 @@ function RoleForm({
               : "The New-session dialog can override this per participant."}
           </span>
         </label>
+
+        {/* Default EFFORT (hotfix, user 2026-08-25). This is a surface over
+            the SAME slot spawn already resolves — `claude-overrides.json`
+            per_role[slug].effort — not a new roles column, so the New-session
+            dialog's "Inherit (…)" label, the spawn chain, and the Claude
+            Config tab all agree by construction. Written on change (it's a
+            settings knob, not part of the role-row draft); hidden on the
+            create form until the role exists to key the slot. */}
+        {role && (
+          <label className="block">
+            <FieldLabel>Default effort</FieldLabel>
+            <select
+              value={roleEffort ?? ""}
+              disabled={savingEffort}
+              onChange={(e) => void saveRoleEffort(e.target.value || null)}
+              className={selectClass}
+              aria-label="Default effort"
+            >
+              <option value="">
+                Inherit{inheritedEffortNote ? ` (${inheritedEffortNote})` : ""}
+              </option>
+              {["low", "medium", "high", "xhigh", "max"].map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
+            <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
+              What this role's participants spawn with unless the New-session
+              dialog picks otherwise. Stored in Claude Config's per-role
+              overrides; sessions record the resolved value on their spawn
+              badge.
+            </span>
+          </label>
+        )}
       </div>
 
       <label className="block">
