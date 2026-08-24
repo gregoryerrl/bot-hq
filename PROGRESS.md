@@ -119,7 +119,16 @@ CL mentions are always project-namespaced so same-named files stay apart
 (`2f7a511`). A live smoke with the webview tools then verified the running
 build (Promptcodes subtab rendering the user's own `/test` code, session
 tiles, the A-tab live diff) and caught the panel still describing the old
-expand-in-box behaviour — fixed (`68f0740`). cargo 1312/0, vitest 505/505.
+expand-in-box behaviour — fixed (`68f0740`). The reviewer then caught the
+`/` boundary admitting path openers — `run ./test` would have silently sent
+the user's own `test` promptcode — fixed to start-or-whitespace in expander
+and picker together, with a shared fixture table now pinning the TS and Rust
+backtick heuristics to each other (`5f6eb2f`). Two more user asks closed the
+slice: dropped/pasted files insert short `#name.ext` tokens (composer-local
+map back to the real path; dedup by numbered suffix) and expansions leave the
+composer MARKED — inline code for references, blockquotes for prompts — so
+sent messages render as boxed snippets in the chat stream (`9a43c5b`).
+cargo 1313/0, vitest 508/508.
 
 ---
 
