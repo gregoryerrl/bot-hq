@@ -362,17 +362,18 @@ const SWEEP_STOPWORDS: &[&str] = &[
 /// in the old body (occurrence count, then length) and capped, so a wholesale
 /// rewrite yields the handful of real concepts rather than its whole vocabulary.
 ///
-/// Deliberately token-level and case-insensitive: the live specimen was the
-/// word "duo" surviving in `conventions.md:3` for hours after the harness
-/// framing rule retired it (2026-08-05).
+/// **Distinctive-only, everywhere** (the user's pick a9f8c705, 2026-08-24,
+/// round 13): a candidate reports only when it is code-shaped
+/// (dash/underscore/digit) or the old body marked it structurally
+/// (backticks, bold, a heading). Plain unmarked prose words no longer report
+/// at ANY edit size — the former targeted-edit allowance produced five
+/// generic-English flags ("duplication", "permission", "half", "business",
+/// "properly") at s-a73699ec's close; the historic plain-word catch ("duo",
+/// 2026-08-05) is covered by CL convention, a real term being backticked,
+/// bolded or headed in a well-kept file.
 pub(super) fn retired_terms(old: &str, new: &str) -> Vec<String> {
     const MIN_LEN: usize = 3;
     const MAX_TERMS: usize = 12;
-    // Above this many distinct candidates, the write is a BULK REWRITE and
-    // frequency-ranking selects ordinary prose ("real", "pass", "empty" — the
-    // s-761704e8 tasks.md refactor produced a 510-hit report of exactly such
-    // words). A targeted edit retires a handful of terms and stays under it.
-    const BULK_REWRITE_CANDIDATES: usize = 25;
     fn tokens(body: &str) -> impl Iterator<Item = String> + '_ {
         body.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
             .map(|t| t.trim_matches(['-', '_']).to_lowercase())
@@ -386,16 +387,14 @@ pub(super) fn retired_terms(old: &str, new: &str) -> Vec<String> {
         }
         *counts.entry(tok).or_default() += 1;
     }
-    // Bulk rewrites keep only DISTINCTIVE candidates: term-shaped tokens
-    // (hyphen/underscore/digit — code and file names) or tokens the old body
-    // marked structurally (backticked, bolded, or in a heading). A plain word
-    // like the live "duo" specimen still reports on a targeted edit, where the
-    // pool is small and the old ranking already worked; a plain word in a
-    // 1,500-line rewrite is vocabulary, not a concept.
-    if counts.len() > BULK_REWRITE_CANDIDATES {
-        let old_lower = old.to_lowercase();
-        counts.retain(|tok, _| term_shaped(tok) || structurally_marked(&old_lower, tok));
-    }
+    // DISTINCTIVE candidates only — term-shaped tokens (hyphen/underscore/
+    // digit: code and file names) or tokens the old body marked structurally
+    // (backticked, bolded, or in a heading). Formerly applied only above a
+    // 25-candidate bulk-rewrite threshold; the user's pick (a9f8c705) made it
+    // unconditional after the targeted-edit allowance flagged five
+    // generic-English words at one close.
+    let old_lower = old.to_lowercase();
+    counts.retain(|tok, _| term_shaped(tok) || structurally_marked(&old_lower, tok));
     let mut terms: Vec<(String, usize)> = counts.into_iter().collect();
     // Most-used first (a concept the old body leaned on), longest as tiebreak
     // (more distinctive to grep), then alphabetical so the output is stable.
@@ -1189,14 +1188,21 @@ mod tests {
 
     #[test]
     fn retired_terms_keeps_dropped_concepts_and_drops_noise() {
-        let old = "The duo (Brian + Rain) maintains bot-hq. The duo is the core. \
-                   However, the trio was retired.";
+        // Distinctive-only everywhere (the user's pick a9f8c705, 2026-08-24):
+        // a MARKED term reports; a plain unmarked word does not, whatever the
+        // edit size. The historic "duo" catch survives through the marking a
+        // well-kept CL file gives a real term (backticks here).
+        let old = "The `duo` (Brian + Rain) maintains bot-hq. The `duo` is the core. \
+                   However, the trio was retired. See tmp-scratch too.";
         let new = "The harness maintains bot-hq. The harness is the core.";
         let terms = retired_terms(old, new);
-        // "duo" survives the length floor (3) — the live specimen was exactly
-        // this word — and outranks the single-use "trio" on occurrence count.
+        // Backticked in the old body → a TERM, and first on occurrence count.
         assert_eq!(terms.first().map(String::as_str), Some("duo"));
-        assert!(terms.contains(&"trio".to_string()), "got: {terms:?}");
+        // Code-shaped (hyphen) reports without any marking.
+        assert!(terms.contains(&"tmp-scratch".to_string()), "got: {terms:?}");
+        // A plain unmarked word is vocabulary now, not a concept — the five
+        // generic-English flags at s-a73699ec's close were exactly this class.
+        assert!(!terms.contains(&"trio".to_string()), "got: {terms:?}");
         // Still present in the new body → not retired.
         assert!(!terms.contains(&"maintains".to_string()), "got: {terms:?}");
         assert!(!terms.contains(&"core".to_string()), "got: {terms:?}");
@@ -1237,9 +1243,9 @@ mod tests {
                 "prose vocabulary must not report in a bulk rewrite: {noise} in {terms:?}"
             );
         }
-        // Under the threshold nothing changes: the live "duo" specimen — a
-        // plain unmarked word retired by a targeted edit — still reports
-        // (pinned by `retired_terms_keeps_dropped_concepts_and_drops_noise`).
+        // Since a9f8c705 (2026-08-24) the distinctive filter is unconditional
+        // — no under-threshold allowance for plain words remains; the sibling
+        // test pins the marked-term path that replaced it.
     }
 
     #[test]
@@ -1262,7 +1268,9 @@ mod tests {
         // history, so only conventions.md may be reported.
         std::fs::write(proj.join("conventions.md"), "line one\nThe duo maintains this.\n").unwrap();
         std::fs::write(proj.join("decisions.md"), "2026-08-05: retired the duo framing.\n").unwrap();
-        std::fs::write(proj.join("vision.md"), "The duo (Brian + Rain) is the core.\n").unwrap();
+        // `duo` is backticked — a marked TERM (distinctive-only everywhere,
+        // a9f8c705): an unmarked plain word would no longer record at all.
+        std::fs::write(proj.join("vision.md"), "The `duo` (Brian + Rain) is the core.\n").unwrap();
 
         // The session rewrites vision.md, retiring "duo".
         bridge

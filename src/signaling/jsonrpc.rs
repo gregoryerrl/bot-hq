@@ -1659,7 +1659,9 @@ mod tests {
         let proj = tmp.path().join("library/projects/bot-hq");
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(proj.join("conventions.md"), "The duo maintains this.\n").unwrap();
-        std::fs::write(proj.join("vision.md"), "The duo is the core of it.\n").unwrap();
+        // Backticked: since a9f8c705 (distinctive-only everywhere) an
+        // unmarked plain word no longer records as a retired term.
+        std::fs::write(proj.join("vision.md"), "The `duo` is the core of it.\n").unwrap();
         let bridge = SignalingBridge::with_policy(
             crate::policy::ViolationsLog::new(tmp.path()),
             tmp.path().to_path_buf(),
