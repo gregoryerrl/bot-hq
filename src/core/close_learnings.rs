@@ -48,6 +48,25 @@ pub const CLOSE_EPILOGUE_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// diagnosis into the wrong half of the system.
 pub const CLOSE_EPILOGUE_ARM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// The two halt texts the PUMP mints when a writer stops being askable — a
+/// provider limit, or the transient-retry ladder exhausting into a
+/// back-to-back error streak. Owned HERE, by the consumer, and interpolated
+/// at both mint sites, so the detector and the text cannot drift apart.
+pub const PROVIDER_LIMIT_HALT_PREFIX: &str = "⚠ Provider limit:";
+pub const ERROR_STREAK_HALT_MARKER: &str = "turns are failing back-to-back";
+
+/// Is the session's standing halt one of the pump's "the agent cannot
+/// answer" declarations? Round 13, from `s-58f9a790`: the close epilogue
+/// dealt its learnings turn to a credit-dead writer, got the provider-limit
+/// error back, classified it as a DECLINE, and recorded "the session had
+/// nothing worth recording" over a session that had read fifteen dossiers —
+/// a false archive claim minted by asking a dead model.
+pub fn writer_unwell(halt_reason: Option<&str>) -> bool {
+    halt_reason.is_some_and(|r| {
+        r.starts_with(PROVIDER_LIMIT_HALT_PREFIX) || r.contains(ERROR_STREAK_HALT_MARKER)
+    })
+}
+
 /// Whether a closing session gets a learnings turn, and if not, why not.
 ///
 /// The `Skip*` arms are distinct because they are not the same event: two of
@@ -68,6 +87,13 @@ pub enum Epilogue {
     /// The session was mid-turn. Closing then is the user saying stop (D15's
     /// own framing), and a broadcast into a live turn fights the sequencer.
     SkipBusy,
+    /// The session's standing halt says the writer cannot answer — a provider
+    /// limit or a back-to-back error streak ([`writer_unwell`]). Asking it
+    /// anyway returns the error text, which the outcome classifier reads as a
+    /// decline and records as "nothing worth recording" — a false claim the
+    /// next session orients from (round 13, `s-58f9a790`). Unlike
+    /// `SkipNoWriter` this POSTS a row: the user deserves the honest why.
+    SkipWriterUnwell,
 }
 
 /// The entire decision, in one place.
@@ -81,6 +107,7 @@ pub fn decide(
     any_writer: bool,
     cl_written: bool,
     close_nudged: bool,
+    writer_unwell: bool,
     path: ClosePath,
 ) -> Epilogue {
     if !matches!(
@@ -88,6 +115,12 @@ pub fn decide(
         SessionActivity::Idle | SessionActivity::AwaitingUser
     ) {
         return Epilogue::SkipBusy;
+    }
+    // Before the capability check: an unwell writer typically halted the
+    // session (AwaitingUser passes the gate above), still holds the
+    // capability, and still cannot be asked.
+    if writer_unwell {
+        return Epilogue::SkipWriterUnwell;
     }
     if !any_writer {
         return Epilogue::SkipNoWriter;
@@ -266,16 +299,54 @@ pub fn outcome_notice(outcome: &Outcome) -> String {
 mod tests {
     use super::*;
 
+    /// Round 13 (`s-58f9a790`): an unwell writer is skipped BEFORE anyone
+    /// asks it anything — whatever the flags say — and only from the stopped
+    /// states (a busy close stays a busy close).
+    #[test]
+    fn an_unwell_writer_is_never_asked() {
+        use SessionActivity::*;
+        assert_eq!(
+            decide(AwaitingUser, true, false, false, true, ClosePath::User),
+            Epilogue::SkipWriterUnwell
+        );
+        assert_eq!(
+            decide(Idle, true, false, false, true, ClosePath::Agent),
+            Epilogue::SkipWriterUnwell
+        );
+        // Busy still outranks it: a force-close mid-turn is the user's stop.
+        assert_eq!(
+            decide(Busy, true, false, false, true, ClosePath::User),
+            Epilogue::SkipBusy
+        );
+        // And a healthy writer is unaffected.
+        assert_eq!(
+            decide(AwaitingUser, true, false, false, false, ClosePath::User),
+            Epilogue::Run
+        );
+    }
+
+    #[test]
+    fn writer_unwell_matches_the_pump_halts_and_nothing_else() {
+        assert!(writer_unwell(Some(
+            "⚠ Provider limit: \"You're out of usage credits.\" — the agent can't continue"
+        )));
+        assert!(writer_unwell(Some(
+            "⚠ hands's turns are failing back-to-back (last error: \"x\")."
+        )));
+        assert!(!writer_unwell(Some("All done — the tray holds your next picks.")));
+        assert!(!writer_unwell(None));
+    }
+
     #[test]
     fn an_idle_session_with_a_writer_that_has_not_written_gets_the_turn() {
         assert_eq!(
-            decide(SessionActivity::Idle, true, false, false, ClosePath::User),
+            decide(SessionActivity::Idle, true, false, false, false, ClosePath::User),
             Epilogue::Run
         );
         // The dominant real case: the agent asked "Close session?" and the user
         // closed from the UI, so the session is parked on the user, not idle.
         assert_eq!(
-            decide(SessionActivity::AwaitingUser, true, false, false, ClosePath::User),
+            decide(SessionActivity::AwaitingUser, true, false, false, false, ClosePath::User),
             Epilogue::Run
         );
     }
@@ -285,7 +356,7 @@ mod tests {
         // D15: "a capability answer, not a special case" — a review-only
         // session has nobody who COULD write, so there is nothing to report.
         assert_eq!(
-            decide(SessionActivity::Idle, false, false, false, ClosePath::User),
+            decide(SessionActivity::Idle, false, false, false, false, ClosePath::User),
             Epilogue::SkipNoWriter
         );
     }
@@ -293,14 +364,14 @@ mod tests {
     #[test]
     fn a_session_that_already_wrote_or_was_already_asked_is_not_asked_again() {
         assert_eq!(
-            decide(SessionActivity::Idle, true, true, false, ClosePath::User),
+            decide(SessionActivity::Idle, true, true, false, false, ClosePath::User),
             Epilogue::SkipAlreadyHandled
         );
         // `close_nudged` is the agent's own close having been soft-gated for a
         // delta (jsonrpc A3b). On THAT path it declined; re-asking is how a
         // correct decline becomes filler.
         assert_eq!(
-            decide(SessionActivity::Idle, true, false, true, ClosePath::Agent),
+            decide(SessionActivity::Idle, true, false, true, false, ClosePath::Agent),
             Epilogue::SkipAlreadyHandled
         );
     }
@@ -316,14 +387,14 @@ mod tests {
         // and never retried left the flag set; the user's Close then read it as
         // already-handled.
         assert_eq!(
-            decide(SessionActivity::Idle, true, false, true, ClosePath::User),
+            decide(SessionActivity::Idle, true, false, true, false, ClosePath::User),
             Epilogue::Run,
             "the user's close is what D15 is FOR; the agent's nudge is not its business"
         );
         // And the flag still binds the path it belongs to, so this is a
         // narrowing rather than a removal.
         assert_eq!(
-            decide(SessionActivity::Idle, true, false, true, ClosePath::Agent),
+            decide(SessionActivity::Idle, true, false, true, false, ClosePath::Agent),
             Epilogue::SkipAlreadyHandled
         );
     }
@@ -336,7 +407,7 @@ mod tests {
         // survive it.
         for path in [ClosePath::Agent, ClosePath::User] {
             assert_eq!(
-                decide(SessionActivity::Idle, true, true, false, path),
+                decide(SessionActivity::Idle, true, true, false, false, path),
                 Epilogue::SkipAlreadyHandled,
                 "{path:?}: a session that wrote is not asked again"
             );
@@ -352,7 +423,7 @@ mod tests {
             SessionActivity::Paused,
         ] {
             assert_eq!(
-                decide(activity, true, false, false, ClosePath::User),
+                decide(activity, true, false, false, false, ClosePath::User),
                 Epilogue::SkipBusy,
                 "{activity:?} must not be interrupted for a learnings turn"
             );
@@ -364,7 +435,7 @@ mod tests {
         // Precedence, pinned: a mid-turn close is reported as the stop it is,
         // not as a capability or bookkeeping answer.
         assert_eq!(
-            decide(SessionActivity::Busy, false, true, true, ClosePath::Agent),
+            decide(SessionActivity::Busy, false, true, true, false, ClosePath::Agent),
             Epilogue::SkipBusy
         );
     }

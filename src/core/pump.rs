@@ -830,9 +830,11 @@ pub async fn pump_agent(
                                     cfg.session_id.to_string(),
                                     cfg.slug.to_string(),
                                     format!(
-                                        "⚠ Provider limit: \"{line}\" — the agent can't \
+                                        "{prefix} \"{line}\" — the agent can't \
                                          continue until it resets. Send any message (e.g. \
-                                         'proceed') once it's resumable."
+                                         'proceed') once it's resumable.",
+                                        prefix =
+                                            crate::core::close_learnings::PROVIDER_LIMIT_HALT_PREFIX,
                                     ),
                                 )
                                 .await;
@@ -1008,7 +1010,7 @@ pub async fn pump_agent(
                                     cfg.session_id.to_string(),
                                     cfg.slug.to_string(),
                                     format!(
-                                        "⚠ {}'s turns are failing back-to-back \
+                                        "⚠ {}'s {streak_marker} \
                                          (last error: \"{last_line}\"{}). The session \
                                          stopped so you can steer. If the error is \
                                          about prompt/context size, this \
@@ -1023,7 +1025,9 @@ pub async fn pump_agent(
                                             )
                                         } else {
                                             String::new()
-                                        }
+                                        },
+                                        streak_marker =
+                                            crate::core::close_learnings::ERROR_STREAK_HALT_MARKER
                                     ),
                                 )
                                 .await;

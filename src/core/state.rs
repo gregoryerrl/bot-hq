@@ -1087,7 +1087,46 @@ impl AppState {
             }
         };
         let (cl_written, close_nudged) = self.bridge.close_gate_flags(id).await;
-        let decision = close_learnings::decide(activity, any_writer, cl_written, close_nudged, path);
+        // Is the standing halt one of the pump's "this writer cannot answer"
+        // declarations (provider limit / error streak)? Round 13,
+        // `s-58f9a790`: the epilogue asked a credit-dead writer, read the
+        // error text as a decline, and recorded "nothing worth recording"
+        // over a session with real learnings. A read failure decides
+        // "healthy" — a wrongly-run epilogue is the old behaviour, a wrongly
+        // skipped one loses a write.
+        let writer_unwell = close_learnings::writer_unwell(
+            self.storage
+                .session_halt(id)
+                .await
+                .ok()
+                .flatten()
+                .as_ref()
+                .map(|(_, reason, _)| reason.as_str()),
+        );
+        let decision = close_learnings::decide(
+            activity,
+            any_writer,
+            cl_written,
+            close_nudged,
+            writer_unwell,
+            path,
+        );
+        if decision == close_learnings::Epilogue::SkipWriterUnwell {
+            // The one Skip that posts a row: silence here is how the archive
+            // gets a false "nothing worth recording" — or nothing at all —
+            // where the truth is "the writer could not be asked".
+            crate::core::post_system_notice(
+                &self.storage,
+                Some(self.bridge.as_ref()),
+                id,
+                crate::storage::MessageKind::SystemNotice,
+                "[System: close-out learnings — skipped: the writer hit a provider \
+                 limit or repeated errors and could not be asked. Anything this \
+                 session learned was not recorded.]",
+                None,
+            )
+            .await;
+        }
         // **Three of the four arms were silent, and only one of them by
         // requirement.** D15 asks for `SkipNoWriter` to make no noise TO THE
         // USER — a row — and says nothing about the log. The cost of the other
@@ -1107,6 +1146,7 @@ impl AppState {
             any_writer,
             cl_written,
             close_nudged,
+            writer_unwell,
             "close epilogue decision"
         );
         decision
@@ -3312,6 +3352,32 @@ mod tests {
             .find("return Ok(());")
             .expect("the not-closed row returns Ok without spawning");
         assert!(clear < noop && noop < start, "read the row → no-op if open → spawn");
+    }
+
+    /// **An unwell writer's close is decided from the halt slot, and the skip
+    /// says so** (round 13, `s-58f9a790`). Source-pinned like its siblings:
+    /// the decision path needs a live session to exercise.
+    #[test]
+    fn the_close_decision_reads_the_halt_and_the_unwell_skip_posts_a_row() {
+        let src = include_str!("state.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        let at = prod
+            .find("async fn close_epilogue_decision(")
+            .expect("close_epilogue_decision must exist");
+        let body = &prod[at..at + 4000];
+        assert!(
+            body.contains(".session_halt(") && body.contains("writer_unwell"),
+            "the decision must consult the standing halt for the pump's \
+             cannot-answer markers"
+        );
+        assert!(
+            body.contains("SkipWriterUnwell") && body.contains("post_system_notice"),
+            "the unwell skip posts its honest row — a silent skip reads as \
+             'nothing worth recording'"
+        );
     }
 
     /// **The row closes before the kills** (round 13). The kill reaches the
