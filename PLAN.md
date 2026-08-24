@@ -20,7 +20,12 @@ with the icon / signing / Windows caveats). One release note it must carry:
 an rc2 user who launched once, edited role prose, and never created a
 session has `COUNT(sessions)=0` — migration 0072 replaces their edits with
 the neutral default (narrow, guarded every other way; see 0072's header).
-Also parked to the user: the Tool-Gate weak-match design (tray db1a3d9c).
+The Tool-Gate weak-match question was RESOLVED live on 2026-08-25:
+status quo, deliberately — re-classification of the five "benign" parks
+showed every one correctly gated (the 7-minute park was a real `rm -rf`;
+`gh api` is the un-splittable mutation hatch), and the proposed
+longest-match precedence was killed in review as a compound-command
+bypass. Revisit only on fresh evidence, statement-scoped shape only.
 
 ## Current state (TL;DR)
 
