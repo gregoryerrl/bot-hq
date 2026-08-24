@@ -108,6 +108,15 @@ interface ChatInputProps {
    */
   docMentionables?: PickerItem[];
   /**
+   * User-configured `/` promptcodes (Settings → Promptcodes; ideas.md,
+   * 2026-08-24): short codes for prompts typed often. Picking one REPLACES the
+   * token with the full prompt text — the box shows exactly what will send,
+   * nothing expands later. Absent or empty, `/` opens nothing (so `foo/bar`
+   * and `./bin` never summon a picker: a sigil preceded by an alphanumeric is
+   * part of a word, and a query matching no code renders no listbox).
+   */
+  promptcodes?: { code: string; prompt: string }[];
+  /**
    * The session's activity. While `busy`/`cancelling` the textarea stays
    * writable but the submit slot becomes **Stage** (queued for the next turn
    * boundary) beside a turn-status line (which participants are working) and
@@ -185,6 +194,7 @@ export function ChatInput({
   onSend,
   mentionables,
   docMentionables,
+  promptcodes,
   activity,
   busy,
   stagedAnswers = 0,
@@ -222,7 +232,8 @@ export function ChatInput({
   // `@` opens nothing, exactly as before; same rule for `#`.
   const sigils =
     (mentionables && mentionables.length > 0 ? "@" : "") +
-    (docMentionables && docMentionables.length > 0 ? "#" : "");
+    (docMentionables && docMentionables.length > 0 ? "#" : "") +
+    (promptcodes && promptcodes.length > 0 ? "/" : "");
   const token = sigils ? activeToken(value, caret, sigils) : null;
   const tokenItems: PickerItem[] =
     token === null
@@ -233,7 +244,19 @@ export function ChatInput({
             label: m.label,
             insert: `@${m.slug}`,
           }))
-        : (docMentionables ?? []);
+        : token.sigil === "#"
+          ? (docMentionables ?? [])
+          : (promptcodes ?? []).map((c) => {
+              const firstLine = c.prompt.split("\n", 1)[0] ?? "";
+              return {
+                key: c.code,
+                label:
+                  firstLine.length > 60
+                    ? `${firstLine.slice(0, 59)}…`
+                    : firstLine,
+                insert: c.prompt,
+              };
+            });
   const matches = token ? matchPickerItems(tokenItems, token.query) : [];
   const pickerOpen = !!token && matches.length > 0 && !pickerDismissed;
   const active = matches[Math.min(highlight, matches.length - 1)];
@@ -472,7 +495,9 @@ export function ChatInput({
               aria-label={
                 token?.sigil === "#"
                   ? "Mention a document"
-                  : "Mention a participant"
+                  : token?.sigil === "/"
+                    ? "Insert a promptcode"
+                    : "Mention a participant"
               }
               className="absolute bottom-full left-0 z-10 mb-1 max-h-48 w-full overflow-y-auto overflow-x-hidden rounded border border-outline-variant bg-surface-container-lowest py-1 shadow-lg"
             >

@@ -175,6 +175,30 @@ export function SessionView() {
     ],
     [sessionDocs, clRows],
   );
+  // ideas.md 2026-08-24: `/` promptcodes — user-configured code → prompt pairs
+  // (Settings → Promptcodes, `app_settings` key "promptcodes"). Parsed
+  // defensively: a malformed value reads as "none configured".
+  const { data: promptcodesRaw = null } = useTauriQuery<string | null>(
+    "get_app_setting",
+    { key: "promptcodes" },
+  );
+  const promptcodes = useMemo(() => {
+    if (!promptcodesRaw) return [];
+    try {
+      const parsed = JSON.parse(promptcodesRaw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(
+        (c): c is { code: string; prompt: string } =>
+          typeof c === "object" &&
+          c !== null &&
+          typeof (c as { code?: unknown }).code === "string" &&
+          typeof (c as { prompt?: unknown }).prompt === "string" &&
+          (c as { code: string }).code.trim() !== "",
+      );
+    } catch {
+      return [];
+    }
+  }, [promptcodesRaw]);
   // rc3 D33: approvals are not parkable — they take the input slot. The gate
   // shows rows[0], and `tray_entries_for_session` is already `ORDER BY id ASC`,
   // so the row that has been blocking longest is the one asked first.
@@ -930,6 +954,7 @@ export function SessionView() {
                 .filter((p) => p.enabled)
                 .map((p) => ({ slug: p.slug, label: participantLabel(p) }))}
               docMentionables={docMentionables}
+              promptcodes={promptcodes}
               stagedAnswers={stagedCount}
               staged={!!stagedResp}
               stagedText={stagedResp?.text ?? null}

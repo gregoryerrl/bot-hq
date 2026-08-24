@@ -831,6 +831,50 @@ describe("ChatInput document picker", () => {
   });
 });
 
+// ===========================================================================
+// ideas.md 2026-08-24 — `/` promptcodes: token → the configured prompt text
+// ===========================================================================
+
+describe("ChatInput promptcode picker", () => {
+  const CODES = [
+    {
+      code: "n-verify",
+      prompt:
+        "Do n rounds of verification (you decide n), different angles.\nIf a round fails, start over from 1/n",
+    },
+    { code: "ship", prompt: "Run the gates and commit." },
+  ];
+
+  function type(text: string) {
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(box, {
+      target: { value: text, selectionStart: text.length },
+    });
+    return box;
+  }
+
+  it("replaces the token with the FULL prompt text — what you see is what sends", () => {
+    render(<ChatInput onSend={() => {}} promptcodes={CODES} />);
+    const box = type("/n-v");
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(box).toHaveValue(
+      "Do n rounds of verification (you decide n), different angles.\nIf a round fails, start over from 1/n ",
+    );
+  });
+
+  it("does not open inside a path (foo/bar is prose)", () => {
+    render(<ChatInput onSend={() => {}} promptcodes={CODES} />);
+    type("look at foo/bar");
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("stays out of the way with no codes configured", () => {
+    render(<ChatInput onSend={() => {}} />);
+    type("/anything");
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+});
+
 describe("ChatInput staged answers (rc3 D34)", () => {
   it("enables Send on an empty box when picks are staged", async () => {
     // Answering without commentary is a complete response — the user's tinker

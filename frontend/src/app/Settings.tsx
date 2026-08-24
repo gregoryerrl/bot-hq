@@ -14,6 +14,7 @@ import { ModelsPanel } from "./ModelsPanel";
 import { RolesPanel } from "./RolesPanel";
 import { ViolationsPanel } from "./ViolationsPanel";
 import { FeedbackPanel } from "./FeedbackPanel";
+import { PromptcodesPanel } from "./PromptcodesPanel";
 import { PolicyForm } from "../components/PolicyForm";
 import { GatedKeywordList } from "../components/GatedKeywordList";
 import type {
@@ -33,6 +34,7 @@ type SettingsSubTab =
   | "policy"
   | "violations"
   | "feedback"
+  | "promptcodes"
   | "archive"
   | "updates";
 
@@ -116,6 +118,13 @@ export function Settings() {
           Feedback
         </SubTabButton>
         <SubTabButton
+          active={tab === "promptcodes"}
+          controls="settings-tab-promptcodes"
+          onClick={() => select("promptcodes")}
+        >
+          Promptcodes
+        </SubTabButton>
+        <SubTabButton
           active={tab === "archive"}
           controls="settings-tab-archive"
           onClick={() => select("archive")}
@@ -179,6 +188,13 @@ export function Settings() {
           className={cn("h-full", tab !== "feedback" && "hidden")}
         >
           {visited.has("feedback") && <FeedbackPanel />}
+        </div>
+        <div
+          id="settings-tab-promptcodes"
+          role="tabpanel"
+          className={cn("h-full", tab !== "promptcodes" && "hidden")}
+        >
+          {visited.has("promptcodes") && <PromptcodesPanel />}
         </div>
         <div
           id="settings-tab-archive"
