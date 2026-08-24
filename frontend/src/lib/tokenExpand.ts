@@ -71,10 +71,13 @@ export function expandComposerTokens(
         const matchedRaw = ch === "#"
           ? docItems.some((d) => d.key === raw)
           : promptcodes.some((c) => c.code === raw);
+        // The quote CLOSES with a blank line (review note): without it,
+        // CommonMark lazy-continuation pulls the words after the token into
+        // the quote — "please /code now" rendered " now" inside the box.
         const marked =
           ch === "#"
             ? `\`${replacement}\``
-            : `\n> ${replacement.split("\n").join("\n> ")}\n`;
+            : `\n> ${replacement.split("\n").join("\n> ")}\n\n`;
         out += marked + (matchedRaw ? "" : tail);
         i = end;
         continue;

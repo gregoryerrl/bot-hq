@@ -875,7 +875,7 @@ describe("ChatInput promptcode picker", () => {
     fireEvent.keyDown(box, { key: "Enter" });
     await waitFor(() =>
       expect(onSend).toHaveBeenCalledWith(
-        "\n> Do n rounds of verification (you decide n), different angles.\n> If a round fails, start over from 1/n\n",
+        "\n> Do n rounds of verification (you decide n), different angles.\n> If a round fails, start over from 1/n\n\n",
       ),
     );
   });
@@ -945,6 +945,29 @@ describe("ChatInput file paste", () => {
     await waitFor(() =>
       expect(onSend).toHaveBeenCalledWith("`/tmp/a b.md`"),
     );
+  });
+
+  it("an attachment token survives a composer remount (cce52574)", async () => {
+    // The user's normal workflow: drop a file, switch sessions (ChatInput
+    // unmounts), come back. The draft restores the token; the persisted map
+    // must restore the PATH behind it — a dead token is pixel-identical to a
+    // live one and silently sent literal prose.
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    localStorage.clear();
+    const { unmount } = render(
+      <ChatInput onSend={() => {}} draftKey="bothq:draft:s-test" />,
+    );
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    pasteInto(box, "file:///tmp/shot.png\n");
+    expect(box).toHaveValue("#shot.png ");
+    unmount();
+
+    render(<ChatInput onSend={onSend} draftKey="bothq:draft:s-test" />);
+    const restored = screen.getByRole("textbox") as HTMLTextAreaElement;
+    expect(restored).toHaveValue("#shot.png ");
+    fireEvent.keyDown(restored, { key: "Enter" });
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("`/tmp/shot.png`"));
+    localStorage.clear();
   });
 
   it("dedupes same-named attachments with a numbered token", () => {

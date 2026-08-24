@@ -207,6 +207,35 @@ export function draftKeyFor(sessionId: string): string {
   return `bothq:draft:${sessionId}`;
 }
 
+/** Suffix deriving the attachment-map key from a draft key — ONE literal, so
+ *  ChatInput (which only has the generic `draftKey` prop) and Providers
+ *  (which clears by session id) cannot drift apart. */
+export const DRAFT_FILES_SUFFIX = ":files";
+
+/** Where a session's attachment token→path map persists (cce52574): the
+ *  sibling of its composer draft, cleared everywhere the draft is. */
+export function draftFilesKeyFor(sessionId: string): string {
+  return `${draftKeyFor(sessionId)}${DRAFT_FILES_SUFFIX}`;
+}
+
+/** Parse a persisted attachment map; garbage reads as "no attachments". */
+function readAttachedFiles(key: string | undefined): PickerItem[] {
+  if (!key) return [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) ?? "[]") as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (f): f is PickerItem =>
+        typeof f === "object" &&
+        f !== null &&
+        typeof (f as { key?: unknown }).key === "string" &&
+        typeof (f as { insert?: unknown }).insert === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
 export function ChatInput({
   placeholder,
   onSend,
@@ -246,12 +275,17 @@ export function ChatInput({
   // typing a slug the roster does not hold, which is their right. Cleared
   // whenever the token itself changes, so the next `@` opens normally.
   const [pickerDismissed, setPickerDismissed] = useState(false);
-  // Files the user dropped/pasted THIS composer session (round 13): each gets
-  // a short `#name.ext` token in the box and this map carries it back to the
-  // real path at Send/Stage. Component-local like the text itself — a token
-  // that outlives the composer (a draft restored after remount) degrades to
-  // literal prose rather than a wrong path.
-  const [attachedFiles, setAttachedFiles] = useState<PickerItem[]>([]);
+  // Files the user dropped/pasted into this composer (round 13): each gets a
+  // short `#name.ext` token in the box and this map carries it back to the
+  // real path at Send/Stage. **Persisted beside the draft** (cce52574): the
+  // draft text survives a remount — switching sessions is the user's normal
+  // workflow — so a memory-only map left the restored `#token` pixel-identical
+  // to a live one while silently sending literal prose. Restored lazily like
+  // the draft itself; cleared wherever the draft is.
+  const filesKey = draftKey ? `${draftKey}${DRAFT_FILES_SUFFIX}` : undefined;
+  const [attachedFiles, setAttachedFiles] = useState<PickerItem[]>(() =>
+    readAttachedFiles(filesKey),
+  );
 
   // A sigil is live only while it has something to offer — with no roster,
   // `@` opens nothing, exactly as before; same rule for `#`.
@@ -453,33 +487,39 @@ export function ChatInput({
    *  earlier attachments and the document list. */
   const attachPaths = (paths: string[]) => {
     if (paths.length === 0) return;
-    setAttachedFiles((prev) => {
-      const taken = new Set<string>([
-        ...prev.map((f) => f.key),
-        ...(docMentionables ?? []).map((d) => d.key),
-      ]);
-      const added: PickerItem[] = [];
-      for (const path of paths) {
-        const existing = prev.find((f) => f.insert === path);
-        if (existing) {
-          added.push(existing);
-          continue;
-        }
-        const base = (path.split("/").pop() || "file").replace(/\s+/g, "-");
-        let key = base;
-        for (let n = 2; taken.has(key); n += 1) {
-          const dot = base.lastIndexOf(".");
-          key = dot > 0 ? `${base.slice(0, dot)}-${n}${base.slice(dot)}` : `${base}-${n}`;
-        }
-        taken.add(key);
-        added.push({ key, label: key, insert: path });
+    // Computed OUTSIDE the state updater (review note on 9a43c5b): the
+    // updater must stay pure — the first cut ran the caret insert inside it,
+    // which was safe only because the insert read `value` non-functionally.
+    // Drops are user-paced, so the closure read of `attachedFiles` cannot
+    // race a second attach in the same tick.
+    const prev = attachedFiles;
+    const taken = new Set<string>([
+      ...prev.map((f) => f.key),
+      ...(docMentionables ?? []).map((d) => d.key),
+    ]);
+    const added: PickerItem[] = [];
+    for (const path of paths) {
+      const existing = prev.find((f) => f.insert === path);
+      if (existing) {
+        added.push(existing);
+        continue;
       }
-      insertAtCaretRef.current(
-        `${added.map((f) => `#${f.key}`).join(" ")} `,
-      );
-      const fresh = added.filter((f) => !prev.includes(f));
-      return fresh.length > 0 ? [...prev, ...fresh] : prev;
-    });
+      const base = (path.split("/").pop() || "file").replace(/\s+/g, "-");
+      let key = base;
+      for (let n = 2; taken.has(key); n += 1) {
+        const dot = base.lastIndexOf(".");
+        key = dot > 0 ? `${base.slice(0, dot)}-${n}${base.slice(dot)}` : `${base}-${n}`;
+      }
+      taken.add(key);
+      added.push({ key, label: key, insert: path });
+    }
+    const fresh = added.filter((f) => !prev.includes(f));
+    if (fresh.length > 0) {
+      const next = [...prev, ...fresh];
+      setAttachedFiles(next);
+      if (filesKey) localStorage.setItem(filesKey, JSON.stringify(next));
+    }
+    insertAtCaretRef.current(`${added.map((f) => `#${f.key}`).join(" ")} `);
   };
 
   const attachPathsRef = useRef(attachPaths);
@@ -553,7 +593,13 @@ export function ChatInput({
     // Drop the key entirely when the box is emptied so abandoned sessions
     // don't accumulate "" entries in localStorage.
     if (next) localStorage.setItem(draftKey, next);
-    else localStorage.removeItem(draftKey);
+    else {
+      localStorage.removeItem(draftKey);
+      // The attachment map travels with the draft (cce52574): an emptied box
+      // has no tokens left for it to resolve.
+      if (filesKey) localStorage.removeItem(filesKey);
+      setAttachedFiles([]);
+    }
   };
 
   // Auto-grow: reset to `auto` so scrollHeight reflects actual content height,

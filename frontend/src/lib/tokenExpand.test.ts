@@ -13,12 +13,12 @@ const CODES = [
 describe("expandComposerTokens", () => {
   it("expands a promptcode as a BLOCKQUOTE snippet (round 13: marked)", () => {
     expect(expandComposerTokens("please /n-verify now", DOCS, CODES)).toBe(
-      "please \n> Do n rounds of verification.\n now",
+      "please \n> Do n rounds of verification.\n\n now",
     );
     // Multiline prompts quote every line.
     const codes = [{ code: "two", prompt: "line one\nline two" }];
     expect(expandComposerTokens("/two", DOCS, codes)).toBe(
-      "\n> line one\n> line two\n",
+      "\n> line one\n> line two\n\n",
     );
   });
 
@@ -33,7 +33,7 @@ describe("expandComposerTokens", () => {
 
   it("sheds trailing punctuation before matching", () => {
     expect(expandComposerTokens("/n-verify.", DOCS, CODES)).toBe(
-      "\n> Do n rounds of verification.\n.",
+      "\n> Do n rounds of verification.\n\n.",
     );
   });
 
@@ -46,9 +46,9 @@ describe("expandComposerTokens", () => {
     expect(expandComposerTokens("cd ~/test", DOCS, codes)).toBe("cd ~/test");
     expect(expandComposerTokens("see (/test)", DOCS, codes)).toBe("see (/test)");
     // `/` opens only at start or after whitespace.
-    expect(expandComposerTokens("/test", DOCS, codes)).toBe("\n> EXPANDED\n");
+    expect(expandComposerTokens("/test", DOCS, codes)).toBe("\n> EXPANDED\n\n");
     expect(expandComposerTokens("say /test now", DOCS, codes)).toBe(
-      "say \n> EXPANDED\n now",
+      "say \n> EXPANDED\n\n now",
     );
   });
 
@@ -74,7 +74,7 @@ describe("expandComposerTokens", () => {
 
   it("an expansion body is never re-scanned", () => {
     const codes = [{ code: "a", prompt: "use /b here" }, { code: "b", prompt: "BOOM" }];
-    expect(expandComposerTokens("/a", DOCS, codes)).toBe("\n> use /b here\n");
+    expect(expandComposerTokens("/a", DOCS, codes)).toBe("\n> use /b here\n\n");
   });
 });
 

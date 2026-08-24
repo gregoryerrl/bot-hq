@@ -12,7 +12,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriEvent } from "./hooks/useTauriEvent";
-import { draftKeyFor } from "./components/ChatInput";
+import { draftKeyFor, draftFilesKeyFor } from "./components/ChatInput";
 import { useHealthStore, type AgentHealth } from "./stores/health";
 import { useContextStore } from "./stores/context";
 import { useChatStore } from "./stores/chat";
@@ -187,6 +187,7 @@ function GlobalEventSync() {
       // and left an orphan `bothq:draft:<sid>` key forever.
       clearChat(p.session_id);
       localStorage.removeItem(draftKeyFor(p.session_id));
+      localStorage.removeItem(draftFilesKeyFor(p.session_id));
     },
     [invalidate, clearHealth, clearActivity, clearContext, clearChat],
   );
@@ -273,6 +274,7 @@ function GlobalEventSync() {
   const onStageDelivered = useCallback(
     (p: { session_id: string }) => {
       localStorage.removeItem(draftKeyFor(p.session_id));
+      localStorage.removeItem(draftFilesKeyFor(p.session_id));
       queryClient.setQueryData(
         ["get_staged_response", { sessionId: p.session_id }],
         null,
