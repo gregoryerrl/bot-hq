@@ -195,8 +195,8 @@ pub struct ParticipantDraft {
     /// dialog's per-participant picker is the override.
     pub model_id: Option<String>,
     /// Per-participant spawn knobs, mirroring the columns 0044 gave the table.
-    /// `None` = inherit, exactly as the `sessions.{brian,rain}_effort` columns
-    /// these generalise mean it.
+    /// `None` = the dialog's Default choice — spawn resolves the role's
+    /// configured default, else the medium floor (no-inherit, 2026-08-25).
     pub effort: Option<String>,
     pub ultracode: Option<bool>,
     /// The palette entry the user picked for this participant, by NAME
