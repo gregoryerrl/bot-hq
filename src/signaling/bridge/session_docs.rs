@@ -134,6 +134,28 @@ impl SignalingBridge {
             let Some(storage) = self.storage.lock().await.clone() else {
                 return Err(anyhow::anyhow!("storage not configured"));
             };
+            // **A phase doc keeps its phase when the caller omits one** (round
+            // 13, found live: an executor's `mode=append` without `phase` on
+            // the `apply` doc nulled the tag through `phase = excluded.phase`,
+            // and the doc vanished from the A tab and every
+            // `session_doc_search(phase=…)` — the reviewer read "[]" over a
+            // 7 KB changelog). An untagged write whose SLUG lands on an
+            // existing phase-tagged row adopts that row's phase instead of
+            // stripping it; genuinely untagged scratch (no such row) is
+            // unchanged.
+            let adopted;
+            let phase = match phase {
+                Some(p) => Some(p),
+                None => {
+                    adopted = storage
+                        .session_document_by_slug(session_id, slug)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|d| d.phase);
+                    adopted.as_deref()
+                }
+            };
             let key = effective_slug(slug, phase);
             // Append only has meaning against an existing doc; appending to a
             // missing one is just a write.
@@ -535,6 +557,70 @@ mod tests {
         // slice would duplicate the whole accumulated prefix into an archive.
         let archives = bridge.session_doc_search("s1", Some("apply@"), None).await.unwrap();
         assert!(archives.is_empty(), "append must not archive; got {archives:?}");
+    }
+
+    #[tokio::test]
+    async fn an_untagged_write_to_a_phase_docs_slug_adopts_its_phase() {
+        // Round 13, observed live in s-9bbff909: three `apply`-doc appends
+        // without `phase` nulled the tag (`phase = excluded.phase`), so
+        // `session_doc_search(phase="apply")` returned [] over a written
+        // changelog. The write must adopt the existing row's phase, for
+        // append AND replace alike — and stay findable by phase.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        bridge
+            .session_doc_write("s1", "apply", "changelog v1", Some("apply"), false)
+            .await
+            .unwrap();
+        // The live failure: an append that omits phase.
+        bridge
+            .session_doc_write("s1", "apply", "batch 2 landed", None, true)
+            .await
+            .unwrap();
+        let doc = storage
+            .session_document_by_slug("s1", "apply")
+            .await
+            .unwrap()
+            .expect("the apply doc exists");
+        assert_eq!(doc.phase.as_deref(), Some("apply"), "append kept the tag");
+        assert!(doc.body.contains("changelog v1") && doc.body.contains("batch 2 landed"));
+
+        // Replace without phase adopts too (and still archives the old body).
+        bridge
+            .session_doc_write("s1", "apply", "changelog v2", None, false)
+            .await
+            .unwrap();
+        let doc = storage
+            .session_document_by_slug("s1", "apply")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.phase.as_deref(), Some("apply"), "replace kept the tag");
+
+        // The retrieval the reviewer actually ran.
+        let found = bridge
+            .session_doc_search("s1", None, Some("apply"))
+            .await
+            .unwrap();
+        assert!(
+            found.iter().any(|d| d.slug == "apply"),
+            "phase-filtered search finds the doc again: {found:?}"
+        );
+
+        // A genuinely untagged scratch doc is untouched by the adoption rule.
+        bridge
+            .session_doc_write("s1", "scratch", "notes", None, false)
+            .await
+            .unwrap();
+        let doc = storage
+            .session_document_by_slug("s1", "scratch")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.phase, None, "scratch stays untagged");
     }
 
     #[tokio::test]
