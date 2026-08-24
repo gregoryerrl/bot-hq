@@ -1149,4 +1149,31 @@ mod tests {
             .unwrap();
         assert!(out.contains("sid=s-env extra=ride-along"), "{out}");
     }
+
+    /// Batch 0 (rc3→1.0.0, dissect items 3/12): the approve path hands the
+    /// STORED command to the shell byte-complete — a multi-line script's
+    /// line-2 assignment is consumed on its last line and a deep-line marker
+    /// executes. The chat row showing only the first line
+    /// (`bridge/util.rs::render_answer`) is display, not execution; if this
+    /// test holds and the display changes claim otherwise, believe this test.
+    #[tokio::test]
+    async fn execute_gated_runs_the_whole_multi_line_command_not_its_first_line() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        let dir = tempfile::tempdir().unwrap();
+        storage
+            .create_session("s-deep", "t", Some(dir.path().to_str().unwrap()))
+            .await
+            .unwrap();
+        let command = "cd .\nMARK=gate-depth-9e1\necho one\necho two\necho three\necho four\necho five\necho six\necho seven\necho eight\necho nine\necho ten\necho eleven\necho twelve\nprintf 'tail:%s\\n' \"$MARK\"";
+        let out = bridge
+            .execute_gated("s-deep", command)
+            .await
+            .unwrap();
+        assert!(
+            out.contains("tail:gate-depth-9e1"),
+            "the last line of a 15-line gated command must execute with line-2 state intact: {out}"
+        );
+    }
 }

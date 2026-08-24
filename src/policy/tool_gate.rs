@@ -574,6 +574,59 @@ mod tests {
         );
     }
 
+    /// The mechanism behind gate `525af951` (s-43567984, dissect item 3): the
+    /// parked script set `FILES="a b …"` and looped `for f in $FILES`, and the
+    /// delivered output was `0 files` with exit 0 — read at the time as "the
+    /// variable didn't survive". It did survive. **zsh does not word-split an
+    /// unquoted parameter expansion** (no `SH_WORD_SPLIT`), so under the
+    /// gate's shell the loop ran ONCE with the whole string as one path,
+    /// every `git cat-file -e` missed, nothing copied, and the last command
+    /// exited 0. bash and sh split it into N words. The command was authored
+    /// against bash semantics and executed under zsh: not a state-loss bug,
+    /// not a truncation bug — a shell-semantics divergence. Batch 8 acts on
+    /// this by surfacing the shell + exit code on every gate result, not by
+    /// swapping the shell (the heredoc test above is the counter-case where
+    /// zsh is the one that works).
+    #[tokio::test]
+    async fn unquoted_expansion_word_splits_in_bash_and_sh_but_not_in_zsh() {
+        let dir = tempdir().unwrap();
+        let command = "FILES=\"alpha beta gamma\"\nn=0\nfor f in $FILES; do n=$((n+1)); done\necho COUNT=$n";
+        let sh = run_in_shell("sh", command, dir.path(), Duration::from_secs(5), &[]).await;
+        assert_eq!(sh.code, 0, "stderr: {:?}", sh.stderr);
+        assert!(sh.stdout.contains("COUNT=3"), "sh splits: {:?}", sh.stdout);
+        if shell_present("bash") {
+            let bash = run_in_shell("bash", command, dir.path(), Duration::from_secs(5), &[]).await;
+            assert!(bash.stdout.contains("COUNT=3"), "bash splits: {:?}", bash.stdout);
+        }
+        if shell_present("zsh") {
+            let zsh = run_in_shell("zsh", command, dir.path(), Duration::from_secs(5), &[]).await;
+            assert_eq!(zsh.code, 0, "stderr: {:?}", zsh.stderr);
+            assert!(
+                zsh.stdout.contains("COUNT=1"),
+                "zsh does NOT split an unquoted expansion — one iteration, whole string: {:?}",
+                zsh.stdout
+            );
+        }
+    }
+
+    /// Exonerates the exec layer for dissect items 3/12: one `shell -c` gets
+    /// the WHOLE multi-line command, an assignment on line 2 is readable on
+    /// the last line, and nothing truncates at the first newline. (The
+    /// first-line rendering in the chat row is a display choice in
+    /// `bridge/util.rs`, not an execution property — Batch 8's T8.)
+    #[tokio::test]
+    async fn a_multi_line_command_executes_past_its_first_line_with_state_intact() {
+        let dir = tempdir().unwrap();
+        let command = "true\nMARK=\"deep-state-7c3\"\necho line-three\necho line-four\necho line-five\necho line-six\necho line-seven\necho line-eight\necho line-nine\necho line-ten\necho line-eleven\necho line-twelve\necho line-thirteen\necho line-fourteen\necho \"tail:$MARK\"";
+        let out = run_in_shell("sh", command, dir.path(), Duration::from_secs(5), &[]).await;
+        assert_eq!(out.code, 0, "stderr: {:?}", out.stderr);
+        assert!(
+            out.stdout.contains("tail:deep-state-7c3"),
+            "line-2 state must reach line 15 of one -c invocation: {:?}",
+            out.stdout
+        );
+    }
+
     #[test]
     fn resolve_keywords_falls_back_to_global() {
         let dir = tempdir().unwrap();
