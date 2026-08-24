@@ -72,12 +72,15 @@ impl Storage {
     /// finally as schema rather than as a display rule. A later declaration
     /// replaces the earlier: the freshest recap is the one the user reads.
     /// Not remotely a tray row: the tray is for questions.
+    /// Returns whether a row was actually written — `false` means the session
+    /// is closed (or unknown) and the declare was REFUSED, which the caller
+    /// must treat as "no halt exists", never as success (828147ad).
     pub async fn declare_session_halt(
         &self,
         session_id: &str,
         agent: &str,
         reason: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // An ordinary halt replaces a temporary one's wake time too: one slot.
         // `closed_at IS NULL`: a CLOSED session refuses the declare (round 13).
         // The live specimen: teardown's kill reached the pump before the row
@@ -96,20 +99,21 @@ impl Storage {
         .bind(session_id)
         .execute(&self.pool)
         .await
-        .with_context(|| format!("declaring halt for session {session_id}"))?;
-        Ok(())
+        .with_context(|| format!("declaring halt for session {session_id}"))
+        .map(|r| r.rows_affected() > 0)
     }
 
     /// A TEMPORARY halt (round 12, migration 0069): the same slot, plus the
     /// RFC3339-Z instant the host wakes the declarer at. The banner counts
     /// down to `wake_at`; `clear_session_halt` clears it with the rest.
+    /// Same `bool` contract as [`Self::declare_session_halt`].
     pub async fn declare_temporary_session_halt(
         &self,
         session_id: &str,
         agent: &str,
         reason: &str,
         wake_at: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // Same closed-row refusal as `declare_session_halt` (round 13).
         sqlx::query(
             "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ?, halt_wake_at = ?              WHERE id = ? AND closed_at IS NULL",
@@ -121,8 +125,8 @@ impl Storage {
         .bind(session_id)
         .execute(&self.pool)
         .await
-        .with_context(|| format!("declaring temporary halt for session {session_id}"))?;
-        Ok(())
+        .with_context(|| format!("declaring temporary halt for session {session_id}"))
+        .map(|r| r.rows_affected() > 0)
     }
 
     /// The wake instant of the session's TEMPORARY halt, or `None` for no halt
@@ -221,7 +225,8 @@ impl Storage {
         .await
         .context("scanning for restart-orphaned sessions")?;
         for id in &orphans {
-            self.declare_session_halt(
+            // The WHERE above already filters closed rows; the bool is moot.
+            let _ = self.declare_session_halt(
                 id,
                 "system",
                 "The app restarted while a turn was in flight — that turn was \
@@ -479,14 +484,19 @@ mod tests {
         s.clear_session_halt("s1").await.unwrap();
 
         s.close_session("s1", false).await.unwrap();
-        s.declare_session_halt("s1", "hands", "ghost").await.unwrap();
+        assert!(
+            !s.declare_session_halt("s1", "hands", "ghost").await.unwrap(),
+            "the refusal is REPORTED, not a silent Ok (828147ad)"
+        );
         assert!(
             s.session_halt("s1").await.unwrap().is_none(),
             "a closed row keeps no ghost halt"
         );
-        s.declare_temporary_session_halt("s1", "hands", "ghost", "2027-01-01T00:00:00Z")
-            .await
-            .unwrap();
+        assert!(
+            !s.declare_temporary_session_halt("s1", "hands", "ghost", "2027-01-01T00:00:00Z")
+                .await
+                .unwrap()
+        );
         assert!(s.session_halt("s1").await.unwrap().is_none());
         assert!(s.session_halt_wake_at("s1").await.unwrap().is_none());
     }

@@ -1313,12 +1313,11 @@ impl SignalingBridge {
     // `gate_age_secs` / `STALE_GATE_MAX_AGE_SECS`.)
 
 
-    /// Shared tail of `mark_awaiting_user` + `request_phase_advance`: flag the
-    /// session awaiting, write a durable `kind=halt` row to `session_tray` (so
-    /// the per-session tray, dashboard tile counter, and header bell reflect the
-    /// wait via `list_pending_tray` — NOT the in-memory pending map, which halts
-    /// don't populate — and it survives a restart), then emit `AwaitingUser` so
-    /// the UI shows the halt; the ring latches on `HaltDeclared` until the user acts.
+    /// Shared tail of `mark_awaiting_user` + `request_phase_advance`: write
+    /// the session's HALT SLOT (rc3 D35 — one slot on the session row; no
+    /// tray row of any kind, `kind=halt` is legacy DATA nothing writes), flag
+    /// the session awaiting, then emit `AwaitingUser` so the UI shows the
+    /// halt; the ring latches on `HaltDeclared` until the user acts.
     /// `halt_ring` is false when the RING ITSELF is the declarer: it has already
     /// stopped where it stands, and telling it again is the phantom-participant
     /// round-trip — `participant_by_slug("system")` finds nobody, warns, and
@@ -1359,7 +1358,23 @@ impl SignalingBridge {
                     }
                     None => storage.declare_session_halt(&session_id, &agent, &text).await,
                 } {
-                    Ok(()) => true,
+                    Ok(true) => true,
+                    // `Ok(false)` is the REFUSAL: the session is closed (or
+                    // gone) and the declare matched no row (round 13,
+                    // 828147ad). Nothing may follow — no awaiting flip, no
+                    // ring `HaltDeclared`, no banner event, no fallback row —
+                    // or the DB ghost the predicate closed becomes a runtime
+                    // ghost: a session stopped and bannered with no halt in
+                    // storage. The one caller racing a close (a pump's
+                    // died-mid-turn declare, an agent halting into a
+                    // concurrent close) simply loses, which is the point.
+                    Ok(false) => {
+                        tracing::debug!(
+                            session_id,
+                            "halt declare refused: the session is closed"
+                        );
+                        return;
+                    }
                     Err(e) => {
                         tracing::warn!(?e, session_id, "declare_session_halt failed");
                         false
@@ -3106,11 +3121,13 @@ mod tests {
     /// session that was stopped, bannered, and had no halt in storage — the
     /// banner disappeared at the next restart while the reason for it did not.
     ///
-    /// Asserted over the source because the failure cannot be induced from a
-    /// test: `declare_session_halt` is an UPDATE, and an UPDATE matching no rows
-    /// is `Ok`, not `Err` — there is no storage state that makes it fail on
-    /// demand. What is checkable is the ORDER and the presence of the
-    /// not-recorded branch, which are the two things that were missing.
+    /// The ORDER half is asserted over the source because a true write
+    /// FAILURE (an `Err`) still cannot be induced from a test. The no-match
+    /// case CAN be now — since round 13 the UPDATE carries `closed_at IS
+    /// NULL` and reports `Ok(false)`, the REFUSAL — and that path is pinned
+    /// behaviorally by `a_halt_on_a_closed_session_is_refused_entirely`
+    /// below: refusal is an early return, never `recorded = false` (which
+    /// would banner a session that has no halt in storage — 828147ad).
     #[test]
     fn the_halt_is_recorded_before_it_is_shown() {
         let src = include_str!("tray.rs");
@@ -3141,6 +3158,63 @@ mod tests {
             "a halt that could not be recorded must not look identical to one that \
              persisted"
         );
+        assert!(
+            body.contains("Ok(false) => {"),
+            "the closed-row REFUSAL must be its own arm — folding it into \
+             `recorded = false` banners a session with no halt in storage \
+             (828147ad)"
+        );
+    }
+
+    /// **A halt on a closed session is refused entirely** (round 13,
+    /// 828147ad). F1's `closed_at IS NULL` predicate made the no-match UPDATE
+    /// reachable; deriving `recorded` from a bare `Ok` then produced the
+    /// runtime ghost — awaiting flipped, `AwaitingUser` emitted, the
+    /// not-recorded notice SUPPRESSED — for a session that held no halt. The
+    /// refusal must leave no trace: flag untouched, no event, no notice row,
+    /// slot empty.
+    #[tokio::test]
+    async fn a_halt_on_a_closed_session_is_refused_entirely() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage.close_session("s1", false).await.unwrap();
+
+        let awaiting = Arc::new(AtomicBool::new(false));
+        bridge
+            .register_session_awaiting("s1".into(), Arc::clone(&awaiting))
+            .await;
+        let mut events = bridge.subscribe();
+
+        bridge
+            .mark_awaiting_user("s1".into(), "hands".into(), "ghost recap".into())
+            .await;
+
+        assert!(
+            storage.session_halt("s1").await.unwrap().is_none(),
+            "no slot on a closed row"
+        );
+        assert!(
+            !awaiting.load(Ordering::Acquire),
+            "the awaiting flag must not flip for a refused halt"
+        );
+        let mut saw_awaiting = false;
+        while let Ok(ev) = events.try_recv() {
+            if matches!(ev, SignalingEvent::AwaitingUser { .. }) {
+                saw_awaiting = true;
+            }
+        }
+        assert!(!saw_awaiting, "no banner event for a refused halt");
+        let notices = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.content.contains("could not be recorded"))
+            .count();
+        assert_eq!(notices, 0, "no false not-recorded notice either");
     }
 
     #[tokio::test]
