@@ -3114,7 +3114,11 @@ mod tests {
         let data_dir = TempDir::new().unwrap();
 
         let mut store = ClaudeOverrides::default();
-        store.all.effort = Some("medium".into()); // the fan-out floor
+        // `_all.effort` is set to a NON-floor value on purpose: since the
+        // no-inherit change it must reach nobody — a role without its own
+        // entry floors to DEFAULT_EFFORT ("medium"), and "low" here is how the
+        // assertions below tell the floor from an `_all` leak.
+        store.all.effort = Some("low".into());
         store
             .per_role
             .entry("eyes".into())
@@ -3177,19 +3181,28 @@ mod tests {
             "the role's MCP opt-out must reach the forwarded mcp-config"
         );
 
-        // The other role is untouched and falls back to `_all`, which is what
-        // makes the assertion above about the ROLE and not about the store.
+        // The other role has no entry of its own: it floors to DEFAULT_EFFORT.
+        // Getting `_all`'s "low" here would be the inherit leak the 2026-08-25
+        // change removed — which is what makes the assertion above about the
+        // ROLE and not about the store.
         let for_executor = spawn_of(executor.clone()).await;
-        assert_eq!(for_executor.overrides.effort.as_deref(), Some("medium"));
+        assert_eq!(
+            for_executor.overrides.effort.as_deref(),
+            Some(crate::claude_config::DEFAULT_EFFORT),
+            "an unconfigured role must floor to the default, not inherit _all's low"
+        );
         assert!(crate::agents::spawn::debug_env(&for_executor)
             .contains(&("CLAUDE_CODE_EFFORT_LEVEL".into(), "medium".into())));
         assert!(crate::claude_config::overrides::disabled_mcp(&for_executor.overrides).is_empty());
 
-        // A participant with no role has no per-role entry to find.
+        // A participant with no role has no per-role entry to find — same floor.
         let mut roleless = reviewer.clone();
         roleless.role_id = None;
         let for_roleless = spawn_of(roleless).await;
-        assert_eq!(for_roleless.overrides.effort.as_deref(), Some("medium"));
+        assert_eq!(
+            for_roleless.overrides.effort.as_deref(),
+            Some(crate::claude_config::DEFAULT_EFFORT)
+        );
     }
 
     /// rc3 **P1**: the path a spawn records is the file holding the composed
@@ -3250,11 +3263,12 @@ mod tests {
     /// shipped five times. Deleting the `set_spawn_knobs` call in
     /// `participant_spawn_config` must turn this red.
     ///
-    /// It asserts the FLAG separately from the values, because they answer
-    /// different questions and the common path makes them look alike: a
-    /// participant that inherits everything reconciles to `None`, so
-    /// `effort_at_spawn IS NULL` is what success looks like. Only
-    /// `spawn_knobs_recorded` distinguishes that from a row nothing ever spawned.
+    /// It asserts the FLAG separately from the values because they answer
+    /// different questions. Since the no-inherit floor (2026-08-25) every
+    /// spawn records a CONCRETE effort — `effort_at_spawn IS NULL` now only
+    /// means a row that predates the floor (or nothing ever spawned, which
+    /// `spawn_knobs_recorded` still distinguishes). The no-pick case below
+    /// pins the floor value itself onto the row.
     #[tokio::test]
     async fn a_spawn_records_the_reconciled_knobs_on_the_participant_row() {
         let s = Storage::memory().await.unwrap();
@@ -3328,6 +3342,37 @@ mod tests {
             stored.as_deref(),
             Some("prompt"),
             "the exact composed string the spawn received is inspectable on the row"
+        );
+
+        // The floor reaches the ROW: a participant with no pick and no role
+        // config records DEFAULT_EFFORT, not NULL — this is the wire between
+        // reconcile's floor and what the spawn badge shows.
+        let peer = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap();
+        participant_spawn_config(
+            &s,
+            &peer,
+            resolve_participant_config(&s, &peer).await,
+            &paths,
+            &None,
+            "prompt".to_string(),
+            "127.0.0.1:1".parse().unwrap(),
+            mcp_temp.path(),
+            None,
+            &SignalingBridge::new(),
+        )
+        .await
+        .expect("spawn config");
+        let floored: (Option<String>, i64) = sqlx::query_as(
+            "SELECT effort_at_spawn, spawn_knobs_recorded FROM session_participants WHERE id = ?",
+        )
+        .bind(peer.id)
+        .fetch_one(s.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            floored,
+            (Some(crate::claude_config::DEFAULT_EFFORT.to_string()), 1),
+            "a no-pick, no-config spawn must record the floor, never NULL"
         );
     }
 

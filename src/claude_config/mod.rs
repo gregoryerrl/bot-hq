@@ -82,7 +82,7 @@ fn write_with_mode(path: &std::path::Path, body: &[u8], _mode: u32) -> std::io::
 
 pub use overrides::{
     load_overrides, resolve_agent_overrides, save_overrides, AgentOverride, ClaudeOverrides,
-    SkillVisibility,
+    SkillVisibility, DEFAULT_EFFORT,
 };
 pub use reader::{config_dir, read_claude_config};
 pub use writer::{set_bool, set_plugin_enabled, set_string};

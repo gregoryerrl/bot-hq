@@ -139,10 +139,21 @@ pub fn save_overrides(data_dir: &Path, store: &ClaudeOverrides) -> Result<()> {
     Ok(())
 }
 
+/// The effort a participant spawns with when neither its per-run pick nor its
+/// role's default says otherwise — the floor `reconcile_spawn_knobs` applies.
+///
+/// Mirrored by `DEFAULT_EFFORT` in `frontend/src/lib/effort.ts` (every dropdown
+/// shows this as the unconfigured-role value); a test in this module pins the
+/// two literals together, because the two layers disagreeing is exactly the
+/// silent-mislabel bug the no-inherit change closed.
+pub const DEFAULT_EFFORT: &str = "medium";
+
 /// Resolve the effective override for a participant playing `role_slug`: the
-/// `_all` default with that role's entry layered on top (per-key, the role
-/// wins). `None` — a participant with no role row — and an unconfigured role
-/// both resolve to `_all` alone.
+/// `_all` default with that role's entry layered on top — EXCEPT effort and
+/// ultracode, which are per-role-only (no-inherit, 2026-08-25). `_all` still
+/// fans out skills/plugins/mcp/memory knobs, but a role without its own
+/// effort/ultracode falls to the spawn floor ([`DEFAULT_EFFORT`]), never to
+/// `_all` or to the user's own settings.json knob.
 ///
 /// **The key is a ROLE slug, not an agent name and not a participant slug.**
 /// This used to match the literals `"brian"` / `"rain"`; both production callers
@@ -150,18 +161,19 @@ pub fn save_overrides(data_dir: &Path, store: &ClaudeOverrides) -> Result<()> {
 /// per-agent overrides resolved to the global config without a word.
 pub fn resolve_agent_overrides(store: &ClaudeOverrides, role_slug: Option<&str>) -> AgentOverride {
     let Some(specific) = role_slug.and_then(|slug| store.per_role.get(slug)) else {
-        return store.all.clone();
+        let mut base = store.all.clone();
+        base.effort = None;
+        base.ultracode = None;
+        return base;
     };
     let mut merged = store.all.clone();
     merged.skills.extend(specific.skills.clone());
     merged.plugins.extend(specific.plugins.clone());
     merged.mcp.extend(specific.mcp.clone());
-    if specific.effort.is_some() {
-        merged.effort = specific.effort.clone();
-    }
-    if specific.ultracode.is_some() {
-        merged.ultracode = specific.ultracode;
-    }
+    // Unconditional on purpose: a per-role entry that exists but carries no
+    // effort (skills-only) must NOT leak `_all.effort` past the spawn floor.
+    merged.effort = specific.effort.clone();
+    merged.ultracode = specific.ultracode;
     if specific.disable_auto_memory.is_some() {
         merged.disable_auto_memory = specific.disable_auto_memory;
     }
@@ -280,6 +292,52 @@ mod tests {
         // _all's skill "a" survives; hands' "b" is layered on.
         assert_eq!(merged.skills.get("a"), Some(&SkillVisibility::Off));
         assert_eq!(merged.skills.get("b"), Some(&SkillVisibility::NameOnly));
+    }
+
+    /// No-inherit (2026-08-25): effort/ultracode never come from `_all`, in
+    /// BOTH shapes of miss — no per-role entry at all, and an entry that exists
+    /// but is skills-only. The second is the one an `is_some()` guard would
+    /// leak: the entry is found, so the old code kept `_all.effort` as the
+    /// merge base and the floor downstream never saw the absence.
+    #[test]
+    fn all_effort_and_ultracode_never_leak_into_a_role() {
+        let mut store = ClaudeOverrides::default();
+        store.all.effort = Some("max".into());
+        store.all.ultracode = Some(true);
+        store.all.skills.insert("a".into(), SkillVisibility::Off);
+        // Skills-only entry for hands; no entry at all for eyes.
+        store
+            .per_role
+            .entry("hands".into())
+            .or_default()
+            .skills
+            .insert("b".into(), SkillVisibility::NameOnly);
+
+        for slug in [Some("hands"), Some("eyes"), None] {
+            let merged = resolve_agent_overrides(&store, slug);
+            assert_eq!(merged.effort, None, "effort must not inherit from _all ({slug:?})");
+            assert_eq!(merged.ultracode, None, "ultracode must not inherit from _all ({slug:?})");
+            // The fan-out itself is untouched.
+            assert_eq!(merged.skills.get("a"), Some(&SkillVisibility::Off));
+        }
+    }
+
+    /// The two layers of the no-inherit floor show the same literal. Rust owns
+    /// the resolution (`reconcile_spawn_knobs`), TypeScript owns every dropdown
+    /// that DISPLAYS the unconfigured-role value — drift between them is the
+    /// shows-medium-runs-something-else bug this change exists to close.
+    #[test]
+    fn frontend_default_effort_matches_the_rust_floor() {
+        let ts = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/frontend/src/lib/effort.ts"
+        ))
+        .expect("frontend/src/lib/effort.ts must exist — the display half of the effort floor");
+        let needle = format!("DEFAULT_EFFORT = \"{DEFAULT_EFFORT}\"");
+        assert!(
+            ts.contains(&needle),
+            "effort.ts must carry `{needle}` so both layers show the same floor"
+        );
     }
 
     #[test]

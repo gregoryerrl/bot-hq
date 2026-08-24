@@ -131,8 +131,10 @@ pub struct SessionCreateOptions {
 pub struct ParticipantPick {
     pub role_id: i64,
     pub model_id: Option<String>,
-    /// `None` = inherit. Per participant since rc3 D12; the dialog used to
-    /// carry one effort select per AGENT, in two fixed blocks.
+    /// `None` = the dialog's Default choice: spawn resolves the role's
+    /// configured default, else the `DEFAULT_EFFORT` floor (no-inherit,
+    /// 2026-08-25). Per participant since rc3 D12; the dialog used to carry
+    /// one effort select per AGENT, in two fixed blocks.
     pub effort: Option<String>,
     pub ultracode: Option<bool>,
     /// The palette entry the user picked for this row, by NAME ("Cyan"), or
@@ -286,26 +288,30 @@ pub struct ParticipantView {
     /// (rc3 **D20**, migration 0053). `participant_display_name` is what joins
     /// this with the role and the model; the frontend must not re-derive it.
     pub label: Option<String>,
-    /// This participant's effort override (rc3 D12), or `null` to inherit.
+    /// This participant's effort pick (rc3 D12), or `null` for the dialog's
+    /// Default choice (the role's configured default, else the floor).
     ///
     /// The New Session dialog writes both this and `ultracode` per row and
     /// nothing could read them back, so the session view had no way to show
     /// what a running participant was actually spawned with. Read off the
     /// participant row, where spawn reads them from.
     pub effort: Option<String>,
-    /// This participant's ultracode override (rc3 D12), or `null` to inherit.
+    /// This participant's ultracode pick (rc3 D12), or `null` for Default.
     pub ultracode: Option<bool>,
     /// What this participant was ACTUALLY spawned with (migration 0061) — the
     /// pair left standing after the precedence chain and its exclusion rule.
     ///
     /// **This is the field that answers the doc above `effort`.** That one is
-    /// the user's CHOICE, and a choice of "inherit" says nothing about what was
-    /// inherited: the chain runs per-role → `_all` → the config knob → the
-    /// per-run pick, and `effort=max` + `ultracode` are mutually exclusive so
-    /// the reconciliation can clear either. The frontend cannot compute this —
+    /// the user's CHOICE, and a choice of Default says nothing about what it
+    /// resolved to: the chain runs per-run pick → the role's
+    /// `per_role[slug]` entry → the `DEFAULT_EFFORT` floor (no-inherit,
+    /// 2026-08-25 — `_all` and the settings.json knob are out of it), and
+    /// `effort=max` + `ultracode` are mutually exclusive so the reconciliation
+    /// can flip either. The frontend cannot compute this —
     /// `claude-overrides.json` keys by ROLE SLUG, which this view does not
     /// carry — and re-resolving it here would answer "what it WOULD be spawned
-    /// with now", which diverges the moment Claude Config is edited mid-session.
+    /// with now", which diverges the moment the role's default is edited
+    /// mid-session.
     pub effort_at_spawn: Option<String>,
     pub ultracode_at_spawn: Option<bool>,
     /// Whether the two above describe a real spawn. The common path reconciles

@@ -1730,8 +1730,10 @@ context_window: number | null }
  */
 export type ParticipantPick = { roleId: number; modelId: string | null; 
 /**
- * `None` = inherit. Per participant since rc3 D12; the dialog used to
- * carry one effort select per AGENT, in two fixed blocks.
+ * `None` = the dialog's Default choice: spawn resolves the role's
+ * configured default, else the `DEFAULT_EFFORT` floor (no-inherit,
+ * 2026-08-25). Per participant since rc3 D12; the dialog used to carry
+ * one effort select per AGENT, in two fixed blocks.
  */
 effort: string | null; ultracode: boolean | null; 
 /**
@@ -1817,7 +1819,8 @@ color: string | null;
  */
 label: string | null; 
 /**
- * This participant's effort override (rc3 D12), or `null` to inherit.
+ * This participant's effort pick (rc3 D12), or `null` for the dialog's
+ * Default choice (the role's configured default, else the floor).
  * 
  * The New Session dialog writes both this and `ultracode` per row and
  * nothing could read them back, so the session view had no way to show
@@ -1826,7 +1829,7 @@ label: string | null;
  */
 effort: string | null; 
 /**
- * This participant's ultracode override (rc3 D12), or `null` to inherit.
+ * This participant's ultracode pick (rc3 D12), or `null` for Default.
  */
 ultracode: boolean | null; 
 /**
@@ -1834,13 +1837,16 @@ ultracode: boolean | null;
  * pair left standing after the precedence chain and its exclusion rule.
  * 
  * **This is the field that answers the doc above `effort`.** That one is
- * the user's CHOICE, and a choice of "inherit" says nothing about what was
- * inherited: the chain runs per-role → `_all` → the config knob → the
- * per-run pick, and `effort=max` + `ultracode` are mutually exclusive so
- * the reconciliation can clear either. The frontend cannot compute this —
+ * the user's CHOICE, and a choice of Default says nothing about what it
+ * resolved to: the chain runs per-run pick → the role's
+ * `per_role[slug]` entry → the `DEFAULT_EFFORT` floor (no-inherit,
+ * 2026-08-25 — `_all` and the settings.json knob are out of it), and
+ * `effort=max` + `ultracode` are mutually exclusive so the reconciliation
+ * can flip either. The frontend cannot compute this —
  * `claude-overrides.json` keys by ROLE SLUG, which this view does not
  * carry — and re-resolving it here would answer "what it WOULD be spawned
- * with now", which diverges the moment Claude Config is edited mid-session.
+ * with now", which diverges the moment the role's default is edited
+ * mid-session.
  */
 effort_at_spawn: string | null; ultracode_at_spawn: boolean | null; 
 /**

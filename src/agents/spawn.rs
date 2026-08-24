@@ -1261,13 +1261,17 @@ pub(crate) fn ensure_claude_runnable(_bin: &str) -> Result<()> {
 }
 
 /// Overlay the participant's own effort/ultracode picks onto the persistent
-/// per-role overrides, then reconcile the pair — **the whole precedence chain,
-/// in one place.**
+/// per-role overrides, reconcile the pair, then floor it — **the whole
+/// precedence chain, in one place.**
 ///
-/// `persistent` is what `claude-overrides.json` resolved for this participant's
-/// ROLE (per-role → `_all` → the `env.CLAUDE_CODE_EFFORT_LEVEL` knob).
-/// `pick_effort` / `pick_ultracode` are the participant's D12 columns, and they
-/// WIN — a choice made for this run beats a standing default.
+/// The chain is two steps and a floor (no-inherit, 2026-08-25): the per-run
+/// pick, else the role's default (`per_role[slug]` — `resolve_agent_overrides`
+/// no longer lets effort/ultracode fall through to `_all`), else
+/// [`crate::claude_config::DEFAULT_EFFORT`]. Every spawn therefore emits a
+/// concrete `CLAUDE_CODE_EFFORT_LEVEL`, so the user's own settings.json knob
+/// never reaches an agent. `pick_effort` / `pick_ultracode` are the
+/// participant's D12 columns, and they WIN — a choice made for this run beats
+/// a standing default.
 ///
 /// ## Why the reconciliation exists
 ///
@@ -1313,6 +1317,16 @@ pub fn reconcile_spawn_knobs(
         } else {
             persistent.effort = None;
         }
+    }
+    if persistent.ultracode == Some(true) {
+        // Ultracode pins effort to xhigh at runtime; record and emit the pair
+        // explicitly so a role that never receives `--settings` (no edit_files)
+        // still spawns at a truthful CLAUDE_CODE_EFFORT_LEVEL, and so the
+        // user's own settings.json effort cannot collide with the flag.
+        persistent.effort = Some("xhigh".into());
+    } else if persistent.effort.is_none() {
+        // The no-inherit floor: nothing picked, role default absent.
+        persistent.effort = Some(crate::claude_config::DEFAULT_EFFORT.into());
     }
 }
 
@@ -1992,7 +2006,11 @@ mod tests {
 
         let mut o = persistent_for_hands(|o| o.effort = Some("max".into()));
         reconcile_spawn_knobs(&mut o, None, Some(true));
-        assert_eq!(o.effort, None, "the inherited max must be cleared");
+        assert_eq!(
+            o.effort.as_deref(),
+            Some("xhigh"),
+            "the inherited max must be cleared — and the floor records ultracode's implied xhigh"
+        );
         assert_eq!(o.ultracode, Some(true), "the per-run ultracode is what survives");
     }
 
@@ -2002,6 +2020,11 @@ mod tests {
         let mut o = persistent_for_hands(|o| o.ultracode = Some(true));
         reconcile_spawn_knobs(&mut o, None, None);
         assert_eq!(o.ultracode, Some(true), "control: the inherited ultracode is live");
+        assert_eq!(
+            o.effort.as_deref(),
+            Some("xhigh"),
+            "a legacy ultracode-only override floors to its implied xhigh"
+        );
 
         let mut o = persistent_for_hands(|o| o.ultracode = Some(true));
         reconcile_spawn_knobs(&mut o, Some("max"), None);
@@ -2012,13 +2035,39 @@ mod tests {
     /// Both knobs picked in the same run is NOT a collision — the user said both
     /// explicitly, and `max` yields because ultracode is the stronger posture.
     /// Pinned because it is the one branch the two collision tests never reach:
-    /// they each leave one pick on Inherit.
+    /// they each leave one pick on Default.
     #[test]
     fn picking_both_in_one_run_keeps_ultracode() {
         let mut o = persistent_for_hands(|_| {});
         reconcile_spawn_knobs(&mut o, Some("max"), Some(true));
         assert_eq!(o.ultracode, Some(true));
-        assert_eq!(o.effort, None, "ultracode is the stronger posture, so max yields");
+        assert_eq!(
+            o.effort.as_deref(),
+            Some("xhigh"),
+            "ultracode is the stronger posture, so max yields to its implied xhigh"
+        );
+    }
+
+    /// The no-inherit floor (2026-08-25): nothing picked, nothing configured
+    /// for the role → `DEFAULT_EFFORT`, never `None`. This is what guarantees
+    /// every spawn emits a concrete `CLAUDE_CODE_EFFORT_LEVEL` and the user's
+    /// own settings.json knob stops reaching agents.
+    #[test]
+    fn nothing_picked_nothing_configured_floors_to_default_effort() {
+        let mut o = persistent_for_hands(|_| {});
+        reconcile_spawn_knobs(&mut o, None, None);
+        assert_eq!(o.effort.as_deref(), Some(crate::claude_config::DEFAULT_EFFORT));
+        assert_eq!(o.ultracode, None);
+
+        // A per-run level pick sent with ultracode:false (the dialog's shape
+        // for every concrete pick) clears a role-default ultracode.
+        let mut o = persistent_for_hands(|o| {
+            o.effort = Some("xhigh".into());
+            o.ultracode = Some(true);
+        });
+        reconcile_spawn_knobs(&mut o, Some("high"), Some(false));
+        assert_eq!(o.effort.as_deref(), Some("high"));
+        assert_eq!(o.ultracode, Some(false), "the explicit clear survives");
     }
 
     /// **The equality this whole redesign rests on.** Recording the reconciled
@@ -2031,12 +2080,18 @@ mod tests {
     /// chosen to prevent.
     #[test]
     fn the_reconciled_pair_is_what_reaches_the_child() {
-        // Ultracode wins: env carries no effort, --settings carries ultracode.
+        // Ultracode wins: env carries the implied xhigh (never the cleared max
+        // — and never nothing, so a role that gets no --settings still spawns
+        // at a truthful level), --settings carries ultracode.
         let mut o = persistent_for_hands(|o| o.effort = Some("max".into()));
         reconcile_spawn_knobs(&mut o, None, Some(true));
         let mut c = cfg();
         c.overrides = o.clone();
-        assert_eq!(effort_env(&c), None, "a cleared effort must not reach the env");
+        assert_eq!(
+            effort_env(&c).as_deref(),
+            Some("xhigh"),
+            "ultracode must reach the env as its implied xhigh, not as the cleared max"
+        );
         assert!(
             settings_fragment(&c).contains("ultracode"),
             "the surviving ultracode must reach --settings"

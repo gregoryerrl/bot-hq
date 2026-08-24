@@ -692,6 +692,7 @@ every other FE area imports.
 | `frontend/src/components/Markdown.tsx`, `frontend/src/components/ErrorBanner.tsx`, `frontend/src/components/ConfirmDialog.tsx`, `frontend/src/components/SubTabButton.tsx` | shared atoms | S |
 | `frontend/src/components/authorColor.ts` | label → hue class; D20 8-hue palette named by colour | S |
 | `frontend/src/lib/participants.ts` | `ParticipantView`, label/slug/slot-key resolution, `isSpawnable` (stale mirror), runtime keys | M |
+| `frontend/src/lib/effort.ts` | the effort model post-no-inherit: `EFFORT_LEVELS`/`ULTRACODE`/`DEFAULT_EFFORT` + choice↔stored-pair mapping shared by the dialog and the Roles tab; `DEFAULT_EFFORT` is pinned to the Rust floor by `overrides.rs::frontend_default_effort_matches_the_rust_floor` | S |
 | `frontend/src/lib/participantNames.ts` | `UNKNOWN_PARTICIPANT` leaf (breaks a cycle) | S |
 | `frontend/src/lib/time.ts`, `frontend/src/lib/phase.ts`, `frontend/src/lib/diffGroups.ts`, `frontend/src/lib/cn.ts`, `frontend/src/lib/sessionId.ts`, `frontend/src/lib/staging.ts`, `frontend/src/lib/filePaste.ts`, `frontend/src/lib/tokenExpand.ts` | time/phase/diff-grouping/clsx/short-session-id/staged-answer/file-paste/token-expansion helpers (`stagedKey` + `picksDiffer` are the re-stage effect's pure half; `uriListToPaths`/`pathsToInsertText` are the composer's paste-drop half) | S |
 | `frontend/src/lib/attention.ts` | idle-unflagged badge label + tooltip; single source for SessionTile and SessionView, which had it duplicated verbatim | S |
