@@ -247,6 +247,13 @@ export function HaltBanner({
   const now = useCountdown(wakeAt);
   const reasonText = halt && typeof halt.reason === "string" ? halt.reason : "";
   const [reasonRef, measuredOverflow] = useMeasuredClampOverflow(reasonText, expanded);
+  // A NEW recap opens collapsed (EYES B3): nothing else resets `expanded`, so
+  // a halt declared after the user expanded the previous one rendered
+  // pre-expanded — and, since the measurement pauses while expanded, carried
+  // the OLD recap's frozen toggle. One slot, fresh reading posture per halt.
+  useEffect(() => {
+    setExpanded(false);
+  }, [reasonText]);
   const wakeAtMs = wakeAt ? parseUtcMs(wakeAt) : null;
   const pending = rows.filter((r) => r.status === "pending");
   const approvals = pending.filter(isApproval);

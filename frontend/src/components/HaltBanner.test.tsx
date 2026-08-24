@@ -334,6 +334,24 @@ describe("HaltBanner", () => {
     }
   });
 
+  it("a NEW recap opens collapsed even if the previous one was expanded (EYES B3)", () => {
+    // The slot is one halt; the reading posture must be one recap's, not the
+    // last one's. Before the reset, a fresh two-line recap rendered inside
+    // the expanded scroller with the previous measurement's stale toggle.
+    const long =
+      "l1\nl2\nl3\nl4\nl5 — long enough that the toggle exists and gets used.";
+    const { rerender } = render(
+      <HaltBanner halt={halt({ reason: long })} rows={[]} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /show the full recap/i }));
+    expect(screen.getByText(/l1/).className).not.toContain("line-clamp-3");
+    rerender(<HaltBanner halt={halt({ reason: "fresh two-liner\nsecond line" })} rows={[]} />);
+    const fresh = screen.getByText(/fresh two-liner/);
+    expect(fresh.className).toContain("line-clamp-3");
+    expect(fresh.className).not.toContain("overflow-y-auto");
+    expect(screen.queryByRole("button", { name: /show less/i })).toBeNull();
+  });
+
   it("tells the user what clears it", () => {
     // "Sending a message clears the halt" is the semantic (one entry point,
     // D28); saying so turns a stopped session from a mystery into an
