@@ -593,6 +593,9 @@ async fn spawn_session_handle(
             Some(sha)
         }
         Ok(None) | Err(_) => {
+            // Set only when the write-once insert loses to an existing row —
+            // the stored anchor then outranks this spawn's capture (EYES A2).
+            let mut return_sha: Option<String> = None;
             let captured: Option<String> = if let Some(repo) = working_repo_path.as_ref() {
                 let repo = repo.clone();
                 tokio::task::spawn_blocking(move || -> Option<String> {
@@ -616,13 +619,28 @@ async fn spawn_session_handle(
             };
             if let Some(ref sha) = captured {
                 tracing::info!(session_id = %session.id, %sha, "captured session_start_sha");
-                if let Err(e) = storage.set_session_start_sha_if_absent(&session.id, sha).await {
-                    tracing::warn!(session_id = %session.id, ?e, "session_start_sha not persisted; the next respawn will rebaseline");
+                match storage.set_session_start_sha_if_absent(&session.id, sha).await {
+                    // `false` = the row already held an anchor this spawn's
+                    // read missed (a transient read error above, or a racing
+                    // spawn wrote first). The ROW is the anchor — using the
+                    // fresh capture here would hand this spawn a different
+                    // diff base than the one persisted (EYES A2). Re-read and
+                    // defer to it; only an unreadable row keeps the capture.
+                    Ok(false) => {
+                        if let Ok(Some(stored)) = storage.session_start_sha(&session.id).await {
+                            tracing::debug!(session_id = %session.id, %stored, "session_start_sha: row already anchored; deferring to it");
+                            return_sha = Some(stored);
+                        }
+                    }
+                    Ok(true) => {}
+                    Err(e) => {
+                        tracing::warn!(session_id = %session.id, ?e, "session_start_sha not persisted; the next respawn will rebaseline");
+                    }
                 }
             } else {
                 tracing::debug!(session_id = %session.id, "no session_start_sha (no repo or git failed)");
             }
-            captured
+            return_sha.or(captured)
         }
     };
 
@@ -2253,6 +2271,46 @@ mod tests {
             prod.matches(".persisted_ipav_phase(").count(),
             1,
             "the session start reads the persisted phase exactly once. Zero              means 0063 ships as a column nothing loads and every session              resumes at Investigate again. If this reads 2, a COMMENT wrote the              name with a leading `.` — name it bare in prose"
+        );
+    }
+
+    /// **The write-once diff anchor is actually consulted at spawn** (1.0.0
+    /// Batch 1 T7, EYES A1 / advisory d376ff16). The storage test proves the
+    /// write-once SQL; nothing there pins that the spawn path READS the row
+    /// before capturing — delete the read arm and every test stays green while
+    /// T7 ships inert, the five-time wire defect. Source pins, because the
+    /// spawn path launches real subprocesses no test can follow:
+    ///   1. the row is read (`.session_start_sha(`) BEFORE any `rev-parse`
+    ///      capture,
+    ///   2. a capture is persisted through the write-once insert,
+    ///   3. a lost insert (`Ok(false)`) defers back to the stored value.
+    #[test]
+    fn the_spawn_reads_the_persisted_anchor_before_capturing() {
+        let src = include_str!("session.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        let read = prod
+            .find(".session_start_sha(")
+            .expect("the spawn reads the persisted anchor");
+        // The args-array form is the CALL; line-104's prose says `git
+        // rev-parse` and must not satisfy this pin.
+        let capture = prod
+            .find("[\"rev-parse\", \"HEAD\"]")
+            .expect("the spawn can still capture HEAD for a fresh row");
+        assert!(
+            read < capture,
+            "the row is consulted BEFORE any capture — a respawn must not rebaseline"
+        );
+        assert!(
+            prod.contains(".set_session_start_sha_if_absent("),
+            "a fresh capture is persisted write-once, or the next respawn rebaselines"
+        );
+        assert!(
+            prod.matches(".session_start_sha(").count() >= 2,
+            "losing the write-once insert re-reads the row and defers to it (EYES A2): \
+             the stored anchor outranks this spawn's capture"
         );
     }
 
