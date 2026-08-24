@@ -1,4 +1,5 @@
 import { render, waitFor } from "@testing-library/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type Event, type EventCallback } from "@tauri-apps/api/event";
@@ -109,6 +110,46 @@ describe("Providers — the slot-shaped runtime wire", () => {
     // Keyed on the payload: another session's draft is untouched.
     expect(localStorage.getItem("bothq:draft:s1")).toBe("still being typed");
     localStorage.removeItem("bothq:draft:s1");
+  });
+
+  // Round 13, issues.md "still happening": the draft key was only ONE of four
+  // stale artifacts a delivery-to-an-unmounted-view leaves. The cached
+  // `get_staged_response` re-marked the box staged on return (rehydrating the
+  // DELIVERED text), and the surviving trayStaging picks beside answered rows
+  // made SessionView's re-stage effect RESEND the message. This handler is the
+  // only one that always hears the delivery, so it clears all of it.
+  it("drops the delivered session's staged cache and tray picks, no view mounted", async () => {
+    const { useTrayStaging } = await import("./stores/trayStaging");
+    useTrayStaging.setState({
+      staged: { s2: { "choice-a": "Yes" }, s1: { "choice-b": "No" } },
+    });
+    let client: import("@tanstack/react-query").QueryClient | null = null;
+    function Probe() {
+      client = useQueryClient();
+      return null;
+    }
+    render(
+      <Providers>
+        <Probe />
+      </Providers>,
+    );
+    await waitFor(() => expect(handlers.has("session:stage_delivered")).toBe(true));
+    client!.setQueryData(["get_staged_response", { sessionId: "s2" }], {
+      text: "already sent",
+      picks: [{ choice_id: "choice-a", picked: "Yes" }],
+    });
+
+    emit("session:stage_delivered", { session_id: "s2" });
+
+    // The stale response is nulled — nothing left to re-mark the box staged…
+    expect(
+      client!.getQueryData(["get_staged_response", { sessionId: "s2" }]),
+    ).toBeNull();
+    // …and the picks are consumed — nothing left for the re-stage effect.
+    expect(useTrayStaging.getState().staged["s2"]).toBeUndefined();
+    // Another session's staging is untouched.
+    expect(useTrayStaging.getState().staged["s1"]).toEqual({ "choice-b": "No" });
+    useTrayStaging.setState({ staged: {} });
   });
 
   it("subscribes the plugin registry events once, for the tab row and the manager alike (round 8)", async () => {

@@ -17,6 +17,7 @@ import { useHealthStore, type AgentHealth } from "./stores/health";
 import { useContextStore } from "./stores/context";
 import { useChatStore } from "./stores/chat";
 import { useActivityStore, type SessionActivity } from "./stores/activity";
+import { useTrayStaging } from "./stores/trayStaging";
 import {
   busyBySlot,
   seedRuntimeStores,
@@ -260,9 +261,29 @@ function GlobalEventSync() {
   // handler, the key kept the sent text, and the box refilled on return
   // (issues.md #3). The composer also drops the key at stage time; this is the
   // half that catches a stage made before that shipped, or from another view.
-  const onStageDelivered = useCallback((p: { session_id: string }) => {
-    localStorage.removeItem(draftKeyFor(p.session_id));
-  }, []);
+  // …and (round 13, issues.md "still happening"): the localStorage half alone
+  // left THREE stale artifacts behind for an unmounted view — the non-null
+  // `get_staged_response` cache, the session's picks in the module-level
+  // trayStaging store, and the un-refreshed tray rows. On return, the cached
+  // response re-marked the box staged (rehydrating the DELIVERED text into
+  // it), and the re-stage effect could see answered rows + surviving picks and
+  // re-stage — i.e. resend — the message. Clearing all of it here, at the one
+  // handler that always hears the delivery, is the whole fix; the mounted
+  // SessionView handler stays as the fast path.
+  const onStageDelivered = useCallback(
+    (p: { session_id: string }) => {
+      localStorage.removeItem(draftKeyFor(p.session_id));
+      queryClient.setQueryData(
+        ["get_staged_response", { sessionId: p.session_id }],
+        null,
+      );
+      useTrayStaging.getState().clear(p.session_id);
+      void queryClient.invalidateQueries({
+        queryKey: ["list_session_tray", { sessionId: p.session_id }],
+      });
+    },
+    [queryClient],
+  );
 
   useTauriEvent("session:stage_delivered", onStageDelivered, [onStageDelivered]);
   useTauriEvent("session:pending_choice", onTray, [onTray]);
