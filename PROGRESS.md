@@ -110,6 +110,17 @@ The 15-hour overnight session (`s-1c6db975`) came back CLEAN — 25/25 gates,
 8 temporary halts used as designed, transient stalls self-healed, empty halt
 slot at close — the harness working as built.
 
+**Post-relaunch rework** (the user, on the live round-13 build): composer
+tokens now STAY tokens — `#bot-hq/conventions.md`, `/n-verify` — the way
+claude-code shows them, expanding once when the text leaves the box (Send and
+Stage, `lib/tokenExpand.ts`); backticks escape every sigil, `@` included
+(`core/mentions.rs` skips code spans with the same odd-backtick heuristic);
+CL mentions are always project-namespaced so same-named files stay apart
+(`2f7a511`). A live smoke with the webview tools then verified the running
+build (Promptcodes subtab rendering the user's own `/test` code, session
+tiles, the A-tab live diff) and caught the panel still describing the old
+expand-in-box behaviour — fixed (`68f0740`). cargo 1312/0, vitest 505/505.
+
 ---
 
 ## 2026-08-19 (round 12) — the round the live session was dissected, s-73825e99
