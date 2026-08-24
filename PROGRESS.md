@@ -127,8 +127,13 @@ backtick heuristics to each other (`5f6eb2f`). Two more user asks closed the
 slice: dropped/pasted files insert short `#name.ext` tokens (composer-local
 map back to the real path; dedup by numbered suffix) and expansions leave the
 composer MARKED — inline code for references, blockquotes for prompts — so
-sent messages render as boxed snippets in the chat stream (`9a43c5b`).
-cargo 1313/0, vitest 508/508.
+sent messages render as boxed snippets in the chat stream (`9a43c5b`); the
+reviewer then caught the attachment map dying on remount — it now persists
+beside the draft, restored lazily and cleared wherever the draft is
+(`78a7b9a`) — and a final decorative pass paints LIVE tokens as tinted chips
+in the box via a transparent-text backdrop mirror, per-family hues, with a
+dead token showing no chip at all (`baabaa5` — the reviewer's visibility
+note made literal). cargo 1313/0, vitest 513/513.
 
 ---
 
