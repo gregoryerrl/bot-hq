@@ -11,24 +11,29 @@ const CODES = [
 ];
 
 describe("expandComposerTokens", () => {
-  it("expands a promptcode token at send, keeping surrounding prose", () => {
+  it("expands a promptcode as a BLOCKQUOTE snippet (round 13: marked)", () => {
     expect(expandComposerTokens("please /n-verify now", DOCS, CODES)).toBe(
-      "please Do n rounds of verification. now",
+      "please \n> Do n rounds of verification.\n now",
+    );
+    // Multiline prompts quote every line.
+    const codes = [{ code: "two", prompt: "line one\nline two" }];
+    expect(expandComposerTokens("/two", DOCS, codes)).toBe(
+      "\n> line one\n> line two\n",
     );
   });
 
-  it("expands document tokens to their references", () => {
+  it("expands document tokens as inline code", () => {
     expect(expandComposerTokens("read #doc/investigate", DOCS, CODES)).toBe(
-      "read (session doc: investigate)",
+      "read `(session doc: investigate)`",
     );
     expect(expandComposerTokens("see #bot-hq/conventions.md", DOCS, CODES)).toBe(
-      "see /Users/x/library/projects/bot-hq/conventions.md",
+      "see `/Users/x/library/projects/bot-hq/conventions.md`",
     );
   });
 
   it("sheds trailing punctuation before matching", () => {
     expect(expandComposerTokens("/n-verify.", DOCS, CODES)).toBe(
-      "Do n rounds of verification..",
+      "\n> Do n rounds of verification.\n.",
     );
   });
 
@@ -41,9 +46,9 @@ describe("expandComposerTokens", () => {
     expect(expandComposerTokens("cd ~/test", DOCS, codes)).toBe("cd ~/test");
     expect(expandComposerTokens("see (/test)", DOCS, codes)).toBe("see (/test)");
     // `/` opens only at start or after whitespace.
-    expect(expandComposerTokens("/test", DOCS, codes)).toBe("EXPANDED");
+    expect(expandComposerTokens("/test", DOCS, codes)).toBe("\n> EXPANDED\n");
     expect(expandComposerTokens("say /test now", DOCS, codes)).toBe(
-      "say EXPANDED now",
+      "say \n> EXPANDED\n now",
     );
   });
 
@@ -69,7 +74,7 @@ describe("expandComposerTokens", () => {
 
   it("an expansion body is never re-scanned", () => {
     const codes = [{ code: "a", prompt: "use /b here" }, { code: "b", prompt: "BOOM" }];
-    expect(expandComposerTokens("/a", DOCS, codes)).toBe("use /b here");
+    expect(expandComposerTokens("/a", DOCS, codes)).toBe("\n> use /b here\n");
   });
 });
 

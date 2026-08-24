@@ -809,7 +809,7 @@ describe("ChatInput document picker", () => {
     fireEvent.keyDown(box, { key: "Enter" });
     await waitFor(() =>
       expect(onSend).toHaveBeenCalledWith(
-        "/Users/x/library/projects/bot-hq/conventions.md",
+        "`/Users/x/library/projects/bot-hq/conventions.md`",
       ),
     );
   });
@@ -827,6 +827,7 @@ describe("ChatInput document picker", () => {
   });
 
   it("keeps the @ and # sources separate", () => {
+    // (attached files also ride the # picker — covered by the paste tests.)
     render(
       <ChatInput
         onSend={() => {}}
@@ -874,7 +875,7 @@ describe("ChatInput promptcode picker", () => {
     fireEvent.keyDown(box, { key: "Enter" });
     await waitFor(() =>
       expect(onSend).toHaveBeenCalledWith(
-        "Do n rounds of verification (you decide n), different angles.\nIf a round fails, start over from 1/n",
+        "\n> Do n rounds of verification (you decide n), different angles.\n> If a round fails, start over from 1/n\n",
       ),
     );
   });
@@ -932,12 +933,26 @@ describe("ChatInput file paste", () => {
     });
   }
 
-  it("inserts a Finder-copied file as its quoted absolute path", () => {
-    render(<ChatInput onSend={() => {}} />);
+  it("inserts a Finder-copied file as a short #token, expanding at send", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} />);
     const box = screen.getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: "", selectionStart: 0 } });
     pasteInto(box, "file:///tmp/a%20b.md\n");
-    expect(box).toHaveValue('"/tmp/a b.md" ');
+    // The token, not the path (round 13) — basename, whitespace sanitized.
+    expect(box).toHaveValue("#a-b.md ");
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith("`/tmp/a b.md`"),
+    );
+  });
+
+  it("dedupes same-named attachments with a numbered token", () => {
+    render(<ChatInput onSend={() => {}} />);
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    pasteInto(box, "file:///one/report.md\n");
+    pasteInto(box, "file:///two/report.md\n");
+    expect(box).toHaveValue("#report.md #report-2.md ");
   });
 
   it("leaves plain-text pastes to the browser default", () => {

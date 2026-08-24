@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { uriListToPaths, quotePath, pathsToInsertText } from "./filePaste";
+import { uriListToPaths } from "./filePaste";
 
 describe("uriListToPaths", () => {
   it("decodes file URIs, one per line, skipping comments and non-files", () => {
@@ -15,11 +15,3 @@ describe("uriListToPaths", () => {
   });
 });
 
-describe("pathsToInsertText", () => {
-  it("quotes only the paths that need it", () => {
-    expect(quotePath("/tmp/plain.md")).toBe("/tmp/plain.md");
-    expect(pathsToInsertText(["/tmp/a b.md", "/tmp/c.md"])).toBe(
-      '"/tmp/a b.md" /tmp/c.md',
-    );
-  });
-});

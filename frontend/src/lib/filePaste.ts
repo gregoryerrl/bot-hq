@@ -23,13 +23,7 @@ export function uriListToPaths(uriList: string): string[] {
     });
 }
 
-/** Quote a path for the message box when it contains whitespace, so the agent
- *  (and any shell it feeds the path to) reads one token. */
-export function quotePath(p: string): string {
-  return /\s/.test(p) ? `"${p}"` : p;
-}
-
-/** Join dropped/pasted paths into the text the composer inserts. */
-export function pathsToInsertText(paths: string[]): string {
-  return paths.map(quotePath).join(" ");
-}
+// (`quotePath`/`pathsToInsertText` were removed in round 13: dropped files
+// now insert short `#name.ext` tokens and the composer's expansion map wraps
+// the real path in inline code at Send — no shell-quoting of raw paths in the
+// box any more.)

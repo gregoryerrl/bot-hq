@@ -29,6 +29,13 @@ const TRAILING_PUNCT = /[.,;:!?)\]]+$/;
  * are left alone — the backend parses those. Unknown tokens are prose and
  * pass through; replacements are emitted to an output buffer and never
  * re-scanned, so an expansion body containing `/something` cannot cascade.
+ *
+ * Expansions leave MARKED (round 13, the user: "enclose it in a snippet/box…
+ * so the message looks more organized"): a `#` reference lands as inline
+ * code (`` `path` ``), a `/` promptcode as a blockquote — chat rows render
+ * markdown, so the sent message shows the expansion boxed, and the agents
+ * read the same prose either way. The added backticks come in PAIRS, so the
+ * odd-count escape heuristic downstream is unaffected.
  */
 export function expandComposerTokens(
   text: string,
@@ -64,7 +71,11 @@ export function expandComposerTokens(
         const matchedRaw = ch === "#"
           ? docItems.some((d) => d.key === raw)
           : promptcodes.some((c) => c.code === raw);
-        out += replacement + (matchedRaw ? "" : tail);
+        const marked =
+          ch === "#"
+            ? `\`${replacement}\``
+            : `\n> ${replacement.split("\n").join("\n> ")}\n`;
+        out += marked + (matchedRaw ? "" : tail);
         i = end;
         continue;
       }

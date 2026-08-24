@@ -7,7 +7,7 @@ import { cn } from "../lib/cn";
 import { authorColorClass } from "./authorColor";
 import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import { anyBusy, isLocked, type AgentBusy, type SessionActivity } from "../stores/activity";
-import { pathsToInsertText, uriListToPaths } from "../lib/filePaste";
+import { uriListToPaths } from "../lib/filePaste";
 import { expandComposerTokens, insideBacktickSpan } from "../lib/tokenExpand";
 
 /** One participant the `@` picker can insert (rc3 D17). */
@@ -246,6 +246,12 @@ export function ChatInput({
   // typing a slug the roster does not hold, which is their right. Cleared
   // whenever the token itself changes, so the next `@` opens normally.
   const [pickerDismissed, setPickerDismissed] = useState(false);
+  // Files the user dropped/pasted THIS composer session (round 13): each gets
+  // a short `#name.ext` token in the box and this map carries it back to the
+  // real path at Send/Stage. Component-local like the text itself — a token
+  // that outlives the composer (a draft restored after remount) degrades to
+  // literal prose rather than a wrong path.
+  const [attachedFiles, setAttachedFiles] = useState<PickerItem[]>([]);
 
   // A sigil is live only while it has something to offer — with no roster,
   // `@` opens nothing, exactly as before; same rule for `#`.
@@ -268,7 +274,7 @@ export function ChatInput({
             insert: `@${m.slug}`,
           }))
         : token.sigil === "#"
-          ? (docMentionables ?? [])
+          ? [...(docMentionables ?? []), ...attachedFiles]
           : (promptcodes ?? []).map((c) => {
               const firstLine = c.prompt.split("\n", 1)[0] ?? "";
               return {
@@ -334,7 +340,13 @@ export function ChatInput({
       // The box keeps the tokens; what leaves the composer is expanded. The
       // staged snapshot is therefore the EXPANDED text (a reload-while-staged
       // rehydrates it — the deliverable, not the shorthand).
-      await onStage(expandComposerTokens(text, docMentionables ?? [], promptcodes ?? []));
+      await onStage(
+        expandComposerTokens(
+          text,
+          [...(docMentionables ?? []), ...attachedFiles],
+          promptcodes ?? [],
+        ),
+      );
       // The text stays in the (now read-only) box — it IS the staged message.
       // But the DRAFT key is dropped: from here the backend holds the text
       // (`stagedText` rehydrates the box after a reload), and the key was what
@@ -435,7 +447,45 @@ export function ChatInput({
   const insertAtCaretRef = useRef(insertAtCaret);
   insertAtCaretRef.current = insertAtCaret;
 
-  // Files dragged onto the window insert as absolute paths. Tauri v2 keeps
+  /** Register dropped/pasted paths and insert their short `#` tokens at the
+   *  caret — the sigil look the user asked for, instead of raw paths. Keys
+   *  are sanitized basenames, deduped with `-2`-style suffixes against both
+   *  earlier attachments and the document list. */
+  const attachPaths = (paths: string[]) => {
+    if (paths.length === 0) return;
+    setAttachedFiles((prev) => {
+      const taken = new Set<string>([
+        ...prev.map((f) => f.key),
+        ...(docMentionables ?? []).map((d) => d.key),
+      ]);
+      const added: PickerItem[] = [];
+      for (const path of paths) {
+        const existing = prev.find((f) => f.insert === path);
+        if (existing) {
+          added.push(existing);
+          continue;
+        }
+        const base = (path.split("/").pop() || "file").replace(/\s+/g, "-");
+        let key = base;
+        for (let n = 2; taken.has(key); n += 1) {
+          const dot = base.lastIndexOf(".");
+          key = dot > 0 ? `${base.slice(0, dot)}-${n}${base.slice(dot)}` : `${base}-${n}`;
+        }
+        taken.add(key);
+        added.push({ key, label: key, insert: path });
+      }
+      insertAtCaretRef.current(
+        `${added.map((f) => `#${f.key}`).join(" ")} `,
+      );
+      const fresh = added.filter((f) => !prev.includes(f));
+      return fresh.length > 0 ? [...prev, ...fresh] : prev;
+    });
+  };
+
+  const attachPathsRef = useRef(attachPaths);
+  attachPathsRef.current = attachPaths;
+
+  // Files dragged onto the window insert as short tokens. Tauri v2 keeps
   // dragDropEnabled on (HTML5 drop never fires) and its event carries real OS
   // paths — the thing a DOM drop cannot give. Registered while the composer is
   // mounted; the gate and closed-session bars unmount it, so a drop only ever
@@ -450,8 +500,7 @@ export function ChatInput({
         const un = await getCurrentWebview().onDragDropEvent((event) => {
           if (event.payload.type !== "drop") return;
           const paths = event.payload.paths ?? [];
-          if (paths.length > 0)
-            insertAtCaretRef.current(`${pathsToInsertText(paths)} `);
+          if (paths.length > 0) attachPathsRef.current(paths);
         });
         if (cancelled) un();
         else unlisten = un;
@@ -475,7 +524,7 @@ export function ChatInput({
     const paths = uriList ? uriListToPaths(uriList) : [];
     if (paths.length > 0) {
       e.preventDefault();
-      insertAtCaret(`${pathsToInsertText(paths)} `);
+      attachPaths(paths);
       return;
     }
     if (!savePastedImage) return;
@@ -490,7 +539,7 @@ export function ChatInput({
         const ext = (file.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
         const bytes = new Uint8Array(await file.arrayBuffer());
         const path = await savePastedImage(bytes, ext);
-        insertAtCaretRef.current(`${path} `);
+        attachPathsRef.current([path]);
       } catch (err) {
         setError(errorMessage(err));
       }
@@ -536,7 +585,13 @@ export function ChatInput({
     setSending(true);
     setError(null);
     try {
-      await onSend(expandComposerTokens(text, docMentionables ?? [], promptcodes ?? []));
+      await onSend(
+        expandComposerTokens(
+          text,
+          [...(docMentionables ?? []), ...attachedFiles],
+          promptcodes ?? [],
+        ),
+      );
       updateValue("");
     } catch (err) {
       // Keep `value` so the user can retry without retyping, and surface the
