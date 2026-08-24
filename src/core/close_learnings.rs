@@ -110,6 +110,16 @@ pub fn decide(
     writer_unwell: bool,
     path: ClosePath,
 ) -> Epilogue {
+    // Evidence of a write outranks busy-ness (Batch 9 T18, dissect C9): an
+    // AGENT-path close is Busy by construction — the agent is mid-turn
+    // calling close_session — so SkipBusy-first made every such close log
+    // "skipped: busy" even when the delta was demonstrably on disk, and the
+    // truthful reason (already handled) was unreachable. Both are skips;
+    // only the record differs, and the record is the point.
+    let already = cl_written || (close_nudged && matches!(path, ClosePath::Agent));
+    if already {
+        return Epilogue::SkipAlreadyHandled;
+    }
     if !matches!(
         activity,
         SessionActivity::Idle | SessionActivity::AwaitingUser
@@ -133,10 +143,6 @@ pub fn decide(
     // cover ("the USER's Close button ... kills every subprocess without anyone
     // being asked"), because an agent that called the tool once and never
     // retried had already set the flag.
-    let already = cl_written || (close_nudged && matches!(path, ClosePath::Agent));
-    if already {
-        return Epilogue::SkipAlreadyHandled;
-    }
     Epilogue::Run
 }
 
@@ -431,11 +437,21 @@ mod tests {
     }
 
     #[test]
-    fn busy_outranks_every_other_reason_to_skip() {
-        // Precedence, pinned: a mid-turn close is reported as the stop it is,
-        // not as a capability or bookkeeping answer.
+    fn evidence_of_a_write_outranks_busy_in_the_record() {
+        // Precedence INVERTED on purpose (Batch 9 T18, supersedes
+        // `busy_outranks_every_other_reason_to_skip`): an agent-path close is
+        // Busy by construction — the agent is mid-turn calling close_session —
+        // so busy-first made every such close log "skipped: busy" even when
+        // the delta was demonstrably on disk. Both are skips; the RECORD is
+        // what differs, and the truthful record is the already-handled one.
         assert_eq!(
             decide(SessionActivity::Busy, false, true, true, false, ClosePath::Agent),
+            Epilogue::SkipAlreadyHandled
+        );
+        // Busy still wins when there is NO write evidence — a mid-turn close
+        // with nothing persisted is reported as the stop it is.
+        assert_eq!(
+            decide(SessionActivity::Busy, true, false, false, false, ClosePath::User),
             Epilogue::SkipBusy
         );
     }

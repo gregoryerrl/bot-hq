@@ -332,6 +332,12 @@ pub struct CancelEvent {
     /// 1 = queued, 0 = dropped (full/closed channel), None = no such agent.
     pub slot0_interrupt_queued: Option<i64>,
     pub slot1_interrupt_queued: Option<i64>,
+    /// Idle AT SETTLE — after the escalation window and any kill completed —
+    /// NOT idle at the moment Stop was pressed (Batch 9 T15, dissect #24: all
+    /// six rows of a session read `both_idle=1` and were called a telemetry
+    /// lie against activity rows stamped at press time; both were true — this
+    /// bool is simply the later instant). `1` on a hard cancel means the kill
+    /// settled and every pump went idle, which is the escalation working.
     pub both_idle: i64,
     pub cancel_superseded: i64,
     pub idled_since_cancel: i64,

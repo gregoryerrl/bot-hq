@@ -612,11 +612,14 @@ async fn call_tool(
             // no row records that (the tool text used to promise one).
             // Nothing to do bridge-side; the call just needs to succeed.
             Ok(ToolCallResult::text(
-                "peer_ack noted — it becomes a DONE vote only if this turn is \
-                 content-free (or you passed `final: true`). A turn carrying \
-                 substantive text (>200 chars) still ends as an ordinary turn and \
-                 the ack does not count: reviews and corrections must never be \
-                 silently downgraded to agreement.",
+                "peer_ack noted — it becomes a DONE vote when this turn is \
+                 content-free, OR when you passed `final: true` (the deliberate \
+                 override: final counts even on a substantive turn). Without \
+                 `final`, a turn carrying substantive text (>200 chars) ends as \
+                 an ordinary spoken turn and the ack does not count: reviews and \
+                 corrections must never be silently downgraded to agreement. A \
+                 counted ack still settles nothing alone — the session settles \
+                 when every active participant is done.",
             ))
         }
         "pass_turn" => {

@@ -5,6 +5,37 @@
 use super::*;
 
 impl Storage {
+    /// Has ANY CL file of `project` (or `_globals`) been index-touched since
+    /// `since`? (1.0.0 Batch 9 T5, dissect #10.) The close-out gate's
+    /// `cl_written` used to live only in the bridge's per-PROCESS map, so a
+    /// respawn — every reopen — forgot a delta that was already on disk and
+    /// re-nudged for it. The index row's `updated_at` moves on every
+    /// `cl_write_file` and on any `cl_rescan` after an out-of-band edit; a
+    /// write another session made since `since` also matches, which for a
+    /// nudge SUPPRESSOR is the safe direction. An edit never rescanned stays
+    /// invisible — documented, not solved.
+    pub async fn cl_written_since(&self, project: Option<&str>, since: &str) -> Result<bool> {
+        let (n,): (i64,) = match project {
+            Some(p) => {
+                sqlx::query_as(
+                    "SELECT COUNT(*) FROM cl_index \
+                     WHERE (project_id = ? OR project_id = '_globals') AND updated_at >= ?",
+                )
+                .bind(p)
+                .bind(since)
+                .fetch_one(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_as("SELECT COUNT(*) FROM cl_index WHERE updated_at >= ?")
+                    .bind(since)
+                    .fetch_one(&self.pool)
+                    .await?
+            }
+        };
+        Ok(n > 0)
+    }
+
     // ---- cl_index --------------------------------------------------------
 
     /// Upsert a CL index entry. Used by the backfill scan AND by the UI's

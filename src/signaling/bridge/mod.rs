@@ -1217,10 +1217,39 @@ impl SignalingBridge {
     /// entry has never touched the CL and was never nudged, which is what the
     /// default says.
     pub async fn close_gate_flags(&self, session_id: &str) -> (bool, bool) {
-        let gate = self.session_close_gate.lock().await;
-        gate.get(session_id)
-            .map(|s| (s.cl_written, s.close_nudged))
-            .unwrap_or((false, false))
+        let (mem_written, nudged) = {
+            let gate = self.session_close_gate.lock().await;
+            gate.get(session_id)
+                .map(|s| (s.cl_written, s.close_nudged))
+                .unwrap_or((false, false))
+        };
+        if mem_written {
+            return (true, nudged);
+        }
+        // The in-memory flag is PER-PROCESS and a reopen respawns the process
+        // (Batch 9 T5, dissect #10: close #1 said cl_written=true, the
+        // respawned close #2 said false and re-nudged for a delta that had
+        // been on disk for five minutes). Fall back to durable evidence: any
+        // index-touched CL write for this session's project since the session
+        // began. Fail-safe FALSE — an unreadable index must not suppress the
+        // nudge.
+        let durable = async {
+            let storage = self.storage.lock().await.clone()?;
+            let since = storage
+                .get_session(session_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.created_at)?;
+            let project = self.project_for_session(session_id).await;
+            storage
+                .cl_written_since(project.as_deref(), &since)
+                .await
+                .ok()
+        }
+        .await
+        .unwrap_or(false);
+        (durable, nudged)
     }
 
     /// A3b: should the agent's `close_session` be soft-gated with a

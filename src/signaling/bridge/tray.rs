@@ -282,6 +282,22 @@ impl SignalingBridge {
         let stale_internal_id = match &storage {
             Some(storage) => match storage.get_tray_entry(&stale_choice_id).await {
                 Ok(Some(row)) => {
+                    // The answer-vs-supersede race (Batch 9 T3, dissect #17):
+                    // the user's pick for this row landed ten seconds after an
+                    // agent superseded it — the answer was delivered against a
+                    // retired row (answered_at NULL, the pick stranded) and
+                    // the replacement was never seen. A row that is no longer
+                    // pending has an answer in flight or landed: REFUSE and
+                    // point the agent at reading it instead of replacing it.
+                    // (A pick still STAGED client-side is invisible here —
+                    // that half of the race closes at delivery, which answers
+                    // the original row whatever happened since.)
+                    if row.status != "pending" {
+                        anyhow::bail!(
+                            "not superseded: {stale_choice_id} is '{}' — an answer landed                              or is in flight; read the user's pick instead of replacing                              the question",
+                            row.status
+                        );
+                    }
                     if row.agent != agent || row.session_id != session_id {
                         tracing::warn!(
                             %stale_choice_id,
@@ -1124,10 +1140,29 @@ impl SignalingBridge {
         // difference is a concurrent `advance_phase` landing in that window,
         // where taking the post-time phase is the correct one — it is the phase
         // the row says the agent was told.
+        // The open-blocking banner rides EVERY user-origin delivery, not only
+        // the typed-message path (Batch 9 T12, dissect #21): a tray answer
+        // landing while a blocking finding was open used to carry a bare
+        // phase envelope, so the banner appeared on one delivery and vanished
+        // on the next while the finding still gated commits. Same fail-safe-0
+        // posture as `broadcast_user_message` — the banner is salience, not
+        // the gate.
+        let open_blocking = {
+            let storage = self.storage.lock().await.clone();
+            match storage {
+                Some(s) => s
+                    .count_open_blocking_findings(&session_id)
+                    .await
+                    .unwrap_or(0) as usize,
+                None => 0,
+            }
+        };
         let envelope = self
             .current_session_phase(&session_id)
             .await
-            .map(|phase| crate::storage::Envelope::phase(phase.name()));
+            .map(|phase| {
+                crate::storage::Envelope::phase(phase.name()).with_open_blocking(open_blocking)
+            });
         let receipt = {
             let storage = self.storage.lock().await.clone();
             match storage {

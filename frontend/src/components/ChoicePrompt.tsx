@@ -40,6 +40,11 @@ interface ChoicePromptProps {
  * twice — first for resolve-on-click, then for the Other box — and both were
  * a second answer path racing the batch.
  */
+/** The canonical staged text for the one-click dismissal — the agent reads
+ *  it verbatim as the user's answer and knows to find the substance in the
+ *  accompanying message. */
+export const ANSWERED_IN_CHAT = "(answered in my chat message — read it there)";
+
 export function ChoicePrompt({
   choice,
   stagedOption,
@@ -72,7 +77,7 @@ export function ChoicePrompt({
         </div>
       )}
 
-      <div className="mt-2">
+      <div className="mt-2 flex items-center gap-1.5">
         <input
           type="text"
           value={other}
@@ -83,6 +88,28 @@ export function ChoicePrompt({
           placeholder="Other — type a custom answer; it sends with your message…"
           className="w-full rounded border border-outline/40 bg-surface px-2 py-1 font-mono text-xs text-on-surface placeholder:text-on-surface-variant/70 focus:border-secondary focus:outline-none"
         />
+        {/* One-click "I answered this in my message" (Batch 9 T3, dissect
+            #18): prose answers used to leave the row pending until the AGENT
+            noticed and superseded it — four times in one dissected session.
+            This is an Other-preset, not a new send path: it stages the
+            canonical text and delivers with the composer's Send like any
+            other answer, so the agent reads it as the user's words and the
+            row clears with the batch. */}
+        <Button
+          size="sm"
+          variant="ghost"
+          className={cn(
+            "shrink-0 whitespace-nowrap",
+            other === ANSWERED_IN_CHAT && "ring-1 ring-primary text-primary",
+          )}
+          title="Stage: the answer is in my chat message — clears this question when you Send"
+          onClick={() => {
+            setOther(ANSWERED_IN_CHAT);
+            onOther(choice.choice_id, ANSWERED_IN_CHAT);
+          }}
+        >
+          Answered in chat
+        </Button>
       </div>
     </div>
   );

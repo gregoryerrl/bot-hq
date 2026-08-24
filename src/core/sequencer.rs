@@ -1497,10 +1497,16 @@ impl RingState {
             // the only way to diagnose a ring that stopped is to infer it
             // from delivery rows after the fact.
             if !live {
+                // `carried_epoch = 0` is "no epoch at all" (the field's unset
+                // default), not merely a very stale one — a self-woken
+                // background continuation is the usual source. Named in the
+                // log so the two failure shapes stop reading identically
+                // (Batch 9 T17, dissect #26).
                 debug!(
                     session = %deps.session_id,
                     participant_id,
                     carried_epoch = completed,
+                    no_epoch = completed == 0,
                     live_epoch = self.epoch,
                     holder = ?self.holder.as_ref().map(|h| h.id),
                     "sequencer: completion discarded — the ring did NOT step"
