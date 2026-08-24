@@ -98,6 +98,12 @@ pub struct ClIndexEntryView {
     pub created_at: String,
     pub updated_at: String,
     pub agent_visible: bool,
+    /// The RESOLVED on-disk location (project root + file_path), mirroring the
+    /// MCP tool's field: consumers must never construct a path from
+    /// `project_id` + `file_path` themselves — root-level `_globals` files live
+    /// directly under the library root, so the naive join does not exist.
+    /// `None` when the project root cannot be resolved.
+    pub abs_path: Option<String>,
 }
 
 impl From<ClIndexEntry> for ClIndexEntryView {
@@ -111,6 +117,9 @@ impl From<ClIndexEntry> for ClIndexEntryView {
             created_at: e.created_at,
             updated_at: e.updated_at,
             agent_visible: e.agent_visible,
+            // Resolved by the command, which holds the bridge; a bare row
+            // conversion cannot know the project root.
+            abs_path: None,
         }
     }
 }
@@ -201,7 +210,25 @@ pub async fn cl_index_search(
     let rows = bridge
         .cl_index_search(project.as_deref(), query.as_deref())
         .await?;
-    Ok(rows.into_iter().map(Into::into).collect())
+    // Resolve each row's on-disk location the way the agent-side MCP tool does
+    // (`jsonrpc.rs` cl_index_search): per-project root, joined with file_path.
+    let mut roots: std::collections::HashMap<String, Option<std::path::PathBuf>> =
+        std::collections::HashMap::new();
+    let mut views = Vec::with_capacity(rows.len());
+    for r in rows {
+        if !roots.contains_key(&r.project_id) {
+            let root = bridge.cl_project_root(&r.project_id).await;
+            roots.insert(r.project_id.clone(), root);
+        }
+        let abs_path = roots
+            .get(&r.project_id)
+            .and_then(|root| root.as_ref())
+            .map(|root| root.join(&r.file_path).display().to_string());
+        let mut view: ClIndexEntryView = r.into();
+        view.abs_path = abs_path;
+        views.push(view);
+    }
+    Ok(views)
 }
 
 #[tauri::command]

@@ -16,29 +16,44 @@ type Mentionable = {
   label: string;
 };
 
+/** One row any sigil picker can offer: what to read, what to insert. */
+type PickerItem = {
+  /** The short handle after the sigil (`@slug` / `#doc-slug` / `/code`) —
+   *  matched by prefix, printed as the mono hint. */
+  key: string;
+  /** What the user reads — role · model, a doc title, a code's first line. */
+  label: string;
+  /** The text the pick puts in the box (a trailing space is added for it). */
+  insert: string;
+};
+
 /**
- * The `@`-token the caret is sitting in, or `null`.
+ * The sigil-token the caret is sitting in, or `null`.
  *
- * Walks BACK from the caret to the nearest `@`, giving up at whitespace — so
- * `@adv|` is a live token and `@adv thoughts|` is not, which is what makes the
- * picker close by itself once the user moves on.
+ * Generalized from the `@` walker (rc3 D17) for `#` documents and `/`
+ * promptcodes — same walk, same boundaries, so the three pickers cannot
+ * drift: walks BACK from the caret to the nearest sigil in `sigils`, giving
+ * up at whitespace — `@adv|` is a live token and `@adv thoughts|` is not,
+ * which is what makes a picker close by itself once the user moves on.
  *
  * The boundary rule matches the backend parser (`core::mentions`) rather than
- * approximating it: an `@` preceded by an alphanumeric is part of an email
- * address, not a mention, and offering a picker there would suggest bot-hq is
- * about to do something it will not.
+ * approximating it: a sigil preceded by an alphanumeric is part of a word —
+ * an email address for `@`, a path segment for `/`, `issue#5` for `#` — and
+ * offering a picker there would suggest bot-hq is about to do something it
+ * will not.
  */
-function activeMention(
+function activeToken(
   text: string,
   caret: number,
-): { start: number; query: string } | null {
+  sigils: string,
+): { sigil: string; start: number; query: string } | null {
   let i = caret;
   while (i > 0) {
     const ch = text[i - 1];
-    if (ch === "@") {
+    if (sigils.includes(ch)) {
       const before = i >= 2 ? text[i - 2] : undefined;
       if (before !== undefined && /[a-zA-Z0-9]/.test(before)) return null;
-      return { start: i - 1, query: text.slice(i, caret) };
+      return { sigil: ch, start: i - 1, query: text.slice(i, caret) };
     }
     if (/\s/.test(ch)) return null;
     i -= 1;
@@ -57,14 +72,11 @@ function activeMention(
  * the label at all is still worth it, because the user reads `EYES` and
  * `DeepSeek`, never the slug.
  */
-function matchMentionables(
-  all: Mentionable[],
-  query: string,
-): Mentionable[] {
+function matchPickerItems(all: PickerItem[], query: string): PickerItem[] {
   const q = query.toLowerCase();
   if (!q) return all;
   return all.filter((m) => {
-    if (m.slug.toLowerCase().startsWith(q)) return true;
+    if (m.key.toLowerCase().startsWith(q)) return true;
     return m.label
       .toLowerCase()
       .split(/[^a-z0-9]+/)
@@ -85,6 +97,16 @@ interface ChatInputProps {
    * what every surface that is not a session chat wants.
    */
   mentionables?: Mentionable[];
+  /**
+   * Internal documents the `#` picker can reference — this session's IPAV /
+   * custom docs and the Context Library's files (ideas.md, 2026-08-24). Picking
+   * one inserts its `insert` text: an absolute path for a CL file (agents Read
+   * it), a `(session doc: slug)` reference for a session doc (agents hold
+   * `session_doc_read`). Insertion happens at pick time — what you see in the
+   * box is exactly what sends; nothing expands later. Absent or empty, `#`
+   * opens nothing.
+   */
+  docMentionables?: PickerItem[];
   /**
    * The session's activity. While `busy`/`cancelling` the textarea stays
    * writable but the submit slot becomes **Stage** (queued for the next turn
@@ -162,6 +184,7 @@ export function ChatInput({
   placeholder,
   onSend,
   mentionables,
+  docMentionables,
   activity,
   busy,
   stagedAnswers = 0,
@@ -195,12 +218,24 @@ export function ChatInput({
   // whenever the token itself changes, so the next `@` opens normally.
   const [pickerDismissed, setPickerDismissed] = useState(false);
 
-  const mention =
-    mentionables && mentionables.length > 0
-      ? activeMention(value, caret)
-      : null;
-  const matches = mention ? matchMentionables(mentionables!, mention.query) : [];
-  const pickerOpen = !!mention && matches.length > 0 && !pickerDismissed;
+  // A sigil is live only while it has something to offer — with no roster,
+  // `@` opens nothing, exactly as before; same rule for `#`.
+  const sigils =
+    (mentionables && mentionables.length > 0 ? "@" : "") +
+    (docMentionables && docMentionables.length > 0 ? "#" : "");
+  const token = sigils ? activeToken(value, caret, sigils) : null;
+  const tokenItems: PickerItem[] =
+    token === null
+      ? []
+      : token.sigil === "@"
+        ? (mentionables ?? []).map((m) => ({
+            key: m.slug,
+            label: m.label,
+            insert: `@${m.slug}`,
+          }))
+        : (docMentionables ?? []);
+  const matches = token ? matchPickerItems(tokenItems, token.query) : [];
+  const pickerOpen = !!token && matches.length > 0 && !pickerDismissed;
   const active = matches[Math.min(highlight, matches.length - 1)];
 
   // Somebody is working. The box stays WRITABLE (the Stage toggle,
@@ -309,11 +344,13 @@ export function ChatInput({
     }
   };
 
-  /** Replace the token the caret is in with `@slug `, and put the caret after it. */
-  const insertMention = (slug: string) => {
-    if (!mention) return;
-    const next = `${value.slice(0, mention.start)}@${slug} ${value.slice(caret)}`;
-    const at = mention.start + slug.length + 2;
+  /** Replace the token the caret is in with the item's text + a space, and
+   *  put the caret after it (the space keeps the next word out of the token). */
+  const insertItem = (item: PickerItem) => {
+    if (!token) return;
+    const inserted = `${item.insert} `;
+    const next = `${value.slice(0, token.start)}${inserted}${value.slice(caret)}`;
+    const at = token.start + inserted.length;
     updateValue(next);
     setCaret(at);
     setHighlight(0);
@@ -432,21 +469,25 @@ export function ChatInput({
           {pickerOpen && (
             <ul
               role="listbox"
-              aria-label="Mention a participant"
+              aria-label={
+                token?.sigil === "#"
+                  ? "Mention a document"
+                  : "Mention a participant"
+              }
               className="absolute bottom-full left-0 z-10 mb-1 max-h-48 w-full overflow-y-auto overflow-x-hidden rounded border border-outline-variant bg-surface-container-lowest py-1 shadow-lg"
             >
               {matches.map((m, i) => (
-                <li key={m.slug}>
+                <li key={m.key}>
                   <button
                     type="button"
                     role="option"
-                    aria-selected={m.slug === active?.slug}
+                    aria-selected={m.key === active?.key}
                     // `onMouseDown`, not `onClick`: a click blurs the
                     // textarea first, and the blur closes the picker before
                     // the click can land on it.
                     onMouseDown={(e) => {
                       e.preventDefault();
-                      insertMention(m.slug);
+                      insertItem(m);
                     }}
                     onMouseEnter={() => setHighlight(i)}
                     // `min-w-0` + the per-span truncate: the label is
@@ -458,7 +499,7 @@ export function ChatInput({
                     // now clips into invisibility rather than fixing.
                     className={cn(
                       "flex w-full min-w-0 items-baseline gap-2 px-3 py-1.5 text-left text-sm",
-                      m.slug === active?.slug
+                      m.key === active?.key
                         ? "bg-surface-container-high text-on-surface"
                         : "text-on-surface-variant",
                     )}
@@ -472,7 +513,8 @@ export function ChatInput({
                       {m.label}
                     </span>
                     <span className="shrink-0 font-mono text-xs opacity-60">
-                      @{m.slug}
+                      {token?.sigil}
+                      {m.key}
                     </span>
                   </button>
                 </li>
@@ -512,7 +554,7 @@ export function ChatInput({
                 }
                 if (e.key === "Enter" || e.key === "Tab") {
                   e.preventDefault();
-                  if (active) insertMention(active.slug);
+                  if (active) insertItem(active);
                   return;
                 }
                 if (e.key === "Escape") {

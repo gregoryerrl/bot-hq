@@ -142,6 +142,39 @@ export function SessionView() {
     "get_session_halt",
     { sessionId },
   );
+  // ideas.md 2026-08-24: the composer's `#` picker references internal
+  // documents — THIS session's IPAV/custom docs (never another session's) and
+  // the Context Library's agent-visible files. Picking inserts the reference
+  // at pick time: a `(session doc: slug)` the agent resolves with
+  // `session_doc_read`, or a CL file's absolute path the agent Reads verbatim.
+  const { data: sessionDocs = [] } = useTauriQuery<
+    { slug: string; phase: string | null }[]
+  >("session_doc_search", { sessionId });
+  const { data: clRows = [] } = useTauriQuery<
+    {
+      project_id: string;
+      file_path: string;
+      agent_visible: boolean;
+      abs_path: string | null;
+    }[]
+  >("cl_index_search", {});
+  const docMentionables = useMemo(
+    () => [
+      ...sessionDocs.map((d) => ({
+        key: d.slug,
+        label: d.phase ? `${d.slug} (${d.phase} doc)` : `${d.slug} (doc)`,
+        insert: `(session doc: ${d.slug})`,
+      })),
+      ...clRows
+        .filter((r) => r.agent_visible && r.abs_path)
+        .map((r) => ({
+          key: r.file_path.split("/").pop() ?? r.file_path,
+          label: `${r.project_id}/${r.file_path}`,
+          insert: r.abs_path!,
+        })),
+    ],
+    [sessionDocs, clRows],
+  );
   // rc3 D33: approvals are not parkable — they take the input slot. The gate
   // shows rows[0], and `tray_entries_for_session` is already `ORDER BY id ASC`,
   // so the row that has been blocking longest is the one asked first.
@@ -896,6 +929,7 @@ export function SessionView() {
               mentionables={participants
                 .filter((p) => p.enabled)
                 .map((p) => ({ slug: p.slug, label: participantLabel(p) }))}
+              docMentionables={docMentionables}
               stagedAnswers={stagedCount}
               staged={!!stagedResp}
               stagedText={stagedResp?.text ?? null}

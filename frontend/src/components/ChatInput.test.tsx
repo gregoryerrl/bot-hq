@@ -765,6 +765,72 @@ describe("ChatInput mention picker", () => {
   });
 });
 
+// ===========================================================================
+// ideas.md 2026-08-24 — the `#` document picker (same walker as `@`)
+// ===========================================================================
+
+describe("ChatInput document picker", () => {
+  const DOCS = [
+    { key: "investigate", label: "investigate (session doc)", insert: "(session doc: investigate)" },
+    { key: "conventions.md", label: "bot-hq/conventions.md", insert: "/Users/x/library/projects/bot-hq/conventions.md" },
+  ];
+
+  function type(text: string) {
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(box, {
+      target: { value: text, selectionStart: text.length },
+    });
+    return box;
+  }
+
+  it("offers the documents on # and inserts the reference text", () => {
+    render(<ChatInput onSend={() => {}} docMentionables={DOCS} />);
+    type("read #inv");
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    fireEvent.mouseDown(screen.getAllByRole("option")[0]);
+    expect(screen.getByRole("textbox")).toHaveValue(
+      "read (session doc: investigate) ",
+    );
+  });
+
+  it("inserts a CL file as its absolute path — the agent Reads it verbatim", () => {
+    render(<ChatInput onSend={() => {}} docMentionables={DOCS} />);
+    const box = type("#conv");
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(box).toHaveValue(
+      "/Users/x/library/projects/bot-hq/conventions.md ",
+    );
+  });
+
+  it("does not open inside a word (issue#5 is prose, not a mention)", () => {
+    render(<ChatInput onSend={() => {}} docMentionables={DOCS} />);
+    type("see issue#5");
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("stays out of the way with no documents to offer", () => {
+    render(<ChatInput onSend={() => {}} />);
+    type("#anything");
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("keeps the @ and # sources separate", () => {
+    render(
+      <ChatInput
+        onSend={() => {}}
+        mentionables={[{ slug: "hands", label: "HANDS · Opus" }]}
+        docMentionables={DOCS}
+      />,
+    );
+    type("@");
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    expect(screen.getAllByRole("option")[0]).toHaveTextContent("HANDS");
+    type("#");
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    expect(screen.getAllByRole("option")[0]).toHaveTextContent("investigate");
+  });
+});
+
 describe("ChatInput staged answers (rc3 D34)", () => {
   it("enables Send on an empty box when picks are staged", async () => {
     // Answering without commentary is a complete response — the user's tinker
