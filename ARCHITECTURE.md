@@ -20,9 +20,12 @@ through an agent harness — N role-playing participants — with policy enforce
 session spawns participants the user picks from their ROLES:
 
 - A role holds a set of **capabilities** (ticked in Settings → Roles) and its own
-  instruction prose. The two the user seeded are **HANDS** (executes: edits,
-  commits, runs bash) and **EYES** (reviews: adversarial, no write tools) — but
-  those are their configuration, not bot-hq's furniture.
+  instruction prose. A FRESH install seeds one neutral role — `agent`, every
+  capability, no prose (migration 0072) — plus a one-time Roles-tab offer to
+  install the example pair, **HANDS** (executes) + **EYES** (adversarial
+  reviewer); declined, the offer never returns, and an upgrading install never
+  sees it. The author's own install keeps its HANDS/EYES rows — they are that
+  user's configuration, not bot-hq's furniture.
 - A participant is displayed as `ROLE · Model` and is never named after a person.
 
 Every participant is backed by a `claude-code` subprocess. **Tool access is gated
@@ -43,8 +46,9 @@ c7bba28:src/agents/native/` is where it starts from.
 
 bot-hq is an **agent harness** — describe it that way, never by agent count. A
 session runs N participants (dialog default 1, dialog cap 4, backend cap 8),
-each playing a role the user defined. The roles that ship seeded are the user's
-own two; a different user configures different ones.
+each playing a role the user defined. A fresh install is born with one neutral
+`agent` role and the optional example-pair offer (1.0.0 Batch 4); every other
+role is the user's own creation.
 
 A former helper agent, **Emma**, was removed from the core; a return as a
 plugin is possible but unplanned (it is not on the plugin ideas list below).
@@ -166,8 +170,12 @@ so a row the user edited is never touched and a cleared row takes the new
 built-in; `seeded_role_prose_is_byte_identical_to_the_hardcoded_constants`
 pins the migrated text to the constants.
 
-The constants remain in the binary as the SEED and as the fallback — an empty
-`description_prompt` resolves back to them (`resolve_role_prose` →
+Since 1.0.0 Batch 4 the constants are PRESET payload only
+(`PRESET_HANDS_ROLE`/`PRESET_EYES_ROLE`, installable from the Roles tab's
+one-time offer): the prose FALLBACK is deleted, so an empty
+`description_prompt` means an empty role — "a default role with no instruction
+prompt" is expressible, and clearing the box no longer resurrects 11.8 KB the
+user just removed. (The old text continued: `resolve_role_prose` →
 `builtin_prose_for_role`, keyed on the role slug). So clearing the box in the
 Roles tab restores the built-in text rather than producing a role with no
 instructions.
@@ -400,7 +408,10 @@ builds don't thrash the A-tab diff. (Shipped 2026-06-15; see PROGRESS.md.)
 
 **Topbar:** `Dashboard | Context Library | Plugins | Settings`.
 
-**Dashboard:** grid of session tiles. Each tile shows title, last
+**Dashboard:** grid of session tiles in the USER'S order — `sort_key`, seeded
+from creation order (0071) and exchanged by drag-to-SWAP (dropping tile A on
+tile B trades exactly those two slots; the old last-activity order made tiles
+race each other). Each tile shows title, last
 activity, and a `[Need User Input · N]` pill (primary-tinted border) when
 questions, gates or approvals await the user — the tile INDICATES only; the
 answer surface is the session's Tray tab. Click tile → opens session view.
@@ -416,9 +427,13 @@ that opens the Session Settings panel (the per-session policy snapshot).
 A CLOSED session's view is read-only history (round 10): its mount respawns
 nothing (`ensure_session_started` refuses a closed row on every path), and the
 composer's slot shows a **Reopen** bar — the one control that applies — whose
-`reopen_session` clears `closed_at` / `archived` / the halt slot, respawns the
-roster via `--resume`, and refetches the row so the live composer replaces the
-bar (round 11; an already-open row is a success no-op). Chronological chat: all
+`reopen_session` clears `closed_at` / `archived`, SETS a system-declared halt
+("Session reopened — waiting for your prompt." — the idle watchdog gates on the
+slot, so the fresh roster is never nudged into re-closing), resets the IPAV
+phase, posts a REOPENED system row for the respawned roster's bearings, and
+respawns via `--resume` (1.0.0 Batch 1; an already-open row is a success
+no-op). The Apply-tab diff anchor `session_start_sha` persists write-once
+(0070), so a reopen never rebaselines it. Chronological chat: all
 messages (user, each participant, phase_change)
 interleaved by `created_at`; each participant's colour is one of an 8-hue
 palette hashed on its `ROLE · Model` label, with a per-participant override

@@ -23,6 +23,57 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-25 (round 14) — the 1.0.0-readiness overnight run
+
+Mandate (maximal scope, the user's tray pick): the personal-vs-product config
+line, the s-43567984 dissection's 27 findings, the user's 4 ideas/issues
+items, the primer-prompt overhaul, and the CL verdict — release MECHANICS
+deferred to a dedicated session (see PLAN.md). ~16 commits, every batch
+adversarially reviewed in-flight; three reviewer BLOCKING findings (haiku-as-
+default, cross-session disposition reach, plus the T1 short-id class they
+gated) each fixed in the same lap it was filed.
+
+**Config line (fresh installs get a product, not the author's setup):** 0072
+seeds one neutral `agent` role + a one-time example-pair offer (COUNT(sessions)=0
+discriminator, double-guarded DELETE, verified on a live-DB copy pre-commit);
+the prose fallback is deleted so an empty role stays empty; 0073 seeds current
+models with real context windows and the spawn fallback reads the registry's
+NAMED default (one const with the compiled last resort); GENERAL_RULES drops
+its 4 session ids + 11 dated citations; git-hook text says "reviewer";
+`flag_finding` replaces `eyes_flag` (alias kept; parity oracle updated by its
+own escalation procedure, tray-cited); `reviewer_approved` replaces
+`eyes_approved` (0074 + same-commit bindings regen); prose reseed 0075 via the
+dump procedure; Brian/Rain legacy consts deleted; client names scrubbed from
+fixtures/samples.
+
+**Dissect fixes:** reopen lands in a system halt + announce row, resets the
+phase, and keeps the write-once diff anchor (0070); the deadlock guard speaks
+the roster's own names; gate results carry exit·bytes·shell (the "false green"
+was zsh's no-word-split, pinned by tests at both seams); multi-line gated
+commands echo in full; reject carries a typed reason; parks say NOT an error;
+disposition resolves 8+-char prefixes with actionable errors, SESSION-SCOPED;
+phase votes are audit rows (0076) with the stale-key race closed explicitly;
+current-phase votes refused; superseded ballots named; supersede-vs-answer
+race refused server-side; "Answered in chat" stages from the tray card;
+cl_written falls back to durable index evidence; open-blocking banner rides
+every user-origin delivery; advisories named in the ok verdict.
+
+**Prompts:** composed prompt persisted per spawn (0044's promise, finally);
+the What-stops-what taxonomy stated once and referenced; invisible tools
+surfaced (file_feedback, cl_stale_refs, webview_*, gate_status,
+session_doc_read); cwd-persistence and gate-shell traps taught where commands
+are authored.
+
+**CL:** the staleness report gains "code moved since written" (hash drift,
+report-side — the retrieve path already had it); append mode + retrieve
+telemetry confirmed already-shipped (investigate record corrected in place);
+compaction ritual appended to the project CL's conventions.
+
+Deferred with rationale, parked so they can't be lost: Tool-Gate weak-match
+design (tray), drag semantics beyond swap (user picked swap), the release
+session itself. Gates at close: cargo 1320/0, vitest 520/520, tsc clean,
+fresh-dist release build.
+
 ## 2026-08-24 (round 13) — issues.md + ideas.md, the day's three defects and three features
 
 Mandate: work the user's `issues.md` (three live defects) and `ideas.md`

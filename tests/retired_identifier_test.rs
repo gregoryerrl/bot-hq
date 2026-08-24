@@ -86,16 +86,11 @@ const RETIRED: &[&str] = &["brian", "rain"];
 /// identifier's whole job is to name a retired thing. **Adding to this list is a
 /// decision, not a fix** — the question to answer first is whether the thing
 /// being named is genuinely frozen.
-const EXEMPT: &[(&str, &str)] = &[
-    (
-        "src/paths.rs",
-        "`LEGACY_BRIAN_CUSTOM_INSTRUCTION` / `LEGACY_RAIN_CUSTOM_INSTRUCTION` are \
-         byte-frozen seed templates: `migrate_agent_custom_instructions` compares \
-         `body.trim() != legacy_template.trim()`, so ANY change makes an \
-         untouched seed read as real user content. Same class as an applied \
-         migration.",
-    ),
-];
+// EMPTY since 1.0.0 Batch 6 (M7b): `src/paths.rs` was the last entry — its
+// byte-frozen `LEGACY_BRIAN/RAIN_CUSTOM_INSTRUCTION` templates left the
+// binary with the dead consolidation that read them, and the sweep's own
+// earning-its-place check demanded the exemption go with them.
+const EXEMPT: &[(&str, &str)] = &[];
 
 /// One flagged occurrence.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]

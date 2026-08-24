@@ -9,6 +9,19 @@ For recent changes see [`PROGRESS.md`](PROGRESS.md).
 
 ---
 
+## The 1.0.0 release session (DEFERRED — user call, 2026-08-25)
+
+The overnight 1.0.0-readiness run (see PROGRESS.md round 14) shipped the
+code: config-line cleanup, the dissect fixes, the paper-cut sweep. What it
+deliberately did NOT do is release. A dedicated session owns: version bump
+(`Cargo.toml` + `tauri.conf.json`) → tag `v1.0.0` → release workflow →
+publish + brew tap (`shipping.md` in the project CL carries the checklist,
+with the icon / signing / Windows caveats). One release note it must carry:
+an rc2 user who launched once, edited role prose, and never created a
+session has `COUNT(sessions)=0` — migration 0072 replaces their edits with
+the neutral default (narrow, guarded every other way; see 0072's header).
+Also parked to the user: the Tool-Gate weak-match design (tray db1a3d9c).
+
 ## Current state (TL;DR)
 
 bot-hq is built and used. The rebuild milestone (v0.1.0) shipped and the
