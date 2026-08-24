@@ -1031,6 +1031,19 @@ async readWorkspaceFile(sessionId: string, path: string) : Promise<Result<Worksp
 }
 },
 /**
+ * Save clipboard IMAGE bytes the composer received on paste, returning the
+ * absolute path the box inserts (and the agent later Reads). Temp-dir-only by
+ * construction — the path is built here, never taken from the caller.
+ */
+async savePastedFile(sessionId: string, bytes: number[], ext: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_pasted_file", { sessionId, bytes, ext }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Feedback rows newest-first. `status = None` returns every row.
  */
 async listAgentFeedback(status: string | null) : Promise<Result<AgentFeedbackView[], AppError>> {
@@ -1420,7 +1433,15 @@ truncated: boolean;
  */
 binary: boolean }
 export type ClFolderView = { id: number; project_id: string; folder_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
-export type ClIndexEntryView = { id: number; project_id: string; file_path: string; description: string; tags: string | null; created_at: string; updated_at: string; agent_visible: boolean }
+export type ClIndexEntryView = { id: number; project_id: string; file_path: string; description: string; tags: string | null; created_at: string; updated_at: string; agent_visible: boolean; 
+/**
+ * The RESOLVED on-disk location (project root + file_path), mirroring the
+ * MCP tool's field: consumers must never construct a path from
+ * `project_id` + `file_path` themselves — root-level `_globals` files live
+ * directly under the library root, so the naive join does not exist.
+ * `None` when the project root cannot be resolved.
+ */
+abs_path: string | null }
 export type ClRescanReportView = { added: string[]; touched: string[]; orphaned: string[] }
 /**
  * The full resolved view of the user's Claude Code config.

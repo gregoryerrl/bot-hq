@@ -8,6 +8,7 @@ import { authorColorClass } from "./authorColor";
 import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import { anyBusy, isLocked, type AgentBusy, type SessionActivity } from "../stores/activity";
 import { pathsToInsertText, uriListToPaths } from "../lib/filePaste";
+import { expandComposerTokens, insideBacktickSpan } from "../lib/tokenExpand";
 
 /** One participant the `@` picker can insert (rc3 D17). */
 type Mentionable = {
@@ -243,7 +244,11 @@ export function ChatInput({
     (mentionables && mentionables.length > 0 ? "@" : "") +
     (docMentionables && docMentionables.length > 0 ? "#" : "") +
     (promptcodes && promptcodes.length > 0 ? "/" : "");
-  const token = sigils ? activeToken(value, caret, sigils) : null;
+  const rawToken = sigils ? activeToken(value, caret, sigils) : null;
+  // Backticks escape every sigil (round 13): typing `` `/n-verify` `` is the
+  // user SHOWING the token, and a picker over it would say otherwise.
+  const token =
+    rawToken && !insideBacktickSpan(value, rawToken.start) ? rawToken : null;
   const tokenItems: PickerItem[] =
     token === null
       ? []
@@ -317,7 +322,10 @@ export function ChatInput({
     setStaging(true);
     setError(null);
     try {
-      await onStage(text);
+      // The box keeps the tokens; what leaves the composer is expanded. The
+      // staged snapshot is therefore the EXPANDED text (a reload-while-staged
+      // rehydrates it — the deliverable, not the shorthand).
+      await onStage(expandComposerTokens(text, docMentionables ?? [], promptcodes ?? []));
       // The text stays in the (now read-only) box — it IS the staged message.
       // But the DRAFT key is dropped: from here the backend holds the text
       // (`stagedText` rehydrates the box after a reload), and the key was what
@@ -376,11 +384,13 @@ export function ChatInput({
     }
   };
 
-  /** Replace the token the caret is in with the item's text + a space, and
-   *  put the caret after it (the space keeps the next word out of the token). */
+  /** Replace the token the caret is in with its CANONICAL TOKEN + a space —
+   *  `@slug` / `#key` / `/code` — never the expansion (round 13, the user:
+   *  "I want to see the actual `#filehere` and `/promptcodehere`"). The
+   *  expansion happens once, at Send/Stage, in `expandComposerTokens`. */
   const insertItem = (item: PickerItem) => {
     if (!token) return;
-    const inserted = `${item.insert} `;
+    const inserted = `${token.sigil}${item.key} `;
     const next = `${value.slice(0, token.start)}${inserted}${value.slice(caret)}`;
     const at = token.start + inserted.length;
     updateValue(next);
@@ -517,7 +527,7 @@ export function ChatInput({
     setSending(true);
     setError(null);
     try {
-      await onSend(text);
+      await onSend(expandComposerTokens(text, docMentionables ?? [], promptcodes ?? []));
       updateValue("");
     } catch (err) {
       // Keep `value` so the user can retry without retyping, and surface the

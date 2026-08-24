@@ -18,6 +18,7 @@ const entry = (id: number, file_path: string): ClIndexEntryView => ({
   created_at: "",
   updated_at: "",
   agent_visible: true,
+  abs_path: null,
 });
 
 describe("buildTree", () => {

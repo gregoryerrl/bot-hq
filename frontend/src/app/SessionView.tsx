@@ -158,17 +158,21 @@ export function SessionView() {
       abs_path: string | null;
     }[]
   >("cl_index_search", {});
+  // Keys are the TOKENS the box shows (round 13): always project-namespaced
+  // for CL files (`#bot-hq/conventions.md`), `doc/<slug>` for this session's
+  // docs — same-named files across projects stay tell-apart-able, and the
+  // token round-trips to its expansion at Send.
   const docMentionables = useMemo(
     () => [
       ...sessionDocs.map((d) => ({
-        key: d.slug,
-        label: d.phase ? `${d.slug} (${d.phase} doc)` : `${d.slug} (doc)`,
+        key: `doc/${d.slug}`,
+        label: d.phase ? `doc/${d.slug} (${d.phase})` : `doc/${d.slug}`,
         insert: `(session doc: ${d.slug})`,
       })),
       ...clRows
         .filter((r) => r.agent_visible && r.abs_path)
         .map((r) => ({
-          key: r.file_path.split("/").pop() ?? r.file_path,
+          key: `${r.project_id}/${r.file_path}`,
           label: `${r.project_id}/${r.file_path}`,
           insert: r.abs_path!,
         })),

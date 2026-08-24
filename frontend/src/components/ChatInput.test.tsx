@@ -780,8 +780,8 @@ describe("ChatInput mention picker", () => {
 
 describe("ChatInput document picker", () => {
   const DOCS = [
-    { key: "investigate", label: "investigate (session doc)", insert: "(session doc: investigate)" },
-    { key: "conventions.md", label: "bot-hq/conventions.md", insert: "/Users/x/library/projects/bot-hq/conventions.md" },
+    { key: "doc/investigate", label: "doc/investigate (investigate)", insert: "(session doc: investigate)" },
+    { key: "bot-hq/conventions.md", label: "bot-hq/conventions.md", insert: "/Users/x/library/projects/bot-hq/conventions.md" },
   ];
 
   function type(text: string) {
@@ -792,22 +792,25 @@ describe("ChatInput document picker", () => {
     return box;
   }
 
-  it("offers the documents on # and inserts the reference text", () => {
+  it("offers the documents on # and keeps the TOKEN in the box (round 13)", () => {
     render(<ChatInput onSend={() => {}} docMentionables={DOCS} />);
-    type("read #inv");
+    type("read #doc");
     expect(screen.getAllByRole("option")).toHaveLength(1);
     fireEvent.mouseDown(screen.getAllByRole("option")[0]);
-    expect(screen.getByRole("textbox")).toHaveValue(
-      "read (session doc: investigate) ",
-    );
+    expect(screen.getByRole("textbox")).toHaveValue("read #doc/investigate ");
   });
 
-  it("inserts a CL file as its absolute path — the agent Reads it verbatim", () => {
-    render(<ChatInput onSend={() => {}} docMentionables={DOCS} />);
-    const box = type("#conv");
+  it("a CL file's token is project-namespaced; the abs path leaves only at Send", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} docMentionables={DOCS} />);
+    const box = type("#bot");
     fireEvent.keyDown(box, { key: "Enter" });
-    expect(box).toHaveValue(
-      "/Users/x/library/projects/bot-hq/conventions.md ",
+    expect(box).toHaveValue("#bot-hq/conventions.md ");
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        "/Users/x/library/projects/bot-hq/conventions.md",
+      ),
     );
   });
 
@@ -836,7 +839,7 @@ describe("ChatInput document picker", () => {
     expect(screen.getAllByRole("option")[0]).toHaveTextContent("HANDS");
     type("#");
     expect(screen.getAllByRole("option")).toHaveLength(2);
-    expect(screen.getAllByRole("option")[0]).toHaveTextContent("investigate");
+    expect(screen.getAllByRole("option")[0]).toHaveTextContent("doc/investigate");
   });
 });
 
@@ -862,12 +865,31 @@ describe("ChatInput promptcode picker", () => {
     return box;
   }
 
-  it("replaces the token with the FULL prompt text — what you see is what sends", () => {
-    render(<ChatInput onSend={() => {}} promptcodes={CODES} />);
+  it("keeps /code in the box and sends the FULL prompt (round 13)", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} promptcodes={CODES} />);
     const box = type("/n-v");
     fireEvent.keyDown(box, { key: "Enter" });
-    expect(box).toHaveValue(
-      "Do n rounds of verification (you decide n), different angles.\nIf a round fails, start over from 1/n ",
+    expect(box).toHaveValue("/n-verify ");
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        "Do n rounds of verification (you decide n), different angles.\nIf a round fails, start over from 1/n",
+      ),
+    );
+  });
+
+  it("backticks escape: no picker over `/code`, and it sends literally", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} promptcodes={CODES} />);
+    const box = type("type `/n-verify");
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.change(box, {
+      target: { value: "type `/n-verify` yourself", selectionStart: 25 },
+    });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith("type `/n-verify` yourself"),
     );
   });
 

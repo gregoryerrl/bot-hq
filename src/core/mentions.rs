@@ -53,6 +53,14 @@ pub fn parse_mention_slugs(text: &str) -> Vec<String> {
         if i > 0 && bytes[i - 1].is_ascii_alphanumeric() {
             continue;
         }
+        // Backticks escape a mention (round 13, the user's rule for every
+        // composer sigil): `` `@eyes` `` is the user SHOWING the syntax, not
+        // summoning. Inside-a-code-span = an odd number of backticks before
+        // this position — the same heuristic the composer pickers use, so the
+        // two ends of the wire agree on what is literal.
+        if bytes[..i].iter().filter(|b| **b == b'`').count() % 2 == 1 {
+            continue;
+        }
         let rest = &text[i + 1..];
         let end = rest
             .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
@@ -128,6 +136,18 @@ mod tests {
         // the roster, and a parser that needed one could not be tested without
         // a database.
         assert_eq!(parse_mention_slugs("@nobody-at-all hi"), ["nobody-at-all"]);
+    }
+
+    #[test]
+    fn a_backticked_mention_is_shown_not_summoned() {
+        // Round 13: backticks escape every composer sigil, `@` included.
+        assert!(parse_mention_slugs("write `@eyes` to summon").is_empty());
+        assert!(parse_mention_slugs("`@eyes @hands` are the two").is_empty());
+        // Outside the span, mentions still parse — the count is positional.
+        assert_eq!(parse_mention_slugs("run `x` then @eyes go"), ["eyes"]);
+        // An unclosed backtick escapes everything after it — the safe reading
+        // of a half-typed code span.
+        assert!(parse_mention_slugs("see ` @eyes").is_empty());
     }
 
     #[test]
