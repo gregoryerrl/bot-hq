@@ -114,7 +114,7 @@ export function PromptcodesPanel() {
         )}
 
         {!seeded ? (
-          <Skeleton rows={2} className="mt-4" rowClassName="h-9" />
+          <Skeleton rows={2} className="mt-4 space-y-2" rowClassName="h-9 rounded border border-outline-variant bg-surface-container" />
         ) : (
           <>
             <ul className="mt-4 space-y-3">
