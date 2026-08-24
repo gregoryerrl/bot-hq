@@ -76,11 +76,10 @@ pump-shaped fixes ride the teardown instead of patching it —
 2026-08-13: there is no hold queue to flush — see the router behaviour
 inventory), `#30` duplicate spawn warmup, and the peer-wait watchdog
 classification (the false
-NEEDS DIRECTION on review handoffs, #25-family). **Not deferred:**
-`#27` (tray answers don't preempt a running turn) is user↔agent
-plumbing that survives any composition — it stays an open standalone
-fix, along with `#29` (gate-refusal UX), `#31` (close-out staleness
-sweep), and `#28` (auto-answerable gate classes).
+NEEDS DIRECTION on review handoffs, #25-family). **Status of the
+not-deferred set, updated 2026-08-25:** `#27` shipped then was REVERSED
+on purpose (rc3 D34); `#29` and `#31` shipped 2026-08-06 (struck
+below); `#28` closed 2026-08-25 — see its row.
 
 ---
 
@@ -120,11 +119,16 @@ Read those before starting; this section is the map, not the territory.
    already reads, not from decisions.md appends or agent self-declaration;
    sweep runs at `close_session` before/independently of the learnings
    nudge, advisory and once-only.
-4. **#28 — auto-answerable gate classes** (medium; design first).
-   Extend the `push_gate=auto` pattern: per-class auto-approval
-   (read-only gated commands first), same-class batch approve in the
-   tray. Target: engaged-session checkpoint churn (27 asks @ 7.7 min
-   avg in one session).
+4. ~~**#28 — auto-answerable gate classes**~~ — CLOSED 2026-08-25
+   without code: the "read-only gated command" class it was designed
+   around evaporated under re-classification (every measured "benign"
+   park was correctly gated — real `rm -rf`/`rm -r`+`eval`/`gh api`,
+   the un-splittable mutation hatch), and the matcher-precedence
+   design that could have expressed it was killed in review as a
+   compound-command bypass. The measured approval slowness was the
+   first-line-only gate echo, fixed in the readiness run. Reopen only
+   on fresh evidence, statement-scoped design only (see "The 1.0.0
+   release session" note above and PROGRESS.md round 14).
 
 **Track 2 — CL mechanisms (closing the vision gaps in `vision.md`'s
 "reading notes" + "memory hierarchy" bullets):**
