@@ -626,9 +626,14 @@ describe("SessionView context readings (rc3 P7)", () => {
     localStorage.setItem(draftKeyFor("s1"), "queued while they work");
     renderSessionView();
     await screen.findByRole("tab", { name: "Workspace" });
-    // The gate has the slot, so there is no composer to hear the tick.
+    // The gate has the slot, so there is no COMPOSER to hear the tick. The
+    // property is the composer's absence, not a textbox-free page — the gate
+    // legitimately carries its own small <input> now (the Batch-8
+    // rejection-reason field). The composer is the page's one <textarea>, so
+    // that structural fact is the query; a role+name match would be vacuous
+    // here (the textarea has no aria-label).
     await waitFor(() =>
-      expect(screen.queryByRole("textbox")).not.toBeInTheDocument(),
+      expect(document.querySelector("textarea")).toBeNull(),
     );
 
     const events = (await import("@tauri-apps/api/event")) as unknown as {

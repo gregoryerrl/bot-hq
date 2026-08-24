@@ -1055,7 +1055,7 @@ fn gate_refusal_text(command: &str, parked: Option<&ParkedGate>) -> String {
                 "bot-hq has PARKED it for the user's approval"
             };
             format!(
-                "BLOCKED by the bot-hq Tool Gate: `{command}`.\n\
+                "PARKED for the user's approval (a Tool Gate stop, NOT an error): `{command}`.\n\
                  You do not need to do anything to queue it — {lead} \
                  (gate_id: {}).\n\
                  Do NOT call `action_gate` for this command; it is already \
@@ -1069,7 +1069,7 @@ fn gate_refusal_text(command: &str, parked: Option<&ParkedGate>) -> String {
             )
         }
         None => format!(
-            "BLOCKED by the bot-hq Tool Gate: `{command}`.\n\
+            "STOPPED by the bot-hq Tool Gate (normal control flow, NOT a fault): `{command}`.\n\
              This command needs the USER'S APPROVAL — not a different command. \
              Call the `action_gate` MCP tool with command=\"{command}\". bot-hq \
              will surface an Approve/Reject prompt to the user and, on approve, \

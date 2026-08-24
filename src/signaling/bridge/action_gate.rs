@@ -299,7 +299,21 @@ fn format_command_output(out: &tool_gate::CommandOutput) -> String {
             s.push('\n');
         }
     }
-    s.push_str(&format!("[action_gate → exit {}]", out.code));
+    // Exit code + payload size + the executing shell, always (1.0.0 Batch 8
+    // B3, from the Batch-0 evidence): the historic false green was a script
+    // authored under bash semantics running under the gate's zsh — every
+    // result now says what ran it and how big the answer was, so
+    // "suspiciously empty but exit 0" is visible at a glance instead of a
+    // forensic finding. The shell is resolved the same way the runner
+    // resolves it (`gate_shell`), so the label cannot drift from reality.
+    let bytes = out.stdout.len() + out.stderr.len();
+    s.push_str(&format!(
+        "[action_gate → exit {} · {} output byte{} · shell {}]",
+        out.code,
+        bytes,
+        if bytes == 1 { "" } else { "s" },
+        tool_gate::gate_shell(),
+    ));
     s
 }
 

@@ -342,3 +342,29 @@ describe("ApprovalGate", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 });
+
+describe("reject reason (1.0.0 Batch 8 T2)", () => {
+  it("a typed reason rides the Reject pick; empty stays the plain menu Reject", async () => {
+    const onResolve = resolved();
+    const { unmount } = render(
+      <ApprovalGate rows={[approval()]} onResolve={onResolve} />,
+    );
+    fireEvent.change(screen.getByLabelText(/rejection reason/i), {
+      target: { value: "wrong branch — retarget staging" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^reject$/i }));
+    await waitFor(() =>
+      expect(onResolve).toHaveBeenCalledWith(
+        "c-1",
+        "Reject — wrong branch — retarget staging",
+        false,
+      ),
+    );
+    unmount();
+
+    const plain = resolved();
+    render(<ApprovalGate rows={[approval()]} onResolve={plain} />);
+    fireEvent.click(screen.getByRole("button", { name: /^reject$/i }));
+    await waitFor(() => expect(plain).toHaveBeenCalledWith("c-1", "Reject", false));
+  });
+});

@@ -81,6 +81,7 @@ export function ApprovalGate({
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
   const [showDetails, setShowDetails] = useState(false);
   const [stale, setStale] = useState<{
     picked: string;
@@ -216,10 +217,31 @@ export function ApprovalGate({
                 type="button"
                 variant="secondary"
                 disabled={!!busy}
-                onClick={() => void resolve("Reject")}
+                onClick={() =>
+                  void resolve(
+                    // A typed reason rides the pick (1.0.0 Batch 8 T2): the
+                    // backend fail-closes ANY non-menu pick as a rejection
+                    // whose words the agent is told to honor — a bare
+                    // "rejected (Reject)" once cost two extra round-trips of
+                    // the agent asking why. Empty reason = the plain menu
+                    // Reject, exactly as before.
+                    rejectReason.trim()
+                      ? `Reject — ${rejectReason.trim()}`
+                      : "Reject",
+                  )
+                }
               >
-                {busy === "Reject" ? "Rejecting…" : "Reject"}
+                {busy?.startsWith("Reject") ? "Rejecting…" : "Reject"}
               </Button>
+              <input
+                type="text"
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="why? (optional — sent with Reject)"
+                aria-label="Rejection reason"
+                disabled={!!busy}
+                className="min-w-40 flex-1 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm text-on-surface placeholder:text-on-surface-variant"
+              />
             </>
           ) : (
             // An agent's `request_approval` with its OWN labels (round 11):

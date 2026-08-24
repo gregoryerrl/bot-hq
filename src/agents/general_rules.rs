@@ -280,10 +280,13 @@ mod tests {
             1, // the taxonomy heading itself, exactly once…
             "the taxonomy exists and is referred to, not restated"
         );
-        assert_eq!(
-            GENERAL_RULES.matches("What-stops-what").count(),
-            2,
-            "…in the hyphenated reference form, twice (UI signaling + question discipline)"
+        // ≥1, not an exact count (EYES): the property is "referenced, not
+        // restated" — a third legitimate reference must not go red, or the
+        // number gets bumped without thought and the guard stops meaning
+        // anything.
+        assert!(
+            GENERAL_RULES.matches("What-stops-what").count() >= 1,
+            "…and at least one section refers to it by name"
         );
     }
 

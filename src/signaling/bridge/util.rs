@@ -451,7 +451,20 @@ pub(super) fn oob_resolution_body(
              not the menu.\n"
                 .to_string()
         };
-        return format!("Gate {id8} {verdict}: `{shown}`\n{typed}{stale_block}{mooting_block}");
+        // A MULTI-LINE command echoes in full below the verdict line (1.0.0
+        // Batch 8 T8, dissect #12): the first line alone — usually a bare
+        // `cd` — once cost a reviewer a confident wrong finding about what
+        // "the gate ate", because the actual script was visible nowhere in
+        // the channel. Single-line commands are already complete on the
+        // verdict line; round 7's A5 concern (repeating a long command into
+        // the user-voice channel) loses to a channel that misrepresents what
+        // ran.
+        let full = if command.lines().count() > 1 {
+            format!("```\n{}\n```\n", command.trim_end())
+        } else {
+            String::new()
+        };
+        return format!("Gate {id8} {verdict}: `{shown}`\n{full}{typed}{stale_block}{mooting_block}");
     }
     let listed = options.iter().any(|o| o == picked);
     let free_text_block = if options.is_empty() || listed {
@@ -700,7 +713,14 @@ mod tests {
             &[],
         );
         assert!(rejected.starts_with("Gate 621f164e rejected (Reject): `git push origin main`"));
-        assert!(!rejected.contains("second line"), "first line only");
+        // Batch 8 T8 inverted the old "first line only" pin for MULTI-LINE
+        // commands: hiding the script cost a reviewer a confident wrong
+        // finding about what "the gate ate" (dissect #12) — the channel must
+        // not misrepresent what ran. Single-line commands (above) still name
+        // the command exactly once; multi-line ones carry the full fenced
+        // script.
+        assert!(rejected.contains("# a second line"), "the full script is in the channel");
+        assert!(rejected.contains("```"), "fenced, so it renders as the script it is");
         assert!(!rejected.contains("honor the words"), "a listed pick needs no clause");
         // Typed on a gate: refused on the verdict line, and the agent is told to
         // act on the words (the tray permits typing on any row).
