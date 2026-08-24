@@ -16,7 +16,6 @@ pub mod spawn;
 pub use capability::{Capability, CapabilitySet, ResolvedCapabilities};
 pub use capability_prompt::{PeerFact, RosterFacts};
 pub use general_rules::GENERAL_RULES;
-pub use prompts::builtin_prose_for_role;
 pub use protocol::{OutgoingUserMessage, StreamEvent};
 pub use spawn::{
     reconcile_spawn_knobs, spawn_agent, spawn_supervised_agent, AgentEvent, AgentHandle,

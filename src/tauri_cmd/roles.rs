@@ -82,8 +82,11 @@ impl TryFrom<Role> for RoleView {
                 role.id, role.slug
             ))
         })?;
-        let has_builtin_prose =
-            !crate::agents::prompts::builtin_prose_for_role(&role.slug).is_empty();
+        // Permanently false since 1.0.0 Batch 4: the prose fallback is
+        // deleted (empty prose = empty role), so NO role has a compiled
+        // default to restore. The field survives one release for bindings
+        // compat; the Roles tab's copy no longer branches on it.
+        let has_builtin_prose = false;
         Ok(Self {
             id: role.id,
             slug: role.slug,
@@ -139,6 +142,33 @@ impl From<Capability> for CapabilityView {
 #[specta::specta]
 pub fn list_capabilities() -> Vec<CapabilityView> {
     Capability::ALL.iter().copied().map(Into::into).collect()
+}
+
+/// Resolve the ONE-TIME example-pair offer (1.0.0 Batch 4; the user's design:
+/// "show only on fresh install? If declined, never show it again").
+/// `install = true` copies the preset pair into role rows and stamps
+/// `installed`; `false` stamps `declined`. Either way the card never renders
+/// again — the Roles tab shows it only while `get_app_setting`
+/// ("role_preset_offer") returns the literal `pending`, and an ABSENT key
+/// means no offer, so a used install never sees it at all.
+#[tauri::command]
+#[specta::specta]
+pub async fn resolve_role_preset_offer(
+    storage: tauri::State<'_, Arc<Storage>>,
+    install: bool,
+) -> Result<(), AppError> {
+    if install {
+        storage
+            .install_role_preset()
+            .await
+            .map_err(|e| AppError::DbError(e.to_string()))?;
+    } else {
+        storage
+            .set_setting("role_preset_offer", "declined")
+            .await
+            .map_err(|e| AppError::DbError(e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// What the Roles tab submits, for both create and edit.
@@ -492,7 +522,9 @@ mod tests {
         // true: the tab's own list, which needs the archived row to offer an
         // un-archive at all.
         let all = load_roles(&storage, true).await.unwrap();
-        assert_eq!(all.len(), 3);
+        // 4 = the pair + the created role + the test world's archived neutral
+        // `agent` (Batch 4).
+        assert_eq!(all.len(), 4);
         assert!(all.iter().any(|r| r.id == created.id && r.archived));
     }
 

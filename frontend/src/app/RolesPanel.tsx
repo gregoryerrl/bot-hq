@@ -98,6 +98,24 @@ export function RolesPanel() {
   const { data: models = [] } = useTauriQuery<ModelView[]>("list_models");
   const { data: capabilities = [] } =
     useTauriQuery<CapabilityView[]>("list_capabilities");
+  // The one-time example-pair offer (Batch 4). Only the literal 'pending'
+  // renders the card; null / absent / any other value is silence.
+  const { data: presetOffer = null, refetch: refetchOffer } = useTauriQuery<
+    string | null
+  >("get_app_setting", { key: "role_preset_offer" });
+  const resolveOffer = useTauriMutation<null, { install: boolean }>(
+    "resolve_role_preset_offer",
+  );
+  const answerOffer = (install: boolean) =>
+    resolveOffer.mutate(
+      { install },
+      {
+        onSuccess: () => {
+          void refetchOffer();
+          void refetch();
+        },
+      },
+    );
 
   // `null` = the "+ New role" form; a number = that role's id.
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -128,9 +146,40 @@ export function RolesPanel() {
           <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
             A role is a template a session's participants are invited from: the
             instruction it runs with, what it is allowed to do, and the model it
-            defaults to. Add as many as you like — HANDS and EYES are just the
-            two that ship seeded.
+            defaults to. A session picks its participants from the roles you
+            define here — add as many as you like.
           </p>
+          {/* The ONE-TIME example-pair offer (1.0.0 Batch 4, the user's
+              design): rendered only while the flag is the literal 'pending'
+              — seeded by migration 0072 on FRESH installs only. An absent
+              key is NO offer (EYES E4), so an upgrading install never sees
+              this; declining stamps 'declined' and it never returns. */}
+          {presetOffer === "pending" && (
+            <div className="mt-3 max-w-prose rounded-md border border-outline-variant bg-surface-container-low p-3">
+              <p className="font-body-md text-body-md text-on-surface">
+                Want a starting point? Install the example pair — an executor
+                (HANDS) and an adversarial reviewer (EYES) with battle-tested
+                instructions. They become ordinary roles you can edit or
+                remove.
+              </p>
+              <div className="mt-2 flex gap-2">
+                <Button
+                  variant="primary"
+                  onClick={() => answerOffer(true)}
+                  disabled={resolveOffer.isPending}
+                >
+                  Install pair
+                </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => answerOffer(false)}
+                  disabled={resolveOffer.isPending}
+                >
+                  No thanks
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
         <Button
           variant="primary"
@@ -538,31 +587,20 @@ function RoleForm({
           spawn, and the capabilities themselves are what the tool gate reads.
           Text written here cannot grant a capability the boxes below withhold.
         </span>
-        {/* **Emptying the box is not "no instruction".** `submit` sends
-            `description_prompt: null` for an all-whitespace value, and the
-            spawn path treats a NULL row as "use the built-in", so clearing it
-            silently reinstates the shipped prose for a role that HAS one. That
-            is the right behaviour, but it was invisible, and a user who cleared
-            the box to silence a role got the opposite of what they asked for.
-            Said here, at the box, rather than in a doc.
-
-            The predicate is `has_builtin_prose`, NOT `builtin`. It asks the
-            backend whether `agents::prompts` carries a constant this role's
-            participants fall back to. `builtin` is a different question — who
-            seeded the row — and migration 0048 answered it "nobody" for every
-            role, permanently, so branching on it sent every user down the
-            "role you added" arm and told them clearing HANDS' prompt would
-            leave HANDS unbriefed. The opposite is true. */}
+        {/* Clearing means CLEARED (1.0.0 Batch 4): the compiled-prose
+            fallback was deleted with the neutral default role, so an empty
+            box stores no prose and the role joins sessions with no
+            instruction of its own — briefed by the universal rules and its
+            capability grants alone. One arm now; `has_builtin_prose` is
+            permanently false and nothing branches on it. */}
         {promptCleared && (
           <span
             role="note"
             className="mt-1 block max-w-prose font-code-sm text-code-sm text-warning"
           >
-            Empty is not a blank instruction. Saving now stores no prose for
-            this role.{" "}
-            {role?.has_builtin_prose
-              ? "At spawn the prompt falls back to bot-hq’s built-in text for this role, so clearing the box is how you restore the default wording."
-              : "bot-hq carries no built-in text for this role, so it would join a session with no instruction of its own."}
+            Empty means empty: saving stores no prose, and this role joins
+            sessions with no instruction of its own (its capabilities and the
+            universal rules still apply).
           </span>
         )}
       </label>

@@ -633,6 +633,61 @@ impl Storage {
     /// named.
     ///
     /// **The slug is allocated by a SELECT and used by a later INSERT, and those
+    /// Install the EXAMPLE PAIR — the author's HANDS (executor) + EYES
+    /// (adversarial reviewer) roles, prose copied from the compiled preset
+    /// constants INTO rows (1.0.0 Batch 4; the user: "give the users option
+    /// try my personal role configs, they can remove it"). The rows are
+    /// ordinary user-owned roles afterwards — editable, archivable, and with
+    /// NO fallback behind them (the prose fallback is deleted; clearing the
+    /// box means empty).
+    ///
+    /// Idempotent per slug: a taken `hands`/`eyes` slug is skipped, not
+    /// suffixed — installing over a half-present pair completes it rather
+    /// than minting `hands-2`. Returns how many rows were inserted. Stamps
+    /// `role_preset_offer = 'installed'` either way, so the offer card
+    /// resolves even if both slugs were somehow taken.
+    pub async fn install_role_preset(&self) -> Result<usize> {
+        use crate::agents::prompts::{PRESET_EYES_ROLE, PRESET_HANDS_ROLE};
+        let pair: [(&str, &str, &str, &str); 2] = [
+            (
+                "hands",
+                "HANDS",
+                PRESET_HANDS_ROLE,
+                r#"["read_channel","post_channel","ask_user","park_approval","supersede_question","disposition_finding","override_reviewer_block","halt","run_terminal","write_context_library","edit_files","run_bash","gated_bash","close_session"]"#,
+            ),
+            (
+                "eyes",
+                "EYES",
+                PRESET_EYES_ROLE,
+                r#"["read_channel","post_channel","file_finding","approve_finding","run_bash"]"#,
+            ),
+        ];
+        let now = now_utc();
+        let mut inserted = 0;
+        for (slug, display, prose, caps) in pair {
+            let res = sqlx::query(
+                "INSERT INTO roles \
+                 (slug, display_name, description_prompt, capabilities, participation_mode, \
+                  builtin, archived, created_at, updated_at) \
+                 SELECT ?, ?, ?, ?, 'active', 0, 0, ?, ? \
+                 WHERE NOT EXISTS (SELECT 1 FROM roles WHERE slug = ?)",
+            )
+            .bind(slug)
+            .bind(display)
+            .bind(prose)
+            .bind(caps)
+            .bind(&now)
+            .bind(&now)
+            .bind(slug)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("installing preset role {slug}"))?;
+            inserted += res.rows_affected() as usize;
+        }
+        self.set_setting("role_preset_offer", "installed").await?;
+        Ok(inserted)
+    }
+
     /// are two statements.** Two creates racing on the same base name can both
     /// read the same taken-set and pick the same suffix; the second INSERT then
     /// fails on `roles.slug`'s UNIQUE index and this returns that error with the
@@ -3252,53 +3307,72 @@ mod tests {
 
     /// The replacement for what `builtin` used to be asked, pinned end to end.
     ///
-    /// `no_role_is_flagged_builtin_after_0048` above makes `builtin` permanently
-    /// false, which silently broke the Roles tab's "clearing this box restores
-    /// the built-in text" notice — it branched on that flag, so it started
-    /// telling every user that clearing HANDS' prompt would leave HANDS with no
-    /// instruction. The truth is the opposite: `read_system_prompt` falls back
-    /// to `builtin_prose_for_role(<role slug>)`, which returns `HANDS_ROLE` in
-    /// full.
+    /// **A fresh DB is born with ONE neutral role and a pending offer; the
+    /// preset install copies the pair's prose into ROWS** (1.0.0 Batch 4 —
+    /// migration 0072 + `install_role_preset`; supersedes the fallback-
+    /// coupling test that lived here, deleted with `builtin_prose_for_role`).
     ///
-    /// `builtin_prose_for_role` answers that honestly, but only if the role slug
-    /// it keys on is the one a real roster's participants actually point at. So
-    /// this walks a REAL roster rather than asserting the mapping against
-    /// itself. rc3 D10 removed the role→AGENT hop the mapping used to make; what
-    /// is left to check is that the seeded roles reach prose at all.
+    /// The full migrator IS the fresh-install path (`Storage::memory()` runs
+    /// it on an empty DB), so this asserts what a brand-new user actually
+    /// gets: 0044 seeds hands/eyes, 0072's guarded DML deletes them (no
+    /// sessions ⇒ discriminator true), inserts `agent` with every capability
+    /// and NULL prose, and stamps the offer 'pending'. The used-DB branch —
+    /// the author's install, where the discriminator is false — cannot run
+    /// here by construction and is verified on a COPY of the live DB before
+    /// this migration ships (Batch 4's mandatory gate).
     #[tokio::test]
-    async fn builtin_prose_for_role_matches_what_the_seeded_roster_falls_back_to() {
-        use crate::agents::prompts::builtin_prose_for_role;
+    async fn a_fresh_db_gets_the_neutral_role_and_the_preset_installs_into_rows() {
+        use crate::agents::prompts::{PRESET_EYES_ROLE, PRESET_HANDS_ROLE};
 
-        let s = storage_with_0044().await;
-        s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
-        let roster = s.participants_for_session("s1").await.unwrap();
-        assert_eq!(roster.len(), 2, "the roster did not seed, so nothing is compared");
+        // `memory_bare`, not `memory`: this test IS the fresh-install path
+        // (memory() pre-installs the pair for the rest of the suite).
+        let s = Storage::memory_bare().await.unwrap();
+        let roles = s.list_roles().await.unwrap();
+        let slugs: Vec<&str> = roles.iter().map(|r| r.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["agent"], "fresh: exactly the neutral role");
+        let agent = &roles[0];
+        assert_eq!(agent.display_name, "Agent");
+        assert!(
+            agent.description_prompt.is_none(),
+            "the default role has NO instruction prompt — the user's literal ask"
+        );
+        let caps: Vec<String> = serde_json::from_str(&agent.capabilities).unwrap();
+        assert_eq!(caps.len(), 16, "the solo generalist holds every capability");
+        assert_eq!(
+            s.get_setting("role_preset_offer").await.unwrap().as_deref(),
+            Some("pending"),
+            "the one-time offer is armed on a fresh DB only"
+        );
 
-        for p in &roster {
-            let role_id = p.role_id.expect("a seeded participant points at a role");
-            let role = s.role_by_id(role_id).await.unwrap().expect("its role row exists");
-            // Non-vacuous: an empty answer would make the Roles tab's notice
-            // wrong in exactly the direction this test exists for.
-            assert!(
-                !builtin_prose_for_role(&role.slug).is_empty(),
-                "role '{}' has no built-in prose, so clearing its prompt would leave \
-                 participant '{}' with no identity at all",
-                role.slug,
-                p.slug
-            );
-            // And it is that ROLE's prose, not the other one's — a transposed
-            // match arm reads as a model behaving strangely, not as a bug.
-            assert!(
-                builtin_prose_for_role(&role.slug).contains(&role.display_name),
-                "role '{}' fell back to prose that does not name it",
-                role.slug
-            );
-        }
+        // Install: the pair lands as ordinary rows, prose byte-equal to the
+        // preset constants — the ONLY remaining path those constants reach a
+        // prompt by.
+        assert_eq!(s.install_role_preset().await.unwrap(), 2);
+        let roles = s.list_roles().await.unwrap();
+        let hands = roles.iter().find(|r| r.slug == "hands").expect("hands installed");
+        let eyes = roles.iter().find(|r| r.slug == "eyes").expect("eyes installed");
+        assert_eq!(hands.description_prompt.as_deref(), Some(PRESET_HANDS_ROLE));
+        assert_eq!(eyes.description_prompt.as_deref(), Some(PRESET_EYES_ROLE));
+        assert_eq!(
+            s.get_setting("role_preset_offer").await.unwrap().as_deref(),
+            Some("installed")
+        );
 
-        // A role the roster never seeds has nothing to fall back to — the other
-        // arm of the notice, and the one that WAS right before.
-        assert_eq!(builtin_prose_for_role("reviewer-2"), "");
+        // Idempotent per slug: a re-install inserts nothing and errors nothing.
+        assert_eq!(s.install_role_preset().await.unwrap(), 0);
+
+        // Clearing installed prose STAYS empty — the resurrect path is gone.
+        let draft = crate::storage::RoleDraft {
+            display_name: hands.display_name.clone(),
+            slug: None,
+            description_prompt: None,
+            capabilities: hands.capabilities.clone(),
+            participation_mode: hands.participation_mode.clone(),
+            default_model_id: None,
+        };
+        s.update_role(hands.id, &draft).await.unwrap();
+        let cleared = s.role_by_id(hands.id).await.unwrap().unwrap();
+        assert!(cleared.description_prompt.is_none(), "cleared means cleared");
     }
 
     /// 0044 seeded `hands` with `route_gated_command`, which is not a
@@ -3436,7 +3510,7 @@ mod tests {
         let eyes = s.role_by_slug("eyes").await.unwrap().unwrap();
         assert_eq!(
             eyes.description_prompt.as_deref(),
-            Some(crate::agents::prompts::EYES_ROLE),
+            Some(crate::agents::prompts::PRESET_EYES_ROLE),
             "0048 did not overwrite 0046's seed"
         );
 
@@ -3560,8 +3634,8 @@ mod tests {
         // Half 1 — a stock migrated database is on the NEW constants, for both,
         // and the constants say the new things.
         for (slug, expected) in [
-            ("hands", crate::agents::prompts::HANDS_ROLE),
-            ("eyes", crate::agents::prompts::EYES_ROLE),
+            ("hands", crate::agents::prompts::PRESET_HANDS_ROLE),
+            ("eyes", crate::agents::prompts::PRESET_EYES_ROLE),
         ] {
             let role = s.role_by_slug(slug).await.unwrap().unwrap();
             let prose = role.description_prompt.expect("prose seeded");
@@ -3624,8 +3698,8 @@ mod tests {
 
         // Half 1 — a stock migrated database is on the NEW constants, for both.
         for (slug, expected) in [
-            ("hands", crate::agents::prompts::HANDS_ROLE),
-            ("eyes", crate::agents::prompts::EYES_ROLE),
+            ("hands", crate::agents::prompts::PRESET_HANDS_ROLE),
+            ("eyes", crate::agents::prompts::PRESET_EYES_ROLE),
         ] {
             let role = s.role_by_slug(slug).await.unwrap().unwrap();
             let prose = role.description_prompt.expect("prose seeded");
@@ -3677,7 +3751,7 @@ mod tests {
         let prose = hands.description_prompt.expect("hands prose seeded");
         assert_eq!(
             prose,
-            crate::agents::prompts::HANDS_ROLE,
+            crate::agents::prompts::PRESET_HANDS_ROLE,
             "0055 did not overwrite 0050's seed for hands"
         );
         // The point of the migration, spelled out: stopping is the move, and
@@ -3723,8 +3797,8 @@ mod tests {
         // 0049 really did overwrite what 0046 and 0048 had written.
         let s = storage_with_0044().await;
         for (slug, expected) in [
-            ("hands", crate::agents::prompts::HANDS_ROLE),
-            ("eyes", crate::agents::prompts::EYES_ROLE),
+            ("hands", crate::agents::prompts::PRESET_HANDS_ROLE),
+            ("eyes", crate::agents::prompts::PRESET_EYES_ROLE),
         ] {
             let role = s.role_by_slug(slug).await.unwrap().unwrap();
             assert_eq!(
@@ -3768,7 +3842,7 @@ mod tests {
     /// the 0049 test above, for the reseed rc3 D15 needed.
     ///
     /// D15 made HANDS' close-out learnings ask conditional ("writing nothing is
-    /// the expected outcome"), which changes `HANDS_ROLE`, which 0049 had
+    /// the expected outcome"), which changes `PRESET_HANDS_ROLE`, which 0049 had
     /// already seeded byte-for-byte into the database. 0049 is applied and
     /// immutable, so the only correct move is this new migration — and it needs
     /// the same two-sided proof: it must overwrite 0049's seed, and it must
@@ -3782,7 +3856,7 @@ mod tests {
         let prose = hands.description_prompt.expect("hands prose seeded");
         assert_eq!(
             prose,
-            crate::agents::prompts::HANDS_ROLE,
+            crate::agents::prompts::PRESET_HANDS_ROLE,
             "0050 did not overwrite 0049's seed for hands"
         );
         // The point of the migration, spelled out: the ask is conditional and
@@ -3811,7 +3885,7 @@ mod tests {
         // with no `write_context_library` grant.
         assert_eq!(
             s.role_by_slug("eyes").await.unwrap().unwrap().description_prompt.as_deref(),
-            Some(crate::agents::prompts::EYES_ROLE),
+            Some(crate::agents::prompts::PRESET_EYES_ROLE),
         );
     }
 
@@ -3820,7 +3894,7 @@ mod tests {
     /// **The drift oracle for migration 0046.**
     ///
     /// 0046 seeds `roles.description_prompt` with the verbatim bytes of
-    /// `HANDS_ROLE` / `EYES_ROLE`. Two copies of ~23KB of prose now exist — the
+    /// `PRESET_HANDS_ROLE` / `PRESET_EYES_ROLE`. Two copies of ~23KB of prose now exist — the
     /// SQL literal and the Rust constant — and nothing in the compiler relates
     /// them. Without this test, editing `prompts.rs` would leave every existing
     /// install serving the OLD prose from its database (0046 already applied,
@@ -3841,23 +3915,23 @@ mod tests {
         let hands = s.role_by_slug("hands").await.unwrap().expect("0044 seeds 'hands'");
         assert_eq!(
             hands.description_prompt.as_deref(),
-            Some(crate::agents::prompts::HANDS_ROLE),
-            "roles.description_prompt for 'hands' has drifted from HANDS_ROLE"
+            Some(crate::agents::prompts::PRESET_HANDS_ROLE),
+            "roles.description_prompt for 'hands' has drifted from PRESET_HANDS_ROLE"
         );
 
         let eyes = s.role_by_slug("eyes").await.unwrap().expect("0044 seeds 'eyes'");
         assert_eq!(
             eyes.description_prompt.as_deref(),
-            Some(crate::agents::prompts::EYES_ROLE),
-            "roles.description_prompt for 'eyes' has drifted from EYES_ROLE"
+            Some(crate::agents::prompts::PRESET_EYES_ROLE),
+            "roles.description_prompt for 'eyes' has drifted from PRESET_EYES_ROLE"
         );
 
         // Guard against the assertion above passing vacuously. `assert_eq!` on
         // two `None`s would be green, and a migration that seeded nothing is
         // exactly the failure this whole test exists to catch.
         assert!(
-            !crate::agents::prompts::HANDS_ROLE.is_empty()
-                && !crate::agents::prompts::EYES_ROLE.is_empty(),
+            !crate::agents::prompts::PRESET_HANDS_ROLE.is_empty()
+                && !crate::agents::prompts::PRESET_EYES_ROLE.is_empty(),
             "the constants are empty — the comparison above proves nothing"
         );
     }
@@ -3902,7 +3976,7 @@ mod tests {
         let eyes = s.role_by_slug("eyes").await.unwrap().unwrap();
         assert_eq!(
             eyes.description_prompt.as_deref(),
-            Some(crate::agents::prompts::EYES_ROLE)
+            Some(crate::agents::prompts::PRESET_EYES_ROLE)
         );
     }
 
@@ -4169,8 +4243,9 @@ mod tests {
         blank.slug = Some("watcher".into());
         assert!(s.create_role(&blank).await.is_err(), "a role needs a name");
 
-        // Nothing partial was written by any of the three.
-        assert_eq!(s.list_roles_including_archived().await.unwrap().len(), 2);
+        // Nothing partial was written by any of the three. (3 = the pair +
+        // the archived neutral `agent` role the test world carries, Batch 4.)
+        assert_eq!(s.list_roles_including_archived().await.unwrap().len(), 3);
 
         // The same checks guard UPDATE, not just INSERT — a role edited into an
         // unschedulable mode is the identical failure, arrived at later.
@@ -4296,7 +4371,8 @@ mod tests {
         // Still a row: the id a past session's `role_id` points at resolves,
         // and the tab can offer an un-archive.
         let all = s.list_roles_including_archived().await.unwrap();
-        assert_eq!(all.len(), 2);
+        // 3 = the pair + the test world's archived neutral `agent` (Batch 4).
+        assert_eq!(all.len(), 3);
         assert!(all.iter().any(|r| r.id == hands.id && r.archived));
         assert!(s.role_by_id(hands.id).await.unwrap().unwrap().archived);
         assert!(s.role_by_slug("hands").await.unwrap().unwrap().archived);

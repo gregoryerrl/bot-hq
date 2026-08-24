@@ -121,7 +121,34 @@ impl Storage {
     }
 
     /// In-memory test backend. Available to integration tests in `tests/`.
+    /// The TEST world: a migrated in-memory DB **with the example pair
+    /// installed** (1.0.0 Batch 4). Migration 0072 made a truly fresh DB
+    /// carry only the neutral `agent` role — the right product default, but
+    /// the wrong fixture for the hundreds of tests modelling a two-role
+    /// (executor + reviewer) session; they model a user who installed the
+    /// preset, and this says so once instead of in every test. Fresh-install
+    /// behavior itself is asserted against [`Self::memory_bare`].
     pub async fn memory() -> Result<Self> {
+        let s = Self::memory_bare().await?;
+        s.install_role_preset()
+            .await
+            .context("installing the example pair into the test DB")?;
+        // Retire the neutral `agent` role in the TEST world: it seeds first
+        // (lowest surviving roles.id), so leaving it active would make every
+        // default roster `agent` + `hands` instead of the pair the fixtures
+        // model. Archived, not deleted — exactly what a real user who
+        // installed the pair and retired the default would have.
+        sqlx::query("UPDATE roles SET archived = 1 WHERE slug = 'agent'")
+            .execute(&s.pool)
+            .await
+            .context("archiving the neutral role in the test DB")?;
+        Ok(s)
+    }
+
+    /// A migrated in-memory DB EXACTLY as a brand-new install boots — the
+    /// neutral role, the pending preset offer, nothing else. For tests about
+    /// fresh-install semantics; everything else wants [`Self::memory`].
+    pub async fn memory_bare() -> Result<Self> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")?
             .create_if_missing(true)
             .foreign_keys(true);

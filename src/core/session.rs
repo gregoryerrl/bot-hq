@@ -1625,7 +1625,7 @@ pub fn read_system_prompt(
     // 1. Role prose — the DB row when it has one, else the binary's constant.
     //
     // Migration 0046 seeds `roles.description_prompt` with the VERBATIM bytes of
-    // `HANDS_ROLE` / `EYES_ROLE`, so on an unedited install both branches
+    // `PRESET_HANDS_ROLE` / `PRESET_EYES_ROLE`, so on an unedited install both branches
     // produce a byte-identical prompt and this is a pure source swap. The point
     // of the swap is that the DB row is user-editable and the constant is not:
     // editing the row now changes what the agent is told.
@@ -1637,13 +1637,15 @@ pub fn read_system_prompt(
     // silently spawn an agent with NO role at all, which is the worst possible
     // failure mode: it still runs, and it runs unbriefed.
     let role = match role_prose {
-        // An all-whitespace row is treated as absent, not as an empty role. The
-        // UI that will edit this column has no way to distinguish "cleared it by
-        // accident" from "meant it", and a blank identity is never the safer
-        // reading of the two.
         Some(p) if !p.trim().is_empty() => p,
-        // Keyed on the ROLE's slug, not on an agent name (rc3 D10).
-        _ => crate::agents::prompts::builtin_prose_for_role(role_slug),
+        // Empty means EMPTY (1.0.0 Batch 4): the compiled-constant fallback
+        // was deleted with the neutral default role — it made a blank role
+        // unexpressible, restoring 11.8 KB the user had just cleared. A
+        // prose-less role is a real configuration ("a default role, no
+        // instruction prompt" — the user's words), and it spawns fully
+        // briefed by layers 1–2; the preset's prose lives in the ROW once
+        // installed, so this arm is only ever "the user wants no layer 3".
+        _ => "",
     };
     if !role.is_empty() {
         push_section(&mut out, role);
@@ -3440,15 +3442,32 @@ mod tests {
         ));
     }
 
+    /// The ROW is the only prose source (1.0.0 Batch 4): passed prose leads
+    /// the prompt; absent prose composes NO layer 3 — the compiled-constant
+    /// fallback is deleted, so "a default role with no instruction prompt"
+    /// is finally expressible.
     #[test]
-    fn prompt_starts_with_hardcoded_role() {
+    fn prompt_leads_with_the_rows_prose_and_composes_none_when_absent() {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let prompt = read_system_prompt(&paths, "hands", None, None, None, None, None).unwrap();
-        // Hardcoded role from agents::prompts — identity + ask-close.
-        assert!(prompt.contains("# Role — HANDS"));
-        assert!(prompt.contains("Close session"));
+        let with = read_system_prompt(
+            &paths,
+            "hands",
+            None,
+            None,
+            None,
+            Some(crate::agents::prompts::PRESET_HANDS_ROLE),
+            None,
+        )
+        .unwrap();
+        assert!(with.contains("# Role — HANDS"));
+        assert!(with.contains("Close session"));
+        let without = read_system_prompt(&paths, "agent", None, None, None, None, None).unwrap();
+        assert!(
+            !without.contains("# Role —"),
+            "no row prose ⇒ no layer 3 — not somebody else's identity, not a resurrect"
+        );
     }
 
     // ---- 0046: the prompt's role prose comes from the database ----------
@@ -3483,8 +3502,17 @@ mod tests {
             let from_db =
                 read_system_prompt(&paths, slug, Some("p"), None, None, Some(&seeded), None)
                     .unwrap();
+            // The constant passed EXPLICITLY (Batch 4): None no longer falls
+            // back — the claim under test is that the preset-installed ROW
+            // carries the same bytes as the compiled constant.
+            let constant = if slug == "hands" {
+                crate::agents::prompts::PRESET_HANDS_ROLE
+            } else {
+                crate::agents::prompts::PRESET_EYES_ROLE
+            };
             let from_constant =
-                read_system_prompt(&paths, slug, Some("p"), None, None, None, None).unwrap();
+                read_system_prompt(&paths, slug, Some("p"), None, None, Some(constant), None)
+                    .unwrap();
             assert_eq!(
                 from_db, from_constant,
                 "the {slug} prompt changed when the prose came from the database"
@@ -3508,29 +3536,42 @@ mod tests {
         let edited = "You are HANDS. Ship small, verified changes. SENTINEL_K3P";
         let prompt =
             read_system_prompt(&paths, "hands", None, None, None, Some(edited), None).unwrap();
-        let baseline = read_system_prompt(&paths, "hands", None, None, None, None, None).unwrap();
+        // The pre-edit world this must replace: the ROW carrying the preset
+        // prose (1.0.0 Batch 4 — rows are the only source; the compiled
+        // fallback is gone, so the "unedited" baseline is a row the preset
+        // install wrote).
+        let baseline = read_system_prompt(
+            &paths,
+            "hands",
+            None,
+            None,
+            None,
+            Some(crate::agents::prompts::PRESET_HANDS_ROLE),
+            None,
+        )
+        .unwrap();
 
         assert!(prompt.contains("SENTINEL_K3P"), "the edit never reached the prompt");
 
-        // The built-in prose is REPLACED, not appended to. Two role sections
+        // The preset prose is REPLACED, not appended to. Two role sections
         // would be a contradictory prompt, with the user's edit arguing against
         // a copy of the text they just replaced.
         //
         // Compared against the WHOLE constant rather than a hand-picked phrase:
         // the first attempt at this test asserted on "Close session", which
         // `GENERAL_RULES` also contains (general_rules.rs:74), so it failed
-        // against correct code. `HANDS_ROLE` carries one `<your project>`
+        // against correct code. `PRESET_HANDS_ROLE` carries one `<your project>`
         // placeholder that layer 6 interpolates, so the search text has to be
         // interpolated the same way — `None` project resolves to `"_globals"`.
-        let builtin = crate::agents::prompts::HANDS_ROLE.replace("<your project>", "\"_globals\"");
+        let builtin = crate::agents::prompts::PRESET_HANDS_ROLE.replace("<your project>", "\"_globals\"");
         assert!(
             baseline.contains(&builtin),
-            "the search text does not match the built-in branch, so the negative \
+            "the search text does not match the row-sourced branch, so the negative \
              assertion below would pass vacuously"
         );
         assert!(
             !prompt.contains(&builtin),
-            "the built-in role survived alongside the edited one"
+            "the preset role survived alongside the edited one"
         );
 
         // Later layers are untouched — this swaps layer 1, nothing else.
@@ -3544,24 +3585,28 @@ mod tests {
         );
     }
 
-    /// A blank row falls back rather than spawning an agent with no identity.
-    ///
-    /// `Some("")` and `Some("   \n")` are what a user clearing the field in a
-    /// text box produces. The unbriefed agent still runs, so the failure is
-    /// silent — it looks like a model behaving oddly, not like a cleared field.
+    /// A blank row and an absent row compose the SAME prompt — one with no
+    /// layer 3 (1.0.0 Batch 4). `Some("")` / whitespace are what clearing the
+    /// text box produces, and clearing now MEANS empty: the compiled fallback
+    /// that used to resurrect 11.8 KB of preset prose here is deleted. The
+    /// agent still spawns fully briefed by layers 1–2.
     #[test]
-    fn a_blank_role_row_falls_back_to_the_built_in_prose() {
+    fn a_blank_role_row_composes_the_same_empty_layer_as_an_absent_one() {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
 
         let baseline = read_system_prompt(&paths, "hands", None, None, None, None, None).unwrap();
+        assert!(
+            !baseline.contains("# Role —"),
+            "the absent-prose baseline must carry no role section at all"
+        );
         for blank in ["", "   ", "\n\t \n"] {
             let prompt =
                 read_system_prompt(&paths, "hands", None, None, None, Some(blank), None).unwrap();
             assert_eq!(
                 prompt, baseline,
-                "a blank role row ({blank:?}) did not fall back to the constant"
+                "a blank role row ({blank:?}) must read as absent, not as a third state"
             );
         }
     }
@@ -3585,7 +3630,7 @@ mod tests {
         assert_eq!(
             resolve_role_prose(&s, hands).await,
             (
-                Some(crate::agents::prompts::HANDS_ROLE.to_string()),
+                Some(crate::agents::prompts::PRESET_HANDS_ROLE.to_string()),
                 Some("hands".to_string())
             ),
             "the roster path did not reach the seeded prose"
@@ -3593,7 +3638,7 @@ mod tests {
         assert_eq!(
             resolve_role_prose(&s, eyes).await,
             (
-                Some(crate::agents::prompts::EYES_ROLE.to_string()),
+                Some(crate::agents::prompts::PRESET_EYES_ROLE.to_string()),
                 Some("eyes".to_string())
             )
         );
@@ -3729,7 +3774,7 @@ mod tests {
     }
 
     /// **The parity test for migration 0048's prose edit.** Refusals were
-    /// deleted from `EYES_ROLE`; rc3 is a reframe, so each has to still reach
+    /// deleted from `PRESET_EYES_ROLE`; rc3 is a reframe, so each has to still reach
     /// EYES — from layer 2 instead of from the constant. This walks the exact
     /// list and proves both halves for every one: the tool is refused in the
     /// composed prompt, and the constant no longer says so itself.
@@ -3778,7 +3823,7 @@ mod tests {
             + start;
         let under_denials = &prompt[start..end];
 
-        // (what left `EYES_ROLE` in 0048, the capability that regenerates it,
+        // (what left `PRESET_EYES_ROLE` in 0048, the capability that regenerates it,
         //  the tool names that refusal has to keep naming)
         let moved: [(&str, Capability, &[&str]); 4] = [
             (
@@ -3832,7 +3877,7 @@ mod tests {
         // source each for the two halves — see `prompts.rs`'s module header, and
         // `prompts::tests::the_surviving_deny_list_is_exactly_what_layer_2
         // _cannot_generate` for why the naming half cannot live in layer 2.
-        let constant = crate::agents::prompts::EYES_ROLE;
+        let constant = crate::agents::prompts::PRESET_EYES_ROLE;
         for gone in [
             "the bridge enforces HANDS-only",
             "are reserved for Brian",
@@ -3840,7 +3885,7 @@ mod tests {
         ] {
             assert!(
                 !constant.contains(gone),
-                "EYES_ROLE still hand-writes a refusal layer 2 generates: {gone}"
+                "PRESET_EYES_ROLE still hand-writes a refusal layer 2 generates: {gone}"
             );
         }
 
@@ -3858,7 +3903,7 @@ mod tests {
         for tool in ["`Edit`", "`Write`", "`NotebookEdit`"] {
             assert!(
                 !edit_deny.contains(tool),
-                "edit_files' denial names {tool} and so does EYES_ROLE — one rule, two \
+                "edit_files' denial names {tool} and so does PRESET_EYES_ROLE — one rule, two \
                  sources. Layer 2 is the wrong one to hold it: it is rendered from a \
                  `Capability`, which is a bot-hq concept, while {tool} is the CLI's own \
                  spelling — and `prompts.rs` is where the spellings live."
@@ -4026,14 +4071,25 @@ mod tests {
     ///
     /// So this is now the assembled-prompt pin: whatever else composes into an
     /// EYES briefing, these two sections reach the spawned agent. Asserted on the
-    /// COMPOSED prompt rather than on `EYES_ROLE`, because composition — not the
+    /// COMPOSED prompt rather than on `PRESET_EYES_ROLE`, because composition — not the
     /// constant — is where a section has actually been lost before.
     #[test]
     fn the_composed_eyes_prompt_carries_observations_only_and_the_tool_inventory() {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let composed = read_system_prompt(&paths, "eyes", None, None, None, None, None).unwrap();
+        // The row's prose passed explicitly (Batch 4: rows are the only
+        // source; composition is still the thing under test).
+        let composed = read_system_prompt(
+            &paths,
+            "eyes",
+            None,
+            None,
+            None,
+            Some(crate::agents::prompts::PRESET_EYES_ROLE),
+            None,
+        )
+        .unwrap();
         assert!(
             composed.contains("## Observations only"),
             "the composed EYES prompt lost the observations-only rule"
@@ -4362,7 +4418,7 @@ mod tests {
         // And the edit REPLACED the built-in prose rather than landing next to
         // it. Without this the assertions above would also pass for a prompt
         // carrying two contradictory role sections.
-        let builtin = crate::agents::prompts::HANDS_ROLE.replace("<your project>", "\"_globals\"");
+        let builtin = crate::agents::prompts::PRESET_HANDS_ROLE.replace("<your project>", "\"_globals\"");
         assert!(
             !hands.contains(&builtin),
             "the built-in role survived alongside the edited one"
@@ -4583,9 +4639,17 @@ mod tests {
         // should still produce a prompt with at minimum the hardcoded role
         // and the hardcoded universal rules.
         std::fs::remove_file(paths.cl_dir.join("custom-general-rules.md")).ok();
-        let prompt =
-            read_system_prompt(&paths, "eyes", Some("nonexistent"), None, None, None, None)
-                .unwrap();
+        let prompt = read_system_prompt(
+            &paths,
+            "eyes",
+            Some("nonexistent"),
+            None,
+            None,
+            // Row prose passed explicitly (Batch 4: no compiled fallback).
+            Some(crate::agents::prompts::PRESET_EYES_ROLE),
+            None,
+        )
+        .unwrap();
         assert!(prompt.contains("EYES"));
         assert!(prompt.contains("Working directory"));
     }

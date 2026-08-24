@@ -312,32 +312,26 @@ describe("RolesPanel", () => {
     ).toBeInTheDocument();
   });
 
-  it("says an emptied instruction falls back to the built-in text", async () => {
-    // Clearing the box does NOT give the role a blank instruction: `submit`
-    // sends `description_prompt: null` and the spawn path reads NULL as "use
-    // the built-in", so emptying it reinstates the shipped prose. Correct
-    // behaviour, but it was invisible, so a user clearing the box to silence a
-    // role got the opposite.
-    //
-    // `builtin` is deliberately NOT set here. It is false on every real row,
-    // and this arm must still be reached — that is the whole regression: the
-    // panel branched on `builtin` and sent HANDS down the "no instruction" arm.
+  it("says an emptied instruction stays empty (Batch 4: the fallback is deleted)", async () => {
+    // Clearing the box now means CLEARED: the compiled-prose fallback was
+    // deleted with the neutral default role, so `description_prompt: null`
+    // spawns the role with no layer-3 prose at all — briefed by the universal
+    // rules and its capability grants. One arm, whatever has_builtin_prose
+    // says (the field is permanently false backend-side; a stale true from a
+    // cached view must not resurrect the old promise).
     mockBackend([role({ has_builtin_prose: true })]);
     renderPanel();
     await screen.findByText("HANDS");
 
     // Nothing shouts while there is prose in the box.
-    expect(screen.queryByText(/empty is not a blank instruction/i)).toBeNull();
+    expect(screen.queryByText(/empty means empty/i)).toBeNull();
 
     fireEvent.change(prose(), { target: { value: "   \n  " } });
 
-    const notice = await screen.findByText(/empty is not a blank instruction/i);
-    // `’` in the source, so the apostrophe on screen is U+2019, not U+0027.
-    expect(notice).toHaveTextContent(/falls back to bot-hq[’']s built-in text/i);
-    // A role with prose behind it is the "restore defaults" case, and the copy
-    // says so rather than warning about an instruction-less spawn.
-    expect(notice).toHaveTextContent(/restore the default/i);
-    expect(notice).not.toHaveTextContent(/no instruction of its own/i);
+    const notice = await screen.findByText(/empty means empty/i);
+    expect(notice).toHaveTextContent(/no instruction of its own/i);
+    expect(notice).not.toHaveTextContent(/restore the default/i);
+    expect(notice).not.toHaveTextContent(/built-in/i);
 
     // And the save really does send `null`, so the notice is describing what
     // happens rather than a second, separate rule.
@@ -348,29 +342,6 @@ describe("RolesPanel", () => {
         draft: expect.objectContaining({ description_prompt: null }),
       }),
     );
-  });
-
-  it("does not promise a built-in for a role bot-hq carries no prose for", async () => {
-    // `role_for` only knows the seeded agent slugs; anything else falls back to
-    // an empty string and the section is skipped. Telling the author of a new
-    // role that clearing the box "restores the default" would be a promise with
-    // nothing behind it. The backend decides this via `has_builtin_prose`.
-    mockBackend([
-      role({
-        id: 5,
-        slug: "auditor",
-        display_name: "Auditor",
-        has_builtin_prose: false,
-      }),
-    ]);
-    renderPanel();
-    await screen.findByText("Auditor");
-
-    fireEvent.change(prose(), { target: { value: "" } });
-
-    const notice = await screen.findByText(/empty is not a blank instruction/i);
-    expect(notice).toHaveTextContent(/no instruction of its own/i);
-    expect(notice).not.toHaveTextContent(/restore the default/i);
   });
 
   it("offers exactly two participation modes, and both of them do something", async () => {

@@ -6,11 +6,11 @@
 fn main() {
     let dir = std::env::args().nth(1).expect("usage: dump_role_prose <out-dir>");
     let d = std::path::Path::new(&dir);
-    std::fs::write(d.join("hands_new.txt"), bot_hq::agents::prompts::HANDS_ROLE).unwrap();
-    std::fs::write(d.join("eyes_new.txt"), bot_hq::agents::prompts::EYES_ROLE).unwrap();
+    std::fs::write(d.join("hands_new.txt"), bot_hq::agents::prompts::PRESET_HANDS_ROLE).unwrap();
+    std::fs::write(d.join("eyes_new.txt"), bot_hq::agents::prompts::PRESET_EYES_ROLE).unwrap();
     println!(
         "hands={} eyes={}",
-        bot_hq::agents::prompts::HANDS_ROLE.len(),
-        bot_hq::agents::prompts::EYES_ROLE.len()
+        bot_hq::agents::prompts::PRESET_HANDS_ROLE.len(),
+        bot_hq::agents::prompts::PRESET_EYES_ROLE.len()
     );
 }
