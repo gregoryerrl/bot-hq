@@ -140,9 +140,49 @@ impl SignalingBridge {
         .await
         .map_err(|e| anyhow::anyhow!("cl_stale_refs task panicked: {e}"))?
         .map_err(|e| anyhow::anyhow!("scanning the repo failed: {e}"))?;
-        Ok(super::cl_staleness::render_report(
-            project, &repo_root, &claims,
-        ))
+        // The drift sweep (Batch 10; the W6 verdict's gap, narrowed by review:
+        // the retrieve path already hash-flags drifted atoms per query — the
+        // REPORT was the blind surface). Same comparison, whole project: an
+        // atom whose cited code's hash moved since indexing is "code moved
+        // since written" — the symbol may well still exist, which is exactly
+        // the case the identifier scan above cannot see.
+        let drifted: Vec<String> = {
+            let storage = self.storage.lock().await.clone();
+            match storage {
+                Some(s) => {
+                    let atoms = s.cl_atoms_with_code_hash(project).await.unwrap_or_default();
+                    atoms
+                        .iter()
+                        .filter(|a| {
+                            let current =
+                                super::cl_refs::compute_code_hash(&a.body, &repo_root);
+                            current.as_deref() != a.code_hash.as_deref()
+                        })
+                        .map(|a| format!("{} > {}", a.file_path, a.heading_path))
+                        .collect()
+                }
+                None => Vec::new(),
+            }
+        };
+        let mut report = super::cl_staleness::render_report(project, &repo_root, &claims);
+        if !drifted.is_empty() {
+            report.push_str(&format!(
+                "
+## Code moved since written ({} atom{})
+                 The cited identifiers still exist, but the code they describe has                  changed since the atom was indexed — behavior claims may be stale                  even though nothing above flags them:
+{}
+",
+                drifted.len(),
+                if drifted.len() == 1 { "" } else { "s" },
+                drifted
+                    .iter()
+                    .map(|d| format!("- {d}"))
+                    .collect::<Vec<_>>()
+                    .join("
+")
+            ));
+        }
+        Ok(report)
     }
 
     /// Read-side ranked retrieval for agents: returns the CL atom bodies best

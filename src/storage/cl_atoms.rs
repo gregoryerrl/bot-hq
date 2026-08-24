@@ -136,6 +136,34 @@ impl Storage {
     /// then file_path/heading_path for a deterministic, repeatable order.
     /// The query is sanitized into a safe FTS5 MATCH expression so arbitrary input
     /// can't throw a syntax error; a query with no searchable tokens returns empty.
+    /// Every code-citing atom of `project` — the drift sweep's input (1.0.0
+    /// Batch 10): `cl_stale_refs`' report was identifier-EXISTENCE-shaped and
+    /// blind to an atom whose cited symbol survived while its behavior
+    /// changed; the retrieve path already hash-flags that drift per-atom, and the
+    /// report now runs the same comparison across the whole project.
+    pub async fn cl_atoms_with_code_hash(&self, project: &str) -> Result<Vec<RetrievedAtom>> {
+        let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT file_path, heading_path, body, code_hash FROM cl_atoms \
+             WHERE project_id = ? AND code_hash IS NOT NULL",
+        )
+        .bind(project)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(file_path, heading_path, body, code_hash)| RetrievedAtom {
+                project_id: project.to_string(),
+                file_path,
+                heading_path,
+                body,
+                code_hash,
+                stale: false,
+                mtime: None,
+                stale_age_days: None,
+            })
+            .collect())
+    }
+
     pub async fn cl_retrieve(
         &self,
         project_id: &str,
