@@ -68,8 +68,15 @@ real OS paths, `text/uri-list` covers Finder-copied files, and clipboard
 IMAGE bytes save through the new `save_pasted_file` command into a
 per-session temp subdir inside the viewer's allowed roots (`db30aab`).
 
-Pending: batch 3b (release-suppression for agent-declared halts) awaits the
-12951cc3 pick.
+The user picked "halt wins" on 12951cc3 the same day: an AGENT-declared halt
+now suppresses a gate answer's release — the command runs and its output row
+persists, but the ring stays down, the slot and the awaiting flag stand
+(mechanical host stops keep approve→resume-and-clear). Pinned end to end by a
+real-path wire test (`AppState::resolve_choice` over stub subprocesses, all
+three table rows). Bonus defect found by the reviewer reading this round's own
+docs: a phase doc WRITTEN WITHOUT a phase (an append, typically) had its tag
+nulled by `phase = excluded.phase` and vanished from the I/P/A/V tabs — the
+write now adopts the existing row's phase.
 
 ---
 

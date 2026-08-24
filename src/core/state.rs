@@ -2176,6 +2176,21 @@ impl AppState {
     /// participant reads them off its own cursor (D19), so holding a copy bought
     /// nothing. The PAUSE still suppresses the release, which is the half that
     /// was doing the work.
+    /// **Does an AGENT-declared halt suppress a gate answer's release?**
+    /// (12951cc3, the user's pick, 2026-08-24 — "halt wins".) True only when a
+    /// halt is standing, its declarer is a participant rather than the host
+    /// (`"system"` writes the mechanical stops: consensus, all-pass, round
+    /// cap, spin), and the answered row is a GATE — answering a QUESTION is a
+    /// user response and releases as ever. When it holds, the parked command
+    /// still ran and its output row persisted; the ring stays down and the
+    /// slot stands until the user's own message, which is what the banner
+    /// promises. An unreadable row counts as a gate (fail toward keeping the
+    /// halt: a halt wrongly kept is one message from cleared; one wrongly
+    /// released is the s-b1d2591b lying banner).
+    fn gate_release_suppressed(halt_declared_by: Option<&str>, is_gate_row: bool) -> bool {
+        is_gate_row && halt_declared_by.is_some_and(|by| by != "system")
+    }
+
     fn tray_wake(holds_wakes: bool, recorded: bool, ring_running: bool) -> TrayWake {
         TrayWake {
             clear_awaiting: true,
@@ -2200,11 +2215,21 @@ impl AppState {
         // live smoke found tray-only input left the watchdog disarmed (only
         // `broadcast` bumped the counter). StaleGateNeedsConfirm is excluded:
         // nothing was flipped or delivered.
+        // Was the resolved row a GATE? Read once here, for the suppression
+        // predicate below. Fail-CLOSED to "gate" (round 13): an unreadable row
+        // must not release a standing agent halt.
+        let mut resolved_a_gate = true;
         if matches!(
             outcome,
             ResolveOutcome::Delivered | ResolveOutcome::DeliveredOutOfBand { .. }
         ) {
             let row = self.storage.get_tray_entry(choice_id).await;
+            resolved_a_gate = row
+                .as_ref()
+                .ok()
+                .and_then(|r| r.as_ref())
+                .map(|r| crate::storage::is_gate_row(&r.kind, r.options_json.as_deref()))
+                .unwrap_or(true);
             if let Ok(Some(entry)) = row {
                 let sessions = self.sessions.lock().await;
                 if let Some(handle) = sessions.get(&entry.session_id) {
@@ -2234,6 +2259,20 @@ impl AppState {
         {
             let sessions = self.sessions.lock().await;
             if let Some(handle) = sessions.get(session_id) {
+                // The user's pick on 12951cc3 (2026-08-24, "halt wins"): a gate
+                // answered under a standing AGENT halt runs its command and
+                // persists the output row, but wakes nothing — no awaiting
+                // clear, no release, slot intact. The bridge already skipped
+                // its own awaiting-clear for this case; skipping here keeps
+                // the two halves agreeing. Mechanical (host) stops release and
+                // clear exactly as before.
+                let halt = self.storage.session_halt(session_id).await.ok().flatten();
+                if Self::gate_release_suppressed(
+                    halt.as_ref().map(|(by, _, _)| by.as_str()),
+                    resolved_a_gate,
+                ) {
+                    return Ok(outcome);
+                }
                 let step = Self::tray_wake(
                     handle.activity.holds_wakes(),
                     receipt.is_some(),
@@ -2513,6 +2552,20 @@ mod tests {
     }
 
     // --- issues.md #27: an OOB tray answer preempts the running turn ---
+
+    #[test]
+    fn an_agent_halt_suppresses_a_gate_release_and_nothing_else_does() {
+        // 12951cc3 (2026-08-24, "halt wins"), the full table.
+        // Agent halt + gate: suppressed — command ran, session stays halted.
+        assert!(AppState::gate_release_suppressed(Some("hands"), true));
+        // Host stops (consensus / all-pass / round cap / spin) keep resuming.
+        assert!(!AppState::gate_release_suppressed(Some("system"), true));
+        // No halt standing: nothing to protect.
+        assert!(!AppState::gate_release_suppressed(None, true));
+        // A QUESTION answer is a user response — releases under any halt.
+        assert!(!AppState::gate_release_suppressed(Some("hands"), false));
+        assert!(!AppState::gate_release_suppressed(Some("system"), false));
+    }
 
     #[test]
     fn tray_wake_covers_the_pause_record_and_running_combinations() {

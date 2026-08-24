@@ -880,7 +880,26 @@ impl SignalingBridge {
                 // answer is read. The bridge set the flag (set_session_awaiting),
                 // so the bridge clears it on resolve. Also covers the Err
                 // fall-through below (core then re-clears — harmlessly redundant).
-                self.clear_session_awaiting(&p.choice.session_id).await;
+                //
+                // **Unless an AGENT-declared halt is standing over a gate answer**
+                // (12951cc3, the user's pick, 2026-08-24): the gate ran, but the
+                // session stays halted — the awaiting flag must keep deriving
+                // `awaiting_user`, so the banner and the input state stay true.
+                // Host-declared stops (`declared_by = "system"`: consensus,
+                // all-pass, round cap, spin) keep today's clear-and-resume.
+                let agent_halt_stands = p.gate
+                    && match self.storage.lock().await.clone() {
+                        Some(storage) => storage
+                            .session_halt(&p.choice.session_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some_and(|(by, _, _)| by != "system"),
+                        None => false,
+                    };
+                if !agent_halt_stands {
+                    self.clear_session_awaiting(&p.choice.session_id).await;
+                }
                 match p.tx.send(picked) {
                     Ok(()) => Ok(ResolveOutcome::Delivered),
                     Err(picked) => {
@@ -2556,6 +2575,154 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(s2.session_halt("s9").await.unwrap().is_none(), "the ring that came up took the wake");
         assert!(matches!(rx9.try_recv(), Ok(SequencerCommand::UserMessage { .. })));
+    }
+
+    /// **The dc99564c wire, end to end** (round 13): a gate answered through
+    /// `AppState::resolve_choice` on an idle ring — the real path, stub
+    /// subprocesses only — with the halt slot read back from storage after.
+    /// Three rows of the 12951cc3 table:
+    ///   host-declared halt + gate  → released AND slot NULL (release ⇒ clear);
+    ///   agent-declared halt + gate → command path runs, but NO release, slot
+    ///                                and awaiting flag stand ("halt wins");
+    ///   agent-declared halt + question → a user response releases + clears.
+    /// Deleting the clear inside `user_responded`, the suppression predicate,
+    /// or the release itself each reddens a different assertion here.
+    #[tokio::test]
+    async fn a_gate_answer_clears_a_host_halt_and_leaves_an_agents_standing() {
+        use crate::core::sequencer::SequencerCommand;
+        use std::sync::atomic::Ordering;
+        /// `ask_user_choice_inner` returns the parked ACK the agent reads —
+        /// `{"choice_id":"…","status":"parked"}` — not the bare id.
+        fn cid(ack: &str) -> String {
+            serde_json::from_str::<serde_json::Value>(ack).unwrap()["choice_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let server = crate::signaling::start_signaling_server(Arc::clone(&bridge))
+            .await
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::core::AppState::new(
+            crate::paths::Paths::for_data_dir(tmp.path().to_path_buf()),
+            storage.clone(),
+            server,
+        )
+        .await;
+
+        let park_gate = |sid: &str| {
+            let bridge = Arc::clone(&bridge);
+            let sid = sid.to_string();
+            async move {
+                bridge
+                    .ask_user_choice_inner(
+                        sid,
+                        "hands".into(),
+                        "Run gated command?".into(),
+                        vec!["Approve".into(), "Reject".into()],
+                        Some(super::super::ApprovalContext {
+                            kind: crate::policy::ViolationKind::ToolBlocklist,
+                            action: "echo hi".into(),
+                            detail: None,
+                            command: None,
+                        }),
+                        None,
+                        false,
+                        true,
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        // (park_gate returns the raw ack; every use goes through `cid`.)
+
+        // --- Row 1: host halt (consensus et al.) + gate → release AND clear.
+        storage.create_session("s1", "t", None).await.unwrap();
+        let (h1, _stdin1) = crate::core::session::stub_session_for_tests("s1", &bridge).await;
+        let awaiting1 = Arc::clone(&h1.awaiting);
+        bridge.register_session_awaiting("s1".into(), Arc::clone(&awaiting1)).await;
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel(16);
+        bridge.register_session_sequencer("s1".into(), tx1).await;
+        state.sessions.lock().await.insert("s1".into(), h1);
+        let gate1 = cid(&park_gate("s1").await);
+        bridge.declare_host_halt("s1", "All-pass yield".into()).await;
+        awaiting1.store(true, Ordering::Release);
+        state.resolve_choice(&gate1, "Approve".into(), false).await.unwrap();
+        assert!(
+            storage.session_halt("s1").await.unwrap().is_none(),
+            "a host halt is cleared by the gate answer's release (release ⇒ clear)"
+        );
+        let mut released = false;
+        while let Ok(cmd) = rx1.try_recv() {
+            if matches!(cmd, SequencerCommand::UserMessage { .. }) {
+                released = true;
+            }
+        }
+        assert!(released, "the idle ring is released to drain the answer row");
+        assert!(!awaiting1.load(Ordering::Acquire), "the awaiting flag cleared");
+
+        // --- Row 2: AGENT halt + gate → suppressed ("halt wins", 12951cc3).
+        storage.create_session("s2", "t", None).await.unwrap();
+        let (h2, _stdin2) = crate::core::session::stub_session_for_tests("s2", &bridge).await;
+        let awaiting2 = Arc::clone(&h2.awaiting);
+        bridge.register_session_awaiting("s2".into(), Arc::clone(&awaiting2)).await;
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel(16);
+        bridge.register_session_sequencer("s2".into(), tx2).await;
+        state.sessions.lock().await.insert("s2".into(), h2);
+        let gate2 = cid(&park_gate("s2").await);
+        storage
+            .declare_session_halt("s2", "hands", "recap: waiting on you")
+            .await
+            .unwrap();
+        awaiting2.store(true, Ordering::Release);
+        state.resolve_choice(&gate2, "Approve".into(), false).await.unwrap();
+        let halt = storage.session_halt("s2").await.unwrap();
+        assert_eq!(
+            halt.as_ref().map(|(by, _, _)| by.as_str()),
+            Some("hands"),
+            "the agent's halt slot stands: {halt:?}"
+        );
+        while let Ok(cmd) = rx2.try_recv() {
+            assert!(
+                !matches!(cmd, SequencerCommand::UserMessage { .. }),
+                "no release under an agent's halt: {cmd:?}"
+            );
+        }
+        assert!(
+            awaiting2.load(Ordering::Acquire),
+            "the awaiting flag stands too — banner and input state stay true"
+        );
+
+        // --- Row 3: the same agent halt + a QUESTION → a user response, as ever.
+        let q = bridge
+            .ask_user_choice_inner(
+                "s2".into(),
+                "hands".into(),
+                "Which way?".into(),
+                vec!["a".into(), "b".into()],
+                None,
+                None,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        let q = cid(&q);
+        state.resolve_choice(&q, "a".into(), false).await.unwrap();
+        assert!(
+            storage.session_halt("s2").await.unwrap().is_none(),
+            "answering a question is a user response — it clears the halt"
+        );
+        let mut released2 = false;
+        while let Ok(cmd) = rx2.try_recv() {
+            if matches!(cmd, SequencerCommand::UserMessage { .. }) {
+                released2 = true;
+            }
+        }
+        assert!(released2, "and releases the ring");
     }
 
     /// A session with no ring registered must not panic or block — the bridge is
