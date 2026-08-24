@@ -955,6 +955,14 @@ export function SessionView() {
                 .map((p) => ({ slug: p.slug, label: participantLabel(p) }))}
               docMentionables={docMentionables}
               promptcodes={promptcodes}
+              savePastedImage={async (bytes, ext) => {
+                // Vec<u8> crosses the IPC as a plain number array.
+                return await invoke<string>("save_pasted_file", {
+                  sessionId,
+                  bytes: Array.from(bytes),
+                  ext,
+                });
+              }}
               stagedAnswers={stagedCount}
               staged={!!stagedResp}
               stagedText={stagedResp?.text ?? null}

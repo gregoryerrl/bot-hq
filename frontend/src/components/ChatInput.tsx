@@ -7,6 +7,7 @@ import { cn } from "../lib/cn";
 import { authorColorClass } from "./authorColor";
 import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import { anyBusy, isLocked, type AgentBusy, type SessionActivity } from "../stores/activity";
+import { pathsToInsertText, uriListToPaths } from "../lib/filePaste";
 
 /** One participant the `@` picker can insert (rc3 D17). */
 type Mentionable = {
@@ -117,6 +118,13 @@ interface ChatInputProps {
    */
   promptcodes?: { code: string; prompt: string }[];
   /**
+   * Save clipboard IMAGE bytes and return the absolute path to insert
+   * (ideas.md 2026-08-24 — paste files into the box). Supplied by the parent
+   * because saving needs the session id; without it an image paste is ignored.
+   * File paths (Finder copy, drag-drop) need no saving — they insert directly.
+   */
+  savePastedImage?: (bytes: Uint8Array, ext: string) => Promise<string>;
+  /**
    * The session's activity. While `busy`/`cancelling` the textarea stays
    * writable but the submit slot becomes **Stage** (queued for the next turn
    * boundary) beside a turn-status line (which participants are working) and
@@ -195,6 +203,7 @@ export function ChatInput({
   mentionables,
   docMentionables,
   promptcodes,
+  savePastedImage,
   activity,
   busy,
   stagedAnswers = 0,
@@ -387,6 +396,88 @@ export function ChatInput({
     });
   };
 
+  /** Insert text at the caret (drop/paste of file paths), keeping the box
+   *  editable state rules: a staged (read-only) box refuses the insert. */
+  const insertAtCaret = (text: string) => {
+    if (!text || staged) return;
+    const el = textareaRef.current;
+    const at = el?.selectionStart ?? value.length;
+    const next = `${value.slice(0, at)}${text}${value.slice(at)}`;
+    updateValue(next);
+    const after = at + text.length;
+    setCaret(after);
+    requestAnimationFrame(() => {
+      const box = textareaRef.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(after, after);
+    });
+  };
+  const insertAtCaretRef = useRef(insertAtCaret);
+  insertAtCaretRef.current = insertAtCaret;
+
+  // Files dragged onto the window insert as absolute paths. Tauri v2 keeps
+  // dragDropEnabled on (HTML5 drop never fires) and its event carries real OS
+  // paths — the thing a DOM drop cannot give. Registered while the composer is
+  // mounted; the gate and closed-session bars unmount it, so a drop only ever
+  // lands here when the box is on screen. Dynamic import + catch: outside a
+  // Tauri webview (vitest/jsdom) registration quietly does nothing.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      try {
+        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+        const un = await getCurrentWebview().onDragDropEvent((event) => {
+          if (event.payload.type !== "drop") return;
+          const paths = event.payload.paths ?? [];
+          if (paths.length > 0)
+            insertAtCaretRef.current(`${pathsToInsertText(paths)} `);
+        });
+        if (cancelled) un();
+        else unlisten = un;
+      } catch {
+        // Not running inside a Tauri webview — nothing to register.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  /** Paste: a Finder-copied file arrives as text/uri-list → insert its path;
+   *  clipboard IMAGE data is saved via `savePastedImage` → insert the saved
+   *  path. Plain text pastes fall through to the browser default. */
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const data = e.clipboardData;
+    if (!data) return;
+    const uriList = data.getData("text/uri-list");
+    const paths = uriList ? uriListToPaths(uriList) : [];
+    if (paths.length > 0) {
+      e.preventDefault();
+      insertAtCaret(`${pathsToInsertText(paths)} `);
+      return;
+    }
+    if (!savePastedImage) return;
+    const image = Array.from(data.items).find(
+      (item) => item.kind === "file" && item.type.startsWith("image/"),
+    );
+    const file = image?.getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    void (async () => {
+      try {
+        const ext = (file.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const path = await savePastedImage(bytes, ext);
+        insertAtCaretRef.current(`${path} `);
+      } catch (err) {
+        setError(errorMessage(err));
+      }
+    })();
+  };
+
   const updateValue = (next: string) => {
     setValue(next);
     setPickerDismissed(false);
@@ -560,6 +651,7 @@ export function ChatInput({
             onSelect={(e) =>
               setCaret(e.currentTarget.selectionStart ?? 0)
             }
+            onPaste={handlePaste}
             onKeyDown={(e) => {
               // **The picker owns these keys while it is open**, and Enter
               // most of all: an open picker means the user is mid-mention,

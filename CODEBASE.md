@@ -685,6 +685,7 @@ every other FE area imports.
 | `frontend/src/app/ModelsPanel.tsx` | saved-model registry + connection test | M |
 | `frontend/src/app/SessionPolicyPanel.tsx`, `frontend/src/components/PolicyForm.tsx`, `frontend/src/components/GatedKeywordList.tsx` | session gear drawer; shared policy editor; gated keyword rows | M / S / S |
 | `frontend/src/app/ViolationsPanel.tsx`, `frontend/src/app/FeedbackPanel.tsx`, `frontend/src/app/MeasurementView.tsx` | violations viewer; feedback triage; CL retrieval stats | M / S / S |
+| `frontend/src/app/PromptcodesPanel.tsx` | Settings → Promptcodes: `{code, prompt}` pairs the composer's `/` picker expands (`app_settings` key `promptcodes`) | M |
 | `frontend/src/components/UpdateBanner.tsx` | dismissible update banner | S |
 | `frontend/src/components/ui/Button.tsx`, `frontend/src/components/ui/Card.tsx`, `frontend/src/components/ui/Input.tsx`, `frontend/src/components/ui/Select.tsx`, `frontend/src/components/ui/SegToggle.tsx`, `frontend/src/components/ui/Skeleton.tsx`, `frontend/src/components/ui/Textarea.tsx` | base atoms (`Select.tsx` is the house `selectClass` — since round 11 applied by Models/Roles/ClaudeConfig/the New Session dialog with no wrapper component; `Skeleton` since round 11: the loading-rows idiom five panels spelled by hand; `Button` carries the house `rounded` and a focus-visible ring since round 11) | S |
 | `frontend/src/components/icons.tsx` | THE hand-rolled SVG icon set — two bases kept deliberately (attribute-sized stroke 1.75 `Svg`; class-sized stroke 2 `ClassSvg`, the family moved in from the CL module in round 9); the near-twins `MemoryIcon`/`FileIcon` and `RescanIcon`/`RefreshIcon` await a visual decision | S |
@@ -692,7 +693,7 @@ every other FE area imports.
 | `frontend/src/components/authorColor.ts` | label → hue class; D20 8-hue palette named by colour | S |
 | `frontend/src/lib/participants.ts` | `ParticipantView`, label/slug/slot-key resolution, `isSpawnable` (stale mirror), runtime keys | M |
 | `frontend/src/lib/participantNames.ts` | `UNKNOWN_PARTICIPANT` leaf (breaks a cycle) | S |
-| `frontend/src/lib/time.ts`, `frontend/src/lib/phase.ts`, `frontend/src/lib/diffGroups.ts`, `frontend/src/lib/cn.ts`, `frontend/src/lib/sessionId.ts`, `frontend/src/lib/staging.ts` | time/phase/diff-grouping/clsx/short-session-id/staged-answer helpers (`stagedKey` + `picksDiffer` are the re-stage effect's pure half) | S |
+| `frontend/src/lib/time.ts`, `frontend/src/lib/phase.ts`, `frontend/src/lib/diffGroups.ts`, `frontend/src/lib/cn.ts`, `frontend/src/lib/sessionId.ts`, `frontend/src/lib/staging.ts`, `frontend/src/lib/filePaste.ts` | time/phase/diff-grouping/clsx/short-session-id/staged-answer/file-paste helpers (`stagedKey` + `picksDiffer` are the re-stage effect's pure half; `uriListToPaths`/`pathsToInsertText` are the composer's paste-drop half) | S |
 | `frontend/src/lib/attention.ts` | idle-unflagged badge label + tooltip; single source for SessionTile and SessionView, which had it duplicated verbatim | S |
 | `frontend/src/lib/framing.ts` | retired-agent / pair-assumption detection for user-facing strings; `framing.test.ts` sweeps `frontend/src/` with it | S |
 | `frontend/src/index.css`, `frontend/tailwind.config.ts`, `frontend/package.json`, `frontend/vite.config.ts`, `frontend/tsconfig.json` | tokens + build config | — |

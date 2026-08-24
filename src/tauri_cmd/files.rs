@@ -192,9 +192,106 @@ fn read_workspace_file_blocking(repo: Option<String>, path: &str) -> Result<Work
     })
 }
 
+/// Extensions the paste-image save accepts — clipboard image data only; a
+/// pasted FILE arrives as a `file://` URI and never reaches this command.
+fn is_pasteable_ext(ext: &str) -> bool {
+    matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp")
+}
+
+/// Refuse a pasted blob bigger than the viewer would show anyway.
+const MAX_PASTED_BYTES: usize = 10 * 1024 * 1024;
+
+/// Where pasted clipboard images land: a per-session subdir under the OS temp
+/// dir — inside `allowed_roots`, so the viewer can show what was pasted, and
+/// readable by agents (issue: ideas.md 2026-08-24, paste files into the box).
+/// The session id is sanitized to its `[a-z0-9-]` characters, so a hostile id
+/// cannot traverse; the uuid filename never collides.
+fn pasted_file_path(session_id: &str, ext: &str) -> PathBuf {
+    let safe: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    let safe = if safe.is_empty() { "session".to_string() } else { safe };
+    std::env::temp_dir()
+        .join("bothq-paste")
+        .join(safe)
+        .join(format!("{}.{ext}", uuid::Uuid::new_v4()))
+}
+
+/// Save clipboard IMAGE bytes the composer received on paste, returning the
+/// absolute path the box inserts (and the agent later Reads). Temp-dir-only by
+/// construction — the path is built here, never taken from the caller.
+#[tauri::command]
+#[specta::specta]
+pub async fn save_pasted_file(
+    session_id: String,
+    bytes: Vec<u8>,
+    ext: String,
+) -> Result<String, AppError> {
+    let ext = ext.to_ascii_lowercase();
+    if !is_pasteable_ext(&ext) {
+        return Err(AppError::Validation(format!(
+            "unsupported pasted type .{ext} — images only"
+        )));
+    }
+    if bytes.is_empty() {
+        return Err(AppError::Validation("empty clipboard image".into()));
+    }
+    if bytes.len() > MAX_PASTED_BYTES {
+        return Err(AppError::Validation(format!(
+            "pasted image is {} bytes; the cap is {MAX_PASTED_BYTES}",
+            bytes.len()
+        )));
+    }
+    let path = pasted_file_path(&session_id, &ext);
+    tokio::task::spawn_blocking(move || -> Result<String, AppError> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| AppError::Internal(format!("cannot create paste dir: {e}")))?;
+        }
+        std::fs::write(&path, &bytes)
+            .map_err(|e| AppError::Internal(format!("cannot write pasted file: {e}")))?;
+        Ok(path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("paste task failed: {e}")))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pasted_file_lands_under_the_temp_root_the_viewer_allows() {
+        // The whole point of the per-session temp subdir: the path this
+        // command mints is inside `allowed_roots`, so the "View" affordance
+        // works on what was just pasted — and a hostile session id cannot
+        // steer it anywhere else.
+        let p = pasted_file_path("s-abc123", "png");
+        let roots = allowed_roots(None);
+        let parent = p.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let canon_parent = parent.canonicalize().unwrap();
+        assert!(
+            is_contained(&canon_parent, &roots),
+            "paste dir {canon_parent:?} must sit under an allowed root"
+        );
+        let evil = pasted_file_path("../../../etc", "png");
+        assert!(
+            evil.to_string_lossy().contains("bothq-paste/etc"),
+            "traversal characters are stripped, not honoured: {evil:?}"
+        );
+    }
+
+    #[test]
+    fn pasteable_extensions_are_images_only() {
+        assert!(is_pasteable_ext("png"));
+        assert!(is_pasteable_ext("webp"));
+        assert!(!is_pasteable_ext("svg"), "svg is scriptable — not pasteable");
+        assert!(!is_pasteable_ext("php"));
+        assert!(!is_pasteable_ext(""));
+    }
+
 
     #[test]
     fn a_relative_path_resolves_against_the_session_repo() {

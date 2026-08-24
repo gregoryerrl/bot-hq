@@ -1,5 +1,14 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
+
+// The composer registers a drag-drop listener through the Tauri webview API on
+// mount; outside a webview the dynamic import must resolve to a harmless stub
+// or every render in this file would reject in the background.
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: async () => () => {},
+  }),
+}));
 import { ChatInput } from "./ChatInput";
 
 const DRAFT_KEY = "bothq:draft:s-test1234";
@@ -872,6 +881,32 @@ describe("ChatInput promptcode picker", () => {
     render(<ChatInput onSend={() => {}} />);
     type("/anything");
     expect(screen.queryByRole("listbox")).toBeNull();
+  });
+});
+
+describe("ChatInput file paste", () => {
+  function pasteInto(box: HTMLElement, uriList: string) {
+    fireEvent.paste(box, {
+      clipboardData: {
+        getData: (t: string) => (t === "text/uri-list" ? uriList : ""),
+        items: [],
+      },
+    });
+  }
+
+  it("inserts a Finder-copied file as its quoted absolute path", () => {
+    render(<ChatInput onSend={() => {}} />);
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "", selectionStart: 0 } });
+    pasteInto(box, "file:///tmp/a%20b.md\n");
+    expect(box).toHaveValue('"/tmp/a b.md" ');
+  });
+
+  it("leaves plain-text pastes to the browser default", () => {
+    render(<ChatInput onSend={() => {}} />);
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    pasteInto(box, "");
+    expect(box).toHaveValue("");
   });
 });
 
