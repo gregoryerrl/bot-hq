@@ -78,6 +78,22 @@ docs: a phase doc WRITTEN WITHOUT a phase (an append, typically) had its tag
 nulled by `phase = excluded.phase` and vanished from the I/P/A/V tabs — the
 write now adopts the existing row's phase.
 
+**The dissection arc** (user mandate, same day): s-a73699ec ("aug 24
+ad-manager work", 7 h) deep-read against the session-study method. Finding 1
+shipped: every agent-initiated close of a busy session stamped a ghost
+"stopped mid-turn — send a message to respawn them" halt onto the CLOSED row
+(teardown killed before closing; the pump's death declaration raced in
+between — both dissected sessions carried it). Teardown now closes the row
+before it kills, both declare fns carry `closed_at IS NULL` — and, per the
+review's catch, they REPORT the refusal (`Result<bool>` from rows_affected)
+so `emit_halt_row` treats a refused declare as a hard no-op instead of a
+runtime ghost (awaiting flipped + banner + no slot). The suppression halt
+reads also fail TOWARD the standing halt now, on both halves. Finding 2 (the
+close-out staleness sweep flagging generic English — "duplication",
+"permission", "half" — every mechanical tightening reddens the deliberate
+"duo" pins) is parked as the user's pick. `ba79599` `bdd4933` `a3e5d8a`;
+suite 1308/0.
+
 ---
 
 ## 2026-08-19 (round 12) — the round the live session was dissected, s-73825e99
