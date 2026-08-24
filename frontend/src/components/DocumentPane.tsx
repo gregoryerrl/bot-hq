@@ -11,7 +11,7 @@ import { ChoicePrompt, type ChoicePromptChoice } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
 import { ErrorBanner } from "./ErrorBanner";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { FileViewerDialog, fileArgInCommand } from "./FileViewerDialog";
+import { FileViewerDialog, fileArgsInCommand } from "./FileViewerDialog";
 import { TrashIcon } from "./icons";
 import { Button } from "./ui/Button";
 import { cn } from "../lib/cn";
@@ -983,12 +983,28 @@ function TrayChoice({
               approved is invisible without this. */}
           <div className="mt-1 flex flex-wrap gap-1.5">
             {(() => {
-              const f = fileArgInCommand(entry.command_text);
-              return f ? (
-                <Button size="sm" variant="ghost" onClick={() => onViewFile(f)}>
-                  View {f.split("/").pop()}
-                </Button>
-              ) : null;
+              const files = fileArgsInCommand(entry.command_text ?? "");
+              const shown = files.slice(0, 3);
+              const dropped = files.length - shown.length;
+              return (
+                <>
+                  {shown.map((f) => (
+                    <Button
+                      key={f}
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onViewFile(f)}
+                    >
+                      View {f.split("/").pop()}
+                    </Button>
+                  ))}
+                  {dropped > 0 && (
+                    <span className="self-center text-[0.7rem] text-on-surface-variant">
+                      +{dropped} more file{dropped > 1 ? "s" : ""}
+                    </span>
+                  )}
+                </>
+              );
             })()}
             <Button
               size="sm"

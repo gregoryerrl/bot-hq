@@ -1,7 +1,11 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { FileViewerDialog, fileArgInCommand } from "./FileViewerDialog";
+import {
+  FileViewerDialog,
+  fileArgInCommand,
+  fileArgsInCommand,
+} from "./FileViewerDialog";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
@@ -43,6 +47,42 @@ describe("fileArgInCommand", () => {
   it("returns null when no file is referenced", () => {
     expect(fileArgInCommand("git push origin main")).toBeNull();
     expect(fileArgInCommand("cargo test")).toBeNull();
+  });
+});
+
+describe("fileArgsInCommand", () => {
+  it("finds the script the incident gate hid (cc7bf76e, .php)", () => {
+    expect(
+      fileArgsInCommand("./bin/secrets-run php /tmp/349-duplicate.php"),
+    ).toEqual(["/tmp/349-duplicate.php"]);
+  });
+
+  it("returns EVERY candidate, in appearance order — no first-match guessing", () => {
+    expect(fileArgsInCommand("php -d x=y foo.ini run.php")).toEqual([
+      "foo.ini",
+      "run.php",
+    ]);
+  });
+
+  it("lists flag-form files first and dedupes against the bare scan", () => {
+    expect(
+      fileArgsInCommand("gh pr create --body-file /tmp/x.md body.php"),
+    ).toEqual(["/tmp/x.md", "body.php"]);
+    expect(
+      fileArgsInCommand("git commit -F /tmp/msg.txt && cat /tmp/msg.txt"),
+    ).toEqual(["/tmp/msg.txt"]);
+  });
+
+  it("skips flag-looking tokens and URLs", () => {
+    // `--some-flag.sh` is a flag, not a file; the URL's .php is not a local path.
+    expect(
+      fileArgsInCommand("run --some-flag.sh https://x.com/a.php"),
+    ).toEqual([]);
+  });
+
+  it("keeps the single-slot wrapper on the first candidate", () => {
+    expect(fileArgInCommand("php -d x=y foo.ini run.php")).toBe("foo.ini");
+    expect(fileArgInCommand("git push origin main")).toBeNull();
   });
 });
 

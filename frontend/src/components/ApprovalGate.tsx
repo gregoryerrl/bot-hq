@@ -7,7 +7,10 @@ import { formatRelative, formatTimestamp } from "../lib/time";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import type { TrayRow } from "./HaltBanner";
-import { fileArgInCommand } from "./FileViewerDialog";
+import { fileArgsInCommand } from "./FileViewerDialog";
+
+/** How many View-file buttons a card renders before summarising the rest. */
+const VIEW_FILE_BUTTON_CAP = 3;
 
 /**
  * **An approval is not a question, and it must not be parkable (rc3 D33).**
@@ -403,13 +406,29 @@ function ViewFileButton({
   onViewFile?: (path: string) => void;
 }) {
   if (!command || !onViewFile) return null;
-  const file = fileArgInCommand(command);
-  if (!file) return null;
+  const files = fileArgsInCommand(command);
+  if (files.length === 0) return null;
+  // Cap the buttons, but say what was dropped — a fourth file silently
+  // missing is the incident this surface exists to prevent.
+  const shown = files.slice(0, VIEW_FILE_BUTTON_CAP);
+  const dropped = files.length - shown.length;
   return (
-    <div className="mt-1.5">
-      <Button size="sm" variant="ghost" onClick={() => onViewFile(file)}>
-        View {file.split("/").pop()}
-      </Button>
+    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      {shown.map((file) => (
+        <Button
+          key={file}
+          size="sm"
+          variant="ghost"
+          onClick={() => onViewFile(file)}
+        >
+          View {file.split("/").pop()}
+        </Button>
+      ))}
+      {dropped > 0 && (
+        <span className="text-xs text-on-surface-variant">
+          +{dropped} more file{dropped > 1 ? "s" : ""} in the command
+        </span>
+      )}
     </div>
   );
 }

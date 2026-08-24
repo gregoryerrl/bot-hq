@@ -195,18 +195,53 @@ export function FileViewerDialog({
   );
 }
 
+/** Strip the shell quoting a command assembles paths with. */
+function stripQuotes(token: string): string {
+  return token.replace(/^["']|["']$/g, "");
+}
+
 /**
- * Pull a file path out of a gated command so the card can offer to show it.
+ * The bare-argument extension families agents actually gate: the original
+ * body/image set plus scripts, source, config and data files. `.php` was the
+ * incident (gate `cc7bf76e`, 2026-08-24): `php /tmp/349-duplicate.php` offered
+ * no View button, and the user approved a script they could not read.
+ */
+const BARE_FILE_EXTS =
+  "md|markdown|png|jpe?g|gif|webp|svg|txt|json|diff|patch|" +
+  "php|sql|sh|bash|zsh|py|rb|pl|js|mjs|ts|tsx|jsx|yml|yaml|toml|csv|" +
+  "html|css|xml|log|conf|ini|env|rs|go|java|c|h|cpp";
+
+/**
+ * EVERY file path a gated command names, so the card can offer each one.
  *
- * Covers the forms agents actually use for gate bodies — `--body-file X`,
- * `-F X`, `--file X` — plus a bare markdown/image argument. Quotes are stripped
- * because commands are assembled as shell strings.
+ * Flag forms (`--body-file X`, `--file X`, `-F X`) come first — they are the
+ * deliberate "here is the body" convention — then bare arguments with a known
+ * extension, in appearance order. Returning ALL candidates instead of the
+ * first is the point: widening the extension set turned a missing button into
+ * a possibly WRONG one (`php -d x=y foo.ini run.php` has two file-shaped
+ * arguments, and guessing one hides the other — the same failure shape as the
+ * incident). Flag-looking tokens (`-…`) and URLs (`…://…`) are skipped;
+ * duplicates collapse.
+ */
+export function fileArgsInCommand(command: string): string[] {
+  const out: string[] = [];
+  const flagRe = /(?:--body-file|--file|-F)[=\s]+("[^"]+"|'[^']+'|\S+)/g;
+  for (const m of command.matchAll(flagRe)) out.push(stripQuotes(m[1]));
+  const bareRe = new RegExp(`(\\S+\\.(?:${BARE_FILE_EXTS}))\\b`, "gi");
+  for (const m of command.matchAll(bareRe)) {
+    const token = stripQuotes(m[1]);
+    if (token.startsWith("-")) continue;
+    if (token.includes("://")) continue;
+    out.push(token);
+  }
+  return [...new Set(out)];
+}
+
+/**
+ * The single most likely file a command names — the first candidate. Kept for
+ * single-slot surfaces (the chat tool pill); gate and tray cards render every
+ * candidate via [`fileArgsInCommand`].
  */
 export function fileArgInCommand(command: string): string | null {
-  const flag = command.match(/(?:--body-file|--file|-F)[=\s]+("[^"]+"|'[^']+'|\S+)/);
-  if (flag) return flag[1].replace(/^["']|["']$/g, "");
-  const bare = command.match(
-    /(\S+\.(?:md|markdown|png|jpe?g|gif|webp|svg|txt|json|diff|patch))\b/i,
-  );
-  return bare ? bare[1].replace(/^["']|["']$/g, "") : null;
+  return fileArgsInCommand(command)[0] ?? null;
 }
