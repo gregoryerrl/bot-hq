@@ -590,6 +590,33 @@ impl AppState {
             return Ok(());
         }
         tracing::info!(session_id, "session reopened on the user's button; respawning its roster");
+        // The reopen announces itself IN the channel (1.0.0 Batch 1, dissect
+        // s-43567984 #1): the respawned roster reads this row at its next
+        // boundary instead of carrying pre-close context forward — the live
+        // failure was an agent honoring a pre-close "close it" tray answer and
+        // re-closing the session the user had just reopened. The storage half
+        // has already filled the halt slot, so nothing is dealt a turn for
+        // this row; it is bearings, not a summons.
+        if crate::core::post_system_notice(
+            &self.storage,
+            Some(&self.bridge),
+            session_id,
+            crate::storage::MessageKind::SystemNotice,
+            "[System: session REOPENED by the user. The prior close — and any \
+             pre-close instruction to close — is void. The session is halted \
+             until the user's next message; hold for it and treat that message \
+             as the current task."
+                .to_string(),
+            None,
+        )
+        .await
+        .is_none()
+        {
+            tracing::warn!(
+                session_id,
+                "reopen: announce row not posted; the respawned roster has no on-screen account of the reopen"
+            );
+        }
         let started = self.ensure_session_started(session_id).await;
         // The row moved either way, so the frontend is told BEFORE the spawn
         // result is returned: the dashboard lists the session again, and a
@@ -3330,20 +3357,38 @@ mod tests {
             .split("\n    pub ")
             .next()
             .expect("a split always yields a first part");
-        let clear = reopen
+        // 1.0.0 Batch 1 (issues.md 2026-08-24 + dissect s-43567984 #1): the
+        // storage half now SETS a system halt (all four columns) instead of
+        // clearing the slot — the watchdog gates on the slot, so the fresh
+        // roster is never nudged into re-closing the session the user just
+        // reopened. The state half ANNOUNCES the reopen in the channel before
+        // anything spawns, so the respawned agents read the reopen as a row
+        // instead of inheriting pre-close context invisibly.
+        let row_move = reopen
             .find(".reopen_session(session_id)")
-            .expect("the reopen clears the row through storage");
+            .expect("the reopen moves the row through storage (which sets the system halt)");
+        let announce = reopen
+            .find("post_system_notice")
+            .expect("the reopen announces itself in the channel");
+        assert!(
+            reopen.contains("REOPENED"),
+            "the announce row must say the session was reopened — bearings for the fresh roster"
+        );
         let start = reopen
             .find("ensure_session_started(session_id)")
             .expect("the reopen spawns through the one spawn path");
         let told = reopen
             .find("notify_session_created(session_id)")
             .expect("the reopen tells the frontend the row is live again");
-        assert!(clear < start && start < told, "clear the row → spawn → tell the UI");
+        assert!(
+            row_move < announce && announce < start && start < told,
+            "move the row (halt set) → announce in-channel → spawn → tell the UI"
+        );
         // Round 11: an already-open row is a success no-op — the storage half
         // returns `false` so a double click (or a stale view) is harmless, and
         // this path used to turn that into an error the bar rendered as
-        // "Reopen failed". The no-op must return BEFORE the spawn.
+        // "Reopen failed". The no-op must return BEFORE the announce and spawn:
+        // a second click must not re-announce over a live session.
         assert!(
             !reopen.contains("bail!"),
             "a not-closed row is not an error: the reopen is idempotent"
@@ -3351,7 +3396,10 @@ mod tests {
         let noop = reopen
             .find("return Ok(());")
             .expect("the not-closed row returns Ok without spawning");
-        assert!(clear < noop && noop < start, "read the row → no-op if open → spawn");
+        assert!(
+            row_move < noop && noop < announce,
+            "read the row → no-op if open → announce → spawn"
+        );
     }
 
     /// **An unwell writer's close is decided from the halt slot, and the skip

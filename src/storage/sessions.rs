@@ -287,12 +287,25 @@ impl Storage {
 
     /// **Reopen a closed row** (round 10, B4 — the user's pick: "a Reopen button
     /// for closed sessions"). Clears `closed_at` AND `archived` (the dashboard
-    /// filters on both), and empties the halt slot — the halt a session closed
-    /// under is not a stop the reopened session declared. Returns whether a row
-    /// moved: `false` for an unknown or still-open session, which is what makes
-    /// a double click harmless.
+    /// filters on both) and **fills the halt slot with a system-declared halt**
+    /// (1.0.0-readiness Batch 1, issues.md 2026-08-24 + dissect s-43567984 #1):
+    /// a reopened session has no task yet, and the halt is what keeps it
+    /// honest while the user types one — the idle watchdog gates on the slot
+    /// (`watchdog::idle_unflagged_decision`), so the respawned roster is never
+    /// nudged into "declare state", which is exactly the path that made a
+    /// fresh agent re-close the session the user had just reopened. All FOUR
+    /// halt columns are overwritten — a surviving `halt_wake_at` from the
+    /// pre-close halt would be a timer that wakes the ring unbidden.
     ///
-    /// The other half of the reopen — the roster respawn — is
+    /// `ipav_phase` resets with it: the restored phase chip was meaningless
+    /// for the whole second half of the dissected session (a reopen almost
+    /// always starts a NEW task). Tradeoff, stated: a reopen-to-continue loses
+    /// the chip and the roster re-votes its way back in one boundary.
+    ///
+    /// Returns whether a row moved: `false` for an unknown or still-open
+    /// session, which is what makes a double click harmless.
+    ///
+    /// The other half of the reopen — the announce row + roster respawn — is
     /// `AppState::reopen_session`, and it is the ONLY path that may spawn a
     /// roster for a row that was closed: `ensure_session_started` refuses closed
     /// rows since round 10, so viewing an archived session no longer revives
@@ -301,14 +314,45 @@ impl Storage {
     pub async fn reopen_session(&self, id: &str) -> Result<bool> {
         let res = sqlx::query(
             "UPDATE sessions SET closed_at = NULL, archived = 0, \
-                 halt_declared_by = NULL, halt_reason = NULL, halt_declared_at = NULL, \
-                 halt_wake_at = NULL \
+                 halt_declared_by = 'system', \
+                 halt_reason = 'Session reopened — waiting for your prompt.', \
+                 halt_declared_at = ?, halt_wake_at = NULL, \
+                 ipav_phase = NULL \
              WHERE id = ? AND closed_at IS NOT NULL",
         )
+        .bind(now_utc())
         .bind(id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("reopening session {id}"))?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// The session's persisted diff anchor (migration 0070). `None` until the
+    /// first spawn over a git repo captures one.
+    pub async fn session_start_sha(&self, id: &str) -> Result<Option<String>> {
+        let row: Option<Option<String>> =
+            sqlx::query_scalar("SELECT session_start_sha FROM sessions WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.flatten())
+    }
+
+    /// Persist the diff anchor, WRITE-ONCE (1.0.0 Batch 1, T7): the predicate
+    /// keeps the FIRST spawn's capture — a reopen or restart re-running the
+    /// spawn path cannot rebaseline the Apply-tab diff to a later HEAD. The
+    /// bool says whether this call was the one that wrote it.
+    pub async fn set_session_start_sha_if_absent(&self, id: &str, sha: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE sessions SET session_start_sha = ? \
+             WHERE id = ? AND session_start_sha IS NULL",
+        )
+        .bind(sha)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("persisting session_start_sha for {id}"))?;
         Ok(res.rows_affected() > 0)
     }
 
@@ -501,16 +545,24 @@ mod tests {
         assert!(s.session_halt_wake_at("s1").await.unwrap().is_none());
     }
 
-    /// **A closed session reopens on a button, not on a view** (round 10, B4).
-    /// The storage half: `reopen_session` clears BOTH `closed_at` and
-    /// `archived` (the dashboard's active filter is `archived = 0 AND
-    /// closed_at IS NULL`), empties the halt slot the session closed under, and
+    /// **A closed session reopens on a button, INTO a system halt** (round 10
+    /// B4 + 1.0.0 Batch 1). The storage half: `reopen_session` clears BOTH
+    /// `closed_at` and `archived` (the dashboard's active filter is
+    /// `archived = 0 AND closed_at IS NULL`), REPLACES the halt the session
+    /// closed under with a system-declared "waiting for your prompt" halt —
+    /// all four columns overwritten, so a pre-close TEMPORARY halt's timer
+    /// cannot wake the reopened ring — resets the persisted IPAV phase, and
     /// is a no-op on an open or unknown row.
     #[tokio::test]
-    async fn reopen_clears_closed_archived_and_the_halt_slot() {
+    async fn reopen_sets_a_system_halt_and_resets_the_phase() {
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.declare_session_halt("s1", "hands", "done for now").await.unwrap();
+        // The pre-close state this must NOT leak: an agent's TEMPORARY halt
+        // (wake timer armed) and a persisted Verify phase.
+        s.declare_temporary_session_halt("s1", "hands", "done for now", "2099-01-01T00:00:00Z")
+            .await
+            .unwrap();
+        s.set_persisted_ipav_phase("s1", "verify").await.unwrap();
         // Close it archived, as the Archive tab's rows are.
         s.close_session("s1", true).await.unwrap();
         let row = s.get_session("s1").await.unwrap().unwrap();
@@ -525,9 +577,30 @@ mod tests {
         let row = s.get_session("s1").await.unwrap().unwrap();
         assert!(row.closed_at.is_none(), "reopened: closed_at cleared");
         assert_eq!(row.archived, 0, "reopened: archived cleared too, or the dashboard still hides it");
+        let (by, reason, at) = s
+            .session_halt("s1")
+            .await
+            .unwrap()
+            .expect("a reopened session is HALTED — the watchdog gates on this slot");
+        assert_eq!(by, "system", "the halt is the host's, not a ghost of the agent's");
         assert!(
-            s.session_halt("s1").await.unwrap().is_none(),
-            "the halt the session closed under is not the reopened session's stop"
+            reason.contains("waiting for your prompt"),
+            "the recap says what the session waits for: {reason}"
+        );
+        assert!(!at.is_empty(), "declared_at stamped");
+        let wake: Option<String> =
+            sqlx::query_scalar("SELECT halt_wake_at FROM sessions WHERE id = 's1'")
+                .fetch_one(s.pool())
+                .await
+                .unwrap();
+        assert!(
+            wake.is_none(),
+            "the pre-close temporary halt's timer must not survive the reopen: {wake:?}"
+        );
+        assert_eq!(
+            s.persisted_ipav_phase("s1").await.unwrap(),
+            None,
+            "the restored phase chip misled the whole second half of s-43567984 — a reopen resets it"
         );
         assert_eq!(
             s.list_active_sessions().await.unwrap().len(),
@@ -535,9 +608,33 @@ mod tests {
             "back on the dashboard"
         );
 
-        // A second click, or a reopen of an open row, moves nothing.
+        // A second click, or a reopen of an open row, moves nothing — and the
+        // no-op must not re-stamp the halt either.
         assert!(!s.reopen_session("s1").await.unwrap());
         assert!(!s.reopen_session("nope").await.unwrap());
+    }
+
+    /// **The diff anchor is write-once** (1.0.0 Batch 1, T7 — migration 0070).
+    /// The first capture wins; a respawn's later HEAD cannot rebaseline it,
+    /// and a reopen leaves it standing.
+    #[tokio::test]
+    async fn session_start_sha_is_write_once_and_survives_reopen() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        assert_eq!(s.session_start_sha("s1").await.unwrap(), None);
+        assert!(s.set_session_start_sha_if_absent("s1", "aaa111").await.unwrap());
+        assert!(
+            !s.set_session_start_sha_if_absent("s1", "bbb222").await.unwrap(),
+            "a second capture must not rebaseline the anchor"
+        );
+        assert_eq!(s.session_start_sha("s1").await.unwrap().as_deref(), Some("aaa111"));
+        s.close_session("s1", false).await.unwrap();
+        assert!(s.reopen_session("s1").await.unwrap());
+        assert_eq!(
+            s.session_start_sha("s1").await.unwrap().as_deref(),
+            Some("aaa111"),
+            "reopen keeps the original anchor — the whole session's work stays in the diff"
+        );
     }
 
     /// **A closed row can be archived after the fact** (round 11). The

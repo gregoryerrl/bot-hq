@@ -575,37 +575,56 @@ async fn spawn_session_handle(
         }
     }
 
-    // Capture the working repo's HEAD SHA so the session view's Apply tab can
-    // diff against it (covers committed + staged + unstaged in one `git diff`).
+    // The working repo's HEAD SHA so the session view's Apply tab can diff
+    // against it (covers committed + staged + unstaged in one `git diff`).
     // None when no repo / no `.git/` / git invocation failed — the view then
     // falls back to `git diff HEAD` with an anchor-lost note, then to the
     // latest phase='apply' session doc, then to an empty state.
-    let session_start_sha: Option<String> = if let Some(repo) = working_repo_path.as_ref() {
-        let repo = repo.clone();
-        tokio::task::spawn_blocking(move || -> Option<String> {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
+    //
+    // PERSISTED WRITE-ONCE since migration 0070 (1.0.0 Batch 1, T7): every
+    // respawn runs this path — reopen, restart, config change — and each used
+    // to re-capture, silently rebaselining "diff since session start" to that
+    // moment's HEAD (dissect s-43567984 #11: a mid-session staging merge
+    // became the anchor). The row's value, once written, IS the anchor; the
+    // capture only fills a NULL.
+    let session_start_sha: Option<String> = match storage.session_start_sha(&session.id).await {
+        Ok(Some(sha)) => {
+            tracing::debug!(session_id = %session.id, %sha, "session_start_sha from the row (respawn keeps the original anchor)");
+            Some(sha)
+        }
+        Ok(None) | Err(_) => {
+            let captured: Option<String> = if let Some(repo) = working_repo_path.as_ref() {
+                let repo = repo.clone();
+                tokio::task::spawn_blocking(move || -> Option<String> {
+                    let out = std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&repo)
+                        .args(["rev-parse", "HEAD"])
+                        .output()
+                        .ok()?;
+                    if !out.status.success() {
+                        return None;
+                    }
+                    let sha = String::from_utf8(out.stdout).ok()?.trim().to_string();
+                    (!sha.is_empty()).then_some(sha)
+                })
+                .await
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
+            if let Some(ref sha) = captured {
+                tracing::info!(session_id = %session.id, %sha, "captured session_start_sha");
+                if let Err(e) = storage.set_session_start_sha_if_absent(&session.id, sha).await {
+                    tracing::warn!(session_id = %session.id, ?e, "session_start_sha not persisted; the next respawn will rebaseline");
+                }
+            } else {
+                tracing::debug!(session_id = %session.id, "no session_start_sha (no repo or git failed)");
             }
-            let sha = String::from_utf8(out.stdout).ok()?.trim().to_string();
-            (!sha.is_empty()).then_some(sha)
-        })
-        .await
-        .ok()
-        .flatten()
-    } else {
-        None
+            captured
+        }
     };
-    if let Some(ref sha) = session_start_sha {
-        tracing::info!(session_id = %session.id, %sha, "captured session_start_sha");
-    } else {
-        tracing::debug!(session_id = %session.id, "no session_start_sha (no repo or git failed)");
-    }
 
     let mcp_temp = TempDir::new().context("creating mcp-config temp dir")?;
 
