@@ -533,11 +533,17 @@ export function Dashboard() {
             aria-modal="true"
             aria-label="New session"
             className={cn(
-              "fixed left-1/2 top-1/2 z-50 w-[min(880px,92vw)] max-h-[90vh] -translate-x-1/2 -translate-y-1/2 overflow-y-auto overflow-x-hidden",
+              // FIXED frame (user 2026-08-25): the size is the viewport-clamped
+              // constant, never the content — adding participants scrolls the
+              // roster list instead of growing the dialog, and removing them
+              // does not shrink it. The min() clamp keeps both edges on-screen
+              // for short/narrow windows (a fixed+translated box cannot be
+              // scrolled back into view by the page).
+              "fixed left-1/2 top-1/2 z-50 flex h-[min(760px,90vh)] w-[min(1100px,92vw)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden",
               "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
             )}
           >
-            <div className="mb-4 flex items-center justify-between">
+            <div className="mb-4 flex shrink-0 items-center justify-between">
               <h2 className="font-headline-md text-headline-md text-on-surface">
                 New session
               </h2>
@@ -552,10 +558,12 @@ export function Dashboard() {
             </div>
             {/* Two columns (ideas.md 2026-08-24): the session's SCOPE — title,
                 project, repo, worktree — on the left; the ROSTER on the right.
-                The thin single-stack window wasted the width and scrolled
-                instead. Collapses back to one column below md. */}
-            <div className="grid grid-cols-1 items-start gap-x-6 gap-y-4 md:grid-cols-2">
-              <div className="space-y-4">
+                Inside the fixed frame the body is the flexible middle: each
+                column scrolls itself on md+, and below md the whole body
+                scrolls as one stack (a per-list scroller inside an
+                auto-height column would constrain nothing there). */}
+            <div className="min-h-0 flex-1 gap-x-6 overflow-x-hidden max-md:space-y-4 max-md:overflow-y-auto md:flex">
+              <div className="min-h-0 space-y-4 overflow-x-hidden md:w-[340px] md:shrink-0 md:overflow-y-auto md:pr-1">
               <label className="block">
                 <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
                   Title
@@ -654,8 +662,8 @@ export function Dashboard() {
                 </label>
               )}
               </div>
-              <div>
-                <div className="mb-1 flex items-center justify-between">
+              <div className="flex min-h-0 min-w-0 flex-col md:flex-1">
+                <div className="mb-1 flex shrink-0 items-center justify-between">
                   <span className="font-label-caps text-label-caps text-on-surface-variant">
                     Participants
                   </span>
@@ -663,32 +671,83 @@ export function Dashboard() {
                     {participants.length} of {MAX_PARTICIPANTS}
                   </span>
                 </div>
-                <div className="flex flex-col gap-2">
+                {/* The one scroller on md+: overflow lands here, never on the
+                    frame — the footer stays reachable at any roster size. No
+                    flex-1: the list takes its natural height and SHRINKS
+                    (min-h-0) when the column runs out, so the add-button and
+                    hints sit right under the cards instead of pinned to the
+                    column floor. */}
+                <div className="flex min-h-0 flex-col gap-2 overflow-x-hidden md:overflow-y-auto md:pr-1">
                   {participants.map((row, index) => (
                     <div
                       key={row.key}
                       className="rounded-md border border-outline-variant bg-surface p-2"
                     >
-                      <div className="mb-1 flex items-center justify-between">
-                        <span className="font-code-sm text-code-sm text-on-surface-variant">
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <span className="shrink-0 font-code-sm text-code-sm text-on-surface-variant">
                           Participant {index + 1}
                         </span>
-                        {participants.length > 1 && (
+                        {/* rc3 D20: the colour this participant's byline takes,
+                            folded into the header line so the controls fit one
+                            row. "Rotate" is the DEFAULT rather than an absence
+                            — the rotation already guarantees no two
+                            participants of one session share a hue, so a pick
+                            is a preference, not a fix. Swatches rather than a
+                            select: the thing being chosen is a colour, and its
+                            name is the label of last resort. */}
+                        <span className="flex items-center gap-1">
                           <button
                             type="button"
-                            aria-label={`Remove participant ${index + 1}`}
-                            onClick={() =>
-                              setParticipants((rows) =>
-                                rows.filter((_, i) => i !== index),
-                              )
-                            }
-                            className="text-on-surface-variant transition-colors hover:text-on-surface"
+                            aria-label={`Participant ${index + 1} colour: rotate`}
+                            aria-pressed={row.color === null}
+                            title="Rotate — a distinct hue by turn order"
+                            onClick={() => patchParticipant(index, { color: null })}
+                            className={cn(
+                              "size-5 rounded-full border text-[0.6rem] leading-none text-on-surface-variant",
+                              row.color === null
+                                ? "border-primary ring-1 ring-primary"
+                                : "border-outline-variant",
+                            )}
                           >
-                            ×
+                            <RescanIcon size={10} className="mx-auto" />
                           </button>
-                        )}
+                          {PARTICIPANT_COLORS.map((c) => (
+                            <button
+                              key={c.name}
+                              type="button"
+                              aria-label={`Participant ${index + 1} colour: ${c.name}`}
+                              aria-pressed={row.color === c.name}
+                              title={c.name}
+                              onClick={() => patchParticipant(index, { color: c.name })}
+                              className={cn(
+                                "size-5 rounded-full border",
+                                c.swatch,
+                                row.color === c.name
+                                  ? "border-primary ring-1 ring-primary"
+                                  : "border-outline-variant",
+                              )}
+                            />
+                          ))}
+                          {participants.length > 1 && (
+                            <button
+                              type="button"
+                              aria-label={`Remove participant ${index + 1}`}
+                              onClick={() =>
+                                setParticipants((rows) =>
+                                  rows.filter((_, i) => i !== index),
+                                )
+                              }
+                              className="ml-1 text-on-surface-variant transition-colors hover:text-on-surface"
+                            >
+                              ×
+                            </button>
+                          )}
+                        </span>
                       </div>
-                      <div className="grid grid-cols-2 gap-2">
+                      {/* One line for the dropdowns (user 2026-08-25) — the
+                          fixed frame is wide enough that stacking them read as
+                          wasted space. Collapses to 2×2 below md. */}
+                      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
                         <label className="block">
                           <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
                             Role
@@ -816,56 +875,11 @@ export function Dashboard() {
                             className="w-full rounded border border-outline-variant bg-surface px-2 py-1 font-code-sm text-code-sm text-on-surface placeholder:text-on-surface-variant"
                           />
                         </label>
-                        {/* rc3 D20: the colour this participant's byline takes.
-                            "Rotate" is the DEFAULT rather than an absence — the
-                            rotation already guarantees no two participants of
-                            one session share a hue, so a pick is a preference,
-                            not a fix. Swatches rather than a select: the thing
-                            being chosen is a colour, and its name is the label
-                            of last resort. */}
-                        <label className="block">
-                          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                            Colour
-                          </span>
-                          <div className="flex flex-wrap items-center gap-1 pt-0.5">
-                            <button
-                              type="button"
-                              aria-label={`Participant ${index + 1} colour: rotate`}
-                              aria-pressed={row.color === null}
-                              title="Rotate — a distinct hue by turn order"
-                              onClick={() => patchParticipant(index, { color: null })}
-                              className={cn(
-                                "size-5 rounded-full border text-[0.6rem] leading-none text-on-surface-variant",
-                                row.color === null
-                                  ? "border-primary ring-1 ring-primary"
-                                  : "border-outline-variant",
-                              )}
-                            >
-                              <RescanIcon size={10} className="mx-auto" />
-                            </button>
-                            {PARTICIPANT_COLORS.map((c) => (
-                              <button
-                                key={c.name}
-                                type="button"
-                                aria-label={`Participant ${index + 1} colour: ${c.name}`}
-                                aria-pressed={row.color === c.name}
-                                title={c.name}
-                                onClick={() => patchParticipant(index, { color: c.name })}
-                                className={cn(
-                                  "size-5 rounded-full border",
-                                  c.swatch,
-                                  row.color === c.name
-                                    ? "border-primary ring-1 ring-primary"
-                                    : "border-outline-variant",
-                                )}
-                              />
-                            ))}
-                          </div>
-                        </label>
                       </div>
                     </div>
                   ))}
                 </div>
+                <div className="shrink-0">
                 {participants.length < MAX_PARTICIPANTS && (
                   <button
                     type="button"
@@ -922,14 +936,15 @@ export function Dashboard() {
                     depends on it.
                   </p>
                 )}
+                </div>
               </div>
             </div>
             {createError && (
-              <p className="mt-4 rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+              <p className="mt-4 shrink-0 rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
                 Create failed: {createError}
               </p>
             )}
-            <div className="mt-5 flex justify-end gap-2">
+            <div className="mt-5 flex shrink-0 justify-end gap-2">
               <Button variant="ghost" onClick={() => setCreating(false)}>
                 Cancel
               </Button>
