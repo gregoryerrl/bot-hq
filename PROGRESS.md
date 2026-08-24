@@ -23,6 +23,56 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-24 (round 13) — issues.md + ideas.md, the day's three defects and three features
+
+Mandate: work the user's `issues.md` (three live defects) and `ideas.md`
+(three composer features), fixing adjacent finds en route. Seven commits
+`5a42dc2..db30aab`, every batch EYES-reviewed at Investigate and Plan (P1/P2
+re-specified batches 2–3 before a line shipped). Gates: cargo 1300/0, vitest
+497/497, tsc clean, fresh-dist release build.
+
+**The three defects, each root-caused against the live DB before any edit.**
+(1) *"Says HALT but not halted"* (`s-b1d2591b`): a gate approval released a
+halted ring while D35 deliberately kept the halt slot — banner truthfully
+rendering a stale slot over a busy session, and the stale slot silencing the
+idle watchdog. `user_responded` lost its `clear_halt` flag (release ⇒ clear,
+`c873bfe`); the D35 source-guard was rewritten to pin the new invariant, the
+dead `tray_answer_clears_halt` derivation deleted, and `TrayWake.clear_halt`
+renamed `clear_awaiting` (it always gated the tracker, never the slot).
+Whether an AGENT-declared halt should instead suppress the release for gate
+answers is the user's parked tray pick (12951cc3) — until it lands, approve
+resumes AND clears. (2) *Staged message not clearing* (multi-session): a
+delivery to an UNMOUNTED SessionView left three stale artifacts — the cached
+`get_staged_response`, the module-level trayStaging picks, the tray rows —
+which re-marked the box staged on return and could genuinely RESEND the
+message via the re-stage effect. `Providers.onStageDelivered` now clears all
+of it at the one handler that always hears the delivery (`0150b4f`); the
+planned SessionView backstop was dropped after review proved it a text-loss
+route on unstage. (3) *Gate hid a `.php` file* (`cc7bf76e`):
+`fileArgInCommand` knew body/image extensions only and returned first-match.
+`fileArgsInCommand` returns EVERY candidate across a widened set, the gate and
+tray cards render one View button each (cap 3, dropped count visible), and the
+single-slot wrapper survives for the chat tool pill (`5a42dc2`).
+
+**The three features (ideas.md).** The `@` walker generalized to
+`activeToken` over sigils — the existing `@` test suite pinned the refactor —
+powering `#` document mentions (this session's IPAV/custom docs +
+agent-visible CL files; inserts a `(session doc: slug)` reference or the CL
+file's absolute path at pick time; `ClIndexEntryView` grew the MCP tool's
+`abs_path` so the FE never constructs paths) and `/` promptcodes (a new
+Settings → Promptcodes subtab editing `{code, prompt}` pairs in one
+`app_settings` JSON key — no migration; picking replaces the token with the
+full prompt text, so the box always shows exactly what sends). Paste and
+drag-drop land files as absolute paths: Tauri's `onDragDropEvent` supplies
+real OS paths, `text/uri-list` covers Finder-copied files, and clipboard
+IMAGE bytes save through the new `save_pasted_file` command into a
+per-session temp subdir inside the viewer's allowed roots (`db30aab`).
+
+Pending: batch 3b (release-suppression for agent-declared halts) awaits the
+12951cc3 pick.
+
+---
+
 ## 2026-08-19 (round 12) — the round the live session was dissected, s-73825e99
 
 Mandate: audit again (messes, staleness, redundancies, mis/missed
