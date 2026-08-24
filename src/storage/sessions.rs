@@ -79,8 +79,16 @@ impl Storage {
         reason: &str,
     ) -> Result<()> {
         // An ordinary halt replaces a temporary one's wake time too: one slot.
+        // `closed_at IS NULL`: a CLOSED session refuses the declare (round 13).
+        // The live specimen: teardown's kill reached the pump before the row
+        // close, and the pump's died-mid-turn declaration stamped a ghost
+        // "stopped mid-turn — send a message to respawn them" onto the closed
+        // row (s-a73699ec, s-b1d2591b — every agent-initiated close of a busy
+        // session). Teardown now closes the row before it kills; this
+        // predicate is the half that holds even if a straggler declare lands
+        // after that.
         sqlx::query(
-            "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ?, halt_wake_at = NULL WHERE id = ?",
+            "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ?, halt_wake_at = NULL              WHERE id = ? AND closed_at IS NULL",
         )
         .bind(agent)
         .bind(reason)
@@ -102,8 +110,9 @@ impl Storage {
         reason: &str,
         wake_at: &str,
     ) -> Result<()> {
+        // Same closed-row refusal as `declare_session_halt` (round 13).
         sqlx::query(
-            "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ?, halt_wake_at = ? WHERE id = ?",
+            "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ?, halt_wake_at = ?              WHERE id = ? AND closed_at IS NULL",
         )
         .bind(agent)
         .bind(reason)
@@ -453,6 +462,34 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use crate::storage::Storage;
+
+    /// **A closed session refuses a halt declaration** (round 13). The ghost
+    /// specimen: the close path's kill raced ahead of the row close, and the
+    /// pump's died-mid-turn declaration stamped "stopped mid-turn — send a
+    /// message to respawn them" onto an already-closing session's row — every
+    /// agent-initiated close of a busy session carried it (s-a73699ec,
+    /// s-b1d2591b). Both declare variants must no-op once `closed_at` is set;
+    /// an OPEN session still takes both.
+    #[tokio::test]
+    async fn a_closed_session_refuses_both_halt_declarations() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.declare_session_halt("s1", "hands", "live halt").await.unwrap();
+        assert!(s.session_halt("s1").await.unwrap().is_some(), "open row takes it");
+        s.clear_session_halt("s1").await.unwrap();
+
+        s.close_session("s1", false).await.unwrap();
+        s.declare_session_halt("s1", "hands", "ghost").await.unwrap();
+        assert!(
+            s.session_halt("s1").await.unwrap().is_none(),
+            "a closed row keeps no ghost halt"
+        );
+        s.declare_temporary_session_halt("s1", "hands", "ghost", "2027-01-01T00:00:00Z")
+            .await
+            .unwrap();
+        assert!(s.session_halt("s1").await.unwrap().is_none());
+        assert!(s.session_halt_wake_at("s1").await.unwrap().is_none());
+    }
 
     /// **A closed session reopens on a button, not on a view** (round 10, B4).
     /// The storage half: `reopen_session` clears BOTH `closed_at` and

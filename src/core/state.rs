@@ -1258,16 +1258,29 @@ impl AppState {
                 tracing::debug!(session_id = %id, "teardown already in progress; joining it");
                 return Ok(());
             }
-            if let Some(mut handle) = sessions.remove(id) {
-                for agent in handle.agents_mut() {
-                    agent.handle.kill();
-                }
-            }
+            let handle = sessions.remove(id);
+            // **Row close BEFORE the kills** (round 13). The kill reaches the
+            // pump immediately; the pump's died-mid-turn declaration then
+            // raced the row close and stamped a ghost "stopped mid-turn —
+            // send a message to respawn them" halt onto the closing session
+            // (s-a73699ec: declared the same instant as `closed_at`;
+            // s-b1d2591b: 37 ms before). With `closed_at` set first, the
+            // declare's `closed_at IS NULL` predicate makes any straggler a
+            // no-op — and a FAILED row close now kills nothing, leaving the
+            // session genuinely respawnable.
             if let Some(archive) = archive {
                 if let Err(e) = self.storage.close_session(id, archive).await {
-                    // Not torn down after all: leave the session respawnable.
+                    // Not torn down after all: put the handle back untouched.
+                    if let Some(handle) = handle {
+                        sessions.insert(id.to_string(), handle);
+                    }
                     self.mark_closing(id, false);
                     return Err(e);
+                }
+            }
+            if let Some(mut handle) = handle {
+                for agent in handle.agents_mut() {
+                    agent.handle.kill();
                 }
             }
         }
@@ -3284,6 +3297,34 @@ mod tests {
             .find("return Ok(());")
             .expect("the not-closed row returns Ok without spawning");
         assert!(clear < noop && noop < start, "read the row → no-op if open → spawn");
+    }
+
+    /// **The row closes before the kills** (round 13). The kill reaches the
+    /// pump at once; its died-mid-turn declaration used to race the row close
+    /// and stamp a ghost halt onto the closing session. Asserted over the
+    /// source like its siblings: exercising it needs a live pump dying inside
+    /// a real teardown. The storage half (`closed_at IS NULL` on both declare
+    /// variants) is pinned in `storage/sessions.rs`; this pins the ORDER that
+    /// makes the predicate see the closed row.
+    #[test]
+    fn the_teardown_closes_the_row_before_it_kills() {
+        let src = include_str!("state.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        let at = prod
+            .find("async fn teardown_session(")
+            .expect("teardown_session must exist");
+        let body = &prod[at..];
+        let close = body.find(".close_session(").expect("the row close is in the body");
+        let kill = body.find(".kill()").expect("the kill loop is in the body");
+        assert!(
+            close < kill,
+            "teardown must close the row before it kills the agents — the \
+             reverse order is how the pump's death declaration stamped a ghost \
+             halt onto a closed session (round 13)"
+        );
     }
 
     /// **The epilogue's turn runs BEFORE anything is torn down.**
