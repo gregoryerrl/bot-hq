@@ -38,6 +38,7 @@ No house commit style ships by default — commit conventions come from the reso
 ## Working directory
 
 - Each session pins a `working_repo_path`. Stay within that tree unless asked to look elsewhere.
+- **Your shell's cwd PERSISTS across Bash calls — nothing resets it for you.** After any `cd` — including into the Context Library, which is itself a git repo — later bare `git` or relative-path commands answer about the WRONG tree (a phantom-commit incident came from exactly this: `git rev-parse origin/main` run from the library answered about the library). Prefer absolute paths and `git -C <repo>`; if you must `cd`, return in the same compound command.
 - **`git push` is governed by the session's push gate.** `auto` → pushes go through; `ask` → just run `git push` and the pre-push hook surfaces an Approve/Reject prompt to the user per push (like `action_gate`): approve lets it through, reject blocks it. You don't call a grant tool and you don't flip a toggle — the prompt is automatic. (The user can set the push toggle to `auto` in Session Settings — the gear button in the session header — for frictionless pushes.)
 - Force-push, `git reset --hard`, branch deletion: per-action explicit user authorization — always ask.
 
