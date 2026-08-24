@@ -1865,7 +1865,10 @@ fn default_agent_config(name: &str) -> AgentConfig {
     AgentConfig {
         agent_name: name.to_string(),
         provider: "anthropic".into(),
-        model_name: "claude-opus-5".into(),
+        // The SAME name `default_spawn_model` prefers — one source, so the
+        // registry path and this last resort cannot name different defaults
+        // (EYES 8790cb6a).
+        model_name: crate::storage::DEFAULT_SPAWN_MODEL_NAME.into(),
         base_url: None,
         auth_token: None,
         updated_at: String::new(),
@@ -2247,12 +2250,14 @@ pub(crate) async fn resolve_spawn_config(
     if let Ok(Some(cfg)) = storage.get_agent_config(agent_name).await {
         return cfg;
     }
-    // The registry's newest row before the compiled constant (Batch 5): a
-    // fresh install whose user skipped Settings → Models still spawns on
-    // whatever the current seed carries (0073) instead of a hardcoded id
-    // that goes stale between releases. Only an EMPTY registry falls to the
-    // constant.
-    if let Ok(Some(m)) = storage.newest_model().await {
+    // The registry before the compiled constant (Batch 5): a fresh install
+    // whose user skipped Settings → Models still spawns on the seeded
+    // DEFAULT generation (0073) instead of a hardcoded id that goes stale
+    // between releases. `default_spawn_model` prefers the named default over
+    // mere recency (EYES 8790cb6a: newest-row picked the LAST insert —
+    // haiku — silently making the weakest model every fresh agent's spawn).
+    // Only an EMPTY registry falls to the constant.
+    if let Ok(Some(m)) = storage.default_spawn_model().await {
         return AgentConfig {
             agent_name: agent_name.to_string(),
             provider: m.provider,
@@ -2281,18 +2286,19 @@ mod tests {
         // Fresh world: 0073 seeded the current generation. No participant
         // model, no role default, no agent_configs row → the registry answers.
         let cfg = super::resolve_spawn_config(&s, "agent", None).await;
-        let seeded: Vec<String> = sqlx::query_scalar("SELECT model_name FROM models")
-            .fetch_all(s.pool())
-            .await
-            .unwrap();
-        assert!(
-            seeded.contains(&cfg.model_name),
-            "the fallback model ({}) must come FROM the registry, not a constant",
-            cfg.model_name
+        // The NAMED default, not merely "some seeded row" (EYES blocking
+        // 8790cb6a): newest-row alone resolved the LAST insert — haiku —
+        // so a fresh install spawned everything on the weakest model. The
+        // seed order must never decide the default again.
+        assert_eq!(
+            cfg.model_name,
+            crate::storage::DEFAULT_SPAWN_MODEL_NAME,
+            "the fresh-install fallback is the named default generation"
         );
-        assert!(
-            cfg.context_window.is_some(),
-            "0073 seeds windows, so the meter has a denominator out of the box"
+        assert_eq!(
+            cfg.context_window,
+            Some(1_000_000),
+            "0073 seeds the default's window, so the meter has a denominator out of the box"
         );
 
         // Only an EMPTY registry falls to the compiled constant — and that

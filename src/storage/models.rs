@@ -17,6 +17,12 @@ const MODEL_COLUMNS: &str = "id, display_name, provider, model_name, base_url, a
 /// checkbox from it.
 pub const WORKTREE_DEFAULT_KEY: &str = "worktree_default";
 
+/// The default spawn generation — the ONE name `default_spawn_model` prefers
+/// in the registry and `core::session::default_agent_config` compiles in as
+/// the empty-registry last resort. Single source (EYES 8790cb6a): two notions
+/// of "the default model" is how a fresh install spawned everything on Haiku.
+pub const DEFAULT_SPAWN_MODEL_NAME: &str = "claude-opus-5";
+
 /// Key in `app_settings`: "0" = disable the Track-A workflow-adherence nudges
 /// (e.g. the session-start CL-index primer) that mechanically page a model
 /// toward the workflow when it doesn't reliably follow the prompt. Opt-OUT:
@@ -89,12 +95,25 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
-    /// The most recently added model row — the spawn chain's registry-wide
-    /// fallback (1.0.0 Batch 5). "Newest" because the registry is
-    /// user-curated: the row added last is the closest thing to "what the
-    /// user considers current". `None` only when the registry is empty, which
-    /// is when the compiled last-resort constant applies.
-    pub async fn newest_model(&self) -> Result<Option<Model>> {
+    /// The model spawns fall back to when nothing else resolved (1.0.0
+    /// Batch 5, corrected by EYES blocking 8790cb6a): PREFER the explicitly
+    /// named default generation, and only then recency. "Newest row" alone
+    /// was a proxy for "the default" and the two diverged immediately — 0073
+    /// inserts haiku LAST, so on a fresh install every agent silently spawned
+    /// on the weakest current model with a 200K window while the picker
+    /// offered Opus 5. The name below is the single source both this resolver
+    /// and the compiled last-resort constant read, so the two notions of
+    /// "default" cannot split again.
+    pub async fn default_spawn_model(&self) -> Result<Option<Model>> {
+        if let Some(m) = sqlx::query_as::<_, Model>(
+            "SELECT * FROM models WHERE model_name = ? ORDER BY rowid LIMIT 1",
+        )
+        .bind(DEFAULT_SPAWN_MODEL_NAME)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            return Ok(Some(m));
+        }
         let row = sqlx::query_as::<_, Model>(
             "SELECT * FROM models ORDER BY created_at DESC, rowid DESC LIMIT 1",
         )
