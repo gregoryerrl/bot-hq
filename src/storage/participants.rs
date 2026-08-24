@@ -144,9 +144,9 @@ pub struct Participant {
     pub turn_position: i64,
     pub done_vote: bool,
     pub enabled: bool,
-    /// Per-participant spawn knobs (rc3 **D12**). `None` = inherit, exactly as
-    /// the `sessions.{brian,rain}_effort` / `_ultracode` columns they replace
-    /// meant it. Columns since 0044; only rc3 reads them.
+    /// Per-participant spawn knobs (rc3 **D12**). `None` = the dialog's Default
+    /// choice — spawn resolves the role's configured default, else the medium
+    /// floor (no-inherit, 2026-08-25). Columns since 0044; only rc3 reads them.
     pub effort: Option<String>,
     pub ultracode: Option<bool>,
     /// This participant's prior claude-code conversation id, so a respawn
@@ -170,9 +170,10 @@ pub struct Participant {
     /// it would be spawned with NOW"). Same call `slot0_model_at_spawn` made.
     pub effort_at_spawn: Option<String>,
     pub ultracode_at_spawn: Option<bool>,
-    /// Whether the pair above describes a real spawn. Load-bearing because the
-    /// common path reconciles to `None`: without it, "spawned with no override"
-    /// and "row predates 0061" are the same two NULLs.
+    /// Whether the pair above describes a real spawn. Every post-floor spawn
+    /// records a concrete effort (no-inherit, 2026-08-25), so a NULL pair means
+    /// a pre-floor row; the flag still separates that from a row nothing ever
+    /// spawned.
     pub spawn_knobs_recorded: bool,
 }
 
@@ -1444,23 +1445,6 @@ impl Storage {
         Ok(())
     }
 
-    /// Record what this participant was ACTUALLY spawned with — the effort and
-    /// ultracode values left standing after `reconcile_spawn_knobs`, i.e. what
-    /// the child process really received (migration 0061).
-    ///
-    /// **Distinct from the `effort` / `ultracode` columns beside them**, which
-    /// are the user's CHOICE and are usually "inherit" — 94 of 94 rows held
-    /// `NULL` when this shipped. A choice of inherit says nothing about the
-    /// effective value, and the effective value cannot be recovered later: the
-    /// chain is per-role → `_all` → the config knob → the per-run pick, plus an
-    /// exclusion rule that can flip either knob, and re-resolving it after the
-    /// fact answers "what it WOULD be spawned with now".
-    ///
-    /// `spawn_knobs_recorded` is set unconditionally, and that is the point of
-    /// the column: the common path resolves to `None`, so `effort_at_spawn IS
-    /// NULL` is what a SUCCESSFUL record looks like. Without the flag it would be
-    /// indistinguishable from a row that predates 0061, and a UI cannot honestly
-    /// render "no override in force" for one and "unknown" for the other.
     /// Persist the fully composed system prompt on the participant row
     /// (1.0.0 Batch 7 P3). The column shipped in 0044 with its purpose in the
     /// schema comment and no writer; `participant_spawn_config` is the one
@@ -1475,6 +1459,23 @@ impl Storage {
         Ok(())
     }
 
+    /// Record what this participant was ACTUALLY spawned with — the effort and
+    /// ultracode values left standing after `reconcile_spawn_knobs`, i.e. what
+    /// the child process really received (migration 0061).
+    ///
+    /// **Distinct from the `effort` / `ultracode` columns beside them**, which
+    /// are the user's CHOICE (usually the Default absence pair). A choice of
+    /// Default says nothing about the effective value, and the effective value
+    /// cannot be recovered later: the chain is per-run pick → the role's
+    /// `per_role[slug]` entry → the `DEFAULT_EFFORT` floor (no-inherit,
+    /// 2026-08-25), plus an exclusion rule that can flip either knob, and
+    /// re-resolving it after the fact answers "what it WOULD be spawned with
+    /// now".
+    ///
+    /// `spawn_knobs_recorded` is set unconditionally. Since the floor, every
+    /// spawn records a concrete effort — `effort_at_spawn IS NULL` means a
+    /// pre-floor row, and the flag still separates that from a row nothing
+    /// ever spawned, so a UI can honestly render each.
     pub async fn set_spawn_knobs(
         &self,
         participant_id: i64,

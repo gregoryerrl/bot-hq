@@ -314,9 +314,10 @@ pub struct ParticipantView {
     /// mid-session.
     pub effort_at_spawn: Option<String>,
     pub ultracode_at_spawn: Option<bool>,
-    /// Whether the two above describe a real spawn. The common path reconciles
-    /// to `None`, so without this flag "spawned with no override in force" and
-    /// "this row predates 0061" are the same pair of nulls — and a badge would
+    /// Whether the two above describe a real spawn. Every post-floor spawn
+    /// records a concrete effort (no-inherit, 2026-08-25), so a null pair now
+    /// means a pre-floor row — and without this flag that would be
+    /// indistinguishable from a row nothing ever spawned, and a badge would
     /// have to guess which. `false` means say nothing.
     pub spawn_knobs_recorded: bool,
 }

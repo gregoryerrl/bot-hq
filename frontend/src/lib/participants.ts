@@ -47,9 +47,11 @@ export type ParticipantView = {
   /** The user's own name for this participant, or null to take the role and
    *  ordinal (rc3 **D20**, migration 0053). See {@link participantLabel}. */
   label: string | null;
-  /** This participant's own effort / ultracode pick (rc3 **D12**), or null to
-   *  inherit. This is the CHOICE, not the effective value — see the pair below,
-   *  and {@link SpawnBadge} for which one is rendered and which one is styled. */
+  /** This participant's own effort / ultracode pick (rc3 **D12**), or null for
+   *  the Default choice — spawn resolves the role's configured default, else
+   *  the medium floor (no-inherit, 2026-08-25). This is the CHOICE, not the
+   *  effective value — see the pair below, and {@link SpawnBadge} for which
+   *  one is rendered and which one is styled. */
   effort: string | null;
   ultracode: boolean | null;
   /** What this participant was ACTUALLY spawned with (migration 0061): the pair
@@ -59,9 +61,10 @@ export type ParticipantView = {
    *  would answer "what it would be spawned with NOW". */
   effort_at_spawn: string | null;
   ultracode_at_spawn: boolean | null;
-  /** Whether the pair above describes a real spawn. The common path reconciles
-   *  to null, so without this "spawned with no override in force" and "this row
-   *  predates 0061" are the same two nulls. False means say nothing. */
+  /** Whether the pair above describes a real spawn. Every post-floor spawn
+   *  records a concrete effort (no-inherit, 2026-08-25), so a null pair means
+   *  a pre-floor row — and without this flag that would be indistinguishable
+   *  from a row nothing ever spawned. False means say nothing. */
   spawn_knobs_recorded: boolean;
   enabled: boolean;
 };
