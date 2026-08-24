@@ -375,8 +375,8 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
-            name: "eyes_flag",
-            description: gated_by("eyes_flag", "File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until a participant holding `disposition_finding` resolves it (the mechanical sign-off gate, mirroring the commit-message gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id — an OPEN finding with an identical `summary` is a re-raise: its existing id comes back, no duplicate row is filed, and its raise count grows only if another participant has spoken since (change the summary to file a genuinely new finding). Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains the executor to ignore the gate). This is how a finding STICKS instead of relying on someone reading chat."),
+            name: "flag_finding",
+            description: gated_by("flag_finding", "File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until a participant holding `disposition_finding` resolves it (the mechanical sign-off gate, mirroring the commit-message gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id — an OPEN finding with an identical `summary` is a re-raise: its existing id comes back, no duplicate row is filed, and its raise count grows only if another participant has spoken since (change the summary to file a genuinely new finding). Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains the executor to ignore the gate). This is how a finding STICKS instead of relying on someone reading chat."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -397,7 +397,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "finding_id": { "type": "string", "description": "The finding id from eyes_flag / check_open_findings." },
+                    "finding_id": { "type": "string", "description": "The finding id from flag_finding / check_open_findings." },
                     "status": {
                         "type": "string",
                         "enum": ["fixed", "rebutted"],
@@ -430,11 +430,11 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "approve_finding",
-            description: gated_by("approve_finding", "Confirm that an escalated finding the executor marked fixed is genuinely resolved — clears the escalation's 'awaiting confirmation' signal. Use this AFTER a finding you re-raised has been dispositioned, once you've verified the fix is real. This does NOT gate commits (the disposition already cleared the commit gate); it's the sign-off that closes the loop. If you DON'T agree the fix is adequate, do NOT approve — re-file it with `eyes_flag` instead (a fresh open finding re-blocks the commit)."),
+            description: gated_by("approve_finding", "Confirm that an escalated finding the executor marked fixed is genuinely resolved — clears the escalation's 'awaiting confirmation' signal. Use this AFTER a finding you re-raised has been dispositioned, once you've verified the fix is real. This does NOT gate commits (the disposition already cleared the commit gate); it's the sign-off that closes the loop. If you DON'T agree the fix is adequate, do NOT approve — re-file it with `flag_finding` instead (a fresh open finding re-blocks the commit)."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "finding_id": { "type": "string", "description": "The finding id (from eyes_flag / check_open_findings) to confirm as resolved." }
+                    "finding_id": { "type": "string", "description": "The finding id (from flag_finding / check_open_findings) to confirm as resolved." }
                 },
                 "required": ["finding_id"]
             }),

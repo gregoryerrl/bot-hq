@@ -59,7 +59,7 @@ export function SessionFindingsBanner({ sessionId }: { sessionId: string }) {
   const awaitingConfirm = findings.filter(
     (f) =>
       f.raise_count >= 2 &&
-      !f.eyes_approved &&
+      !f.reviewer_approved &&
       f.status !== "open",
   );
   if (awaitingConfirm.length > 0) {

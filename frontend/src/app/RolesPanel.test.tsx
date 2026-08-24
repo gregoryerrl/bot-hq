@@ -61,7 +61,6 @@ const MODELS: ModelView[] = [
  * role while these tests stayed green: a fixture asserting a state the schema
  * can no longer produce tests nothing.
  *
- * `has_builtin_prose` is the real question and is derived in Rust from the
  * slug, so it defaults to `true` here to match this fixture's `hands`.
  */
 function role(over: Partial<RoleView> = {}): RoleView {
@@ -74,7 +73,6 @@ function role(over: Partial<RoleView> = {}): RoleView {
     participation_mode: "active",
     default_model_id: null,
     builtin: false,
-    has_builtin_prose: true,
     archived: false,
     ...over,
   };
@@ -316,10 +314,9 @@ describe("RolesPanel", () => {
     // Clearing the box now means CLEARED: the compiled-prose fallback was
     // deleted with the neutral default role, so `description_prompt: null`
     // spawns the role with no layer-3 prose at all — briefed by the universal
-    // rules and its capability grants. One arm, whatever has_builtin_prose
-    // says (the field is permanently false backend-side; a stale true from a
-    // cached view must not resurrect the old promise).
-    mockBackend([role({ has_builtin_prose: true })]);
+    // rules and its capability grants. One arm — the built-in-prose flag is
+    // deleted from the view entirely (Batch 6 D2).
+    mockBackend([role()]);
     renderPanel();
     await screen.findByText("HANDS");
 
@@ -419,7 +416,6 @@ describe("RolesPanel", () => {
       id: 3,
       slug: "retired",
       display_name: "Retired",
-      has_builtin_prose: false,
       archived: true,
     });
     mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
@@ -457,7 +453,6 @@ describe("RolesPanel", () => {
           display_name: "Code Reviewer",
           description_prompt: "Be terse.",
           capabilities: [],
-          has_builtin_prose: false,
         });
         list.push(created);
         return created;

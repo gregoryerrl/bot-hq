@@ -264,15 +264,11 @@ impl Paths {
                 .with_context(|| format!("writing {}", self.version_path.display()))?;
         }
 
-        // One-time consolidation of per-agent custom-instruction.md files into
-        // the single library-root custom-instructions.md. Runs BEFORE seeding
-        // so untouched legacy seeds delete cleanly and the loop below then
-        // creates the consolidated file from its template.
-        for slot in self.migrate_agent_custom_instructions()? {
-            if !first_run {
-                repaired_slots.push(slot);
-            }
-        }
+        // The per-agent custom-instruction consolidation (brian/rain →
+        // custom-instructions.md) was DELETED here (1.0.0 Batch 6 M7b): dead
+        // for every fresh install, and any pre-June-2026 layout has long
+        // migrated. Its ~500 B of retired-agent-name templates left the
+        // binary with it.
 
         for (path, body) in default_cl_files(&self.cl_dir) {
             if !path.exists() {
@@ -305,57 +301,6 @@ impl Paths {
         }
     }
 
-    /// One-time consolidation of the per-agent
-    /// `agents/<name>/custom-instruction.md` files into a single library-root
-    /// `custom-instructions.md` loaded for ALL agents. Idempotent: once the
-    /// legacy files are gone this is a no-op. An untouched seed (matches its
-    /// shipped template) is deleted outright; real user content is folded into
-    /// the consolidated file under a provenance heading first. Emptied
-    /// per-agent dirs (and `agents/` itself) are pruned; non-empty dirs
-    /// survive.
-    fn migrate_agent_custom_instructions(&self) -> Result<Vec<String>> {
-        let mut migrated = Vec::new();
-        let consolidated = self.cl_dir.join("custom-instructions.md");
-        for (agent, legacy_template) in [
-            ("brian", LEGACY_BRIAN_CUSTOM_INSTRUCTION),
-            ("rain", LEGACY_RAIN_CUSTOM_INSTRUCTION),
-        ] {
-            let legacy = self
-                .cl_dir
-                .join(format!("agents/{agent}/custom-instruction.md"));
-            let Ok(body) = fs::read_to_string(&legacy) else {
-                continue;
-            };
-            if body.trim() != legacy_template.trim() && !body.trim().is_empty() {
-                // Real user content — preserve it in the consolidated file
-                // before deleting the per-agent original.
-                if !consolidated.exists() {
-                    fs::write(
-                        &consolidated,
-                        include_str!("../templates/cl/custom-instructions.md"),
-                    )
-                    .with_context(|| format!("seeding {}", consolidated.display()))?;
-                }
-                let mut out = fs::read_to_string(&consolidated)
-                    .with_context(|| format!("reading {}", consolidated.display()))?;
-                out.push_str(&format!(
-                    "\n\n## Migrated from agents/{agent}/custom-instruction.md\n\n"
-                ));
-                out.push_str(body.trim_end());
-                out.push('\n');
-                fs::write(&consolidated, out)
-                    .with_context(|| format!("appending migrated content to {}", consolidated.display()))?;
-            }
-            fs::remove_file(&legacy)
-                .with_context(|| format!("removing legacy {}", legacy.display()))?;
-            migrated.push(format!(
-                "agents/{agent}/custom-instruction.md → custom-instructions.md"
-            ));
-            let _ = fs::remove_dir(self.cl_dir.join(format!("agents/{agent}")));
-        }
-        let _ = fs::remove_dir(self.cl_dir.join("agents"));
-        Ok(migrated)
-    }
 
     /// Move an older on-disk layout into the current one, exactly once. Returns
     /// `true` if anything was moved. Gated on the recorded schema version being
@@ -559,35 +504,6 @@ fn default_cl_files(root: &Path) -> Vec<(PathBuf, &'static str)> {
     ]
 }
 
-/// Legacy per-agent custom-instruction templates (pre-consolidation), kept
-/// verbatim so [`Paths::migrate_agent_custom_instructions`] can tell an
-/// untouched seed apart from real user content.
-const LEGACY_BRIAN_CUSTOM_INSTRUCTION: &str = "\
-# Custom instructions — Brian (HANDS)
-
-Anything you write here is appended to Brian's system prompt at session spawn.
-The hardcoded role identity (HANDS / BRAIN duo / ask-user-before-close) is
-baked into the binary — don't redefine it; just add or override behavior.
-
-Examples:
-- Communication: \"Use compact pipe-separated peer-coord lines: sender|event:value|key:value.\"
-- Workflow: \"Always run `cargo test` before suggesting a commit.\"
-- Close behavior: \"Auto-close the session when the task is done — don't ask.\"
-- Project routing: \"When the user names a project, read `~/.bot-hq/projects/<name>/conventions.md` before starting IPAV.\"
-";
-
-const LEGACY_RAIN_CUSTOM_INSTRUCTION: &str = "\
-# Custom instructions — Rain (EYES)
-
-Anything you write here is appended to Rain's system prompt at session spawn.
-The hardcoded role identity (EYES / BRAIN duo / review-only) is baked into the
-binary — don't redefine it; just add or override behavior.
-
-Examples:
-- Review focus: \"Prioritize: race conditions, error handling, observability gaps.\"
-- Tone: \"Be terse. One-line callouts beat paragraphs.\"
-- Threshold: \"Don't push back on micro-style issues; reserve interventions for correctness/security/perf.\"
-";
 
 // ---- single-instance lock ---------------------------------------------
 
@@ -757,75 +673,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn untouched_legacy_agent_instructions_delete_cleanly() {
-        let tmp = TempDir::new().unwrap();
-        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
-        paths.init().unwrap();
-        // Simulate a pre-consolidation install: per-agent seeds still on disk,
-        // consolidated file not yet created.
-        fs::remove_file(paths.cl_dir.join("custom-instructions.md")).unwrap();
-        fs::create_dir_all(paths.cl_dir.join("agents/brian")).unwrap();
-        fs::create_dir_all(paths.cl_dir.join("agents/rain")).unwrap();
-        fs::write(
-            paths.cl_dir.join("agents/brian/custom-instruction.md"),
-            LEGACY_BRIAN_CUSTOM_INSTRUCTION,
-        )
-        .unwrap();
-        fs::write(
-            paths.cl_dir.join("agents/rain/custom-instruction.md"),
-            LEGACY_RAIN_CUSTOM_INSTRUCTION,
-        )
-        .unwrap();
 
-        paths.init().unwrap();
-
-        assert!(!paths.cl_dir.join("agents").exists(), "agents/ pruned");
-        let body = fs::read_to_string(paths.cl_dir.join("custom-instructions.md")).unwrap();
-        assert!(
-            !body.contains("## Migrated from"),
-            "untouched seeds must not leave migration headings"
-        );
-    }
-
-    #[test]
-    fn user_modified_legacy_agent_instructions_fold_into_consolidated_file() {
-        let tmp = TempDir::new().unwrap();
-        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
-        paths.init().unwrap();
-        fs::remove_file(paths.cl_dir.join("custom-instructions.md")).unwrap();
-        fs::create_dir_all(paths.cl_dir.join("agents/brian")).unwrap();
-        fs::create_dir_all(paths.cl_dir.join("agents/rain")).unwrap();
-        fs::write(
-            paths.cl_dir.join("agents/brian/custom-instruction.md"),
-            "run the linter twice\n",
-        )
-        .unwrap();
-        fs::write(
-            paths.cl_dir.join("agents/rain/custom-instruction.md"),
-            LEGACY_RAIN_CUSTOM_INSTRUCTION,
-        )
-        .unwrap();
-
-        paths.init().unwrap();
-
-        assert!(!paths.cl_dir.join("agents").exists());
-        let body = fs::read_to_string(paths.cl_dir.join("custom-instructions.md")).unwrap();
-        assert!(
-            body.contains("## Migrated from agents/brian/custom-instruction.md"),
-            "user content must carry a provenance heading"
-        );
-        assert!(body.contains("run the linter twice"));
-        assert!(
-            !body.contains("## Migrated from agents/rain/custom-instruction.md"),
-            "untouched rain seed must be deleted, not folded"
-        );
-
-        // Idempotent: a further init leaves the folded content alone.
-        paths.init().unwrap();
-        let again = fs::read_to_string(paths.cl_dir.join("custom-instructions.md")).unwrap();
-        assert_eq!(body, again);
-    }
 
     #[test]
     fn migrates_legacy_root_layout_into_library() {
@@ -858,14 +706,19 @@ mod tests {
         assert!(paths.cl_dir.join("projects/foo/conventions.md").exists());
         assert!(paths.cl_dir.join("custom-general-rules.md").exists());
         assert!(paths.cl_dir.join("scratch.md").exists());
-        // The moved per-agent custom-instruction.md ("hi") is then consolidated
-        // into the library-root custom-instructions.md by the follow-on
-        // agent-instruction migration.
-        assert!(!paths.cl_dir.join("agents").exists());
+        // The per-agent consolidation was deleted (1.0.0 Batch 6 M7b), so the
+        // moved agents/ folder survives as ordinary library content — the
+        // root-layout migration under test here moves it and stops.
+        assert!(
+            paths.cl_dir.join("agents/brian/custom-instruction.md").exists(),
+            "root-layout migration moves agents/ under library/ untouched"
+        );
         let consolidated =
             fs::read_to_string(paths.cl_dir.join("custom-instructions.md")).unwrap();
-        assert!(consolidated.contains("## Migrated from agents/brian/custom-instruction.md"));
-        assert!(consolidated.contains("hi"));
+        assert!(
+            !consolidated.contains("## Migrated from"),
+            "no follow-on consolidation exists any more"
+        );
         // host-only state moved under .local/.
         assert!(paths.violations_path.exists());
         // marker renamed; old root locations gone.

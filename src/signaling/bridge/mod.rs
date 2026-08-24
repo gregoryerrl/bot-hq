@@ -527,6 +527,32 @@ impl PhaseAdvanceOutcome {
 }
 
 impl SignalingBridge {
+    /// The session's roster as (display_name, slug) pairs for the peer-wait
+    /// deadlock guard (`jsonrpc::peer_shaped_reason`, 1.0.0 Batch 6 M6):
+    /// enabled participants only, so a disabled role's name stops tripping
+    /// refusals. Falls back to the example pair on ANY failure — an
+    /// unreadable roster must not silently DISARM the guard that stopped a
+    /// 100-minute stall (s-96fda118).
+    pub(crate) async fn roster_peer_tokens(&self, session_id: &str) -> Vec<(String, String)> {
+        let fallback = || {
+            vec![
+                ("HANDS".to_string(), "hands".to_string()),
+                ("EYES".to_string(), "eyes".to_string()),
+            ]
+        };
+        let Some(storage) = self.storage.lock().await.clone() else {
+            return fallback();
+        };
+        match storage.participants_for_session(session_id).await {
+            Ok(rows) if !rows.is_empty() => rows
+                .into_iter()
+                .filter(|p| p.enabled)
+                .map(|p| (p.display_name, p.slug))
+                .collect(),
+            _ => fallback(),
+        }
+    }
+
     pub(crate) fn new_with(violations: Option<ViolationsLog>, data_dir: Option<PathBuf>) -> Arc<Self> {
         // Sized generously: every stream chunk fires MessagePersisted and several
         // consumers share this one channel (the Tauri subscriber, external

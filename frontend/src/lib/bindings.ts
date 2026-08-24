@@ -181,6 +181,20 @@ async reopenSession(sessionId: string) : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * SWAP two dashboard tiles — the user's drag (1.0.0 Batch 3, tray c38a216b:
+ * a literal two-slot exchange, nothing else shifts). Returns whether anything
+ * moved; the Dashboard refetches on true and leaves the grid alone on false
+ * (unknown id / self-drop).
+ */
+async swapSessionOrder(a: string, b: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("swap_session_order", { a, b }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Force-restart a live session's agents so they pick up a Claude-config change
  * (overrides + inherited settings are read at spawn). Unlike `respawn_session`
  * this is NOT a no-op on a healthy session — it evicts and re-spawns. Agents
@@ -430,6 +444,23 @@ async archiveRole(id: number, archived: boolean) : Promise<Result<null, AppError
  */
 async listCapabilities() : Promise<CapabilityView[]> {
     return await TAURI_INVOKE("list_capabilities");
+},
+/**
+ * Resolve the ONE-TIME example-pair offer (1.0.0 Batch 4; the user's design:
+ * "show only on fresh install? If declined, never show it again").
+ * `install = true` copies the preset pair into role rows and stamps
+ * `installed`; `false` stamps `declined`. Either way the card never renders
+ * again — the Roles tab shows it only while `get_app_setting`
+ * ("role_preset_offer") returns the literal `pending`, and an ABSENT key
+ * means no offer, so a used install never sees it at all.
+ */
+async resolveRolePresetOffer(install: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_role_preset_offer", { install }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 async listModels() : Promise<Result<ModelView[], AppError>> {
     try {
@@ -1548,7 +1579,7 @@ raise_count: number;
 /**
  * True once EYES confirmed the resolution via `approve_finding`.
  */
-eyes_approved: boolean }
+reviewer_approved: boolean }
 /**
  * Force-push gate.
  */
@@ -2038,21 +2069,12 @@ default_model_id: string | null;
  * 
  * **Permanently `false` since migration 0048**, which set it to 0 on every
  * row to state that bot-hq ships no roles; `create_role` hardcodes 0 and
- * `update_role` never writes it. Nothing may branch on it — use
- * [`Self::has_builtin_prose`] for "does this role have a default to
- * restore", which is the question the tab was really asking.
+ * `update_role` never writes it. Nothing may branch on it. (Its old
+ * companion `has_builtin_prose` was DELETED in 1.0.0 Batch 6 — the prose
+ * fallback it described died in Batch 4, so the answer was permanently
+ * false and the field was a dead flag in the first stable bindings.)
  */
-builtin: boolean; 
-/**
- * True when clearing `description_prompt` restores built-in prose rather
- * than leaving the role with no instruction of its own.
- * 
- * Answered in Rust, not by a slug list in TypeScript, for the same reason
- * [`CapabilityView`] is: the set of roles the binary carries prose for
- * lives in `agents::prompts`, and a copy in the frontend drifts silently
- * the first time it changes.
- */
-has_builtin_prose: boolean; archived: boolean }
+builtin: boolean; archived: boolean }
 /**
  * Per-session create-dialog picks beyond the positional args. Bundled into
  * one struct because `create_session` sits at tauri-specta's 10-arg command

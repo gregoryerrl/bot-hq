@@ -69,11 +69,9 @@ function draftOf(role: RoleView): RoleDraftInput {
  * that gets injected into a session, the capabilities it grants, how it
  * participates, and which model it defaults to (rc3 decision D8).
  *
- * HANDS and EYES are rows here like any other — seeded by migration 0044/0046
- * from the built-in constants. Migration 0048 then cleared `builtin` on every
- * row, so the product claims to own none of them; nothing on this tab reads
- * that column any more. What the tab does still need to know is whether a role
- * has built-in prose to fall back to, and that arrives as `has_builtin_prose`.
+ * Roles are entirely user-owned rows (a fresh 1.0.0 install seeds one neutral
+ * `agent` role; the HANDS/EYES pair is a one-time offer, not furniture).
+ * `builtin` is permanently false and nothing on this tab reads it.
  *
  * Master/detail rather than a modal: the role instruction is the point of the
  * tab and a long-form editor does not fit in a dialog. The list is the rail;
@@ -591,8 +589,8 @@ function RoleForm({
             fallback was deleted with the neutral default role, so an empty
             box stores no prose and the role joins sessions with no
             instruction of its own — briefed by the universal rules and its
-            capability grants alone. One arm now; `has_builtin_prose` is
-            permanently false and nothing branches on it. */}
+            capability grants alone. One arm, no built-in-prose branch —
+            the fallback (and its flag) died in Batches 4/6. */}
         {promptCleared && (
           <span
             role="note"

@@ -12,7 +12,7 @@ function row(over: Record<string, unknown> = {}) {
   return {
     id: 1,
     session_id: "s-224b28ce",
-    project: "bcc-data-hub-ingest",
+    project: "acme-data-ingest",
     agent: "rain",
     kind: "issue",
     title: "Gate command is unreadable",
@@ -60,11 +60,11 @@ describe("FeedbackPanel", () => {
   it("shows provenance and body only once expanded", async () => {
     renderPanel([row()]);
     const title = await screen.findByText("Gate command is unreadable");
-    expect(screen.queryByText(/bcc-data-hub-ingest/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/acme-data-ingest/)).not.toBeInTheDocument();
 
     fireEvent.click(title);
     // Provenance = where the friction was hit, linked back to that session.
-    expect(await screen.findByText(/bcc-data-hub-ingest/)).toBeInTheDocument();
+    expect(await screen.findByText(/acme-data-ingest/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "s-224b28" })).toHaveAttribute(
       "href",
       "/sessions/s-224b28ce",

@@ -105,7 +105,7 @@ The session has a Terminal subtab: a real shell in the working repo that the USE
 
 ## Review sign-off gate (before every commit)
 
-A participant that holds the finding capability can file BLOCKING findings on your work via `eyes_flag`. A blocking finding MECHANICALLY gates `git commit` (and `git push`) until you resolve it — the pre-commit hook enforces this even if you never read chat, mirroring the commit-message gate. So **before any `git commit`, call `check_open_findings`.** If it returns `blocked: …`, resolve EACH listed finding with `disposition_finding(finding_id, status, reason)`:
+A participant that holds the finding capability can file BLOCKING findings on your work via `flag_finding`. A blocking finding MECHANICALLY gates `git commit` (and `git push`) until you resolve it — the pre-commit hook enforces this even if you never read chat, mirroring the commit-message gate. So **before any `git commit`, call `check_open_findings`.** If it returns `blocked: …`, resolve EACH listed finding with `disposition_finding(finding_id, status, reason)`:
 - `status=\"fixed\"` — you fixed it; `reason` references the fix (commit / line / test).
 - `status=\"rebutted\"` — you disagree; `reason` justifies why. A rebuttal does NOT need the filer's agreement (so it can't deadlock), but it IS surfaced to the user — so rebut honestly; don't wave off a real bug just to clear the gate.
 
@@ -204,13 +204,13 @@ The single test before emitting: *if I delete this message, does a peer or the u
 
 Concrete pushbacks beat polite affirmations. A flagged risk HANDS addresses is value-add; a \"good plan\" without examination is noise. When you do agree, say *why* in one sentence (\"confirmed: no references to `app::` anywhere\") so HANDS and the user can audit the basis. Better an annoying nitpick than a silent miss.
 
-## Make blocking findings STICK — `eyes_flag`
+## Make blocking findings STICK — `flag_finding`
 
-A finding that lives only in chat can be missed under execution momentum — that is exactly how a review-flagged, production-breaking bug once shipped (HANDS committed past four chat warnings without engaging them). When you find a real bug that MUST NOT ship, don't rely on HANDS reading chat: file it with **`eyes_flag(severity=\"blocking\", summary, code_ref?)`**. A blocking finding mechanically gates `git commit` / `git push` until HANDS dispositions it — so the GATE holds the line, not your persistence.
+A finding that lives only in chat can be missed under execution momentum — that is exactly how a review-flagged, production-breaking bug once shipped (HANDS committed past four chat warnings without engaging them). When you find a real bug that MUST NOT ship, don't rely on HANDS reading chat: file it with **`flag_finding(severity=\"blocking\", summary, code_ref?)`**. A blocking finding mechanically gates `git commit` / `git push` until HANDS dispositions it — so the GATE holds the line, not your persistence.
 
 - `severity=\"blocking\"` — ONLY for a genuine correctness / safety / data-loss bug you want fixed before ship. Over-flagging trains HANDS to rubber-stamp the gate, so reserve it for what truly must not ship.
 - `severity=\"advisory\"` — nits and suggestions: recorded and surfaced, never blocks.
-- Still explain the finding in chat too — `eyes_flag` is the enforcement; chat is the conversation. And you don't have to win the argument with HANDS: a rebuttal you disagree with surfaces to the user, who adjudicates. Flag honestly; let the gate + the user hold the line.
+- Still explain the finding in chat too — `flag_finding` is the enforcement; chat is the conversation. And you don't have to win the argument with HANDS: a rebuttal you disagree with surfaces to the user, who adjudicates. Flag honestly; let the gate + the user hold the line.
 
 ## Bottom-up review (read against the grain)
 
@@ -455,10 +455,10 @@ mod tests {
     #[test]
     fn roles_carry_findings_gate_guidance() {
         // The s-3cb39c76 fix: HANDS must be told to check + disposition before
-        // committing; EYES must be told to file blocking findings via eyes_flag.
+        // committing; EYES must be told to file blocking findings via flag_finding.
         assert!(PRESET_HANDS_ROLE.contains("check_open_findings"));
         assert!(PRESET_HANDS_ROLE.contains("disposition_finding"));
-        assert!(PRESET_EYES_ROLE.contains("eyes_flag"));
+        assert!(PRESET_EYES_ROLE.contains("flag_finding"));
     }
 
     #[test]

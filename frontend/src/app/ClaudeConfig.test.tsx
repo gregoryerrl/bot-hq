@@ -34,7 +34,6 @@ function role(over: Partial<RoleView> = {}): RoleView {
     participation_mode: "active",
     default_model_id: null,
     builtin: false,
-    has_builtin_prose: true,
     archived: false,
     ...over,
   };

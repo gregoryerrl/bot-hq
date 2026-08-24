@@ -115,7 +115,7 @@ mod tests {
         s.create_session("s-datahub", "t", None).await.unwrap();
         s.insert_feedback(
             "s-datahub",
-            Some("bcc-data-hub-ingest"),
+            Some("acme-data-ingest"),
             "hands",
             "issue",
             "Gate command is unreadable",
@@ -126,7 +126,7 @@ mod tests {
 
         let all = s.list_feedback(None).await.unwrap();
         assert_eq!(all.len(), 1);
-        assert_eq!(all[0].project.as_deref(), Some("bcc-data-hub-ingest"));
+        assert_eq!(all[0].project.as_deref(), Some("acme-data-ingest"));
         assert_eq!(all[0].status, "open");
         assert_eq!(all[0].agent, "hands");
     }

@@ -1076,7 +1076,7 @@ mod tests {
     fn status_flip_lint_flags_evidence_free_upgrades_only() {
         use super::status_flip_warning;
         // The 2026-07-24 shape: #435 flips PENDING→RESOLVED with no evidence.
-        let old = "- **#435 delta loop** — PENDING Tom's reply\n- other note\n";
+        let old = "- **#435 delta loop** — PENDING the stakeholder's reply\n- other note\n";
         let new = "- **#435 delta loop** — RESOLVED (keep both)\n- other note\n";
         let warn = status_flip_warning(old, new).expect("evidence-free flip warns");
         assert!(warn.contains("#435"), "got: {warn}");
@@ -1087,7 +1087,7 @@ mod tests {
         assert!(status_flip_warning(old, cited).is_none());
 
         // Evidence on the FOLLOWING line also counts.
-        let next_line = "- **#435 delta loop** — RESOLVED\n  per Tom, 2026-07-23 Discord\n";
+        let next_line = "- **#435 delta loop** — RESOLVED\n  per the stakeholder, 2026-07-23\n";
         assert!(status_flip_warning(old, next_line).is_none());
 
         // Anchor-by-prefix (no issue ref) flips are caught too.

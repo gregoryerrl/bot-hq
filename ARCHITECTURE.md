@@ -589,7 +589,7 @@ for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `pass_turn`, `halt`, `advance_phase` (a VOTE
 since D37 — see "The phase-advance vote"),
 `web_search`, `request_phase_advance`, `file_feedback`, `request_approval`,
-`action_gate`, `gate_status`, `check_commit_message`, `eyes_flag`,
+`action_gate`, `gate_status`, `check_commit_message`, `flag_finding` (alias `eyes_flag`),
 `disposition_finding`, `check_open_findings`, `override_reviewer_block`,
 `approve_finding`, `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_search`,
@@ -618,10 +618,10 @@ refuses gate-matched commands with a route to `action_gate` — the terminal is
 not a gate bypass. The PTY is killed on `close_session`; scrollback is
 in-memory only (200 KB ring).
 
-**Review findings gate (EYES sign-off).** `eyes_flag` /
+**Review findings gate (reviewer sign-off).** `flag_finding` (alias `eyes_flag`) /
 `disposition_finding` / `check_open_findings` / `override_reviewer_block` /
 `approve_finding` (+ the pre-commit `check_commit_message`) implement the
-reviewer sign-off gate: a `blocking` finding filed via `eyes_flag` gates
+reviewer sign-off gate: a `blocking` finding filed via `flag_finding` gates
 `git commit` AND `git push` (mechanically, via the pre-commit and pre-push
 hooks — `hooks.rs::check_findings_gate` runs on both) until it is resolved
 with `disposition_finding` (fixed / rebutted). The gate is fail-CLOSED when the

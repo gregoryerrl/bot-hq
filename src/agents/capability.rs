@@ -236,7 +236,7 @@ pub fn required_for(tool: &str) -> Option<Capability> {
         "disposition_finding" => DispositionFinding,
         "override_reviewer_block" => OverrideReviewerBlock,
         "terminal_exec" => RunTerminal,
-        "eyes_flag" => FileFinding,
+        "flag_finding" | "eyes_flag" => FileFinding,
         "approve_finding" => ApproveFinding,
         "cl_write_file" | "cl_register_folder_description" => WriteContextLibrary,
         "close_session" => CloseSession,

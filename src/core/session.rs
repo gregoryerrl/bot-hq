@@ -2526,7 +2526,7 @@ mod tests {
         // still has to justify the bytes an agent actually reads.
         assert_eq!(
             wire,
-            "[system] [PHASE: Apply]\n⚠ 2 unresolved EYES blocking finding(s) — run \
+            "[system] [PHASE: Apply]\n⚠ 2 unresolved reviewer blocking finding(s) — run \
              check_open_findings and disposition each (fix/rebut) before you \
              commit.\n[System: previous turn interrupted]\ndeclare state"
         );

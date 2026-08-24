@@ -18,7 +18,7 @@ pub const OPEN_BLOCKING_FOR_SESSION: &str =
 
 const FINDING_COLUMNS: &str = "id, session_id, finding_uid, agent, severity, summary, \
      code_ref, status, disposition_reason, disposed_by, created_at, updated_at, \
-     raise_count, eyes_approved";
+     raise_count, reviewer_approved";
 
 impl Storage {
     /// Insert a fresh finding in `open` status. Returns the row id. The session
@@ -166,11 +166,11 @@ impl Storage {
     }
 
     /// EYES confirms a finding's resolution (`approve_finding`): set
-    /// `eyes_approved = 1`, clearing the escalation signal. Returns rows
+    /// `reviewer_approved = 1`, clearing the escalation signal. Returns rows
     /// affected (0 if the uid is unknown). Non-gating — purely signal-clearing.
     pub async fn approve_finding(&self, finding_uid: &str) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE findings SET eyes_approved = 1, updated_at = ? WHERE finding_uid = ?",
+            "UPDATE findings SET reviewer_approved = 1, updated_at = ? WHERE finding_uid = ?",
         )
         .bind(now_utc())
         .bind(finding_uid)
@@ -304,7 +304,7 @@ mod tests {
             .unwrap();
         assert_eq!(found.finding_uid, "f1");
         assert_eq!(found.raise_count, 1);
-        assert_eq!(found.eyes_approved, 0);
+        assert_eq!(found.reviewer_approved, 0);
         // A disposed finding is NOT a dedup target (a re-flag becomes a fresh one).
         s.disposition_finding("f1", FindingStatus::Fixed, Some("done"), "hands")
             .await
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(s.increment_raise_count("f1").await.unwrap(), 1);
         assert_eq!(s.get_finding("f1").await.unwrap().unwrap().raise_count, 2);
         assert_eq!(s.approve_finding("f1").await.unwrap(), 1);
-        assert_eq!(s.get_finding("f1").await.unwrap().unwrap().eyes_approved, 1);
+        assert_eq!(s.get_finding("f1").await.unwrap().unwrap().reviewer_approved, 1);
     }
 
     /// The findings re-raise turn-evidence guard's actual question: has anyone

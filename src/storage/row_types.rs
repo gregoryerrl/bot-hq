@@ -382,7 +382,7 @@ pub struct Finding {
     pub raise_count: i64,
     /// `1` once EYES confirmed the resolution via `approve_finding` (clears the
     /// escalation signal); `0` otherwise. Orthogonal to `status`.
-    pub eyes_approved: i64,
+    pub reviewer_approved: i64,
 }
 
 /// Aggregated `retrieval_events` telemetry (Stage 4b measurement). Raw counts

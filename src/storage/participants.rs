@@ -2051,7 +2051,7 @@ pub struct Envelope {
     /// for a four-word string would invert the layering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     phase: Option<String>,
-    /// Unresolved EYES blocking findings; `0` renders nothing.
+    /// Unresolved reviewer blocking findings; `0` renders nothing.
     #[serde(default, skip_serializing_if = "is_zero")]
     open_blocking: usize,
     /// A host note that rides in front of the body — e.g. the post-cancel
@@ -2199,7 +2199,7 @@ pub fn render_wire(envelope: Option<&Envelope>, body: &str) -> String {
         // The banner rides every turn until the findings are dispositioned —
         // salience, not a gate (post-mortem §5.2).
         wire.push_str(&format!(
-            "⚠ {} unresolved EYES blocking finding(s) — run check_open_findings and \
+            "⚠ {} unresolved reviewer blocking finding(s) — run check_open_findings and \
              disposition each (fix/rebut) before you commit.\n",
             envelope.open_blocking
         ));
@@ -4009,7 +4009,7 @@ mod tests {
         let wire = render_wire(Some(&Envelope::phase("Verify").with_open_blocking(3)), "go");
         assert_eq!(
             wire,
-            "[PHASE: Verify]\n⚠ 3 unresolved EYES blocking finding(s) — run \
+            "[PHASE: Verify]\n⚠ 3 unresolved reviewer blocking finding(s) — run \
              check_open_findings and disposition each (fix/rebut) before you \
              commit.\ngo"
         );
@@ -6453,7 +6453,7 @@ mod tests {
         assert_eq!(replayed.wire(), posted.wire());
         assert_eq!(
             replayed.wire(),
-            "[system] [PHASE: Verify]\n⚠ 3 unresolved EYES blocking finding(s) — run \
+            "[system] [PHASE: Verify]\n⚠ 3 unresolved reviewer blocking finding(s) — run \
              check_open_findings and disposition each (fix/rebut) before you \
              commit.\ndeclare state"
         );

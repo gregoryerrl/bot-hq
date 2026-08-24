@@ -28,7 +28,7 @@ pub struct FindingView {
     /// Times EYES raised this finding; `>= 2` = escalated (banner emphasis).
     pub raise_count: i64,
     /// True once EYES confirmed the resolution via `approve_finding`.
-    pub eyes_approved: bool,
+    pub reviewer_approved: bool,
 }
 
 impl From<crate::storage::Finding> for FindingView {
@@ -47,7 +47,7 @@ impl From<crate::storage::Finding> for FindingView {
             created_at: f.created_at,
             updated_at: f.updated_at,
             raise_count: f.raise_count,
-            eyes_approved: f.eyes_approved != 0,
+            reviewer_approved: f.reviewer_approved != 0,
         }
     }
 }

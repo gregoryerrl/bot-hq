@@ -1482,7 +1482,7 @@ fn log_findings_block(data_dir: &Path, hook: &str, session_id: &str, n: usize) {
         ViolationKind::Findings,
         action.to_string(),
         ViolationOutcome::Denied,
-        Some(format!("{n} unresolved EYES blocking finding(s)")),
+        Some(format!("{n} unresolved reviewer blocking finding(s)")),
     );
 }
 
@@ -1550,10 +1550,10 @@ fn findings_block_body(findings: &[(String, String, Option<String>)]) -> String 
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "{n} unresolved EYES blocking finding(s) — blocked.\n\n{list}\n\n\
+        "{n} unresolved reviewer blocking finding(s) — blocked.\n\n{list}\n\n\
          Resolve each before retrying: call `disposition_finding(finding_id, status, reason)` \
          with status='fixed' (reference the fix) or 'rebutted' (justify why). A rebuttal needs \
-         no EYES agreement, so this cannot deadlock. Do NOT bypass with --no-verify.\n",
+         no reviewer agreement, so this cannot deadlock. Do NOT bypass with --no-verify.\n",
         n = findings.len(),
     )
 }

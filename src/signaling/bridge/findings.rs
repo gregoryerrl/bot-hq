@@ -72,7 +72,7 @@ impl SignalingBridge {
     }
 
     /// The reviewer (`ApproveFinding`) confirms an escalated finding's resolution — clears the
-    /// escalation "awaiting EYES confirm" signal (sets `eyes_approved`). NON-
+    /// escalation "awaiting reviewer confirm" signal (sets `reviewer_approved`). NON-
     /// gating: the commit gate is already open once HANDS dispositioned, so this
     /// only closes the soft-escalation loop. Returns a human-readable result.
     pub async fn approve_finding(&self, finding_uid: String) -> Result<String> {
@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approve_finding_sets_eyes_approved() {
+    async fn approve_finding_sets_reviewer_approved() {
         let bridge = SignalingBridge::new();
         let storage = Storage::memory().await.unwrap();
         bridge.set_storage(storage.clone()).await;
@@ -559,10 +559,10 @@ mod tests {
             .disposition_finding(uid.clone(), FindingStatus::Fixed, "fixed".into(), "hands".into())
             .await
             .unwrap();
-        assert_eq!(storage.get_finding(&uid).await.unwrap().unwrap().eyes_approved, 0);
+        assert_eq!(storage.get_finding(&uid).await.unwrap().unwrap().reviewer_approved, 0);
         // EYES approves → escalation cleared.
         let res = bridge.approve_finding(uid.clone()).await.unwrap();
         assert!(res.contains("approved"), "got: {res}");
-        assert_eq!(storage.get_finding(&uid).await.unwrap().unwrap().eyes_approved, 1);
+        assert_eq!(storage.get_finding(&uid).await.unwrap().unwrap().reviewer_approved, 1);
     }
 }

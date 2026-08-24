@@ -19,7 +19,7 @@ const KIND_LABELS: Record<ViolationKind, string> = {
   per_action: "Per-action",
   generic_approval: "Approval",
   policy_mutation: "Policy change",
-  findings: "EYES findings",
+  findings: "Review findings",
 };
 
 const OUTCOME_CLS: Record<ViolationOutcome, string> = {

@@ -283,7 +283,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `request_approval(kind, action, question, options)` | The agent's own yes/no (or a choice of ways) on an action of its — any labels. Parks in the TRAY like a question, audited in violations.jsonl, blocks nothing; the host's gates (`action_gate`, the push gate) are the session blockers. |
 | `action_gate(command)` | Run a Bash command the Tool Gate blocked: bot-hq surfaces Approve/Reject and, on approve, executes it in the session repo and returns the output. |
 | `check_commit_message(message)` | Pre-commit grep of a proposed message against the project's forbidden-words policy. Returns `ok` or `forbidden_word:<w>`. |
-| `eyes_flag(severity, summary, …)` | Needs `file_finding`. File a review finding; a `blocking` one gates the executor's next `git commit` and `git push` until resolved. |
+| `flag_finding(severity, summary, …)` | Needs `file_finding`. File a review finding; a `blocking` one gates the executor's next `git commit` and `git push` until resolved. (`eyes_flag` is the pre-1.0 name, accepted as an alias.) |
 | `disposition_finding(finding_id, status, reason)` | Needs `disposition_finding`. Resolve a finding (`fixed` / `rebutted`), clearing the commit gate. |
 | `check_open_findings()` | Check for unresolved blocking findings before committing. Returns `ok` or the blocking list. |
 | `override_reviewer_block()` | Needs `override_reviewer_block`. Escape valve for the fail-closed "reviewer is down" commit block. |
@@ -323,7 +323,7 @@ whose role does not hold the capability it needs — `ask_user_choice` needs `as
 `mark_awaiting_user` and `halt` need `halt`; `request_approval` needs `park_approval`; `action_gate`
 needs `gated_bash`; `supersede_question` needs `supersede_question`; `disposition_finding` and
 `override_reviewer_block` need their own; `terminal_exec` needs `run_terminal` (a role without it
-reads the terminal via `terminal_read`, never types into it); `eyes_flag` needs `file_finding` and
+reads the terminal via `terminal_read`, never types into it); `flag_finding` needs `file_finding` and
 `approve_finding` needs `approve_finding`; `cl_write_file` and `cl_register_folder_description` need
 `write_context_library`; `close_session` needs `close_session` (D16). The seeded pair — HANDS holds the
 executing set, EYES the reviewing set — is the user's configuration in Settings → Roles, so a role that

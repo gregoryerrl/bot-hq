@@ -905,11 +905,15 @@ mod tests {
             list_active_sessions_with_preview_sql().contains(&session_order_by("s.")),
             "the preview SQL orders by the shared expression"
         );
-        // The plain list builds its string inline; pin the expression itself
-        // so a reorder there must go THROUGH session_order_by.
-        assert!(
-            session_order_by("").starts_with("ORDER BY (sort_key IS NULL) ASC, sort_key ASC"),
-            "explicit arrangement first, key-less rows sink to the end"
+        // The FULL string, tiebreakers included (EYES C1): `created_at ASC,
+        // id ASC` is what stops EQUAL sort_keys from reordering between
+        // refetches — and equal keys are reachable (create_session computes
+        // MAX+1 outside a transaction, so two concurrent creates can share
+        // one). Pinning only the prefix would let the fix's own point drift.
+        assert_eq!(
+            session_order_by(""),
+            "ORDER BY (sort_key IS NULL) ASC, sort_key ASC, created_at ASC, id ASC",
+            "explicit arrangement first, key-less rows sink to the end, stable tiebreaks"
         );
     }
 

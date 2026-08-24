@@ -288,9 +288,17 @@ fn parse_wake_after(args: &Value) -> Result<Option<std::time::Duration>, JsonRpc
 /// so `eyes_flag` is one word). Returns the token that tripped it, for the
 /// refusal text. Heuristic vocabulary, not an identity check — nothing is
 /// keyed on a participant being called any of these.
-fn peer_shaped_reason(reason: &str) -> Option<&'static str> {
-    const ROLE_TOKENS: &[(&str, &str)] =
-        &[("HANDS", "hands"), ("EYES", "eyes"), ("@hands", "hands"), ("@eyes", "eyes")];
+fn peer_shaped_reason(reason: &str, roster: &[(String, String)]) -> Option<String> {
+    // The vocabulary is the LIVE roster (1.0.0 Batch 6, M6 — promoted by the
+    // config-line review): the deadlock this guards against (s-96fda118, 100
+    // minutes) is a property of ANY multi-participant session, but the old
+    // constant list knew only HANDS/EYES — for a user who names their roles
+    // PILOT/NAVIGATOR (exactly the population the neutral-default work
+    // creates) the guard never fired. Each roster entry contributes its
+    // display name (matched as written), its slug (lowercase, behind the
+    // possessive/quantity filter below), and the summons form `@slug`. The
+    // caller passes the session's enabled participants; an unreadable roster
+    // falls back to the seeded pair so the guard never silently disarms.
     const WAIT_SHAPES: &[&str] = &[
         "wait",
         "pending",
@@ -351,13 +359,19 @@ fn peer_shaped_reason(reason: &str) -> Option<&'static str> {
     }
     for sentence in reason.split(['.', '!', '?', '\n', ';']) {
         let lower = sentence.to_lowercase();
-        let token = ROLE_TOKENS
+        let token: Option<String> = roster
             .iter()
-            .find(|(t, _)| has_word(sentence, t))
-            .map(|(_, label)| *label)
-            .or_else(|| lowercase_slug(&lower, "hands").then_some("hands"))
-            .or_else(|| lowercase_slug(&lower, "eyes").then_some("eyes"))
-            .or_else(|| (has_word(&lower, "peer") || has_word(&lower, "peers")).then_some("peer"));
+            .find_map(|(display, slug)| {
+                let at_form = format!("@{slug}");
+                (has_word(sentence, display)
+                    || has_word(&lower, &at_form)
+                    || lowercase_slug(&lower, slug))
+                .then(|| slug.clone())
+            })
+            .or_else(|| {
+                (has_word(&lower, "peer") || has_word(&lower, "peers"))
+                    .then(|| "peer".to_string())
+            });
         let Some(token) = token else { continue };
         if WAIT_SHAPES.iter().any(|w| lower.contains(w)) {
             return Some(token);
@@ -552,7 +566,8 @@ async fn call_tool(
             // 100 minutes until the user shouted. Waiting on a peer is not
             // waiting on the user — refuse and tell the agent what to do
             // instead. Word-boundary match so e.g. "restrained" can't trip it.
-            if let Some(hit) = peer_shaped_reason(&reason) {
+            let roster_tokens = bridge.roster_peer_tokens(&caller.session_id).await;
+            if let Some(hit) = peer_shaped_reason(&reason, &roster_tokens) {
                 return Ok(ToolCallResult::error(format!(
                     "reason names your peer ('{hit}') — mark_awaiting_user is for \
                      waiting on the USER, and halting on a peer stalls the session: \
@@ -907,7 +922,12 @@ async fn call_tool(
                 }
             }
         }
-        "eyes_flag" => {
+        // `eyes_flag` is the pre-1.0 name, kept as an ALIAS (Batch 6 M7c):
+        // live sessions spawned before the rename carry prompts and role
+        // prose that say `eyes_flag`, and a reviewer mid-session must not
+        // lose its one enforcement tool to a rename. One implementation,
+        // two accepted names; the registry advertises only `flag_finding`.
+        "flag_finding" | "eyes_flag" => {
             let severity_str = arg_required_str(&args, "severity")?;
             let severity = crate::storage::FindingSeverity::parse(&severity_str).ok_or_else(|| {
                 JsonRpcError::new(
@@ -1472,6 +1492,51 @@ fn parse_violation_kind(s: &str) -> Option<ViolationKind> {
 
 #[cfg(test)]
 mod tests {
+    /// The seeded-pair fixture for `peer_shaped_reason` — the roster shape
+    /// every pre-Batch-6 assertion was written against. Batch 6 made the
+    /// vocabulary roster-derived; these tests pin that the HANDS/EYES world
+    /// behaves exactly as before, and the roster test below pins the new
+    /// recall (a renamed roster fires too).
+    fn peer_shaped_reason_pair(reason: &str) -> Option<String> {
+        super::peer_shaped_reason(
+            reason,
+            &[
+                ("HANDS".to_string(), "hands".to_string()),
+                ("EYES".to_string(), "eyes".to_string()),
+            ],
+        )
+    }
+
+    /// **A renamed roster fires the guard** (Batch 6 M6 — the promotion's
+    /// whole point): the deadlock is a property of any multi-participant
+    /// session, and the neutral-default work creates exactly the population
+    /// whose roles are NOT named HANDS/EYES.
+    #[test]
+    fn the_peer_guard_speaks_the_rosters_own_names() {
+        let roster = vec![
+            ("PILOT".to_string(), "pilot".to_string()),
+            ("NAVIGATOR".to_string(), "navigator".to_string()),
+        ];
+        assert_eq!(
+            super::peer_shaped_reason("blocked until PILOT answers", &roster),
+            Some("pilot".to_string())
+        );
+        assert_eq!(
+            super::peer_shaped_reason("waiting on @navigator to review", &roster),
+            Some("navigator".to_string())
+        );
+        // The English-noun filter still applies to the renamed slug.
+        assert_eq!(
+            super::peer_shaped_reason("the autopilot needs your sign-off", &roster),
+            None
+        );
+        // And a HANDS mention means nothing to a roster that has no HANDS.
+        assert_eq!(
+            super::peer_shaped_reason("blocked until HANDS answers", &roster),
+            None
+        );
+    }
+
     use super::*;
     use crate::signaling::bridge::SignalingEvent;
 
@@ -3453,21 +3518,20 @@ mod tests {
 
     #[test]
     fn peer_shaped_reasons_are_detected_with_word_boundaries() {
-        use super::peer_shaped_reason;
         // The s-96fda118 deadlock reason shape: parking on the peer.
         assert_eq!(
-            peer_shaped_reason("Handed the six refusal probes to EYES — they can only run natively"),
-            Some("eyes")
+            peer_shaped_reason_pair("Handed the six refusal probes to EYES — they can only run natively"),
+            Some("eyes".to_string())
         );
-        assert_eq!(peer_shaped_reason("waiting for my peer to review"), Some("peer"));
-        assert_eq!(peer_shaped_reason("EYES review pending"), Some("eyes"));
-        assert_eq!(peer_shaped_reason("blocked until @hands answers"), Some("hands"));
-        assert_eq!(peer_shaped_reason("Peers need to confirm the plan first"), Some("peer"));
+        assert_eq!(peer_shaped_reason_pair("waiting for my peer to review"), Some("peer".to_string()));
+        assert_eq!(peer_shaped_reason_pair("EYES review pending"), Some("eyes".to_string()));
+        assert_eq!(peer_shaped_reason_pair("blocked until @hands answers"), Some("hands".to_string()));
+        assert_eq!(peer_shaped_reason_pair("Peers need to confirm the plan first"), Some("peer".to_string()));
         // Word boundaries: substrings inside real words must not trip it.
-        assert_eq!(peer_shaped_reason("waiting for the rainbow deploy window"), None);
-        assert_eq!(peer_shaped_reason("user must restrain the migration"), None);
-        assert_eq!(peer_shaped_reason("need the user's Clockify token"), None);
-        assert_eq!(peer_shaped_reason(""), None);
+        assert_eq!(peer_shaped_reason_pair("waiting for the rainbow deploy window"), None);
+        assert_eq!(peer_shaped_reason_pair("user must restrain the migration"), None);
+        assert_eq!(peer_shaped_reason_pair("need the user's tracker token"), None);
+        assert_eq!(peer_shaped_reason_pair(""), None);
     }
 
     /// Round 12: the guard refused legitimate user-waits that merely MENTIONED
@@ -3476,30 +3540,29 @@ mod tests {
     /// or a wait shape with only lowercase English, is not a peer-wait.
     #[test]
     fn peer_guard_needs_a_role_token_and_a_wait_shape_in_one_sentence() {
-        use super::peer_shaped_reason;
         // s-1c29c521 00:20:01Z — refused, then rephrased: English noun.
-        assert_eq!(peer_shaped_reason("All work that doesn't need you is done. Two things in your hands."), None);
-        assert_eq!(peer_shaped_reason("needs your eyes on the design before I continue"), None);
-        assert_eq!(peer_shaped_reason("rain check on the deploy until you say"), None);
+        assert_eq!(peer_shaped_reason_pair("All work that doesn't need you is done. Two things in your hands."), None);
+        assert_eq!(peer_shaped_reason_pair("needs your eyes on the design before I continue"), None);
+        assert_eq!(peer_shaped_reason_pair("rain check on the deploy until you say"), None);
         // s-cf106858 / s-0d063183 — descriptive mentions, no wait on the peer.
-        assert_eq!(peer_shaped_reason("Plan complete and reviewed (EYES F1–F5 folded in, no rebuttals)"), None);
-        assert_eq!(peer_shaped_reason("Conversational turn — floor is yours; EYES awake and passing, no work queued."), None);
+        assert_eq!(peer_shaped_reason_pair("Plan complete and reviewed (EYES F1–F5 folded in, no rebuttals)"), None);
+        assert_eq!(peer_shaped_reason_pair("Conversational turn — floor is yours; EYES awake and passing, no work queued."), None);
         // A snake_case identifier is one word.
-        assert_eq!(peer_shaped_reason("waiting for you to approve the eyes_flag finding"), None);
+        assert_eq!(peer_shaped_reason_pair("waiting for you to approve the eyes_flag finding"), None);
         // The wait shape in ANOTHER sentence does not reach across.
-        assert_eq!(peer_shaped_reason("EYES reviewed the plan. Waiting for your console read."), None);
+        assert_eq!(peer_shaped_reason_pair("EYES reviewed the plan. Waiting for your console read."), None);
         // Uppercase is how a participant writes a peer; the lowercase slug
         // counts too (F14 — the deadlock shape in lowercase) unless a
         // possessive or a quantity precedes it, which is the English noun.
-        assert_eq!(peer_shaped_reason("waiting on hands to finish"), Some("hands"));
-        assert_eq!(peer_shaped_reason("waiting on HANDS to finish"), Some("hands"));
-        assert_eq!(peer_shaped_reason("blocked until eyes answers"), Some("eyes"));
-        assert_eq!(peer_shaped_reason("need more eyes on it before I continue"), None);
-        assert_eq!(peer_shaped_reason("the work is in my hands now; waiting for your console read"), None);
-        assert_eq!(peer_shaped_reason("all hands on deck until the deploy lands"), None);
+        assert_eq!(peer_shaped_reason_pair("waiting on hands to finish"), Some("hands".to_string()));
+        assert_eq!(peer_shaped_reason_pair("waiting on HANDS to finish"), Some("hands".to_string()));
+        assert_eq!(peer_shaped_reason_pair("blocked until eyes answers"), Some("eyes".to_string()));
+        assert_eq!(peer_shaped_reason_pair("need more eyes on it before I continue"), None);
+        assert_eq!(peer_shaped_reason_pair("the work is in my hands now; waiting for your console read"), None);
+        assert_eq!(peer_shaped_reason_pair("all hands on deck until the deploy lands"), None);
         // Hyphenated: the word before the slug is still the word, not the hyphen.
-        assert_eq!(peer_shaped_reason("all-hands meeting until Friday"), None);
-        assert_eq!(peer_shaped_reason("a four-eyes check is pending on your side"), None);
+        assert_eq!(peer_shaped_reason_pair("all-hands meeting until Friday"), None);
+        assert_eq!(peer_shaped_reason_pair("a four-eyes check is pending on your side"), None);
     }
 
 }

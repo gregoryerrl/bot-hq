@@ -448,7 +448,17 @@ async fn the_reviewer_down_gate_blocks_only_a_duo_with_a_dead_reviewer() {
 /// to leave the tool ungated and close the reported problem by scoping the
 /// withdrawal to the row's asker instead — which changes no capability and needs
 /// no entry here.
-const SANCTIONED_DIVERGENCE: &[&str] = &["close_session"];
+///
+/// `flag_finding` joined on 2026-08-25 (1.0.0 Batch 6, M7c): the USER's call,
+/// recorded in tray answer e7caaf8e — the maximal-scope pick whose option text
+/// named "eyes_flag rename (last cheap moment)". The pre-rc3 name gate never
+/// knew the name `flag_finding` (its behavior lives on under the accepted
+/// alias `eyes_flag`, which still reproduces the old gate exactly); the new
+/// canonical name is capability-gated from birth, so the legacy comparison is
+/// definitionally inapplicable to it. This oracle fired on the rename and the
+/// entry was added in the SAME commit citing the decision — the escalation
+/// procedure working, not being bypassed.
+const SANCTIONED_DIVERGENCE: &[&str] = &["flag_finding", "close_session"];
 
 #[tokio::test]
 async fn the_capability_gate_reproduces_the_name_gate_for_every_tool() {
