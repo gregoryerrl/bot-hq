@@ -887,14 +887,27 @@ impl SignalingBridge {
                 // `awaiting_user`, so the banner and the input state stay true.
                 // Host-declared stops (`declared_by = "system"`: consensus,
                 // all-pass, round cap, spin) keep today's clear-and-resume.
+                // Read-failure counts as STANDING (review note on the 12951cc3
+                // batch): `.ok()` here cleared the awaiting flag on a DB
+                // hiccup — the exact behaviour the pick voted out — while the
+                // state-side half kept the slot. Both halves now fail the
+                // same direction.
                 let agent_halt_stands = p.gate
                     && match self.storage.lock().await.clone() {
-                        Some(storage) => storage
+                        Some(storage) => match storage
                             .session_halt(&p.choice.session_id)
                             .await
-                            .ok()
-                            .flatten()
-                            .is_some_and(|(by, _, _)| by != "system"),
+                        {
+                            Ok(halt) => halt.is_some_and(|(by, _, _)| by != "system"),
+                            Err(e) => {
+                                tracing::warn!(
+                                    ?e,
+                                    session_id = %p.choice.session_id,
+                                    "halt read failed at gate resolve; keeping the awaiting flag"
+                                );
+                                true
+                            }
+                        },
                         None => false,
                     };
                 if !agent_halt_stands {

@@ -2279,7 +2279,22 @@ impl AppState {
                 // its own awaiting-clear for this case; skipping here keeps
                 // the two halves agreeing. Mechanical (host) stops release and
                 // clear exactly as before.
-                let halt = self.storage.session_halt(session_id).await.ok().flatten();
+                // The read fails TOWARD the standing halt (review note on the
+                // 12951cc3 batch): `.ok()` would turn a DB hiccup into "no
+                // halt" and release — silently restoring the behaviour the
+                // user voted out. An unreadable slot on a GATE answer is
+                // treated as an agent's halt standing; a question answer is a
+                // user response and never suppresses, readable or not.
+                let halt = match self.storage.session_halt(session_id).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::warn!(?e, session_id, "halt read failed at gate resolve");
+                        if resolved_a_gate {
+                            return Ok(outcome);
+                        }
+                        None
+                    }
+                };
                 if Self::gate_release_suppressed(
                     halt.as_ref().map(|(by, _, _)| by.as_str()),
                     resolved_a_gate,
