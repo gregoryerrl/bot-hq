@@ -916,6 +916,20 @@ describe("ChatInput promptcode picker", () => {
     expect(screen.getAllByRole("option")).toHaveLength(1);
   });
 
+  it("chips a live token in the backdrop and leaves a dead one plain", () => {
+    const { container } = render(
+      <ChatInput onSend={() => {}} promptcodes={CODES} />,
+    );
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(box, {
+      target: { value: "do /n-verify not /nope", selectionStart: 0 },
+    });
+    const chip = container.querySelector('[data-token="code"]');
+    expect(chip?.textContent).toBe("/n-verify");
+    // The dead token gets no chip — the visible difference.
+    expect(container.querySelectorAll("[data-token]")).toHaveLength(1);
+  });
+
   it("stays out of the way with no codes configured", () => {
     render(<ChatInput onSend={() => {}} />);
     type("/anything");

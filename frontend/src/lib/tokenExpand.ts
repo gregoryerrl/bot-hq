@@ -37,6 +37,73 @@ const TRAILING_PUNCT = /[.,;:!?)\]]+$/;
  * read the same prose either way. The added backticks come in PAIRS, so the
  * odd-count escape heuristic downstream is unaffected.
  */
+/** One display segment of composer text: plain prose, or a LIVE token of a
+ *  given sigil family. Only tokens that actually RESOLVE get a kind — a dead
+ *  token (unknown code, an attachment whose map is gone) segments as plain,
+ *  which is exactly the visible difference the chips exist to show. */
+export type TokenSegment = {
+  text: string;
+  kind: "plain" | "mention" | "doc" | "code";
+};
+
+/**
+ * Split composer text into display segments for the highlight backdrop
+ * (round 13, "make them prettier in the input box"). Same walk as
+ * [`expandComposerTokens`] — same boundaries, same backtick escape, same
+ * trailing-punctuation shedding — so what the chips mark is precisely what
+ * Send will expand (and `@` what the backend will summon).
+ */
+export function tokenSegments(
+  text: string,
+  mentionSlugs: readonly string[],
+  docItems: readonly ExpandableItem[],
+  promptcodes: readonly { code: string; prompt: string }[],
+): TokenSegment[] {
+  const out: TokenSegment[] = [];
+  let plain = "";
+  const flush = () => {
+    if (plain) out.push({ text: plain, kind: "plain" });
+    plain = "";
+  };
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    const boundaryOk =
+      ch === "/"
+        ? i === 0 || /\s/.test(text[i - 1])
+        : i === 0 || !/[a-zA-Z0-9]/.test(text[i - 1]);
+    const isSigil = ch === "#" || ch === "/" || ch === "@";
+    if (isSigil && boundaryOk && !insideBacktickSpan(text, i)) {
+      let end = i + 1;
+      while (end < text.length && !/\s/.test(text[end])) end += 1;
+      const raw = text.slice(i + 1, end);
+      const stripped = raw.replace(TRAILING_PUNCT, "");
+      const matches = (candidate: string): boolean =>
+        ch === "@"
+          ? mentionSlugs.some(
+              (m) => m.toLowerCase() === candidate.toLowerCase(),
+            )
+          : ch === "#"
+            ? docItems.some((d) => d.key === candidate)
+            : promptcodes.some((c) => c.code === candidate);
+      const hit = matches(raw) ? raw : matches(stripped) ? stripped : null;
+      if (hit !== null) {
+        flush();
+        out.push({
+          text: `${ch}${hit}`,
+          kind: ch === "@" ? "mention" : ch === "#" ? "doc" : "code",
+        });
+        i += 1 + hit.length;
+        continue;
+      }
+    }
+    plain += ch;
+    i += 1;
+  }
+  flush();
+  return out;
+}
+
 export function expandComposerTokens(
   text: string,
   docItems: readonly ExpandableItem[],

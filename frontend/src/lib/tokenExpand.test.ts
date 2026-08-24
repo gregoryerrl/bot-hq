@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { expandComposerTokens, insideBacktickSpan } from "./tokenExpand";
+import {
+  expandComposerTokens,
+  insideBacktickSpan,
+  tokenSegments,
+} from "./tokenExpand";
 import backtickFixtures from "./backtickFixtures.json";
 
 const DOCS = [
@@ -75,6 +79,43 @@ describe("expandComposerTokens", () => {
   it("an expansion body is never re-scanned", () => {
     const codes = [{ code: "a", prompt: "use /b here" }, { code: "b", prompt: "BOOM" }];
     expect(expandComposerTokens("/a", DOCS, codes)).toBe("\n> use /b here\n\n");
+  });
+});
+
+describe("tokenSegments", () => {
+  const SLUGS = ["eyes", "hands"];
+
+  it("marks live tokens by family and leaves prose plain", () => {
+    expect(
+      tokenSegments("ask @eyes about #doc/investigate then /n-verify", SLUGS, DOCS, CODES),
+    ).toEqual([
+      { text: "ask ", kind: "plain" },
+      { text: "@eyes", kind: "mention" },
+      { text: " about ", kind: "plain" },
+      { text: "#doc/investigate", kind: "doc" },
+      { text: " then ", kind: "plain" },
+      { text: "/n-verify", kind: "code" },
+    ]);
+  });
+
+  it("a DEAD token segments as plain — the visible difference", () => {
+    expect(tokenSegments("#gone.png and /nope", SLUGS, DOCS, CODES)).toEqual([
+      { text: "#gone.png and /nope", kind: "plain" },
+    ]);
+  });
+
+  it("backticks and boundaries match the expander", () => {
+    expect(tokenSegments("`/n-verify` cd ./n-verify", SLUGS, DOCS, CODES)).toEqual([
+      { text: "`/n-verify` cd ./n-verify", kind: "plain" },
+    ]);
+    // Trailing punctuation stays OUTSIDE the chip.
+    expect(tokenSegments("(/n-verify.)", SLUGS, DOCS, CODES)).toEqual([
+      { text: "(/n-verify.)", kind: "plain" },
+    ]);
+    expect(tokenSegments("/n-verify.", SLUGS, DOCS, CODES)).toEqual([
+      { text: "/n-verify", kind: "code" },
+      { text: ".", kind: "plain" },
+    ]);
   });
 });
 

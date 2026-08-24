@@ -8,7 +8,11 @@ import { authorColorClass } from "./authorColor";
 import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import { anyBusy, isLocked, type AgentBusy, type SessionActivity } from "../stores/activity";
 import { uriListToPaths } from "../lib/filePaste";
-import { expandComposerTokens, insideBacktickSpan } from "../lib/tokenExpand";
+import {
+  expandComposerTokens,
+  insideBacktickSpan,
+  tokenSegments,
+} from "../lib/tokenExpand";
 
 /** One participant the `@` picker can insert (rc3 D17). */
 type Mentionable = {
@@ -321,6 +325,20 @@ export function ChatInput({
               };
             });
   const matches = token ? matchPickerItems(tokenItems, token.query) : [];
+  // The highlight backdrop's segments (round 13, decorative): live tokens
+  // chip, dead ones stay plain — same walk as the Send-time expander.
+  const displaySegments = tokenSegments(
+    value,
+    (mentionables ?? []).map((m) => m.slug),
+    [...(docMentionables ?? []), ...attachedFiles],
+    promptcodes ?? [],
+  );
+  const highlightsRef = useRef<HTMLDivElement>(null);
+  const syncHighlightScroll = () => {
+    const el = textareaRef.current;
+    const hl = highlightsRef.current;
+    if (el && hl) hl.scrollTop = el.scrollTop;
+  };
   const pickerOpen = !!token && matches.length > 0 && !pickerDismissed;
   const active = matches[Math.min(highlight, matches.length - 1)];
 
@@ -613,6 +631,8 @@ export function ChatInput({
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight + 2, 200)}px`;
+    syncHighlightScroll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
 
   // Typed to what it uses (`preventDefault`) rather than `FormEvent`, so the
@@ -757,6 +777,43 @@ export function ChatInput({
               ))}
             </ul>
           )}
+          {/* The chip backdrop (round 13): a mirror of the box's text with
+              LIVE tokens wrapped in tinted pills, painted behind a
+              transparent-background textarea. Same padding/border metrics as
+              the house Textarea so the pills sit under their glyphs; the
+              mirror's own text is transparent — only the chips show. A dead
+              token gets no chip, which is the honest signal (cce52574's
+              residual made visible). */}
+          <div
+            ref={highlightsRef}
+            aria-hidden
+            data-testid="composer-highlights"
+            className={cn(
+              "pointer-events-none absolute inset-0 overflow-hidden",
+              "whitespace-pre-wrap break-words rounded border border-transparent",
+              "bg-surface-container px-2.5 py-1.5 text-sm text-transparent",
+            )}
+          >
+            {displaySegments.map((seg, idx) =>
+              seg.kind === "plain" ? (
+                <span key={idx}>{seg.text}</span>
+              ) : (
+                <span
+                  key={idx}
+                  data-token={seg.kind}
+                  className={cn(
+                    "rounded-sm ring-1",
+                    seg.kind === "mention" && "bg-primary/20 ring-primary/30",
+                    seg.kind === "doc" && "bg-tertiary/20 ring-tertiary/30",
+                    seg.kind === "code" && "bg-secondary/25 ring-secondary/35",
+                  )}
+                >
+                  {seg.text}
+                </span>
+              ),
+            )}
+            {"\n"}
+          </div>
           <Textarea
             ref={textareaRef}
             rows={2}
@@ -771,6 +828,7 @@ export function ChatInput({
             onSelect={(e) =>
               setCaret(e.currentTarget.selectionStart ?? 0)
             }
+            onScroll={syncHighlightScroll}
             onPaste={handlePaste}
             onKeyDown={(e) => {
               // **The picker owns these keys while it is open**, and Enter
@@ -815,7 +873,10 @@ export function ChatInput({
             disabled={sending || activity === "cancelling"}
             readOnly={staged}
             title="Enter to send · Shift+Enter for a newline"
-            className={cn("w-full resize-none", staged && "opacity-80")}
+            className={cn(
+              "relative w-full resize-none bg-transparent",
+              staged && "opacity-80",
+            )}
           />
         </div>
         <div className="flex items-center gap-2">
