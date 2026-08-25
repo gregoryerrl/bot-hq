@@ -17,6 +17,15 @@ import { FeedbackPanel } from "./FeedbackPanel";
 import { PromptcodesPanel } from "./PromptcodesPanel";
 import { PolicyForm } from "../components/PolicyForm";
 import { GatedKeywordList } from "../components/GatedKeywordList";
+import {
+  osNotificationsEnabled,
+  setOsNotificationsEnabled,
+} from "../lib/osNotifications";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import type {
   GatedKeyword,
   Policy,
@@ -36,7 +45,8 @@ type SettingsSubTab =
   | "feedback"
   | "promptcodes"
   | "archive"
-  | "updates";
+  | "updates"
+  | "notifications";
 
 /**
  * Settings is a tabbed container. Every panel that has been visited stays
@@ -138,6 +148,13 @@ export function Settings() {
         >
           Updates
         </SubTabButton>
+        <SubTabButton
+          active={tab === "notifications"}
+          controls="settings-tab-notifications"
+          onClick={() => select("notifications")}
+        >
+          Notifications
+        </SubTabButton>
       </div>
       <div className="min-h-0 flex-1">
         <div
@@ -209,6 +226,13 @@ export function Settings() {
           className={cn("h-full", tab !== "updates" && "hidden")}
         >
           {visited.has("updates") && <UpdatesPanel />}
+        </div>
+        <div
+          id="settings-tab-notifications"
+          role="tabpanel"
+          className={cn("h-full", tab !== "notifications" && "hidden")}
+        >
+          {visited.has("notifications") && <NotificationsPanel />}
         </div>
       </div>
     </div>
@@ -667,5 +691,124 @@ function ToolGateSection() {
         </p>
       )}
     </section>
+  );
+}
+
+// ============================================================================
+// Notifications — escalate needs-you moments to the OS while unfocused
+// ============================================================================
+
+function NotificationsPanel() {
+  const [enabled, setEnabled] = useState(osNotificationsEnabled());
+  const [testState, setTestState] = useState<"idle" | "sent" | "denied" | "failed">(
+    "idle",
+  );
+
+  const toggle = () => {
+    const next = !enabled;
+    setOsNotificationsEnabled(next);
+    setEnabled(next);
+    if (next) {
+      // Flipping On is the focused, intentional moment — request the OS
+      // permission HERE. The lazy request at first fire only ever runs while
+      // the user is in another app, where a surprise system prompt gets
+      // dismissed — and a dismissal is sticky.
+      void (async () => {
+        try {
+          let granted = await isPermissionGranted();
+          if (!granted) granted = (await requestPermission()) === "granted";
+          setTestState(granted ? "idle" : "denied");
+        } catch {
+          setTestState("failed");
+        }
+      })();
+    }
+  };
+
+  const sendTest = async () => {
+    try {
+      let granted = await isPermissionGranted();
+      if (!granted) granted = (await requestPermission()) === "granted";
+      if (!granted) {
+        setTestState("denied");
+        return;
+      }
+      sendNotification({
+        title: "bot-hq — test notification",
+        body: "This is what a needs-you escalation looks like.",
+      });
+      setTestState("sent");
+    } catch {
+      setTestState("failed");
+    }
+  };
+
+  return (
+    <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
+      <h2 className="font-headline-lg text-headline-lg text-on-surface">
+        Notifications
+      </h2>
+      <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+        While the window is unfocused, bot-hq escalates needs-you moments to
+        your machine&rsquo;s notifications. The in-app bell counts parked
+        questions; OS escalation deliberately covers more — questions and
+        approvals, gated commands, and session halts. Repeats are
+        cooldown-suppressed and simultaneous waits coalesce into one summary.
+      </p>
+
+      <div className="mt-6 flex items-center justify-between gap-4 rounded-lg border border-outline-variant bg-surface-container p-5">
+        <div>
+          <div className="font-body-md text-body-md text-on-surface">
+            OS notifications
+          </div>
+          <div className="mt-0.5 max-w-prose font-code-sm text-code-sm text-on-surface-variant">
+            {enabled
+              ? "On — escalations toast while the window is unfocused."
+              : "Off — everything stays in the in-app bell, tray and banners."}
+          </div>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          onClick={toggle}
+          className={cn(
+            "inline-flex shrink-0 items-center rounded border px-3 py-1.5 font-code-sm text-code-sm transition-colors",
+            enabled
+              ? "border-primary bg-primary text-on-primary hover:bg-primary-fixed"
+              : "border-outline-variant text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface",
+          )}
+        >
+          {enabled ? "On" : "Off"}
+        </button>
+      </div>
+
+      <div className="mt-4 flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => void sendTest()}
+          className="inline-flex items-center rounded border border-outline-variant px-3 py-1.5 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+        >
+          Send test notification
+        </button>
+        {testState === "sent" && (
+          <span className="font-code-sm text-code-sm text-on-surface-variant">
+            Sent — if nothing appeared, check this app&rsquo;s permission in
+            your OS notification settings.
+          </span>
+        )}
+        {testState === "denied" && (
+          <span className="font-code-sm text-code-sm text-warning">
+            Permission denied — grant it in your OS notification settings.
+          </span>
+        )}
+        {testState === "failed" && (
+          <span className="font-code-sm text-code-sm text-warning">
+            Send failed — on Linux this usually means no notification daemon is
+            running.
+          </span>
+        )}
+      </div>
+    </div>
   );
 }

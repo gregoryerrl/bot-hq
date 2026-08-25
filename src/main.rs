@@ -348,6 +348,11 @@ fn main() -> Result<()> {
         // Dialog plugin — native folder picker for the New-project / working-repo
         // path fields (replaces blind text-entry of paths).
         .plugin(tauri_plugin_dialog::init())
+        // Notification plugin — needs-you escalation to OS notifications while
+        // the window is unfocused (questions, approvals, gates, halts). The
+        // frontend owns the policy (useOsNotifications); permission is
+        // requested lazily at the first real send.
+        .plugin(tauri_plugin_notification::init())
         // Plugin-bundle serving: `bhq-plugin://<id>/<path>` resolves to
         // `<data_dir>/plugins/<id>/<path>` for INSTALLED + ENABLED plugins
         // only. Registered once at Builder time — install/enable needs no

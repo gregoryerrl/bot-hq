@@ -68,6 +68,11 @@ sudo apt install ./bot-hq_<version>_amd64.deb
 The `.deb` declares its `libwebkit2gtk-4.1` dependency. For the AppImage, make
 sure a WebKitGTK 4.1 runtime is present (it is on most desktops).
 
+OS notifications (needs-you escalation while the window is unfocused) require
+a notification daemon — present on mainstream desktops (GNOME, KDE, XFCE);
+minimal window managers may need one installed. **Settings → Notifications →
+Send test notification** tells you if sends fail.
+
 ## Windows
 
 Run the NSIS installer (`bot-hq_<version>_x64-setup.exe`). The build is

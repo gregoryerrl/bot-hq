@@ -23,8 +23,10 @@ import {
   seedRuntimeStores,
   type SessionRuntime,
 } from "./stores/runtime";
+import { useOsNotifications } from "./hooks/useOsNotifications";
 
 export function Providers({ children }: { children: ReactNode }) {
+  useOsNotifications();
   const [queryClient] = useState(
     () =>
       new QueryClient({

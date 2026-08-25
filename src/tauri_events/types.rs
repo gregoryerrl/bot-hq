@@ -56,8 +56,12 @@ impl PhaseChangedEvent {
     pub const EVENT_NAME: &'static str = "session:phase_changed";
 }
 
-/// Emitted when a session enters or leaves "awaiting user input" state
-/// (mark_awaiting_user / ask_user_choice / request_approval set the flag).
+/// Emitted when a session DECLARES its halt (`mark_awaiting_user` / `halt`) —
+/// entering awaiting-user, and only that: questions and approvals emit
+/// [`PendingChoiceEvent`] instead, and leaving the state has its own
+/// `session:halt_cleared`. This is the single non-test emit site's contract
+/// (`bridge/tray.rs`), and the OS-notification escalation relies on it — a
+/// question park must not double-fire as a halt.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct AwaitingUser {
     pub session_id: String,

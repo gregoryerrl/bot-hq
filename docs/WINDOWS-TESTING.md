@@ -84,6 +84,10 @@ Tick these off and tell us where it breaks:
       exercises the policy git-hooks on Windows.)*
 - [ ] **Second instance is blocked** — launch bot-hq again while it's running;
       it should refuse to start a second copy ("already running").
+- [ ] **OS notification fires** — Settings → Notifications → **Send test
+      notification** shows a Windows toast. *(Toasts need the AppUserModelID
+      the NSIS installer registers — this checklist assumes the installed app.
+      A loose/portable `.exe` run no-ops silently; that's expected, not a bug.)*
 - [ ] **No errors on first launch** — nothing crashes during startup.
 
 ---
