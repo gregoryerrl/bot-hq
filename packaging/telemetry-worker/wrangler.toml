@@ -1,0 +1,16 @@
+# bot-hq telemetry ingest — Cloudflare Worker + D1.
+#
+# Deploy (one-time, your Cloudflare account — see README.md):
+#   npx wrangler d1 create bot-hq-telemetry        # then paste database_id below
+#   npx wrangler d1 execute bot-hq-telemetry --remote --file=schema.sql
+#   npx wrangler deploy                            # prints the workers.dev URL
+# Paste the URL into bot-hq → Settings → Diagnostics → endpoint.
+
+name = "bot-hq-telemetry"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[[d1_databases]]
+binding = "TELEMETRY_DB"
+database_name = "bot-hq-telemetry"
+database_id = "REPLACE-WITH-OUTPUT-OF-d1-create"

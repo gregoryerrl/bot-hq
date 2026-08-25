@@ -1,0 +1,15 @@
+{
+  "name": "bot-hq-telemetry-worker",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "test": "vitest run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5",
+    "typescript": "^5",
+    "vitest": "^3",
+    "wrangler": "^4"
+  }
+}
