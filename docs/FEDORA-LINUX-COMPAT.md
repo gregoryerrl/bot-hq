@@ -300,27 +300,6 @@ pill in a dark header.
 The fix is `:root { color-scheme: dark; }` in `frontend/src/index.css`, pinned by
 `frontend/src/lib/theme.ts` + `theme.test.ts`.
 
-**Verified empirically, not just pinned.** The open question was whether
-WebKitGTK honours `color-scheme` for a native `<select>` at all, or whether the
-GTK theme wins regardless. Answered by rendering the same markup twice in the
-host's WebKitGTK 2.52.5 — the version bot-hq links — under
-`GTK_THEME=Adwaita:light`, the condition that causes the bug:
-
-| page | rendered `<select>` |
-| --- | --- |
-| no `color-scheme` (1.0.0 behaviour) | **light pill, dark text** — the bug, reproduced in isolation |
-| `:root { color-scheme: dark; }` | **dark control, light text** |
-
-So the declaration overrides the GTK theme rather than merely agreeing with it
-when the theme is already dark. Captures kept at
-`~/.bot-hq/.local/screenshots/color-scheme-{with,without}-fix.png`; the
-before-state in the real app is `fedora-dropdown-before.png` beside them.
-
-Method note: rendered through `WebKit2.WebView.get_snapshot` on an
-`Gtk.OffscreenWindow`, which needs no compositor and captures the web view's own
-buffer rather than screen pixels — so the result cannot be contaminated by
-window stacking or by whatever the compositor decided to do with focus.
-
 **Measured, not assumed** (2026-08-25, after the build dependencies were
 installed). Whether WebKitGTK honours `color-scheme` for a native `<select>` was
 an open question through the whole fix — the pin test only proves the
@@ -338,6 +317,17 @@ So the declaration overrides the GTK theme rather than merely coinciding with a
 dark one; forcing the theme light in BOTH runs is what rules that out. The
 from-source app was also built and run on this host under the same forced light
 theme and renders correctly.
+
+Independently corroborated by a second method, arrived at without knowledge of
+the first: the same two pages rendered through `WebKit2.WebView.get_snapshot` on
+a `Gtk.OffscreenWindow` (python/gi), same forced light theme, same result — light
+pill without the declaration, dark control with it. That method needs no
+compositor and captures the web view's own buffer rather than screen pixels, so
+it cannot be contaminated by window stacking or focus; captures at
+`~/.bot-hq/.local/screenshots/color-scheme-{with,without}-fix.png`. Two
+independent probes agreeing is worth more here than either alone, since the
+session that produced them spent the day discovering how easily a plausible
+mechanism survives a single unrepeated measurement.
 
 **Confirmed in the running application by Gregory** (2026-08-25): "the colors
 got fixed (dropdowns, etc)". That is the report that closes this defect — the
