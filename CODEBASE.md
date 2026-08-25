@@ -44,7 +44,7 @@ listed. `PINNED`/`UNPINNED` verdicts are as of HEAD `f8127b0` (2026-08-15); late
 |---|---|---|---|
 | **A** Agent runtime | build/launch/feed/read one claude-code subprocess per participant; capabilities; hardcoded prompt layers | `src/agents/` | ARCHITECTURE §Process model, §Role prompts; D3 D4 D9 D10 |
 | **B1** Core — the ring | the turn engine: deal turns, deliver backlogs, yield (consensus / halt / gate / all-pass / cap / spin / Stage); the per-participant pump; activity; user send | `src/core/` (sequencer, pump, activity, broadcast, state, mentions, ipav) | ARCHITECTURE §Turn coordination; D17 D19 D21–D35 |
-| **B2** Core — lifecycle | open → compose prompts → spawn → ring start; close → epilogue; watchdog; worktrees; terminals; updates | `src/core/` (session, close_learnings, watchdog, worktree, terminal, updates) | ARCHITECTURE §Process model, §Session worktrees; D8 D15 D21 |
+| **B2** Core — lifecycle | open → compose prompts → spawn → ring start; close → epilogue; watchdog; worktrees; terminals; updates | `src/core/` (session, close_learnings, watchdog, worktree, terminal, updates, telemetry) | ARCHITECTURE §Process model, §Session worktrees; D8 D15 D21 |
 | **C1** Internal MCP dispatch | the 40-tool agent↔UI signaling server: routing, capability gate, tool descriptors | `src/signaling/` (server, jsonrpc, protocol, …) | ARCHITECTURE §Internal MCP server; D10 D16 |
 | **C2** Signaling bridge | the process-wide hub the tools call into: tray, halt slot, ring gates, SignalingEvent fan-out, findings, session docs, CL facade/write/push | `src/signaling/bridge/` | ARCHITECTURE §Internal MCP server, §Context Library; D22 D34 D35 |
 | **D** External MCP | REMOVED 2026-08-17 (`d0661b4`) — the driver is a future plugin | — | ARCHITECTURE §The external driver — REMOVED |
@@ -201,6 +201,7 @@ check.
 | `src/core/worktree.rs` | `ensure_worktree`/`remove_worktree_if_clean` (argv-array `git`, no shell) | M |
 | `src/core/terminal.rs` | `TerminalRegistry`/`SessionTerminal`: one PTY per session, bounded scrollback, `wait_settle` (Notify, not polling) | M |
 | `src/core/updates.rs` | GitHub-releases version check (pure logic + thin fetch) → `UpdateBanner` | M |
+| `src/core/telemetry.rs` | opt-in diagnostics: hash-only panic/error events, `$HOME`→`~` redaction, 1MB drop-oldest jsonl queue, never-blocks flusher (runtime-config endpoint), panic-capture chain, `TELEMETRY_ENABLED` atomic | M |
 
 **Entry points.** `open_session` · `spawn_session_handle` · `compose_system_prompt`
 · `participant_spawn_config` · `boot_then_start` · `AppState::close_session` →
@@ -504,7 +505,7 @@ fs watcher (`cl:changed`, `session:worktree_changed`, `plugin:assets_changed`).
 | `src/tauri_cmd/messages.rs` | `get_session_messages` / `broadcast_message` | S |
 | `src/tauri_cmd/tray.rs` | choices/approvals/halts/staged responses (`stage_user_response`, `send_user_response`, `resolve_choice`, `discard_choice`) | M |
 | `src/tauri_cmd/docs.rs` | session docs search, `compute_apply_diff` (git in `spawn_blocking`), `summarize_session_doc` (headless `claude -p`), `validate_model` | L |
-| `src/tauri_cmd/findings.rs`, `src/tauri_cmd/feedback.rs`, `src/tauri_cmd/models.rs`, `src/tauri_cmd/updates.rs`, `src/tauri_cmd/terminal.rs`, `src/tauri_cmd/tool_gate.rs` | thin wrappers | S |
+| `src/tauri_cmd/findings.rs`, `src/tauri_cmd/feedback.rs`, `src/tauri_cmd/models.rs`, `src/tauri_cmd/updates.rs`, `src/tauri_cmd/telemetry.rs`, `src/tauri_cmd/terminal.rs`, `src/tauri_cmd/tool_gate.rs` | thin wrappers | S |
 | `src/tauri_cmd/files.rs` | `read_workspace_file` (path-guarded, size-capped) | M |
 | `src/tauri_cmd/roles.rs` | roles CRUD + capabilities | L |
 | `src/tauri_cmd/policy.rs` | 3-tier policy get/set + `read_violations` (no limit) | M |

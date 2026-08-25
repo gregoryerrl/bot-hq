@@ -45,6 +45,7 @@ pub mod sessions;
 pub mod terminal;
 pub mod tool_gate;
 pub mod tray;
+pub mod telemetry;
 pub mod updates;
 
 pub use error::AppError;

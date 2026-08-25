@@ -146,6 +146,15 @@ impl Storage {
         Ok(())
     }
 
+    pub async fn delete_setting(&self, key: &str) -> Result<()> {
+        sqlx::query("DELETE FROM app_settings WHERE key = ?")
+            .bind(key)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("deleting app_setting {key}"))?;
+        Ok(())
+    }
+
     /// Whether a repo-backed session created WITHOUT an explicit worktree
     /// choice runs in an isolated git worktree. Opt-OUT: unset or any value
     /// but "0" → worktree on (parallel sessions per project are the default);

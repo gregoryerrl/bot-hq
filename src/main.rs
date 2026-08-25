@@ -195,9 +195,15 @@ fn main() -> Result<()> {
             }
             let storage_arc = Arc::new(storage.clone());
             let bridge_arc = bridge.clone();
+            // Opt-in diagnostics: seed the enabled atomic, queue this boot's
+            // app_launch, start the flusher loop. Spawned — never blocks boot.
+            bot_hq::core::telemetry::start(storage.clone(), paths.local_dir.clone());
             let core = Arc::new(CoreAppState::new(paths.clone(), storage, server).await);
             Ok::<_, anyhow::Error>((core, storage_arc, bridge_arc))
         })?;
+    // Panic capture (hashes only, gated on the opt-in atomic) chains onto the
+    // reaper hook installed above — capture first, then reap + print.
+    bot_hq::core::telemetry::install_panic_capture(&paths.local_dir);
 
     // Shutdown-signal handler. When killed from outside (SIGTERM from
     // launchd, SIGINT from terminal, SIGHUP on session disconnect), Tauri's
