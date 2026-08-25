@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Application manifest embedded into bot-hq's TEST binaries on Windows.
+
+  The [[bin]] target gets its manifest from tauri-build, but cargo's test
+  binaries (lib unit tests + tests/ integration binaries) get none. Without a
+  manifest the loader activates the legacy v5.82 Common-Controls assembly,
+  whose comctl32.dll fails to bind `CoTaskMemAlloc` (api-ms-win-core-com-l1-1-0)
+  at load -> STATUS_ENTRYPOINT_NOT_FOUND, crashing every test binary before a
+  single test runs. Declaring the Common-Controls v6 dependency activates the
+  6.0 assembly (as the bin already does) and the import binds.
+
+  Injected via build.rs `cargo:rustc-link-arg-tests` so it never reaches the
+  [[bin]] target (which would double-embed against tauri-build's manifest).
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>
