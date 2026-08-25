@@ -183,6 +183,20 @@ proximate cause from (a) — the responder is in the other helper's path.
 Four Windows product bugs found, three fixed:
 1. **Tool Gate had no shell** — a GUI process has no `sh` on PATH, so every
    *approved* gated command silently failed to run. `1049a96d`.
+
+   **CONFIRMED IN PRODUCTION**, not just by tests. Opening this branch's own PR
+   was routed through `action_gate` for approval; the user approved, and the
+   installed 1.0.0 build returned:
+
+   ```
+   failed to spawn `...gh.exe pr create...`: program not found
+   [action_gate → exit -1 · 336 output bytes · shell sh]
+   ```
+
+   `shell sh` is `gate_shell()`'s bare fallback — the exact failure. Until this
+   point F6 rested on a code reading plus 20 failing tests; this is the bug
+   executing in the shipped build, on a real approved command. The fix is on
+   this branch, so the running app does not have it.
 2. **`HOME` is unset on Windows** — `default_user_settings_paths` returned an
    empty Vec, so every agent spawned with **zero user MCP servers forwarded**,
    silently. Telemetry's twin hashed panic text unredacted, so identical crashes
