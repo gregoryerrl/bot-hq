@@ -10,6 +10,11 @@ import { slotKey } from "./lib/participants";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+vi.mock("@tauri-apps/plugin-notification", () => ({
+  isPermissionGranted: vi.fn(async () => true),
+  requestPermission: vi.fn(async () => "granted"),
+  sendNotification: vi.fn(),
+}));
 
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
@@ -263,5 +268,107 @@ describe("Providers — the slot-shaped runtime wire", () => {
     expect(useHealthStore.getState().bySession.s1).toEqual({
       "eyes-2": "retrying",
     });
+  });
+});
+
+// ===========================================================================
+// The OS-notification wire, at its call site (EYES b96ab2cd)
+//
+// Deleting `useOsNotifications()` from Providers left 528 tests green — the
+// definition, the import and the call were the only three hits in the tree.
+// These tests render <Providers> and fire the real EVENTS, so they fail if
+// the import, the call, the subscription, the queue, the flush or the send is
+// cut. planFlush's policy has its own suite; this is only the wire.
+// ===========================================================================
+
+import { sendNotification } from "@tauri-apps/plugin-notification";
+
+const mockSend = vi.mocked(sendNotification);
+
+describe("Providers — the OS-notification wire", () => {
+  beforeEach(() => {
+    handlers.clear();
+    mockInvoke.mockReset();
+    mockListen.mockReset();
+    mockListen.mockImplementation(
+      async (event: string, handler: EventCallback<unknown>) => {
+        handlers.set(event, (payload) =>
+          handler({ event, id: 0, payload } as Event<unknown>),
+        );
+        return () => {};
+      },
+    );
+    mockInvoke.mockResolvedValue([]);
+    mockSend.mockClear();
+    localStorage.removeItem("bot-hq:os-notifications");
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("a pending_choice event while unfocused reaches sendNotification", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    renderProviders();
+    emit("session:pending_choice", {
+      choice_id: "c1",
+      session_id: "s1",
+      agent: "hands",
+      question: "merge or park?",
+      options: ["merge", "park"],
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(mockSend.mock.calls[0][0]).toMatchObject({
+      body: "merge or park?",
+    });
+  });
+
+  it("an awaiting_user event while unfocused reaches sendNotification", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    renderProviders();
+    emit("session:awaiting_user", {
+      session_id: "s1",
+      agent: "hands",
+      reason: "waiting on the deploy window",
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(mockSend.mock.calls[0][0]).toMatchObject({
+      title: expect.stringContaining("waiting"),
+    });
+  });
+
+  it("the Off toggle really silences escalation", async () => {
+    const { setOsNotificationsEnabled } = await import("./lib/osNotifications");
+    setOsNotificationsEnabled(false);
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    renderProviders();
+    emit("session:pending_choice", {
+      choice_id: "c1",
+      session_id: "s1",
+      agent: "hands",
+      question: "should not toast",
+      options: ["ok"],
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it("returning to the app during the burst window drops the queue", async () => {
+    const focus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    renderProviders();
+    emit("session:pending_choice", {
+      choice_id: "c1",
+      session_id: "s1",
+      agent: "hands",
+      question: "still there?",
+      options: ["yes"],
+    });
+    focus.mockReturnValue(true); // user came back before the flush
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(mockSend).not.toHaveBeenCalled();
   });
 });
