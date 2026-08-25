@@ -46,11 +46,17 @@ bypass. Revisit only on fresh evidence, statement-scoped shape only.
     `Ok(PermissionState::Granted)` for *both* `request_permission` and
     `permission_state`. `isPermissionGranted()` is a compile-time constant on
     desktop and carries zero information about whether a toast displays.
-  - **Still UNTESTED, neither confirmed nor refuted:** AppUserModelID /
-    Start-menu-shortcut identity, and whether WebView2's `document.hasFocus()`
-    returns false for a backgrounded window (`useOsNotifications.ts:44`,
-    `:62` — both bare, silent early returns). The `hasFocus` question needs
-    **no** notifications to settle: a log line or dev-build probe answers it.
+  - **AppUserModelID: REFUTED, hypothesis dead.** After the user enabled
+    notifications (2026-08-25), toasts work and `com.gregoryerrl.bot-hq` appears
+    under `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings`
+    — Windows registers an app only once it has actually DELIVERED one. The
+    identity and Start-menu shortcut are fine.
+  - **Still UNTESTED:** whether a REAL unfocused park escalates — i.e. whether
+    WebView2's `document.hasFocus()` returns false for a backgrounded window
+    (`useOsNotifications.ts:44`, `:62`, both bare silent early returns). The
+    test button bypasses those gates, so its success says nothing about them.
+    Needs **no** notifications to settle: a log line or dev-build probe answers
+    it.
   - **The real defect found instead** — bot-hq cannot tell the user their
     notifications are off. `sendNotification` returns `void` and wraps the
     synchronous Web Notification constructor, so the send can never report
