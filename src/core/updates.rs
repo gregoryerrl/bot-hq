@@ -21,12 +21,19 @@ use specta::Type;
 pub const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/gregoryerrl/bot-hq/releases/latest";
 
-/// The release-API URL the app actually polls: `BOT_HQ_UPDATE_URL` when set
-/// (point it at any repo's `/releases/latest` to exercise the populated banner
-/// against a real 200 before this repo has a stable release), else
-/// [`LATEST_RELEASE_URL`].
+/// The release-API URL the app actually polls. Debug builds honor a
+/// `BOT_HQ_UPDATE_URL` override (point it at any repo's `/releases/latest` to
+/// exercise the populated banner against a real 200 before this repo has a
+/// stable release); release builds always use [`LATEST_RELEASE_URL`] — the
+/// banner's Download opens whatever URL the response carries, so a
+/// production-honored env var would let local env redirect it.
 pub fn release_api_url() -> String {
-    std::env::var("BOT_HQ_UPDATE_URL").unwrap_or_else(|_| LATEST_RELEASE_URL.to_string())
+    if cfg!(debug_assertions) {
+        if let Ok(url) = std::env::var("BOT_HQ_UPDATE_URL") {
+            return url;
+        }
+    }
+    LATEST_RELEASE_URL.to_string()
 }
 
 /// The subset of the GitHub release JSON we care about. Unknown fields are
