@@ -278,7 +278,7 @@
       </a>
       <div class="nav-links">
         <a href="#why">Why</a>
-        <a href="#roles">The roles</a>
+        <a href="#roles">Your roles</a>
         <a href="#workflow">Workflow</a>
         <a href="#library">Context Library</a>
         <a class="nav-cta" href="https://github.com/gregoryerrl/bot-hq/releases">Download</a>
@@ -292,7 +292,7 @@
       <div>
         <img class="hero-logo" src="logo.png" alt="bot-hq logo" />
         <h1>An agent harness<br />you <span class="accent">command</span>.<br />Nothing ships unwatched.</h1>
-        <p class="sub">bot-hq is a desktop app for running AI-assisted coding sessions you can actually trust — agents that execute and review each other under gates you set, a project knowledge base that outlives the session, and every decision surfaced to you.</p>
+        <p class="sub">bot-hq is a desktop app for running AI-assisted coding sessions you can actually trust — any roles you define, any workflow you want, every phase leaving a document you can open, under gates you set. The work is watchable, the knowledge outlives the session, and every decision is surfaced to you.</p>
         <p class="who">For developers &amp; teams who want the speed of AI coding without giving up oversight. <b>You stay the conductor.</b></p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://github.com/gregoryerrl/bot-hq/releases">⬇ Download</a>
@@ -333,18 +333,18 @@
       <div class="grid grid-3" style="margin-top: 40px;">
         <div class="card">
           <div class="icon" style="background: rgba(255,122,0,0.12); color: var(--hands);">01</div>
-          <h3>A builder <em>and</em> a reviewer</h3>
-          <p>Real review catches what the author misses — especially when the reviewer runs a different model and gives a genuine second opinion instead of an echo.</p>
+          <h3>Work in phases, not a scroll</h3>
+          <p><b>IPAV</b> — Investigate, Plan, Apply, Verify. Every substantial task walks the four phases, and each phase leaves a short document behind. You read the agents' own account, not chat archaeology.</p>
         </div>
         <div class="card">
           <div class="icon" style="background: rgba(162,89,255,0.12); color: var(--eyes-soft);">02</div>
-          <h3>A durable knowledge base</h3>
-          <p>Your conventions, gotchas, and project memory live in one place the agents read <em>before</em> they start — so they begin informed, not cold.</p>
+          <h3>A document trail that outlives the chat</h3>
+          <p>Session documents carry the task's working state; the <b>Context Library</b> carries what your project taught you across sessions; <b>policies</b> carry the rules — enforced by git hooks, not vibes.</p>
         </div>
         <div class="card">
           <div class="icon" style="background: rgba(173,198,255,0.14); color: var(--user);">03</div>
-          <h3>You stay in the loop</h3>
-          <p>Pushes, risky commands, and flagged problems pause for your approval. Everything else just flows. You decide when work is done.</p>
+          <h3>A UI built to watch it all</h3>
+          <p>Phase tabs, a live color-coded diff, a visible terminal, and a tray where questions and approvals park for you. Pushes and risky commands pause; everything else flows. You decide when work is done.</p>
         </div>
       </div>
     </div>
@@ -353,30 +353,30 @@
   <!-- ============ THE ROLES ============ -->
   <section id="roles">
     <div class="wrap">
-      <p class="eyebrow">The roles you compose</p>
-      <h2>Roles you define. Enforced, not suggested.</h2>
-      <p class="lead">A session runs the participants you pick — one, or several — each playing a role you own: its instructions, its capabilities, its model. The two that ship seeded are an executor and a reviewer, with a hard boundary between them. The reviewer literally cannot edit files.</p>
+      <p class="eyebrow">Composition is yours</p>
+      <h2>Any roles. Any workflow. Enforced, not suggested.</h2>
+      <p class="lead">A session runs the participants you pick — one, or several — each playing a role you own: its instructions, its capabilities, its model. A role's capabilities are enforced at the tool layer, so the boundary you draw is a real one, not a polite request.</p>
 
       <div class="grid grid-3" style="margin-top: 40px;">
         <div class="card role-card hands">
-          <div class="role-name">HANDS · the executor</div>
-          <h3>The builder</h3>
-          <p>Writes code, runs commands, makes commits. Your AI pair-programmer doing the actual work in the repo.</p>
+          <div class="role-name">e.g. · an executor</div>
+          <h3>Does the work</h3>
+          <p>Writes code, runs commands, makes commits. One classic composition pairs it with an adversarial reviewer — but a solo executor, a panel of specialists, or anything else you dream up is just another roster.</p>
         </div>
         <div class="card role-card eyes">
-          <div class="role-name">EYES · the reviewer</div>
-          <h3>The reviewer</h3>
-          <p>Reads the executor's work and pushes back adversarially. Write tools are blocked at the source — review only, no surprises.</p>
+          <div class="role-name">e.g. · a reviewer</div>
+          <h3>Pushes back</h3>
+          <p>Reads the work and challenges it. Strip its write capabilities and it literally cannot edit files — review only, no surprises. Run it on a different model for a genuine second opinion instead of an echo.</p>
         </div>
         <div class="card role-card you">
-          <div class="role-name">You · ORCHESTRATOR</div>
-          <h3>The conductor</h3>
-          <p>Give the task, answer what the agents park for you, approve the steps that need a human, call it done. They don't run off on their own.</p>
+          <div class="role-name">You · the conductor</div>
+          <h3>Commands the session</h3>
+          <p>Give the task, answer what the agents park for you, approve the steps that need a human, call it done. Whatever the roster, they don't run off on their own.</p>
         </div>
       </div>
 
       <div class="note">
-        <p><b>Why mix models?</b> Each participant can run on its own model. A reviewer that doesn't share the author's blind spots catches more — cross-model diversity buys a real second opinion instead of an echo chamber.</p>
+        <p><b>Roles are templates you keep</b> — write the instructions once, tick the capabilities, pick a default model, and reuse them across every session. A fresh install starts with one neutral role and offers an executor/reviewer example pair you can take or skip.</p>
       </div>
     </div>
   </section>
@@ -397,12 +397,12 @@
         <div class="step">
           <div class="letter">P</div>
           <h4>Plan</h4>
-          <p>The executor proposes the approach and tradeoffs; the reviewer reviews it <em>before</em> any code is written.</p>
+          <p>The approach and its tradeoffs are proposed — and challenged — <em>before</em> any code is written.</p>
         </div>
         <div class="step">
           <div class="letter">A</div>
           <h4>Apply</h4>
-          <p>The executor produces the work — the actual edits, commits, and commands.</p>
+          <p>The work gets produced — the actual edits, commits, and commands, or whatever the task's deliverable is.</p>
         </div>
         <div class="step">
           <div class="letter">V</div>
@@ -473,7 +473,7 @@
   <section class="download" id="download">
     <div class="wrap">
       <p class="eyebrow">Get started</p>
-      <h2>Run your first reviewed session.</h2>
+      <h2>Run your first session.</h2>
       <p class="lead">Download the desktop app for your platform, or build it from source. You'll also need the <code style="font-family:var(--mono);color:var(--hands-soft)">claude-code</code> CLI, which bot-hq drives under the hood.</p>
 
       <div class="cta-row" style="justify-content: center;">
@@ -486,8 +486,8 @@
 git clone https://github.com/gregoryerrl/bot-hq.git
 <span class="p">cd</span> bot-hq
 cp .env.example .env
-(<span class="p">cd</span> frontend &amp;&amp; npm install)
-cargo tauri dev   <span class="c"># builds the UI + opens the app</span>
+(<span class="p">cd</span> frontend &amp;&amp; npm install &amp;&amp; npm run build)
+cargo run   <span class="c"># builds + opens the app</span>
       </div>
     </div>
   </section>
