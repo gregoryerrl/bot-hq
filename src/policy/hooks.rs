@@ -2473,7 +2473,14 @@ mod tests {
         );
         assert!(body.starts_with("#!/bin/sh"));
         assert!(body.contains(MANAGED_MARKER));
-        assert!(body.contains("/usr/local/bin/bot-hq policy-check pre-commit"));
+        // On Windows `render_hook_body` double-quotes and forward-slashes the
+        // binary path, so Git-for-Windows' MSYS `sh` execs it as a native path.
+        let expect_bin = if cfg!(windows) {
+            "\"/usr/local/bin/bot-hq\" policy-check pre-commit"
+        } else {
+            "/usr/local/bin/bot-hq policy-check pre-commit"
+        };
+        assert!(body.contains(expect_bin), "body: {body}");
         assert!(body.contains("--data-dir /home/u/.bot-hq-dev"));
         assert!(body.contains("--project acme-app"));
     }

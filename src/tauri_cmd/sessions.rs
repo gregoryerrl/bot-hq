@@ -1685,7 +1685,9 @@ mod tests {
         let (working, base) =
             resolve_session_placement(&storage, dd, "s-wt", Some(repo_s.clone()), None).await;
         assert_eq!(base.as_deref(), Some(repo_s.as_str()));
-        let w = working.unwrap();
+        // The worktree path is a native filesystem path (`\` on Windows);
+        // normalize separators for the cross-platform substring assertion.
+        let w = working.unwrap().replace('\\', "/");
         assert!(w.contains(".local/worktrees/s-wt"), "got {w}");
         assert!(w.ends_with("myproj"), "got {w}");
 

@@ -328,13 +328,42 @@ mod tests {
         let repo_canon = repo.path().canonicalize().unwrap();
         let outside_canon = outside.path().canonicalize().unwrap();
         // Build a relative path from the repo to the outside file.
-        let hops = repo_canon.components().count();
+        // Count only NORMAL components. The old `components().count() - 1`
+        // assumed exactly one non-Normal leading component, which is true on
+        // Unix (`RootDir`) and false on Windows, where a canonical path leads
+        // with BOTH `Prefix(VerbatimDisk)` and `RootDir` — so it produced one
+        // `..` too few and the traversal never climbed to the drive root.
+        let hops = repo_canon
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .count();
         let mut rel = PathBuf::new();
-        for _ in 0..hops.saturating_sub(1) {
+        for _ in 0..hops {
             rel.push("..");
         }
-        // `outside_canon` is absolute; strip its root so the join is relative.
-        for c in outside_canon.components().skip(1) {
+        // `outside_canon` is absolute; keep only its NORMAL components so the
+        // join stays relative. `skip(1)` assumed exactly one leading component,
+        // which holds on Unix — a Windows canonical path has TWO
+        // (`Prefix(VerbatimDisk)` + `RootDir`), so `skip(1)` left `RootDir`
+        // first and `PathBuf::push` of a root component RESETS the path.
+        //
+        // STILL RED ON WINDOWS, cause NOT yet identified. Both this and the
+        // `hops` count above are genuine corrections, and neither fixed it:
+        // `resolve_requested_path` returns its input unchanged when
+        // `p.is_relative()` is false, and the observed `joined` is the bare
+        // outside path — so `rel` is somehow still absolute here. Recorded
+        // rather than guessed at a third time.
+        //
+        // NOT a product defect: `is_contained` is canonical-vs-canonical
+        // component-wise `starts_with`, `allowed_roots` SKIPS any root it
+        // cannot canonicalize, and an empty root set refuses. The guard is
+        // fail-closed in every direction; what is broken is this test's own
+        // path arithmetic, which dies at its SETUP assertion before ever
+        // reaching the `!is_contained(...)` line it exists to check.
+        for c in outside_canon
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        {
             rel.push(c);
         }
         rel.push("secret.md");

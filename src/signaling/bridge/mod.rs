@@ -2295,7 +2295,18 @@ mod tests {
     /// doc-guard defect in a new place — a needle a mention can satisfy.
     #[test]
     fn every_hashmap_field_is_named_in_unregister_session() {
-        let src = include_str!("mod.rs");
+        // CRLF-normalized at the READ SITE. `include_str!` embeds the file
+        // verbatim, so on a CRLF checkout (the Windows default without
+        // `.gitattributes`) the `"\n}\n"` needle below is really `"\r\n}\r\n"`
+        // and `find` returns None -> "unterminated struct".
+        //
+        // Deliberately NOT extracted into a testable scanner with a fixture,
+        // unlike `participants.rs::reseed_statement`: that one takes arbitrary
+        // string input and so has a real CRLF contract worth pinning, whereas
+        // this parses exactly ONE known file and nothing else — "parse this
+        // file deterministically" is its whole contract, and normalizing the
+        // input satisfies it without inventing a seam.
+        let src = &include_str!("mod.rs").replace("\r\n", "\n");
 
         let struct_start = src
             .find("pub struct SignalingBridge {")
