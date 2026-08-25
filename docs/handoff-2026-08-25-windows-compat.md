@@ -210,14 +210,33 @@ directly that notifications work**, and independently
   `Ok(PermissionState::Granted)` for BOTH `request_permission` and
   `permission_state`, so `isPermissionGranted()` is a compile-time constant on
   desktop carrying no information about display.
-- **Still UNTESTED:** whether a *real unfocused park* escalates — i.e. whether
-  WebView2's `document.hasFocus()` returns false for a backgrounded window
-  (`useOsNotifications.ts:44`, `:62`, both bare silent early returns). The test
-  button bypasses those gates, so its success says nothing about them.
-  **THIS MUST BE TESTED ON WINDOWS, NOT macOS** — the question is specifically
-  about WebView2's behaviour, and macOS runs WKWebView. It needs no
-  notifications infrastructure to settle: a log line or dev-build probe answers
-  it, as does one live unfocused park.
+- **The escalation path is CONFIRMED WORKING on Windows** (tested live,
+  2026-08-25 11:02 UTC). `document.hasFocus()` reports a backgrounded WebView2
+  window correctly, both focus gates behave, and the event wiring delivers.
+  **T6 is closed; nothing here is left for macOS.**
+
+  Measured objectively rather than by asking whether anyone saw a toast —
+  Windows records each app's deliveries at
+  `HKCU\…\Notifications\Settings\com.gregoryerrl.bot-hq`:
+
+  | | `LastNotificationAddedTime` | `PeriodicNotificationCount` |
+  |---|---|---|
+  | baseline, seconds pre-park | 10:10:25 | 1 |
+  | post-park | **11:02:29** | **3** |
+
+  Count `1 → 3` because `useOsNotifications` subscribes to BOTH
+  `session:pending_choice` (the park) and `session:awaiting_user` (the halt that
+  followed) — two distinct event types, both escalated.
+
+  **Method note, because the first attempt got this wrong.** An earlier run
+  showed no delivery and was very nearly recorded as a product bug: pref,
+  cooldown, DND and the OS layer had all been excluded, leaving
+  `document.hasFocus()` as the only candidate. It was wrong — the user had not
+  been reliably unfocused. The protocol had an instrument available (the
+  registry) and asked a human anyway; a mistaken "yes, a toast appeared" was
+  offered and then corrected by the user. Re-running with a **fresh baseline
+  taken immediately before the park** and a read taken **before refocus** made
+  the result independent of anyone's attention.
 - **Real product gap, unfixed:** `sendNotification` returns `void` and wraps the
   synchronous Web Notification constructor, so the send can never report
   failure; combined with the permission constant, **bot-hq cannot tell a user

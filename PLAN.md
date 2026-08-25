@@ -51,12 +51,16 @@ bypass. Revisit only on fresh evidence, statement-scoped shape only.
     under `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings`
     — Windows registers an app only once it has actually DELIVERED one. The
     identity and Start-menu shortcut are fine.
-  - **Still UNTESTED:** whether a REAL unfocused park escalates — i.e. whether
-    WebView2's `document.hasFocus()` returns false for a backgrounded window
-    (`useOsNotifications.ts:44`, `:62`, both bare silent early returns). The
-    test button bypasses those gates, so its success says nothing about them.
-    Needs **no** notifications to settle: a log line or dev-build probe answers
-    it.
+  - **The escalation path is CONFIRMED WORKING** (live test, 2026-08-25 11:02
+    UTC). A real unfocused park delivered, so `document.hasFocus()` reports a
+    backgrounded WebView2 window correctly and the event wiring is sound.
+    Measured from `HKCU\…\Notifications\Settings\com.gregoryerrl.bot-hq`:
+    `LastNotificationAddedTime` 10:10:25 → **11:02:29**, count **1 → 3** (the
+    park via `session:pending_choice` AND the following halt via
+    `session:awaiting_user` — two event types, both escalated).
+  - **T6 is CLOSED.** Nothing about toasts remains open on Windows. The
+    remaining item is the one below, which is about bot-hq's inability to REPORT
+    a failure, not about delivery.
   - **The real defect found instead** — bot-hq cannot tell the user their
     notifications are off. `sendNotification` returns `void` and wraps the
     synchronous Web Notification constructor, so the send can never report
