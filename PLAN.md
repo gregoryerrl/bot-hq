@@ -31,6 +31,28 @@ showed every one correctly gated (the 7-minute park was a real `rm -rf`;
 longest-match precedence was killed in review as a compound-command
 bypass. Revisit only on fresh evidence, statement-scoped shape only.
 
+## 1.0.1 shortlist (from the 1.0.0 release session, 2026-08-25)
+
+- **Windows toasts are broken in 1.0.0** — first real data (the user's
+  installed NSIS build, live during Verify): no toast from the Settings test
+  button. No permission prompt is EXPECTED on Windows (the dialog doesn't
+  exist; the plugin auto-grants) — the silent no-toast is the bug. Likely
+  AppUserModelID / Start-menu-shortcut identity for the NSIS install; debug
+  on real Windows. Smoke-method note: a freshly launched instance holds
+  focus BY CONSTRUCTION, so the real-event check is launch → focus another
+  app → park.
+- ~~Opting in sent nothing until the next launch~~ — FIXED on main
+  (`b269360`): the ask-card/toggle Enable now enqueues `app_launch`
+  immediately (found live by the first Windows install's empty D1).
+- `telemetry::start`/`install_panic_capture` call-site guards are
+  `include_str!`+`contains` — they catch deletion (the failure that has
+  happened) but not comment-out; the stronger form is a `telemetry::install()`
+  seam a test calls directly.
+- Role prose view-diff / reset-to-default affordance (promised in the 1.0.0
+  release notes as planned).
+- macOS auto-install / signing remain user-deferred (see the release section
+  below).
+
 ## Current state (TL;DR)
 
 bot-hq is built and used. The rebuild milestone (v0.1.0) shipped and the
