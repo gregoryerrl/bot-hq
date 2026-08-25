@@ -40,10 +40,11 @@ jobs:
           - platform: ubuntu-22.04
             args: ''
             rust-targets: ''
-          # Windows: NSIS .exe installer. Known staged runtime gaps (PID
-          # lock, bash hooks) — tracked in PLAN.md / CL shipping notes; the
-          # compile-level reaper/signal gating landed. The mcp-token ACL gap
-          # went with the external driver's token (2026-08-17): no token, no gap.
+          # Windows: NSIS .exe installer. Platform plumbing is in (PID lock
+          # via OpenProcess, ctrl-handler child reaper, Git-for-Windows hook
+          # rendering); what Windows lacks is live runtime mileage — see
+          # docs/WINDOWS-TESTING.md. The mcp-token ACL gap went with the
+          # external driver's token (2026-08-17): no token, no gap.
           - platform: windows-latest
             args: ''
             rust-targets: ''

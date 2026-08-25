@@ -1,8 +1,9 @@
-# bot-hq on Windows — Tester Guide (v1.0.0-rc2)
+# bot-hq on Windows — Tester Guide (v1.0.0)
 
-Thanks for helping test bot-hq on Windows! This is a **pre-release** build
-(`v1.0.0-rc2`) — it compiles and bundles on Windows, but this is early
-runtime testing on the platform, so expect a rough edge or two.
+Thanks for helping test bot-hq on Windows! Windows support in `v1.0.0` is
+newly hatched — it compiles, bundles and carries the platform plumbing
+(per-user install, process reaping, Git-for-Windows hooks), but it has seen
+far less live runtime than macOS, so expect a rough edge or two.
 Your feedback is exactly what we need.
 
 bot-hq drives AI-assisted coding sessions through role-playing participants
@@ -57,7 +58,7 @@ window on launch, install the Evergreen runtime from Microsoft:
 
 ## 2. Install bot-hq
 
-1. Download `bot-hq_1.0.0-rc2_x64-setup.exe` from the
+1. Download `bot-hq_1.0.0_x64-setup.exe` from the
    [GitHub release](https://github.com/gregoryerrl/bot-hq/releases).
 2. Run it. The installer is **unsigned**, so Windows SmartScreen will warn
    *"Windows protected your PC."* Click **More info → Run anyway**. (This is
