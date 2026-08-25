@@ -23,7 +23,39 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
-## 2026-08-25 (round 14) — the 1.0.0-readiness overnight run
+## 2026-08-25 — the 1.0.0 release session (features + tag)
+
+The dedicated release session PLAN.md deferred to. Version bumped to
+**1.0.0** everywhere that carries it (Cargo, tauri.conf, frontend package +
+lockfile; the homebrew cask waits for the published artifact's sha by its own
+design). Three features landed ahead of the tag, each with its wire pinned at
+the call site in the same batch (the review class that shipped five times
+before):
+
+- **Update check** stayed check-and-notify by the user's call (no updater
+  plugin, no signing) — the existing banner was proven against a real 200 for
+  the first time: a debug-only `BOT_HQ_UPDATE_URL` override + a screenshot of
+  the populated banner, plus an `#[ignore]` live test (run bare pre-tag).
+- **OS notifications** (`tauri-plugin-notification`): tray parks (questions,
+  approvals, gated commands) and halts escalate to machine notifications
+  while the window is unfocused — pure dedupe/cooldown/coalesce policy
+  (`planFlush`), flush-time focus re-check, permission asked at the Settings
+  toggle's On flip, Settings → Notifications subtab with a test button.
+  Four Providers-rendering wire tests incl. the Off toggle.
+- **Opt-in diagnostics** (`core/telemetry.rs` + `packaging/telemetry-worker/`,
+  a Cloudflare Worker + D1 deployed to the author's account): hash-only
+  panics, `$HOME` redaction, 1MB drop-oldest queue, never-blocks flusher with
+  permanent-4xx drop, install id that dies on disable, Settings → Diagnostics
+  subtab + one-time ask card + `PRIVACY.md` naming the recipient. Proven
+  end-to-end twice: an in-test HTTP sink (app side) and a real opted-in boot
+  whose `app_launch` landed in production D1.
+
+Also: both 0072 migration directions rehearsed on copies of the pre-0060
+legacy DB (preserve verified against the live DB byte-for-length; the
+destructive path hit every expectation), the rc2-era Windows-gap comments
+corrected (PID lock and hooks were already done), and a 293MB
+committed-node_modules incident caught and filtered out of local history
+before anything was pushed (`.gitignore`'s anchor was the hole).
 
 Mandate (maximal scope, the user's tray pick): the personal-vs-product config
 line, the s-43567984 dissection's 27 findings, the user's 4 ideas/issues
