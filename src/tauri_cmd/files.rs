@@ -277,8 +277,14 @@ mod tests {
             "paste dir {canon_parent:?} must sit under an allowed root"
         );
         let evil = pasted_file_path("../../../etc", "png");
+        // Normalize separators for the substring check — the minted path is a
+        // native one (`bothq-paste\etc` on Windows), and only the needle was
+        // Unix-shaped. The BEHAVIOUR was always right: `../../../etc` is
+        // stripped to `etc`, which is exactly what this asserts.
         assert!(
-            evil.to_string_lossy().contains("bothq-paste/etc"),
+            evil.to_string_lossy()
+                .replace('\\', "/")
+                .contains("bothq-paste/etc"),
             "traversal characters are stripped, not honoured: {evil:?}"
         );
     }
@@ -367,8 +373,23 @@ mod tests {
             rel.push(c);
         }
         rel.push("secret.md");
-        let joined = resolve_requested_path(rel.to_str().unwrap(), repo_canon.to_str());
-        assert!(joined.starts_with(&repo_canon), "joined under the repo: {joined:?}");
+        // Join against the NON-canonicalized repo path — which is also what
+        // production passes, since a session's `working_repo_path` is a
+        // user-supplied string rather than a canonicalized one.
+        //
+        // It matters on Windows: `canonicalize` always returns a VERBATIM
+        // `\\?\` path, verbatim paths cannot contain `..` (the OS takes them
+        // literally), so `PathBuf::push` RESOLVES `..` against a verbatim base
+        // at join time instead of concatenating it lexically. The traversal
+        // this test needs is unconstructible that way — the hops are eaten
+        // before `canonicalize` ever sees them, which is why two rounds of hop
+        // arithmetic produced a byte-identical failure.
+        let repo_base = repo.path();
+        let joined = resolve_requested_path(rel.to_str().unwrap(), repo_base.to_str());
+        assert!(
+            joined.starts_with(repo_base),
+            "joined under the repo: rel={rel:?} joined={joined:?}"
+        );
         let canonical = joined.canonicalize().expect("the traversal names a real file");
         assert_eq!(canonical, target.canonicalize().unwrap());
         assert!(
