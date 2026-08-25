@@ -671,6 +671,9 @@ function RoleForm({
           rules derived from the capabilities below are composed after it at
           spawn, and the capabilities themselves are what the tool gate reads.
           Text written here cannot grant a capability the boxes below withhold.
+          Once you edit a role&rsquo;s text it is yours for good: bot-hq never
+          auto-updates prose that differs from the shipped default, including
+          across app upgrades.
         </span>
         {/* Clearing means CLEARED (1.0.0 Batch 4): the compiled-prose
             fallback was deleted with the neutral default role, so an empty
