@@ -58,6 +58,29 @@ chmod +x bot-hq_<version>_amd64.AppImage
 ./bot-hq_<version>_amd64.AppImage
 ```
 
+#### If no window opens (Fedora and other modern-Mesa distributions)
+
+On distributions whose Mesa is much newer than the AppImage's Ubuntu 22.04
+build base — Fedora 40+, Arch, recent openSUSE — the app can start without
+ever showing a window. It does not crash and does not exit. Run it from a
+terminal; if you see
+
+```
+Could not create default EGL display: EGL_BAD_PARAMETER. Aborting...
+```
+
+then the bundled Wayland libraries are colliding with your host graphics
+stack and WebKit's rendering process is aborting. Install with:
+
+```sh
+scripts/install-appimage-linux.sh bot-hq_<version>_amd64.AppImage
+```
+
+That repairs the payload and installs `bot-hq` to `~/.local/bin` with a
+desktop entry. See [`docs/FEDORA-LINUX-COMPAT.md`](docs/FEDORA-LINUX-COMPAT.md)
+for the full diagnosis. Setting `WEBKIT_DISABLE_DMABUF_RENDERER` or
+`GDK_BACKEND` does **not** work for this failure.
+
 ### Debian / Ubuntu (.deb)
 
 ```sh
