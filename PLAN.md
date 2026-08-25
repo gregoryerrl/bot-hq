@@ -49,6 +49,20 @@ bypass. Revisit only on fresh evidence, statement-scoped shape only.
   `include_str!`+`contains` — they catch deletion (the failure that has
   happened) but not comment-out; the stronger form is a `telemetry::install()`
   seam a test calls directly.
+- **Investigate: a `BOT_HQ_DATA_DIR` instance spawned agents pointed at the
+  DEFAULT data dir.** Observed 2026-08-25 while smoke-testing: launching
+  `target/debug/bot-hq` with `BOT_HQ_DATA_DIR=~/.bot-hq-smoke` logged
+  `data dir ready data_dir=/home/pistol/.bot-hq-smoke` — the app's own data dir
+  took — yet the agent subprocesses it spawned carried a tool-gate hook reading
+  `--data-dir "/home/pistol/.bot-hq"` and `--resume` ids belonging to a session
+  living in the DEFAULT dir, i.e. it appeared to resume the other instance's
+  live session. **Not established:** whether hook generation uses a default path
+  rather than the active one, whether first-run seeding copies from the default
+  dir, or whether this was a misreading of process ancestry — the instances were
+  killed immediately rather than investigated, because a live session was in
+  progress. Reproduce on an idle machine before drawing conclusions. If real, it
+  matters: the dev/installed split documented in CLAUDE.md relies on that
+  variable isolating one instance from another.
 - **Ship an RPM so Fedora installs with `sudo dnf install bot-hq`** (user's
   call, 2026-08-25). This is recommendation 2 of `docs/FEDORA-LINUX-COMPAT.md`
   promoted to a wanted deliverable: the AppImage needs a repair script on any
