@@ -21,6 +21,14 @@ use specta::Type;
 pub const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/gregoryerrl/bot-hq/releases/latest";
 
+/// The release-API URL the app actually polls: `BOT_HQ_UPDATE_URL` when set
+/// (point it at any repo's `/releases/latest` to exercise the populated banner
+/// against a real 200 before this repo has a stable release), else
+/// [`LATEST_RELEASE_URL`].
+pub fn release_api_url() -> String {
+    std::env::var("BOT_HQ_UPDATE_URL").unwrap_or_else(|_| LATEST_RELEASE_URL.to_string())
+}
+
 /// The subset of the GitHub release JSON we care about. Unknown fields are
 /// ignored by serde, so the full (large) payload deserializes fine.
 #[derive(Debug, Clone, Deserialize)]
@@ -244,5 +252,26 @@ mod tests {
         assert!(!info.update_available);
         assert_eq!(info.latest_version, "0.1.0");
         assert!(info.release_url.is_empty());
+    }
+
+    /// Live-network proof that a REAL GitHub 200 deserializes + populates
+    /// `UpdateInfo` — every other test in this module eats hand-written JSON.
+    /// Run manually: `cargo test live_github -- --ignored`.
+    #[tokio::test]
+    #[ignore = "live network: hits the real GitHub releases API"]
+    async fn live_github_latest_release_deserializes() {
+        let client = reqwest::Client::new();
+        // ripgrep: bare `X.Y.Z` release tags that parse as semver. (tauri's own
+        // repo tags releases per-crate — `tauri-v2.x` — which is_newer treats
+        // as unparseable by design.)
+        let info = check_for_update(
+            &client,
+            "https://api.github.com/repos/BurntSushi/ripgrep/releases/latest",
+            "0.0.1",
+        )
+        .await
+        .expect("live GitHub /releases/latest must fetch + parse");
+        assert!(info.update_available, "0.0.1 predates every ripgrep release");
+        assert!(!info.release_url.is_empty());
     }
 }

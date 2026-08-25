@@ -19,7 +19,7 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<UpdateInfo, AppEr
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| AppError::internal(format!("could not build HTTP client: {e}")))?;
-    updates::check_for_update(&client, updates::LATEST_RELEASE_URL, &current)
+    updates::check_for_update(&client, &updates::release_api_url(), &current)
         .await
         .map_err(|e| AppError::internal(format!("update check failed: {e}")))
 }
