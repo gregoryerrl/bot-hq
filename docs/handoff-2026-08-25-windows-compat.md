@@ -3,7 +3,8 @@
 **Written from Windows, for the macOS machine to pick up.** Signature block at
 the bottom names who verified what, and — more importantly — what nobody did.
 
-- **Branch:** `windows-compat`, pushed, HEAD `1583fe4a`, 13 commits, tree clean.
+- **Branch:** `windows-compat`, pushed, tree clean. **14 commits — this document
+  is the 14th**, so don't expect a SHA quoted here to be HEAD.
 - **Cut from:** `origin/main` @ `4a1eb72a`.
 - **Not merged, no PR opened.**
 
@@ -42,8 +43,22 @@ Specifically unproven on any Unix machine:
 | `tests/portable_home_test.rs`, `codebase_map_test`'s sync guard | new targets, never run on Unix |
 | `frontend/framing.ts` `stripComments` | uncfg'd; also consumed by `overflow.ts` x2 |
 
-**Expected on macOS: everything green.** Anything red is a real bug this branch
-introduced and could not see.
+**Expected on macOS — with numbers, so "green" is checkable rather than a vibe:**
+
+| Suite | Expect |
+|---|---|
+| `cargo test` (lib) | **~1330 tests, 0 failures** — Windows shows 1325 passed + 5 Windows-only failures (§3) that should PASS on macOS |
+| `cargo test` (integration) | **7 targets, 41 tests, 0 failures** |
+| `npm test` | **56 files, 538 tests, 0 failures** |
+
+A green with no count cannot distinguish a full run from a partial one — that
+was failure #5 of this session (see the signature block). Check the counts.
+
+Anything red is a real bug this branch introduced and could not see.
+
+**Do NOT try to settle the `document.hasFocus()` question from macOS** (§6). It
+is specifically about **WebView2**, which is Windows-only; macOS runs WKWebView,
+so a probe there measures a different engine and answers nothing.
 
 ## 2. The work the user wants done on macOS: CI test jobs
 
@@ -181,12 +196,15 @@ Four Windows product bugs found, three fixed:
 The 1.0.0 report was a **disabled OS subsystem**: `ToastEnabled = 0`, the
 Windows master notifications switch. No application could display a toast.
 
-After the user enabled it (2026-08-25, this session), toasts work and
-`com.gregoryerrl.bot-hq` now appears under
-`HKCU\…\Notifications\Settings` — Windows registers an app only once it has
-actually delivered one.
+After the user enabled it (2026-08-25, this session), **the user confirmed
+directly that notifications work**, and independently
+`com.gregoryerrl.bot-hq` now appears under `HKCU\…\Notifications\Settings`.
 
 - **AppUserModelID: REFUTED.** The identity works; that hypothesis is dead.
+  Two independent legs, worth keeping distinct: the user's own confirmation is
+  evidence a toast was **displayed**; the registry entry is evidence the app
+  reached the notification platform with a **recognized AUMID**. The registry
+  leg alone would rest on an inference about when Windows writes that key.
 - **Permission explanations: eliminated from source.**
   `tauri-plugin-notification-2.3.3/src/desktop.rs` hardcodes
   `Ok(PermissionState::Granted)` for BOTH `request_permission` and
@@ -195,8 +213,11 @@ actually delivered one.
 - **Still UNTESTED:** whether a *real unfocused park* escalates — i.e. whether
   WebView2's `document.hasFocus()` returns false for a backgrounded window
   (`useOsNotifications.ts:44`, `:62`, both bare silent early returns). The test
-  button bypasses those gates, so its success says nothing about them. **This
-  needs no notifications to settle** — a log line or dev-build probe answers it.
+  button bypasses those gates, so its success says nothing about them.
+  **THIS MUST BE TESTED ON WINDOWS, NOT macOS** — the question is specifically
+  about WebView2's behaviour, and macOS runs WKWebView. It needs no
+  notifications infrastructure to settle: a log line or dev-build probe answers
+  it, as does one live unfocused park.
 - **Real product gap, unfixed:** `sendNotification` returns `void` and wraps the
   synchronous Web Notification constructor, so the send can never report
   failure; combined with the permission constant, **bot-hq cannot tell a user
