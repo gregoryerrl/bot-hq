@@ -482,6 +482,17 @@ and `journalctl -k` shows no OOM kill or segfault in the same window. Whether
 the two are related is **not established**; treating this as "why the app died"
 would be exactly the proxy-read this document keeps having to correct.
 
+**Note on the commit history:** the subject of `94db155f` reads "the repaired
+appimage still crashes, and not on egl", which asserts more than the evidence
+supports — it was written before the scope above was established, and
+`git log --oneline` is scanned far more often than a commit body. It was not
+rewritten, because the branch was already pushed. **This document is
+authoritative; that subject is not.** One later cause WAS found for at least one
+death, and it is not this one: the app was OOM-killed at 18:17:14
+(`Out of memory: Killed process 31752 (bot-hq) anon-rss:2923840kB` on a 7.5 GiB
+machine, two Rust builds in flight). An OOM kill leaves no panic and no shutdown
+line, so the log just stops — which is what made it look like a crash.
+
 **Evidence.** `coredumpctl` for the patched payload's web process:
 
 ```
