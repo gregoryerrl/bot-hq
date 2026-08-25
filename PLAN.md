@@ -33,14 +33,15 @@ bypass. Revisit only on fresh evidence, statement-scoped shape only.
 
 ## 1.0.1 shortlist (from the 1.0.0 release session, 2026-08-25)
 
-- **Windows toasts are broken in 1.0.0** — first real data (the user's
-  installed NSIS build, live during Verify): no toast from the Settings test
-  button. No permission prompt is EXPECTED on Windows (the dialog doesn't
-  exist; the plugin auto-grants) — the silent no-toast is the bug. Likely
-  AppUserModelID / Start-menu-shortcut identity for the NSIS install; debug
-  on real Windows. Smoke-method note: a freshly launched instance holds
-  focus BY CONSTRUCTION, so the real-event check is launch → focus another
-  app → park.
+- **Windows toasts — UNCONFIRMED in 1.0.0.** The user (installed NSIS
+  build, live during Verify) reported no permission prompt on toggling On —
+  which is EXPECTED on Windows (the dialog doesn't exist; the plugin
+  auto-grants) and is NOT the bug. Whether a toast appears from the test
+  button or from a real unfocused park was not reported either way. First
+  step is CONFIRM on real Windows (launch → focus another app → park; a
+  freshly launched instance holds focus BY CONSTRUCTION), then diagnose —
+  AppUserModelID / Start-menu-shortcut identity is the leading hypothesis,
+  not a finding.
 - ~~Opting in sent nothing until the next launch~~ — FIXED on main
   (`b269360`): the ask-card/toggle Enable now enqueues `app_launch`
   immediately (found live by the first Windows install's empty D1).
