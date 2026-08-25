@@ -9,17 +9,21 @@ For recent changes see [`PROGRESS.md`](PROGRESS.md).
 
 ---
 
-## The 1.0.0 release session (DEFERRED — user call, 2026-08-25)
+## The 1.0.0 release session — DONE (published 2026-08-25)
 
-The overnight 1.0.0-readiness run (see PROGRESS.md round 14) shipped the
-code: config-line cleanup, the dissect fixes, the paper-cut sweep. What it
-deliberately did NOT do is release. A dedicated session owns: version bump
-(`Cargo.toml` + `tauri.conf.json`) → tag `v1.0.0` → release workflow →
-publish + brew tap (`shipping.md` in the project CL carries the checklist,
-with the icon / signing / Windows caveats). One release note it must carry:
-an rc2 user who launched once, edited role prose, and never created a
-session has `COUNT(sessions)=0` — migration 0072 replaces their edits with
-the neutral default (narrow, guarded every other way; see 0072's header).
+**v1.0.0 is live**: <https://github.com/gregoryerrl/bot-hq/releases/tag/v1.0.0>
+(universal `.dmg` + `.deb`/AppImage + NSIS `.exe`), and the tap
+`gregoryerrl/homebrew-bot-hq` serves the cask (`brew install --cask
+gregoryerrl/bot-hq/bot-hq`). The release body carries the 0072 note (an
+rc2 user with `COUNT(sessions)=0` gets the neutral default — both
+directions rehearsed against a copy of the real pre-0060 DB) and the
+role-prose-freeze note. Shipped alongside the tag: the check-and-notify
+banner proven live, OS-notification escalation, and opt-in diagnostics
+(worker deployed; PRIVACY.md). The current `>_` mark shipped as the 1.0.0
+icon by the user's call — the "temp icon" framing is retired. Known
+honest limits at publish (user-acknowledged): Windows + Linux artifacts
+were built-and-unsmoked; macOS was smoked end-to-end. Signing / auto-
+update remain out (user call — see PROGRESS.md 2026-08-25).
 The Tool-Gate weak-match question was RESOLVED live on 2026-08-25:
 status quo, deliberately — re-classification of the five "benign" parks
 showed every one correctly gated (the 7-minute park was a real `rm -rf`;
@@ -413,11 +417,12 @@ extension points in `docs/PLUGINS.md`):
 
 Tauri covers macOS, Linux, Windows, and `.github/workflows/release.yml`
 builds all three (universal `.dmg`, `.deb` + AppImage, NSIS `.exe`) on tag
-pushes. What remains is runtime, not build: the Windows PID lock and the
-bash git hooks (see the workflow's own notes and `docs/WINDOWS-TESTING.md`),
-keychain backends (auth-token v2), and signing (`docs/SIGNING.md`). The icon
-font this line used to name was the Slint UI's; the web UI ships its own
-fonts under `frontend/public/fonts`.
+pushes — all three shipped in v1.0.0. What remains is runtime MILEAGE, not
+build or plumbing: the Windows PID lock, ctrl-handler reaper and
+Git-for-Windows hook rendering all landed pre-1.0.0 (the old gap notes were
+stale); what Windows/Linux lack is hours of live use (`docs/WINDOWS-TESTING.md`
+is the checklist). Still open: keychain backends (auth-token v2) and signing
+(`docs/SIGNING.md`).
 
 ---
 
