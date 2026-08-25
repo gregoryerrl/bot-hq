@@ -140,6 +140,11 @@ impl SessionTerminal {
         if let Some(dir) = cwd.filter(|d| d.is_dir()) {
             cmd.cwd(dir);
         }
+        // Under an AppImage launch this PTY inherits the payload's library
+        // paths, and the user WATCHES this one: the leak surfaces as
+        // `flatpak: symbol lookup error` and libpcre2 warnings on every shell
+        // startup. A no-op off a payload. See `appimage_env`.
+        crate::appimage_env::scrub_pty(&mut cmd);
         cmd.env("TERM", "xterm-256color");
         // The git hooks read BOT_HQ_SESSION_ID to know whose session a commit
         // or push belongs to (`policy/hooks.rs::hook_session_id`): without it

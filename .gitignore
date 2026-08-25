@@ -44,6 +44,12 @@ node_modules/
 /frontend/.vite/
 /.vite/
 /frontend/tsconfig.tsbuildinfo
+
+# Out-of-tree cargo target dir used when building in a container (the Fedora
+# smoke test builds with CARGO_TARGET_DIR=target-container so the host and
+# container trees do not fight). Multi-GB — the `/target/` anchor above does
+# not cover it.
+/target-container/
 /frontend/**/tsconfig.tsbuildinfo
 
 # Tauri

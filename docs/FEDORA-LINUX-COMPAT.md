@@ -3,6 +3,12 @@
 Status: **root-caused and fixed** via `scripts/install-appimage-linux.sh`.
 Underlying packaging defect in the release AppImage is **still open**.
 
+A second investigation on 2026-08-25, from inside a session running on the
+repaired payload, found three further Linux defects — an environment leak into
+every spawned child, a light-themed native control set, and a screenshot tool
+that never worked off macOS. Those are §§"The environment leak" onward; the
+original no-window investigation is unchanged below.
+
 ## Symptom
 
 On Fedora 44 the `bot-hq_1.0.0_amd64.AppImage` appears to do nothing. No
@@ -141,6 +147,217 @@ It does not fix the artifact. Options, roughly in order of preference:
 Item 3 is done on this branch. Items 1 and 2 are packaging changes and are
 left open deliberately — the AppImage build is not reproducible from this
 host, so a change there could not have been tested here.
+
+---
+
+## The environment leak (found 2026-08-25, fixed in `src/appimage_env.rs`)
+
+### Symptom
+
+Inside a bot-hq session running from the repaired payload, host tools fail in
+the agent's shell and in the app's own Terminal tab:
+
+```
+git ls-remote --heads origin
+  git-remote-https: symbol lookup error: /lib64/libcurl.so.4: undefined symbol:
+      nghttp2_option_set_no_rfc9113_leading_and_trailing_ws_validation
+  fatal: remote helper 'https' aborted session          → fetch/pull/push all dead
+
+curl --version   → the identical symbol lookup error
+python3 -c ...   → Fatal Python error: Failed to import encodings module
+flatpak          → libaccountsservice.so.0: undefined symbol: g_once_init_leave_pointer
+spectacle        → liblzma.so.5: version `XZ_5.4' not found (required by libKF6Archive.so.6)
+                   libgnutls.so.30: version `GNUTLS_3_7_7' not found
+git --version    → works, but warns: libpcre2-8.so.0: no version information available
+```
+
+### What is actually happening
+
+An AppImage launches through `AppRun`, which sources
+`apprun-hooks/linuxdeploy-plugin-gtk.sh` (the `GTK_*`, `GIO_*`, `GSETTINGS_*`,
+`XDG_DATA_DIRS`, `GDK_BACKEND` and `APPDIR` exports) and then execs
+`AppRun.wrapped`, linuxdeploy's C shim, which exports `LD_LIBRARY_PATH`, `PATH`,
+`PYTHONHOME`, `PYTHONPATH`, `PERLLIB` and `QT_PLUGIN_PATH`. All of it points
+into the payload, and **every process bot-hq spawns inherits it wholesale** —
+agent subprocesses, the PTY behind the Terminal tab, approved gated commands,
+the library's `git push`, and the four installed git hooks transitively.
+
+A child is usually a HOST binary, so it loads the payload's Ubuntu-22.04-era
+libraries instead of its own. `ldd /lib64/libcurl.so.4` resolves **twelve**
+dependencies into the payload — nghttp2, idn2, psl, the whole krb5 stack,
+brotli, unistring, udev, keyutils — which is the entire HTTP/TLS/Kerberos chain
+of any host binary that links it. Plain `git` only pulls `libpcre2`, which is
+why it merely warns while `git-remote-https` (a separate binary that links
+libcurl) dies outright.
+
+`PYTHONHOME` is a different mechanism worth naming separately: `PYTHONPATH` is
+additive and harmless, but `PYTHONHOME` *overrides* the interpreter prefix, and
+the payload has no python lib directory at all.
+
+### The corollary that costs debugging time
+
+`gsettings` does not fail under the leak — it **lies**:
+
+| | `gtk-theme` | `color-scheme` |
+| --- | --- | --- |
+| inside an agent shell (leaked) | `'Adwaita'` | `'default'` |
+| with the payload vars stripped | `'Breeze'` | `'prefer-dark'` |
+
+The obvious explanation — that the payload's `GSETTINGS_SCHEMA_DIR` shadows the
+host schemas — is **wrong**, and was believed here long enough to nearly produce
+a false correction against a correct diagnosis. Measured, one variable at a
+time:
+
+```
+leaked baseline           → 'default'        the lie
+-u GSETTINGS_SCHEMA_DIR   → 'default'        still lying
+-u GIO_EXTRA_MODULES      → 'default'        still lying
+-u LD_LIBRARY_PATH        → 'prefer-dark'    truthful
+```
+
+The real mechanism is `LD_LIBRARY_PATH`: host `gsettings` loads the PAYLOAD's
+glib/gio, which searches its own compiled-in module path, and that directory
+ships exactly one module —
+
+```
+payload: libgiognutls.so
+host:    giomodule.cache libdconfsettings.so libgiognomeproxy.so
+         libgiognutls.so libgiolibproxy.so
+```
+
+— so there is **no dconf backend**, and GSettings falls back to returning each
+key's schema default. That is why both keys read as defaults rather than as the
+payload's own GNOME values.
+
+Any theme or desktop-integration measurement taken inside a session must be
+re-taken through a scrubbed environment before it is believed.
+
+### The fix
+
+`src/appimage_env.rs` strips payload-rooted entries from the environment of
+processes bot-hq **spawns**, and only there. The rule is structural rather than
+a list of variable names, because `AppRun` is generated and can add variables at
+any release:
+
+> For every inherited variable, treat the value as a `:`-separated list, drop
+> every entry that resolves under `$APPDIR`, and remove the variable entirely if
+> nothing survives.
+
+with two exceptions learned in review: `PATH` is never removed (it falls back to
+`/usr/bin:/bin` — a child with no `PATH` cannot resolve a bare command), and if
+nothing was dropped, **no** operation is emitted at all, so values the rule was
+never meant to touch are byte-identical rather than round-tripped through
+split/join. It is guarded on `APPDIR` being set *and* the running executable
+living under it, so a source build is a strict no-op.
+
+Applied at `agents/spawn.rs::build_command`, `core/terminal.rs::spawn`,
+`policy/tool_gate.rs::run_in_shell` and `signaling/bridge/cl_push.rs::git`.
+
+### Why not fix it in `AppRun` or the launcher
+
+Because `WebKitWebProcess` genuinely needs those payload libraries. Unsetting
+them before the app starts strips them from the webview too and re-creates the
+`EGL_BAD_PARAMETER` no-window failure documented above. The app keeps the
+AppImage environment; only what it spawns is scrubbed.
+
+### Workaround for a build that predates the fix
+
+```sh
+env -u LD_LIBRARY_PATH -u PYTHONHOME <command>
+```
+
+Two variables cover every symptom measured on this host — verified together:
+`curl 8.18.0`, `git ls-remote` over HTTPS returning real refs, `python3` ok,
+`gsettings` → `'prefer-dark'`, `spectacle 6.7.4`, `Flatpak 1.18.1`.
+
+This is the stopgap for a human on a build that predates the fix. It is NOT an
+argument to narrow the scrub itself: `PERLLIB`, `QT_PLUGIN_PATH` and the
+`GST_*` pair are still payload-rooted and still go, because the structural rule
+does not need to know which breakage each one causes.
+
+---
+
+## Native controls render light on a dark desktop (fixed in `frontend/src/index.css`)
+
+`apprun-hooks/linuxdeploy-plugin-gtk.sh` decides the GTK theme like this:
+
+```sh
+gsettings get org.gnome.desktop.interface gtk-theme | grep -qi "dark" \
+    && GTK_THEME_VARIANT="dark" || GTK_THEME_VARIANT="light"
+export GTK_THEME="${APPIMAGE_GTK_THEME:-Adwaita:$GTK_THEME_VARIANT}"
+```
+
+On KDE that probe returns `'Breeze'` — no substring "dark" — so the hook exports
+`GTK_THEME=Adwaita:light` on a desktop that is dark (`color-scheme` is
+`'prefer-dark'`; the Fedora look-and-feel package is `fedoradark`). It reads the
+wrong key.
+
+WebKitGTK draws native form controls — `<select>` and its popup, scrollbars,
+spinners — from the GTK theme, not from page CSS, so they render light inside
+the app. Captured on this host: the session-header phase `<select>` as a light
+pill in a dark header.
+
+The fix is `:root { color-scheme: dark; }` in `frontend/src/index.css`, pinned by
+`frontend/src/lib/theme.ts` + `theme.test.ts`. It is the portable lever: the
+hook is regenerated by linuxdeploy on every build and is not in this repo, so
+patching it would fix one machine and ship nothing — and the same latent bug
+exists on any light-mode Windows or macOS host, where no GTK hook is involved at
+all. If GTK chrome *outside* the webview ever matters, the durable seam is the
+hook's `APPIMAGE_GTK_THEME` fallback, settable from the launcher that
+`scripts/install-appimage-linux.sh` writes.
+
+---
+
+## `webview_screenshot` never worked off macOS
+
+`src/tauri_cmd/screenshot.rs` hardcoded `/usr/sbin/screencapture` with **no
+`cfg` gate**, and `signaling/jsonrpc.rs` calls it unconditionally. So the MCP
+tool failed at runtime on Linux (`screencapture spawn`) and on Windows, in a
+release shipped to all three platforms — and its error text then told the user
+to open *System Settings → Privacy & Security → Screen Recording*, a pane that
+does not exist on their OS. Nothing caught it because no CI job runs the tests.
+
+Now platform-gated: macOS keeps `screencapture`; Linux tries Spectacle → `grim`
+→ ImageMagick `import` → `gnome-screenshot`, whichever is present, spawned
+through the scrub above (Spectacle is a Qt/KF6 app and dies on the leaked
+`LD_LIBRARY_PATH` otherwise); Windows returns an explicit unsupported error.
+It falls through to the next backend when one fails.
+
+What was actually measured on this host, stated precisely because an earlier
+draft of this section had it backwards:
+
+| backend | result |
+| --- | --- |
+| `spectacle -b -n -a -o <out>` — the shipped argv, and the one selected here | **works**: exit 0, a 395,522-byte 2050x1164 PNG |
+| `import -window root -crop … +repage <out>` — the shipped argv | **fails**: `import: missing an image filename`, no file written — with a real filename supplied. Also fails as `-window root <out>`, with `-display :0`, and under `env -i`. **Not name resolution**: the numeric root id from `xdpyinfo` (`0x400`) fails identically. So ROOT capture specifically does not work here, the error text is misleading, and the cause is **not established** — an earlier draft blamed XWayland, which is a mechanism read off an error message that does not mention one |
+| `import -window <id> <out>` | works (343,622 bytes) — the window-id form, which the code cannot use because it has no XID |
+| `grim`, `gnome-screenshot` | not installed here; unit tests only |
+
+So `import`'s branch is **unreachable on this host at runtime** — Spectacle is
+found first — and would not have worked if it were reached. It is kept because
+the root grab is correct on a real X11 session, and the fall-through means a
+present-but-inapplicable backend no longer ends the attempt.
+
+The 2050x1164 measurement is also where the size-check tolerance comes from:
+Spectacle includes decorations and shadow, so a 1920x1006 window arrives 7%
+wider and 16% taller.
+
+---
+
+## The Tauri `APPDIR` warning — known, not fixed
+
+Every launch of an extracted payload logs:
+
+```
+WARN tauri_utils: `APPDIR` or `APPIMAGE` environment variable found but this
+application was not detected as an AppImage; this might be a security issue.
+```
+
+Same root as the environment leak: the GTK hook exports `APPDIR`
+unconditionally (`# Workaround to run extracted AppImage`) while no `APPIMAGE`
+file exists on the install-script path. Cosmetic, and deliberately left alone —
+the alternative is fabricating an `APPIMAGE` path, which would be a lie to
+Tauri's own detection.
 
 ---
 

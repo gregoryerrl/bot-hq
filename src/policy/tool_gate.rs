@@ -272,6 +272,10 @@ async fn run_in_shell(
     envs: &[(&str, &str)],
 ) -> CommandOutput {
     let mut cmd = tokio::process::Command::new(shell);
+    // A gated command is the user's own approved shell line, so it must
+    // behave exactly as it would outside bot-hq — the payload's library paths
+    // do not travel into it. A no-op off a payload. See `appimage_env`.
+    crate::appimage_env::scrub_tokio(&mut cmd);
     cmd.arg("-c")
         .arg(command)
         .current_dir(cwd)

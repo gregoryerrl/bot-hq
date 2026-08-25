@@ -53,6 +53,23 @@
   background: #404040;
 }
 
+/* Native UA controls — `<select>` popups, scrollbars, spinners, date pickers —
+   are drawn by the platform, not by this stylesheet, and default to LIGHT
+   unless the page declares its scheme. bot-hq has no light mode (zero `dark:`
+   variants, no `darkMode` in the Tailwind config, no `dark` class on <html>),
+   so a light popup over a dark app is always wrong.
+
+   Found on Fedora/KDE 2026-08-25: the AppImage's GTK hook probes GNOME's
+   `org.gnome.desktop.interface gtk-theme`, reads `'Breeze'`, finds no "dark"
+   substring and exports `GTK_THEME=Adwaita:light` — so WebKitGTK drew every
+   `<select>` popup light on a desktop that is dark. That hook is regenerated
+   by linuxdeploy on every build and cannot be patched from this repo; this
+   declaration is the portable lever, and it covers the same latent bug on a
+   light-mode Windows or macOS host. `lib/theme.test.ts` pins it. */
+:root {
+  color-scheme: dark;
+}
+
 html,
 body,
 #root {
