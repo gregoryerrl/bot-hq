@@ -163,6 +163,10 @@ page](https://github.com/gregoryerrl/bot-hq/releases)**, then see
 [`INSTALL.md`](INSTALL.md) for per-platform notes — including the first-launch
 Gatekeeper step on macOS, since builds are currently unsigned.
 
+Once it's running, **[`docs/MANUAL.md`](docs/MANUAL.md)** is the user
+manual — first-run setup, roles, driving sessions, the safety model, and
+every Settings tab.
+
 You'll also need the [`claude-code`](https://claude.com/claude-code) CLI installed
 and authenticated — bot-hq drives it under the hood, one process per agent.
 
