@@ -86,7 +86,16 @@ pub fn app_launch_event() -> QueuedEvent {
 }
 
 pub fn panic_event(message: &str, backtrace: &str) -> QueuedEvent {
-    let home = std::env::var("HOME").ok();
+    // `paths::home_dir()`, not a raw `HOME` read. HOME is unset on Windows, so
+    // `redact_home` took its `None` arm and returned the string UNREDACTED
+    // before hashing: no path ever left the machine (only the digest ships),
+    // but each user's own home path was baked into the hash, so identical
+    // crashes never aggregated across Windows machines — the whole purpose of
+    // hashing them. PRIVACY.md's "your home directory path is redacted to `~`
+    // before hashing" was also false on Windows until this.
+    let home = crate::paths::home_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
     QueuedEvent {
         kind: "panic".into(),
         at: now_rfc3339(),

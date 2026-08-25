@@ -526,10 +526,15 @@ pub fn load_user_mcp_servers(
 /// trusted); `~/.claude/settings.json` is the older per-user config
 /// (often a stale snapshot, so it gets seeded first then overwritten).
 pub fn default_user_settings_paths() -> Vec<std::path::PathBuf> {
-    let Some(home) = std::env::var_os("HOME") else {
+    // `paths::home_dir()`, not a raw `HOME` read: HOME is UNSET in the native
+    // Windows environment (USERPROFILE carries it), so this returned an empty
+    // Vec and EVERY agent spawned with no user MCP servers forwarded —
+    // silently, with no error anywhere. `claude_config::reader` already used
+    // the portable helper; these were missed when paths.rs:393 consolidated
+    // this exact class.
+    let Ok(home) = crate::paths::home_dir() else {
         return Vec::new();
     };
-    let home = std::path::PathBuf::from(home);
     vec![
         home.join(".claude/settings.json"),
         home.join(".claude.json"),
