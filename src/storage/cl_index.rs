@@ -170,6 +170,112 @@ impl Storage {
         Ok(row)
     }
 
+    /// One-shot: rewrite Windows-native `\` CL keys to the portable `/` form.
+    ///
+    /// Historic Windows rows were keyed by `to_string_lossy()` on a native
+    /// path, so they read `agents\rain\custom-instruction.md`. `rel_key` now
+    /// emits `/` on every platform; without this, those rows no longer match
+    /// what the walker produces.
+    ///
+    /// **Why a rename and not a rescan.** Letting the rescan reconcile IS the
+    /// bug: the `\` key drops out of `on_disk`, `cl_facade`'s orphan branch
+    /// deletes the row, and the `/` key comes back through `upsert_cl_index` —
+    /// whose INSERT column list omits `agent_visible` (see [`Self::upsert_cl_index`]),
+    /// so migration 0043's `DEFAULT 1` applies and a **user-hidden file is
+    /// silently unhidden**, with its tags and description reset. This renames
+    /// in place instead, so that state rides along.
+    ///
+    /// **Windows only — the CALLER gates it** (`Storage::open`). On Unix `\` is
+    /// a legal filename character, so rewriting these keys there would corrupt
+    /// them. The function itself stays platform-independent so it is testable
+    /// everywhere; it must simply never be invoked off Windows.
+    ///
+    /// Idempotent: a second run matches no rows.
+    pub(crate) async fn normalize_backslash_cl_keys(&self) -> Result<usize> {
+        // `char(92)` is a backslash — spelled this way so the predicate needs
+        // no LIKE-escape dance.
+        let rows: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+            "SELECT project_id, file_path, agent_visible, tags FROM cl_index \
+             WHERE instr(file_path, char(92)) > 0",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut migrated = 0usize;
+        for (project_id, old_path, old_visible, old_tags) in rows {
+            let new_path = old_path.replace('\\', "/");
+            if new_path == old_path {
+                continue;
+            }
+            let survivor: Option<(bool, Option<String>)> = sqlx::query_as(
+                "SELECT agent_visible, tags FROM cl_index WHERE project_id = ? AND file_path = ?",
+            )
+            .bind(&project_id)
+            .bind(&new_path)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            match survivor {
+                // Collision. `UNIQUE(project_id, file_path)`
+                // (0004_cl_index.sql:38) would ABORT a plain UPDATE, and an
+                // aborted migration on a user's live DB is a bad failure mode
+                // even at low probability. The normalized row is the one the
+                // walker keeps emitting, so it survives — but merging must not
+                // drop user state: `agent_visible = 0` WINS (fail closed; a
+                // hidden file must never become visible because two spellings
+                // of its key happened to coexist), and tags carry over when the
+                // survivor has none.
+                Some((survivor_visible, survivor_tags)) => {
+                    let visible = old_visible && survivor_visible;
+                    let tags = survivor_tags.or(old_tags);
+                    sqlx::query(
+                        "UPDATE cl_index SET agent_visible = ?, tags = ? \
+                         WHERE project_id = ? AND file_path = ?",
+                    )
+                    .bind(visible)
+                    .bind(&tags)
+                    .bind(&project_id)
+                    .bind(&new_path)
+                    .execute(&self.pool)
+                    .await?;
+                    sqlx::query("DELETE FROM cl_index WHERE project_id = ? AND file_path = ?")
+                        .bind(&project_id)
+                        .bind(&old_path)
+                        .execute(&self.pool)
+                        .await?;
+                }
+                // No collision: rename IN PLACE so agent_visible, tags and the
+                // description ride along untouched.
+                None => {
+                    sqlx::query(
+                        "UPDATE cl_index SET file_path = ? WHERE project_id = ? AND file_path = ?",
+                    )
+                    .bind(&new_path)
+                    .bind(&project_id)
+                    .bind(&old_path)
+                    .execute(&self.pool)
+                    .await?;
+                }
+            }
+            migrated += 1;
+        }
+
+        // `cl_atoms` is an FTS5 VIRTUAL table (0024/0026/0027 are all
+        // `CREATE VIRTUAL TABLE … USING fts5`), which has no in-place ALTER and
+        // no house precedent for UPDATE — `replace_atoms_for_file` is
+        // delete-then-insert. It also holds NO user state: every column is
+        // derived from the file. So drop the stale-keyed rows rather than
+        // rewriting them, and let the next rescan re-derive: `cl_facade`'s
+        // unchanged-file arm re-atomizes any indexed file whose atoms are
+        // missing (`!atomised.contains(rel)`), so this self-heals without
+        // needing the file to change.
+        sqlx::query("DELETE FROM cl_atoms WHERE instr(file_path, char(92)) > 0")
+            .execute(&self.pool)
+            .await?;
+
+        Ok(migrated)
+    }
+
     // ---- cl_reads (audit) ------------------------------------------------
 
     /// Record that an agent read a CL file. A single awaited insert whose error
@@ -279,6 +385,68 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The migration must RENAME, never delete-and-reinsert.
+    ///
+    /// `upsert_cl_index`'s INSERT column list omits `agent_visible`, and
+    /// migration 0043 declares `DEFAULT 1` — so a row that is dropped and
+    /// re-added comes back VISIBLE. Letting a rescan reconcile the key change
+    /// would do exactly that and silently unhide a user's hidden file, which is
+    /// the failure this whole batch exists to prevent.
+    ///
+    /// Runs on every platform: the function is platform-independent by design
+    /// (only its call site in `Storage::open` is `#[cfg(windows)]`), so the
+    /// coverage does not depend on the host.
+    #[tokio::test]
+    async fn normalize_backslash_keys_renames_in_place_and_keeps_hidden_on_collision() {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_project("p", "p", None, None, None).await.unwrap();
+
+        // (a) Legacy `\` row with no `/` twin → renamed in place.
+        s.upsert_cl_index("p", "agents\\rain\\diary.md", "d", None)
+            .await
+            .unwrap();
+        s.set_cl_agent_visibility("p", "agents\\rain\\diary.md", false)
+            .await
+            .unwrap();
+
+        // (b) Collision: BOTH spellings exist and the `\` one is hidden.
+        // `UNIQUE(project_id, file_path)` would abort a naive UPDATE here.
+        s.upsert_cl_index("p", "docs\\a.md", "x", None).await.unwrap();
+        s.set_cl_agent_visibility("p", "docs\\a.md", false)
+            .await
+            .unwrap();
+        s.upsert_cl_index("p", "docs/a.md", "x", None).await.unwrap();
+
+        assert_eq!(s.normalize_backslash_cl_keys().await.unwrap(), 2);
+
+        // (a) renamed, and STILL HIDDEN — a delete+insert would read `true`.
+        let renamed = s
+            .get_cl_index("p", "agents/rain/diary.md")
+            .await
+            .unwrap()
+            .expect("the `\\` key must have been renamed to the `/` form");
+        assert!(
+            !renamed.agent_visible,
+            "agent_visible=0 must survive the rename; a delete+insert resets it to DEFAULT 1"
+        );
+        assert!(s
+            .get_cl_index("p", "agents\\rain\\diary.md")
+            .await
+            .unwrap()
+            .is_none());
+
+        // (b) merged onto the surviving `/` row, restrictive flag winning.
+        let merged = s.get_cl_index("p", "docs/a.md").await.unwrap().unwrap();
+        assert!(
+            !merged.agent_visible,
+            "agent_visible=0 must win a collision merge — fail closed"
+        );
+        assert!(s.get_cl_index("p", "docs\\a.md").await.unwrap().is_none());
+
+        // Idempotent: a second run matches nothing.
+        assert_eq!(s.normalize_backslash_cl_keys().await.unwrap(), 0);
+    }
 
     #[tokio::test]
     async fn cl_reads_for_session_returns_recorded_reads_scoped_by_session() {

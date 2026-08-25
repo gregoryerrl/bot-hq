@@ -117,7 +117,33 @@ impl Storage {
             .run(&pool)
             .await
             .context("running sqlite migrations")?;
-        Ok(Self { pool })
+        let storage = Self { pool };
+        // Windows: rewrite legacy `\`-keyed CL rows to the portable `/` form.
+        //
+        // ORDERING IS LOAD-BEARING, and it is why this lives here rather than
+        // in main.rs's startup sequence: every walk needs a `Storage`, so
+        // running it inside `open` makes it structurally impossible for the
+        // startup rescan loop or the fs-watcher's first tick to reach
+        // `walk_cl_dir` first. If either did, every `\` key would look like an
+        // orphan and be purged — destroying exactly the `agent_visible` flag
+        // this migration exists to preserve. A comment could state that
+        // constraint; placing it here enforces it.
+        //
+        // Gated at the CALL SITE, not inside the function: on Unix `\` is a
+        // legal filename character, so rewriting those keys there would corrupt
+        // them. Keeping the function itself platform-independent keeps it
+        // testable on every platform.
+        #[cfg(windows)]
+        {
+            match storage.normalize_backslash_cl_keys().await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(rows = n, "normalized legacy backslash CL keys"),
+                // Non-fatal: on failure the old keys simply remain, which is
+                // the pre-existing state — it must not brick app startup.
+                Err(e) => tracing::warn!(?e, "backslash CL key normalization failed"),
+            }
+        }
+        Ok(storage)
     }
 
     /// In-memory test backend. Available to integration tests in `tests/`.

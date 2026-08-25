@@ -2,7 +2,7 @@
 //! folder-description writes, and the disk↔index reconciliation pass
 //! (`cl_rescan`). Thin wrappers over storage plus the recursive disk walk.
 
-use super::util::{split_into_atoms, walk_cl_dir, WalkedFile};
+use super::util::{normalize_cl_path_input, split_into_atoms, walk_cl_dir, WalkedFile};
 use super::*;
 use crate::storage::{ClIndexEntry, Project};
 use std::collections::HashSet;
@@ -199,8 +199,22 @@ impl SignalingBridge {
         let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(Vec::new());
         };
+        // Caller-supplied paths → stored `/` key form. These land in an exact
+        // `file_path IN (…)` predicate (`cl_atoms::cl_retrieve`), so a `\`
+        // spelling silently narrows the result to nothing instead of erroring.
+        let normalized: Option<Vec<String>> = paths.map(|p| {
+            p.iter()
+                .map(|s| normalize_cl_path_input(s))
+                .collect::<Vec<_>>()
+        });
         let mut atoms = storage
-            .cl_retrieve(project, query, paths, budget_tokens, include_globals)
+            .cl_retrieve(
+                project,
+                query,
+                normalized.as_deref(),
+                budget_tokens,
+                include_globals,
+            )
             .await?;
         // Flag atoms whose cited code drifted since indexing. Repo coupling lives
         // in the bridge (storage stays pure): recompute each atom's code_hash from
@@ -335,6 +349,10 @@ impl SignalingBridge {
         let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(());
         };
+        // Caller-supplied path → stored `/` key form (see
+        // `normalize_cl_path_input`). Without it a `\` spelling silently misses
+        // and the audit row is dropped on the `debug!` below.
+        let file_path = &normalize_cl_path_input(file_path);
         let Some(entry) = storage.get_cl_index(project, file_path).await? else {
             tracing::debug!(
                 project,
