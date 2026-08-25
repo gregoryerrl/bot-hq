@@ -70,7 +70,11 @@ bypass. Revisit only on fresh evidence, statement-scoped shape only.
   process (fixed at the spawn sites, but the leak is inherent to the format).
   A distribution package sidesteps both — the graphics stack, the library set
   and the `PATH`/`LD_LIBRARY_PATH` injection are all the distro's problem, and
-  the desktop entry, icon and launcher come free. Note the packaging tension:
+  the desktop entry, icon and launcher come free. A THIRD argument arrived
+  2026-08-25: the repaired payload still aborts in WebKitWebProcess via
+  `__glibcxx_assert_fail`, because it bundles WebKit but no `libstdc++`, so
+  Ubuntu-built C++ meets Fedora's GCC-16 hardened assertions. Unlike the EGL
+  and env-leak defects, that one cannot be patched from this repo at all. Note the packaging tension:
   the release workflow builds bundles on Ubuntu, so an RPM needs either a
   Fedora runner or a container step.
 - **`webview_screenshot` should target the window, not its coordinates.** Every

@@ -462,6 +462,55 @@ speculative, each item maps to a failure above:
 
 ---
 
+## A third mismatch: bundled C++ against the host libstdc++ (2026-08-25, NOT fixed)
+
+The repaired payload still crashed on this host after the EGL fix. It is a
+different failure from both of the ones above, and it is not fixable from this
+repository.
+
+**Evidence.** `coredumpctl` for the patched payload's web process:
+
+```
+PID 4399 (WebKitWebProcess), SIGABRT, 19.4M core
+Executable: ~/.local/lib/bot-hq/squashfs-root/.../webkit2gtk-4.1/WebKitWebProcess
+
+#2  abort                        (libc.so.6)
+#3  __glibcxx_assert_fail        (libstdc++.so.6)      ← hardened assertion
+#4+ libwebkit2gtk-4.1.so.0       (13 further frames)
+```
+
+**Why.** The payload bundles its own 90 MB `libwebkit2gtk-4.1.so.0`, built on
+Ubuntu 22.04 — but it bundles **no `libstdc++` and no `libgcc_s` at all**
+(`find` over the payload: zero hits). So the bundled WebKit resolves
+`libstdc++.so.6` to `/lib64/libstdc++.so.6`, which on Fedora 44 is
+**GCC 16.2.1** with `__glibcxx_assert` compiled in. A standard-library
+precondition that Ubuntu's older, assertion-free libstdc++ tolerated silently
+now aborts the process.
+
+This is the same shape as the EGL defect — a bundled library set meeting a much
+newer host — one layer up: C++ runtime rather than graphics.
+
+**Not established:** which precondition, and whether the underlying violation is
+a genuine WebKit bug that merely became fatal here, or something specific to the
+version pairing. Debug symbols for the bundled WebKit would be needed, and they
+are not shipped.
+
+**What sidesteps it.** A binary built on the host does not have the problem at
+all — measured on the same machine:
+
+| build | libwebkit2gtk | libstdc++ |
+| --- | --- | --- |
+| AppImage payload | **bundled** (Ubuntu 22.04) | host `/lib64` (GCC 16) |
+| built from source here | host `/lib64` | host `/lib64` |
+
+A from-source build links one consistent set and has run without this crash.
+That is the third independent argument for shipping an RPM (PLAN.md): the
+distribution resolves the graphics stack, the environment injection **and** the
+C++ runtime as one coherent set, and none of the three can be patched after the
+fact from inside this repo.
+
+---
+
 ## Sign-off
 
 Investigated and written by **Claude Opus 5** (claude-code), acting for
