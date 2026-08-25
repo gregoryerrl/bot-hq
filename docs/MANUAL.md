@@ -134,9 +134,12 @@ below.
 - **Findings**: a reviewer's blocking finding shows on the session and
   gates commits until resolved (fixed or rebutted — rebuttals are shown
   to you).
-- **OS notifications** (§5, Notifications): questions, approvals, gates
-  and halts escalate to your machine's notifications while the window is
-  unfocused, so you can walk away.
+- **OS notifications** (§5, Notifications — new in 1.0.0): questions,
+  approvals, gates and halts escalate to your machine's notifications
+  while the window is unfocused. Use **Send test notification** to
+  confirm delivery works on your machine — on Windows, delivery is
+  unconfirmed as of 1.0.0 (it's the top 1.0.1 item; note Windows shows
+  no permission prompt by design, so the absence of one is normal).
 
 ### Ending one
 
@@ -164,11 +167,17 @@ history (Settings → Archive).
   policy toggles, inherited from global → project → session: `push_gate`
   (`auto` = pushes go through; `ask` = every push parks an
   Approve/Reject), `force_push` (blocked/allowed), and the action-gate
-  behavior. Destructive operations (force-push, hard resets, branch
-  deletion) additionally require your explicit per-action say-so.
-- Agents treat production databases as read-only, and outward actions
-  (publishing, posting, sending) require your explicit in-session
-  instruction — gates surface them when commands are involved.
+  behavior.
+
+Everything above is **enforced mechanically** — the harness blocks it
+whether or not an agent cooperates. Two more rules are **instructed, not
+enforced**: agents are told to treat production databases as read-only
+and to take outward actions (publishing, posting, sending under your
+identity) only on your explicit in-session instruction. The runtime does
+NOT block these by itself — if you want them mechanical, add matching
+Tool Gate keywords (your prod hostname, `psql -h`, `gh api`, …) so the
+commands park for your approval. The same goes for destructive git
+operations beyond the toggles above: gate the forms you care about.
 
 ---
 
@@ -186,7 +195,7 @@ history (Settings → Archive).
 | **Promptcodes** | Reusable prompt snippets. |
 | **Archive** | Closed sessions and their documents. |
 | **Updates** | Installed vs latest release, with **Check now**. A banner also appears app-wide when a newer release exists — **Download** opens the release page; installs are manual by design. |
-| **Notifications** | The OS-escalation toggle (§3) + **Send test notification**. Repeats are cooldown-suppressed; simultaneous waits coalesce into one summary. Linux needs a notification daemon; Windows toasts assume the installed app. |
+| **Notifications** | The OS-escalation toggle (§3) + **Send test notification** — the way to confirm delivery on your machine. Repeats are cooldown-suppressed; simultaneous waits coalesce into one summary. Linux needs a notification daemon. Windows delivery is unconfirmed as of 1.0.0 (no permission prompt there is normal — Windows has none). |
 | **Diagnostics** | The opt-in telemetry toggle, your install id (minted on enable, deleted on disable), locally-queued bytes, and the endpoint override for self-hosting the sink ([`packaging/telemetry-worker/`](../packaging/telemetry-worker/)). |
 
 ---
