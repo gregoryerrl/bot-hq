@@ -16,6 +16,12 @@
 //! blocks on any of this. The panic hook is sync and DB-free: it reads the
 //! [`TELEMETRY_ENABLED`] atomic (seeded at boot, flipped by the toggle
 //! command) and appends directly.
+//!
+//! The sink defaults to the maintainer-deployed worker ([`DEFAULT_ENDPOINT`],
+//! deployed 2026-08-25 from `packaging/telemetry-worker/`) so released
+//! binaries report somewhere out of the box; the `telemetry_endpoint` setting
+//! overrides it for self-hosters. Opt-in is still the master switch — the
+//! default endpoint changes where enabled installs report, never whether.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -28,6 +34,18 @@ pub const KEY_ENABLED: &str = "telemetry_enabled";
 pub const KEY_INSTALL_ID: &str = "telemetry_install_id";
 pub const KEY_ENDPOINT: &str = "telemetry_endpoint";
 pub const KEY_ASKED: &str = "telemetry_asked";
+
+/// The maintainer-deployed sink (worker source: `packaging/telemetry-worker/`).
+pub const DEFAULT_ENDPOINT: &str = "https://bot-hq-telemetry.gregoryerrl.workers.dev";
+
+/// The endpoint to POST to: a non-empty `telemetry_endpoint` setting wins
+/// (self-hosted sink), else [`DEFAULT_ENDPOINT`]. Trailing slashes dropped.
+pub fn resolve_endpoint(setting: Option<&str>) -> String {
+    match setting.map(str::trim) {
+        Some(s) if !s.is_empty() => s.trim_end_matches('/').to_string(),
+        _ => DEFAULT_ENDPOINT.to_string(),
+    }
+}
 
 /// Sync mirror of `telemetry_enabled` for the panic hook (which cannot await a
 /// DB read mid-panic). Seeded at boot, flipped by the toggle command.
@@ -187,10 +205,14 @@ pub async fn flush_once(storage: &crate::storage::Storage, local_dir: &Path) {
     if !TELEMETRY_ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    let endpoint = match storage.get_setting(KEY_ENDPOINT).await {
-        Ok(Some(e)) if !e.trim().is_empty() => e.trim().trim_end_matches('/').to_string(),
-        _ => return,
-    };
+    let endpoint = resolve_endpoint(
+        storage
+            .get_setting(KEY_ENDPOINT)
+            .await
+            .ok()
+            .flatten()
+            .as_deref(),
+    );
     let install_id = match storage.get_setting(KEY_INSTALL_ID).await {
         Ok(Some(id)) if !id.is_empty() => id,
         _ => return,
@@ -338,6 +360,17 @@ mod tests {
         drop(f);
         let q = read_queue(&p);
         assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn resolve_endpoint_prefers_the_setting_and_falls_back_to_default() {
+        assert_eq!(
+            resolve_endpoint(Some("https://mine.example/")),
+            "https://mine.example"
+        );
+        assert_eq!(resolve_endpoint(Some("   ")), DEFAULT_ENDPOINT);
+        assert_eq!(resolve_endpoint(None), DEFAULT_ENDPOINT);
+        assert!(DEFAULT_ENDPOINT.starts_with("https://"));
     }
 
     #[test]

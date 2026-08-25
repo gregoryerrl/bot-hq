@@ -6,6 +6,12 @@ as hashes, OS + version, feature counters — never repo or prompt content) to
 own. There is no public read path — querying is yours alone, via `wrangler d1`
 or the Cloudflare dashboard.
 
+**Released binaries default to the maintainer's deployment of this worker**
+(`core/telemetry.rs::DEFAULT_ENDPOINT`, deployed 2026-08-25). To self-host
+instead, deploy your own below and paste its URL into **Settings →
+Diagnostics** — the setting overrides the default. (The `database_id` in
+`wrangler.toml` is the maintainer's; `d1 create` prints yours — replace it.)
+
 ## One-time deploy (free tier)
 
 ```sh

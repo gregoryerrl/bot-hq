@@ -13,4 +13,4 @@ compatibility_date = "2026-08-01"
 [[d1_databases]]
 binding = "TELEMETRY_DB"
 database_name = "bot-hq-telemetry"
-database_id = "REPLACE-WITH-OUTPUT-OF-d1-create"
+database_id = "7c5caeb5-d1e6-4f19-91eb-ae67aee67b92"
