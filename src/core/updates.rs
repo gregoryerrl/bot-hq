@@ -185,6 +185,18 @@ mod tests {
         assert!(!is_newer("1.2.3", "v1.2.3"));
     }
 
+    /// THE comparison that carried the installed base to 1.0.0: a prerelease
+    /// ranks BELOW its associated normal version (semver §11), so every
+    /// rc2/rc3 install must see v1.0.0 as newer — and never the reverse. No
+    /// other test here uses a prerelease string, so a normalize()/is_newer
+    /// rewrite that mishandled suffixes would keep the rest green (EYES
+    /// b4abd774).
+    #[test]
+    fn is_newer_ranks_a_prerelease_below_its_release() {
+        assert!(is_newer("1.0.0-rc3", "v1.0.0"));
+        assert!(!is_newer("1.0.0", "v1.0.0-rc3"));
+    }
+
     #[test]
     fn is_newer_false_when_older() {
         assert!(!is_newer("2.0.0", "1.9.9"));
