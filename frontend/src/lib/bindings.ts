@@ -1328,6 +1328,38 @@ async checkForUpdate() : Promise<Result<UpdateInfo, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async getTelemetryStatus() : Promise<Result<TelemetryStatus, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_telemetry_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setTelemetryEnabled(enabled: boolean) : Promise<Result<TelemetryStatus, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_telemetry_enabled", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setTelemetryEndpoint(endpoint: string) : Promise<Result<TelemetryStatus, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_telemetry_endpoint", { endpoint }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async markTelemetryAsked() : Promise<Result<TelemetryStatus, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("mark_telemetry_asked") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -2269,6 +2301,7 @@ export type StagedPick = { choice_id: string; picked: string }
  * The staged response, as the frontend rehydrates it after a reload.
  */
 export type StagedResponseView = { text: string; picks: StagedPick[] }
+export type TelemetryStatus = { enabled: boolean; asked: boolean; install_id: string | null; endpoint: string; queued_bytes: number }
 export type TerminalOpenView = { 
 /**
  * Base64 of the retained scrollback — replayed into xterm on mount so a
