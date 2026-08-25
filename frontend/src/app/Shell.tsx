@@ -3,6 +3,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { cn } from "../lib/cn";
 import { PendingTray } from "../components/PendingTray";
 import { UpdateBanner } from "../components/UpdateBanner";
+import { DiagnosticsAskCard } from "../components/DiagnosticsAskCard";
 import { useHealthStore, appHealthSummary } from "../stores/health";
 import { useActivityStore } from "../stores/activity";
 import { useTauriQuery } from "../hooks/useInvoke";
@@ -113,6 +114,7 @@ export function Shell() {
         </div>
       </header>
       <UpdateBanner />
+      <DiagnosticsAskCard />
       <main className="flex-1 overflow-hidden">
         <Outlet />
       </main>

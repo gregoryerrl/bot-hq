@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { PRIVACY_URL, type TelemetryStatus } from "../lib/telemetry";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useServerDraft } from "../hooks/useServerDraft";
 import { Button } from "../components/ui/Button";
@@ -46,7 +48,8 @@ type SettingsSubTab =
   | "promptcodes"
   | "archive"
   | "updates"
-  | "notifications";
+  | "notifications"
+  | "diagnostics";
 
 /**
  * Settings is a tabbed container. Every panel that has been visited stays
@@ -155,6 +158,13 @@ export function Settings() {
         >
           Notifications
         </SubTabButton>
+        <SubTabButton
+          active={tab === "diagnostics"}
+          controls="settings-tab-diagnostics"
+          onClick={() => select("diagnostics")}
+        >
+          Diagnostics
+        </SubTabButton>
       </div>
       <div className="min-h-0 flex-1">
         <div
@@ -233,6 +243,13 @@ export function Settings() {
           className={cn("h-full", tab !== "notifications" && "hidden")}
         >
           {visited.has("notifications") && <NotificationsPanel />}
+        </div>
+        <div
+          id="settings-tab-diagnostics"
+          role="tabpanel"
+          className={cn("h-full", tab !== "diagnostics" && "hidden")}
+        >
+          {visited.has("diagnostics") && <DiagnosticsPanel />}
         </div>
       </div>
     </div>
@@ -808,6 +825,129 @@ function NotificationsPanel() {
             running.
           </span>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Diagnostics — opt-in telemetry (status, toggle, endpoint, privacy)
+// ============================================================================
+
+function DiagnosticsPanel() {
+  const status = useTauriQuery<TelemetryStatus>("get_telemetry_status", {});
+  const [endpointDraft, setEndpointDraft] = useState<string | null>(null);
+  const [endpointError, setEndpointError] = useState<string | null>(null);
+
+  const s = status.data;
+  const call = async (cmd: string, args?: Record<string, unknown>) => {
+    try {
+      setEndpointError(null);
+      await invoke(cmd, args);
+    } catch (e) {
+      setEndpointError(String(e));
+    } finally {
+      void status.refetch();
+    }
+  };
+
+  return (
+    <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
+      <h2 className="font-headline-lg text-headline-lg text-on-surface">
+        Diagnostics
+      </h2>
+      <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+        Strictly opt-in. When enabled, bot-hq sends anonymous crash reports
+        (hashes, never text), app version + OS, and error classes to an
+        endpoint operated by the bot-hq author on Cloudflare — never code,
+        prompts, or session content.{" "}
+        <button
+          type="button"
+          onClick={() => void openUrl(PRIVACY_URL)}
+          className="underline decoration-outline-variant underline-offset-2 hover:text-primary"
+        >
+          Full privacy note
+        </button>
+      </p>
+
+      <div className="mt-6 flex items-center justify-between gap-4 rounded-lg border border-outline-variant bg-surface-container p-5">
+        <div>
+          <div className="font-body-md text-body-md text-on-surface">
+            Share diagnostics
+          </div>
+          <div className="mt-0.5 max-w-prose font-code-sm text-code-sm text-on-surface-variant">
+            {s?.enabled
+              ? "On — thank you. Disable any time; the install id and queue die with it."
+              : "Off — nothing is collected or sent."}
+          </div>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={s?.enabled ?? false}
+          disabled={!s}
+          onClick={() => void call("set_telemetry_enabled", { enabled: !s?.enabled })}
+          className={cn(
+            "inline-flex shrink-0 items-center rounded border px-3 py-1.5 font-code-sm text-code-sm transition-colors",
+            s?.enabled
+              ? "border-primary bg-primary text-on-primary hover:bg-primary-fixed"
+              : "border-outline-variant text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface",
+          )}
+        >
+          {s?.enabled ? "On" : "Off"}
+        </button>
+      </div>
+
+      <div className="mt-4 rounded-lg border border-outline-variant bg-surface-container p-5">
+        <dl className="flex flex-col gap-2 font-code-sm text-code-sm">
+          <div className="flex justify-between gap-4">
+            <dt className="text-on-surface-variant">Install id</dt>
+            <dd className="text-on-surface">
+              {s?.install_id ?? "— (minted when you enable)"}
+            </dd>
+          </div>
+          <div className="flex justify-between gap-4">
+            <dt className="text-on-surface-variant">Queued locally</dt>
+            <dd className="text-on-surface">{s ? `${s.queued_bytes} bytes` : "—"}</dd>
+          </div>
+        </dl>
+
+        <label className="mt-4 block border-t border-outline-variant/30 pt-4">
+          <span className="font-label-caps text-label-caps text-on-surface-variant">
+            Endpoint (self-host override)
+          </span>
+          <div className="mt-1 flex gap-2">
+            <input
+              value={endpointDraft ?? s?.endpoint ?? ""}
+              onChange={(e) => setEndpointDraft(e.target.value)}
+              placeholder="default: the author-operated sink (see privacy note)"
+              spellCheck={false}
+              className="min-w-0 flex-1 rounded border border-outline-variant bg-surface-container-lowest px-3 py-1.5 font-code-sm text-code-sm text-on-surface caret-primary placeholder:text-on-surface-variant focus:border-primary focus:outline-none"
+            />
+            <button
+              type="button"
+              disabled={endpointDraft === null}
+              onClick={() => {
+                void call("set_telemetry_endpoint", { endpoint: endpointDraft ?? "" });
+                setEndpointDraft(null);
+              }}
+              className="inline-flex shrink-0 items-center rounded border border-outline-variant px-3 py-1.5 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
+            >
+              Save
+            </button>
+          </div>
+          <span className="mt-1 block max-w-prose font-code-sm text-code-sm text-on-surface-variant">
+            Deploy your own sink from{" "}
+            <span className="text-on-surface">packaging/telemetry-worker/</span>{" "}
+            and paste its URL to keep diagnostics entirely yours. Empty = the
+            default.
+          </span>
+          {endpointError && (
+            <span className="mt-1 block font-code-sm text-code-sm text-warning">
+              {endpointError}
+            </span>
+          )}
+        </label>
       </div>
     </div>
   );

@@ -243,7 +243,18 @@ pub async fn flush_once(storage: &crate::storage::Storage, local_dir: &Path) {
             let _ = drop_sent(&path, batch.len());
             tracing::debug!(sent = batch.len(), "telemetry flushed");
         }
-        Ok(resp) => tracing::debug!(status = %resp.status(), "telemetry sink refused"),
+        // 429 is the sink's own throttle — genuinely transient, retry later.
+        Ok(resp) if resp.status().as_u16() == 429 => {
+            tracing::debug!("telemetry sink throttled; retrying next flush");
+        }
+        // Any other 4xx is PERMANENT (schema mismatch, oversize): retrying
+        // forever would pin the bad batch at the queue head and poison every
+        // later flush until 1 MB of new events evicts it. Drop it.
+        Ok(resp) if resp.status().is_client_error() => {
+            let _ = drop_sent(&path, batch.len());
+            tracing::debug!(status = %resp.status(), "telemetry batch permanently refused — dropped");
+        }
+        Ok(resp) => tracing::debug!(status = %resp.status(), "telemetry sink erred; will retry"),
         Err(e) => tracing::debug!(error = %e, "telemetry flush failed (offline is fine)"),
     }
 }
@@ -274,8 +285,11 @@ pub fn start(storage: crate::storage::Storage, local_dir: PathBuf) {
         if enabled {
             let _ = enqueue(&queue_path(&local_dir), &app_launch_event());
         }
+        // One short post-launch delay, then a flush every FLUSH_EVERY — the
+        // initial sleep sits OUTSIDE the loop so the steady-state interval is
+        // FLUSH_EVERY itself, not 60s + FLUSH_EVERY.
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             flush_once(&storage, &local_dir).await;
             tokio::time::sleep(FLUSH_EVERY).await;
         }
@@ -371,6 +385,119 @@ mod tests {
         assert_eq!(resolve_endpoint(Some("   ")), DEFAULT_ENDPOINT);
         assert_eq!(resolve_endpoint(None), DEFAULT_ENDPOINT);
         assert!(DEFAULT_ENDPOINT.starts_with("https://"));
+    }
+
+    /// One accepted TCP connection playing an HTTP sink: parse the request
+    /// body by content-length, answer `status`, hand the body to the test.
+    async fn one_shot_sink(status: u16) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let body = loop {
+                let n = sock.read(&mut tmp).await.unwrap();
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(split) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..split]).to_string();
+                    let clen: usize = head
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+                        .unwrap_or(0);
+                    let mut body = buf[split + 4..].to_vec();
+                    while body.len() < clen {
+                        let n = sock.read(&mut tmp).await.unwrap();
+                        body.extend_from_slice(&tmp[..n]);
+                    }
+                    break String::from_utf8_lossy(&body).to_string();
+                }
+            };
+            let resp = format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            let _ = tx.send(body);
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    async fn storage_with_telemetry(endpoint: &str) -> crate::storage::Storage {
+        let s = crate::storage::Storage::memory().await.unwrap();
+        s.set_setting(KEY_ENABLED, "1").await.unwrap();
+        s.set_setting(KEY_ENDPOINT, endpoint).await.unwrap();
+        s.set_setting(KEY_INSTALL_ID, "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d")
+            .await
+            .unwrap();
+        s
+    }
+
+    /// The APP-SIDE chain end-to-end: events on disk → flush_once → a real
+    /// HTTP POST whose body matches the worker contract → queue emptied on
+    /// 2xx. This is the half the deployed-worker roundtrip (direct curl)
+    /// could not see (EYES ebf148dd).
+    #[tokio::test]
+    async fn flush_once_posts_the_queue_and_drops_it_on_success() {
+        let d = tmp();
+        let p = queue_path(d.path());
+        enqueue(&p, &error_event("spawn", "agent_start")).unwrap();
+        enqueue(&p, &app_launch_event()).unwrap();
+        let (url, body_rx) = one_shot_sink(202).await;
+        let storage = storage_with_telemetry(&url).await;
+        TELEMETRY_ENABLED.store(true, Ordering::Relaxed);
+        flush_once(&storage, d.path()).await;
+        let body: serde_json::Value =
+            serde_json::from_str(&body_rx.await.unwrap()).expect("sink got JSON");
+        assert_eq!(body["events"].as_array().unwrap().len(), 2);
+        assert_eq!(body["install_id"], "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d");
+        assert!(!p.exists(), "acknowledged queue is emptied");
+    }
+
+    /// 400 is permanent: the batch is DROPPED, not retried forever at the
+    /// queue head (EYES f2223ae1). 429/5xx keep it — separately covered by
+    /// the match arms; the load-bearing behavior is this one.
+    #[tokio::test]
+    async fn flush_once_drops_a_permanently_refused_batch() {
+        let d = tmp();
+        let p = queue_path(d.path());
+        enqueue(&p, &error_event("spawn", "agent_start")).unwrap();
+        let (url, _body_rx) = one_shot_sink(400).await;
+        let storage = storage_with_telemetry(&url).await;
+        TELEMETRY_ENABLED.store(true, Ordering::Relaxed);
+        flush_once(&storage, d.path()).await;
+        assert!(!p.exists(), "permanently refused batch is dropped");
+    }
+
+    /// Cross-language contract: a FULL batch of the fattest client-side event
+    /// must fit the worker's 64 KB body cap — BATCH_MAX and MAX_BODY_BYTES
+    /// live in different languages with nothing else tying them together.
+    #[test]
+    fn a_full_batch_of_the_fattest_events_fits_the_worker_body_cap() {
+        let fat = panic_event(&"m".repeat(10_000), &"b".repeat(100_000));
+        let batch: Vec<QueuedEvent> = (0..BATCH_MAX).map(|_| fat.clone()).collect();
+        let body = build_batch_body("9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d", &batch);
+        assert!(
+            body.len() < 64 * 1024,
+            "batch body {} bytes must stay under the worker's 64KB cap",
+            body.len()
+        );
+    }
+
+    /// The wire at its call sites: `start` and `install_panic_capture` are
+    /// called from `main` and NOWHERE else — deleting either line makes the
+    /// subsystem silently inert with every other test green (EYES ebf148dd).
+    /// Same source-text guard idiom as the prompt contains-tests.
+    #[test]
+    fn main_calls_start_and_panic_capture() {
+        let main_rs = include_str!("../main.rs");
+        assert!(
+            main_rs.contains("core::telemetry::start(storage.clone(), paths.local_dir.clone())"),
+            "main.rs must start the telemetry flusher"
+        );
+        assert!(
+            main_rs.contains("core::telemetry::install_panic_capture(&paths.local_dir)"),
+            "main.rs must chain telemetry panic capture"
+        );
     }
 
     #[test]
