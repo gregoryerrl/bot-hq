@@ -225,8 +225,19 @@ directly that notifications work**, and independently
   | post-park | **11:02:29** | **3** |
 
   Count `1 → 3` because `useOsNotifications` subscribes to BOTH
-  `session:pending_choice` (the park) and `session:awaiting_user` (the halt that
-  followed) — two distinct event types, both escalated.
+  `session:pending_choice` (the park, 11:02:1x) and `session:awaiting_user` (the
+  halt that followed, 11:02:27). The important part is not that two event types
+  work — it is that the focus gate passed at **two different instants ~10s
+  apart, in two separate flushes**. One delivery could be a timing fluke; two
+  independent evaluations of `document.hasFocus()` are not.
+
+  **What each measurement proves, kept separate:** the registry advance proves
+  the APP-SIDE path end-to-end — the enabled pref, both focus gates,
+  `planFlush`, and the send. It does NOT prove a banner visually appeared, since
+  the user was deliberately away and was not asked to watch. That half was
+  demonstrated separately at 10:10 by the test button, which the user confirmed
+  directly. Two measurements, two halves — do not let a composite claim rest on
+  either alone.
 
   **Method note, because the first attempt got this wrong.** An earlier run
   showed no delivery and was very nearly recorded as a product bug: pref,
