@@ -73,6 +73,14 @@ pub async fn set_telemetry_enabled(
                 .set_setting(KEY_INSTALL_ID, &uuid::Uuid::new_v4().to_string())
                 .await?;
         }
+        // The boot path only enqueues app_launch when ALREADY enabled, so a
+        // fresh install that opts in here would send nothing until its next
+        // launch — the first real Windows user hit exactly this. Enqueue the
+        // launch event at the opt-in moment; the running flusher ships it.
+        let _ = telemetry::enqueue(
+            &telemetry::queue_path(&core.paths.local_dir),
+            &telemetry::app_launch_event(),
+        );
     } else {
         storage.set_setting(KEY_ENABLED, "0").await?;
         // Off means unlinkable: the id dies with the opt-out, and so does
