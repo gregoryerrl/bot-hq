@@ -152,7 +152,13 @@ back is your call, through the normal push flow.
 
 ### Just want to run it
 
-Grab the latest build for your platform from the **[releases
+On macOS, Homebrew is the one-liner:
+
+```sh
+brew install --cask gregoryerrl/bot-hq/bot-hq
+```
+
+Or grab the latest build for your platform from the **[releases
 page](https://github.com/gregoryerrl/bot-hq/releases)**, then see
 [`INSTALL.md`](INSTALL.md) for per-platform notes — including the first-launch
 Gatekeeper step on macOS, since builds are currently unsigned.
