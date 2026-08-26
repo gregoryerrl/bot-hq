@@ -198,6 +198,18 @@ fn main() -> Result<()> {
             // Opt-in diagnostics: seed the enabled atomic, queue this boot's
             // app_launch, start the flusher loop. Spawned — never blocks boot.
             bot_hq::core::telemetry::start(storage.clone(), paths.local_dir.clone());
+            // One-time starter offers (1.0.1): installs that predate 0077 but
+            // never wrote a config file still get the offer — key absent AND
+            // file absent. Spawned; never blocks boot.
+            {
+                let st = storage.clone();
+                let dd = paths.data_dir.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = bot_hq::policy::presets::backfill_offers(&st, &dd).await {
+                        tracing::warn!(?e, "preset-offer backfill failed");
+                    }
+                });
+            }
             let core = Arc::new(CoreAppState::new(paths.clone(), storage, server).await);
             Ok::<_, anyhow::Error>((core, storage_arc, bridge_arc))
         })?;

@@ -69,6 +69,51 @@ pub async fn set_general_policy(
     Ok(())
 }
 
+/// Resolve the one-time starter-policy offer (1.0.1; mirrors
+/// `resolve_role_preset_offer`). Split from the command so the F6 assertion
+/// (an existing file survives byte-identical) can run in a unit test.
+///
+/// Writes the RAW commented starter (`presets::STARTER_GENERAL_POLICY_YAML`),
+/// not a serialized `Policy` — the comments teaching the format are the
+/// point, and `write_policy_file` would strip them.
+pub(crate) async fn resolve_policy_offer_inner(
+    storage: &Storage,
+    dd: &std::path::Path,
+    install: bool,
+) -> Result<(), AppError> {
+    if install {
+        let path = policy::general_policy_path(dd);
+        // NEVER overwrite a hand-written policy; stamp either way so the
+        // card retires.
+        if !path.exists() {
+            policy::write_config_atomically(&path, policy::presets::STARTER_GENERAL_POLICY_YAML)?;
+            policy::audit::record_policy_write(dd, &path)?;
+        }
+    }
+    storage
+        .set_setting(
+            "policy_preset_offer",
+            if install { "installed" } else { "declined" },
+        )
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?;
+    Ok(())
+}
+
+/// The Settings → Policies card's resolver. Renders only while
+/// `get_app_setting("policy_preset_offer")` is the literal `pending`; an
+/// absent key means no offer.
+#[tauri::command]
+#[specta::specta]
+pub async fn resolve_policy_preset_offer(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    storage: tauri::State<'_, Arc<Storage>>,
+    install: bool,
+) -> Result<(), AppError> {
+    let dd = data_dir(&bridge)?;
+    resolve_policy_offer_inner(&storage, &dd, install).await
+}
+
 // --- Project tier ------------------------------------------------------------
 
 #[tauri::command]
@@ -298,5 +343,41 @@ mod tests {
         assert_eq!(loaded.tool_gate.len(), 2);
         assert_eq!(loaded.tool_gate[0].keyword, "rm -rf");
         assert_eq!(loaded.tool_gate[1].keyword, "gh issue comment");
+    }
+
+    #[tokio::test]
+    async fn the_policy_offer_never_touches_an_existing_file() {
+        // F6: an install=true against a hand-written general-policy.yaml must
+        // leave it byte-identical — the starter only lands on a bare dir.
+        let dir = tempfile::tempdir().unwrap();
+        let s = crate::storage::Storage::memory().await.unwrap();
+        let path = crate::policy::general_policy_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "push_gate: auto\nforce_push: allowed\n").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        super::resolve_policy_offer_inner(&s, dir.path(), true).await.unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "an existing general-policy.yaml must survive byte-identical"
+        );
+        assert_eq!(
+            s.get_setting("policy_preset_offer").await.unwrap().as_deref(),
+            Some("installed")
+        );
+
+        // Bare dir: the commented starter lands and resolves to the safe
+        // basics the card promises.
+        let dir2 = tempfile::tempdir().unwrap();
+        super::resolve_policy_offer_inner(&s, dir2.path(), true).await.unwrap();
+        let p = crate::policy::Policy::resolve(dir2.path(), None, None).unwrap();
+        assert_eq!(p.push_gate, crate::policy::PushGateMode::Ask);
+        assert_eq!(p.force_push, crate::policy::ForcePushMode::Blocked);
+        assert!(p.forbidden_in_commits.is_empty());
+
+        // Decline writes nothing.
+        let dir3 = tempfile::tempdir().unwrap();
+        super::resolve_policy_offer_inner(&s, dir3.path(), false).await.unwrap();
+        assert!(!crate::policy::general_policy_path(dir3.path()).exists());
     }
 }

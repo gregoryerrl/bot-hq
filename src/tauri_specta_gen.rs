@@ -98,6 +98,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         // Tool Gate (global gated-Bash keywords)
         tool_gate::get_tool_gate_keywords,
         tool_gate::set_tool_gate_keywords,
+        tool_gate::resolve_gate_preset_offer,
         // Policy (3-tier toggles: global / project / session — user-only)
         policy::get_general_policy,
         policy::set_general_policy,
@@ -107,6 +108,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         policy::set_session_policy,
         policy::get_session_tool_gate,
         policy::set_session_tool_gate,
+        policy::resolve_policy_preset_offer,
         policy::read_violations,
         // Claude Config (surface + override the config agents inherit)
         claude_config::claude_config_read,
