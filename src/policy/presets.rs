@@ -18,7 +18,11 @@ use std::path::Path;
 /// Curation notes, so a future edit doesn't regress them:
 /// - `rm -r` subsumes `rm -rf` under substring matching — don't list both.
 /// - `sudo ` carries a trailing space: the matcher is a substring check and
-///   bare `sudo` would match `pseudo`.
+///   bare `sudo` would match `pseudo`. It also catches routine package
+///   installs (`sudo dnf` / `sudo apt`) — deliberate (privilege escalation is
+///   the permission-ask class), stated on the offer card, and Gate wins over
+///   AutoAllow (`tool_gate::match_keyword`), so the escape is editing the
+///   keyword, not an allow-entry.
 /// - NO `git push --force`: `force_push: blocked` in the starter policy fires
 ///   FIRST (hooks check it before the gate), so a keyword here would park an
 ///   approval the hook then denies — approve-then-refuse is worse than either

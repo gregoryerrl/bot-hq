@@ -20,7 +20,9 @@ const OFFERS = {
       "Install the basic safety gates: destructive commands (rm -r, sudo, " +
       "disk writers, git reset --hard, git clean -f) park for your " +
       "Approve/Reject before they run. A gated command pauses the session " +
-      "until you answer. Every keyword stays editable below.",
+      "until you answer. Note the sudo gate also catches package installs " +
+      "(sudo dnf / sudo apt) — if that's too chatty for your machine, edit " +
+      "or remove any keyword below.",
     install: "Install basic gates",
   },
   policy: {
