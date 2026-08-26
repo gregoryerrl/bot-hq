@@ -47,15 +47,25 @@ pub(crate) async fn resolve_gate_offer_inner(
     data_dir: &Path,
     install: bool,
 ) -> Result<(), AppError> {
-    if install {
-        // NEVER overwrite: a hand-written list wins over the starter. The key
-        // is stamped either way, so the card retires.
-        if !tool_gate::config_path(data_dir).exists() {
+    let stamp = if install {
+        // A hand-written NON-EMPTY list wins over the starter — but an
+        // absent, empty (`[]`), whitespace or malformed file all resolve to
+        // ZERO keywords through `load`'s fail-open, which is "no gating at
+        // all": stamping 'installed' over that had the user believing
+        // destructive commands were gated when nothing was (EYES 120806f3).
+        // Effectively-empty counts as unconfigured and the starter lands; a
+        // real list is kept and the stamp says so instead of lying.
+        if tool_gate::load(data_dir).is_empty() {
             tool_gate::save(data_dir, &crate::policy::presets::starter_gate_keywords())?;
+            "installed"
+        } else {
+            "kept_existing"
         }
-    }
+    } else {
+        "declined"
+    };
     storage
-        .set_setting("gate_preset_offer", if install { "installed" } else { "declined" })
+        .set_setting("gate_preset_offer", stamp)
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
     Ok(())
@@ -112,7 +122,24 @@ mod tests {
         assert_eq!(
             std::fs::read(&path).unwrap(),
             before,
-            "an existing tool-gate.json must survive byte-identical"
+            "an existing non-empty tool-gate.json must survive byte-identical"
+        );
+        // EYES 120806f3: the stamp must not claim the starter was installed
+        // when the existing list was kept.
+        assert_eq!(
+            s.get_setting("gate_preset_offer").await.unwrap().as_deref(),
+            Some("kept_existing")
+        );
+
+        // An EFFECTIVELY-EMPTY file (`[]` = load's fail-open, zero gating) is
+        // unconfigured: the starter replaces it and 'installed' is true.
+        let dir_empty = tempdir().unwrap();
+        tool_gate::save(dir_empty.path(), &[]).unwrap();
+        super::resolve_gate_offer_inner(&s, dir_empty.path(), true).await.unwrap();
+        assert_eq!(
+            tool_gate::load(dir_empty.path()),
+            crate::policy::presets::starter_gate_keywords(),
+            "an empty list is zero gating — Install must actually install"
         );
         assert_eq!(
             s.get_setting("gate_preset_offer").await.unwrap().as_deref(),

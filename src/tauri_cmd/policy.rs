@@ -81,20 +81,30 @@ pub(crate) async fn resolve_policy_offer_inner(
     dd: &std::path::Path,
     install: bool,
 ) -> Result<(), AppError> {
-    if install {
+    let stamp = if install {
         let path = policy::general_policy_path(dd);
-        // NEVER overwrite a hand-written policy; stamp either way so the
-        // card retires.
-        if !path.exists() {
+        // A hand-written policy wins over the starter — but a missing or
+        // whitespace-only file configures nothing, and stamping 'installed'
+        // over it would lie (EYES 120806f3, the gate twin). Semantic
+        // defaults are NOT second-guessed: a file that says `push_gate:
+        // auto` is a real choice and is kept.
+        let effectively_empty = match std::fs::read_to_string(&path) {
+            Ok(body) => body.trim().is_empty(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false, // unreadable ≠ empty: don't overwrite what we can't see
+        };
+        if effectively_empty {
             policy::write_config_atomically(&path, policy::presets::STARTER_GENERAL_POLICY_YAML)?;
             policy::audit::record_policy_write(dd, &path)?;
+            "installed"
+        } else {
+            "kept_existing"
         }
-    }
+    } else {
+        "declined"
+    };
     storage
-        .set_setting(
-            "policy_preset_offer",
-            if install { "installed" } else { "declined" },
-        )
+        .set_setting("policy_preset_offer", stamp)
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
     Ok(())
@@ -361,6 +371,20 @@ mod tests {
             before,
             "an existing general-policy.yaml must survive byte-identical"
         );
+        // EYES 120806f3: kept ≠ installed — the stamp says which happened.
+        assert_eq!(
+            s.get_setting("policy_preset_offer").await.unwrap().as_deref(),
+            Some("kept_existing")
+        );
+
+        // A whitespace-only file configures nothing: the starter lands.
+        let dir_ws = tempfile::tempdir().unwrap();
+        let ws_path = crate::policy::general_policy_path(dir_ws.path());
+        std::fs::create_dir_all(ws_path.parent().unwrap()).unwrap();
+        std::fs::write(&ws_path, "\n  \n").unwrap();
+        super::resolve_policy_offer_inner(&s, dir_ws.path(), true).await.unwrap();
+        let p_ws = crate::policy::Policy::resolve(dir_ws.path(), None, None).unwrap();
+        assert_eq!(p_ws.push_gate, crate::policy::PushGateMode::Ask);
         assert_eq!(
             s.get_setting("policy_preset_offer").await.unwrap().as_deref(),
             Some("installed")
