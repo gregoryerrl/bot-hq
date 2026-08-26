@@ -195,7 +195,7 @@ operations beyond the toggles above: gate the forms you care about.
 | **Promptcodes** | Reusable prompt snippets. |
 | **Archive** | Closed sessions and their documents. |
 | **Updates** | Installed vs latest release, with **Check now**. A banner also appears app-wide when a newer release exists — **Download** opens the release page; installs are manual by design. |
-| **Notifications** | The OS-escalation toggle (§3) + **Send test notification** — the way to confirm delivery on your machine. Repeats are cooldown-suppressed; simultaneous waits coalesce into one summary. Linux needs a notification daemon. Windows delivery is unconfirmed as of 1.0.0 (no permission prompt there is normal — Windows has none). |
+| **Notifications** | The OS-escalation toggle (§3) + **Send test notification**, which sends one immediately — it bypasses the toggle above it, the focus check, the cooldown and the event wiring, so it exercises the send, not the whole escalation path (it fires even with escalation switched Off). It also **cannot report whether the toast was displayed**: the send is fire-and-forget, so a green "sent" is compatible with nothing appearing (notably if your OS notifications are switched off system-wide). Repeats are cooldown-suppressed; simultaneous waits coalesce into one summary. Linux needs a notification daemon. Windows delivery is unconfirmed as of 1.0.0 (no permission prompt there is normal — Windows has none). |
 | **Diagnostics** | The opt-in telemetry toggle, your install id (minted on enable, deleted on disable), locally-queued bytes, and the endpoint override for self-hosting the sink ([`packaging/telemetry-worker/`](../packaging/telemetry-worker/)). |
 
 ---
@@ -245,8 +245,15 @@ contributing a panel gets its own top-bar tab.
 - **No update banner but you expect one** — the check runs at launch and
   only sees *published, non-prerelease* releases.
 - **No OS notifications on Linux** — install/run a notification daemon
-  (mainstream desktops ship one); **Send test notification** tells you if
-  sends fail.
+  (mainstream desktops ship one).
+- **No toast appears, on any platform** — first check your OS notification
+  setting itself, because a system-level toggle that is off suppresses
+  every app. Windows: **Settings → System → Notifications** (one master
+  switch). macOS: **System Settings → Notifications**, then bot-hq's own
+  entry → *Allow notifications*. Linux: the notification daemon above.
+  **Send test notification** cannot tell you any of this: the send is
+  fire-and-forget, so it reports "sent" whether or not anything was
+  displayed.
 - **Commit blocked** — read the hook's message: a forbidden word
   (reword it) or an unresolved blocking finding (resolve it in-session).
   Don't bypass hooks; that's the safety model working.

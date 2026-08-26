@@ -3615,13 +3615,62 @@ mod tests {
         );
     }
 
+    /// Migration text with CRLF normalized to LF.
+    ///
+    /// `include_str!` embeds a file VERBATIM, so on a checkout with CRLF line
+    /// endings (the Windows default without `.gitattributes`) every `;\n`
+    /// needle in the scanners below is really `;\r\n`: `find` returns None and
+    /// the extractor panics "unterminated statement". The one scanner that uses
+    /// `trim_end()` instead of a needle doesn't panic — it silently returns
+    /// CRLF text that then fails comparison against role prose stored LF.
+    ///
+    /// Normalizing the HAYSTACK once beats making every needle conditional, and
+    /// LF is what all these callers want anyway, since they compare against
+    /// prose held LF in the database.
+    fn lf(sql: &str) -> String {
+        sql.replace("\r\n", "\n")
+    }
+
+    /// The CRLF contract, pinned with an EMBEDDED fixture.
+    ///
+    /// The `\r\n` below is written as an ESCAPE SEQUENCE, not as real line
+    /// endings in this file, and that is the entire point. Adding
+    /// `.gitattributes`/`eol=lf` renormalizes the working tree, after which a
+    /// test that leaned on the tree's own endings would never see a `\r`
+    /// again on any machine — deleting the fix above would leave it green.
+    /// This machine is currently the only place the CRLF path runs at all
+    /// (macOS/Linux CI is LF by construction), so the fixture IS the guard.
+    #[test]
+    fn reseed_statement_survives_crlf_input() {
+        let section = "-- 9. Re-seed prose";
+        let crlf = "-- 9. Re-seed prose\r\nUPDATE roles SET x = 1\r\nWHERE y = 2\r\n);\r\ntrailing\r\n";
+
+        let out = reseed_statement(crlf, "0009", section);
+        assert!(out.starts_with("UPDATE"), "got: {out:?}");
+        assert!(
+            out.ends_with(");"),
+            "the statement must end at its guard paren: {out:?}"
+        );
+        assert!(
+            !out.contains('\r'),
+            "the extracted statement must be LF, since it is compared against \
+             prose stored LF in the database: {out:?}"
+        );
+
+        // The same input with LF endings must extract identically - the
+        // normalization must not change WHAT is extracted, only tolerate how
+        // the file was checked out.
+        let lf_in = crlf.replace("\r\n", "\n");
+        assert_eq!(out, reseed_statement(&lf_in, "0009", section));
+    }
+
     /// The prose re-seed from `0048_roles_are_the_users.sql`, read out of the
     /// migration itself so the test cannot drift from what actually ran.
     fn prose_reseed_statement() -> &'static str {
         use std::sync::OnceLock;
         static STMT: OnceLock<String> = OnceLock::new();
         STMT.get_or_init(|| {
-            let sql = include_str!("../../migrations/0048_roles_are_the_users.sql");
+            let sql = &lf(include_str!("../../migrations/0048_roles_are_the_users.sql"));
             let marker = "-- 3. Re-seed 'eyes' prose";
             let from = sql.find(marker).expect("0048 lost its section-3 marker");
             let start = sql[from..].find("UPDATE").expect("no UPDATE after the marker") + from;
@@ -3636,7 +3685,7 @@ mod tests {
         use std::sync::OnceLock;
         static STMT: OnceLock<String> = OnceLock::new();
         STMT.get_or_init(|| {
-            let sql = include_str!("../../migrations/0048_roles_are_the_users.sql");
+            let sql = &lf(include_str!("../../migrations/0048_roles_are_the_users.sql"));
             let marker = "-- 2. Drop the stray grant";
             let from = sql.find(marker).expect("0048 lost its section-2 marker");
             let start = sql[from..].find("UPDATE").expect("no UPDATE after the marker") + from;
@@ -3651,6 +3700,10 @@ mod tests {
     /// Each statement ends at `);\n` — the closing paren of its guard — which
     /// no line of the prose contains, unlike a bare `;`.
     fn reseed_statement(sql: &str, which: &str, section: &str) -> String {
+        // CRLF-robust — see [`lf`]. This one takes ARBITRARY string input, so
+        // the contract is genuinely "handle either line ending", which is why
+        // it carries a fixture test rather than relying on the tree's endings.
+        let sql = &lf(sql);
         let from = sql
             .find(section)
             .unwrap_or_else(|| panic!("{which} lost its {section:?} marker"));

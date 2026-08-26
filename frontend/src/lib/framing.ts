@@ -42,6 +42,24 @@ const RETIRED_FRAMING =
  */
 export function stripComments(source: string): string {
   return source
+    // CRLF first, or nothing below works on a Windows checkout. `split("\n")`
+    // leaves a trailing `\r` on every line; JS's `.` does not match `\r` and
+    // `$` without the `m` flag matches only end-of-input, so in
+    // `/(^|[^:])\/\/.*$/` the `\r` sits between `.*` and `$`, the match fails,
+    // and the line comment is NOT stripped — retired names inside comments then
+    // leak into `findRetiredFraming` and fail the sweep on a file nobody
+    // renders. No needle and no exception, so neither a panic-sweep nor a
+    // needle-sweep finds it.
+    //
+    // Fixed here rather than by normalizing the repo's line endings: this is an
+    // EXPORTED utility with three call sites (`findRetiredFraming`,
+    // `overflow.ts` x2) and tests that pass arbitrary string literals, so
+    // "handle either line ending" is a real contract. A repo-wide renormalize
+    // would only hide it.
+    //
+    // Line count and column offsets are both preserved: CRLF -> LF is 1:1 on
+    // lines, and dropping a trailing `\r` cannot shift a column before it.
+    .replace(/\r\n/g, "\n")
     .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, " "))
     .split("\n")
     .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))

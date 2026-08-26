@@ -101,7 +101,19 @@ impl SignalingBridge {
             .await?;
 
         let offset = term.current_offset();
-        term.write_input(format!("{command}\n").as_bytes())?;
+        // Windows consoles submit a line on CARRIAGE RETURN, not line feed.
+        // cmd.exe echoes an LF-terminated write and then just sits there, so
+        // the command never runs: observed live on this branch, where both
+        // `git push -u origin windows-compat` and `ver` appeared at the prompt
+        // and produced no output and no new prompt. That made `terminal_exec` —
+        // a documented MCP tool — silently non-functional on Windows, and it
+        // reads as a hung command rather than a broken one, which is why it was
+        // mistaken for a credential prompt. Unix PTYs take `\n`.
+        #[cfg(windows)]
+        let submit = format!("{command}\r");
+        #[cfg(not(windows))]
+        let submit = format!("{command}\n");
+        term.write_input(submit.as_bytes())?;
 
         if block == Some(false) {
             return Ok(format!(

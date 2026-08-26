@@ -62,6 +62,9 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 /// any way we care about. (Round 9 found the earlier `bash_present()` memoised
 /// into ONE unkeyed cell under a `name` parameter; keyed now, because the
 /// shell choice below asks about more than one.)
+// Unix-only in production since `gate_shell` short-circuits on Windows, but
+// still exercised by tests on every platform — keep it, silence the warning.
+#[cfg_attr(windows, allow(dead_code))]
 fn shell_present(shell: &str) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -87,6 +90,9 @@ fn shell_present(shell: &str) -> bool {
 /// Shells `$SHELL` is allowed to nominate for a gated command: POSIX-family
 /// only. A fish / nu / csh login shell would break strictly more of the
 /// `$(…)` / heredoc shapes agents write than any of these do.
+// Unix-only in production since `gate_shell` short-circuits on Windows, but
+// still exercised by tests on every platform — keep it, silence the warning.
+#[cfg_attr(windows, allow(dead_code))]
 const GATE_SHELL_ALLOWLIST: [&str; 5] = ["zsh", "bash", "sh", "dash", "ksh"];
 
 /// The shell an approved gated command runs under — **the shell the agent
@@ -106,11 +112,120 @@ const GATE_SHELL_ALLOWLIST: [&str; 5] = ["zsh", "bash", "sh", "dash", "ksh"];
 /// (a Finder-launched .app) or non-POSIX (fish), which is why the fallback
 /// chain and the allowlist are both here rather than a bare `$SHELL`.
 pub(crate) fn gate_shell() -> String {
-    gate_shell_for(std::env::var_os("SHELL").as_deref(), shell_present)
+    // Windows: the `$SHELL` + allowlist path cannot apply. `$SHELL` is unset for
+    // a GUI process, `shell_present` can spawn none of zsh/bash/sh, and the
+    // shell we DO resolve is an absolute `…\usr\bin\sh.exe` whose basename is
+    // `sh.exe` — not on GATE_SHELL_ALLOWLIST, which holds bare `sh`. Adding
+    // `.exe` entries would widen the allowlist on every platform; short-
+    // circuiting here keeps it POSIX-only where it still means something.
+    #[cfg(windows)]
+    {
+        return match posix_shell() {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            // The actionable message is surfaced by `run_in_repo`; this
+            // fallback only keeps `action_gate`'s result footer readable.
+            Err(_) => "sh".to_string(),
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        gate_shell_for(std::env::var_os("SHELL").as_deref(), shell_present)
+    }
+}
+
+/// [`gate_shell`] reduced to a DISPLAY label — the basename, never the full
+/// path.
+///
+/// On Windows the resolved shell is absolute, and the Scoop and
+/// `%LOCALAPPDATA%\Programs` layouts carry the USERNAME inside it. Gate results
+/// are written into session transcripts, which get archived and pasted into
+/// issues, so the footer prints `sh.exe` rather than
+/// `C:\Users\<name>\scoop\…\sh.exe`. Still derived from the same resolution, so
+/// the label cannot drift from what actually ran.
+pub(crate) fn gate_shell_label() -> String {
+    let shell = gate_shell();
+    Path::new(&shell)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or(shell)
+}
+
+/// Resolve the POSIX shell that runs gated commands **on Windows**.
+///
+/// A GUI-launched process has no `sh` on its PATH — Git-for-Windows puts its
+/// shells there only inside a Git Bash session — so `Command::new("sh")` cannot
+/// spawn and every approved gated command silently fails to run. Locate
+/// Git-for-Windows' bundled MSYS2 shell instead, derived from `git --exec-path`
+/// rather than a hardcoded layout (Program Files, Program Files (x86),
+/// `%LOCALAPPDATA%\Programs`, Scoop and Chocolatey all differ). Git-for-Windows
+/// is already an effective prerequisite: claude-code is the only model connector
+/// and its own Bash tool runs through that shell.
+///
+/// NOT `cmd.exe`/PowerShell: agents author gated commands as POSIX shell, so
+/// `$(…)`, heredocs and quoting would break, and `gate_shell`'s whole intent is
+/// to run the command in the shell the agent validated it in.
+///
+/// The ancestor walk is BOUNDED by the Git install-root marker `cmd/git.exe`.
+/// Unbounded it reaches `C:\` and would happily select a stray `C:\bin\sh.exe`
+/// left behind by an MSYS2/Cygwin install.
+///
+/// Only SUCCESS is cached. Caching the failure would mean a user who hits the
+/// error, installs Git-for-Windows exactly as the message instructs, keeps
+/// failing until they restart the app — and nothing tells them to.
+#[cfg(windows)]
+fn posix_shell() -> Result<PathBuf, String> {
+    use std::sync::OnceLock;
+    static SH: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(found) = SH.get() {
+        return Ok(found.clone());
+    }
+    let resolved = (|| {
+        let out = std::process::Command::new("git")
+            .arg("--exec-path")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        // e.g. `C:/Program Files/Git/mingw64/libexec/git-core` — the install
+        // root is the ancestor carrying `cmd/git.exe`, and the MSYS shell sits
+        // at `usr/bin/sh.exe` (preferred) or `bin/sh.exe` beneath it.
+        // The `cmd/git.exe` marker IS the bound — an ancestor is only ever
+        // SELECTED if it carries one, so `C:\` cannot be picked. A depth cap on
+        // top of it would add nothing but a false negative: an install nested
+        // deeper than the cap would report "install Git for Windows" while Git
+        // is installed, which is the one message here that must stay truthful.
+        let exec_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        for ancestor in Path::new(&exec_path).ancestors() {
+            if !ancestor.join("cmd/git.exe").is_file() {
+                continue;
+            }
+            for rel in ["usr/bin/sh.exe", "bin/sh.exe"] {
+                let candidate = ancestor.join(rel);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    })();
+    match resolved {
+        Some(p) => {
+            let _ = SH.set(p.clone());
+            Ok(p)
+        }
+        None => Err("could not locate a POSIX `sh` (Git-for-Windows' bundled shell) — install \
+                     Git for Windows (https://git-scm.com/download/win), a documented bot-hq \
+                     prerequisite"
+            .to_string()),
+    }
 }
 
 /// [`gate_shell`] with its two inputs injected, so the choice is a pure
 /// function a test can drive through every branch.
+// Unix-only in production since `gate_shell` short-circuits on Windows, but
+// still exercised by tests on every platform — keep it, silence the warning.
+#[cfg_attr(windows, allow(dead_code))]
 fn gate_shell_for(
     env_shell: Option<&std::ffi::OsStr>,
     present: impl Fn(&str) -> bool,
@@ -252,6 +367,18 @@ pub async fn run_in_repo(
     // The agent's own shell, not a fixed one — see `gate_shell`. (Round 7's
     // sh→bash for s-06a3c60b was the same lesson one shell short: macOS's bash
     // IS 3.2, and the command was proven under zsh.)
+    //
+    // Windows: surface `posix_shell`'s actionable message (install Git for
+    // Windows) instead of letting `gate_shell`'s "sh" fallback reach the
+    // spawner and report a bare "program not found".
+    #[cfg(windows)]
+    if let Err(e) = posix_shell() {
+        return CommandOutput {
+            stdout: String::new(),
+            stderr: format!("failed to run `{command}`: {e}"),
+            code: -1,
+        };
+    }
     run_in_shell(&gate_shell(), command, cwd, timeout, envs).await
 }
 
@@ -279,6 +406,24 @@ async fn run_in_shell(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Git-for-Windows' `sh.exe -c` does NOT put its own bin dir on PATH (a Git
+    // Bash *login* shell does), so the MSYS coreutils a gated command leans on
+    // (`ls`, `cat`, `touch`, `sleep`, …) would not resolve — finding `sh` alone
+    // is only half the fix. Prepend the shell's own directory; the inherited
+    // system PATH (git, gh, …) is preserved after it. Set BEFORE the caller's
+    // `envs` loop so an explicit PATH from the caller still wins.
+    #[cfg(windows)]
+    {
+        let bin_dir = Path::new(shell).parent().unwrap_or_else(|| Path::new(""));
+        if !bin_dir.as_os_str().is_empty() {
+            let existing = std::env::var_os("PATH").unwrap_or_default();
+            let mut dirs = vec![bin_dir.to_path_buf()];
+            dirs.extend(std::env::split_paths(&existing));
+            if let Ok(joined) = std::env::join_paths(dirs) {
+                cmd.env("PATH", joined);
+            }
+        }
+    }
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -314,6 +459,26 @@ async fn run_in_shell(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The POSIX `sh` the shell-semantics tests pin deliberately (they assert
+    /// `sh` behaviour, not `$SHELL` behaviour, so they must not go through
+    /// [`gate_shell`]). A bare `"sh"` cannot spawn from a native Windows
+    /// process — Git-for-Windows puts its shells on PATH only inside a Git Bash
+    /// session — so resolve the same bundled shell the gate resolves rather
+    /// than skipping the coverage on the one platform that needed it.
+    fn test_sh() -> String {
+        #[cfg(windows)]
+        {
+            return posix_shell()
+                .expect("Git-for-Windows `sh` — a documented bot-hq prerequisite")
+                .to_string_lossy()
+                .into_owned();
+        }
+        #[cfg(not(windows))]
+        {
+            "sh".to_string()
+        }
+    }
     use tempfile::tempdir;
 
     fn kw(keyword: &str, mode: GateMode) -> GatedKeyword {
@@ -591,7 +756,7 @@ mod tests {
     async fn unquoted_expansion_word_splits_in_bash_and_sh_but_not_in_zsh() {
         let dir = tempdir().unwrap();
         let command = "FILES=\"alpha beta gamma\"\nn=0\nfor f in $FILES; do n=$((n+1)); done\necho COUNT=$n";
-        let sh = run_in_shell("sh", command, dir.path(), Duration::from_secs(5), &[]).await;
+        let sh = run_in_shell(&test_sh(), command, dir.path(), Duration::from_secs(5), &[]).await;
         assert_eq!(sh.code, 0, "stderr: {:?}", sh.stderr);
         assert!(sh.stdout.contains("COUNT=3"), "sh splits: {:?}", sh.stdout);
         if shell_present("bash") {
@@ -618,7 +783,7 @@ mod tests {
     async fn a_multi_line_command_executes_past_its_first_line_with_state_intact() {
         let dir = tempdir().unwrap();
         let command = "true\nMARK=\"deep-state-7c3\"\necho line-three\necho line-four\necho line-five\necho line-six\necho line-seven\necho line-eight\necho line-nine\necho line-ten\necho line-eleven\necho line-twelve\necho line-thirteen\necho line-fourteen\necho \"tail:$MARK\"";
-        let out = run_in_shell("sh", command, dir.path(), Duration::from_secs(5), &[]).await;
+        let out = run_in_shell(&test_sh(), command, dir.path(), Duration::from_secs(5), &[]).await;
         assert_eq!(out.code, 0, "stderr: {:?}", out.stderr);
         assert!(
             out.stdout.contains("tail:deep-state-7c3"),

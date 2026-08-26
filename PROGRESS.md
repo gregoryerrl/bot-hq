@@ -23,6 +23,106 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-25 — Windows compat (branch `windows-compat`)
+
+First focused Windows session after the 1.0.0 smoke. Backend lib failures
+**41 → 7**, frontend **1 → 0**, and the integration suite runs on Windows for
+the first time (**39 tests, 6/6 targets** — previously zero).
+
+**Measure from PowerShell, never Git Bash.** This is the most reusable thing
+learned. Git Bash puts Git-for-Windows' `usr/bin` on PATH, which makes `sh` and
+the MSYS coreutils resolve and silently greens ~13 shell tests that genuinely
+fail for a GUI-launched app. An early "corrected" baseline of 28 was measured
+that way; the CL's recorded 41 was right all along.
+
+**Product fixes.**
+- **Tool Gate had no shell on Windows.** A GUI process has no `sh` on PATH, so
+  every approved gated command silently failed to run. `posix_shell()` resolves
+  Git-for-Windows' MSYS shell from `git --exec-path`, bounded by the
+  `cmd/git.exe` install-root marker, caching success only. Finding the shell was
+  half the fix: `sh.exe -c` does not add its own bin dir to PATH, so `touch`,
+  `ls` and `cat` had to be reachable too.
+- **`HOME` is unset on Windows.** `default_user_settings_paths` returned an empty
+  Vec, so every agent spawned with **no user MCP servers forwarded** — silently.
+  The same read in `telemetry.rs` hashed panic text unredacted, so identical
+  crashes never aggregated (no path leaked; only the digest ships). Ships with a
+  standing guard, `tests/portable_home_test.rs`.
+- **`terminal_exec` was dead on Windows.** Windows consoles submit on CR, not LF;
+  cmd.exe echoed the command and never ran it. Only the *synthesized* terminator
+  was wrong — user typing always worked because xterm.js emits `\r` natively.
+  **The fix is necessary but not sufficient, and the gap is worth knowing:**
+  ConPTY opens by emitting a DSR cursor-position query and withholds the
+  child's output until something answers. In the app xterm.js answers — but
+  `SessionView.tsx:262` mounts the Terminal content **only on first activation**,
+  so in a session where the user never opened that tab there is no responder and
+  the shell stalls, exactly as every headless test did. A backend-driven MCP tool
+  should not depend on a UI component being mounted: the reactive responder
+  belongs in `SessionTerminal`'s reader loop, not in the test helper it currently
+  lives in (`terminal.rs:553`, which carries the promotion caveat). NOT done
+  here.
+- **CL keys are now `/`-form on every platform.** Windows-native keys collapsed
+  the Library tree to flat nodes, made `policy.yaml` unrecognisable, and let an
+  agent overwrite a user-hidden file by spelling the path the other way (latent
+  here — zero hidden rows). Migration renames **in place**: a rescan would purge
+  and reinsert, and `upsert_cl_index` omits `agent_visible`, so it would have
+  silently unhidden the files it protects.
+
+**Harness.** `build.rs` now carries the `-tests` manifest injection the script
+had *documented since June* but which was never committed; the script named a
+target deleted 2026-08-17, and cargo aborts the whole invocation on an unknown
+name, so its integration pass ran **nothing** for two months. Now pinned by a
+sync test inside `codebase_map_test`.
+
+**A third product-breaking Windows bug, named but NOT fixed here.** `dead` is
+never set. The reader loop (`terminal.rs:238`) exits only on `read()` returning
+`Ok(0)` or `Err`, and `child.wait()`, the `[process exited]` note and
+`dead.store(true)` all sit downstream of it — but ConPTY does not deliver EOF on
+the master when the child exits (the pseudoconsole holds the pipe open until the
+`HPCON` closes), so the read blocks forever. Every consequence is user-facing: a
+shell that exits is never replaced (`:393`), exited terminals count as live
+(`:409`), `wait_settle`'s early-exit never fires so every call burns its full
+timeout (`:330`), and `[process exited]` never renders. Death has to come from
+the child handle rather than the read side — with the wrinkle that the reader
+thread still blocks afterward, so the master must be closed to unblock it or a
+thread leaks per terminal. Four tests left red rather than papered over.
+Related: `:466` guards this very code with a source-text `contains` check — the
+text is present and the code is unreachable, a sharper version of the weakness
+PLAN.md already records for the telemetry call-site guards.
+
+**The `tauri_cmd::files` pair was neither of the things it looked like.**
+`canonicalize` returns a VERBATIM `\\?\` path on Windows; verbatim paths cannot
+contain `..`, so `PathBuf::push` resolves the hops away at join time instead of
+concatenating them — the traversal the test needs was unconstructible, which is
+why two rounds of hop arithmetic produced a byte-identical failure. Fixed by
+passing the non-canonicalized repo path, which is also what production passes.
+The second was a Unix-shaped needle in a substring assertion. Neither was a
+product defect: `is_contained` is canonical-vs-canonical component-wise
+`starts_with`, `allowed_roots` skips any root it cannot canonicalize, and an
+empty root set refuses.
+
+**The Unix arms of this branch are UNVERIFIED.** Everything here was measured on
+Windows, and Rust strips `#[cfg(not(windows))]` blocks after parsing — syntax
+errors would have surfaced, but name resolution and type checking never ran on
+them. That covers four new cfg splits (`gate_shell`, `posix_shell`,
+`spawn_shell`, the `terminal_exec` submit) plus uncfg'd cross-platform code
+(`lf()`, `rel_key`, `stripComments`, the rebuilt `files.rs` helper, two new test
+targets). A cross type-check was attempted —
+`cargo check --target x86_64-unknown-linux-gnu --lib --tests` — and is blocked
+on this box for an environmental reason, not by our code: tauri's Linux
+dependencies need a gtk sysroot (`pkg-config has not been configured to support
+cross-compilation`). It never reached our sources. And nothing downstream would
+catch a break either: **no CI job runs `cargo test` on any platform**, which is
+the single highest-value follow-up this branch leaves behind.
+
+Also worth stating plainly: **41 → 5 is specific to this machine, PowerShell,
+and that manifest/RUSTFLAGS recipe.** It is not a claim about Windows generally.
+
+**T6 toasts resolved as a non-bug.** The reported failure was
+`ToastEnabled = 0` — the Windows master notifications switch, off. Permission
+explanations are eliminated *from source* (`tauri-plugin-notification`'s
+`desktop.rs` hardcodes `Granted`). AppUserModelID and the `document.hasFocus()`
+theory are both recorded UNTESTED rather than quietly dropped.
+
 ## 2026-08-25 — the 1.0.0 release session (features + tag)
 
 The dedicated release session PLAN.md deferred to. Version bumped to

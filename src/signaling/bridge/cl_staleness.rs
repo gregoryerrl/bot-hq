@@ -317,11 +317,10 @@ pub fn stale_claims(cl_dir: &Path, repo_root: &Path) -> Result<Vec<StaleClaim>, 
             let Ok(body) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let rel = path
-                .strip_prefix(cl_dir)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
+            // `/`-form: these become the `file` field of every staleness hit,
+            // which callers match against CL keys.
+            let rel = super::util::rel_key(&path, cl_dir)
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
             out.append(&mut stale_in_body(&rel, &body, repo_root, &corpus, &tracked));
         }
     }

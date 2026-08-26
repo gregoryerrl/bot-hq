@@ -3,6 +3,7 @@
 //! project's CL root that rescans the index and lifts the close-out gate
 //! itself, so no separate `cl_rescan` call is needed.
 
+use super::util::{normalize_cl_path_input, rel_key};
 use super::*;
 use crate::storage::Project;
 use anyhow::Context;
@@ -42,6 +43,15 @@ impl SignalingBridge {
                 content.len()
             );
         }
+        // Normalize the caller's separators to the stored `/` key form BEFORE
+        // the guard below. Without this, an agent writing the natural
+        // `agents/rain/notes.md` missed a row keyed `agents\rain\notes.md`,
+        // `get_cl_index` returned Ok(None), the `if let Some(row)` never fired,
+        // and the agent_visible check was SKIPPED — while Windows resolved both
+        // spellings to the SAME FILE, so the write landed on a user-hidden
+        // file. Runs after the `..` / leading-`/` validation above so those
+        // rejections still see the raw input.
+        let file_path = normalize_cl_path_input(&file_path);
         // User-hidden files (agent_visible = 0) refuse AGENT writes: an agent
         // that can't see a diary in search must not be able to overwrite it by
         // guessing its path. The Library UI edits bypass this (different path).
@@ -475,7 +485,9 @@ pub(super) fn sweep_project(root: &Path, project: &str, terms: &[String]) -> Vec
         let Ok(body) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let rel = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+        // `/`-form so the reported hit path matches the CL key the reader will
+        // search for, rather than a native `agents\rain\x.md` spelling.
+        let rel = rel_key(&path, root).unwrap_or_else(|| path.display().to_string());
         for term in terms {
             if let Some((lineno, _)) = body.lines().enumerate().find(|(_, line)| {
                 line.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
@@ -895,6 +907,68 @@ mod tests {
         // File untouched.
         let body = std::fs::read_to_string(tmp.path().join("library/projects/bot-hq/diary.md")).unwrap();
         assert_eq!(body, "mine");
+    }
+
+    /// The nested case the top-level test above could never catch.
+    ///
+    /// `diary.md` has no separator, so its key matched under every spelling and
+    /// the guard always fired. A NESTED key does not: the guard is an exact SQL
+    /// match (`get_cl_index`), so before `normalize_cl_path_input` an agent
+    /// writing the other separator spelling got `Ok(None)`, the
+    /// `if let Some(row)` never fired, the `agent_visible` check was SKIPPED —
+    /// and Windows resolved both spellings to the SAME FILE, so the write
+    /// landed on a user-hidden file. Silent, because `Ok(None)` is
+    /// indistinguishable from the ordinary "new file" case.
+    #[tokio::test]
+    async fn cl_write_file_refuses_a_hidden_nested_file_under_either_separator() {
+        let (bridge, storage, tmp) = bridge_with_data_dir().await;
+        let dir = tmp.path().join("library/projects/bot-hq/agents/rain");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("diary.md"), "mine").unwrap();
+        // Keys are stored `/`-form on every platform — see `util::rel_key`.
+        storage
+            .upsert_cl_index("bot-hq", "agents/rain/diary.md", "d", None)
+            .await
+            .unwrap();
+        storage
+            .set_cl_agent_visibility("bot-hq", "agents/rain/diary.md", false)
+            .await
+            .unwrap();
+
+        // The canonical spelling must be refused on every platform.
+        let mut spellings = vec!["agents/rain/diary.md"];
+        // The `\` spelling is only an alias for the same file on WINDOWS. On
+        // Unix a backslash is a legal filename character, so `agents\rain\…`
+        // names a genuinely different file and must NOT be conflated — which is
+        // exactly why `normalize_cl_path_input` is one-directional and
+        // `#[cfg(windows)]`-gated.
+        if cfg!(windows) {
+            spellings.push("agents\\rain\\diary.md");
+        }
+
+        for spelling in spellings {
+            let err = bridge
+                .cl_write_file(
+                    "s1".to_string(),
+                    "hands".to_string(),
+                    "bot-hq".to_string(),
+                    spelling.to_string(),
+                    "overwrite attempt".to_string(),
+                    false,
+                    false,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("user-only"),
+                "spelling {spelling:?} must be refused, got: {err}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("diary.md")).unwrap(),
+            "mine",
+            "the hidden file must be untouched"
+        );
     }
 
     #[tokio::test]

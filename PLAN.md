@@ -33,15 +33,44 @@ bypass. Revisit only on fresh evidence, statement-scoped shape only.
 
 ## 1.0.1 shortlist (from the 1.0.0 release session, 2026-08-25)
 
-- **Windows toasts — UNCONFIRMED in 1.0.0.** The user (installed NSIS
-  build, live during Verify) reported no permission prompt on toggling On —
-  which is EXPECTED on Windows (the dialog doesn't exist; the plugin
-  auto-grants) and is NOT the bug. Whether a toast appears from the test
-  button or from a real unfocused park was not reported either way. First
-  step is CONFIRM on real Windows (launch → focus another app → park; a
-  freshly launched instance holds focus BY CONSTRUCTION), then diagnose —
-  AppUserModelID / Start-menu-shortcut identity is the leading hypothesis,
-  not a finding.
+- **Windows toasts — the 2026-08-25 report was a DISABLED OS SUBSYSTEM, not a
+  bot-hq bug.** On the reporting machine
+  `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications\ToastEnabled`
+  was **0** — the master Windows notifications switch — so no application
+  could display a toast. Corroborated: only 5 registered entries under
+  `Notifications\Settings`, all Windows' own handlers. Verified independently
+  by both session participants. (The absence of a permission prompt on
+  Windows is EXPECTED and was never the bug.)
+  - **Permission-based explanations are ELIMINATED FROM SOURCE**, not merely
+    untested: `tauri-plugin-notification-2.3.3/src/desktop.rs` hardcodes
+    `Ok(PermissionState::Granted)` for *both* `request_permission` and
+    `permission_state`. `isPermissionGranted()` is a compile-time constant on
+    desktop and carries zero information about whether a toast displays.
+  - **AppUserModelID: REFUTED, hypothesis dead.** After the user enabled
+    notifications (2026-08-25), toasts work and `com.gregoryerrl.bot-hq` appears
+    under `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings`
+    — Windows registers an app only once it has actually DELIVERED one. The
+    identity and Start-menu shortcut are fine.
+  - **The escalation path is CONFIRMED WORKING** (live test, 2026-08-25 11:02
+    UTC). A real unfocused park delivered, so `document.hasFocus()` reports a
+    backgrounded WebView2 window correctly and the event wiring is sound.
+    Measured from `HKCU\…\Notifications\Settings\com.gregoryerrl.bot-hq`:
+    `LastNotificationAddedTime` 10:10:25 → **11:02:29**, count **1 → 3** (the
+    park via `session:pending_choice` AND the following halt via
+    `session:awaiting_user` — two event types, both escalated).
+  - **T6 is CLOSED.** Nothing about toasts remains open on Windows. The
+    remaining item is the one below, which is about bot-hq's inability to REPORT
+    a failure, not about delivery.
+  - **The real defect found instead** — bot-hq cannot tell the user their
+    notifications are off. `sendNotification` returns `void` and wraps the
+    synchronous Web Notification constructor, so the send can never report
+    failure and `setTestState("failed")` is dead code for it on every
+    platform; combined with the permission constant, **"Send test
+    notification" shows green "sent" against a dead subsystem.** On Windows
+    the `ToastEnabled` registry read is the only signal that carries
+    information. Put the check beside the user-facing claim (test button /
+    escalation toggle), never in the fire-and-forget send path.
+    `docs/MANUAL.md` was corrected on this branch; the code check is not done.
 - ~~Opting in sent nothing until the next launch~~ — FIXED on main
   (`b269360`): the ask-card/toggle Enable now enqueues `app_launch`
   immediately (found live by the first Windows install's empty D1).

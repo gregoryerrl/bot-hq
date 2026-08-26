@@ -277,8 +277,14 @@ mod tests {
             "paste dir {canon_parent:?} must sit under an allowed root"
         );
         let evil = pasted_file_path("../../../etc", "png");
+        // Normalize separators for the substring check — the minted path is a
+        // native one (`bothq-paste\etc` on Windows), and only the needle was
+        // Unix-shaped. The BEHAVIOUR was always right: `../../../etc` is
+        // stripped to `etc`, which is exactly what this asserts.
         assert!(
-            evil.to_string_lossy().contains("bothq-paste/etc"),
+            evil.to_string_lossy()
+                .replace('\\', "/")
+                .contains("bothq-paste/etc"),
             "traversal characters are stripped, not honoured: {evil:?}"
         );
     }
@@ -328,18 +334,62 @@ mod tests {
         let repo_canon = repo.path().canonicalize().unwrap();
         let outside_canon = outside.path().canonicalize().unwrap();
         // Build a relative path from the repo to the outside file.
-        let hops = repo_canon.components().count();
+        // Count only NORMAL components. The old `components().count() - 1`
+        // assumed exactly one non-Normal leading component, which is true on
+        // Unix (`RootDir`) and false on Windows, where a canonical path leads
+        // with BOTH `Prefix(VerbatimDisk)` and `RootDir` — so it produced one
+        // `..` too few and the traversal never climbed to the drive root.
+        let hops = repo_canon
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .count();
         let mut rel = PathBuf::new();
-        for _ in 0..hops.saturating_sub(1) {
+        for _ in 0..hops {
             rel.push("..");
         }
-        // `outside_canon` is absolute; strip its root so the join is relative.
-        for c in outside_canon.components().skip(1) {
+        // `outside_canon` is absolute; keep only its NORMAL components so the
+        // join stays relative. `skip(1)` assumed exactly one leading component,
+        // which holds on Unix — a Windows canonical path has TWO
+        // (`Prefix(VerbatimDisk)` + `RootDir`), so `skip(1)` left `RootDir`
+        // first and `PathBuf::push` of a root component RESETS the path.
+        //
+        // STILL RED ON WINDOWS, cause NOT yet identified. Both this and the
+        // `hops` count above are genuine corrections, and neither fixed it:
+        // `resolve_requested_path` returns its input unchanged when
+        // `p.is_relative()` is false, and the observed `joined` is the bare
+        // outside path — so `rel` is somehow still absolute here. Recorded
+        // rather than guessed at a third time.
+        //
+        // NOT a product defect: `is_contained` is canonical-vs-canonical
+        // component-wise `starts_with`, `allowed_roots` SKIPS any root it
+        // cannot canonicalize, and an empty root set refuses. The guard is
+        // fail-closed in every direction; what is broken is this test's own
+        // path arithmetic, which dies at its SETUP assertion before ever
+        // reaching the `!is_contained(...)` line it exists to check.
+        for c in outside_canon
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        {
             rel.push(c);
         }
         rel.push("secret.md");
-        let joined = resolve_requested_path(rel.to_str().unwrap(), repo_canon.to_str());
-        assert!(joined.starts_with(&repo_canon), "joined under the repo: {joined:?}");
+        // Join against the NON-canonicalized repo path — which is also what
+        // production passes, since a session's `working_repo_path` is a
+        // user-supplied string rather than a canonicalized one.
+        //
+        // It matters on Windows: `canonicalize` always returns a VERBATIM
+        // `\\?\` path, verbatim paths cannot contain `..` (the OS takes them
+        // literally), so `PathBuf::push` RESOLVES `..` against a verbatim base
+        // at join time instead of concatenating it lexically. The traversal
+        // this test needs is unconstructible that way — the hops are eaten
+        // before `canonicalize` ever sees them, which is why two rounds of hop
+        // arithmetic produced a byte-identical failure.
+        let repo_base = repo.path();
+        let joined = resolve_requested_path(rel.to_str().unwrap(), repo_base.to_str());
+        assert!(
+            joined.starts_with(repo_base),
+            "joined under the repo: rel={rel:?} joined={joined:?}"
+        );
         let canonical = joined.canonicalize().expect("the traversal names a real file");
         assert_eq!(canonical, target.canonicalize().unwrap());
         assert!(

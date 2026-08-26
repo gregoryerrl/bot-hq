@@ -500,11 +500,106 @@ mod tests {
     }
 
     /// Spawn helper for PTY tests: a real shell running one command.
-    fn spawn_sh(script: &str) -> Arc<SessionTerminal> {
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
+    ///
+    /// Uses the SAME shell production uses on each platform (see
+    /// [`default_shell`]): `cmd.exe` on Windows, `/bin/sh` elsewhere.
+    ///
+    /// Deliberately NOT the MSYS `sh` that `policy::tool_gate::posix_shell`
+    /// resolves for gated commands. The terminal never spawns that here, and
+    /// MSYS-built programs are exactly the class whose ConPTY behaviour
+    /// diverges — it is why `winpty` exists. Greening these tests under a shell
+    /// the product does not use would be a coverage illusion, not coverage.
+    ///
+    /// The scripts are scaffolding; the PTY mechanics are the assertion. Every
+    /// assertion here is `contains`-based, so cmd.exe's CRLF line terminator
+    /// (it has no `printf`, and `echo` always terminates the line) does not
+    /// change what any of them test.
+    fn spawn_shell(script: &str) -> Arc<SessionTerminal> {
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = CommandBuilder::new("cmd.exe");
+            c.arg("/C");
+            c
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut c = CommandBuilder::new("/bin/sh");
+            c.arg("-c");
+            c
+        };
         cmd.arg(script);
-        SessionTerminal::spawn("test-session", cmd, None, None).expect("pty spawn")
+        let term = SessionTerminal::spawn("test-session", cmd, None, None).expect("pty spawn");
+        // ConPTY opens by emitting a DSR cursor-position query (`ESC[6n`) and
+        // waits for the host to answer `ESC[<row>;<col>R` before the child's
+        // output flows. In the app xterm.js answers automatically, which is why
+        // production works and every headless PTY test saw a scrollback of
+        // exactly "\u{1b}[6n" and nothing else — long-lived children included,
+        // which is what ruled out a teardown race.
+        //
+        // This is a HARNESS gap, not a product defect: the product's PTY path
+        // is fine (the session Terminal renders cmd.exe's banner live). Answer
+        // the query once so the tests have the responder the app normally
+        // supplies.
+        //
+        // UNCONDITIONAL IS CORRECT **HERE AND ONLY HERE**. These children are
+        // `cmd.exe /C <script>`, which never reads stdin, so an early or
+        // duplicate response is harmless. Do NOT promote this into
+        // `SessionTerminal` as-is: writing the response unprompted races the
+        // query, and in an INTERACTIVE shell a stray `ESC[1;1R` arrives as
+        // typed characters sitting on the command line. A production responder
+        // has to be REACTIVE — trigger on observing `ESC[6n` in the output
+        // stream, in the reader loop.
+        #[cfg(windows)]
+        let _ = term.write_input(b"\x1b[1;1R");
+        term
+    }
+
+    /// The PTY test scripts: same intent per platform, native syntax.
+    ///
+    /// cmd.exe has no `printf` and no `sleep`. `ping -n <N+1> 127.0.0.1` is the
+    /// robust "block for N seconds" idiom for a `/C` one-liner — deliberately
+    /// NOT `timeout /t`, which refuses to run when stdin is redirected. `&`
+    /// separates commands and is written unspaced, since `echo before& …` would
+    /// otherwise emit a trailing space.
+    mod script {
+        /// Echo the session id the git hooks read.
+        #[cfg(windows)]
+        pub const ECHO_SESSION_ID: &str = "echo sid=%BOT_HQ_SESSION_ID%";
+        #[cfg(not(windows))]
+        pub const ECHO_SESSION_ID: &str = "printf 'sid=%s' \"$BOT_HQ_SESSION_ID\"";
+
+        /// Emit one marker and exit.
+        #[cfg(windows)]
+        pub const ECHO_MARKER: &str = "echo hello-from-pty";
+        #[cfg(not(windows))]
+        pub const ECHO_MARKER: &str = "printf 'hello-from-pty'";
+
+        /// Exit immediately, cleanly.
+        pub const EXIT_OK: &str = "exit 0";
+
+        /// Stay alive well past any test's timeout.
+        #[cfg(windows)]
+        pub const STAY_ALIVE: &str = "ping -n 31 127.0.0.1 >nul";
+        #[cfg(not(windows))]
+        pub const STAY_ALIVE: &str = "sleep 30";
+
+        /// Two output chunks separated by a gap, then stay alive — so a reader
+        /// can capture an offset between them.
+        #[cfg(windows)]
+        pub const TWO_CHUNKS_THEN_ALIVE: &str =
+            "echo before&ping -n 2 127.0.0.1 >nul&echo after-marker&ping -n 31 127.0.0.1 >nul";
+        #[cfg(not(windows))]
+        pub const TWO_CHUNKS_THEN_ALIVE: &str =
+            "printf 'before'; sleep 0.2; printf 'after-marker'; sleep 30";
+
+        /// Never stop emitting. Must produce output more often than the
+        /// settle window (400ms), so the `ping` idiom is wrong here — its 1s
+        /// granularity would let the reader settle between chunks. A zero-step
+        /// `for /L` counter never terminates.
+        #[cfg(windows)]
+        pub const ENDLESS_OUTPUT: &str = "for /l %i in (1,0,2) do @echo x";
+        #[cfg(not(windows))]
+        pub const ENDLESS_OUTPUT: &str = "while true; do printf x; sleep 0.05; done";
     }
 
     async fn wait_for<F: Fn(&SessionTerminal) -> bool>(
@@ -529,7 +624,7 @@ mod tests {
     /// `cmd.env("BOT_HQ_SESSION_ID", …)` in `spawn` and this goes red.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_pty_carries_the_session_id_the_hooks_read() {
-        let term = spawn_sh("printf 'sid=%s' \"$BOT_HQ_SESSION_ID\"");
+        let term = spawn_shell(script::ECHO_SESSION_ID);
         let ok = wait_for(
             &term,
             |t| {
@@ -539,12 +634,16 @@ mod tests {
             5_000,
         )
         .await;
-        assert!(ok, "the shell did not see BOT_HQ_SESSION_ID=test-session");
+        assert!(
+            ok,
+            "the shell did not see BOT_HQ_SESSION_ID=test-session. scrollback={:?}",
+            String::from_utf8_lossy(&term.scrollback.lock().unwrap().snapshot())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pty_round_trip_captures_output() {
-        let term = spawn_sh("printf 'hello-from-pty'");
+        let term = spawn_shell(script::ECHO_MARKER);
         let ok = wait_for(
             &term,
             |t| {
@@ -554,12 +653,16 @@ mod tests {
             5_000,
         )
         .await;
-        assert!(ok, "PTY output never contained the marker");
+        assert!(
+            ok,
+            "PTY output never contained the marker. scrollback={:?}",
+            String::from_utf8_lossy(&term.scrollback.lock().unwrap().snapshot())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pty_reader_marks_dead_on_exit() {
-        let term = spawn_sh("exit 0");
+        let term = spawn_shell(script::EXIT_OK);
         assert!(
             wait_for(&term, |t| t.is_dead(), 5_000).await,
             "terminal never marked dead after shell exit"
@@ -570,7 +673,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn kill_terminates_long_running_shell() {
-        let term = spawn_sh("sleep 30");
+        let term = spawn_shell(script::STAY_ALIVE);
         term.kill();
         assert!(
             wait_for(&term, |t| t.is_dead(), 5_000).await,
@@ -580,7 +683,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_settle_returns_output_since_offset() {
-        let term = spawn_sh("printf 'before'; sleep 0.2; printf 'after-marker'; sleep 30");
+        let term = spawn_shell(script::TWO_CHUNKS_THEN_ALIVE);
         // Let the first chunk land, then capture the offset and wait for the
         // rest to settle.
         assert!(
@@ -608,7 +711,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_settle_times_out_on_endless_output() {
-        let term = spawn_sh("while true; do printf x; sleep 0.05; done");
+        let term = spawn_shell(script::ENDLESS_OUTPUT);
         let (out, timed_out) = term.wait_settle(0, 400, 1_200).await;
         assert!(timed_out, "endless output must hit the max_ms cap");
         assert!(!out.is_empty());
@@ -620,7 +723,7 @@ mod tests {
         let reg = TerminalRegistry::new();
         // ensure() with the default shell would open a real login shell; use
         // the spawn helper via the map directly to keep the test hermetic.
-        let dead = spawn_sh("exit 0");
+        let dead = spawn_shell(script::EXIT_OK);
         assert!(wait_for(&dead, |t| t.is_dead(), 5_000).await);
         reg.terminals
             .lock()
@@ -628,7 +731,7 @@ mod tests {
             .insert("s1".into(), Arc::clone(&dead));
         assert!(reg.get_live("s1").await.is_none(), "dead terminal leaked as live");
 
-        let live = spawn_sh("sleep 30");
+        let live = spawn_shell(script::STAY_ALIVE);
         reg.terminals
             .lock()
             .await

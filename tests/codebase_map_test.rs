@@ -139,3 +139,61 @@ fn every_path_the_codebase_map_names_exists() {
         stale.join("\n  ")
     );
 }
+
+/// `scripts/test-windows.ps1` names every integration target explicitly, and
+/// BOTH failure directions have already bitten this repo:
+///
+/// - a STALE name aborts the whole cargo invocation before anything compiles.
+///   `external_mcp_test` was deleted 2026-08-17 and stayed in the list, so the
+///   script's integration pass silently ran **nothing** for two months while
+///   four newly-added targets were never executed once;
+/// - a MISSING name means a test exists and never runs on the one platform it
+///   was written for. `portable_home_test` had to be remembered into the list
+///   by hand, and guards a bug that only manifests on Windows.
+///
+/// Neither direction is visible from the script alone or from `tests/` alone.
+///
+/// This lives inside an ALREADY-REGISTERED target on purpose: a standalone test
+/// would have to be registered itself, and would inherit the exact bootstrap
+/// problem it exists to prevent.
+#[test]
+fn the_windows_script_names_every_integration_target() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = fs::read_to_string(root.join("scripts/test-windows.ps1"))
+        .expect("scripts/test-windows.ps1 must exist");
+
+    // `--test <name>`, taking the first token so a trailing PowerShell
+    // continuation backtick or `@args` does not become part of the name.
+    let named: BTreeSet<String> = script
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("--test "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(str::to_string)
+        .collect();
+
+    let on_disk: BTreeSet<String> = fs::read_dir(root.join("tests"))
+        .expect("tests/ must exist")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("rs"))
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect();
+
+    // Fail closed: a broken walk or a parse that matched nothing must report
+    // failure, not "no differences found".
+    assert!(!on_disk.is_empty(), "the tests/ walk found no .rs files");
+    assert!(
+        !named.is_empty(),
+        "parsed no --test names out of scripts/test-windows.ps1 - the parser \
+         broke, which would make this guard pass by comparing nothing"
+    );
+
+    let missing: Vec<_> = on_disk.difference(&named).collect();
+    let stale: Vec<_> = named.difference(&on_disk).collect();
+    assert!(
+        missing.is_empty() && stale.is_empty(),
+        "scripts/test-windows.ps1 is out of sync with tests/.\n  \
+         missing from the script (exists but never runs on Windows): {missing:?}\n  \
+         named but absent from tests/ (ABORTS the whole pass): {stale:?}"
+    );
+}

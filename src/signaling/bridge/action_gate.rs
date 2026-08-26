@@ -304,15 +304,18 @@ fn format_command_output(out: &tool_gate::CommandOutput) -> String {
     // authored under bash semantics running under the gate's zsh — every
     // result now says what ran it and how big the answer was, so
     // "suspiciously empty but exit 0" is visible at a glance instead of a
-    // forensic finding. The shell is resolved the same way the runner
-    // resolves it (`gate_shell`), so the label cannot drift from reality.
+    // forensic finding. The shell is resolved the same way the runner resolves
+    // it (`gate_shell`), so the label cannot drift from reality — but printed
+    // as a BASENAME (`gate_shell_label`): on Windows the resolved path is
+    // absolute, and Scoop / `%LOCALAPPDATA%\Programs` layouts carry the
+    // username in it, while this string lands in archived transcripts.
     let bytes = out.stdout.len() + out.stderr.len();
     s.push_str(&format!(
         "[action_gate → exit {} · {} output byte{} · shell {}]",
         out.code,
         bytes,
         if bytes == 1 { "" } else { "s" },
-        tool_gate::gate_shell(),
+        tool_gate::gate_shell_label(),
     ));
     s
 }
@@ -320,6 +323,23 @@ fn format_command_output(out: &tool_gate::CommandOutput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Render an ABSOLUTE fixture path in POSIX form for a gated command.
+    ///
+    /// Real agent commands arrive forward-slashed, and on Windows the gate runs
+    /// them through Git-for-Windows' MSYS `sh`, which mangles native `C:\…`
+    /// argument paths — so a fixture built with `Path::display()` hands `touch`
+    /// something it cannot create.
+    ///
+    /// **Do NOT unify this with `util::rel_key`.** They look like the same
+    /// operation and are not: `rel_key` joins `Component::Normal` because it
+    /// builds a RELATIVE database key, and running that over an absolute
+    /// tempdir path would silently drop the `C:\` prefix and hand `touch` a
+    /// relative path. Different jobs, different correct implementations — a
+    /// plain `replace` is right *here* precisely because the input is absolute.
+    fn posix_path(p: &std::path::Path) -> String {
+        p.display().to_string().replace('\\', "/")
+    }
     use crate::policy::tool_gate::{GateMode, GatedKeyword};
     use crate::policy::ViolationsLog;
     use crate::storage::Storage;
@@ -384,7 +404,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         bridge.register_session_sequencer("s1".into(), tx).await;
         let marker = repo.path().join("ran.txt");
-        let cmd = format!("touch {}", marker.display());
+        let cmd = format!("touch {}", posix_path(&marker));
         let out = bridge
             .action_gate("s1".into(), "hands".into(), cmd.clone(), true)
             .await
@@ -441,7 +461,7 @@ mod tests {
         let data = tempdir().unwrap();
         let repo = tempdir().unwrap();
         let marker = repo.path().join("ran.txt");
-        let cmd = format!("touch {}", marker.display());
+        let cmd = format!("touch {}", posix_path(&marker));
         let bridge = bridge_with(
             data.path(),
             &[gk("touch", GateMode::Gate)],
@@ -489,7 +509,7 @@ mod tests {
             let data = tempdir().unwrap();
             let repo = tempdir().unwrap();
             let marker = repo.path().join("ran.txt");
-            let cmd = format!("touch {}", marker.display());
+            let cmd = format!("touch {}", posix_path(&marker));
             let bridge = bridge_with(
                 data.path(),
                 &[gk("touch", GateMode::Gate)],
@@ -574,7 +594,7 @@ mod tests {
         let data = tempdir().unwrap();
         let repo = tempdir().unwrap();
         let marker = repo.path().join("ran.txt");
-        let cmd = format!("touch {}", marker.display());
+        let cmd = format!("touch {}", posix_path(&marker));
         let bridge = bridge_with(
             data.path(),
             &[gk("touch", GateMode::Gate)],
@@ -694,7 +714,7 @@ mod tests {
         let data = tempdir().unwrap();
         let repo = tempdir().unwrap();
         let marker = repo.path().join("ran.txt");
-        let cmd = format!("touch {}", marker.display());
+        let cmd = format!("touch {}", posix_path(&marker));
         let bridge = bridge_with(
             data.path(),
             &[gk("touch", GateMode::Gate)],
@@ -746,7 +766,7 @@ mod tests {
         let data = tempdir().unwrap();
         let repo = tempdir().unwrap();
         let marker = repo.path().join("ran.txt");
-        let cmd = format!("touch {}", marker.display());
+        let cmd = format!("touch {}", posix_path(&marker));
         let bridge =
             SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
         let storage = Storage::memory().await.unwrap();
@@ -797,7 +817,7 @@ mod tests {
         let data = tempdir().unwrap();
         let repo = tempdir().unwrap();
         let marker = repo.path().join("ran.txt");
-        let cmd = format!("touch {}", marker.display());
+        let cmd = format!("touch {}", posix_path(&marker));
         let bridge =
             SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
         let storage = Storage::memory().await.unwrap();
@@ -854,7 +874,7 @@ mod tests {
         let data = tempdir().unwrap();
         let repo = tempdir().unwrap();
         let marker = repo.path().join("ran.txt");
-        let cmd = format!("touch {}", marker.display());
+        let cmd = format!("touch {}", posix_path(&marker));
         let bridge =
             SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
         let storage = Storage::memory().await.unwrap();
@@ -955,7 +975,7 @@ mod tests {
         let repo = tempdir().unwrap();
         let marker = repo.path().join("ran.txt");
         let bridge = bridge_with(data.path(), &[gk("echo", GateMode::Gate)], "s1", repo.path()).await;
-        let cmd = format!("touch {}", marker.display()); // matches no keyword
+        let cmd = format!("touch {}", posix_path(&marker)); // matches no keyword
 
         let (gate_id, existing) = bridge
             .park_gated_command("s1", "hands", &cmd)
@@ -1070,7 +1090,7 @@ mod tests {
         let data = tempdir().unwrap();
         let repo = tempdir().unwrap();
         let marker = repo.path().join("fresh.txt");
-        let cmd = format!("touch {}", marker.display());
+        let cmd = format!("touch {}", posix_path(&marker));
         let bridge = bridge_with(
             data.path(),
             &[gk("touch", GateMode::Gate)],
@@ -1103,7 +1123,7 @@ mod tests {
 
         // Age a second gate past the window by rewriting its asked_at.
         let marker2 = repo.path().join("old.txt");
-        let cmd2 = format!("touch {}", marker2.display());
+        let cmd2 = format!("touch {}", posix_path(&marker2));
         let parked2 = bridge
             .action_gate("s1".into(), "hands".into(), cmd2.clone(), false)
             .await

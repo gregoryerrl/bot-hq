@@ -22,6 +22,69 @@ pub(super) struct WalkedFile {
 /// hidden files/dirs (anything starting with '.') and a few well-known noise
 /// directories (`projects` at the CL-dir (`library/`) level is handled by
 /// per-project rescans, not here).
+/// Normalize a CALLER-SUPPLIED CL path to the stored `/` key form.
+///
+/// **Direction matters, and it is the OPPOSITE of the superseded design.** An
+/// earlier plan normalized inbound paths to native separators (`/` → `\`),
+/// which was right only while keys were stored natively. Keys are now `/`-form
+/// on every platform (see [`rel_key`]), so an inbound `\` spelling must be
+/// converted **to** `/`. Carrying the old direction forward would break every
+/// lookup and re-open the `agent_visible` bypass in mirror image.
+///
+/// `#[cfg(windows)]` only, and one-directional: on Unix `\` is a legal filename
+/// character, so a path containing one names a real, different file and must be
+/// left exactly as given.
+///
+/// Uses a plain `replace`, not [`rel_key`]'s component join, and that is
+/// deliberate: this is a flat string spelling-fix on an already-relative
+/// caller key, not a path being decomposed. `\` cannot appear in a Windows
+/// filename, so the replace is unambiguous there.
+pub(super) fn normalize_cl_path_input(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        return path.replace('\\', "/");
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string()
+    }
+}
+
+/// Build a CL index KEY for `path` relative to `root`.
+///
+/// CL keys are LOGICAL, cross-platform identifiers, not native paths: they are
+/// the `cl_index` / `cl_atoms` primary-key values, they are matched against
+/// caller-supplied paths, and the frontend splits them on `/`
+/// (`contextLibraryShared.tsx:93`/`:200`/`:205`, and
+/// `ContextLibraryEditor.tsx:23` keys `policy.yaml` off the basename). A native
+/// `to_string_lossy()` emits `\` on Windows, which collapses the Library tree to
+/// flat nodes and makes `policy.yaml` unrecognisable — so join with `/`.
+///
+/// **Joins `Component::Normal` only, and REJECTS anything else.** Two reasons,
+/// both learned the hard way:
+///   - a plain `replace('\\', "/")` is WRONG on Unix, where `\` is a legal
+///     filename character: it rewrites a key that then no longer matches the
+///     file on disk, and the rescan's orphan branch purges the row (taking
+///     `agent_visible` and user tags with it).
+///   - returning `None` beats silently dropping `CurDir`/`ParentDir`. At the
+///     non-walker call sites the input is NOT pre-normalized by `strip_prefix`,
+///     and `a/../b.md` must not quietly become `a/b.md` — this is a key builder,
+///     not a path flattener.
+pub(super) fn rel_key(path: &Path, root: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let mut parts = Vec::new();
+    for component in rel.components() {
+        match component {
+            std::path::Component::Normal(s) => parts.push(s.to_string_lossy().into_owned()),
+            _ => return None,
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("/"))
+}
+
 pub(super) fn walk_cl_dir(
     dir: &Path,
     root: &Path,
@@ -65,9 +128,9 @@ pub(super) fn walk_cl_dir(
         if !is_text {
             continue;
         }
-        let rel = match path.strip_prefix(root) {
-            Ok(r) => r.to_string_lossy().to_string(),
-            Err(_) => continue,
+        let rel = match rel_key(&path, root) {
+            Some(r) => r,
+            None => continue,
         };
         let mtime = match entry
             .metadata()
@@ -484,6 +547,38 @@ pub(super) fn oob_resolution_body(
 
 #[cfg(test)]
 mod tests {
+    /// `rel_key` builds a LOGICAL key, not a native path, and must reject
+    /// anything that isn't a plain component rather than flattening it.
+    ///
+    /// The `ParentDir` case is the one that matters: at the non-walker call
+    /// sites the input is not pre-normalized by `strip_prefix`, so silently
+    /// turning `a/../b.md` into `a/b.md` would make this a path flattener
+    /// pointed at a database key.
+    #[test]
+    fn rel_key_joins_with_forward_slashes_and_rejects_non_normal_components() {
+        use std::path::Path;
+        let root = Path::new("/cl");
+
+        assert_eq!(
+            super::rel_key(&root.join("agents").join("rain").join("x.md"), root).as_deref(),
+            Some("agents/rain/x.md"),
+            "nested keys are `/`-joined on EVERY platform, not native-separated"
+        );
+        assert_eq!(
+            super::rel_key(&root.join("notes.md"), root).as_deref(),
+            Some("notes.md")
+        );
+        // `..` must be refused, not flattened away.
+        assert_eq!(
+            super::rel_key(&root.join("a").join("..").join("b.md"), root),
+            None,
+            "a ParentDir component must be rejected, never silently dropped"
+        );
+        // Outside the root, and the root itself, are both non-keys.
+        assert_eq!(super::rel_key(Path::new("/elsewhere/x.md"), root), None);
+        assert_eq!(super::rel_key(root, root), None, "the root is not a key");
+    }
+
     /// The two mappers are different on purpose (round 8, R3): a GATE approves
     /// only on the listed `Approve`; a custom-labelled `request_approval` row
     /// keeps the prefix map. Kill-tested: make `gate_verdict` delegate to

@@ -31,6 +31,28 @@ describe("framing detection", () => {
     expect(hit[0].words).toEqual(["duo"]);
   });
 
+  /**
+   * **A CRLF checkout must strip comments too.** `split("\n")` leaves a
+   * trailing `\r` on every line; JS's `.` does not match `\r` and `$` without
+   * `m` matches only end-of-input, so the line-comment regex silently failed to
+   * match and retired names sitting in COMMENTS leaked into the sweep — failing
+   * the guard on text nobody renders.
+   *
+   * The `\r\n` below is an ESCAPE SEQUENCE, not this file's own line endings,
+   * and that is the point: adding `.gitattributes`/`eol=lf` normalizes the
+   * working tree, after which a test that leaned on the tree's endings would
+   * never see a `\r` again and deleting the fix would leave it green.
+   */
+  it("strips line comments from CRLF source, not only LF", () => {
+    const crlf = 'const a = 1; // the duo was here\r\nconst b = 2;\r\n';
+
+    expect(stripComments(crlf)).not.toContain("duo");
+    // Line structure survives the normalization (CRLF -> LF is 1:1 on lines).
+    expect(stripComments(crlf).split("\n")).toHaveLength(3);
+    // And the whole point: a name that appears ONLY in a comment is not a hit.
+    expect(findRetiredFraming(crlf)).toHaveLength(0);
+  });
+
   it("keeps a url out of the line-comment rule", () => {
     // `https://` must not read as a comment start, or everything after a link
     // on the same line stops being scanned.
