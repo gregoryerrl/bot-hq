@@ -113,6 +113,11 @@ and in `docs/rebuild-archive/`.
   package.
 - **Windows child-process reaping** via a Job Object (new unsafe FFI — lands
   only behind the Windows CI job).
+- **macOS signing + notarization** — consciously deferred by the user at
+  1.0.0 and again here (Gatekeeper banner-only by choice). The how is in
+  `docs/SIGNING.md` (cert → repo secrets → uncomment the workflow's `APPLE_*`
+  env); doing it removes the right-click-Open friction and unblocks a future
+  auto-updater.
 
 ## [1.0.0] — 2026-08-25
 
