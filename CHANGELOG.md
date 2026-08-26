@@ -7,6 +7,13 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-08-26
+
+Hotfix for the Windows upgrade path. The items 1.0.1 deferred "to 1.0.2"
+(PTY death, DSR responder, the Windows CI job going required, AppImage
+de-bundling, Job Object reaping, macOS signing) are untouched here and carry
+to the next release.
+
 ### Fixed
 
 - **Windows: upgrading from any 1.0.0-rc / 1.0.0 install no longer exits at

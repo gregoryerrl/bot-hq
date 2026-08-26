@@ -23,6 +23,17 @@ Release: <https://github.com/gregoryerrl/bot-hq/releases/tag/v1.0.1> ·
 - [ ] **Reopen any closed session**: the REOPENED row may carry the soft "no learnings delta was recorded" note (rare on an actively-worked project).
 
 ## Windows re-run (installer: `bot-hq_1.0.1_x64-setup.exe`)
+
+> **⚠️ Run this section on 1.0.2, not 1.0.1.** The 1.0.1 installer cannot start
+> on a machine that ever ran rc1/rc2/1.0.0: it exits within a second, before any
+> window, with `migration 1 was previously applied but has been modified` on
+> stderr only (the log stops at "data dir ready"). Root cause and fix are in
+> CHANGELOG 1.0.2 — the CRLF-checkout builds stamped CRLF migration checksums,
+> 1.0.1 embedded LF. Found on the first Windows launch of 1.0.1 (2026-08-26).
+> 1.0.2 repairs the database in place on first open; the same flip also made an
+> untouched HANDS/EYES pair read as "Differs from the shipped default" (fixed by
+> migration 0078). Everything below still applies, on 1.0.2.
+
 - [ ] **Update banner on the installed 1.0.0 before upgrading** (second direct observation).
 - [ ] App boots; **Dashboard shows the starter-offers banner** (sessions exist, no config files → backfill arms both offers).
 - [ ] **Accept the GATES offer and verify the list actually landed** — Settings → Tool Gate must show the 7 basic keywords. ⚠️ This is the FIRST LIVE test of the `120806f3` fix anywhere: on the macOS throwaway instance the pre-fix build was clicked — the policy starter installed but the gate Install was a silent no-op (that click became the finding). The published build carries the fix; this click proves it.
