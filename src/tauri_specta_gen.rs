@@ -69,6 +69,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         roles::archive_role,
         roles::list_capabilities,
         roles::resolve_role_preset_offer,
+        roles::get_role_default_prose,
         // Models registry + default-model setting
         models::list_models,
         models::upsert_model,

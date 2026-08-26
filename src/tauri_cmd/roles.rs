@@ -158,6 +158,21 @@ pub async fn resolve_role_preset_offer(
     Ok(())
 }
 
+/// The shipped default prose for a preset slug — the source the Roles tab's
+/// view-diff / reset-to-default affordance compares against (promised in the
+/// 1.0.0 release notes, shipped 1.0.1). `None` for every user-created slug:
+/// only the example pair has a shipped default, and bot-hq never auto-applies
+/// it — the frontend fills the DRAFT and the user still saves.
+#[tauri::command]
+#[specta::specta]
+pub fn get_role_default_prose(slug: String) -> Option<String> {
+    match slug.as_str() {
+        "hands" => Some(crate::agents::prompts::PRESET_HANDS_ROLE.to_string()),
+        "eyes" => Some(crate::agents::prompts::PRESET_EYES_ROLE.to_string()),
+        _ => None,
+    }
+}
+
 /// What the Roles tab submits, for both create and edit.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct RoleDraftInput {

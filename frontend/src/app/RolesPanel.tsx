@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
+import { lineDiff } from "../lib/lineDiff";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { cn } from "../lib/cn";
@@ -421,6 +422,18 @@ function RoleForm({
   // the notice below promises and what the save actually sends are one test.
   const promptCleared = (draft.description_prompt ?? "").trim() === "";
 
+  // Shipped-default prose for THIS slug (null for user-created roles — the
+  // affordance below renders nothing then). Compared against the DRAFT so
+  // the hint tracks what a save would store, not the last-saved row.
+  const { data: defaultProse = null } = useTauriQuery<string | null>(
+    "get_role_default_prose",
+    { slug: role?.slug ?? "" },
+    { enabled: !!role },
+  );
+  const [showDefaultDiff, setShowDefaultDiff] = useState(false);
+  const prose = draft.description_prompt ?? "";
+  const differsFromDefault = defaultProse != null && prose !== defaultProse;
+
   // Slugs the checklist knows about. Anything on the role that is NOT in here
   // is shown separately rather than as a silent omission — see below.
   const known = useMemo(
@@ -692,6 +705,63 @@ function RoleForm({
           </span>
         )}
       </label>
+
+      {/* View-diff / reset vs the shipped preset prose (1.0.0 release-notes
+          promise, shipped 1.0.1). Only the example pair has a default —
+          every other slug gets null and this block never renders. Reset
+          fills the DRAFT; the user still saves, so nothing moves silently. */}
+      {defaultProse != null && (
+        <div className="-mt-2">
+          {differsFromDefault ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-code-sm text-code-sm text-on-surface-variant">
+                Differs from the shipped default.
+              </span>
+              <Button
+                variant="ghost"
+                onClick={() => setShowDefaultDiff((v) => !v)}
+              >
+                {showDefaultDiff ? "Hide diff" : "View diff"}
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setDraft({ ...draft, description_prompt: defaultProse });
+                  setShowDefaultDiff(false);
+                }}
+              >
+                Reset to default
+              </Button>
+            </div>
+          ) : (
+            <span className="font-code-sm text-code-sm text-on-surface-variant">
+              Matches the shipped default.
+            </span>
+          )}
+          {showDefaultDiff && differsFromDefault && (
+            <pre
+              aria-label="Diff vs shipped default"
+              className="mt-2 max-h-80 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words rounded border border-outline-variant bg-surface-container-lowest p-2 font-code-sm text-code-sm leading-relaxed"
+            >
+              {lineDiff(defaultProse, prose).map((l, i) => (
+                <div
+                  key={i}
+                  className={
+                    l.kind === "add"
+                      ? "text-success"
+                      : l.kind === "del"
+                        ? "text-error"
+                        : "text-on-surface-variant"
+                  }
+                >
+                  {(l.kind === "add" ? "+ " : l.kind === "del" ? "- " : "  ") +
+                    l.text}
+                </div>
+              ))}
+            </pre>
+          )}
+        </div>
+      )}
 
       <fieldset
         className={cn(
