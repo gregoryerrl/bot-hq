@@ -239,6 +239,11 @@ contributing a panel gets its own top-bar tab.
   runtime.
 - **"bot-hq is already running"** — the single-instance lock; quit the
   other copy (a stale lock from a crash is taken over automatically).
+- **"bot-hq could not start" dialog at launch** — a fatal error before the
+  window could open. The dialog carries the error chain and the log
+  directory (`~/.bot-hq/.local/logs/`); the same text goes to stderr when
+  bot-hq is launched from a terminal. Headless or scripted launches can
+  suppress the dialog with `BOT_HQ_NO_STARTUP_DIALOG=1`.
 - **Agents won't spawn / model Test fails** — verify `claude` runs and is
   authenticated in a terminal; on Windows confirm `where.exe claude` ends
   in `claude.exe` (native installer, not the npm shim).

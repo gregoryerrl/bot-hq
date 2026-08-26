@@ -423,14 +423,19 @@ session present (`ask` → HTTP → exit code).
 
 **What it does.** The sole persistence layer: `Storage` owns one `SqlitePool`
 (8 connections, foreign keys on, WAL journal — readers never block writers); every other
-area reads/writes through it. `Storage::open` runs `sqlx::migrate!`; migrations
-are immutable once applied (hook-guarded), highest `0069`, `0056` reverted by
-re-stamp. One timestamp helper (`now_utc()`, RFC3339-Z) is meant to be bound by
-every write.
+area reads/writes through it. `Storage::open` first rewrites `_sqlx_migrations`
+checksums a CRLF-checkout build stamped (`repair_crlf_migration_checksums`), then
+runs `MIGRATOR` — the embedded set with every `sql` normalised to LF before its
+checksum, so the digest is a property of the text, not of the checkout (the
+1.0.0→1.0.1 Windows brick); migrations
+are immutable once applied (hook-guarded), highest `0078`, `0056` deleted after
+being applied (affected DBs were hand re-stamped — rc3 audit F2; never delete an
+applied migration again, add a forward no-op). One timestamp helper
+(`now_utc()`, RFC3339-Z) is meant to be bound by every write.
 
 | path | role | size |
 |---|---|---|
-| `src/storage/mod.rs` | `Storage::open`/`memory`, pool, `migrate!`, generic CL search | S |
+| `src/storage/mod.rs` | `Storage::open`/`memory`, pool, the LF-normalised `MIGRATOR` (the crate's one `sqlx::migrate!`) + `repair_crlf_migration_checksums`, generic CL search | M |
 | `src/storage/row_types.rs` | shared `FromRow` structs/enums (Message, Session, Finding, …) | M |
 | `src/storage/time.rs` | `now_utc()` | S |
 | `src/storage/sessions.rs` | `sessions` CRUD, `reopen_session`/`archive_session`, spawn-model/effort columns, halt slot (`declare_session_halt`/`clear_session_halt`), boot orphan sweep | M |
@@ -450,7 +455,7 @@ every write.
 | `src/storage/projects.rs` | `projects` registry, CL path resolution | M |
 | `src/storage/plugins.rs`, `src/storage/plugin_kv.rs` | plugin registry + per-plugin kv | M / S |
 | `src/storage/cl_index.rs`, `src/storage/cl_atoms.rs` | CL index/folders/reads; FTS5 atoms + `cl_retrieve` | M / M |
-| `migrations/` | 0001…0069 (0056 absent) — append-only | — |
+| `migrations/` | 0001…0078 (0056 absent) — append-only | — |
 | `tests/storage_test.rs` | cross-cutting smoke: empty-DB migration, tray scoping, message since-id, session close/list, config round-trips | M |
 
 **Entry points.** `Storage::open` · `now_utc` · `next_active_participant` ·
@@ -468,16 +473,28 @@ survives as a plain slug string, its CHECK and its `Author` enum both deleted. H
 `src/signaling/bridge/tray.rs`, `src/core/pump.rs`.
 
 **Tests pin.** ring order/skip rules, done-vote reset, roster byte-parity, prose
-migration provenance (0046/0048/0049 oracles), delivery/cursor invariants, 200-row
-paging (`participants.rs`); halt slot + orphan sweep shapes (`sessions.rs`); tray
-sweeps. Not testable today: upgrading an EXISTING DB across a migration revert.
+migration provenance (0046/0048/0049 oracles), 0078's CRLF→LF prose fold with
+`updated_at` untouched (`role_prose_line_endings`), delivery/cursor invariants,
+200-row paging (`participants.rs`); halt slot + orphan sweep shapes (`sessions.rs`); tray
+sweeps; reopening a file DB stamped by a CRLF build, and that a genuinely edited
+migration is still refused (`mod.rs`, `migration_checksum_*`). Not testable
+today: upgrading an EXISTING DB across a migration revert.
 
 **Where to add X.** New table → `migrations/00NN_*.sql` (+ index matching the
 query) → `row_types.rs` struct → `storage/<table>.rs` `impl Storage` + `mod` in
 `mod.rs` → make something other than a test READ it. · New participant column →
 migration → `PARTICIPANT_COLUMNS` const + `participant_from_row` + struct (+
 `insert_roster` if invite-frozen). · Timestamps → bind `now_utc()`, never inline
-`datetime('now')`.
+`datetime('now')`. · New role-prose migration (the 0046…0075 pattern, `UPDATE …
+WHERE description_prompt = '<previous prose>'`) → gate CR-insensitively
+(`REPLACE(description_prompt, char(13), '') = '…'`), not byte-exact: databases the
+CRLF builds wrote (Windows ≤ 1.0.0, and the dev DB) hold CRLF prose — the
+checksum repair rewrites stamps, never table contents — so an LF-literal gate
+silently skips them and leaves those users on the old prose. (0078 folds the
+rows the CRLF builds wrote back to LF once and, migrations applying in version
+order, runs before any later reseed — so on every shipped upgrade path the gate
+is redundant; keep it anyway: it costs nothing and still fires if CR ever
+reaches the column by a path 0078 did not see.)
 
 ---
 
@@ -488,7 +505,13 @@ migration → `PARTICIPANT_COLUMNS` const + `participant_from_row` + struct (+
 dir → logging → single-instance lock → tokio → `Storage` + boot sweeps →
 bridge + internal MCP + llm proxy → `CoreAppState` → signal
 reapers → bindings export → plugin registry seed → Tauri builder (`.setup`:
-subscriber, fs watcher, control-event consumer, heartbeat sweep). `src/tauri_cmd/*`
+subscriber, fs watcher, control-event consumer, heartbeat sweep). The GUI path
+runs inside `run_gui`; any `Err` before Tauri's event loop goes through
+`report_startup_fatal` — an ERROR log line when logging is up, plus a native
+dialog carrying the chain and naming the logs dir (qualified when logging never
+came up); the dialog is skipped on a non-interactive Windows window station
+(`window_station_flags`, so an SSH/service/scheduled-task launch cannot hang on
+an unseen `MessageBoxW`) and by `BOT_HQ_NO_STARTUP_DIALOG=1`. `src/tauri_cmd/*`
 are thin `#[tauri::command]` wrappers (101 commands on 2026-08-17, all listed in
 `src/tauri_specta_gen.rs`); `src/tauri_events/*` turn `SignalingEvent`s into typed
 Tauri events (`BatchEmitter` coalesces messages, 50 ms / N=20, since_id) plus the
@@ -496,7 +519,7 @@ fs watcher (`cl:changed`, `session:worktree_changed`, `plugin:assets_changed`).
 
 | path | role | size |
 |---|---|---|
-| `src/main.rs` | boot, CLI arms, control-event consumer (`SessionCloseRequest`/`HaltAcked`→`halt_declared`/`StagedDeliveryDue`→`deliver_staged`/`AgentAdvancePhase`), heartbeat sweep, logging | L |
+| `src/main.rs` | boot, CLI arms, control-event consumer (`SessionCloseRequest`/`HaltAcked`→`halt_declared`/`StagedDeliveryDue`→`deliver_staged`/`AgentAdvancePhase`), heartbeat sweep, logging, fail-loud startup reporter (`run_gui` → `report_startup_fatal`, `StartupState`) | L |
 | `src/lib.rs` | crate root | S |
 | `src/paths.rs` | data-dir resolution, first-run init, legacy layout migrations (v0→v1→v2), `LockGuard` (PID, steals stale), legacy custom-instruction seeds | L |
 | `src/tauri_specta_gen.rs` | `collect_commands!` (the ONLY registration; an omitted command compiles but is unreachable) + TS export | S |

@@ -7,6 +7,40 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows: upgrading from any 1.0.0-rc / 1.0.0 install no longer exits at
+  launch** with "migration 1 was previously applied but has been modified".
+  Those builds came off a CRLF checkout and stamped CRLF migration checksums;
+  1.0.1 embedded the same migrations with LF endings and refused every
+  upgraded database within a second, before any window (fresh installs and
+  macOS/Linux were never affected — no migration had changed). Migration
+  checksums are now line-ending independent, and a database stamped by a
+  CRLF build is repaired in place on first open (one INFO log line names the
+  rewrite). One-way: once this build has opened a database, 1.0.0 and
+  earlier Windows builds refuse it with the same message — do not roll back
+  past this release after upgrading.
+- **Windows: untouched HANDS/EYES no longer show "Differs from the shipped
+  default"** on installs upgraded from a 1.0.0-rc / 1.0.0 build. Those builds
+  stored the role prose with Windows line endings, so the Roles tab compared
+  it against the shipped default and found every line changed — offering a
+  diff of the whole prose and a Reset that rewrote all of it — when nothing
+  but the line endings differed. A one-shot migration normalises the stored
+  prose (the roles' edit timestamps do not move), and the comparison and the
+  diff now ignore line endings.
+
+### Added
+
+- **A native error dialog when bot-hq fails before its window opens** — a
+  data-dir problem, a failed migration, "bot-hq is already running" from a
+  second launch, a port that will not bind. It carries the full error chain
+  and names the log directory (saying so when logging had not come up yet);
+  the same text goes to the log at ERROR level and, as before, to stderr
+  with exit code 1. Skipped on a non-interactive Windows window station
+  (service, OpenSSH session, non-interactive scheduled task — a message box
+  there would block unseen) and when `BOT_HQ_NO_STARTUP_DIALOG=1` is set
+  for headless or scripted launches.
+
 ## [1.0.1] — 2026-08-26
 
 ### Fixed
