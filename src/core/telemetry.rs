@@ -495,17 +495,27 @@ mod tests {
     /// The wire at its call sites: `start` and `install_panic_capture` are
     /// called from `main` and NOWHERE else — deleting either line makes the
     /// subsystem silently inert with every other test green (EYES ebf148dd).
-    /// Same source-text guard idiom as the prompt contains-tests.
+    /// Same source-text guard idiom as the prompt contains-tests — upgraded
+    /// (1.0.1, PLAN shortlist): the scan now sees only UNCOMMENTED lines, so
+    /// a `// core::telemetry::start(...)` comment-out goes red too, which the
+    /// bare `contains` never caught. (The shortlist's alternative — a single
+    /// `install()` seam — was declined: `start` needs the async runtime while
+    /// panic capture must chain AFTER the reaper hook outside it, so one call
+    /// site would re-order boot to fix a test weakness this closes for free.)
     #[test]
     fn main_calls_start_and_panic_capture() {
-        let main_rs = include_str!("../main.rs");
+        let live: String = include_str!("../main.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            main_rs.contains("core::telemetry::start(storage.clone(), paths.local_dir.clone())"),
-            "main.rs must start the telemetry flusher"
+            live.contains("core::telemetry::start(storage.clone(), paths.local_dir.clone())"),
+            "main.rs must start the telemetry flusher (uncommented)"
         );
         assert!(
-            main_rs.contains("core::telemetry::install_panic_capture(&paths.local_dir)"),
-            "main.rs must chain telemetry panic capture"
+            live.contains("core::telemetry::install_panic_capture(&paths.local_dir)"),
+            "main.rs must chain telemetry panic capture (uncommented)"
         );
     }
 

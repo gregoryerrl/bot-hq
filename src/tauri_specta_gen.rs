@@ -21,8 +21,9 @@ pub fn typescript_config() -> specta_typescript::Typescript {
 }
 
 use crate::tauri_cmd::{
-    claude_config, cl, docs, feedback, files, findings, messages, models, plugin_api,
-    plugins, policy, roles, sessions, telemetry, terminal, tool_gate, tray, updates,
+    claude_config, cl, docs, feedback, files, findings, messages, models, notifications,
+    plugin_api, plugins, policy, roles, sessions, telemetry, terminal, tool_gate, tray,
+    updates,
 };
 use tauri_specta::{collect_commands, Builder};
 
@@ -157,6 +158,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         plugin_api::plugin_invoke_proxy,
         // Updates (check GitHub Releases for a newer bot-hq)
         updates::check_for_update,
+        notifications::windows_toast_enabled,
         // Diagnostics (opt-in telemetry: status / toggle / endpoint / asked)
         telemetry::get_telemetry_status,
         telemetry::set_telemetry_enabled,

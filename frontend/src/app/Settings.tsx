@@ -744,6 +744,12 @@ function NotificationsPanel() {
   const [testState, setTestState] = useState<"idle" | "sent" | "denied" | "failed">(
     "idle",
   );
+  // Some(false) only when Windows' master switch is explicitly off; null on
+  // every other platform (the signal doesn't exist there — render nothing).
+  const { data: toastEnabled = null } = useTauriQuery<boolean | null>(
+    "windows_toast_enabled",
+  );
+  const toastMasterOff = toastEnabled === false;
 
   const toggle = () => {
     const next = !enabled;
@@ -850,6 +856,21 @@ function NotificationsPanel() {
           </span>
         )}
       </div>
+      {/* Windows-only: the ToastEnabled registry value is the ONE signal
+          that carries information about delivery — the plugin's permission
+          API is a desktop compile-time constant and the send is
+          fire-and-forget, so without this a disabled OS master switch reads
+          as a broken app (it did, for a full release). */}
+      {toastMasterOff && (
+        <p
+          role="alert"
+          className="mt-3 max-w-prose rounded border border-warning/40 bg-warning-container/20 px-3 py-2 font-code-sm text-code-sm text-on-surface"
+        >
+          Windows notifications are OFF at the OS level — no app can display a
+          toast. Enable them under System Settings → Notifications, then send
+          the test again.
+        </p>
+      )}
     </div>
   );
 }

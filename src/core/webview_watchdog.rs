@@ -61,17 +61,23 @@ mod tests {
     /// green suite (the exact defect class conventions.md's wire rule names).
     #[test]
     fn main_arms_the_watchdog_and_cancels_on_page_load() {
-        let main = include_str!("../main.rs");
+        // Uncommented lines only — a commented-out call must go red, not
+        // slide past a bare `contains` (telemetry's guard had that hole).
+        let live: String = include_str!("../main.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            main.contains("webview_watchdog::arm("),
-            "main.rs must arm the startup watchdog"
+            live.contains("webview_watchdog::arm("),
+            "main.rs must arm the startup watchdog (uncommented)"
         );
         assert!(
-            main.contains("on_page_load"),
+            live.contains("on_page_load"),
             "main.rs must hook page load — the cancel side"
         );
         assert!(
-            main.contains("WEBVIEW_LOADED.store(true"),
+            live.contains("WEBVIEW_LOADED.store(true"),
             "the page-load hook must flip the flag the watchdog reads"
         );
     }
