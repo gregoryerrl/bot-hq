@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { PRIVACY_URL, type TelemetryStatus } from "../lib/telemetry";
@@ -17,6 +17,7 @@ import { RolesPanel } from "./RolesPanel";
 import { ViolationsPanel } from "./ViolationsPanel";
 import { FeedbackPanel } from "./FeedbackPanel";
 import { PromptcodesPanel } from "./PromptcodesPanel";
+import { PresetOfferCard } from "./PresetOfferCard";
 import { PolicyForm } from "../components/PolicyForm";
 import { GatedKeywordList } from "../components/GatedKeywordList";
 import {
@@ -61,14 +62,35 @@ type SettingsSubTab =
  * model card to configure. Roles is the landing tab because it is the surface
  * that replaced it.
  */
+const SUBTABS: readonly SettingsSubTab[] = [
+  "roles",
+  "models",
+  "claude",
+  "toolgate",
+  "policy",
+  "violations",
+  "feedback",
+  "promptcodes",
+  "archive",
+  "updates",
+];
+
 export function Settings() {
-  const [tab, setTab] = useState<SettingsSubTab>("roles");
+  // `?tab=toolgate` deep-links a subtab (the Dashboard's preset-offer banner
+  // uses it — landing a first-run user on Roles when the offer card is on
+  // Tool Gate would be a dead end). Unknown values fall back to the landing
+  // tab.
+  const [params] = useSearchParams();
+  const requested = params.get("tab") as SettingsSubTab | null;
+  const initial: SettingsSubTab =
+    requested && SUBTABS.includes(requested) ? requested : "roles";
+  const [tab, setTab] = useState<SettingsSubTab>(initial);
   // Lazy-mount-then-keep: a panel mounts only once its tab has been visited, then
   // STAYS mounted (CSS `hidden` when inactive) so in-progress edits survive a
   // subtab switch. This skips firing the queries of tabs the user never opens —
   // the old code mounted all 6 panels (and all their queries) on first visit.
   const [visited, setVisited] = useState<Set<SettingsSubTab>>(
-    () => new Set<SettingsSubTab>(["roles"]),
+    () => new Set<SettingsSubTab>([initial]),
   );
   const select = (t: SettingsSubTab) => {
     setTab(t);
@@ -259,6 +281,7 @@ export function Settings() {
 function ToolGatePanel() {
   return (
     <div className="mx-auto h-full max-w-7xl overflow-y-auto overflow-x-hidden px-6 py-6">
+      <PresetOfferCard kind="gates" />
       <ToolGateSection />
     </div>
   );
@@ -289,6 +312,7 @@ function GlobalPolicyPanel() {
 
   return (
     <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
+      <PresetOfferCard kind="policy" />
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
           <h2 className="font-headline-lg text-headline-lg text-on-surface">

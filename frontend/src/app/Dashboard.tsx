@@ -22,6 +22,7 @@ import {
 import { cn } from "../lib/cn";
 import { PARTICIPANT_COLORS } from "../components/authorColor";
 import { RescanIcon, WarnIcon } from "../components/icons";
+import { PresetOfferBanner } from "./PresetOfferCard";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { pickFolder } from "./contextLibraryShared";
@@ -518,6 +519,7 @@ export function Dashboard() {
           + New session
         </Button>
       </div>
+      <PresetOfferBanner />
       {creating && (
         <>
           {/* Scrim — click anywhere outside the dialog to dismiss */}
