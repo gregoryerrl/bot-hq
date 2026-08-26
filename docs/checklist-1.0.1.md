@@ -33,6 +33,24 @@ Release: <https://github.com/gregoryerrl/bot-hq/releases/tag/v1.0.1> ·
 - [ ] Toasts: Settings → Notifications warns if the OS master switch is off (new); test button delivers when it's on.
 - [ ] CL paths render forward-slashed; a pre-1.0.1 DB migrates its `\` keys in place on first boot.
 
+### Windows CI triage data (for the 1.0.2 session — measured on run 32925433684, the workflow's first run)
+The advisory windows job fails **7** lib tests, not the 5 the windows-compat
+handoff measured on the real box. The five known (ConPTY death class,
+handoff §3a):
+- `core::terminal::tests::kill_terminates_long_running_shell`
+- `core::terminal::tests::pty_reader_marks_dead_on_exit`
+- `core::terminal::tests::registry_replaces_dead_terminal_and_kills_on_remove`
+- `core::terminal::tests::wait_settle_returns_output_since_offset`
+- `signaling::bridge::terminal_tools::tests::terminal_exec_blocking_then_read_round_trip`
+
+Plus two GH-runner-only surprises the real box never showed (timing /
+clock-granularity suspected, unmeasured — triage before annotating):
+- `signaling::bridge::tray::tests::ask_user_choice_auto_supersedes_reask_same_prompt`
+- `signaling::bridge::tray::tests::supersede_question_links_old_to_new`
+
+Conversion rule (CHANGELOG Deferred): annotate by these measured names, then
+flip the windows job to required.
+
 ## Fedora re-run (release AppImage + `scripts/install-appimage-linux.sh` — de-bundle is 1.0.2, the script is still the path)
 - [ ] Script installs; window opens (EGL repair).
 - [ ] **Dashboard shows the starter-offers banner**; accepting the gates offer must land the 7 keywords (same `120806f3` proof as Windows).
