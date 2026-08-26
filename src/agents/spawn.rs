@@ -1343,6 +1343,11 @@ mod ensure_claude_runnable_tests {
 fn build_command(cfg: &SpawnConfig) -> Command {
     let bin = cfg.claude_bin.as_deref().unwrap_or("claude");
     let mut cmd = Command::new(bin);
+    // Scrub FIRST, before any env of ours: under an AppImage launch a child
+    // inherits the payload's LD_LIBRARY_PATH and PYTHONHOME, which kills
+    // `git` over HTTPS, `curl` and `python3` in the agent's own shell. A no-op
+    // when bot-hq is not running from a payload. See `appimage_env`.
+    crate::appimage_env::scrub_tokio(&mut cmd);
     cmd.arg("-p")
         .args(["--input-format", "stream-json"])
         .args(["--output-format", "stream-json"])

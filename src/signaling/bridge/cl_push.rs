@@ -53,7 +53,13 @@ impl PushOutcome {
 
 /// Run `git` in the library, returning trimmed stdout on success.
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
+    let mut cmd = Command::new("git");
+    // This git reaches the NETWORK: under an AppImage launch the payload's
+    // libcurl chain makes `git-remote-https` abort with a symbol lookup error
+    // before the transport opens, so the library push fails for a reason that
+    // has nothing to do with git. A no-op off a payload. See `appimage_env`.
+    crate::appimage_env::scrub_std(&mut cmd);
+    let out = cmd
         .arg("-C")
         .arg(root)
         .args(args)

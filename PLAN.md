@@ -78,6 +78,44 @@ bypass. Revisit only on fresh evidence, statement-scoped shape only.
   `include_str!`+`contains` — they catch deletion (the failure that has
   happened) but not comment-out; the stronger form is a `telemetry::install()`
   seam a test calls directly.
+- **Investigate: a `BOT_HQ_DATA_DIR` instance spawned agents pointed at the
+  DEFAULT data dir.** Observed 2026-08-25 while smoke-testing: launching
+  `target/debug/bot-hq` with `BOT_HQ_DATA_DIR=~/.bot-hq-smoke` logged
+  `data dir ready data_dir=/home/pistol/.bot-hq-smoke` — the app's own data dir
+  took — yet the agent subprocesses it spawned carried a tool-gate hook reading
+  `--data-dir "/home/pistol/.bot-hq"` and `--resume` ids belonging to a session
+  living in the DEFAULT dir, i.e. it appeared to resume the other instance's
+  live session. **Not established:** whether hook generation uses a default path
+  rather than the active one, whether first-run seeding copies from the default
+  dir, or whether this was a misreading of process ancestry — the instances were
+  killed immediately rather than investigated, because a live session was in
+  progress. Reproduce on an idle machine before drawing conclusions. If real, it
+  matters: the dev/installed split documented in CLAUDE.md relies on that
+  variable isolating one instance from another.
+- **Ship an RPM so Fedora installs with `sudo dnf install bot-hq`** (user's
+  call, 2026-08-25). This is recommendation 2 of `docs/FEDORA-LINUX-COMPAT.md`
+  promoted to a wanted deliverable: the AppImage needs a repair script on any
+  modern-Mesa host, and its runtime environment then leaks into every child
+  process (fixed at the spawn sites, but the leak is inherent to the format).
+  A distribution package sidesteps both — the graphics stack, the library set
+  and the `PATH`/`LD_LIBRARY_PATH` injection are all the distro's problem, and
+  the desktop entry, icon and launcher come free. A THIRD argument arrived
+  2026-08-25: the repaired payload still aborts in WebKitWebProcess via
+  `__glibcxx_assert_fail`, because it bundles WebKit but no `libstdc++`, so
+  Ubuntu-built C++ meets Fedora's GCC-16 hardened assertions. Unlike the EGL
+  and env-leak defects, that one cannot be patched from this repo at all. Note the packaging tension:
+  the release workflow builds bundles on Ubuntu, so an RPM needs either a
+  Fedora runner or a container step.
+- **`webview_screenshot` should target the window, not its coordinates.** Every
+  region-based backend (macOS `screencapture -R`, Linux `import -crop`, `grim
+  -g`) captures whatever pixels are AT the rectangle, so an overlapping window
+  is captured at exactly the right size and the dimension guard added
+  2026-08-25 cannot see it — that guard covers wrong geometry, never wrong
+  content. Occlusion is mitigated only by a best-effort `set_focus()` that
+  compositors routinely refuse. The fix is direct window targeting (`import
+  -window <id>`, the form used by hand during the Fedora session and stronger
+  than the shipped one); X11-only, so Wayland still needs the portal path.
+  Pre-existing since 1.0.0, not a regression.
 - Role prose view-diff / reset-to-default affordance (promised in the 1.0.0
   release notes as planned).
 - macOS auto-install / signing remain user-deferred (see the release section
