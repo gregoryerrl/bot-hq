@@ -198,6 +198,11 @@ fn main() -> Result<()> {
             // Opt-in diagnostics: seed the enabled atomic, queue this boot's
             // app_launch, start the flusher loop. Spawned — never blocks boot.
             bot_hq::core::telemetry::start(storage.clone(), paths.local_dir.clone());
+            // Fail-loud startup watchdog (1.0.1 Batch 5): if no page ever
+            // finishes loading, say so on stderr + log + diagnostics instead
+            // of sitting alive and silent (the Fedora 1.0.0 failure mode).
+            // Cancelled by the Builder's on_page_load hook below.
+            bot_hq::core::webview_watchdog::arm(paths.local_dir.clone());
             // One-time starter offers (1.0.1): installs that predate 0077 but
             // never wrote a config file still get the offer — key absent AND
             // file absent. Spawned; never blocks boot.
@@ -371,6 +376,14 @@ fn main() -> Result<()> {
         // frontend owns the policy (useOsNotifications); permission is
         // requested lazily at the first real send.
         .plugin(tauri_plugin_notification::init())
+        // Cancel side of the fail-loud startup watchdog (Batch 5): the first
+        // FINISHED page load proves the webview came up, so the 30s timer in
+        // `webview_watchdog::arm` emits nothing on a merely-slow machine.
+        .on_page_load(|_, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                bot_hq::core::webview_watchdog::WEBVIEW_LOADED.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        })
         // Plugin-bundle serving: `bhq-plugin://<id>/<path>` resolves to
         // `<data_dir>/plugins/<id>/<path>` for INSTALLED + ENABLED plugins
         // only. Registered once at Builder time — install/enable needs no

@@ -18,6 +18,7 @@ pub mod session;
 pub mod state;
 pub mod telemetry;
 pub mod terminal;
+pub mod webview_watchdog;
 pub mod updates;
 pub mod watchdog;
 pub mod worktree;
