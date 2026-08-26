@@ -20,7 +20,7 @@
 #
 # Plain `cargo test` on Windows still crashes the lib harness - use this script.
 # A seamless single-manifest approach (tauri-build WindowsAttributes) is the
-# tracked follow-up; see PROGRESS.md.
+# tracked follow-up; see CHANGELOG.md's deferred list.
 #
 # MEASURE WINDOWS BEHAVIOUR FROM POWERSHELL, NOT GIT BASH. A Git Bash shell puts
 # Git-for-Windows' usr/bin on PATH, which makes `sh` and the MSYS coreutils

@@ -31,9 +31,8 @@ Refs: <https://tauri.app/distribute/sign/macos/>
 
 Unsigned `.exe` installers trigger SmartScreen "unknown publisher" (users click
 *More info → Run anyway*). An OV/EV code-signing certificate removes the
-warning. Windows builds are deferred today (un-`cfg`-gated unix-only code; see
-[PLAN.md](../PLAN.md)); wire signing in when the Windows target returns to the
-release matrix.
+warning. Windows builds ship since 1.0.0 (NSIS `.exe`); signing them is
+still unwired — see CHANGELOG.md's deferred list.
 
 ## Full auto-update (future)
 

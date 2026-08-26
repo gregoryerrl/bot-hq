@@ -16,7 +16,8 @@
 //! `http://127.0.0.1:<port>/sessions/<session_id>/<agent>/mcp` so the bridge
 //! can attribute tool calls to the right (session, agent).
 //!
-//! **Autonomous decision** (logged in PROGRESS.md): we deviate from
+//! **Autonomous decision** (recorded 2026-05 in the then-changelog; git
+//! history carries it): we deviate from
 //! `docs/decisions.md#mcp-server`'s stdio + UDS-bridge sketch. HTTP in-process
 //! is simpler — no re-exec, no IPC framing, direct AppState access. The
 //! decision doc itself flagged HTTP as the "promote if IPC gets hairy" fallback.

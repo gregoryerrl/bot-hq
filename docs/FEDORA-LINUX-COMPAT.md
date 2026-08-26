@@ -450,7 +450,7 @@ speculative, each item maps to a failure above:
 
 - **Ship a distribution package** (`.rpm` alongside the `.deb`) so the graphics
   stack, the library set and the environment are the distribution's problem
-  rather than the payload's. Tracked on PLAN.md's 1.0.1 shortlist at the user's
+  rather than the payload's. Tracked on CHANGELOG.md's Deferred-to-1.0.2 list at the user's
   request. This alone removes failures 1, 2 and 3.
 - **Stop bundling client libraries that must track the host** —
   `libwayland-*`, `libepoxy` — which is item 1 of the original follow-up list
@@ -529,7 +529,8 @@ all — measured on the same machine:
 | built from source here | host `/lib64` | host `/lib64` |
 
 A from-source build links one consistent set and has run without this crash.
-That is the third independent argument for shipping an RPM (PLAN.md): the
+That is the third independent argument for shipping an RPM (CHANGELOG.md,
+Deferred-to-1.0.2): the
 distribution resolves the graphics stack, the environment injection **and** the
 C++ runtime as one coherent set, and none of the three can be patched after the
 fact from inside this repo.

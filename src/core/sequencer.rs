@@ -3962,8 +3962,8 @@ pub enum TurnEnding {
     /// variant exists. Before it, a participant with nothing to say had two
     /// endings available and both were wrong: vote done — which feeds the tally
     /// and walks the session toward an arrival nobody actually reached — or
-    /// emit filler. The filler cost is on the record in `PROGRESS.md`
-    /// (2026-08-04): a reviewer woken with nothing attached answered `"Old plan
+    /// emit filler. The filler cost is on the record from 2026-08-04 (in the
+    /// retired PROGRESS.md; git history keeps it): a reviewer woken with nothing attached answered `"Old plan
     /// — holding for Brian's plan"`, 40 chars, and each such turn burned a slot
     /// of the volley budget that was already being exhausted before substantive
     /// reviews could get through. A pass is the third ending: it steps the
