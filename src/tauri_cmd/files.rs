@@ -40,15 +40,20 @@ fn is_image_ext(ext: &str) -> bool {
     matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp")
 }
 
-/// Roots a viewer read may touch: the session's own repo, plus the temp
-/// directories where agents stage gate bodies.
+/// Roots a viewer read may touch: the session's own repo, the temp
+/// directories where agents stage gate bodies, plus the Context Library.
 ///
 /// Both `/tmp` AND `std::env::temp_dir()` are included on purpose. On macOS
 /// `temp_dir()` is `$TMPDIR` (`/var/folders/…`), which does NOT contain `/tmp`
 /// — and agents write gate bodies to a literal `/tmp/...` (every `--body-file`
 /// in the archive does). Including only one of the two would reject exactly the
 /// files this feature exists to show.
-fn allowed_roots(repo: Option<&str>) -> Vec<PathBuf> {
+///
+/// The library root is read-viewable because agents cite CL paths in chat
+/// constantly and the same content is already user-visible in the CL tab; its
+/// dotted entries stay refused (see [`hidden_under`]) so `library/.git` —
+/// which holds the private CL remote URL — never reaches the UI.
+fn allowed_roots(repo: Option<&str>, library: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(r) = repo {
         if let Ok(c) = Path::new(r).canonicalize() {
@@ -62,7 +67,30 @@ fn allowed_roots(repo: Option<&str>) -> Vec<PathBuf> {
             }
         }
     }
+    if let Some(lib) = library {
+        if let Ok(c) = lib.canonicalize() {
+            if !roots.contains(&c) {
+                roots.push(c);
+            }
+        }
+    }
     roots
+}
+
+/// True when `candidate` sits under `root` AND some component BELOW the root
+/// starts with a dot. The root itself is typically `~/.bot-hq/library` — a
+/// dotted path — so the check must strip the root first or it would refuse
+/// every library file on a default install.
+fn hidden_under(root: &Path, candidate: &Path) -> bool {
+    candidate
+        .strip_prefix(root)
+        .map(|rel| {
+            rel.components().any(|c| {
+                matches!(c, std::path::Component::Normal(n)
+                    if n.to_string_lossy().starts_with('.'))
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// True when `candidate` (already canonical) sits inside one of `roots`.
@@ -99,6 +127,20 @@ fn refuse_if_oversize(path: &str, bytes: u64) -> Result<(), AppError> {
 /// Absolute paths pass through; with no repo on the session, so does a
 /// relative one (and containment then decides).
 fn resolve_requested_path(path: &str, repo: Option<&str>) -> PathBuf {
+    // Expand a leading `~` FIRST: agents cite home-rooted paths in chat as
+    // `~/...`, and `Path::is_relative` is true for those — without this they
+    // fall into the repo-join below and ENOENT as `<repo>/~/...`, with an
+    // error message that still shows the tilde the user can see is valid.
+    // `paths::home_dir()` (not `$HOME`) — the portable_home guard test fails
+    // any direct env read, because `HOME` is unset on Windows.
+    if let Ok(home) = crate::paths::home_dir() {
+        if path == "~" {
+            return home;
+        }
+        if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+            return home.join(rest);
+        }
+    }
     let p = Path::new(path);
     match repo {
         Some(r) if p.is_relative() => Path::new(r).join(p),
@@ -122,17 +164,22 @@ pub async fn read_workspace_file(
         .ok()
         .flatten()
         .and_then(|s| s.working_repo_path);
+    let library = core.paths.cl_dir.clone();
     // Everything below is filesystem work — canonicalize, stat, and a read of
     // up to `MAX_VIEWABLE_BYTES` — so it runs off the reactor, like its
     // sibling `cl_read_file_inner` (round 9: it ran on the 2-worker reactor).
-    tokio::task::spawn_blocking(move || read_workspace_file_blocking(repo, &path))
+    tokio::task::spawn_blocking(move || read_workspace_file_blocking(repo, &path, Some(&library)))
         .await
         .map_err(|e| AppError::Internal(format!("read task failed: {e}")))?
 }
 
-fn read_workspace_file_blocking(repo: Option<String>, path: &str) -> Result<WorkspaceFile, AppError> {
+fn read_workspace_file_blocking(
+    repo: Option<String>,
+    path: &str,
+    library: Option<&Path>,
+) -> Result<WorkspaceFile, AppError> {
     let path = path.to_string();
-    let roots = allowed_roots(repo.as_deref());
+    let roots = allowed_roots(repo.as_deref(), library);
 
     // Canonicalize FIRST — this both resolves `..`/symlinks and proves the file
     // exists. A non-existent path can't be canonicalized, so "missing" and
@@ -145,6 +192,19 @@ fn read_workspace_file_blocking(repo: Option<String>, path: &str) -> Result<Work
             "refused: {} is outside this session's workspace and temp dirs",
             canonical.display()
         )));
+    }
+    // The library root is viewer-readable, but its dotted entries are not:
+    // `library/.git/config` carries the private CL remote URL (possibly
+    // credentialed) and must not become UI-readable via a chat click.
+    if let Some(lib) = library {
+        if let Ok(lib_canon) = lib.canonicalize() {
+            if hidden_under(&lib_canon, &canonical) {
+                return Err(AppError::Unauthorized(format!(
+                    "refused: {} is a dotted entry under the library",
+                    canonical.display()
+                )));
+            }
+        }
     }
 
     let meta = std::fs::metadata(&canonical)
@@ -268,7 +328,7 @@ mod tests {
         // works on what was just pasted — and a hostile session id cannot
         // steer it anywhere else.
         let p = pasted_file_path("s-abc123", "png");
-        let roots = allowed_roots(None);
+        let roots = allowed_roots(None, None);
         let parent = p.parent().unwrap();
         std::fs::create_dir_all(parent).unwrap();
         let canon_parent = parent.canonicalize().unwrap();
@@ -438,7 +498,7 @@ mod tests {
     fn tmp_is_a_root_even_where_temp_dir_differs() {
         // macOS: temp_dir() is $TMPDIR (/var/folders/…) and does NOT cover
         // /tmp, but agents stage gate bodies at a literal /tmp path.
-        let roots = allowed_roots(None);
+        let roots = allowed_roots(None, None);
         let tmp = Path::new("/tmp");
         if let Ok(tmp_c) = tmp.canonicalize() {
             assert!(
@@ -497,5 +557,70 @@ mod tests {
             refuse_if_oversize("edge.bin", std::fs::metadata(&edge).unwrap().len()).is_ok(),
             "a file of exactly MAX_VIEWABLE_BYTES must still be viewable"
         );
+    }
+
+    #[test]
+    fn tilde_paths_expand_to_home_not_the_repo() {
+        // The user-reported failure: `~/.bot-hq/library/...` clicked in chat
+        // died as `<repo>/~/...` because `~` is "relative" to Path. A repo
+        // being set must not change where a tilde path lands.
+        let home = crate::paths::home_dir().unwrap();
+        assert_eq!(
+            resolve_requested_path("~/x.md", Some("/some/repo")),
+            home.join("x.md"),
+            "a tilde path must never be repo-joined"
+        );
+        assert_eq!(resolve_requested_path("~/x.md", None), home.join("x.md"));
+        assert_eq!(resolve_requested_path("~", None), home);
+        // A mid-path tilde is NOT a home reference — leave it alone.
+        assert_eq!(
+            resolve_requested_path("a/~/b.md", Some("/r")),
+            Path::new("/r").join("a/~/b.md")
+        );
+    }
+
+    #[test]
+    fn library_files_are_viewable_but_dotted_entries_are_not() {
+        let lib = tempfile::tempdir().unwrap();
+        // A normal CL file reads fine through the library root...
+        let proj = lib.path().join("projects/demo");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("notes.md"), "cl body").unwrap();
+        let got = read_workspace_file_blocking(
+            None,
+            proj.join("notes.md").to_str().unwrap(),
+            Some(lib.path()),
+        )
+        .expect("a library file must be viewable");
+        assert_eq!(got.text.as_deref(), Some("cl body"));
+
+        // ...but `.git/config` under the same root is refused: it carries the
+        // private CL remote URL, possibly credentialed.
+        let git = lib.path().join(".git");
+        std::fs::create_dir_all(&git).unwrap();
+        std::fs::write(git.join("config"), "[remote]\nurl = secret").unwrap();
+        let err = read_workspace_file_blocking(
+            None,
+            git.join("config").to_str().unwrap(),
+            Some(lib.path()),
+        )
+        .expect_err("library/.git must not be UI-readable");
+        assert!(
+            matches!(err, AppError::Unauthorized(ref m) if m.contains("dotted entry")),
+            "wrong refusal: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_dotted_guard_strips_the_root_first() {
+        // The library root itself is `~/.bot-hq/library` — dotted. The guard
+        // must only look BELOW the root, or every CL file on a default
+        // install is refused.
+        let root = Path::new("/home/u/.bot-hq/library");
+        assert!(!hidden_under(root, &root.join("projects/p/notes.md")));
+        assert!(hidden_under(root, &root.join(".git/config")));
+        assert!(hidden_under(root, &root.join("projects/.hidden/x.md")));
+        // Outside the root entirely: not this guard's call.
+        assert!(!hidden_under(root, Path::new("/etc/passwd")));
     }
 }
