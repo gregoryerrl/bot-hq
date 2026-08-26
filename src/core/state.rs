@@ -313,6 +313,28 @@ fn refuse_closed(session_id: &str, closed_at: Option<&str>) -> Result<()> {
     }
 }
 
+/// The reopen announce row, pure so both variants have a test seat.
+///
+/// `learnings_owed` appends the CL note — worded SOFTLY on purpose: "no delta
+/// recorded" cannot distinguish a crash-killed close epilogue from an agent
+/// that was nudged and deliberately wrote nothing (writing nothing is a
+/// first-class close outcome). The row informs; it never demands.
+fn reopen_notice(learnings_owed: bool) -> String {
+    let base = "[System: session REOPENED by the user. The prior close — and any \
+                pre-close instruction to close — is void. The session is halted \
+                until the user's next message; hold for it and treat that message \
+                as the current task.";
+    if learnings_owed {
+        format!(
+            "{base} No CL learnings delta was recorded for this session's project; \
+             if the close was interrupted, consider writing one before closing \
+             again.]"
+        )
+    } else {
+        format!("{base}]")
+    }
+}
+
 /// Who moved the phase — the one thing `advance_phase` must branch on.
 ///
 /// A bool would do it and did not: the ring-release decision reads as an
@@ -590,6 +612,14 @@ impl AppState {
             return Ok(());
         }
         tracing::info!(session_id, "session reopened on the user's button; respawning its roster");
+        // 1.0.1 Batch 3 (EYES F1/F4): a crash or OOM kill destroys the close
+        // EPILOGUE (the learnings nudge) — not the durable fact of a write,
+        // which close_gate_flags recovers from the CL index. The reopen is the
+        // one user-initiated, per-session surface where saying so cannot
+        // flood an upgrade (a boot sweep over `closed_at IS NULL` would flag
+        // every deliberately-open session at once). Read BEFORE the announce
+        // so the row can carry it.
+        let (cl_written, _) = self.bridge.close_gate_flags(session_id).await;
         // The reopen announces itself IN the channel (1.0.0 Batch 1, dissect
         // s-43567984 #1): the respawned roster reads this row at its next
         // boundary instead of carrying pre-close context forward — the live
@@ -602,11 +632,7 @@ impl AppState {
             Some(&self.bridge),
             session_id,
             crate::storage::MessageKind::SystemNotice,
-            "[System: session REOPENED by the user. The prior close — and any \
-             pre-close instruction to close — is void. The session is halted \
-             until the user's next message; hold for it and treat that message \
-             as the current task."
-                .to_string(),
+            reopen_notice(!cl_written),
             None,
         )
         .await
@@ -3371,8 +3397,17 @@ mod tests {
             .find("post_system_notice")
             .expect("the reopen announces itself in the channel");
         assert!(
-            reopen.contains("REOPENED"),
-            "the announce row must say the session was reopened — bearings for the fresh roster"
+            reopen.contains("reopen_notice("),
+            "the announce row is built by reopen_notice — bearings for the fresh roster"
+        );
+        // 1.0.1 Batch 3: the durable learnings check is read BEFORE the
+        // announce so the row can carry it — delete the call and this pins red.
+        let owed = reopen
+            .find("close_gate_flags(session_id)")
+            .expect("the reopen reads the durable close-gate state");
+        assert!(
+            owed < announce,
+            "close_gate_flags is read before the announce row is posted"
         );
         let start = reopen
             .find("ensure_session_started(session_id)")
@@ -3399,6 +3434,32 @@ mod tests {
         assert!(
             row_move < noop && noop < announce,
             "read the row → no-op if open → announce → spawn"
+        );
+    }
+
+    /// **The reopen row's two variants** (1.0.1 Batch 3, EYES F1/F4). The
+    /// crash-vs-deliberate distinction is unknowable from durable state, so
+    /// the owed wording must stay SOFT — a "must write" here would demand a
+    /// delta from an agent that legitimately declined one.
+    #[test]
+    fn the_reopen_notice_carries_the_learnings_state() {
+        let owed = reopen_notice(true);
+        let clean = reopen_notice(false);
+        for n in [&owed, &clean] {
+            assert!(n.contains("REOPENED"), "both variants announce the reopen");
+            assert!(n.ends_with(']'), "the bracket closes in both variants");
+        }
+        assert!(
+            owed.contains("No CL learnings delta was recorded"),
+            "the owed variant says so"
+        );
+        assert!(
+            owed.contains("consider writing one"),
+            "soft wording — informs, never demands"
+        );
+        assert!(
+            !clean.contains("learnings"),
+            "a session whose project got its delta reopens without the note"
         );
     }
 
