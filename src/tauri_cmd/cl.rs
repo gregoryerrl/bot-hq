@@ -621,7 +621,8 @@ fn validate_project_name(name: &str) -> Result<(), AppError> {
 /// Create a NEW Context Library project at the default managed location
 /// (`<data_dir>/library/projects/<name>/`). Unlike [`cl_register_project`] this
 /// NEVER sets `cl_path` and NEVER indexes an external folder — it makes the
-/// convention dir, seeds starter `conventions.md` + `notes.md` (if absent), and
+/// convention dir, seeds starter `conventions.md` + `notes.md` +
+/// `decisions.md` (each only if absent), and
 /// rescans just that dir. `working_repo_path` only binds the repo sessions run
 /// in; it is NOT scanned. This is the common "add a project" flow.
 #[tauri::command]
@@ -658,14 +659,37 @@ pub async fn cl_create_project(
     // best-effort: a failed write is logged, not fatal (the project row + dir
     // already exist), so the user gets a signal instead of a silent empty project.
     let seed_name = name.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        std::fs::create_dir_all(&root)
+    tokio::task::spawn_blocking(move || seed_project_starters(&root, &seed_name))
+        .await
+        .map_err(|e| AppError::Internal(format!("seed project task panicked: {e}")))??;
+
+    bridge.cl_rescan(&name).await?;
+    emit_project_and_cl_changed(&app, &name);
+    Ok(())
+}
+
+/// The starter files a NEW managed project is born with. Split from
+/// [`cl_create_project`] so a unit test can pin the set — the command itself
+/// takes `tauri::State` and is unreachable from tests.
+fn seed_project_starters(root: &std::path::Path, seed_name: &str) -> Result<(), AppError> {
+    {
+        std::fs::create_dir_all(root)
             .map_err(|e| AppError::Internal(format!("create project dir: {e}")))?;
+        // Structured stubs (1.0.1): headings prompt useful filling — agents
+        // and the user both orient faster from a section skeleton than from a
+        // one-line "edit me". decisions.md joins the seed because the agent
+        // prompts name it as a conventional per-project file; without a seed,
+        // fresh installs are told about a file that doesn't exist.
         let conventions = root.join("conventions.md");
         if !conventions.exists() {
             if let Err(e) = std::fs::write(
                 &conventions,
-                format!("# {seed_name} — conventions\n\n_(Repo, stack, build/test commands, gates, house rules. Edit me.)_\n"),
+                format!(
+                    "# {seed_name} — conventions\n\n\
+                     ## Repo & stack\n\n_(Where the code lives, language, framework.)_\n\n\
+                     ## Commands & gates\n\n_(Build, test, lint — what must pass before a commit.)_\n\n\
+                     ## House rules\n\n_(Commit style, branch naming, anything agents must follow.)_\n"
+                ),
             ) {
                 tracing::warn!(?e, project = %seed_name, "failed to seed conventions.md");
             }
@@ -674,19 +698,29 @@ pub async fn cl_create_project(
         if !notes.exists() {
             if let Err(e) = std::fs::write(
                 &notes,
-                format!("# {seed_name} — notes\n\n_(Durable, non-obvious learnings — gotchas, where-things-live. Edit me.)_\n"),
+                format!(
+                    "# {seed_name} — notes\n\n\
+                     ## Gotchas\n\n_(Non-obvious behavior that costs time to rediscover.)_\n\n\
+                     ## Where things live\n\n_(Feature → the 2-3 files that implement it.)_\n"
+                ),
             ) {
                 tracing::warn!(?e, project = %seed_name, "failed to seed notes.md");
             }
         }
+        let decisions = root.join("decisions.md");
+        if !decisions.exists() {
+            if let Err(e) = std::fs::write(
+                &decisions,
+                format!(
+                    "# {seed_name} — decisions log\n\n\
+                     _(Append-only: date + what was decided + why. Never rewrite history.)_\n"
+                ),
+            ) {
+                tracing::warn!(?e, project = %seed_name, "failed to seed decisions.md");
+            }
+        }
         Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("seed project task panicked: {e}")))??;
-
-    bridge.cl_rescan(&name).await?;
-    emit_project_and_cl_changed(&app, &name);
-    Ok(())
+    }
 }
 
 /// Hard-delete a project: purges the `projects` row + all child CL rows
@@ -1131,5 +1165,32 @@ mod tests {
         assert!(!root.join("renamed.md").exists());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_new_project_is_born_with_three_structured_starters() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects/demo");
+        seed_project_starters(&root, "demo").unwrap();
+        for f in ["conventions.md", "notes.md", "decisions.md"] {
+            assert!(root.join(f).exists(), "{f} must be seeded");
+        }
+        // Structure, not just existence — the headings are what prompt
+        // useful filling.
+        let conv = std::fs::read_to_string(root.join("conventions.md")).unwrap();
+        assert!(conv.contains("## Commands & gates"));
+        let notes = std::fs::read_to_string(root.join("notes.md")).unwrap();
+        assert!(notes.contains("## Where things live"));
+        let dec = std::fs::read_to_string(root.join("decisions.md")).unwrap();
+        assert!(dec.contains("Append-only"));
+
+        // If-absent: a user's existing file survives a re-seed byte-identical.
+        std::fs::write(root.join("notes.md"), "mine").unwrap();
+        seed_project_starters(&root, "demo").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.md")).unwrap(),
+            "mine",
+            "an existing file must never be re-seeded"
+        );
     }
 }
