@@ -611,3 +611,54 @@ describe("default effort (no-inherit, 2026-08-25)", () => {
     );
   });
 });
+
+describe("shipped default (1.0.1 view-diff / reset)", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  /** `mockBackend` plus a shipped default for every slug the panel asks about. */
+  function mockBackendWithDefault(roles: RoleView[], shipped: string) {
+    mockBackend(roles);
+    const base = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation(async (cmd, args, opts) =>
+      cmd === "get_role_default_prose" ? shipped : base!(cmd, args, opts),
+    );
+  }
+
+  const SHIPPED = "You are the hands.\nShip small, verified changes.";
+
+  it("reads prose that differs from the default only by line endings as a match", async () => {
+    // What every Windows install upgraded from a build through 1.0.0 held
+    // until migration 0078: the shipped prose, CRLF. Endings are not content
+    // — no "Differs", no Reset, no whole-file diff.
+    mockBackendWithDefault(
+      [role({ description_prompt: SHIPPED.replace(/\n/g, "\r\n") })],
+      SHIPPED,
+    );
+    renderPanel();
+
+    expect(
+      await screen.findByText("Matches the shipped default."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Differs from the shipped default.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reset to default" })).toBeNull();
+  });
+
+  it("still reports a real edit, and the diff carries only the edited line", async () => {
+    mockBackendWithDefault(
+      [role({ description_prompt: "You are the hands.\r\nShip big.\r\n" })],
+      SHIPPED + "\n",
+    );
+    renderPanel();
+
+    expect(
+      await screen.findByText("Differs from the shipped default."),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "View diff" }));
+    const diff = screen.getByLabelText("Diff vs shipped default");
+    expect(diff.textContent).toContain("- Ship small, verified changes.");
+    expect(diff.textContent).toContain("+ Ship big.");
+    // The unchanged first line is neither removed nor added — CRLF or not.
+    expect(diff.textContent).not.toContain("- You are the hands.");
+    expect(diff.textContent).not.toContain("+ You are the hands.");
+  });
+});

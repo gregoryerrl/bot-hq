@@ -3915,6 +3915,89 @@ mod tests {
         );
     }
 
+    /// `0078_role_prose_line_endings.sql`'s single UPDATE, read out of the
+    /// migration so the test cannot drift from what ran.
+    fn role_prose_line_endings_statement() -> String {
+        let sql = lf(include_str!("../../migrations/0078_role_prose_line_endings.sql"));
+        let start = sql.find("UPDATE").expect("0078 lost its UPDATE");
+        sql[start..].trim_end().to_string()
+    }
+
+    /// **Migration 0078: CRLF role prose comes back to LF, byte-for-byte, and
+    /// nothing else moves.** Every Windows build through 1.0.0 embedded the
+    /// reseed migrations CRLF — the prose is a literal INSIDE the .sql — so
+    /// `roles.description_prompt` on every upgraded install was the seed with
+    /// `\n` → `\r\n` (measured: hands 11918 bytes / 72 CR against the
+    /// 11846-byte LF seed). That never equals the LF `PRESET_*_ROLE` the Roles
+    /// tab compares against, and a byte-exact reseed guard skips it.
+    ///
+    /// In the TEST world the pair is installed by `install_role_preset()` from
+    /// the `PRESET_*_ROLE` constants — LF on every build because rustc
+    /// normalises source literals; no migration literal reaches this row (0072
+    /// deleted the seeded pair on a fresh DB, so 0075's reseed matched
+    /// nothing). That is why the CRLF is injected here on purpose — the
+    /// fixture is the `\r\n`, not the tree's endings (see
+    /// `reseed_statement_survives_crlf_input`). MIGRATOR coverage is pinned by
+    /// `migration_checksum_*` in `mod.rs`, not here. Pinned: the rewritten row
+    /// equals the LF original; `updated_at` does not move (not a user edit);
+    /// a row already LF — eyes throughout, hands on the second run — and the
+    /// NULL-prose `agent` row are not matched at all.
+    #[tokio::test]
+    async fn the_0078_role_prose_line_endings_fold_restores_lf_without_a_fake_edit() {
+        async fn hands_row(s: &Storage) -> (String, String) {
+            sqlx::query_as("SELECT description_prompt, updated_at FROM roles WHERE slug = 'hands'")
+                .fetch_one(s.pool())
+                .await
+                .unwrap()
+        }
+
+        let s = storage_with_0044().await;
+        let original = s
+            .role_by_slug("hands")
+            .await
+            .unwrap()
+            .unwrap()
+            .description_prompt
+            .expect("hands prose seeded");
+        assert!(
+            !original.contains('\r'),
+            "the fixture starts LF (installed from the rustc-normalised PRESET constant)"
+        );
+        assert!(original.contains('\n'), "the fixture needs a line break to convert");
+        let eyes_before = s.role_by_slug("eyes").await.unwrap().unwrap().description_prompt;
+
+        // The ≤ 1.0.0 Windows shape, on a stamp that is not `now` so a bump
+        // would be visible.
+        let crlf = original.replace('\n', "\r\n");
+        let stamp = "2026-01-01 00:00:00";
+        sqlx::query("UPDATE roles SET description_prompt = ?, updated_at = ? WHERE slug = 'hands'")
+            .bind(&crlf)
+            .bind(stamp)
+            .execute(s.pool())
+            .await
+            .unwrap();
+        assert_eq!(hands_row(&s).await, (crlf.clone(), stamp.to_string()));
+
+        let stmt = role_prose_line_endings_statement();
+        let first = sqlx::query(&stmt).execute(s.pool()).await.unwrap();
+        assert_eq!(first.rows_affected(), 1, "exactly the CRLF row is rewritten");
+        assert_eq!(
+            hands_row(&s).await,
+            (original.clone(), stamp.to_string()),
+            "hands must come back byte-identical to the LF seed, updated_at untouched"
+        );
+        assert_eq!(
+            s.role_by_slug("eyes").await.unwrap().unwrap().description_prompt,
+            eyes_before,
+            "an already-LF row is not touched"
+        );
+
+        // Idempotent: a second run matches nothing and changes nothing.
+        let second = sqlx::query(&stmt).execute(s.pool()).await.unwrap();
+        assert_eq!(second.rows_affected(), 0, "an LF row is not matched");
+        assert_eq!(hands_row(&s).await, (original, stamp.to_string()));
+    }
+
     /// **The guard on migration 0049, both directions.**
     ///
     /// 0049 re-seeds both roles' prose because rc3 D10 took the agent names out

@@ -1,14 +1,22 @@
 /**
  * Minimal LCS line diff for the Roles tab's prose-vs-shipped-default view.
  * `lineDiff(from, to)`: `del` lines exist only in `from`, `add` only in `to`.
+ * Lines split on `\n` or `\r\n`, so line endings alone never show as a
+ * difference (the Windows builds through 1.0.0 stored CRLF prose against an
+ * LF default — a whole-file diff over nothing).
  * Prose-sized inputs only (hundreds of lines) — the table is O(n·m); don't
  * point it at megabyte bodies.
  */
 export type DiffLine = { kind: "same" | "add" | "del"; text: string };
 
+/** CRLF and bare CR folded to LF — both sides of a prose comparison want it. */
+export function normalizeLineEndings(s: string): string {
+  return s.replace(/\r\n?/g, "\n");
+}
+
 export function lineDiff(from: string, to: string): DiffLine[] {
-  const a = from.split("\n");
-  const b = to.split("\n");
+  const a = from.split(/\r?\n/);
+  const b = to.split(/\r?\n/);
   const n = a.length;
   const m = b.length;
   // dp[i][j] = LCS length of a[i..] vs b[j..]

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
-import { lineDiff } from "../lib/lineDiff";
+import { lineDiff, normalizeLineEndings } from "../lib/lineDiff";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { cn } from "../lib/cn";
@@ -431,8 +431,17 @@ function RoleForm({
     { enabled: !!role },
   );
   const [showDefaultDiff, setShowDefaultDiff] = useState(false);
-  const prose = draft.description_prompt ?? "";
-  const differsFromDefault = defaultProse != null && prose !== defaultProse;
+  // Both sides LF before the comparison and the diff. Line endings are not
+  // content: the Windows builds through 1.0.0 stored the shipped prose with
+  // CRLF while the default is LF, so every untouched pair read as "differs",
+  // with a diff of every line and a Reset that rewrote it all. Migration 0078
+  // folded those rows back to LF; this keeps endings alone from ever reading
+  // as a difference again, whatever the store holds.
+  const proseLf = normalizeLineEndings(draft.description_prompt ?? "");
+  const defaultProseLf =
+    defaultProse == null ? null : normalizeLineEndings(defaultProse);
+  const differsFromDefault =
+    defaultProseLf != null && proseLf !== defaultProseLf;
 
   // Slugs the checklist knows about. Anything on the role that is NOT in here
   // is shown separately rather than as a silent omission — see below.
@@ -710,7 +719,7 @@ function RoleForm({
           promise, shipped 1.0.1). Only the example pair has a default —
           every other slug gets null and this block never renders. Reset
           fills the DRAFT; the user still saves, so nothing moves silently. */}
-      {defaultProse != null && (
+      {defaultProseLf != null && (
         <div className="-mt-2">
           {differsFromDefault ? (
             <div className="flex flex-wrap items-center gap-2">
@@ -726,7 +735,7 @@ function RoleForm({
               <Button
                 variant="ghost"
                 onClick={() => {
-                  setDraft({ ...draft, description_prompt: defaultProse });
+                  setDraft({ ...draft, description_prompt: defaultProseLf });
                   setShowDefaultDiff(false);
                 }}
               >
@@ -743,7 +752,7 @@ function RoleForm({
               aria-label="Diff vs shipped default"
               className="mt-2 max-h-80 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words rounded border border-outline-variant bg-surface-container-lowest p-2 font-code-sm text-code-sm leading-relaxed"
             >
-              {lineDiff(defaultProse, prose).map((l, i) => (
+              {lineDiff(defaultProseLf, proseLf).map((l, i) => (
                 <div
                   key={i}
                   className={
