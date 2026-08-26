@@ -4,9 +4,9 @@ This is the single source of truth for what bot-hq IS right now. It
 describes the running system, not the original rebuild design — that
 lives at [`docs/rebuild-archive/ARCHITECTURE-rebuild-era.md`](docs/rebuild-archive/ARCHITECTURE-rebuild-era.md).
 
-For user-facing setup see [`README.md`](README.md). For planned work
-see [`PLAN.md`](PLAN.md). For recent change log see
-[`PROGRESS.md`](PROGRESS.md). For WHERE things live — the codebase split
+For user-facing setup see [`README.md`](README.md). For what changed
+per release (and what's deferred) see [`CHANGELOG.md`](CHANGELOG.md).
+For WHERE things live — the codebase split
 into areas with files, entry points, seams and tests — see
 [`CODEBASE.md`](CODEBASE.md) (this file says what bot-hq does; that one
 says where).
@@ -404,7 +404,7 @@ tree/editor, the Apply-tab `git diff`, and the project/session/model lists refre
 external change without polling — the 60s `refetchInterval`s were dropped; only the
 plugin heartbeat (10s) + a broadcast-`Lagged` `session:resync` backstop remain. Working-
 repo churn is filtered by an ignore-list (`target`/`node_modules`/`.git`/dotdirs) so
-builds don't thrash the A-tab diff. (Shipped 2026-06-15; see PROGRESS.md.)
+builds don't thrash the A-tab diff. (Shipped 2026-06-15.)
 
 **Topbar:** `Dashboard | Context Library | Plugins | Settings`.
 

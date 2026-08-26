@@ -24,7 +24,7 @@
 //! exactly the right size. [`plausible_capture`] therefore catches wrong
 //! GEOMETRY and never wrong CONTENT; occlusion is mitigated solely by the
 //! raise. The durable fix is to target the window directly (`import -window
-//! <id>`), which is tracked in PLAN.md rather than half-done here.
+//! <id>`), tracked on the changelog's deferred list rather than half-done here.
 //!
 //! The window geometry is Tauri's (physical pixels ÷ scale factor —
 //! Retina-safe). The PNG lands under `<data_dir>/.local/screenshots/<ts>.png`;
@@ -204,7 +204,7 @@ pub(crate) fn linux_captures(
         // Kept because the root grab is correct on a real X11 session, ordered
         // after Spectacle, and the fall-through means its failure no longer
         // ends the attempt. The window-id form needs an XID the code does not
-        // have; PLAN.md tracks that, and it would fix occlusion too.
+        // have; the changelog's deferred list tracks that, and it would fix occlusion too.
         all.push(Capture::new(
             "import",
             &[

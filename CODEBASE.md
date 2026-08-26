@@ -8,8 +8,8 @@ where a change is most likely to break something and where a test must pin), its
 tests, and recipes for the common "where do I add X" questions.
 
 **What this is not.** It does not describe behaviour — [`ARCHITECTURE.md`](ARCHITECTURE.md)
-does that (what bot-hq IS), [`PLAN.md`](PLAN.md) says what is next,
-[`PROGRESS.md`](PROGRESS.md) what changed. The binding rc3 decisions are in
+does that (what bot-hq IS), [`CHANGELOG.md`](CHANGELOG.md) what changed
+per release (and what is deferred). The binding rc3 decisions are in
 [`docs/plans/2026-08-11-rc3-decisions.md`](docs/plans/2026-08-11-rc3-decisions.md)
 (grep the `D<n>` you need — it is long). Project conventions, gotchas and
 learnings live in the Context Library (`~/.bot-hq/library/projects/bot-hq/`), not
@@ -200,6 +200,7 @@ check.
 | `src/core/watchdog.rs` | `run_stall_watchdog`: stall + idle-unflagged loop → `session:attention` chip / nudge / halt escalation | L |
 | `src/core/worktree.rs` | `ensure_worktree`/`remove_worktree_if_clean` (argv-array `git`, no shell) | M |
 | `src/core/terminal.rs` | `TerminalRegistry`/`SessionTerminal`: one PTY per session, bounded scrollback, `wait_settle` (Notify, not polling) | M |
+| `src/core/webview_watchdog.rs` | fail-loud startup watchdog: 30s no-page-load → stderr + log + telemetry error; cancelled by main.rs `on_page_load` (source-pinned) | S |
 | `src/core/updates.rs` | GitHub-releases version check (pure logic + thin fetch) → `UpdateBanner` | M |
 | `src/core/telemetry.rs` | opt-in diagnostics: hash-only panic/error events, `$HOME`→`~` redaction, 1MB drop-oldest jsonl queue, never-blocks flusher (runtime-config endpoint), panic-capture chain, `TELEMETRY_ENABLED` atomic | M |
 
@@ -381,6 +382,7 @@ substring matcher over Bash calls.
 |---|---|---|
 | `src/policy/mod.rs` | `Policy`, `resolve_at_root`/`merge`, `first_forbidden_word`/`contains_word` (one impl, word-boundary, case-insensitive), prompt block render, `write_config_atomically` (the one temp+rename config writer: policy YAMLs, `tool-gate.json`, the hash cache) | L |
 | `src/policy/hooks.rs` | `policy-check` CLI: commit-msg / pre-commit (forbidden words on added lines + immutable-migration guard + EYES findings gate) / post-commit / pre-push (the EYES findings gate again, then `decide_push` HTTP round-trip; the prompt names the PUSHED refs from git's stdin lines — `parse_push_updates`/`pushed_ref_names`, read once and lazily — HEAD only as fallback) / tool-gate (PreToolUse → `park_gate`); `install_hooks`; `check_findings_gate` on its OWN read-only sqlite, over storage's `OPEN_BLOCKING_FOR_SESSION` predicate | XL |
+| `src/policy/presets.rs` | starter Tool-Gate keywords + commented starter general-policy YAML + `backfill_offers` (offer keys for pre-0077 installs; arm only when key AND config file are absent) | S |
 | `src/policy/tool_gate.rs` | keyword list resolution (session snapshot → global), `match_keyword` (substring, gate wins), `run_in_repo` in the AGENT's shell (`gate_shell`: `$SHELL` if POSIX-family, else zsh→bash→sh — macOS bash is 3.2 and dies on heredoc-in-`$()`) | M |
 | `src/policy/session_policy.rs` | `.local/session-policies/<sid>.yaml` snapshot write-if-absent (enforced by the caller) / read / purge at boot | S |
 | `src/policy/violations.rs` | append-only `violations.jsonl` (unbounded) | M |
@@ -506,7 +508,7 @@ fs watcher (`cl:changed`, `session:worktree_changed`, `plugin:assets_changed`).
 | `src/tauri_cmd/messages.rs` | `get_session_messages` / `broadcast_message` | S |
 | `src/tauri_cmd/tray.rs` | choices/approvals/halts/staged responses (`stage_user_response`, `send_user_response`, `resolve_choice`, `discard_choice`) | M |
 | `src/tauri_cmd/docs.rs` | session docs search, `compute_apply_diff` (git in `spawn_blocking`), `summarize_session_doc` (headless `claude -p`), `validate_model` | L |
-| `src/tauri_cmd/findings.rs`, `src/tauri_cmd/feedback.rs`, `src/tauri_cmd/models.rs`, `src/tauri_cmd/updates.rs`, `src/tauri_cmd/telemetry.rs`, `src/tauri_cmd/terminal.rs`, `src/tauri_cmd/tool_gate.rs` | thin wrappers | S |
+| `src/tauri_cmd/findings.rs`, `src/tauri_cmd/feedback.rs`, `src/tauri_cmd/models.rs`, `src/tauri_cmd/updates.rs`, `src/tauri_cmd/telemetry.rs`, `src/tauri_cmd/terminal.rs`, `src/tauri_cmd/tool_gate.rs`, `src/tauri_cmd/notifications.rs` | thin wrappers (notifications = Windows ToastEnabled registry read; uncfg'd parser) | S |
 | `src/tauri_cmd/files.rs` | `read_workspace_file` (path-guarded, size-capped) | M |
 | `src/tauri_cmd/roles.rs` | roles CRUD + capabilities | L |
 | `src/tauri_cmd/policy.rs` | 3-tier policy get/set + `read_violations` (no limit) | M |
@@ -681,6 +683,7 @@ every other FE area imports.
 | path | role | size |
 |---|---|---|
 | `frontend/src/app/Shell.tsx` | nav shell, shortcuts, footer health dot | S |
+| `frontend/src/app/PresetOfferCard.tsx` | one-time starter-offer cards (gates/policy, literal-'pending' rule) + the flag-keyed Dashboard banner | S |
 | `frontend/src/app/Dashboard.tsx` | session list/filter/tiles + New Session dialog (`MAX_PARTICIPANTS = 4` dialog cap; backend 8) | L |
 | `frontend/src/components/SessionTile.tsx` | one tile: health/phase/attention/Quickview | M |
 | `frontend/src/app/Settings.tsx` | tab container (lazy-mount-then-keep); Policy/Archive/Updates live here | M |
@@ -698,7 +701,7 @@ every other FE area imports.
 | `frontend/src/lib/participants.ts` | `ParticipantView`, label/slug/slot-key resolution, `isSpawnable` (stale mirror), runtime keys | M |
 | `frontend/src/lib/effort.ts` | the effort model post-no-inherit: `EFFORT_LEVELS`/`ULTRACODE`/`DEFAULT_EFFORT` + choice↔stored-pair mapping shared by the dialog and the Roles tab; `DEFAULT_EFFORT` is pinned to the Rust floor by `overrides.rs::frontend_default_effort_matches_the_rust_floor` | S |
 | `frontend/src/lib/participantNames.ts` | `UNKNOWN_PARTICIPANT` leaf (breaks a cycle) | S |
-| `frontend/src/lib/time.ts`, `frontend/src/lib/phase.ts`, `frontend/src/lib/diffGroups.ts`, `frontend/src/lib/cn.ts`, `frontend/src/lib/sessionId.ts`, `frontend/src/lib/staging.ts`, `frontend/src/lib/filePaste.ts`, `frontend/src/lib/tokenExpand.ts` | time/phase/diff-grouping/clsx/short-session-id/staged-answer/file-paste/token-expansion helpers (`stagedKey` + `picksDiffer` are the re-stage effect's pure half; `uriListToPaths`/`pathsToInsertText` are the composer's paste-drop half) | S |
+| `frontend/src/lib/time.ts`, `frontend/src/lib/phase.ts`, `frontend/src/lib/diffGroups.ts`, `frontend/src/lib/cn.ts`, `frontend/src/lib/sessionId.ts`, `frontend/src/lib/staging.ts`, `frontend/src/lib/filePaste.ts`, `frontend/src/lib/tokenExpand.ts`, `frontend/src/lib/lineDiff.ts` | time/phase/diff-grouping/clsx/short-session-id/staged-answer/file-paste/token-expansion/LCS-line-diff helpers (`stagedKey` + `picksDiffer` are the re-stage effect's pure half; `uriListToPaths`/`pathsToInsertText` are the composer's paste-drop half) | S |
 | `frontend/src/lib/telemetry.ts` | hand-mirrored `TelemetryStatus` + `shouldShowDiagnosticsAsk` + PRIVACY_URL | S |
 | `frontend/src/lib/osNotifications.ts` | OS-escalation pure policy: `planFlush` dedupe/60s-cooldown/burst-coalesce (≥3 → “N sessions need you”) + the on/off localStorage pref | S |
 | `frontend/src/lib/attention.ts` | idle-unflagged badge label + tooltip; single source for SessionTile and SessionView, which had it duplicated verbatim | S |
@@ -752,7 +755,7 @@ to `isPolicyFile` → branch in `EditorAreaImpl`.
 | path | role |
 |---|---|
 | `ARCHITECTURE.md` | what bot-hq IS (20 H2s; the audit's drift table lists what to refresh) |
-| `PLAN.md`, `PROGRESS.md`, `CLAUDE.md`, `README.md`, `INSTALL.md` | forward plan · newest-first changelog · session instructions · public doc · install |
+| `CHANGELOG.md`, `CLAUDE.md`, `README.md`, `INSTALL.md` | per-release changelog + deferred list · session instructions · public doc · install |
 | `docs/plans/` | 26 planning docs (2026-08-17); BINDING: `docs/plans/2026-08-11-rc3-decisions.md`, `docs/plans/2026-08-12-rc3-reframe-contract.md`; the rest are dated handoffs (stale by construction) or queues |
 | `docs/PLUGINS.md`, `docs/SIGNING.md`, `docs/WINDOWS-TESTING.md`, `docs/stream-json-events.md`, `docs/design/`, `docs/rebuild-archive/` | contracts, release notes, schema notes, mocks, frozen history |
 | `tests/codebase_map_test.rs` | pins THIS map to the tree both ways (every source file placed; every named path exists) — the map's anti-staleness device |
@@ -770,7 +773,7 @@ to `isPolicyFile` → branch in `EditorAreaImpl`.
 
 **Where to add X.** New canonical fact → update the ARCHITECTURE.md H2 AND grep
 the other sections + README for restatements. · New decision → append `D<n>` to
-the decisions doc, then fix the D-range citations in PLAN.md. · New MCP tool →
+the decisions doc. · New MCP tool →
 mirror into ARCHITECTURE.md + README tool lists (both drift; regenerate from the
 registry).
 

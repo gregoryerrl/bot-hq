@@ -26,11 +26,11 @@ maintenance + feature-extension on the existing system.
 1. **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — what bot-hq IS right now
    (process model, the in-process MCP server, policy layer, storage
    schema, glossary).
-2. **[`PLAN.md`](PLAN.md)** — what's planned next (in-flight work,
-   backlog, deferred plugins).
-3. **[`PROGRESS.md`](PROGRESS.md)** — recent change log,
-   newest-first.
-4. **[`CODEBASE.md`](CODEBASE.md)** — the area map: WHERE things live,
+2. **[`CHANGELOG.md`](CHANGELOG.md)** — what changed per release, plus
+   the `[Unreleased]` block for work since the last one. (`PLAN.md` and
+   `PROGRESS.md` were retired at 1.0.1 — the build-out is done; backlog
+   lives in the Context Library and the changelog's Deferred lists.)
+3. **[`CODEBASE.md`](CODEBASE.md)** — the area map: WHERE things live,
    one area at a time (files, entry points, seams, tests, recipes) —
    open it before touching code; `tests/codebase_map_test.rs` keeps it
    honest.
@@ -121,14 +121,15 @@ data dir.
 
 ## How a typical session looks
 
-1. Read ARCHITECTURE.md, PLAN.md, PROGRESS.md (in that order) to
-   refresh context, and CODEBASE.md before touching code.
-2. Identify the task. If it's in-flight per PROGRESS.md / PLAN.md,
-   pick up where it left off. Otherwise scope it.
+1. Read ARCHITECTURE.md and CHANGELOG.md (the `[Unreleased]` block +
+   latest release) to refresh context, and CODEBASE.md before touching
+   code.
+2. Identify the task. If it's in-flight per CHANGELOG.md `[Unreleased]`
+   or the Context Library, pick up where it left off. Otherwise scope it.
 3. Write code in small chunks. Run `cargo test` + `cargo build` after
    each chunk.
-4. For multi-file or multi-day work, update PROGRESS.md with a
-   newest-first entry summarizing what changed and why.
+4. For multi-file or multi-day work, record it in CHANGELOG.md under
+   `[Unreleased]` — user-facing wording, grouped Added/Fixed/Changed.
 5. When the work is ready for the user to see, mark the task complete
    and surface a summary.
 
@@ -151,12 +152,12 @@ session).
 ## Handling ambiguity
 
 If something is genuinely ambiguous and NOT decided in ARCHITECTURE.md
-or PLAN.md:
+or the Context Library's decisions log:
 
 1. Ask the user via `ask_user_choice` with 2–4 concrete options.
 2. If the user is offline / unresponsive, default to the simplest
    reasonable choice consistent with the documented direction and
-   note your call in PROGRESS.md.
+   note your call in CHANGELOG.md's `[Unreleased]` block.
 3. Don't block on minor choices the user can revise later.
 
 ---
@@ -168,7 +169,8 @@ or PLAN.md:
 - `claude-code` CLI installed and authed. It is the ONLY model connector
   (rc3 D9) — every agent is a subprocess, whatever model it runs — and it
   is needed for live tests.
-- macOS (initial target; Linux + Windows tracked in PLAN.md).
+- macOS (primary), with Windows + Linux supported since 1.0.1 (their
+  remaining gaps are the changelog's Deferred list).
 
 If a prerequisite is missing, document it and continue with
 non-blocked work.

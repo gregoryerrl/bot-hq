@@ -201,8 +201,8 @@ The canonical docs go deeper than this README:
 
 - **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — what bot-hq is, in depth: process
   model, the in-process MCP server, storage schema, policy layer, glossary.
-- **[`PLAN.md`](PLAN.md)** — what's planned next.
-- **[`PROGRESS.md`](PROGRESS.md)** — recent change log, newest-first.
+- **[`CHANGELOG.md`](CHANGELOG.md)** — what changed per release, plus what's
+  deferred.
 
 The original rebuild design + roadmap are preserved under
 [`docs/rebuild-archive/`](docs/rebuild-archive/).
@@ -213,7 +213,7 @@ The original rebuild design + roadmap are preserved under
 ```
 bot-hq/
 ├── Cargo.toml / tauri.conf.json / build.rs
-├── CLAUDE.md / ARCHITECTURE.md / PLAN.md / PROGRESS.md / CODEBASE.md   ← canonical docs (CODEBASE.md = the area map)
+├── CLAUDE.md / ARCHITECTURE.md / CHANGELOG.md / CODEBASE.md   ← canonical docs (CODEBASE.md = the area map)
 ├── frontend/              React 18 + TypeScript + Tailwind UI (Vite)
 │   └── src/{app,components,hooks,stores,lib}/   pages, components, hooks, zustand stores, tauri bindings
 ├── src/
@@ -391,8 +391,8 @@ deleted and where the design record lives.
 
 - **Plaintext auth tokens.** `models.auth_token` (and the legacy `agent_configs.auth_token`) is stored as plaintext
   sqlite at `<data_dir>/.local/bot-hq.db` (default user-only mode bits). Any backup
-  of `<data_dir>` (Time Machine, cloud sync, rsync) captures these. v2 will move to
-  the OS keychain — see [`PLAN.md`](PLAN.md).
+  of `<data_dir>` (Time Machine, cloud sync, rsync) captures these. Moving to
+  the OS keychain is future work.
 - **Policy audit is local-only.** `violations.jsonl` is an append-only audit trail;
   nothing ships it off-host. Hook a sidecar reader if you need it centralized.
 
@@ -405,8 +405,8 @@ cargo build --release               # production binary
 
 The suite covers the lib units plus the signaling and storage integration tests,
 the repo guards (`tests/codebase_map_test.rs`, `tests/retired_identifier_test.rs`,
-`tests/phase_vote_wiring_test.rs`), and the frontend Vitest suite. Live pass counts are tracked in
-[`PROGRESS.md`](PROGRESS.md) (they drift each commit).
+`tests/phase_vote_wiring_test.rs`), and the frontend Vitest suite. Pass counts
+drift each commit; CI (`.github/workflows/test.yml`) is the live record.
 
 ---
 
