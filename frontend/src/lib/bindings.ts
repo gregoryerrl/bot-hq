@@ -462,6 +462,16 @@ async resolveRolePresetOffer(install: boolean) : Promise<Result<null, AppError>>
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * The shipped default prose for a preset slug — the source the Roles tab's
+ * view-diff / reset-to-default affordance compares against (promised in the
+ * 1.0.0 release notes, shipped 1.0.1). `None` for every user-created slug:
+ * only the example pair has a shipped default, and bot-hq never auto-applies
+ * it — the frontend fills the DRAFT and the user still saves.
+ */
+async getRoleDefaultProse(slug: string) : Promise<string | null> {
+    return await TAURI_INVOKE("get_role_default_prose", { slug });
+},
 async listModels() : Promise<Result<ModelView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_models") };
@@ -666,7 +676,8 @@ async clUnregisterProject(name: string) : Promise<Result<null, AppError>> {
  * Create a NEW Context Library project at the default managed location
  * (`<data_dir>/library/projects/<name>/`). Unlike [`cl_register_project`] this
  * NEVER sets `cl_path` and NEVER indexes an external folder — it makes the
- * convention dir, seeds starter `conventions.md` + `notes.md` (if absent), and
+ * convention dir, seeds starter `conventions.md` + `notes.md` +
+ * `decisions.md` (each only if absent), and
  * rescans just that dir. `working_repo_path` only binds the repo sessions run
  * in; it is NOT scanned. This is the common "add a project" flow.
  */
@@ -774,6 +785,19 @@ async setToolGateKeywords(keywords: GatedKeyword[]) : Promise<Result<null, AppEr
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * The Settings → Tool Gate card's resolver. Renders only while
+ * `get_app_setting("gate_preset_offer")` is the literal `pending`; an absent
+ * key means no offer.
+ */
+async resolveGatePresetOffer(install: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_gate_preset_offer", { install }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getGeneralPolicy() : Promise<Result<Policy, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_general_policy") };
@@ -848,6 +872,19 @@ async getSessionToolGate(sessionId: string) : Promise<Result<GatedKeyword[], App
 async setSessionToolGate(sessionId: string, keywords: GatedKeyword[]) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_session_tool_gate", { sessionId, keywords }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The Settings → Policies card's resolver. Renders only while
+ * `get_app_setting("policy_preset_offer")` is the literal `pending`; an
+ * absent key means no offer.
+ */
+async resolvePolicyPresetOffer(install: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_policy_preset_offer", { install }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1324,6 +1361,19 @@ async pluginInvokeProxy(pluginId: string, command: string, argsJson: string | nu
 async checkForUpdate() : Promise<Result<UpdateInfo, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_for_update") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * `Some(false)` = Windows says no app may toast (surface a warning beside
+ * the test button). `Some(true)` = the OS switch is on. `None` = not
+ * Windows — the signal does not exist elsewhere; say nothing.
+ */
+async windowsToastEnabled() : Promise<Result<boolean | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("windows_toast_enabled") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
