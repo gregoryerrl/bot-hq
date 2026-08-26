@@ -1,0 +1,90 @@
+# Test jobs — the gap both platform handoffs named: no CI ran `cargo test`
+# on ANY platform through 1.0.0, which is how 41 Windows lib failures and a
+# never-compiled screenshot cfg-arm shipped unseen.
+#
+# ORDER NOTE (do not "align" with the local five-gate order): locally the
+# release build runs LAST so it embeds a fresh frontend/dist; here the
+# frontend build runs FIRST because `cargo test` cannot even compile without
+# `frontend/dist` present (tauri::generate_context! embeds it). Different
+# constraint, different order — both are correct where they run.
+#
+# Scope is `cargo test` + the frontend suite ONLY. No clippy/-D warnings:
+# this repo has never had a lint gate, and adding one here would be an
+# unbounded cleanup disguised as a CI line.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux webkit/gtk dev packages
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            file \
+            build-essential
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend deps + dist (cargo test needs frontend/dist)
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Backend tests
+        run: cargo test
+      - name: Frontend tests + typecheck
+        working-directory: frontend
+        run: |
+          npx vitest run
+          npx tsc --noEmit
+
+  windows:
+    runs-on: windows-latest
+    # ADVISORY until 1.0.2: Windows has 5 known lib failures (ConPTY never
+    # delivers EOF, so the PTY death path can't fire — windows-compat handoff
+    # §3a; the fix needs live Windows mileage and is deferred). The job runs
+    # the full fail-closed suite so the failures stay VISIBLE in its logs —
+    # continue-on-error surfaces a red job inside a green check rather than
+    # hiding the count. Flip this to required when the ConPTY fix lands.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend deps + dist
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Full Windows suite (PowerShell, fail-closed)
+        shell: pwsh
+        run: .\scripts\test-windows.ps1
+      - name: Frontend tests + typecheck
+        working-directory: frontend
+        run: |
+          npx vitest run
+          npx tsc --noEmit
