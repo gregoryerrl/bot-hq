@@ -61,7 +61,9 @@ pub const STARTER_GENERAL_POLICY_YAML: &str = "\
 forbidden_in_commits: []
 
 # `ask` parks every `git push` for your Approve/Reject and PAUSES the session
-# until you answer; `auto` lets pushes through.
+# until you answer; `auto` lets pushes through. NOTE: a project policy.yaml
+# cannot relax this back to `auto` — the overlay treats `auto` as unset; for
+# a frictionless project, flip the per-session toggle in the gear tab.
 push_gate: ask
 
 # `git push --force` refused outright. Set `allowed` if you rebase branches.

@@ -30,8 +30,10 @@ const OFFERS = {
     body:
       "Install the basic policy: every git push asks for your approval (the " +
       "session pauses until you answer) and force-push is refused. It applies " +
-      "to every project that doesn't set its own. The commit-blocking word " +
-      "list ships empty — the file's comments show how to add your own.",
+      "to every project that doesn't set its own — and a project file cannot " +
+      "relax the push gate back to auto; use the session's gear toggle for " +
+      "that. The commit-blocking word list ships empty — the file's comments " +
+      "show how to add your own.",
     install: "Install basic policy",
   },
 } as const;
