@@ -424,6 +424,12 @@ async fn deliver_idle_nudge(session_id: &str, idle_watch: &IdleWatch, bridge: &S
         .notify_ring_user_message(
             session_id,
             idle_watch.hands_participant_id.into_iter().collect(),
+            // A targeted wake: the mention decides who is dealt, so the flag
+            // is moot when the lookup succeeded. `true` keeps the pre-flag
+            // fallback (reset to the front) for the degenerate no-id case —
+            // the nudge asks for a state declaration and the front is the
+            // participant that can give one.
+            true,
         )
         .await;
 }
@@ -600,12 +606,19 @@ mod tests {
         // works if something wakes — it fires when no turn is coming — so the
         // wake stays; what changed is that the ring makes it a real turn.
         match ring_rx.try_recv() {
-            Ok(crate::core::sequencer::SequencerCommand::UserMessage { mentions }) => {
+            Ok(crate::core::sequencer::SequencerCommand::UserMessage {
+                mentions,
+                restarts_rotation,
+            }) => {
                 assert_eq!(
                     mentions,
                     vec![1],
                     "the nudge asks for a state declaration, so it summons the \
                      participant that can give one"
+                );
+                assert!(
+                    restarts_rotation,
+                    "the nudge keeps the reset fallback for the no-id case"
                 );
             }
             other => panic!("the idle nudge did not release the ring: {other:?}"),

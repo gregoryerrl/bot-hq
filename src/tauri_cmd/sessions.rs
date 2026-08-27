@@ -335,6 +335,55 @@ pub async fn list_session_participants(
     participant_views(&storage, &session_id).await
 }
 
+/// One row of the starvation-visibility chip (WS1c, 2026-08-27): how far
+/// behind the ring's deliveries this participant is running. The session view
+/// polls it and renders a chip only past the summons threshold, so a healthy
+/// roster shows nothing.
+#[derive(Debug, Clone, Serialize, Type, PartialEq)]
+pub struct ParticipantBacklogView {
+    pub participant_id: i64,
+    pub slug: String,
+    /// RFC3339; `None` when this participant has never been dealt a turn.
+    pub last_delivered_at: Option<String>,
+    /// Peer `text` rows past this participant's cursor — the metric the
+    /// 2026-08-27 starvation measurement was made in.
+    pub undelivered_peer_texts: i64,
+    /// Computed HERE from the scheduler's own
+    /// `STARVATION_SUMMONS_MIN_PEER_TEXTS` (EYES A6): the chip renders on this
+    /// flag and carries no threshold of its own, so what the user sees and
+    /// what the ring acts on are one constant, not two literals that can
+    /// drift.
+    pub starving: bool,
+}
+
+/// Per-participant delivery lag for a session — the visibility half of the
+/// anti-starvation work: 137 events across 38 sessions went undiagnosed
+/// because a starved reviewer was indistinguishable from a quiet one in the
+/// UI.
+#[tauri::command]
+#[specta::specta]
+pub async fn session_participant_backlogs(
+    storage: tauri::State<'_, Arc<Storage>>,
+    session_id: String,
+) -> Result<Vec<ParticipantBacklogView>, AppError> {
+    let rows = storage.participant_backlogs(&session_id).await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(participant_id, slug, last_delivered_at, undelivered_peer_texts)| {
+                ParticipantBacklogView {
+                    participant_id,
+                    slug,
+                    last_delivered_at,
+                    undelivered_peer_texts,
+                    starving: undelivered_peer_texts
+                        >= crate::core::sequencer::STARVATION_SUMMONS_MIN_PEER_TEXTS,
+                }
+            },
+        )
+        .collect())
+}
+
 /// One participant's composed system prompt — the ~48 KB of standing
 /// instruction bot-hq assembled for it at spawn (rc3 **P1**).
 ///

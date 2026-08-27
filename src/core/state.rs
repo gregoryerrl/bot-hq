@@ -1510,16 +1510,23 @@ impl AppState {
     /// participants visibly working (`s-b1d2591b`, 08-20 01:29Z), and the
     /// stale slot suppressed the idle watchdog. The invariant now: **whoever
     /// releases (or answers) also clears — a responded-to session holds no
-    /// halt.** Whether an AGENT-declared halt should instead suppress the
-    /// release for gate answers (running the command without waking the ring)
-    /// is the user's parked pick, tray question `12951cc3`; an option-1 answer
-    /// reintroduces the row-kind read as a suppression predicate BEFORE this
-    /// call — never as a second clear-or-not path inside it.
+    /// halt.** The AGENT-halt fork LANDED: tray `12951cc3` (answered
+    /// 2026-08-24, "halt wins") — a gate answered under a standing agent halt
+    /// runs its command without waking the ring, implemented as
+    /// `gate_release_suppressed` BEFORE this call, never as a second
+    /// clear-or-not path inside it.
+    /// `restarts_rotation` rides through to the ring (the starvation fix,
+    /// 2026-08-27): `true` for a typed message — the user steering, which
+    /// resets the rotation to the front — and `false` for a tray/gate answer,
+    /// which releases the ring without resetting, so the rotation steps onward
+    /// and the participant after the asker is served. The halt clear does not
+    /// depend on it: a responded-to session holds no halt either way.
     async fn user_responded(
         &self,
         session_id: &str,
         mentions: Vec<i64>,
         release_ring: bool,
+        restarts_rotation: bool,
     ) {
         // The halt slot FIRST. If the ring release panicked or the process died
         // between the two, a cleared slot and a halted ring is a session the
@@ -1537,7 +1544,7 @@ impl AppState {
         // so waking the ring on it would hand out a turn over an empty backlog.
         if release_ring {
             self.bridge
-                .notify_ring_user_message(session_id, mentions)
+                .notify_ring_user_message(session_id, mentions, restarts_rotation)
                 .await;
         }
     }
@@ -1748,7 +1755,7 @@ impl AppState {
         // to drain. Reversing these two hands out a turn over an empty backlog
         // and the message lands a turn late. Both halves of "the user responded"
         // ride this one call (rc3 D28).
-        self.user_responded(session_id, mentions, true).await;
+        self.user_responded(session_id, mentions, true, true).await;
         // A user prompt re-arms the idle-unflagged watchdog's once-per-window
         // nudge (and its >0 count marks the session as having a task at all).
         handle
@@ -1862,7 +1869,7 @@ impl AppState {
                 handle.activity.set_paused(false);
             }
         }
-        self.user_responded(session_id, Vec::new(), true).await;
+        self.user_responded(session_id, Vec::new(), true, true).await;
         Ok(())
     }
 
@@ -2085,7 +2092,7 @@ impl AppState {
         // elapses. Found in review before it shipped; the premise in the
         // paragraph above is stated as a fact about the CALLER, and this path
         // is a caller it was never true for.
-        self.user_responded(session_id, Vec::new(), source.releases_ring())
+        self.user_responded(session_id, Vec::new(), source.releases_ring(), true)
             .await;
 
         // The in-memory move AND the epoch bump, together. Both callers of this
@@ -2434,11 +2441,24 @@ impl AppState {
                         // Release implies clear (2026-08-24): the row's KIND no
                         // longer decides the halt slot — a released ring with a
                         // standing slot was the `s-b1d2591b` lying banner. The
-                        // suppression fork (should an AGENT-declared halt keep
-                        // a gate answer from releasing at all?) is the user's
-                        // parked pick, tray `12951cc3`; until it lands, a gate
-                        // answer resumes AND clears, mechanically coherent.
-                        self.user_responded(session_id, Vec::new(), true).await;
+                        // suppression fork (an AGENT-declared halt keeps a gate
+                        // answer from releasing at all) LANDED as the user's
+                        // pick on tray `12951cc3` (answered 2026-08-24, "halt
+                        // wins") — `gate_release_suppressed` above implements
+                        // it, so a release reaching this line is already past
+                        // that filter.
+                        //
+                        // `restarts_rotation = false` — THE starvation fix
+                        // (2026-08-27): a tray or gate answer releases the ring
+                        // but does not reset the rotation, so the ring steps
+                        // onward from the anchor and the participant after the
+                        // asker is served. When the executor parks a gate every
+                        // turn, that participant is the reviewer — before this
+                        // flag, every approval re-dealt the executor and the
+                        // reviewer starved (137 events / 38 sessions / worst
+                        // gap 478 min; see SequencerCommand::UserMessage).
+                        self.user_responded(session_id, Vec::new(), true, false)
+                            .await;
                     }
                 }
             }

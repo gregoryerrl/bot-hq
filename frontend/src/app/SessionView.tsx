@@ -7,6 +7,7 @@ import { useHealthStore } from "../stores/health";
 import { useActivityStore } from "../stores/activity";
 import { HealthDot } from "../components/HealthDot";
 import { ContextMeter } from "../components/ContextMeter";
+import { BacklogChip, type ParticipantBacklog } from "../components/BacklogChip";
 import { useContextStore } from "../stores/context";
 import { useDragResize } from "../hooks/useDragResize";
 import { useChatStore } from "../stores/chat";
@@ -130,6 +131,35 @@ export function SessionView() {
   // the key → `ROLE · Model` index every author-keyed surface below resolves
   // through (the turn-status line, and the roster row itself).
   const { participants, labels, hues } = useParticipantLabels(sessionId);
+
+  // WS1c (2026-08-27): per-participant delivery lag — the starvation chip's
+  // read. Event-driven, NOT a poll (EYES A7 — the refetchInterval polls were
+  // deliberately removed; notes.md records the cleanup). No second
+  // `agent:messages:batch` subscription either (ChatPane inside this tree
+  // already holds one, and the test harness deliberately refuses duplicate
+  // subscribers): the chat store's WATERMARK advances on exactly those
+  // batches, so the refetch keys on it — throttled trailing-edge, because a
+  // busy turn's 50 ms batches would otherwise refetch per chunk.
+  const { data: backlogs = [], refetch: refetchBacklogs } = useTauriQuery<
+    ParticipantBacklog[]
+  >("session_participant_backlogs", { sessionId }, { enabled: !!sessionId });
+  const backlogBySlug = new Map(backlogs.map((b) => [b.slug, b]));
+  const chatWatermark = useChatStore((s) => s.watermarks[sessionId] ?? 0);
+  const backlogRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (chatWatermark === 0) return;
+    if (backlogRefreshRef.current != null) return;
+    backlogRefreshRef.current = setTimeout(() => {
+      backlogRefreshRef.current = null;
+      void refetchBacklogs();
+    }, 3_000);
+  }, [chatWatermark, refetchBacklogs]);
+  useEffect(
+    () => () => {
+      if (backlogRefreshRef.current) clearTimeout(backlogRefreshRef.current);
+    },
+    [],
+  );
 
   // rc3 D30: why the session stopped, rendered above the input box. Same query
   // key the tray tab uses, so answering anywhere invalidates both.
@@ -728,6 +758,10 @@ export function SessionView() {
                     context={participantRuntime(agentContext, participants, p)}
                     name={participantLabel(p)}
                     onOpenHistory={() => void openContextHistory(p)}
+                  />
+                  <BacklogChip
+                    backlog={backlogBySlug.get(p.slug)}
+                    name={participantLabel(p)}
                   />
                 </span>
               </span>

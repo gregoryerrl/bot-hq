@@ -2459,7 +2459,10 @@ mod tests {
         let (seq_tx, mut seq_rx) = mpsc::channel(1);
         // The one slot, spent. Anything the pump sends now has to wait.
         seq_tx
-            .send(crate::core::sequencer::SequencerCommand::UserMessage { mentions: Vec::new() })
+            .send(crate::core::sequencer::SequencerCommand::UserMessage {
+                mentions: Vec::new(),
+                restarts_rotation: true,
+            })
             .await
             .unwrap();
         let cfg = PumpConfig {

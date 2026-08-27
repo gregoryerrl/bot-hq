@@ -318,6 +318,12 @@ struct CloseGateState {
     /// We've already surfaced the staleness sweep once — like `close_nudged`,
     /// this makes the sweep advisory: it can never hold a close shut.
     sweep_nudged: bool,
+    /// WS3 (2026-08-27): we've already listed the session's open ADVISORY
+    /// findings once at close. Same advisory-not-gate shape as the sweep — the
+    /// measured gap it closes: 174 of 189 advisories (92%) died undispositioned
+    /// with their sessions, invisibly, because nothing ever surfaced them at
+    /// the moment the session ended.
+    advisories_nudged: bool,
 }
 
 /// Shared signaling state.
@@ -924,11 +930,24 @@ impl SignalingBridge {
     /// one holding the text and the session. Empty is the ordinary case.
     /// (This block sat on `notify_ring_gate` until round 12 — a merge put one
     /// function's doc on the other.)
-    pub async fn notify_ring_user_message(&self, session_id: &str, mentions: Vec<i64>) {
+    /// **`restarts_rotation` distinguishes a typed message from a tray/gate
+    /// answer** (the starvation fix, 2026-08-27): a typed message resets the
+    /// rotation to the front, an answer releases the ring and lets it step
+    /// onward from the anchor. See the flag's doc on `SequencerCommand::
+    /// UserMessage` for the measurement that forced the split.
+    pub async fn notify_ring_user_message(
+        &self,
+        session_id: &str,
+        mentions: Vec<i64>,
+        restarts_rotation: bool,
+    ) {
         let seq = self.session_sequencer.lock().await.get(session_id).cloned();
         if let Some(tx) = seq {
             if tx
-                .try_send(crate::core::sequencer::SequencerCommand::UserMessage { mentions })
+                .try_send(crate::core::sequencer::SequencerCommand::UserMessage {
+                    mentions,
+                    restarts_rotation,
+                })
                 .is_err()
             {
                 tracing::warn!(
@@ -1250,6 +1269,65 @@ impl SignalingBridge {
         .await
         .unwrap_or(false);
         (durable, nudged)
+    }
+
+    /// WS3 (2026-08-27): the session's open ADVISORY findings, surfaced ONCE at
+    /// `close_session` so they stop dying silently — the user's pick on the
+    /// 2026-08-27 review-layer scope question ("All three: + surface open
+    /// advisories at session close"). Returns the capped list on the FIRST
+    /// close attempt while open advisories exist, `None` afterwards or when
+    /// there are none — advisory by construction, exactly like the staleness
+    /// sweep: it can never hold a close shut, and the retry proceeds. The flag
+    /// is set only when a report was actually produced, so a session that
+    /// closes clean never burns its one surfacing on nothing.
+    pub async fn open_advisories_report(&self, session_id: &str) -> Option<String> {
+        let storage = self.storage.lock().await.clone()?;
+        {
+            let mut gate = self.session_close_gate.lock().await;
+            let state = gate.entry(session_id.to_string()).or_default();
+            if state.advisories_nudged {
+                return None;
+            }
+        }
+        let open = storage
+            .findings_for_session(session_id)
+            .await
+            .ok()?
+            .into_iter()
+            .filter(|f| f.severity == "advisory" && f.status == "open")
+            .collect::<Vec<_>>();
+        if open.is_empty() {
+            return None;
+        }
+        self.session_close_gate
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .advisories_nudged = true;
+        const SHOWN: usize = 10;
+        let mut lines: Vec<String> = open
+            .iter()
+            .take(SHOWN)
+            .map(|f| {
+                let mut s = f.summary.replace('\n', " ");
+                if s.chars().count() > 140 {
+                    s = format!("{}…", s.chars().take(140).collect::<String>());
+                }
+                format!("- [{}] {}", f.finding_uid, s)
+            })
+            .collect();
+        if open.len() > SHOWN {
+            lines.push(format!("… and {} more (see the findings list)", open.len() - SHOWN));
+        }
+        Some(format!(
+            "Before closing: {} open advisory finding(s) will archive undispositioned \
+             with this session:\n{}\nDisposition each via disposition_finding (fixed / \
+             rebutted), or relay what should outlive the session, then call \
+             close_session again — the close will proceed either way.",
+            open.len(),
+            lines.join("\n")
+        ))
     }
 
     /// A3b: should the agent's `close_session` be soft-gated with a

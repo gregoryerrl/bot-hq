@@ -1633,7 +1633,9 @@ impl SignalingBridge {
             _ => Vec::new(),
         };
         tracing::info!(session_id, agent, wake_at, "temporary halt ended; waking the declarer");
-        self.notify_ring_user_message(session_id, mentions).await;
+        // Targeted at the declarer via the mention; `true` keeps the pre-flag
+        // reset fallback if the slug lookup missed (see watchdog's wake).
+        self.notify_ring_user_message(session_id, mentions, true).await;
     }
 
     /// Re-arm ONE session's temporary halt when its ring registers (timers are
@@ -1954,7 +1956,7 @@ mod tests {
             "parking must halt the ring"
         );
 
-        bridge.notify_ring_user_message("s1", Vec::new()).await;
+        bridge.notify_ring_user_message("s1", Vec::new(), true).await;
         assert!(
             matches!(rx.try_recv(), Ok(SequencerCommand::UserMessage { .. })),
             "a user message must RELEASE the halt — without this the cycle never restarts"
@@ -2507,7 +2509,7 @@ mod tests {
         assert!(!awaiting.load(Ordering::SeqCst));
         let released = loop {
             match rx.try_recv() {
-                Ok(SequencerCommand::UserMessage { mentions }) => break mentions,
+                Ok(SequencerCommand::UserMessage { mentions, .. }) => break mentions,
                 Ok(_) => continue,
                 Err(_) => panic!("the wake must release the ring"),
             }
@@ -2720,8 +2722,21 @@ mod tests {
         );
         let mut released = false;
         while let Ok(cmd) = rx1.try_recv() {
-            if matches!(cmd, SequencerCommand::UserMessage { .. }) {
+            if let SequencerCommand::UserMessage {
+                restarts_rotation, ..
+            } = cmd
+            {
                 released = true;
+                // The starvation fix's call-site pin (2026-08-27): a gate/tray
+                // ANSWER releases WITHOUT resetting the rotation — flipping
+                // resolve_choice's flag back to `true` re-deals the front on
+                // every approval and the position-1 participant starves (the
+                // 137-event measurement). This is the real path, so the pin
+                // covers state.rs → bridge → command, not just the enum.
+                assert!(
+                    !restarts_rotation,
+                    "a gate answer must not reset the rotation to the front"
+                );
             }
         }
         assert!(released, "the idle ring is released to drain the answer row");

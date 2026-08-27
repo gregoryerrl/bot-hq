@@ -462,6 +462,22 @@ impl ResolvedCapabilities {
             Self::Unreadable { reason } => Some(reason),
         }
     }
+
+    /// A REVIEWER-SHAPED caller: files findings and does not edit files —
+    /// `FileFinding && !EditFiles` (WS2, 2026-08-27). The predicate exists so
+    /// that granting `file_finding` to an EXECUTOR (a holder of `edit_files`)
+    /// does not reclassify it: the phase-doc co-doc redirect keys on THIS, not
+    /// on bare `FileFinding`, because the redirect protects the executor's
+    /// single per-phase doc from the reviewer — an executor that can also file
+    /// findings is still the phase-doc author. A hypothetical editing reviewer
+    /// is treated as an executor here, the same clobber exposure any
+    /// two-editor roster already has. NOT used by the reviewer-down commit
+    /// registry, which deliberately stays on bare `FileFinding` (ANY-down
+    /// blocks, so extra registrants defuse nothing — see
+    /// `register_session_reviewers`).
+    pub fn reviewer_shaped(&self) -> bool {
+        self.grants(Capability::FileFinding) && !self.grants(Capability::EditFiles)
+    }
 }
 
 #[cfg(test)]

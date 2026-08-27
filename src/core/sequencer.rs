@@ -1056,7 +1056,23 @@ pub enum SequencerCommand {
     /// an id it cannot find is a state it should not have to reason about. The
     /// parse itself is `core::mentions`, which runs on exactly one path — the
     /// user's own message — so a participant cannot summon anyone.
-    UserMessage { mentions: Vec<i64> },
+    ///
+    /// **`restarts_rotation` says whether this response RESETS the cycle to the
+    /// front or lets the rotation continue from the anchor** (the starvation
+    /// fix, 2026-08-27). A TYPED message is the user steering — it resets, as
+    /// every user row did before this flag existed. A tray or gate ANSWER is
+    /// the user responding to something a participant parked — it releases the
+    /// ring but does NOT reset, so the ring steps onward from where it was and
+    /// the next participant in the rotation is served. Before this flag, every
+    /// gate approval in a park→approve→park chain reset to the front, and the
+    /// participant at position 1 was never dealt — measured at 137 starvation
+    /// events across 38 sessions (49% of two-participant sessions), worst gap
+    /// 478 minutes, always the reviewer. The tally/lap clear does NOT read this
+    /// flag: the user speaking clears votes either way (see `advance_turn`).
+    UserMessage {
+        mentions: Vec<i64>,
+        restarts_rotation: bool,
+    },
     /// The user STAGED a response while the ring runs (the Stage toggle,
     /// 2026-08-15): the content sits in `AppState`; this is only the flag.
     /// At the next turn boundary the ring parks instead of dealing and emits
@@ -1378,7 +1394,7 @@ struct RingState {
     /// The mentions of a `UserMessage` held back by `winding_down` (see above);
     /// `None` = nothing held. Two releases in the window merge into one — the
     /// rows are already in the channel, and one restart drains them.
-    stashed_release: Option<Vec<i64>>,
+    stashed_release: Option<(Vec<i64>, bool)>,
     /// Participants that have parked a question and cannot proceed until the user
     /// answers (rc3 D22). The ring skips no-one on account of this — it HALTS when
     /// it reaches one, which is what bounds the extra work at one lap. Cleared by
@@ -1416,16 +1432,24 @@ impl RingState {
     /// Hold a release back for the halted holder's completion (round 10, B1).
     /// A second release in the window merges its mentions into the first — one
     /// restart drains every row.
-    fn stash_release(&mut self, mentions: Vec<i64>) {
+    fn stash_release(&mut self, mentions: Vec<i64>, restarts_rotation: bool) {
         match self.stashed_release.as_mut() {
-            Some(held) => held.extend(mentions),
-            None => self.stashed_release = Some(mentions),
+            // Two held releases fold into one replay: mentions queue behind
+            // each other as they would across two turns, and ONE of them
+            // being a typed message (a reset) makes the fold a reset — the
+            // stronger semantic wins, so a user's steer is never downgraded
+            // to a continuation by a tray answer sharing the stash.
+            Some((held, restarts)) => {
+                held.extend(mentions);
+                *restarts |= restarts_rotation;
+            }
+            None => self.stashed_release = Some((mentions, restarts_rotation)),
         }
     }
 
     /// The held release, once nothing is winding down any more; `None` when
     /// there is nothing to replay or a completion is still owed.
-    fn take_stashed_release(&mut self) -> Option<Vec<i64>> {
+    fn take_stashed_release(&mut self) -> Option<(Vec<i64>, bool)> {
         if self.winding_down.is_some() {
             return None;
         }
@@ -1671,6 +1695,7 @@ impl RingState {
                             rx,
                             self,
                             false,
+                            false,
                         )
                         .await;
                     }
@@ -1815,8 +1840,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                          grace; dealing the held release anyway"
                     );
                     state.winding_down = None;
-                    if let Some(mentions) = state.take_stashed_release() {
-                        release_ring(&deps, &mut rx, &mut state, mentions).await;
+                    if let Some((mentions, restarts)) = state.take_stashed_release() {
+                        release_ring(&deps, &mut rx, &mut state, mentions, restarts).await;
                     }
                     continue;
                 }
@@ -1902,15 +1927,18 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // A release held back for this participant's completion is dealt
                 // now that its process is idle (round 10, B1) — the same path a
                 // fresh `UserMessage` takes, so nothing about the restart differs.
-                if let Some(mentions) = state.take_stashed_release() {
+                if let Some((mentions, restarts)) = state.take_stashed_release() {
                     debug!(
                         session = %deps.session_id,
                         "sequencer: replaying the release held for the halted holder's completion"
                     );
-                    release_ring(&deps, &mut rx, &mut state, mentions).await;
+                    release_ring(&deps, &mut rx, &mut state, mentions, restarts).await;
                 }
             }
-            SequencerCommand::UserMessage { mentions } => {
+            SequencerCommand::UserMessage {
+                mentions,
+                restarts_rotation,
+            } => {
                 // **A release that lands while the halted holder is still
                 // finishing waits for its completion** (round 10, B1) — see
                 // `RingState::winding_down` for the fold-in it prevents. Held
@@ -1923,10 +1951,10 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         "sequencer: a release arrived while the halted holder is still finishing; \
                          holding it until that completion lands"
                     );
-                    state.stash_release(mentions);
+                    state.stash_release(mentions, restarts_rotation);
                     continue;
                 }
-                release_ring(&deps, &mut rx, &mut state, mentions).await;
+                release_ring(&deps, &mut rx, &mut state, mentions, restarts_rotation).await;
             }
             SequencerCommand::MessageStaged => {
                 if state.holder.is_none() {
@@ -1995,13 +2023,13 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // the replay's deal reaches the new process, not the dead one.
                 if state.winding_down == Some(participant_id) {
                     state.winding_down = None;
-                    if let Some(mentions) = state.take_stashed_release() {
+                    if let Some((mentions, restarts)) = state.take_stashed_release() {
                         debug!(
                             session = %deps.session_id,
                             participant_id,
                             "sequencer: the halted holder respawned; replaying the held release"
                         );
-                        release_ring(&deps, &mut rx, &mut state, mentions).await;
+                        release_ring(&deps, &mut rx, &mut state, mentions, restarts).await;
                     }
                 }
             }
@@ -2046,6 +2074,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         &deps,
                         &mut rx,
                         &mut state,
+                        false,
                         false,
                     )
                     .await;
@@ -2109,7 +2138,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 );
                 if idle {
                     state.reseed_gates_if_needed(&deps).await;
-                    advance_turn(&deps, &mut rx, &mut state, false).await;
+                    advance_turn(&deps, &mut rx, &mut state, false, false).await;
                 }
             }
             SequencerCommand::Pause => {
@@ -2234,14 +2263,21 @@ fn release_held(
     replayed
 }
 
-/// **The user spoke: restart the ring** — the body of the `UserMessage` arm,
+/// **The user spoke: release the ring** — the body of the `UserMessage` arm,
 /// shared with the replay of a release held back for a halted holder's
-/// completion (round 10, B1) so the two restarts cannot drift.
+/// completion (round 10, B1) so the two releases cannot drift.
+///
+/// `restarts_rotation` decides whether the deal RESETS to the front (a typed
+/// message — the user steering) or steps onward from the anchor (a tray/gate
+/// answer — see the flag's doc on [`SequencerCommand::UserMessage`]). Halt
+/// clearing, spin clearing and the vote-tally reset are release semantics, not
+/// restart semantics: they happen either way.
 async fn release_ring(
     deps: &SequencerDeps,
     rx: &mut mpsc::Receiver<SequencerCommand>,
     state: &mut RingState,
     mentions: Vec<i64>,
+    restarts_rotation: bool,
 ) {
     // **Whoever the user named takes the next turn, in the order
     // they were named** (rc3 D17). Appended rather than assigned:
@@ -2263,12 +2299,13 @@ async fn release_ring(
     // in `advance_turn`; see the comment there for why this arm is
     // the wrong place to own it.
     //
-    // The user speaking with nobody named resets the cycle to the
+    // A TYPED message with nobody named resets the cycle to the
     // front of the rotation, whoever held the turn — `None` is what
-    // `next_active_participant` reads as "reset". The previous
-    // holder's turn is not cancelled; nothing here can stop it. What
-    // happens instead is that the epoch moves, so its completion is
-    // discarded when it arrives.
+    // `next_active_participant` reads as "reset"; a tray/gate ANSWER
+    // (`restarts_rotation = false`) steps onward from the anchor
+    // instead. The previous holder's turn is not cancelled; nothing
+    // here can stop it. What happens instead is that the epoch moves,
+    // so its completion is discarded when it arrives.
     //
     // Spin state IS cleared here, unlike the tally. Router inventory
     // #12 names the pair — a user message clears done-votes AND the
@@ -2289,7 +2326,7 @@ async fn release_ring(
     // lands, this belongs next to the tally clear, not here.
     state.spin.clear();
     state.reseed_gates_if_needed(deps).await;
-    advance_turn(deps, rx, state, true).await;
+    advance_turn(deps, rx, state, true, restarts_rotation).await;
 }
 
 /// Step the ring, stamp the new turn, and deliver its backlog — emptying the
@@ -2304,11 +2341,25 @@ async fn release_ring(
 /// Takes `reset` rather than the current participant because `holder` is behind
 /// a `&mut` here — the caller cannot lend it out and have it written back in
 /// the same call.
+/// The anti-starvation summons threshold: undelivered PEER TEXT rows at or
+/// above this count earn a participant one pre-empting turn on the next
+/// user-row deal. 10 is the event definition of the 2026-08-27 measurement
+/// (137 starvation gaps across 38 sessions, each with ≥10 peer texts passed
+/// unread; healthy baseline batches ran under ~10), not a tuning guess.
+///
+/// `pub(crate)` because the session view's starvation chip must mean exactly
+/// what the scheduler acts on: `session_participant_backlogs` computes its
+/// `starving` flag FROM this constant, so the UI carries no threshold of its
+/// own and the two cannot drift (EYES A6 — "a function is what makes the
+/// halves travel together"; here it is a shared constant).
+pub(crate) const STARVATION_SUMMONS_MIN_PEER_TEXTS: i64 = 10;
+
 async fn advance_turn(
     deps: &SequencerDeps,
     rx: &mut mpsc::Receiver<SequencerCommand>,
     state: &mut RingState,
     user_spoke: bool,
+    restarts_rotation: bool,
 ) {
     // Destructured rather than reached through `state.` at each of the sixty-odd
     // uses below, and that is deliberate: binding through a `&mut RingState`
@@ -2367,15 +2418,93 @@ async fn advance_turn(
         halt(deps, holder, epoch).await;
         return;
     }
+    // **Anti-starvation backstop (2026-08-27), second layer.** The root fix is
+    // `restarts_rotation` below — answers no longer reset the rotation — but a
+    // chain of TYPED messages still resets to the front each time, legitimately,
+    // and a participant past position 0 can accumulate unread peer texts across
+    // the chain with no turn in sight. On every user-row deal: any active
+    // participant (not the holder, not already queued) sitting on
+    // [`STARVATION_SUMMONS_MIN_PEER_TEXTS`]+ undelivered peer texts is minted a
+    // summons — the same queue a user `@mention` fills, so it is served ONE
+    // pre-empting turn and the rotation resumes from the anchor (D17 insertion
+    // semantics; `hand_to_summoned` re-validates at serve time). Self-limiting:
+    // the served turn drains the backlog to zero, so no re-mint until it
+    // re-accumulates. Fail-open on read errors — a starving participant is a
+    // degraded session, not a broken one, and the next user row retries.
+    //
+    // This is a HOST fairness heuristic, not a participant summoning anyone —
+    // D17's "only the user may mention" (see `core::mentions`) guards against
+    // unbounded peer-summon loops, which a backlog-predicated, once-per-episode
+    // mint cannot form.
+    if user_spoke {
+        if let Ok(roster) = deps.storage.participants_for_session(&deps.session_id).await {
+            // The ring front is EXCLUDED from minting (EYES A2): a typed
+            // message's reset deals the front anyway, so a summons for it
+            // would only suppress the reset (queue non-empty → `restart`
+            // false) and leave the anchor unmoved — the steer would land on
+            // the right participant for the wrong reason. The front cannot
+            // starve structurally: every typed reset serves it, and on
+            // answer-continues the rotation reaches it in order. (The holder
+            // is excluded too — vacuous on today's call paths, where dealing
+            // is parked or the ring idle, but a future caller with a live
+            // holder must not summon the participant mid-turn.)
+            let front_id = roster
+                .iter()
+                .find(|p| p.enabled && p.participation_mode == crate::storage::MODE_ACTIVE)
+                .map(|p| p.id);
+            let candidates: Vec<&crate::storage::Participant> = roster
+                .iter()
+                .filter(|p| {
+                    p.enabled
+                        && p.participation_mode == crate::storage::MODE_ACTIVE
+                        && Some(p.id) != front_id
+                        && holder.as_ref().map(|h| h.id) != Some(p.id)
+                        && !summons.queue.contains(&p.id)
+                })
+                .collect();
+            for p in candidates {
+                match deps
+                    .storage
+                    .undelivered_peer_text_count(&deps.session_id, p.id)
+                    .await
+                {
+                    Ok(n) if n >= STARVATION_SUMMONS_MIN_PEER_TEXTS => {
+                        debug!(
+                            session = %deps.session_id,
+                            participant_id = p.id,
+                            slug = %p.slug,
+                            undelivered_peer_texts = n,
+                            "sequencer: anti-starvation summons — this participant is \
+                             served before the rotation continues"
+                        );
+                        summons.queue.push_back(p.id);
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(
+                        session = %deps.session_id,
+                        participant_id = p.id,
+                        error = %e,
+                        "sequencer: starvation check failed; skipping this participant"
+                    ),
+                }
+            }
+        }
+    }
     // **A user message restarts the cycle at the front — UNLESS they named
-    // someone** (rc3 D17 #4). A mention is an insertion: it changes who takes
-    // the next turn and leaves the rotation where it is, because summoning an
-    // advisor must not silently send the ring back to participant 1.
+    // someone** (rc3 D17 #4), **and UNLESS it is a tray/gate ANSWER rather
+    // than a typed message** (`restarts_rotation`, 2026-08-27). A mention is
+    // an insertion: it changes who takes the next turn and leaves the rotation
+    // where it is, because summoning an advisor must not silently send the
+    // ring back to participant 1. An answer is a release without a reset: the
+    // ring steps onward from the anchor, so the participant AFTER the one that
+    // parked the question is served — before this, every approval in a
+    // park→approve→park chain re-dealt the front and position 1 starved (the
+    // 137-event measurement on the flag's doc).
     //
     // The two halves of "reset" come apart here, and only the ring half is
     // conditional. The BOOKKEEPING half — the tally and the lap count — is
     // cleared by the user speaking either way; see below.
-    let restart = user_spoke && summons.queue.is_empty();
+    let restart = user_spoke && restarts_rotation && summons.queue.is_empty();
     // **The ring steps from the ANCHOR, not from the holder** (rc3 D17). For an
     // ordinary turn the two are the same participant — the anchor is set to
     // whoever the ring hands to — so this changes nothing on the common path.
@@ -4484,6 +4613,20 @@ mod tests {
     fn user_message() -> SequencerCommand {
         SequencerCommand::UserMessage {
             mentions: Vec::new(),
+            // The helper models a TYPED message — the steering kind, which
+            // resets the rotation. Answers (restarts_rotation: false) get
+            // their own helper, `answer_message`, so a test's intent is
+            // visible at the call site.
+            restarts_rotation: true,
+        }
+    }
+
+    /// A tray/gate ANSWER: releases the ring without resetting the rotation
+    /// (the starvation fix, 2026-08-27).
+    fn answer_message() -> SequencerCommand {
+        SequencerCommand::UserMessage {
+            mentions: Vec::new(),
+            restarts_rotation: false,
         }
     }
 
@@ -4535,6 +4678,7 @@ mod tests {
     fn summoning(mentions: &[i64]) -> SequencerCommand {
         SequencerCommand::UserMessage {
             mentions: mentions.to_vec(),
+            restarts_rotation: true,
         }
     }
 
@@ -7077,6 +7221,194 @@ mod tests {
         assert!(
             !roster.iter().find(|p| p.id == b).unwrap().done_vote,
             "the user's message cleared a vote cast before it, with a turn still in flight"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **THE starvation fix, pinned by identity** (2026-08-27). The measured
+    /// loop: A (the executor) holds, ends its turn in a halt (a parked gate /
+    /// `mark_awaiting_user`), the user's ANSWER releases the ring — and before
+    /// `restarts_rotation`, that release reset to the front, so A was dealt
+    /// again, halted again, and B (the reviewer) was never served: 137 events
+    /// across 38 sessions, worst gap 478 minutes, always position 1.
+    ///
+    /// Asserted by IDENTITY — B is dealt, not merely "not A" — because a loop,
+    /// a third participant, or nobody would all pass a negative assertion.
+    /// Deleting the flag from the `restart` computation (reverting to
+    /// `user_spoke && queue.is_empty()`) deals A here and the test goes red.
+    #[tokio::test]
+    async fn an_answer_release_deals_the_next_participant_not_the_front() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"], "epoch 1 — A holds, the anchor is A");
+
+        // A parks a question and halts; its process finishes the turn. The
+        // completion lands with the halt latch up, so nothing further is dealt
+        // until the user responds.
+        send(&tx, SequencerCommand::HaltDeclared { participant_id: Some(a) }).await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+
+        // The user ANSWERS (a tray pick / gate approval — not a typed message).
+        post(&storage, "user", None, "approved").await;
+        send(&tx, answer_message()).await;
+        assert_eq!(
+            seats[1].expect(2).await,
+            vec!["go", "approved"],
+            "the answer released the ring WITHOUT resetting: the rotation stepped \
+             from the anchor (A) and dealt B — the participant the old reset starved"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **The backstop layer** (WS1b): `restarts_rotation` cannot help against a
+    /// chain of TYPED messages — each legitimately resets to the front — so a
+    /// participant past position 0 can still accumulate unread peer texts with
+    /// no turn in sight. At the threshold (10, the measured event definition)
+    /// the ring mints an anti-starvation summons and serves that participant
+    /// BEFORE the rotation continues. Deleting the mint in `advance_turn`
+    /// leaves B undealt here and the `expect` times out red.
+    #[tokio::test]
+    async fn a_typed_message_chain_cannot_starve_a_participant_past_the_threshold() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"], "epoch 1 — A holds");
+
+        // A emits ten text chunks over its still-live turn — the multi-chunk
+        // executor turn of the measured sessions — and the user TYPES again,
+        // which before the backstop reset to the front and dealt A with B now
+        // twelve rows behind.
+        for i in 0..10 {
+            post(&storage, "participant", Some("a"), &format!("chunk {i}")).await;
+        }
+        post(&storage, "user", None, "typed again").await;
+        send(&tx, user_message()).await;
+
+        let expected: Vec<String> = std::iter::once("go".to_string())
+            .chain((0..10).map(|i| format!("chunk {i}")))
+            .chain(std::iter::once("typed again".to_string()))
+            .collect();
+        assert_eq!(
+            seats[1].expect(12).await,
+            expected,
+            "B crossed the starvation threshold, so the typed message serves B \
+             first — the summons pre-empts the reset"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **The stash MERGE arm, `false` side** (EYES A1). Round 11's scar on this
+    /// exact function: the merge arm of `stash_release` was the one branch no
+    /// test reached, and adding `restarts_rotation` to the tuple re-opened the
+    /// gap one field over — every prior test folded `true |= true`, where `|=`
+    /// is indistinguishable from `=`, `&=`, or deletion. Two ANSWERS stashed
+    /// during wind-down fold to `(…, false)` — the only path that produces
+    /// `false` through the merge — so mutating the fold to `*restarts = true`
+    /// deals A here and goes red.
+    #[tokio::test]
+    async fn two_answers_stashed_during_wind_down_replay_without_a_reset() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"], "epoch 1 — A holds, anchor A");
+
+        // A parks and halts; while its completion is owed, TWO answers land
+        // (a tray pick and a gate approval in quick succession) — both are
+        // stashed, and the stash folds them.
+        send(&tx, SequencerCommand::HaltDeclared { participant_id: Some(a) }).await;
+        post(&storage, "user", None, "pick one").await;
+        send(&tx, answer_message()).await;
+        post(&storage, "user", None, "pick two").await;
+        send(&tx, answer_message()).await;
+
+        // The completion arrives; the held release replays as ONE deal.
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(
+            seats[1].expect(3).await,
+            vec!["go", "pick one", "pick two"],
+            "two folded answers stay an answer — the replay steps from the \
+             anchor and deals B, no reset to the front"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// **The stash MERGE arm, mixed side** (EYES A1): a typed STEER stashed
+    /// with an answer must replay as a RESET — `true |= false` — because the
+    /// user's steer is never downgraded by an answer sharing the stash. This
+    /// is the test that kills last-wins (`*restarts = restarts_rotation`):
+    /// under it the later answer's `false` wins and B is dealt, red.
+    #[tokio::test]
+    async fn a_steer_stashed_with_an_answer_still_resets_to_the_front() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"], "epoch 1 — A holds");
+
+        send(&tx, SequencerCommand::HaltDeclared { participant_id: Some(a) }).await;
+        post(&storage, "user", None, "typed steer").await;
+        send(&tx, user_message()).await;
+        post(&storage, "user", None, "then an answer").await;
+        send(&tx, answer_message()).await;
+
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(
+            seats[0].expect(2).await,
+            vec!["typed steer", "then an answer"],
+            "the fold keeps the steer: the replay RESETS to the front (A), \
+             an answer sharing the stash cannot downgrade it"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// The degenerate case: an answer arriving before any turn was ever dealt
+    /// has no anchor to continue from — `current = None` reads as reset, so the
+    /// front is dealt exactly as a typed message would. Pins the fallback so
+    /// `restarts_rotation = false` can never strand a fresh ring.
+    #[tokio::test]
+    async fn an_answer_with_no_anchor_falls_back_to_the_front() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        post(&storage, "user", None, "answer first").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, answer_message()).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["answer first"],
+            "no anchor yet — the answer deals the front, same as a typed message"
         );
         drop(tx);
         assert!(exited(task).await);

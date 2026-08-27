@@ -1940,6 +1940,73 @@ impl Storage {
         Ok(row.map(|r| r.0).unwrap_or(0))
     }
 
+    /// Per-participant delivery lag for the session view's starvation chip
+    /// (WS1c, 2026-08-27): `(participant_id, slug, last_delivered_at,
+    /// undelivered_peer_texts)` for every enabled ACTIVE participant, in ring
+    /// order. `last_delivered_at` is `None` for a participant never dealt a
+    /// turn. The count is the same metric as
+    /// [`undelivered_peer_text_count`] — the units the 137-event starvation
+    /// measurement was made in.
+    pub async fn participant_backlogs(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<(i64, String, Option<String>, i64)>> {
+        let rows: Vec<(i64, String, Option<String>, i64)> = sqlx::query_as(
+            "SELECT p.id, p.slug,
+                (SELECT MAX(d.delivered_at) FROM participant_deliveries d
+                  WHERE d.participant_id = p.id),
+                (SELECT COUNT(*) FROM messages m
+                  WHERE m.session_id = p.session_id
+                    AND m.kind = 'text'
+                    AND m.origin = 'participant'
+                    AND m.participant_id IS NOT NULL
+                    AND m.participant_id != p.id
+                    AND m.id > COALESCE(
+                        (SELECT last_read_message_id FROM participant_cursors c
+                          WHERE c.participant_id = p.id), 0))
+             FROM session_participants p
+             WHERE p.session_id = ? AND p.enabled = 1 AND p.participation_mode = 'active'
+             ORDER BY p.turn_position, p.id",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading participant backlogs")?;
+        Ok(rows)
+    }
+
+    /// How many PEER text rows sit past this participant's cursor — other
+    /// participants' `kind='text'` messages it has not been dealt. The
+    /// starvation metric (2026-08-27): the ring's anti-starvation summons fires
+    /// on this count, because it is the number the 137-event measurement was
+    /// made in (gaps where ≥10 peer texts passed unread). User and system rows
+    /// are excluded — they wake the ring by other paths — and so are the
+    /// participant's own rows, which its cursor has trivially passed.
+    pub async fn undelivered_peer_text_count(
+        &self,
+        session_id: &str,
+        participant_id: i64,
+    ) -> Result<i64> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM messages m
+             WHERE m.session_id = ?
+               AND m.kind = 'text'
+               AND m.origin = 'participant'
+               AND m.participant_id IS NOT NULL
+               AND m.participant_id != ?
+               AND m.id > COALESCE(
+                   (SELECT last_read_message_id FROM participant_cursors
+                    WHERE participant_id = ?), 0)",
+        )
+        .bind(session_id)
+        .bind(participant_id)
+        .bind(participant_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("counting undelivered peer texts")?;
+        Ok(row.0)
+    }
+
     /// Record what a participant was handed and move its cursor past the batch,
     /// in ONE transaction.
     ///

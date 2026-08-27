@@ -857,6 +857,13 @@ async fn call_tool(
             if let Some(report) = bridge.staleness_sweep(&caller.session_id).await {
                 return Ok(ToolCallResult::text(report));
             }
+            // WS3 (2026-08-27): open ADVISORY findings surfaced once before the
+            // close proceeds — 92% of advisories died undispositioned with
+            // their sessions before this existed. Advisory like the sweep: the
+            // retry closes regardless.
+            if let Some(report) = bridge.open_advisories_report(&caller.session_id).await {
+                return Ok(ToolCallResult::text(report));
+            }
             // A3b (adherence): soft-gate the FIRST close with no CL learnings
             // delta this session — nudge to persist the delta, then close on
             // the retry. The UI force-close path (tauri_cmd) is separate + ungated.
@@ -1114,15 +1121,18 @@ async fn call_tool(
             // matches no participant — so every phase-tagged write took the
             // fallback arm and clobbered the other participant's phase doc,
             // silently, while the EYES prompt and migration 0049 both kept
-            // promising the co-located behaviour. Same capability the commit
-            // gate's reviewer registry is built from (`core::session`), so the
-            // two cannot disagree about who a reviewer is.
-            match (
-                caller
-                    .capabilities
-                    .grants(crate::agents::Capability::FileFinding),
-                phase.as_deref(),
-            ) {
+            // promising the co-located behaviour.
+            //
+            // **WS2 (2026-08-27): re-keyed to REVIEWER-SHAPED** — `FileFinding
+            // && !EditFiles` — so an EXECUTOR granted `file_finding` (the
+            // reverse review channel) keeps authoring the primary phase docs
+            // instead of having every one silently rerouted to the reviewer
+            // co-doc. The commit gate's reviewer registry deliberately does NOT
+            // follow (bare `FileFinding` there): its ANY-down semantics mean an
+            // extra registrant defuses nothing, while this redirect answers a
+            // different question — who is the phase-doc AUTHOR. See
+            // `ResolvedCapabilities::reviewer_shaped` for the full argument.
+            match (caller.capabilities.reviewer_shaped(), phase.as_deref()) {
                 (true, Some(p)) => {
                     let (id, eyes_slug) = bridge
                         .session_doc_write_eyes(&caller.session_id, p, &body, &caller.agent, append)
@@ -1619,6 +1629,123 @@ mod tests {
             tools.len(),
             names.iter().collect::<std::collections::HashSet<_>>().len(),
             "tool names should be unique"
+        );
+    }
+
+    /// **WS3 (2026-08-27): open advisories are surfaced once at close, then the
+    /// close proceeds.** 92% of advisories (174/189 lifetime) died
+    /// undispositioned with their sessions before this — filed, never seen
+    /// again. The shape is the staleness sweep's: one listing, never a gate.
+    /// A clean session must NOT burn its surfacing (third case) — the flag is
+    /// set only when a report was produced.
+    #[tokio::test]
+    async fn close_surfaces_open_advisories_once_then_proceeds() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage
+            .insert_finding(
+                "s1", "uid-a1", "eyes",
+                crate::storage::FindingSeverity::Advisory,
+                "the draft overstates the backlog claim", None,
+            )
+            .await
+            .unwrap();
+        storage
+            .insert_finding(
+                "s1", "uid-a2", "eyes",
+                crate::storage::FindingSeverity::Advisory,
+                "provenance missing on the force_all paragraph", None,
+            )
+            .await
+            .unwrap();
+        // A blocking finding must NOT appear in the advisory listing — it has
+        // its own mechanical gate.
+        storage
+            .insert_finding(
+                "s1", "uid-b1", "eyes",
+                crate::storage::FindingSeverity::Blocking,
+                "wrong constant", None,
+            )
+            .await
+            .unwrap();
+
+        let close = |n| {
+            let bridge = bridge.clone();
+            async move {
+                let res = dispatch(
+                    req("tools/call", json!({"name": "close_session", "arguments": {}}), n),
+                    &caller(),
+                    &bridge,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let v = serde_json::to_value(&res).unwrap();
+                v["result"]["content"][0]["text"].as_str().unwrap_or("").to_string()
+            }
+        };
+
+        let first = close(1).await;
+        assert!(
+            first.contains("2 open advisory finding(s)")
+                && first.contains("uid-a1")
+                && first.contains("uid-a2"),
+            "the first close lists the open advisories; got: {first}"
+        );
+        assert!(
+            !first.contains("uid-b1"),
+            "blocking findings are not advisories and have their own gate; got: {first}"
+        );
+        // The one-shot chain: advisories fired, so the SECOND close reaches the
+        // next layer (the CL-delta nudge), and the THIRD proceeds. Each layer
+        // is advisory; none can hold the close shut.
+        let second = close(2).await;
+        assert!(
+            second.contains("learnings delta") && !second.contains("advisory finding"),
+            "the advisory listing fires once, before the delta nudge; got: {second}"
+        );
+        let third = close(3).await;
+        assert!(
+            third.contains("close requested"),
+            "every layer is advisory — the close proceeds; got: {third}"
+        );
+
+        // A session with NO open advisories never sees the listing — the
+        // one-shot is not burned by a clean check, and the close chain is one
+        // layer shorter.
+        storage.create_session("s2", "t", None).await.unwrap();
+        let clean_caller = CallerIdentity {
+            session_id: "s2".into(),
+            agent: "hands".into(),
+            capabilities: caller().capabilities,
+        };
+        let clean_close = |n| {
+            let bridge = bridge.clone();
+            let who = clean_caller.clone();
+            async move {
+                let res = dispatch(
+                    req("tools/call", json!({"name": "close_session", "arguments": {}}), n),
+                    &who,
+                    &bridge,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let v = serde_json::to_value(&res).unwrap();
+                v["result"]["content"][0]["text"].as_str().unwrap_or("").to_string()
+            }
+        };
+        let c1 = clean_close(4).await;
+        assert!(
+            !c1.contains("advisory finding"),
+            "no open advisories → no listing; got: {c1}"
+        );
+        let c2 = clean_close(5).await;
+        assert!(
+            c2.contains("close requested"),
+            "a clean session closes after the delta nudge alone; got: {c2}"
         );
     }
 
@@ -3176,6 +3303,34 @@ mod tests {
             plan.body, "the plan",
             "the reviewer's write must not have overwritten the phase doc"
         );
+
+        // **WS2 (2026-08-27): an EXECUTOR granted `file_finding` is still the
+        // phase-doc AUTHOR.** The redirect keys on reviewer-SHAPED
+        // (`FileFinding && !EditFiles`), not bare `FileFinding` — under the
+        // bare predicate this caller's every phase write would silently reroute
+        // to `plan-eyes` and the primary phase docs would never be written.
+        let filing_executor = CallerIdentity {
+            session_id: "s1".into(),
+            agent: "eyes".into(),
+            capabilities: crate::agents::ResolvedCapabilities::Known(
+                crate::agents::CapabilitySet::from_slugs(&["edit_files", "file_finding"]),
+            ),
+        };
+        assert!(
+            !filing_executor.capabilities.reviewer_shaped(),
+            "holding both capabilities is executor-shaped, or this case proves nothing"
+        );
+        let exec = write(filing_executor, "the plan, revised").await;
+        assert!(
+            exec.contains("\"slug\":\"plan\""),
+            "an executor that may also file findings writes the phase doc itself; got: {exec}"
+        );
+        let plan = bridge
+            .session_doc_read("s1", "plan")
+            .await
+            .unwrap()
+            .expect("the phase doc");
+        assert_eq!(plan.body, "the plan, revised", "the author's write landed on the primary doc");
     }
 
     /// **`mode:"append"` must survive the reviewer redirect** (round 9). The

@@ -75,5 +75,27 @@ export function SessionFindingsBanner({ sessionId }: { sessionId: string }) {
       </>
     );
   }
+
+  // WS3's visibility half (2026-08-27): open advisories, quiet but countable —
+  // 92% of advisories (174/189 lifetime) died undispositioned with their
+  // sessions before anything surfaced them. Low salience on purpose: they
+  // block nothing; the count just stops them being invisible.
+  const openAdvisories = findings.filter(
+    (f) => f.status === "open" && f.severity === "advisory",
+  );
+  if (openAdvisories.length > 0) {
+    return (
+      <>
+        <span className="mx-2 text-outline-variant">·</span>
+        <span
+          className="text-on-surface-variant"
+          title="Open advisory findings — non-blocking; close_session lists them once before the session archives"
+        >
+          {openAdvisories.length} advisor
+          {openAdvisories.length === 1 ? "y" : "ies"} open
+        </span>
+      </>
+    );
+  }
   return null;
 }

@@ -36,6 +36,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         sessions::get_session_project_info,
         // rc3 D10: the roster read that replaced every brian_*/rain_* pair.
         sessions::list_session_participants,
+        // WS1c: per-participant delivery lag — the starvation chip's read.
+        sessions::session_participant_backlogs,
         // rc3 P1: what a running participant was actually told.
         sessions::get_participant_system_prompt,
         // rc3 P7: what its context window was doing, closed session included.
