@@ -38,9 +38,37 @@ export function GatedKeywordList({
   const updateRow = (i: number, patch: Partial<GatedKeyword>) =>
     replaceAt(i, { ...value[i], ...patch });
   const addRow = () => append({ keyword: "", mode: "gate" });
+  // "Set all" (2026-08-27, user request): flipping a long keyword list
+  // one row at a time is the friction that pushed a whole session to
+  // auto-allow by hand. One emit, every row, same onChange contract.
+  const setAll = (mode: GateMode) =>
+    onChange(value.map((k) => ({ ...k, mode })));
 
   return (
     <>
+      {value.length > 1 && (
+        <div className="mb-2 flex items-center gap-2">
+          <span className="font-label-caps text-label-caps text-on-surface-variant">
+            Set all
+          </span>
+          <div className="flex overflow-hidden rounded border border-outline-variant">
+            <button
+              type="button"
+              onClick={() => setAll("gate")}
+              className="px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-primary/15 hover:text-primary"
+            >
+              Gate
+            </button>
+            <button
+              type="button"
+              onClick={() => setAll("auto_allow")}
+              className="border-l border-outline-variant px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-success/15 hover:text-success"
+            >
+              Auto-allow
+            </button>
+          </div>
+        </div>
+      )}
       {value.length === 0 ? (
         emptyState
       ) : (
