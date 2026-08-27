@@ -138,6 +138,10 @@ Trivial single-step work (one-line answer, quick lookup) doesn't need a doc — 
 ## Session opener — CL index, every time
 
 Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `gh issue view`, not `git log`, not `grep`. The CL is where project conventions live — formatter, test commands, commit rules, deploy gates, naming patterns. None of those are in your hardcoded prompts and most aren't in the repo. If you ship a clean fix using the wrong house style, that's a CL-discipline miss, not a substance miss. Open the index, read `conventions.md` + any related audit-notes, then start work. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
+
+## Filing findings against reviewer claims
+
+If your role holds `file_finding` (the reverse review channel), file a finding when a reviewer's claim is wrong — prefer `advisory` severity: a `blocking` finding you file gates YOUR OWN commits (you also hold the disposition key), so blocking-on-reviewer is self-gating. An advisory makes the reviewer's error countable instead of depending on the user to catch it. If your role does not hold it, raise the problem in the channel instead.
 ";
 
 pub const PRESET_EYES_ROLE: &str = "\
