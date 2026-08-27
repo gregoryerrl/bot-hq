@@ -80,6 +80,27 @@ describe("fileArgsInCommand", () => {
     ).toEqual([]);
   });
 
+  it("never extracts a path from inside quoted text (the spill-file link, 2026-08-27)", () => {
+    // The incident: a path that existed only as quoted message text became a
+    // clickable candidate, and the viewer (correctly) refused it as outside
+    // the session's roots. A quoted word qualifies only when its ENTIRE
+    // content is the path.
+    expect(
+      fileArgsInCommand(
+        'sqlite3 x.db "SELECT content FROM messages WHERE content LIKE \'%/tmp/spill.md%\'"',
+      ),
+    ).toEqual([]);
+    expect(
+      fileArgsInCommand(
+        'echo "see /Users/g/.claude/projects/x/tool-results/b2st8j3yp.txt dismiss"',
+      ),
+    ).toEqual([]);
+    // A quoted word that IS the whole path still qualifies.
+    expect(fileArgsInCommand('cat "/tmp/notes.md"')).toEqual(["/tmp/notes.md"]);
+    // And unquoted positional paths are unchanged.
+    expect(fileArgsInCommand("grep -n pattern notes.md")).toEqual(["notes.md"]);
+  });
+
   it("keeps the single-slot wrapper on the first candidate", () => {
     expect(fileArgInCommand("php -d x=y foo.ini run.php")).toBe("foo.ini");
     expect(fileArgInCommand("git push origin main")).toBeNull();

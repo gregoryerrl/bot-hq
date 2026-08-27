@@ -227,11 +227,23 @@ export function fileArgsInCommand(command: string): string[] {
   const out: string[] = [];
   const flagRe = /(?:--body-file|--file|-F)[=\s]+("[^"]+"|'[^']+'|\S+)/g;
   for (const m of command.matchAll(flagRe)) out.push(stripQuotes(m[1]));
-  const bareRe = new RegExp(`(\\S+\\.(?:${BARE_FILE_EXTS}))\\b`, "gi");
-  for (const m of command.matchAll(bareRe)) {
-    const token = stripQuotes(m[1]);
+  // Whole-shell-word candidates only (2026-08-27, the spill-file link): the
+  // previous regex scanned the ENTIRE command for any token ending in a known
+  // extension, so a path inside a quoted query, grep pattern, or pasted
+  // output became a clickable candidate — the incident offered a link to a
+  // path that existed only as quoted text, which the viewer then (correctly)
+  // refused as outside the session's roots. A bare candidate now qualifies
+  // only when an entire shell word IS the path: a quoted word whose full
+  // content is prose-containing-a-path no longer matches. Known limit: a
+  // quoted path WITH SPACES loses its button (the strict `\S+` shape refuses
+  // it) — the flag forms above remain the way to name such files.
+  const wordRe = /"[^"]*"|'[^']*'|\S+/g;
+  const pathRe = new RegExp(`^\\S+\\.(?:${BARE_FILE_EXTS})$`, "i");
+  for (const m of command.matchAll(wordRe)) {
+    const token = stripQuotes(m[0]);
     if (token.startsWith("-")) continue;
     if (token.includes("://")) continue;
+    if (!pathRe.test(token)) continue;
     out.push(token);
   }
   return [...new Set(out)];
