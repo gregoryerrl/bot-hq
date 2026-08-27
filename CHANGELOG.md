@@ -7,6 +7,63 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+## [1.0.3] — 2026-08-27
+
+The review-layer release: a full-day dissection of why agent errors were
+reaching the user found the turn ring silently starving the reviewer in 49%
+of two-participant sessions (137 flagged gaps, worst 478 minutes, always the
+reviewer's side), a review channel with no reverse direction, and advisory
+findings dying undispositioned at close (92%). Everything here follows from
+that diagnosis, and the fixes were field-verified live before release: the
+same session shape that starved its reviewer for 97 minutes in the morning
+dealt it within one second, all afternoon.
+
+### Fixed
+
+- **Tray and gate answers no longer reset the turn rotation to the front.**
+  Every approval used to re-deal the executor, so an executor chaining gate
+  parks starved the reviewer of turns entirely — both errors that shipped to
+  GitHub from the measured session went out inside such a window. A typed
+  message still resets (the user steering); an answer releases the ring and
+  steps onward from the anchor, so the participant after the asker is served.
+- **Anti-starvation backstop:** on every user-row deal, any active
+  participant sitting on 10+ undelivered peer texts is served one pre-empting
+  turn through the summons queue — covers the typed-message-chain shape the
+  root fix cannot.
+- **Phase-doc routing keys on reviewer shape** (`file_finding` without
+  `edit_files`), so granting an executor `file_finding` — the reverse review
+  channel — no longer reroutes its I/P/A/V docs into the reviewer co-doc slot.
+- **Chat file links no longer point at paths quoted inside command text.** A
+  path inside a quoted query, grep pattern, or pasted output became a
+  clickable candidate the viewer then refused; bare-path extraction now
+  qualifies whole shell words only.
+
+### Added
+
+- **Outward-publish review precondition:** a gated `gh`/`curl` command may
+  park for approval only after the session's reviewer has been *delivered*
+  its content (full-body match, file or inline; content-free mutations check
+  the turn timeline instead). The refusal teaches the two-turn ritual; a
+  solo roster skips the check loudly; a downed reviewer is escaped by the
+  existing user-approved override; an unchanged body re-parks after a reject
+  without re-review.
+- **Starvation visibility:** the session roster shows an amber
+  `N unread` chip when a participant crosses the summons threshold — computed
+  backend-side from the scheduler's own constant, so the UI and the ring
+  cannot disagree. 137 flagged gaps went undiagnosed because a starved
+  reviewer was indistinguishable from a quiet one.
+- **Open advisory findings surface at session close:** `close_session`
+  lists them once before proceeding (never blocking), and the findings
+  banner counts them while the session runs. Field-verified at first
+  contact: all 7 of the measured session's advisories were dispositioned in
+  the final minute instead of archiving silently.
+- **"Set all" on Gated Commands** (global Settings and the session gear):
+  one control flips every keyword row between Gate and Auto-allow.
+- **HANDS role guidance for the reverse review channel** (suggested-pair
+  prose): when the role holds `file_finding`, prefer advisory severity for
+  reviewer-directed findings — a blocking finding the executor files gates
+  its own commits.
+
 ## [1.0.2] — 2026-08-26
 
 Hotfix for the Windows upgrade path. The items 1.0.1 deferred "to 1.0.2"
