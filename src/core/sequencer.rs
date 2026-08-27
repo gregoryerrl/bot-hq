@@ -2344,8 +2344,10 @@ async fn release_ring(
 /// The anti-starvation summons threshold: undelivered PEER TEXT rows at or
 /// above this count earn a participant one pre-empting turn on the next
 /// user-row deal. 10 is the event definition of the 2026-08-27 measurement
-/// (137 starvation gaps across 38 sessions, each with ≥10 peer texts passed
-/// unread; healthy baseline batches ran under ~10), not a tuning guess.
+/// (137 density-flagged gaps across 38 sessions — an UPPER bound on true
+/// starvation, since the metric also counts texts accumulated inside one
+/// uninterruptible in-flight turn), and it rests independently on the healthy
+/// baseline: post-fix batches measured 4–9, so 10 separates the two regimes.
 ///
 /// `pub(crate)` because the session view's starvation chip must mean exactly
 /// what the scheduler acts on: `session_participant_backlogs` computes its

@@ -245,7 +245,7 @@ fn render_open_findings(open: &[Finding]) -> String {
 /// How recent an RPC call must be to overrule an event-derived Stalled/Dead
 /// verdict in the reviewer gate. Generous on purpose: a reviewer mid-review
 /// makes a call at least this often, while a genuinely dead one never does.
-const REVIEWER_LIVENESS_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+pub(super) const REVIEWER_LIVENESS_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Pure: the reviewer-down gate verdict (Batch 7). `Some(gate_string)` when a
 /// registered reviewer is down — either `blocked: …` or, with an approved override,

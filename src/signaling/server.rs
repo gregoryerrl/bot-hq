@@ -380,9 +380,9 @@ async fn handle_tool_gate(body: Incoming, bridge: Arc<SignalingBridge>) -> Respo
         .unwrap_or("an agent");
 
     match bridge.park_gated_command(session_id, agent, command).await {
-        Ok((gate_id, existing)) => text_response(
+        Ok((gate_id, existing, note)) => text_response(
             StatusCode::OK,
-            &json!({ "gate_id": gate_id, "existing": existing }).to_string(),
+            &json!({ "gate_id": gate_id, "existing": existing, "note": note }).to_string(),
         ),
         Err(e) => {
             warn!(%session_id, error = %e, "tool-gate auto-park failed");

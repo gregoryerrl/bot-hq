@@ -1975,6 +1975,71 @@ impl Storage {
         Ok(rows)
     }
 
+    /// The participant's most recent DISTINCT deal instants, newest first —
+    /// each `delivered_at` stamp is one handed-over batch (one turn's read).
+    /// Backs the outward-review timeline check (batch 2 C): "was the reviewer
+    /// dealt a turn between the caller's previous and current deals?"
+    pub async fn deal_instants(&self, participant_id: i64, n: i64) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT delivered_at FROM participant_deliveries
+             WHERE participant_id = ? ORDER BY delivered_at DESC LIMIT ?",
+        )
+        .bind(participant_id)
+        .bind(n)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading deal instants")?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    /// Any delivery for this participant strictly after `after` and at or
+    /// before `until` (RFC3339 strings compare lexicographically). Empty
+    /// `after` means "since ever".
+    pub async fn has_delivery_between(
+        &self,
+        participant_id: i64,
+        after: &str,
+        until: &str,
+    ) -> Result<bool> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM participant_deliveries
+             WHERE participant_id = ? AND delivered_at > ? AND delivered_at <= ?",
+        )
+        .bind(participant_id)
+        .bind(after)
+        .bind(until)
+        .fetch_one(&self.pool)
+        .await
+        .context("checking deliveries in window")?;
+        Ok(row.0 > 0)
+    }
+
+    /// Content of the newest `limit` channel rows at or below `max_id` — the
+    /// haystack for the outward-review coverage search, done in Rust rather
+    /// than SQL LIKE (bodies contain `%`/`_`). The window bound is a
+    /// documented limit: a body last posted more than `limit` rows before the
+    /// reviewer's cursor reads as uncovered and the park is refused — failing
+    /// closed, per the C spec.
+    pub async fn recent_row_bodies_upto(
+        &self,
+        session_id: &str,
+        max_id: i64,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT content FROM messages
+             WHERE session_id = ? AND id <= ?
+             ORDER BY id DESC LIMIT ?",
+        )
+        .bind(session_id)
+        .bind(max_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading rows for coverage search")?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
     /// How many PEER text rows sit past this participant's cursor — other
     /// participants' `kind='text'` messages it has not been dealt. The
     /// starvation metric (2026-08-27): the ring's anti-starvation summons fires

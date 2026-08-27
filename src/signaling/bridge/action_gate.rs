@@ -37,10 +37,10 @@ impl SignalingBridge {
         // executed with no approval at all. This is the same unconditional
         // park the `/hooks/tool-gate` route uses, for the same reason.
         if require_approval {
-            let (gate_id, existing) = self
+            let (gate_id, existing, note) = self
                 .park_gated_command(&session_id, &agent, &command)
                 .await?;
-            return Ok(parked_gate_text(&gate_id, &command, existing));
+            return Ok(parked_gate_text(&gate_id, &command, existing, note.as_deref()));
         }
         // Two-tier resolve (session snapshot → global fallback) — previously
         // this read only the global list, so a gear-tab session override was
@@ -55,10 +55,10 @@ impl SignalingBridge {
             // / no-match are handled defensively so a direct call still works.)
             None | Some(GateMode::AutoAllow) => self.execute_gated(&session_id, &command).await,
             Some(GateMode::Gate) => {
-                let (gate_id, existing) = self
+                let (gate_id, existing, note) = self
                     .park_gated_command(&session_id, &agent, &command)
                     .await?;
-                Ok(parked_gate_text(&gate_id, &command, existing))
+                Ok(parked_gate_text(&gate_id, &command, existing, note.as_deref()))
             }
         }
     }
@@ -78,6 +78,40 @@ impl SignalingBridge {
     /// exactly-once flip (`resolve_choice` → `execute_gated`), so parking alone
     /// is the whole job here.
     pub(crate) async fn park_gated_command(
+        &self,
+        session_id: &str,
+        agent: &str,
+        command: &str,
+    ) -> Result<(String, bool, Option<String>)> {
+        // **Outward-review precondition (batch 2 C, 2026-08-27).** An OUTWARD
+        // command — one that publishes under the user's identity — may park
+        // only after the session's reviewer has been DELIVERED its content.
+        // Both eras' escapes landed in this hole: the morning's two false
+        // claims went out through gates while the reviewer was starved, and
+        // the afternoon's empty-bodied PR raced its own retraction. The check
+        // refuses (teaching the two-turn ritual) instead of holding: nothing
+        // is timed, nothing is stranded on restart, and a rejected gate
+        // re-parks without re-review when the content is unchanged, because
+        // coverage is keyed on the content itself.
+        //
+        // Ceiling, stated plainly: delivery is provable, review is not — a
+        // reviewer that passed its turn satisfies this check. It is the honest
+        // limit of a mechanical precondition.
+        let note = match self.outward_review_check(session_id, agent, command).await? {
+            OutwardReview::Refuse(text) => return Err(anyhow::anyhow!(text)),
+            OutwardReview::Proceed(note) => note,
+        };
+        if let Some(n) = &note {
+            tracing::warn!(session_id, agent, note = %n, "outward park proceeding with review precondition skipped");
+        }
+        let (gate_id, existing) = self.park_reviewed_command(session_id, agent, command).await?;
+        Ok((gate_id, existing, note))
+    }
+
+    /// The park itself, AFTER the outward-review precondition. Split out so
+    /// the check cannot be skipped by a new caller reaching for "just park":
+    /// this fn is private, `park_gated_command` is the only route in.
+    async fn park_reviewed_command(
         &self,
         session_id: &str,
         agent: &str,
@@ -263,14 +297,249 @@ impl SignalingBridge {
 
 /// The parked-gate response text. `existing` distinguishes a fresh park from a
 /// dedupe hit on an already-pending identical command.
-fn parked_gate_text(gate_id: &str, command: &str, existing: bool) -> String {
+/// The outward-review verdict: park may proceed (with an optional LOUD note
+/// for the ack — a guard that quietly isn't watching is indistinguishable
+/// from one with nothing to report), or is refused with teaching text.
+pub(crate) enum OutwardReview {
+    Proceed(Option<String>),
+    Refuse(String),
+}
+
+/// OUTWARD classifier, v1: a command publishes under the user's identity when
+/// any segment's FIRST WORD is `gh` or `curl`. Segment-anchored both ways (the
+/// FileViewerDialog over-match lesson): `echo "gh issue"` is not outward, and
+/// `true && gh issue edit …` is. `git push` is deliberately absent — the
+/// pre-push hook owns it end to end.
+fn outward_command(command: &str) -> bool {
+    command
+        .split(['\n', ';', '|'])
+        .flat_map(|s| s.split("&&"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .any(|seg| {
+            matches!(seg.split_whitespace().next().unwrap_or(""), "gh" | "curl")
+        })
+}
+
+/// Body payloads an outward command carries: `--body-file <p>` /
+/// `--body-file=<p>` file references, and inline `--body "…"` / `--body '…'`
+/// strings. v1 covers the forms every real gate this week used.
+fn outward_bodies(command: &str) -> (Vec<String>, Vec<String>) {
+    let mut files = Vec::new();
+    let mut inline = Vec::new();
+    let toks: Vec<&str> = command.split_whitespace().collect();
+    for (i, t) in toks.iter().enumerate() {
+        if let Some(p) = t.strip_prefix("--body-file=") {
+            files.push(p.trim_matches(['"', '\'']).to_string());
+        } else if *t == "--body-file" {
+            if let Some(p) = toks.get(i + 1) {
+                files.push(p.trim_matches(['"', '\'']).to_string());
+            }
+        }
+    }
+    // Inline bodies keep their spaces, so they need the raw string, not the
+    // token walk: match the quoted span after `--body`.
+    for marker in ["--body \"", "--body '"] {
+        let quote = marker.chars().last().unwrap();
+        let mut rest = command;
+        while let Some(pos) = rest.find(marker) {
+            let after = &rest[pos + marker.len()..];
+            if let Some(end) = after.find(quote) {
+                inline.push(after[..end].to_string());
+                rest = &after[end..];
+            } else {
+                break;
+            }
+        }
+    }
+    (files, inline)
+}
+
+impl SignalingBridge {
+    /// The C precondition (plan, batch 2): outward parks require the
+    /// reviewer to have been DELIVERED the content. Full-body match — raw or
+    /// JSON-escaped form (a `session_doc_write`'s tool_use row carries the
+    /// body escaped) — against rows at or below the reviewer's cursor.
+    /// Head/tail sampling was rejected in review: a mid-body edit after
+    /// review is this morning's exact escape shape. Content-free outward
+    /// commands (merge/close/label) get the timeline check instead — there
+    /// is no payload to cover, and the PR body a merge lands was itself
+    /// coverage-checked at creation.
+    pub(crate) async fn outward_review_check(
+        &self,
+        session_id: &str,
+        agent: &str,
+        command: &str,
+    ) -> Result<OutwardReview> {
+        if !outward_command(command) {
+            return Ok(OutwardReview::Proceed(None));
+        }
+        let reviewers: Vec<String> = self
+            .session_reviewers(session_id)
+            .into_iter()
+            .filter(|slug| slug != agent)
+            .collect();
+        let Some(reviewer_slug) = reviewers.first() else {
+            return Ok(OutwardReview::Proceed(Some(
+                "note: no reviewer in this roster — outward review precondition skipped".into(),
+            )));
+        };
+        // Reviewer down → the same escape hatch the commit gate has: a
+        // user-approved override, never a timer.
+        let health = self.current_agent_health(session_id, reviewer_slug);
+        let recent =
+            self.agent_rpc_recent(session_id, reviewer_slug, super::findings::REVIEWER_LIVENESS_WINDOW);
+        if matches!(health.as_deref(), Some("stalled") | Some("dead")) && !recent {
+            return Ok(match self.reviewer_override_reason(session_id) {
+                Some(_) => OutwardReview::Proceed(Some(
+                    "note: reviewer down — user-approved override in effect; outward review \
+                     precondition skipped"
+                        .into(),
+                )),
+                None => OutwardReview::Refuse(format!(
+                    "outward publish held: the reviewer ({reviewer_slug}) is \
+                     {} and not recently active. Respawn it, or ask the user to \
+                     approve override_reviewer_block.",
+                    health.as_deref().unwrap_or("down")
+                )),
+            });
+        }
+        let storage = self
+            .storage
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no storage wired"))?;
+        let Some(reviewer) = storage.participant_by_slug(session_id, reviewer_slug).await? else {
+            return Ok(OutwardReview::Proceed(Some(
+                "note: reviewer not in this session's roster rows — outward review \
+                 precondition skipped"
+                    .into(),
+            )));
+        };
+        let (files, mut bodies) = outward_bodies(command);
+        for p in files {
+            let path = std::path::Path::new(&p);
+            let resolved = if path.is_relative() {
+                match self.session_working_repo(session_id).await {
+                    Some(repo) => repo.join(path),
+                    None => path.to_path_buf(),
+                }
+            } else {
+                path.to_path_buf()
+            };
+            match std::fs::read_to_string(&resolved) {
+                Ok(s) if s.len() <= 256 * 1024 => bodies.push(s),
+                Ok(_) => {
+                    return Ok(OutwardReview::Refuse(format!(
+                        "outward publish held: {p} is too large to coverage-check — \
+                         post the body in the channel or a session doc first."
+                    )))
+                }
+                Err(e) => {
+                    return Ok(OutwardReview::Refuse(format!(
+                        "outward publish held: cannot read {p} to check review \
+                         coverage ({e}) — post the body in the channel or a session \
+                         doc first."
+                    )))
+                }
+            }
+        }
+        // Fail CLOSED on the forms the extractor cannot evaluate (review
+        // round 2): a `--body`/`-b` the parser does not recognise must not
+        // silently downgrade to the timeline check while looking armed.
+        let mentions_body = command.contains("--body") // covers --body, --body=, --body-file…
+            || command.split_whitespace().any(|t| t == "-b");
+        if bodies.is_empty() && mentions_body {
+            return Ok(OutwardReview::Refuse(
+                "outward publish held: this command carries a body in a form the \
+                 coverage check cannot extract (-b, --body=…, or unquoted --body). \
+                 Use --body-file <path> or --body \"…\" so the reviewer-delivered \
+                 content can be verified."
+                    .into(),
+            ));
+        }
+        let cursor = storage.cursor_for(reviewer.id).await?;
+        if bodies.is_empty() {
+            // Content-free outward: timeline check — a reviewer deal strictly
+            // between the caller's previous and current deals.
+            let Some(caller) = storage.participant_by_slug(session_id, agent).await? else {
+                return Ok(OutwardReview::Proceed(Some(
+                    "note: caller not in roster rows — outward review precondition skipped".into(),
+                )));
+            };
+            let deals = storage.deal_instants(caller.id, 2).await?;
+            let current = deals.first().cloned().unwrap_or_default();
+            let prev = deals.get(1).cloned().unwrap_or_default();
+            return Ok(
+                if storage.has_delivery_between(reviewer.id, &prev, &current).await? {
+                    OutwardReview::Proceed(None)
+                } else {
+                    OutwardReview::Refuse(
+                        "outward publish held for review: the reviewer has not been \
+                         dealt a turn since your previous one. End your turn — the \
+                         ring deals the reviewer next — then park on your following \
+                         turn."
+                            .into(),
+                    )
+                },
+            );
+        }
+        // Coverage window: the newest 500 rows at or below the cursor. A body
+        // older than that reads as uncovered — failing closed, documented.
+        let haystack = storage.recent_row_bodies_upto(session_id, cursor, 500).await?;
+        for body in &bodies {
+            let trimmed = body.trim();
+            if trimmed.is_empty() {
+                // Fail CLOSED (review round 2): an empty body is this
+                // afternoon's actual escape — PR #559 went out empty-bodied
+                // from `--body-file /dev/stdin` with nothing piped, and the
+                // old `continue` here would have parked it as if reviewed.
+                return Ok(OutwardReview::Refuse(
+                    "outward publish held: the body resolves to EMPTY — a \
+                     --body-file reading an empty file or unpiped stdin \
+                     produces this. Write the real body to a file first."
+                        .into(),
+                ));
+            }
+            let escaped = serde_json::to_string(trimmed).unwrap_or_default();
+            let escaped = escaped.trim_matches('"');
+            let covered = haystack
+                .iter()
+                .any(|row| row.contains(trimmed) || row.contains(escaped));
+            if !covered {
+                return Ok(OutwardReview::Refuse(
+                    "outward publish held for review: the reviewer has not been \
+                     delivered this content. Post the body to the channel or a \
+                     session doc (the write itself is a delivered row), end your \
+                     turn — the ring deals the reviewer next — then park on your \
+                     following turn. Coverage is content-keyed: an unchanged body \
+                     re-parks without re-review."
+                        .into(),
+                ));
+            }
+        }
+        Ok(OutwardReview::Proceed(None))
+    }
+}
+
+fn parked_gate_text(
+    gate_id: &str,
+    command: &str,
+    existing: bool,
+    note: Option<&str>,
+) -> String {
     let lead = if existing {
         "action_gate: an identical command is ALREADY parked for approval"
     } else {
         "action_gate: parked for the user's approval"
     };
+    // The outward-review skip note rides the ack LOUDLY (batch 2 C): a solo
+    // roster or an overridden-down reviewer parks without the precondition,
+    // and the agent must see that the guard was not watching.
+    let note_line = note.map(|n| format!("\n{n}")).unwrap_or_default();
     format!(
-        "{lead} (gate_id: {gate_id}).\n\
+        "{lead} (gate_id: {gate_id}).{note_line}\n\
          `{command}` runs when the user approves; its output arrives as an \
          out-of-band message. On reject you get a rejection notice instead. Do \
          NOT re-issue the command or assume it ran — call gate_status(\"{gate_id}\") \
@@ -977,7 +1246,7 @@ mod tests {
         let bridge = bridge_with(data.path(), &[gk("echo", GateMode::Gate)], "s1", repo.path()).await;
         let cmd = format!("touch {}", posix_path(&marker)); // matches no keyword
 
-        let (gate_id, existing) = bridge
+        let (gate_id, existing, _note) = bridge
             .park_gated_command("s1", "hands", &cmd)
             .await
             .unwrap();
@@ -992,7 +1261,7 @@ mod tests {
 
         // Identical command while pending → same gate, flagged existing, so a
         // retried Bash call can't stack a second card.
-        let (dup_id, dup_existing) = bridge
+        let (dup_id, dup_existing, _note) = bridge
             .park_gated_command("s1", "hands", &cmd)
             .await
             .unwrap();
@@ -1002,6 +1271,241 @@ mod tests {
         // Approval still executes at resolve time, through the normal path.
         bridge.resolve_choice(&gate_id, "Approve".into()).await.unwrap();
         assert!(marker.exists(), "approve runs the parked command");
+    }
+
+    // ---- Outward-review precondition (batch 2 C, 2026-08-27) --------------
+
+    #[test]
+    fn the_outward_classifier_is_segment_anchored_both_ways() {
+        assert!(super::outward_command("gh issue edit 541 --body-file /tmp/x.md"));
+        assert!(super::outward_command("true && gh pr create --base main"));
+        assert!(super::outward_command("curl -X POST https://x"));
+        assert!(!super::outward_command("echo \"gh issue edit\""));
+        assert!(!super::outward_command("git push origin main"));
+        assert!(!super::outward_command("cargo test && echo done"));
+    }
+
+    /// Roster + reviewer registry + a body file in the repo, shared by the
+    /// coverage tests. Returns (bridge, storage, eyes id, body path, body).
+    async fn outward_fixture(
+        data: &tempfile::TempDir,
+        repo: &tempfile::TempDir,
+    ) -> (
+        std::sync::Arc<SignalingBridge>,
+        crate::storage::Storage,
+        i64,
+        String,
+        String,
+    ) {
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        let storage = bridge.storage.lock().await.clone().unwrap();
+        storage
+            .ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS)
+            .await
+            .unwrap();
+        bridge.register_session_reviewers("s1".to_string(), vec!["eyes".to_string()]);
+        let eyes = storage.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
+        let body =
+            "The deletion rule is conditional on Martin's answer.\nSecond line.".to_string();
+        let path = repo.path().join("draft.md");
+        std::fs::write(&path, &body).unwrap();
+        (bridge, storage, eyes, path.to_string_lossy().to_string(), body)
+    }
+
+    #[tokio::test]
+    async fn an_outward_body_never_delivered_is_refused_with_the_ritual() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, _s, _eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let err = bridge
+            .park_gated_command("s1", "hands", &format!("gh issue edit 5 --body-file {path}"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Post the body to the channel or a session doc"),
+            "the refusal teaches the two-turn ritual; got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_outward_body_delivered_to_the_reviewer_parks_and_reparks_after_reject() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, body) = outward_fixture(&data, &repo).await;
+        // HANDS posts the draft (any row carrying the full body) and the
+        // reviewer is DEALT it — its cursor moves past the row.
+        let m = storage
+            .post_to_channel(
+                "s1",
+                "participant",
+                Some("hands"),
+                "text",
+                format!("Draft for review:\n{body}"),
+                None,
+            )
+            .await
+            .unwrap();
+        storage.commit_delivery(eyes, &[(m.message_id(), None)]).await.unwrap();
+
+        let cmd = format!("gh issue edit 5 --body-file {path}");
+        let (gate_id, existing, note) =
+            bridge.park_gated_command("s1", "hands", &cmd).await.unwrap();
+        assert!(!existing);
+        assert!(note.is_none(), "a real review pass carries no skip note");
+
+        // Reject, then re-park the UNCHANGED content: coverage is keyed on
+        // the content, so no re-review is demanded (a later refactor must not
+        // turn reject-and-retry into a loop).
+        bridge.resolve_choice(&gate_id, "Reject".into()).await.unwrap();
+        let (gate2, existing2, _n) =
+            bridge.park_gated_command("s1", "hands", &cmd).await.unwrap();
+        assert_ne!(gate2, gate_id, "a post-reject re-fire parks fresh");
+        assert!(!existing2);
+    }
+
+    #[tokio::test]
+    async fn an_edited_body_after_review_is_refused_again() {
+        // The morning's exact shape: review a version, edit the MIDDLE, park.
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, body) = outward_fixture(&data, &repo).await;
+        let m = storage
+            .post_to_channel("s1", "participant", Some("hands"), "text", format!("Draft:\n{body}"), None)
+            .await
+            .unwrap();
+        storage.commit_delivery(eyes, &[(m.message_id(), None)]).await.unwrap();
+        std::fs::write(&path, body.replace("conditional", "settled")).unwrap();
+        let err = bridge
+            .park_gated_command("s1", "hands", &format!("gh issue edit 5 --body-file {path}"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("has not been delivered this content"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_solo_roster_parks_with_the_loud_skip_note() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        // No reviewers registered at all.
+        let path = repo.path().join("b.md");
+        std::fs::write(&path, "solo body").unwrap();
+        let (_gid, _existing, note) = bridge
+            .park_gated_command(
+                "s1",
+                "hands",
+                &format!("gh issue comment 1 --body-file {}", path.display()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            note.as_deref().unwrap_or("").contains("skipped"),
+            "the skip must be LOUD, not silent; note: {note:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_content_free_outward_needs_a_reviewer_deal_between_the_callers_deals() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, _path, _body) = outward_fixture(&data, &repo).await;
+        let hands = storage.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
+        // Caller dealt twice with NO reviewer deal between → refused.
+        let m1 = storage.post_to_channel("s1", "user", None, "text", "one", None).await.unwrap();
+        storage.commit_delivery(hands, &[(m1.message_id(), None)]).await.unwrap();
+        let m2 = storage.post_to_channel("s1", "user", None, "text", "two", None).await.unwrap();
+        storage.commit_delivery(hands, &[(m2.message_id(), None)]).await.unwrap();
+        let err = bridge
+            .park_gated_command("s1", "hands", "gh pr merge 559 --merge")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("has not been dealt a turn"), "got: {err}");
+        // A reviewer deal after the caller's latest → the next park passes.
+        let m3 = storage.post_to_channel("s1", "user", None, "text", "three", None).await.unwrap();
+        storage.commit_delivery(eyes, &[(m3.message_id(), None)]).await.unwrap();
+        let m4 = storage.post_to_channel("s1", "user", None, "text", "four", None).await.unwrap();
+        storage.commit_delivery(hands, &[(m4.message_id(), None)]).await.unwrap();
+        let (gid, _e, note) = bridge
+            .park_gated_command("s1", "hands", "gh pr merge 559 --merge")
+            .await
+            .unwrap();
+        assert!(!gid.is_empty());
+        assert!(note.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_empty_body_is_refused_not_skipped() {
+        // The afternoon's actual escape: `--body-file /dev/stdin` with nothing
+        // piped shipped an empty-bodied PR. The check must fail CLOSED.
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, _s, _eyes, _path, _body) = outward_fixture(&data, &repo).await;
+        let empty = repo.path().join("empty.md");
+        std::fs::write(&empty, "  \n").unwrap();
+        let err = bridge
+            .park_gated_command(
+                "s1",
+                "hands",
+                &format!("gh pr create --base main --body-file {}", empty.display()),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("resolves to EMPTY"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn an_unextractable_body_form_refuses_instead_of_downgrading() {
+        // `-b`, `--body=…` and unquoted `--body text` are body-carrying forms
+        // the extractor does not parse; they must refuse, not silently fall to
+        // the weaker timeline check while looking armed.
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, _s, _eyes, _path, _body) = outward_fixture(&data, &repo).await;
+        for cmd in [
+            "gh issue comment 5 -b \"quick note\"",
+            "gh issue comment 5 --body=inline",
+            "gh issue comment 5 --body unquoted words",
+        ] {
+            let err = bridge
+                .park_gated_command("s1", "hands", cmd)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("cannot extract"),
+                "{cmd} must refuse, not downgrade; got: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_downed_reviewer_refuses_and_an_override_lifts_it() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, _s, _eyes, path, _body) = outward_fixture(&data, &repo).await;
+        bridge.notify_agent_health("s1".to_string(), "eyes", "dead");
+        let err = bridge
+            .park_gated_command("s1", "hands", &format!("gh issue edit 5 --body-file {path}"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("override_reviewer_block"), "got: {err}");
+        // Activate the override the way the resolve path would — the same
+        // session-scoped slot the commit gate reads.
+        bridge
+            .reviewer_override
+            .lock()
+            .unwrap()
+            .insert("s1".to_string(), "user approved for the smoke".to_string());
+        let (_gid, _e, note) = bridge
+            .park_gated_command("s1", "hands", &format!("gh issue edit 5 --body-file {path}"))
+            .await
+            .unwrap();
+        assert!(note.as_deref().unwrap_or("").contains("override"), "note: {note:?}");
     }
 
     #[tokio::test]
