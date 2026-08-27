@@ -58,6 +58,20 @@ async listSessionParticipants(sessionId: string) : Promise<Result<ParticipantVie
 }
 },
 /**
+ * Per-participant delivery lag for a session — the visibility half of the
+ * anti-starvation work: 137 events across 38 sessions went undiagnosed
+ * because a starved reviewer was indistinguishable from a quiet one in the
+ * UI.
+ */
+async sessionParticipantBacklogs(sessionId: string) : Promise<Result<ParticipantBacklogView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("session_participant_backlogs", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * The prompt one participant is actually running under (rc3 **P1**).
  * 
  * The defect this closes: ~48 KB of standing instruction, assembled from six
@@ -1802,6 +1816,30 @@ export type ModelView = { id: string; display_name: string; provider: string; mo
  * silently destroyed by an edit through this view.
  */
 context_window: number | null }
+/**
+ * One row of the starvation-visibility chip (WS1c, 2026-08-27): how far
+ * behind the ring's deliveries this participant is running. The session view
+ * polls it and renders a chip only past the summons threshold, so a healthy
+ * roster shows nothing.
+ */
+export type ParticipantBacklogView = { participant_id: number; slug: string; 
+/**
+ * RFC3339; `None` when this participant has never been dealt a turn.
+ */
+last_delivered_at: string | null; 
+/**
+ * Peer `text` rows past this participant's cursor — the metric the
+ * 2026-08-27 starvation measurement was made in.
+ */
+undelivered_peer_texts: number; 
+/**
+ * Computed HERE from the scheduler's own
+ * `STARVATION_SUMMONS_MIN_PEER_TEXTS` (EYES A6): the chip renders on this
+ * flag and carries no threshold of its own, so what the user sees and
+ * what the ring acts on are one constant, not two literals that can
+ * drift.
+ */
+starving: boolean }
 /**
  * One row of the dialog's participant list: a role, optionally a model that
  * overrides the role's default (rc3 **D8**), and that row's own spawn knobs
