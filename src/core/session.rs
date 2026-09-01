@@ -1721,6 +1721,20 @@ pub fn read_system_prompt(
         }
     }
 
+    // 2c. Project focus — the work-scope knowledge base. focus.md is the one
+    // CL file whose BODY rides the prompt: the open scopes' context (one
+    // section per scope — a project can run several at once), shared by every
+    // participant identically (scope-watch is a review dimension, so
+    // the reviewer needs the same bytes the executor gets). Position is
+    // deliberate: after the CL primer, before the universal rules that define
+    // the file's discipline (the section's own framing bridges that), and
+    // NEVER below the capability/roster block — it must precede the text that
+    // governs who may write it. An absent file renders a one-line creation
+    // trigger instead, so "no focus.md" is itself a visible state.
+    if let Some(root) = project_root {
+        push_section(&mut out, &render_focus_section(root));
+    }
+
     // 3. Hardcoded universal rules — always present.
     push_section(&mut out, crate::agents::GENERAL_RULES);
 
@@ -1787,10 +1801,13 @@ fn render_cl_primer(entries: &[ClIndexEntry]) -> String {
     // handoffs crowded out the stable, highest-value files (conventions /
     // decisions fell below the row cap and never appeared). Pin those to the
     // front and drop handoffs from the cold-start TOC — both stay discoverable
-    // via `cl_index_search`. `policy.yaml` stays excluded (rendered as the
-    // policy block). `entries` arrives most-recently-updated first.
+    // via `cl_index_search`. `policy.yaml` and `focus.md` stay excluded — both
+    // render as their own prompt blocks, and the primer's "bodies are NOT
+    // inlined" claim must stay true of every row it lists. `entries` arrives
+    // most-recently-updated first.
     const PINNED: [&str; 2] = ["conventions.md", "decisions.md"];
-    let excluded = |p: &str| p == "policy.yaml" || p.starts_with("plans/");
+    let excluded =
+        |p: &str| p == "policy.yaml" || p == "focus.md" || p.starts_with("plans/");
 
     // Pinned first (in PINNED order, only if present), then the rest by the
     // incoming recency order, skipping excluded + already-pinned.
@@ -1828,6 +1845,108 @@ fn render_cl_primer(entries: &[ClIndexEntry]) -> String {
          {}\n",
         lines.join("\n")
     )
+}
+
+/// Advisory threshold for the focus.md prompt section. The first real
+/// focus.md was 25.8 KB after one day of one scope, so the advisory sits
+/// above a healthy day-one file rather than firing on it.
+const FOCUS_ADVISORY_BYTES: usize = 32 * 1024;
+/// Line-start `SUPERSEDES:` markers at or above this count trip the same
+/// advisory — a file heavy with corrections needs a reorganize regardless of
+/// its byte size.
+const FOCUS_SUPERSEDES_ADVISORY: usize = 5;
+/// Pathological-size guard: bodies beyond head+tail render head + marker +
+/// tail. Head keeps the contract and scope sections (they live at the top);
+/// the LARGER tail keeps the newest truths — append-as-you-learn puts the
+/// most recent entries (including `SUPERSEDES:` corrections) at the end, so a
+/// head-only cut would preferentially keep superseded claims and drop their
+/// corrections.
+const FOCUS_HEAD_BYTES: usize = 32 * 1024;
+const FOCUS_TAIL_BYTES: usize = 64 * 1024;
+
+/// Render the "Project focus" prompt section from `<project_root>/focus.md`.
+/// Absent, empty, or unreadable all render the creation trigger — an
+/// unreadable file is logged but must not fail the spawn.
+fn render_focus_section(project_root: &Path) -> String {
+    let path = project_root.join("focus.md");
+    let body = match std::fs::read_to_string(&path) {
+        Ok(s) if !s.trim().is_empty() => s,
+        Ok(_) => return render_focus_absent(&path),
+        Err(err) => {
+            tracing::debug!(path = %path.display(), %err, "focus.md absent or unreadable");
+            return render_focus_absent(&path);
+        }
+    };
+
+    // Advisory is computed on the FULL body: a truncated render must still
+    // report the real size and the real correction count.
+    let supersedes = body
+        .lines()
+        .filter(|l| l.starts_with("SUPERSEDES:"))
+        .count();
+    let advisory = if body.len() > FOCUS_ADVISORY_BYTES || supersedes >= FOCUS_SUPERSEDES_ADVISORY
+    {
+        format!(
+            "\n⚠ focus.md is {} KB with {} line-start `SUPERSEDES:` entr{} — schedule a \
+             replace-mode reorganize (fold the supersession chains back into clean truths, \
+             `confirm_shrink: true`) at the next Plan boundary or the clearing ritual, never \
+             at close-out.\n",
+            body.len() / 1024,
+            supersedes,
+            if supersedes == 1 { "y" } else { "ies" },
+        )
+    } else {
+        String::new()
+    };
+
+    let rendered = if body.len() > FOCUS_HEAD_BYTES + FOCUS_TAIL_BYTES {
+        let head_end = floor_char_boundary(&body, FOCUS_HEAD_BYTES);
+        let tail_start = floor_char_boundary(&body, body.len() - FOCUS_TAIL_BYTES);
+        format!(
+            "{}\n\n[… TRUNCATED — middle omitted ({} KB); Read `{}` whole …]\n\n{}",
+            &body[..head_end],
+            (tail_start - head_end) / 1024,
+            path.display(),
+            &body[tail_start..],
+        )
+    } else {
+        body
+    };
+
+    format!(
+        "## Project focus — the open work scopes (focus.md)\n\n\
+         The body below is `{path}` — the knowledge base of the work scopes this project has \
+         open (one section per scope), inlined at YOUR SPAWN and frozen since: re-read the live \
+         file at each phase boundary and after any user re-steer. Read it whole before acting \
+         on any scope; maintain it per \"Project focus (focus.md)\" in the General rules.\n\
+         {advisory}\n\
+         {rendered}\n",
+        path = path.display(),
+    )
+}
+
+/// The creation trigger rendered when no focus.md is open for the project.
+fn render_focus_absent(path: &Path) -> String {
+    format!(
+        "## Project focus — none open\n\n\
+         `{}` does not exist. If this session opens a substantive work scope, the participant \
+         holding the context-library write capability seeds `focus.md` with that scope's first \
+         section at the Plan boundary — the scope, its ⛔ not-this-scope boundaries, and the \
+         truths already established; participants without the capability surface FOCUS items \
+         for it to fold in. Open a section when the scope will outlive the session; when you \
+         cannot tell, default to opening one. See \"Project focus (focus.md)\" in the General \
+         rules.\n",
+        path.display(),
+    )
+}
+
+/// Largest byte index `<= max` that lands on a char boundary of `s`.
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    let mut i = max.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// Truncate to at most `max` chars (char-boundary safe), appending `…` when cut.
@@ -4620,14 +4739,175 @@ mod tests {
 
     #[test]
     fn render_cl_primer_skips_policy_and_caps_rows() {
-        let mut entries = vec![cl_entry("policy.yaml", "gates")];
+        let mut entries = vec![cl_entry("policy.yaml", "gates"), cl_entry("focus.md", "scope")];
         for i in 0..20 {
             entries.push(cl_entry(&format!("f{i}.md"), "d"));
         }
         let out = render_cl_primer(&entries);
         assert!(!out.contains("policy.yaml"), "policy.yaml must be filtered");
+        // focus.md renders as its own prompt block (section 2c), so listing it
+        // here would falsify the primer's "bodies are NOT inlined" claim.
+        assert!(!out.contains("focus.md"), "focus.md must be filtered");
         let rows = out.lines().filter(|l| l.starts_with("- `")).count();
         assert_eq!(rows, CL_PRIMER_MAX_ROWS, "row count must be capped");
+    }
+
+    // ---- Project focus (focus.md) — prompt section 2c ---------------------
+
+    /// The scope reference reaches every roster shape IDENTICALLY, through the
+    /// real compose join. Scope-watch is a review dimension, so the reviewer
+    /// needs the same bytes the executor gets — a later capability gate on
+    /// section 2c must fail here. Also pins POSITION: after the CL primer,
+    /// before the universal rules and before the capability block (the text
+    /// that governs who may write the file).
+    #[tokio::test]
+    async fn focus_body_rides_the_compose_join_for_every_roster_shape() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        let pdir = tmp.path().join("projects/foo");
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(pdir.join("focus.md"), "# FOCUS\n\nFOCUS_SENTINEL_BODY\n").unwrap();
+        let entries = vec![cl_entry("conventions.md", "c")];
+
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+
+        let expected = render_focus_section(&pdir);
+        assert!(expected.contains("FOCUS_SENTINEL_BODY"));
+        for slug in ["hands", "eyes"] {
+            let me = roster.iter().find(|p| p.slug == slug).unwrap();
+            let prompt = compose_system_prompt(
+                &s,
+                &roster,
+                &paths,
+                me,
+                Some("foo"),
+                Some(&pdir),
+                Some(&entries),
+            )
+            .await
+            .unwrap();
+            assert!(
+                prompt.contains(&expected),
+                "{slug} did not receive the identical focus section"
+            );
+            let at = prompt.find("## Project focus — the open work scopes").unwrap();
+            assert!(
+                prompt.find("Project CL — files available").unwrap() < at,
+                "{slug}: focus must render after the CL primer"
+            );
+            assert!(
+                at < prompt.find("# General rules").unwrap(),
+                "{slug}: focus must render before the universal rules"
+            );
+            assert!(
+                at < prompt.find("## Capabilities — generated").unwrap(),
+                "{slug}: focus must render before the capability block"
+            );
+        }
+    }
+
+    /// Absent, empty, and unreadable all render the creation trigger — with
+    /// the absolute path (discoverability moved here when focus.md left the
+    /// primer) and the write-capability routing. No project root → no section
+    /// of either kind.
+    #[test]
+    fn focus_absent_renders_the_creation_trigger() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+
+        for shape in ["missing", "empty", "unreadable"] {
+            let pdir = tmp.path().join("projects").join(shape);
+            std::fs::create_dir_all(&pdir).unwrap();
+            match shape {
+                "empty" => std::fs::write(pdir.join("focus.md"), "  \n").unwrap(),
+                // A directory named focus.md makes read_to_string fail without
+                // needing platform-specific permission tricks.
+                "unreadable" => std::fs::create_dir(pdir.join("focus.md")).unwrap(),
+                _ => {}
+            }
+            let prompt =
+                read_system_prompt(&paths, Some("foo"), Some(&pdir), None, None, None).unwrap();
+            assert!(
+                prompt.contains("## Project focus — none open"),
+                "{shape}: creation trigger missing"
+            );
+            assert!(
+                prompt.contains(&pdir.join("focus.md").display().to_string()),
+                "{shape}: the absolute path must be named"
+            );
+            assert!(
+                prompt.contains("context-library write capability"),
+                "{shape}: the routing must name who seeds the file"
+            );
+        }
+
+        // The GENERAL_RULES discipline section ("## Project focus (focus.md)")
+        // is in every prompt by design — only section 2c's two headers must be
+        // absent without a project root.
+        let bare = read_system_prompt(&paths, Some("foo"), None, None, None, None).unwrap();
+        assert!(
+            !bare.contains("## Project focus — the open work scopes")
+                && !bare.contains("## Project focus — none open"),
+            "no project root ⇒ no focus section of either kind"
+        );
+    }
+
+    /// The reorganize advisory fires on byte size OR on line-start
+    /// `SUPERSEDES:` density — and only line-start: prose that merely
+    /// mentions the protocol (as a header contract does) must not trip it.
+    #[test]
+    fn focus_advisory_fires_on_size_or_supersedes() {
+        let tmp = TempDir::new().unwrap();
+        let pdir = tmp.path().join("p");
+        std::fs::create_dir_all(&pdir).unwrap();
+
+        std::fs::write(pdir.join("focus.md"), "x".repeat(FOCUS_ADVISORY_BYTES + 1)).unwrap();
+        assert!(render_focus_section(&pdir).contains("⚠ focus.md is"), "size advisory");
+
+        let dense = "scope\n".to_string() + &"SUPERSEDES: an old claim\n".repeat(5);
+        std::fs::write(pdir.join("focus.md"), &dense).unwrap();
+        let out = render_focus_section(&pdir);
+        assert!(out.contains("5 line-start `SUPERSEDES:`"), "density advisory:\n{out}");
+
+        let healthy = "The SUPERSEDES: protocol is documented here.\n\
+                       - SUPERSEDES: a bullet is not a line-start marker\n"
+            .to_string()
+            + &"SUPERSEDES: real correction\n".repeat(4);
+        std::fs::write(pdir.join("focus.md"), &healthy).unwrap();
+        assert!(
+            !render_focus_section(&pdir).contains("⚠ focus.md is"),
+            "4 markers + prose mentions must not trip the advisory"
+        );
+    }
+
+    /// Pathological bodies keep the head (contract + scope live at the top)
+    /// AND the tail (append-as-you-learn puts the newest truths and the
+    /// SUPERSEDES corrections at the end) — dropping only the middle, loudly.
+    #[test]
+    fn focus_pathological_body_keeps_head_and_tail() {
+        let tmp = TempDir::new().unwrap();
+        let pdir = tmp.path().join("p");
+        std::fs::create_dir_all(&pdir).unwrap();
+
+        let mut body = String::from("HEAD_SENTINEL\n");
+        body.push_str(&"a".repeat(39 * 1024));
+        body.push_str("MID_SENTINEL");
+        while body.len() <= FOCUS_HEAD_BYTES + FOCUS_TAIL_BYTES {
+            body.push_str(&"b".repeat(8 * 1024));
+        }
+        body.push_str("\nTAIL_SENTINEL");
+        std::fs::write(pdir.join("focus.md"), &body).unwrap();
+
+        let out = render_focus_section(&pdir);
+        assert!(out.contains("HEAD_SENTINEL"), "head must survive");
+        assert!(out.contains("TAIL_SENTINEL"), "tail must survive");
+        assert!(out.contains("TRUNCATED — middle omitted"), "the cut must be loud");
+        assert!(!out.contains("MID_SENTINEL"), "the middle is what goes");
     }
 
     #[test]

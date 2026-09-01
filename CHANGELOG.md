@@ -7,6 +7,31 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-project `focus.md` — the work-scope knowledge base.** A project CL
+  may now carry a `focus.md` holding the work scopes currently in flight —
+  one section per open scope (a project can run several at once): what is
+  actually being worked on plus the absolute truths established about it,
+  each with its provenance (what was measured, when, and as which identity),
+  written to be read by the user directly, not as agent shorthand. When it
+  exists, its whole body rides every participant's system prompt at
+  spawn — reviewer included, since scope-watch is now a named review
+  dimension; when it doesn't, the prompt carries a one-line creation trigger
+  instead. The universal rules gained the full discipline: open a scope's
+  section at the Plan boundary (defaulting to opening one when a scope's
+  length is unknown), append truths as you learn — each entry naming its
+  scope, corrections opening with line-start `SUPERSEDES:` markers —
+  reorganize only at a Plan boundary, and clear PER SCOPE once that scope
+  settles (graduate its residue to the project CL, remove its section,
+  `confirm_shrink: true`; the file survives for the scopes still open) —
+  never at close-out, where writers are context-poorest. Oversized bodies
+  render head + tail around a loud truncation marker (the tail carries the
+  newest truths), and a size or supersession-density advisory schedules the
+  reorganize. Distilled from the 2026-08-31 ad-manager session dissection,
+  where the scope's knowledge lived in a voice call and a post-hoc
+  reconstruction.
+
 ## [1.0.3] — 2026-08-27
 
 The review-layer release: a full-day dissection of why agent errors were

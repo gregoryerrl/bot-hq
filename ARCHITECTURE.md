@@ -199,6 +199,15 @@ System-prompt layering at session spawn (`src/core/session.rs::read_system_promp
 2b. Project CL index primer (when the session has a project) — the
    `cl_index_search` rows for the project (`file_path — description`,
    most-recently-updated first, capped). The table of contents only.
+2c. Project focus (when the session has a project root) — the FULL body
+   of `<project CL>/focus.md`, the open work scopes' knowledge base (one
+   section per scope; a project can run several concurrently),
+   identical for every participant (scope-watch is a review dimension).
+   Absent file → a one-line creation trigger instead. Oversized bodies
+   render head + tail with a loud middle marker (the tail carries the
+   newest truths under append-as-you-learn); >32 KB or ≥5 line-start
+   `SUPERSEDES:` markers append a reorganize advisory. Position is
+   load-bearing: never below layer 6, which governs who may write it.
 3. Hardcoded universal rules (`agents::general_rules::GENERAL_RULES`)
 4. `<data_dir>/library/custom-general-rules.md` (optional user additions)
 5. `<data_dir>/library/custom-instructions.md` (user tweaks, loaded for

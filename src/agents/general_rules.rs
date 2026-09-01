@@ -138,6 +138,20 @@ Tools:
 
 **`_globals` is not a real working project** — it's a bucket for system-level CL (custom rules, agent custom instructions). When you see a result with `project: \"_globals\"` in `cl_index_search`, treat the file as cross-cutting, not as belonging to a specific project.
 
+## Project focus (focus.md) — the work-scope knowledge base
+
+A project CL may carry a `focus.md`: the knowledge base of the WORK SCOPES currently in flight — **one section per open scope**, each holding what is actually being worked on and the absolute truths established about it (schemas, measured facts, design decisions with their reasoning), every truth carrying its provenance: **what was measured, when, and as which identity**. A project often has more than one scope open at a time (a build slice and a month-end watch, say); each gets its own section with its own status, and the file is the sum of them. It is not the project context base (`conventions.md` / `notes.md` / `decisions.md`) and not a progress tracker; it accumulates fast and every scope section is FULLY CLEARABLE once that scope settles. When the file exists, its whole body is inlined into every participant's prompt at spawn (the \"Project focus\" section above these rules).
+
+**The USER reads this file directly** — it is how they see what we have and what we actually know about each scope without reading sessions. Write it to be read: plain statements, spelled-out identifiers, no agent shorthand.
+
+- **Read discipline.** The spawn inline is FROZEN. Re-read the live file at each phase boundary and after any user re-steer — a peer session (or the user) may have updated it.
+- **Creation ritual — write early, per scope.** At the Plan boundary of substantive scoped work whose scope has NO SECTION yet, the participant holding the context-library write capability adds one (seeding the file itself if this is the first scope), FROM the plan: the scope, its ⛔ not-this-scope boundaries, the truths already established, and open questions with their owners. Open a section when the scope will outlive the session — and when you cannot tell, DEFAULT TO OPENING ONE: a wrong \"it'll be one session\" guess costs scope knowledge, a wrong open costs one small section cleared early. A scope that settles within its first session just runs its clearing ritual at close. A thin day-one section beats a rich post-hoc reconstruction — the reconstruction gets written by a context-exhausted session at close-out, exactly when writers are weakest.
+- **Maintenance — append as you learn.** Add truths at phase boundaries via `cl_write_file(mode: \"append\")`, never as a close-time reconstruction; an appended entry NAMES ITS SCOPE so the next reorganize can fold it into the right section. A correction APPENDS too, opening with a line-start `SUPERSEDES:` marker naming the claim it replaces — at the very start of its line: no bullet, no quote, no indent, or the reorganize advisory cannot count it — append-only without markers turns \"absolute truths\" into a contradiction log where the next session reads a stale claim and its correction as equals.
+- **Reorganize + clear — per scope.** A replace-mode rewrite (folding appended entries and supersession chains back into clean per-scope sections) happens ONLY at a Plan boundary or in a clearing ritual, never at close-out. The clearing ritual, once A scope is merged and settled: graduate that scope's durable residue (truths -> `notes.md`, decisions -> `decisions.md`, anything else CL-worthy to where it belongs), then REMOVE THAT SECTION — the file survives for the scopes still open; removing the last section clears the file. Pass `confirm_shrink: true` on ANY scope removal, not just the final clear — dropping one of two scopes can cross the CL shrink guard's >50% threshold — and announce the clear to the user.
+- **Drift guard — consultation-and-note, never a veto.** Work outside ALL open scope sections gets NAMED in chat against the not-this-scope boundaries (which are project-level: any scope's ⛔ list applies to the whole file). \"Drift\" and \"the user re-steered\" are the same observable: a user-ratified pivot is RECORDED with its ratification, never resisted — and a thread sitting on a ⛔ list that the user then opens is simply PROMOTED to its own scope section.
+- **Reviewer routing.** A participant without the context-library write capability surfaces truth-candidates, corrections, and drift as explicit FOCUS items (a finding, or a chat line the executor folds in the same session). This is the PRIMARY content path, not an edge case — in the session this discipline was distilled from, the reviewer found the day's three most consequential truths and every one reached the file by relay.
+- **Scope-watch is a review dimension.** Participants holding the finding capability review the work against the open scope sections and their ⛔ boundaries — \"the named scope has not started and nobody has said so\" is as reviewable as a wrong line of code.
+
 ## Keeping the CL fresh — write the delta at close
 
 So the next session doesn't re-discover what this one learned, the participant holding the context-library write capability writes a small learnings delta before the session closes — **when there is one.** Writes are direct and immediate, with no review queue, so the write is permanent: be deliberate about what you persist and never drop existing content.
@@ -233,6 +247,31 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("ONE halt slot"),
             "must state the one-slot halt model"
+        );
+    }
+
+    #[test]
+    fn focus_discipline_names_its_load_bearing_mechanics() {
+        // The focus.md section references two tool mechanics that must not
+        // drift out from under the prose: the line-start SUPERSEDES: marker
+        // (what render_focus_section counts for the reorganize advisory) and
+        // confirm_shrink (without it the CL shrink guard refuses the clear,
+        // and the first legitimate clearing reads as a refusal).
+        assert!(
+            GENERAL_RULES.contains("## Project focus (focus.md)"),
+            "the focus discipline section must exist"
+        );
+        assert!(
+            GENERAL_RULES.contains("line-start `SUPERSEDES:` marker"),
+            "corrections must name the marker the advisory counts"
+        );
+        assert!(
+            GENERAL_RULES.contains("`confirm_shrink: true`"),
+            "the clearing ritual must name the shrink-guard escape"
+        );
+        assert!(
+            GENERAL_RULES.contains("never at close-out"),
+            "the reorganize timing rule is the context-exhaustion guard"
         );
     }
 
