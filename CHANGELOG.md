@@ -7,6 +7,15 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+## [1.0.4] — 2026-09-01
+
+The work-scope release: sessions kept losing the thread between days — each
+one re-interpreting what the project was actually working on, with the
+knowledge living in voice calls, chat scroll, and post-hoc reconstructions.
+This release gives every project a durable, user-readable answer. It is also
+the first tagged release since 1.0.2, so installed apps pick up 1.0.3's
+review-layer work with it.
+
 ### Added
 
 - **Per-project `focus.md` — the work-scope knowledge base.** A project CL
