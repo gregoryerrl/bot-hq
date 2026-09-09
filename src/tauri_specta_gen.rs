@@ -1,0 +1,195 @@
+//! Composes the tauri-specta `Builder` for the full command set.
+//!
+//! Re-export TypeScript bindings via `Builder::export(...)` at startup so
+//! the frontend's `frontend/src/lib/bindings.ts` stays in lockstep with
+//! the Rust command signatures + `AppError` shape + view types. Runtime
+//! emit lives in Batch 4's `main.rs`.
+//!
+//! Note: i64 fields (e.g. message ids) map to TS `number` via
+//! `BigIntExportBehavior::Number`. JS numbers are float64 — values stay
+//! exact up to 2^53. Sqlite ROWIDs we use are bounded well below that.
+
+pub fn typescript_config() -> specta_typescript::Typescript {
+    // `@ts-nocheck` suppresses tsc on the generated file itself. The frontend
+    // tsconfig enables `noUnusedLocals`, and tauri-specta unconditionally
+    // imports `TAURI_CHANNEL` + emits `__makeEvents__` whether commands use
+    // them or not — both trip the rule. Type-checking still happens at the
+    // call sites that import from this file; the file is a thin pass-through.
+    specta_typescript::Typescript::default()
+        .header("// @ts-nocheck")
+        .bigint(specta_typescript::BigIntExportBehavior::Number)
+}
+
+use crate::tauri_cmd::{
+    claude_config, cl, docs, feedback, files, findings, messages, models, notifications,
+    plugin_api, plugins, policy, roles, sessions, telemetry, terminal, tool_gate, tray,
+    updates,
+};
+use tauri_specta::{collect_commands, Builder};
+
+pub fn builder() -> Builder<tauri::Wry> {
+    Builder::<tauri::Wry>::new().commands(collect_commands![
+        // Sessions
+        sessions::create_session,
+        sessions::get_session,
+        sessions::get_session_runtime,
+        sessions::get_session_project_info,
+        // rc3 D10: the roster read that replaced every brian_*/rain_* pair.
+        sessions::list_session_participants,
+        // WS1c: per-participant delivery lag — the starvation chip's read.
+        sessions::session_participant_backlogs,
+        // rc3 P1: what a running participant was actually told.
+        sessions::get_participant_system_prompt,
+        // rc3 P7: what its context window was doing, closed session included.
+        sessions::list_participant_context_readings,
+        sessions::check_session_dirty,
+        sessions::session_worktree_kept,
+        sessions::list_sessions,
+        sessions::list_closed_sessions,
+        sessions::respawn_session,
+        sessions::reopen_session,
+        sessions::swap_session_order,
+        sessions::restart_session,
+        sessions::advance_session_phase,
+        sessions::cancel_session_turn,
+        sessions::resume_session,
+        sessions::rename_session,
+        sessions::get_session_phase,
+        sessions::close_session,
+        // Messages
+        messages::get_session_messages,
+        messages::broadcast_message,
+        // Terminal subtab (per-session PTY)
+        terminal::terminal_open,
+        terminal::terminal_input,
+        terminal::terminal_resize,
+        // Agent configs
+        // Roles tab (rc3 D8: the Roles tab owns the default model)
+        roles::list_roles,
+        roles::create_role,
+        roles::update_role,
+        roles::archive_role,
+        roles::list_capabilities,
+        roles::resolve_role_preset_offer,
+        roles::get_role_default_prose,
+        // Models registry + default-model setting
+        models::list_models,
+        models::upsert_model,
+        models::delete_model,
+        models::get_app_setting,
+        models::set_app_setting,
+        // CL
+        cl::cl_index_search,
+        cl::cl_folder_search,
+        cl::cl_rescan,
+        cl::cl_retrieval_stats,
+        cl::list_projects,
+        cl::cl_read_file,
+        cl::cl_write_file,
+        cl::cl_set_description,
+        cl::cl_set_agent_visibility,
+        cl::cl_set_folder_description,
+        cl::cl_delete_folder_description,
+        cl::cl_register_project,
+        cl::cl_unregister_project,
+        cl::cl_create_project,
+        cl::cl_delete_project,
+        cl::cl_rename_project,
+        cl::cl_create_file,
+        cl::cl_mkdir,
+        cl::cl_rename,
+        cl::cl_delete_path,
+        // Tool Gate (global gated-Bash keywords)
+        tool_gate::get_tool_gate_keywords,
+        tool_gate::set_tool_gate_keywords,
+        tool_gate::resolve_gate_preset_offer,
+        // Policy (3-tier toggles: global / project / session — user-only)
+        policy::get_general_policy,
+        policy::set_general_policy,
+        policy::get_project_policy,
+        policy::set_project_policy,
+        policy::get_session_policy,
+        policy::set_session_policy,
+        policy::get_session_tool_gate,
+        policy::set_session_tool_gate,
+        policy::resolve_policy_preset_offer,
+        policy::read_violations,
+        // Claude Config (surface + override the config agents inherit)
+        claude_config::claude_config_read,
+        claude_config::get_claude_overrides,
+        claude_config::set_claude_overrides,
+        claude_config::claude_config_set_string,
+        claude_config::claude_config_set_bool,
+        claude_config::claude_config_set_plugin_enabled,
+        // Tray (choices / approvals / halts)
+        tray::resolve_choice,
+        tray::send_user_response,
+        tray::get_session_halt,
+        tray::stage_user_response,
+        tray::unstage_user_response,
+        tray::get_staged_response,
+        tray::discard_choice,
+        tray::list_session_tray,
+        tray::list_pending_tray,
+        // Workspace file preview (full-screen viewer)
+        files::read_workspace_file,
+        files::save_pasted_file,
+        // Agent feedback about bot-hq itself
+        feedback::list_agent_feedback,
+        feedback::set_agent_feedback_status,
+        // Findings (EYES-sign-off gate)
+        findings::list_session_findings,
+        // Session documents
+        docs::session_doc_search,
+        docs::session_doc_save,
+        docs::session_doc_delete,
+        docs::compute_apply_diff,
+        docs::summarize_session_doc,
+        docs::validate_model,
+        // Plugins
+        plugins::preview_plugin_manifest,
+        plugins::install_plugin,
+        plugins::reapprove_linked_plugin,
+        plugins::reinstall_plugin,
+        plugins::update_plugin_from_source,
+        plugins::list_installed_plugins,
+        plugins::enable_plugin,
+        plugins::disable_plugin,
+        plugins::uninstall_plugin,
+        plugins::plugin_note_ping,
+        plugins::plugin_note_pong,
+        plugin_api::plugin_invoke_proxy,
+        // Updates (check GitHub Releases for a newer bot-hq)
+        updates::check_for_update,
+        notifications::windows_toast_enabled,
+        // Diagnostics (opt-in telemetry: status / toggle / endpoint / asked)
+        telemetry::get_telemetry_status,
+        telemetry::set_telemetry_enabled,
+        telemetry::set_telemetry_endpoint,
+        telemetry::mark_telemetry_asked,
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_constructs_with_full_command_set() {
+        let _b = builder();
+    }
+
+    #[test]
+    fn builder_exports_to_typescript() {
+        let b = builder();
+        let out = std::env::temp_dir().join("bot-hq-types-batch2.ts");
+        b.export(typescript_config(), &out)
+            .expect("tauri-specta export must succeed");
+        assert!(out.exists());
+        let body = std::fs::read_to_string(&out).expect("read generated TS");
+        // Sanity: a few of the command names should appear in the bindings.
+        assert!(body.contains("createSession") || body.contains("create_session"));
+        assert!(body.contains("clWriteFile") || body.contains("cl_write_file"));
+        assert!(body.contains("clRetrievalStats") || body.contains("cl_retrieval_stats"));
+    }
+}

@@ -1,0 +1,14 @@
+-- ============================================================================
+-- 0069 — a TEMPORARY HALT: the session's halt slot can carry a wake time.
+--
+-- Round 12 (2026-08-19), the user's Q2 on issues.md #2 ("agents HALTED falsely
+-- while waiting for CI"): "add a temporary halt … and that's where we can add
+-- the self-wake … TEMPORARY HALT 00:03:57". A halt declared with
+-- `wake_after_secs` stores its wake instant here (RFC3339-Z); the banner counts
+-- down to it, and when it passes the host clears the halt, posts a row and
+-- summons the declarer for a turn. NULL = an ordinary halt (until the user's
+-- next message). Cleared with the rest of the slot.
+--
+-- Nullable, no default, no backfill: every existing halt is the ordinary kind.
+-- ============================================================================
+ALTER TABLE sessions ADD COLUMN halt_wake_at TEXT;

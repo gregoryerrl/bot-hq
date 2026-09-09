@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "bot-hq",
+  "version": "1.0.6",
+  "identifier": "com.gregoryerrl.bot-hq",
+  "build": {
+    "frontendDist": "./frontend/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "bot-hq",
+        "width": 1400,
+        "height": 900
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; frame-src bhq-plugin: https://bhq-plugin.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "deb", "appimage", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Desktop GUI for AI-assisted coding sessions",
+    "longDescription": "bot-hq drives AI-assisted coding sessions through an agent harness — role-playing participants you configure (the seeded pair executes and reviews) — with policy enforcement. Each participant runs as a claude-code subprocess coordinated by a turn ring, with an in-process MCP server for signaling, a Context Library for project knowledge, and git hooks that enforce commit and push policy.",
+    "copyright": "Copyright © 2026 Gregory Errl Babela",
+    "publisher": "Gregory Errl Babela",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

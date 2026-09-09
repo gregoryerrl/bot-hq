@@ -1,0 +1,355 @@
+//! Typed event structs for the Tauri events surface.
+//!
+//! Each event carries an associated string `EVENT_NAME` that matches the
+//! `app.emit(name, &payload)` call. Frontend `useTauriEvent("event.name", …)`
+//! subscribes to the same name. The Tauri-specta exporter picks up these
+//! types via `specta::Type` so the TypeScript bindings stay in sync.
+
+use crate::storage::Message;
+use serde::{Deserialize, Serialize};
+use specta::Type;
+
+/// One chat message in the chronological stream. Mirrors `storage::Message`
+/// with `created_at` left as a string (ISO) so the frontend can parse with
+/// whatever date library it picks.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct AgentMessage {
+    pub id: i64,
+    pub session_id: String,
+    pub author: String,
+    pub kind: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+impl AgentMessage {
+    /// The event name used for batched message emits. Frontend subscribes
+    /// with `listen("agent:messages:batch", handler)`. Tauri 2 event names
+    /// disallow dots (alphanumeric / `-` / `/` / `:` / `_` only) — emits
+    /// with a dotted name return IllegalEventName and the event is dropped.
+    pub const EVENT_NAME_BATCH: &'static str = "agent:messages:batch";
+}
+
+impl From<Message> for AgentMessage {
+    fn from(m: Message) -> Self {
+        Self {
+            id: m.id,
+            session_id: m.session_id,
+            author: m.author,
+            kind: m.kind,
+            content: m.content,
+            created_at: m.created_at,
+        }
+    }
+}
+
+/// Emitted when an agent self-advances the IPAV phase (via `advance_phase`
+/// MCP tool). The dashboard chip moves; the session header subtitle updates.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct PhaseChangedEvent {
+    pub session_id: String,
+    pub agent: String,
+    pub target: String,
+}
+
+impl PhaseChangedEvent {
+    pub const EVENT_NAME: &'static str = "session:phase_changed";
+}
+
+/// Emitted when a session DECLARES its halt (`mark_awaiting_user` / `halt`) —
+/// entering awaiting-user, and only that: questions and approvals emit
+/// [`PendingChoiceEvent`] instead, and leaving the state has its own
+/// `session:halt_cleared`. This is the single non-test emit site's contract
+/// (`bridge/tray.rs`), and the OS-notification escalation relies on it — a
+/// question park must not double-fire as a halt.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct AwaitingUser {
+    pub session_id: String,
+    pub agent: String,
+    pub reason: String,
+}
+
+impl AwaitingUser {
+    pub const EVENT_NAME: &'static str = "session:awaiting_user";
+}
+
+/// Emitted when a parked choice resolves (user picked, or agent withdrew).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct ChoiceResolvedEvent {
+    pub choice_id: String,
+    pub picked: String,
+}
+
+impl ChoiceResolvedEvent {
+    pub const EVENT_NAME: &'static str = "session:choice_resolved";
+}
+
+/// Emitted when an agent parks a choice/question for the user (a direct-emit
+/// nudge; the durable `session_tray` is the source of truth, surfaced via
+/// `list_pending_tray`).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct PendingChoiceEvent {
+    pub choice_id: String,
+    pub session_id: String,
+    pub agent: String,
+    pub question: String,
+    pub options: Vec<String>,
+}
+
+impl PendingChoiceEvent {
+    pub const EVENT_NAME: &'static str = "session:pending_choice";
+}
+
+/// Emitted when a session document is written/updated (`session_doc_write`),
+/// so the doc pane refreshes without a manual tab-switch.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct DocChangedEvent {
+    pub session_id: String,
+}
+
+impl DocChangedEvent {
+    pub const EVENT_NAME: &'static str = "session:doc_changed";
+}
+
+/// Emitted when a session's EYES findings change (`eyes_flag` /
+/// `disposition_finding`), so the per-session findings banner refetches and the
+/// ⚠ count / escalation state stays live without a manual refresh.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct FindingsChangedEvent {
+    pub session_id: String,
+}
+
+impl FindingsChangedEvent {
+    pub const EVENT_NAME: &'static str = "session:findings_changed";
+}
+
+/// Emitted when a session finished closing, so the UI can navigate away from
+/// the now-closed session and refresh its session lists.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct SessionClosedEvent {
+    pub session_id: String,
+}
+
+impl SessionClosedEvent {
+    pub const EVENT_NAME: &'static str = "session:closed";
+}
+
+/// Emitted when an agent's retry-supervisor liveness changes (B2: running /
+/// retrying / dead), so the UI updates the per-agent health dot. `health` is
+/// the `AgentHealth::as_str` string.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct AgentHealthEvent {
+    pub session_id: String,
+    pub agent: String,
+    pub health: String,
+}
+
+impl AgentHealthEvent {
+    pub const EVENT_NAME: &'static str = "session:agent_health";
+}
+
+/// Emitted after an agent's turn completes, carrying how full its context
+/// window is, so the session header can show a per-agent meter.
+///
+/// Raw operands rather than a pre-divided percentage: the tooltip wants
+/// "620K / 1M" next to "62%", and the division is trivial to redo frontend-side
+/// while the operands are not recoverable from a float.
+///
+/// Two properties the UI must respect: the figure is **stale mid-turn** (it
+/// only refreshes on turn completion) and **non-monotonic** (claude-code
+/// auto-compacts, so it can drop — that is correct, not a bug).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct AgentContextEvent {
+    pub session_id: String,
+    pub agent: String,
+    pub used_tokens: u64,
+    pub context_window: u64,
+}
+
+impl AgentContextEvent {
+    pub const EVENT_NAME: &'static str = "session:agent_context";
+}
+
+/// Emitted when a session's activity changes (idle / busy / awaiting-user /
+/// cancelling), so the chat input can lock while a participant is working and
+/// re-open when it's the user's turn. `state` is the `SessionActivity::as_str`
+/// string; `slot0_busy`/`slot1_busy` are the per-TURN-SLOT flags the UI uses to
+/// label which participant is working (the derived `state` collapses them to a
+/// single `busy`).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct SessionActivityEvent {
+    pub session_id: String,
+    pub state: String,
+    pub slot0_busy: bool,
+    pub slot1_busy: bool,
+    /// Every busy turn slot (round 12) — the pair above stops at slot 1, so a
+    /// roster of three or more never showed its later participants working.
+    pub busy_slots: Vec<u32>,
+}
+
+impl SessionActivityEvent {
+    pub const EVENT_NAME: &'static str = "session:activity";
+}
+
+
+/// Emitted when the idle-unflagged watchdog flips a session's attention state.
+/// `state=Some("idle_unflagged")` → show the "needs direction" chip;
+/// `state=None` → clear it (activity resumed or the user spoke).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct SessionAttentionEvent {
+    pub session_id: String,
+    pub state: Option<String>,
+}
+
+impl SessionAttentionEvent {
+    pub const EVENT_NAME: &'static str = "session:attention";
+}
+
+/// Emitted by the filesystem watcher when a Context Library file changed on disk
+/// (after the index was re-synced for the affected scope). `project` is the CL
+/// scope: a named project, or `None` for `_globals`/root files (`scratch.md`,
+/// `tasks.md`, `agents/…`). The frontend invalidates its whole CL query family
+/// regardless of the scope (prefix-based invalidation), so this field is
+/// informational — it's here for future scoped consumers + parity with the other
+/// typed events.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct ClChangedEvent {
+    pub project: Option<String>,
+}
+
+impl ClChangedEvent {
+    pub const EVENT_NAME: &'static str = "cl:changed";
+}
+
+/// Emitted by the filesystem watcher when a file changed inside a live session's
+/// working repo (build/VCS churn filtered out), so the Apply tab re-runs its
+/// `git diff` live instead of only on a phase/doc write.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct WorktreeChangedEvent {
+    pub session_id: String,
+}
+
+impl WorktreeChangedEvent {
+    pub const EVENT_NAME: &'static str = "session:worktree_changed";
+}
+
+/// Emitted by the filesystem watcher when a file changed inside an ENABLED
+/// plugin's served directory (normal: the installed copy; linked: the user's
+/// source repo, with build/VCS churn filtered). PluginHost forwards it into
+/// the plugin's iframe as `{ type: "bhq:event", topic: "plugin_assets_changed" }`
+/// so shelf-style UIs can refresh their own content — no grant needed, it's
+/// the plugin's own directory.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct PluginAssetsChangedEvent {
+    pub plugin_id: String,
+}
+
+impl PluginAssetsChangedEvent {
+    pub const EVENT_NAME: &'static str = "plugin:assets_changed";
+}
+
+/// Emitted (direct `app.emit`) when the project registry changes — a project was
+/// registered or unregistered. That's a DB-only change the filesystem watcher
+/// can't see, so the UI needs an explicit nudge; the frontend invalidates
+/// `list_projects`. No payload.
+pub const PROJECT_CHANGED: &str = "project:changed";
+
+/// Emitted (direct `app.emit`, `AppState::notify_session_created`) once a
+/// created session's row is committed and its spawn attempted — from BOTH
+/// create paths (the dialog's `create_session` and the plugin proxy's
+/// `dispatch_session_inner`). Carries `{ session_id }`; the frontend
+/// invalidates `list_sessions` and `PluginHost` relays `sessions_changed` to
+/// plugins holding `list_sessions`. Until round 7 its only emitter was the
+/// removed external driver's entry point, so it never fired in production.
+pub const SESSION_CREATED: &str = "session:created";
+
+/// Emitted (direct `app.emit`) when the saved-model registry changes (upsert or
+/// delete) — a DB-only change the filesystem watcher can't see. The frontend
+/// invalidates `list_models`. No payload.
+pub const MODEL_CHANGED: &str = "model:changed";
+
+/// Plugin lifecycle event names emitted to the frontend PluginManager, which
+/// listens for the same strings. Centralized so an emit site and the listener
+/// can't drift independently.
+pub const PLUGIN_STATE_CHANGED: &str = "plugin:state-changed";
+pub const PLUGIN_UNINSTALLED: &str = "plugin:uninstalled";
+pub const PLUGIN_CRASHED: &str = "plugin:crashed";
+
+/// The three payload-less (or near-payload-less) session events the bridge
+/// subscriber emits — named here like every other event so `Providers.tsx`'s
+/// listener strings have one Rust counterpart to drift against (round 9: they
+/// were the only three bare literals in `bridge_subscriber.rs`).
+///
+/// `session:resync` — the subscriber lagged its broadcast channel and may have
+/// dropped `session:*` events; the frontend refetches every event-backed query.
+pub const SESSION_RESYNC: &str = "session:resync";
+/// `session:halt_cleared` — the session's halt slot was cleared (the user's
+/// next message); the tray/bell refetch. Null payload.
+pub const SESSION_HALT_CLEARED: &str = "session:halt_cleared";
+/// `session:stage_delivered` — a staged user message landed at the turn
+/// boundary; `{ session_id }`.
+pub const SESSION_STAGE_DELIVERED: &str = "session:stage_delivered";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_message_event_name_is_batch_path() {
+        assert_eq!(AgentMessage::EVENT_NAME_BATCH, "agent:messages:batch");
+    }
+
+    #[test]
+    fn agent_message_serializes_to_expected_shape() {
+        let msg = AgentMessage {
+            id: 1,
+            session_id: "s1".to_string(),
+            author: "hands".to_string(),
+            kind: "text".to_string(),
+            content: "hello".to_string(),
+            created_at: "2026-05-26T18:00:00Z".to_string(),
+        };
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["session_id"], "s1");
+        assert_eq!(v["author"], "hands");
+        assert_eq!(v["content"], "hello");
+    }
+
+    #[test]
+    fn agent_message_from_storage_message_preserves_fields() {
+        let m = Message {
+            id: 7,
+            session_id: "s1".into(),
+            author: "eyes".into(),
+            kind: "text".into(),
+            content: "looks clean".into(),
+            created_at: "2026-05-26T18:01:00Z".into(),
+        };
+        let am: AgentMessage = m.clone().into();
+        assert_eq!(am.id, m.id);
+        assert_eq!(am.session_id, m.session_id);
+        assert_eq!(am.author, m.author);
+        assert_eq!(am.kind, m.kind);
+        assert_eq!(am.content, m.content);
+        assert_eq!(am.created_at, m.created_at);
+    }
+
+    /// The three subscriber-emitted names the frontend subscribes to by string
+    /// (`Providers.tsx`) — pinned like their typed siblings.
+    #[test]
+    fn subscriber_event_names_match_the_frontend_listeners() {
+        assert_eq!(SESSION_RESYNC, "session:resync");
+        assert_eq!(SESSION_HALT_CLEARED, "session:halt_cleared");
+        assert_eq!(SESSION_STAGE_DELIVERED, "session:stage_delivered");
+    }
+
+    #[test]
+    fn phase_changed_event_name() {
+        assert_eq!(PhaseChangedEvent::EVENT_NAME, "session:phase_changed");
+    }
+
+    #[test]
+    fn awaiting_user_event_name() {
+        assert_eq!(AwaitingUser::EVENT_NAME, "session:awaiting_user");
+    }
+}

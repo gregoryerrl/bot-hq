@@ -1,0 +1,945 @@
+//! Data-dir resolution + first-run init.
+//!
+//! Layout under `<data_dir>` (default `~/.bot-hq/`, overridable via
+//! `BOT_HQ_DATA_DIR`). The Context Library lives in its own `library/` subtree
+//! so it can be backed up / cloud-synced independently of host-local state;
+//! secrets, logs, and runtime state live under `.local/` (never synced):
+//!
+//! ```text
+//! <data_dir>/
+//!   version.txt                    (whole-home schema marker, "2" for v1.1)
+//!   library/                       (Context Library — its own folder)
+//!     custom-general-rules.md      (optional user additions; hardcoded core
+//!                                   lives in agents::general_rules)
+//!     scratch.md, tasks.md         (cross-project _globals files)
+//!     custom-instructions.md       (one file, appended to EVERY agent's
+//!                                   prompt — consolidated from the old
+//!                                   per-agent agents/<name>/ files)
+//!     projects/<p>/conventions.md
+//!     projects/<p>/notes.md
+//!     projects/<p>/policy.yaml     (CL-coupled: policy resolver reads here)
+//!   config/                        (host-side machine config — bot-hq-owned)
+//!     general-policy.yaml          (machine policy — overlay base)
+//!     tool-gate.json               (global Tool Gate keyword list)
+//!     claude-overrides.json        (per-agent claude-code overrides, 0600)
+//!   plugins/                       (installed plugins)
+//!   .local/                        (host-only; never synced)
+//!     bot-hq.db
+//!     lock                         (single-instance PID lock)
+//!     violations.jsonl             (policy audit trail)
+//!     .policy-hashes.json          (policy-file hash cache)
+//!     screenshots/<ts>.png
+//!     session-policies/<sid>.yaml     (per-session policy snapshots)
+//! ```
+//!
+//! Older installs are migrated once into this shape by [`Paths::init`] via
+//! [`Paths::migrate_legacy_layout`]: a pre-`library/` root-level CL (v0) is
+//! carved into `library/` + `.local/`, and v1's root-level machine config is
+//! moved into `config/`.
+
+use anyhow::{Context, Result};
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use tracing::{info, warn};
+
+/// Current whole-home on-disk schema version, written to `version.txt`. Bumped
+/// when the layout changes in a way that needs a one-time migration:
+/// - **1** — Context Library carved into `library/`, host state into `.local/`.
+/// - **2** — host machine config (`general-policy.yaml`, `tool-gate.json`,
+///   `claude-overrides.json`) moved from the data-dir root into `config/`.
+const SCHEMA_VERSION: u32 = 2;
+
+/// Build / dependency directories never worth walking — skipped both when
+/// indexing a `cl_path` repo as CL content (`signaling::bridge::util::walk_cl_dir`)
+/// and when filtering working-tree change events (`tauri_events::fs_watcher`).
+/// One shared list so the two consumers can't drift (they did: the watcher copy
+/// was missing `vendor`/`coverage`). Hidden dirs (`.`-prefixed) are handled
+/// separately by each caller.
+pub const IGNORED_BUILD_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    "__pycache__",
+    "vendor",
+    "coverage",
+];
+
+/// Outcome of [`Paths::init`]. Used by the UI layer to surface one-time toasts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitOutcome {
+    /// Data dir didn't exist; we created it from baked-in defaults.
+    FirstRun,
+    /// Data dir exists and was complete. No CL writes performed.
+    Existing,
+    /// Data dir existed but was missing the version file and/or one of the
+    /// required CL slots. We re-initialized the missing pieces. The list of
+    /// slot names that were filled is included so the UI can name them.
+    Repaired { repaired_slots: Vec<String> },
+}
+
+#[derive(Debug, Clone)]
+pub struct Paths {
+    pub data_dir: PathBuf,
+    /// Context Library root: `<data_dir>/library/`. Holds agent custom
+    /// instructions, `custom-general-rules.md`, cross-project `_globals` files
+    /// (`scratch.md`, `tasks.md`), and `projects/<p>/` (conventions, notes,
+    /// decisions, and `policy.yaml`). Its own folder so it can be backed up /
+    /// cloud-synced independently of host-local state.
+    pub cl_dir: PathBuf,
+    /// Host-side machine config: `<data_dir>/config/`. Holds `general-policy.yaml`,
+    /// `tool-gate.json`, and `claude-overrides.json` — bot-hq-owned enforcement /
+    /// spawn config, kept separate from the user-content CL (`library/`) and from
+    /// host-only runtime state (`.local/`).
+    pub config_dir: PathBuf,
+    /// Installed-plugin root: `<data_dir>/plugins/`.
+    pub plugins_dir: PathBuf,
+    /// Host-only runtime state, secrets, and logs: `<data_dir>/.local/`.
+    /// Never synced.
+    pub local_dir: PathBuf,
+    pub db_path: PathBuf,
+    pub lock_path: PathBuf,
+    /// Whole-data-home schema marker: `<data_dir>/version.txt`. Its absence is
+    /// the first-run signal; an old install missing it but carrying root-level
+    /// CL triggers the one-time `library/` migration in [`Paths::init`].
+    pub version_path: PathBuf,
+    /// Policy audit trail: `<data_dir>/.local/violations.jsonl`.
+    ///
+    /// This doc used to open with four lines describing `mcp_token_path` — the
+    /// external driver's bearer token — left attached to THIS field when that
+    /// one was deleted with the driver (2026-08-17). The struct documented a
+    /// secret that no longer exists, on a field it does not describe. Found
+    /// round 6, B7: a doc comment has no compiler to notice it outlived its
+    /// subject, only the next reader.
+    pub violations_path: PathBuf,
+    /// Policy-file hash cache: `<data_dir>/.local/.policy-hashes.json`.
+    pub policy_hashes_path: PathBuf,
+    /// Webview screenshot output dir: `<data_dir>/.local/screenshots/`.
+    pub screenshots_dir: PathBuf,
+    /// Rolling `tracing` output: `<data_dir>/.local/logs/`.
+    ///
+    /// Until this existed there was no log sink at all — `tracing_subscriber::fmt()`
+    /// wrote to a stdout nobody captured when the app launches from Finder. Two
+    /// migrations (`0040_cancel_events`, `0041_forward_events`) existed *because*
+    /// of that: each recorded to sqlite what a `warn!` already said, only to have
+    /// it survive (`forward_events` went with the router — dropped by 0064;
+    /// `cancel_events` still records). See `init_logging`.
+    pub logs_dir: PathBuf,
+    /// The internal signaling server's bound address (e.g. `127.0.0.1:54321`),
+    /// written at startup so the git pre-push hook — a separate subprocess that
+    /// can't reach the running app's bridge directly — can POST `/hooks/pre-push`
+    /// to surface a per-push approval prompt under `push_gate=ask`. Lives under
+    /// `.local/` (runtime state, not user content); removed on clean shutdown.
+    pub signaling_addr_path: PathBuf,
+    /// The per-launch secret the git pre-push hook and the PreToolUse Tool
+    /// Gate hook present on `/hooks/*` (`X-Bot-Hq-Hook-Token`). Minted at
+    /// startup, written 0600 beside `signaling-addr`, read by the hook
+    /// subprocess at run time — never embedded in a hook body, which is a
+    /// world-readable file in the repo. Without it any local process that can
+    /// reach the port could park an approval card in the user's tray.
+    pub hook_token_path: PathBuf,
+}
+
+impl Paths {
+    /// Compute paths from environment. Respects `BOT_HQ_DATA_DIR`. Falls back
+    /// to `~/.bot-hq/`. Expands a leading `~` segment.
+    pub fn from_env() -> Result<Self> {
+        let data_dir = match std::env::var("BOT_HQ_DATA_DIR") {
+            Ok(v) if !v.trim().is_empty() => expand_tilde(v.trim())?,
+            _ => default_data_dir()?,
+        };
+        Ok(Self::for_data_dir(data_dir))
+    }
+
+    pub fn for_data_dir(data_dir: PathBuf) -> Self {
+        let cl_dir = data_dir.join("library");
+        let config_dir = config_dir_path(&data_dir);
+        let plugins_dir = data_dir.join("plugins");
+        let local_dir = data_dir.join(".local");
+        let db_path = local_dir.join("bot-hq.db");
+        let lock_path = local_dir.join("lock");
+        let version_path = data_dir.join("version.txt");
+        let violations_path = local_dir.join("violations.jsonl");
+        let policy_hashes_path = local_dir.join(".policy-hashes.json");
+        let screenshots_dir = local_dir.join("screenshots");
+        let logs_dir = local_dir.join("logs");
+        let signaling_addr_path = local_dir.join("signaling-addr");
+        let hook_token_path = local_dir.join("hook-token");
+        Self {
+            data_dir,
+            cl_dir,
+            config_dir,
+            plugins_dir,
+            local_dir,
+            db_path,
+            lock_path,
+            version_path,
+            violations_path,
+            policy_hashes_path,
+            screenshots_dir,
+            logs_dir,
+            signaling_addr_path,
+            hook_token_path,
+        }
+    }
+
+    /// Single source of truth for the per-project CL convention path:
+    /// `<cl_dir>/projects/<name>/`. All convention callers (storage
+    /// `cl_path_for_project`, policy resolver, policy audit) route through this
+    /// so a layout change can't desync them.
+    pub fn project_dir(&self, name: &str) -> PathBuf {
+        self.cl_dir.join("projects").join(name)
+    }
+
+    /// The `projects/` root under the CL dir, walked by the startup backfill.
+    pub fn cl_projects_dir(&self) -> PathBuf {
+        self.cl_dir.join("projects")
+    }
+
+    /// Persist the internal signaling server's bound address so the git
+    /// pre-push hook subprocess can reach the running app (see
+    /// [`read_signaling_addr`]). Overwritten on every startup so it always
+    /// reflects the live ephemeral port. Best-effort cleanup on clean shutdown
+    /// lives in `SignalingServer::Drop`.
+    pub fn write_signaling_addr(&self, addr: std::net::SocketAddr) -> Result<()> {
+        write_private_file(&self.signaling_addr_path, &format!("{addr}\n"))
+            .with_context(|| format!("writing signaling addr at {}", self.signaling_addr_path.display()))
+    }
+
+    /// Mint this launch's hook secret, persist it 0600 at
+    /// [`Paths::hook_token_path`], and return it for the bridge to register.
+    /// Overwritten on every startup: the secret is only meaningful while this
+    /// process is the one listening on `signaling-addr`.
+    pub fn write_hook_token(&self) -> Result<String> {
+        // Two v4 UUIDs' worth of randomness (2 × 122 bits) as 64 hex chars —
+        // `uuid` is already a dependency; no extra RNG crate.
+        let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        write_private_file(&self.hook_token_path, &format!("{token}\n"))
+            .with_context(|| format!("writing hook token at {}", self.hook_token_path.display()))?;
+        Ok(token)
+    }
+
+    /// The on-disk whole-home schema version from `version.txt`. Absent or
+    /// unparseable → `0` (a pre-`library/` install, or a brand-new data dir).
+    fn schema_version(&self) -> u32 {
+        fs::read_to_string(&self.version_path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Idempotent. Creates the data dir + CL skeleton on first run, repairs
+    /// missing required CL slots on subsequent runs, migrates an older layout
+    /// once (see [`Paths::migrate_legacy_layout`]), and leaves user content
+    /// untouched otherwise. Returns the outcome for UI toasts.
+    ///
+    /// First-run signal: the schema marker reads `0` (no `version.txt`) AND
+    /// there's no legacy root-level CL. A brand-new install (or a wiped data
+    /// dir) gets `FirstRun` and a silent init. An older install (pre-`library/`,
+    /// or v1 with root-level machine config) is migrated into the current layout
+    /// and reported as `Repaired`. A user who deleted just one slot also gets
+    /// `Repaired`.
+    pub fn init(&self) -> Result<InitOutcome> {
+        // Detect a pre-`library/` install BEFORE creating anything: the old
+        // marker `cl-version.txt` or any root-level CL means we migrate rather
+        // than treat this as a fresh first run.
+        let has_legacy = self.data_dir.join("cl-version.txt").exists()
+            || self.data_dir.join("projects").is_dir()
+            || self.data_dir.join("agents").is_dir()
+            || self.data_dir.join("custom-general-rules.md").exists();
+        let first_run = self.schema_version() == 0 && !has_legacy;
+
+        fs::create_dir_all(&self.data_dir)
+            .with_context(|| format!("creating data dir at {}", self.data_dir.display()))?;
+
+        // One-time migration of a legacy root-level CL into library/ + .local/.
+        let migrated = self.migrate_legacy_layout()?;
+
+        fs::create_dir_all(&self.cl_dir)
+            .with_context(|| format!("creating library dir at {}", self.cl_dir.display()))?;
+        fs::create_dir_all(&self.config_dir)
+            .with_context(|| format!("creating config dir at {}", self.config_dir.display()))?;
+        fs::create_dir_all(&self.plugins_dir)
+            .with_context(|| format!("creating plugins dir at {}", self.plugins_dir.display()))?;
+        fs::create_dir_all(&self.local_dir)
+            .with_context(|| format!("creating local dir at {}", self.local_dir.display()))?;
+        // Created eagerly (unlike screenshots/, which is lazy) because the
+        // tracing file appender is built immediately after `init` returns.
+        fs::create_dir_all(&self.logs_dir)
+            .with_context(|| format!("creating logs dir at {}", self.logs_dir.display()))?;
+
+        let mut repaired_slots = Vec::new();
+
+        if self.schema_version() < SCHEMA_VERSION {
+            fs::write(&self.version_path, format!("{SCHEMA_VERSION}\n"))
+                .with_context(|| format!("writing {}", self.version_path.display()))?;
+        }
+
+        // The per-agent custom-instruction consolidation (brian/rain →
+        // custom-instructions.md) was DELETED here (1.0.0 Batch 6 M7b): dead
+        // for every fresh install, and any pre-June-2026 layout has long
+        // migrated. Its ~500 B of retired-agent-name templates left the
+        // binary with it.
+
+        for (path, body) in default_cl_files(&self.cl_dir) {
+            if !path.exists() {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("creating {}", parent.display()))?;
+                }
+                fs::write(&path, body)
+                    .with_context(|| format!("writing default CL slot at {}", path.display()))?;
+                if !first_run {
+                    if let Ok(rel) = path.strip_prefix(&self.data_dir) {
+                        repaired_slots.push(rel.display().to_string());
+                    }
+                }
+            }
+        }
+
+        if migrated {
+            repaired_slots.push("(migrated to library/ + config/ layout)".to_string());
+        }
+
+        if first_run {
+            info!(data_dir = %self.data_dir.display(), "first-run init complete");
+            Ok(InitOutcome::FirstRun)
+        } else if repaired_slots.is_empty() {
+            Ok(InitOutcome::Existing)
+        } else {
+            warn!(slots = ?repaired_slots, "repaired/migrated CL slots");
+            Ok(InitOutcome::Repaired { repaired_slots })
+        }
+    }
+
+
+    /// Move an older on-disk layout into the current one, exactly once. Returns
+    /// `true` if anything was moved. Gated on the recorded schema version being
+    /// behind [`SCHEMA_VERSION`] (the marker is stamped by [`Paths::init`] after
+    /// this runs), so it's a no-op on every later run and on a genuinely fresh
+    /// data dir. Idempotent per-entry: only moves a source that exists when the
+    /// destination doesn't, so a crash mid-migration self-heals on the next
+    /// launch. Projects whose CL lives at an explicit absolute `cl_path` (stored
+    /// in the db) are untouched — only the convention layout under the data dir
+    /// moves.
+    ///
+    /// Stages (cumulative, each exists-guarded):
+    /// - **v0 → v1:** root-level CL → `library/`, host-only state → `.local/`.
+    /// - **v1 → v2:** root-level machine config → `config/`.
+    fn migrate_legacy_layout(&self) -> Result<bool> {
+        if self.schema_version() >= SCHEMA_VERSION {
+            return Ok(false);
+        }
+        fs::create_dir_all(&self.cl_dir)
+            .with_context(|| format!("creating library dir at {}", self.cl_dir.display()))?;
+        fs::create_dir_all(&self.config_dir)
+            .with_context(|| format!("creating config dir at {}", self.config_dir.display()))?;
+        fs::create_dir_all(&self.local_dir)
+            .with_context(|| format!("creating local dir at {}", self.local_dir.display()))?;
+
+        let mut moved = false;
+
+        // v0 → v1: CL content → library/
+        for name in [
+            "projects",
+            "agents",
+            "custom-general-rules.md",
+            "scratch.md",
+            "tasks.md",
+        ] {
+            let from = self.data_dir.join(name);
+            let to = self.cl_dir.join(name);
+            if from.exists() && !to.exists() {
+                move_path(&from, &to)?;
+                moved = true;
+            }
+        }
+
+        // v0 → v1: host-only state → .local/
+        for name in [
+            "violations.jsonl",
+            ".policy-hashes.json",
+            "screenshots",
+        ] {
+            let from = self.data_dir.join(name);
+            let to = self.local_dir.join(name);
+            if from.exists() && !to.exists() {
+                move_path(&from, &to)?;
+                moved = true;
+            }
+        }
+
+        // v1 → v2: host machine config → config/
+        for name in ["general-policy.yaml", "tool-gate.json", "claude-overrides.json"] {
+            let from = self.data_dir.join(name);
+            let to = self.config_dir.join(name);
+            if from.exists() && !to.exists() {
+                move_path(&from, &to)?;
+                moved = true;
+            }
+        }
+
+        // Obsolete pre-`library/` marker — superseded by `version.txt`, which
+        // init stamps to the current schema version after this returns.
+        let old_marker = self.data_dir.join("cl-version.txt");
+        if old_marker.exists() {
+            fs::remove_file(&old_marker)
+                .with_context(|| format!("removing obsolete {}", old_marker.display()))?;
+            moved = true;
+        }
+
+        if moved {
+            warn!(
+                data_dir = %self.data_dir.display(),
+                "migrated legacy layout into library/ + config/ + .local/"
+            );
+        }
+        Ok(moved)
+    }
+}
+
+/// Resolve the user's home directory via `directories::BaseDirs`. Single
+/// source of truth — every path helper below routes through this so the
+/// `.context()` message stays identical, and `claude_config` resolves
+/// `~/.claude` through it too (round 9: it had its own `$HOME`-only copy).
+pub(crate) fn home_dir() -> Result<PathBuf> {
+    Ok(directories::BaseDirs::new()
+        .context("locating user home dir")?
+        .home_dir()
+        .to_path_buf())
+}
+
+/// Default data dir = `~/.bot-hq/`.
+fn default_data_dir() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".bot-hq"))
+}
+
+/// The host-side machine-config dir: `<data_dir>/config/`. A free fn (not only a
+/// [`Paths`] field) so the policy + claude-config path builders — which receive a
+/// bare `data_dir` (the CLI hook subprocess has no [`Paths`]) — resolve the same
+/// location. Single source of the `config/` segment so callers can't desync.
+pub fn config_dir_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("config")
+}
+
+/// Move a file or directory, preferring an atomic `fs::rename` and falling back
+/// to recursive copy + remove when rename fails — e.g. a cross-filesystem
+/// `EXDEV` on unix, or a locked/open file on Windows. Used by the one-time
+/// legacy-layout migration.
+fn move_path(from: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent for {}", to.display()))?;
+    }
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    copy_recursive(from, to)
+        .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
+    if from.is_dir() {
+        fs::remove_dir_all(from)
+    } else {
+        fs::remove_file(from)
+    }
+    .with_context(|| format!("removing source {} after copy", from.display()))?;
+    Ok(())
+}
+
+/// Recursively copy a file or directory tree.
+fn copy_recursive(from: &Path, to: &Path) -> Result<()> {
+    if from.is_dir() {
+        fs::create_dir_all(to).with_context(|| format!("creating dir {}", to.display()))?;
+        for entry in fs::read_dir(from).with_context(|| format!("reading dir {}", from.display()))? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+        }
+    } else {
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent for {}", to.display()))?;
+        }
+        fs::copy(from, to)
+            .with_context(|| format!("copying file {} -> {}", from.display(), to.display()))?;
+    }
+    Ok(())
+}
+
+/// Read the persisted signaling-server address (`<data_dir>/.local/signaling-addr`)
+/// for the git pre-push hook. Returns `None` when the file is missing or empty
+/// (bot-hq not running) — the hook then fail-closes (blocks the push). Free fn
+/// (not a `Paths` method) because the hook subprocess only has `--data-dir`.
+pub fn read_signaling_addr(data_dir: &Path) -> Option<String> {
+    read_trimmed(&data_dir.join(".local").join("signaling-addr"))
+}
+
+/// Read this launch's hook secret (`<data_dir>/.local/hook-token`) for the
+/// hook subprocesses. `None` when absent — the client then sends no header and
+/// lets the server decide: an app that never wrote one (older build) enforces
+/// nothing, an app that did refuses with a message naming the fix.
+pub fn read_hook_token(data_dir: &Path) -> Option<String> {
+    read_trimmed(&data_dir.join(".local").join("hook-token"))
+}
+
+fn read_trimmed(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Write a runtime-state file readable by this user only. Both the signaling
+/// address and the hook token are what a local process needs to reach — or
+/// impersonate a client of — the loopback server, so neither may be
+/// world-readable (the address file was 0644 before 1.0.5). Creates the
+/// parent, truncates, and on Unix opens with mode 0600 so there is no window
+/// between create and chmod.
+fn write_private_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    // An existing file keeps its old mode through `open` — re-apply it so an
+    // upgrade from the 0644 days tightens the file too.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(contents.as_bytes())
+}
+
+/// Expand a leading `~` (and optionally `~/`) in a path string. Shared with
+/// the policy-check hook subprocess (`policy::hooks`) so `~` resolves the same
+/// way (via `directories::BaseDirs`) regardless of caller.
+pub(crate) fn expand_tilde(s: &str) -> Result<PathBuf> {
+    if let Some(stripped) = s.strip_prefix("~/") {
+        Ok(home_dir()?.join(stripped))
+    } else if s == "~" {
+        home_dir()
+    } else {
+        Ok(PathBuf::from(s))
+    }
+}
+
+/// The required CL slots and their baked-in default contents.
+///
+/// Universal rules are no longer here — they moved into the binary as the
+/// `agents::general_rules::GENERAL_RULES` constant. What lives in CL now is:
+///
+/// - `custom-general-rules.md` — optional user additions appended to the
+///   hardcoded universal rules at session spawn
+/// - `custom-instructions.md` — a single placeholder appended to EVERY
+///   agent's prompt (consolidated from the old per-agent
+///   `agents/<name>/custom-instruction.md` files)
+fn default_cl_files(root: &Path) -> Vec<(PathBuf, &'static str)> {
+    vec![
+        (
+            root.join("custom-general-rules.md"),
+            include_str!("../templates/cl/custom-general-rules.md"),
+        ),
+        (
+            root.join("custom-instructions.md"),
+            include_str!("../templates/cl/custom-instructions.md"),
+        ),
+    ]
+}
+
+
+// ---- single-instance lock ---------------------------------------------
+
+/// PID-based lockfile guard. Drops the file when released.
+///
+/// Best-effort: if the recorded PID is still alive (`kill -0`) we refuse to
+/// start. If it's stale, we steal the lock and continue. This avoids the
+/// classic "crashed-with-lockfile" lockout without needing platform-specific
+/// flock syscalls in v1.
+#[derive(Debug)]
+pub struct LockGuard {
+    path: PathBuf,
+}
+
+impl LockGuard {
+    pub fn acquire(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating lock parent at {}", parent.display()))?;
+        }
+
+        if path.exists() {
+            let mut existing = String::new();
+            if let Ok(mut f) = fs::File::open(path) {
+                let _ = f.read_to_string(&mut existing);
+            }
+            if let Ok(pid) = existing.trim().parse::<i32>() {
+                if pid_alive(pid) {
+                    anyhow::bail!(
+                        "bot-hq is already running (pid {pid}, lockfile {}). \
+                         Quit the other instance first.",
+                        path.display()
+                    );
+                }
+                warn!(pid, "stale lockfile, taking over");
+            }
+        }
+
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .with_context(|| format!("opening lockfile {}", path.display()))?;
+        let pid = std::process::id();
+        writeln!(f, "{pid}").with_context(|| format!("writing pid to {}", path.display()))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn pid_alive(pid: i32) -> bool {
+    // signal 0 = no signal, just permission/existence check.
+    // safety: bare libc-style FFI through std on unix.
+    #[cfg(unix)]
+    unsafe {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        kill(pid, 0) == 0
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // STILL_ACTIVE (259 / STATUS_PENDING) is what GetExitCodeProcess reports
+        // for a running process. Literal avoids windows-sys module-path skew.
+        const STILL_ACTIVE: u32 = 259;
+        if pid <= 0 {
+            return false;
+        }
+        // SAFETY: handle is null-checked before use and closed exactly once.
+        // OpenProcess returns NULL when the pid no longer exists (or on access
+        // denial) — treated as not-alive, so a stale lock is taken over.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+            if handle.is_null() {
+                return false;
+            }
+            let mut code: u32 = 0;
+            let ok = GetExitCodeProcess(handle, &mut code);
+            CloseHandle(handle);
+            ok != 0 && code == STILL_ACTIVE
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn first_run_creates_skeleton() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        let outcome = paths.init().unwrap();
+        assert_eq!(outcome, InitOutcome::FirstRun);
+        assert!(paths.version_path.exists());
+        assert!(paths.cl_dir.exists());
+        assert!(paths.plugins_dir.exists());
+        assert!(paths.local_dir.exists());
+        // The tracing file appender is built right after `init` returns and
+        // panics on a missing directory, so this is a boot precondition, not a
+        // nicety. Before the sink existed there was nowhere for a `warn!` to go.
+        assert!(
+            paths.logs_dir.exists(),
+            "init must create the logs dir — the log appender is built immediately after"
+        );
+        assert!(
+            paths.cl_dir.join("custom-general-rules.md").exists(),
+            "first run should seed custom-general-rules.md stub under library/"
+        );
+        assert!(
+            !paths.cl_dir.join("general-rules.md").exists(),
+            "general-rules.md is hardcoded now — should not be seeded"
+        );
+        assert!(
+            paths.cl_dir.join("custom-instructions.md").exists(),
+            "first run should seed the consolidated custom-instructions.md"
+        );
+        assert!(
+            !paths.cl_dir.join("agents").exists(),
+            "per-agent custom-instruction files are consolidated — no agents/ dir"
+        );
+        // CL must NOT be seeded at the data-dir root anymore.
+        assert!(!tmp.path().join("custom-general-rules.md").exists());
+    }
+
+    #[test]
+    fn second_init_is_no_op() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        let outcome = paths.init().unwrap();
+        assert_eq!(outcome, InitOutcome::Existing);
+    }
+
+    #[test]
+    fn missing_slot_gets_repaired() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        fs::remove_file(paths.cl_dir.join("custom-instructions.md")).unwrap();
+        let outcome = paths.init().unwrap();
+        match outcome {
+            InitOutcome::Repaired { repaired_slots } => {
+                assert!(repaired_slots
+                    .iter()
+                    .any(|s| s.contains("custom-instructions")));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+
+
+    #[test]
+    fn migrates_legacy_root_layout_into_library() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Simulate a pre-`library/` install: CL at the data-dir root + the old
+        // marker + host-only state.
+        fs::create_dir_all(root.join("projects/foo")).unwrap();
+        fs::write(root.join("projects/foo/conventions.md"), "# foo\n").unwrap();
+        fs::create_dir_all(root.join("agents/brian")).unwrap();
+        fs::write(root.join("agents/brian/custom-instruction.md"), "hi\n").unwrap();
+        fs::write(root.join("custom-general-rules.md"), "rules\n").unwrap();
+        fs::write(root.join("scratch.md"), "scratch\n").unwrap();
+        fs::write(root.join("cl-version.txt"), "1\n").unwrap();
+        fs::write(root.join("mcp-token"), "tok\n").unwrap();
+        fs::write(root.join("violations.jsonl"), "{}\n").unwrap();
+
+        let paths = Paths::for_data_dir(root.to_path_buf());
+        let outcome = paths.init().unwrap();
+
+        // Not a first run — it's a migration, surfaced as Repaired.
+        match outcome {
+            InitOutcome::Repaired { repaired_slots } => {
+                assert!(repaired_slots.iter().any(|s| s.contains("migrated")));
+            }
+            other => panic!("expected Repaired (migration), got {other:?}"),
+        }
+
+        // CL content moved under library/.
+        assert!(paths.cl_dir.join("projects/foo/conventions.md").exists());
+        assert!(paths.cl_dir.join("custom-general-rules.md").exists());
+        assert!(paths.cl_dir.join("scratch.md").exists());
+        // The per-agent consolidation was deleted (1.0.0 Batch 6 M7b), so the
+        // moved agents/ folder survives as ordinary library content — the
+        // root-layout migration under test here moves it and stops.
+        assert!(
+            paths.cl_dir.join("agents/brian/custom-instruction.md").exists(),
+            "root-layout migration moves agents/ under library/ untouched"
+        );
+        let consolidated =
+            fs::read_to_string(paths.cl_dir.join("custom-instructions.md")).unwrap();
+        assert!(
+            !consolidated.contains("## Migrated from"),
+            "no follow-on consolidation exists any more"
+        );
+        // host-only state moved under .local/.
+        assert!(paths.violations_path.exists());
+        // marker renamed; old root locations gone.
+        assert!(paths.version_path.exists());
+        assert!(!root.join("cl-version.txt").exists());
+        assert!(!root.join("projects").exists());
+        assert!(!root.join("custom-general-rules.md").exists());
+        // **`mcp-token` is deliberately NOT migrated any more.** It was the
+        // external driver's bearer token, and the driver was removed when the
+        // user demoted it to a future plugin — so nothing reads the file. Moving
+        // a dead file into `.local/` is churn in someone's data directory, and
+        // DELETING it is not bot-hq's call: it is the user's file, and an
+        // upgrade that quietly removes user data is worse than a stray one.
+        assert!(root.join("mcp-token").exists(), "a dead token is left where it is, not moved or deleted");
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("custom-general-rules.md"), "rules\n").unwrap();
+        fs::write(root.join("cl-version.txt"), "1\n").unwrap();
+
+        let paths = Paths::for_data_dir(root.to_path_buf());
+        paths.init().unwrap();
+        // Second init: version.txt now exists, nothing left to migrate → no-op.
+        let outcome = paths.init().unwrap();
+        assert_eq!(outcome, InitOutcome::Existing);
+        assert!(paths.cl_dir.join("custom-general-rules.md").exists());
+    }
+
+    #[test]
+    fn migrates_v1_config_files_into_config_dir() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Simulate a v1 (library/) install: marker reads "1", CL already lives
+        // under library/, but the three host config files are still at the root.
+        fs::create_dir_all(root.join("library")).unwrap();
+        fs::write(root.join("version.txt"), "1\n").unwrap();
+        fs::write(
+            root.join("general-policy.yaml"),
+            "forbidden_in_commits:\n  - Acme\n",
+        )
+        .unwrap();
+        fs::write(root.join("tool-gate.json"), "[]\n").unwrap();
+        fs::write(root.join("claude-overrides.json"), "{}\n").unwrap();
+
+        let paths = Paths::for_data_dir(root.to_path_buf());
+        let outcome = paths.init().unwrap();
+
+        // An upgrade migration, not a first run.
+        match outcome {
+            InitOutcome::Repaired { repaired_slots } => {
+                assert!(repaired_slots.iter().any(|s| s.contains("migrated")));
+            }
+            other => panic!("expected Repaired (config migration), got {other:?}"),
+        }
+
+        // The three config files moved under config/ …
+        assert!(paths.config_dir.join("general-policy.yaml").exists());
+        assert!(paths.config_dir.join("tool-gate.json").exists());
+        assert!(paths.config_dir.join("claude-overrides.json").exists());
+        // … and are gone from the data-dir root.
+        assert!(!root.join("general-policy.yaml").exists());
+        assert!(!root.join("tool-gate.json").exists());
+        assert!(!root.join("claude-overrides.json").exists());
+        // Schema marker bumped to the current version.
+        assert_eq!(
+            fs::read_to_string(&paths.version_path).unwrap().trim(),
+            SCHEMA_VERSION.to_string()
+        );
+
+        // Idempotent: a second init moves nothing and reports Existing.
+        assert_eq!(paths.init().unwrap(), InitOutcome::Existing);
+    }
+
+    #[test]
+    fn lock_acquire_and_release() {
+        let tmp = TempDir::new().unwrap();
+        let lock_path = tmp.path().join("lock");
+        let guard = LockGuard::acquire(&lock_path).unwrap();
+        assert!(lock_path.exists());
+        drop(guard);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn lock_blocks_double_acquire_same_process() {
+        let tmp = TempDir::new().unwrap();
+        let lock_path = tmp.path().join("lock");
+        let _guard = LockGuard::acquire(&lock_path).unwrap();
+        let err = LockGuard::acquire(&lock_path).unwrap_err();
+        assert!(err.to_string().contains("already running"));
+    }
+
+    #[test]
+    fn lock_steals_stale_pid() {
+        let tmp = TempDir::new().unwrap();
+        let lock_path = tmp.path().join("lock");
+        // PID 0 isn't a real running process — kill(0, 0) returns ESRCH.
+        // Use a clearly-impossible PID instead: i32::MAX.
+        fs::write(&lock_path, format!("{}\n", i32::MAX)).unwrap();
+        let guard = LockGuard::acquire(&lock_path).unwrap();
+        let contents = fs::read_to_string(&lock_path).unwrap();
+        assert!(contents.contains(&std::process::id().to_string()));
+        drop(guard);
+    }
+
+    #[test]
+    fn signaling_addr_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        // Absent before the server writes it → None (hook fail-closes).
+        assert!(read_signaling_addr(tmp.path()).is_none());
+        let addr: std::net::SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        paths.write_signaling_addr(addr).unwrap();
+        assert_eq!(
+            read_signaling_addr(tmp.path()).as_deref(),
+            Some("127.0.0.1:54321")
+        );
+    }
+
+    #[test]
+    fn hook_token_round_trip_and_fresh_per_write() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        assert!(read_hook_token(tmp.path()).is_none(), "absent before startup");
+        let first = paths.write_hook_token().unwrap();
+        assert_eq!(first.len(), 64, "two simple uuids: {first}");
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(read_hook_token(tmp.path()).as_deref(), Some(first.as_str()));
+        let second = paths.write_hook_token().unwrap();
+        assert_ne!(first, second, "a relaunch mints a new secret");
+        assert_eq!(read_hook_token(tmp.path()).as_deref(), Some(second.as_str()));
+    }
+
+    /// Both runtime-state files are user-private — a local process on a shared
+    /// box must not read the port or the hook secret off disk (EYES measured
+    /// `signaling-addr` at 0644 before 1.0.5). Also covers the upgrade case: a
+    /// pre-existing 0644 file is tightened by the next write.
+    #[cfg(unix)]
+    #[test]
+    fn runtime_state_files_are_user_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        std::fs::create_dir_all(&paths.local_dir).unwrap();
+        std::fs::write(&paths.signaling_addr_path, "127.0.0.1:1\n").unwrap();
+        std::fs::set_permissions(&paths.signaling_addr_path, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let addr: std::net::SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        paths.write_signaling_addr(addr).unwrap();
+        paths.write_hook_token().unwrap();
+        for p in [&paths.signaling_addr_path, &paths.hook_token_path] {
+            let mode = std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{} should be 0600, is {mode:o}", p.display());
+        }
+    }
+
+    #[test]
+    fn tilde_expansion() {
+        let expanded = expand_tilde("~/foo").unwrap();
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        assert_eq!(expanded, home.join("foo"));
+    }
+}

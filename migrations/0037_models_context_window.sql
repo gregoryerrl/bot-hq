@@ -1,0 +1,13 @@
+-- Per-model context window, in tokens. NULL = unknown.
+--
+-- A context window is a property of a MODEL, not a provider: one provider serves
+-- several models with different windows, so a value keyed on the provider string
+-- is confidently wrong for every model it did not come from — and the UI meter
+-- renders that wrongness as a precise percentage. `ProviderProfile` therefore
+-- declares no windows at all (see src/agents/native/profile.rs), and this column
+-- is how the value reaches the code from someone who actually knows it.
+--
+-- Nullable with no default on purpose: absent stays absent. An unknown window
+-- renders as a visible gap and the native loop's context ceiling stays dark,
+-- which is the documented contract — never a guessed number.
+ALTER TABLE models ADD COLUMN context_window INTEGER;

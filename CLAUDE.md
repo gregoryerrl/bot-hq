@@ -1,0 +1,176 @@
+# bot-hq — Project Instructions (for claude-code)
+
+You are working on **bot-hq**, a Tauri v2 + React + Rust desktop GUI app
+for driving AI-assisted coding sessions through an agent harness with
+policy enforcement.
+
+A session runs **N participants**, each playing a ROLE the user defined in
+Settings → Roles (dialog default 1, dialog cap 4, backend cap 8). A role owns its capabilities,
+its instruction prose, its participation mode and its default model. The
+seeded pair is HANDS (executes) and EYES (reviews adversarially) — that is
+the user's configuration, not bot-hq's furniture, and rc3 D10 retired the
+agent names that used to stand in for them.
+
+A former helper agent, Emma, was removed from the core (a return as a
+plugin is possible but unplanned). House framing: describe bot-hq as an
+**agent harness/system** — never by agent count (no "single-agent" /
+"duo"-centric identity language).
+
+The original from-scratch rebuild shipped at v0.1.0; subsequent work
+added a UI redesign and a two-layer
+policy enforcement layer (MCP tools + git hooks). Current work is
+maintenance + feature-extension on the existing system.
+
+## Read these files FIRST, in order:
+
+1. **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — what bot-hq IS right now
+   (process model, the in-process MCP server, policy layer, storage
+   schema, glossary).
+2. **[`CHANGELOG.md`](CHANGELOG.md)** — what changed per release, plus
+   the `[Unreleased]` block for work since the last one. (`PLAN.md` and
+   `PROGRESS.md` were retired at 1.0.1 — the build-out is done; backlog
+   lives in the Context Library and the changelog's Deferred lists.)
+3. **[`CODEBASE.md`](CODEBASE.md)** — the area map: WHERE things live,
+   one area at a time (files, entry points, seams, tests, recipes) —
+   open it before touching code; `tests/codebase_map_test.rs` keeps it
+   honest.
+
+The first three are the canonical behaviour docs; the map says where. The original rebuild design +
+roadmap + Phase 0 research are preserved under
+[`docs/rebuild-archive/`](docs/rebuild-archive/) for historical
+reference — do not treat them as current.
+
+---
+
+## Tauri + React UI work
+
+The frontend is React 18 + TypeScript + Tailwind in `frontend/`. Tauri
+commands live in `src/tauri_cmd/<domain>.rs` as thin `#[tauri::command]`
+wrappers over `SignalingBridge` / `Storage` methods. Events flow through
+`src/tauri_events/`: bridge subscriber → `BatchEmitter` (since_id
+watermark, 50ms / N=20 coalesce) → `app.emit(name, payload)`. TypeScript
+bindings auto-generate via `tauri-specta` on each app launch (writes
+`frontend/src/lib/bindings.ts`).
+
+Plugin runtime (**shipped 2026-07-04**, not scaffolding): plugins are static
+frontend bundles in sandboxed iframes served over one `bhq-plugin://` scheme —
+the plugin id rides the URL host on macOS/Linux and the first path segment under
+the Windows `https://bhq-plugin.localhost` fold. Plugins never call Tauri: they
+postMessage the shell, which forwards to the single Rust enforcement point
+`plugin_invoke_proxy`, re-checking enabled ∧ granted ∧ catalog-listed per call.
+See ARCHITECTURE.md §Plugin runtime.
+
+---
+
+## Operating mode
+
+This is **maintenance + feature-extension** mode. The big build is
+done; work is now incremental.
+
+- **Take work in small testable chunks.** Compile + test after each
+  change.
+- **For non-trivial multi-step features,** spawn the `Agent` tool for
+  parallel work on independent sub-tasks. Brief each sub-agent with:
+  goal, files, interface, tests, definition of done.
+- **Don't litigate decisions already shipped** in `ARCHITECTURE.md`
+  (e.g., HTTP MCP not stdio+UDS, hand-rolled JSON-RPC, role prose as
+  user-editable roles rows seeded from `agents/prompts.rs` (rc3 D8/D10),
+  two-layer policy enforcement). Reopen only with a clear reason.
+- **When unsure about scope or direction,** ask the user via the
+  bot-hq `ask_user_choice` MCP tool (don't write prose questions —
+  they don't surface cleanly in the UI).
+
+---
+
+## Critical rules
+
+- **Commit conventions are config-driven, not shipped here.** Subject
+  style and the forbidden-word list resolve from the project `policy.yaml`
+  + the user's `custom-general-rules.md` in the Context Library — personal
+  / per-project config, not product rules baked into this repo. Whatever
+  the resolved policy forbids is enforced by the `commit-msg` git hook +
+  the `check_commit_message` MCP tool; call that tool before every commit,
+  and don't bypass the hooks (`--no-verify` / hook-skipping).
+- **Push is governed by the session's `push_gate` policy toggle**
+  (`auto` | `ask`, inherited general→project→session, editable in the
+  gear tab). Under `ask`, just run `git push` — the pre-push hook
+  surfaces a per-push Approve/Reject prompt and blocks on the user's
+  pick. There are no agent-side push grants. Don't push because
+  permission feels implicit.
+
+---
+
+## Data paths during dev
+
+Dev runs against the default `~/.bot-hq/` — the `BOT_HQ_DATA_DIR=~/.bot-hq-dev/`
+split was retired 2026-05-15 and the line is commented out in `.env`. Set it only
+if you also run an installed bot-hq release, which would otherwise share this
+data dir.
+
+`<data_dir>` layout (see ARCHITECTURE.md for the full list):
+- `.local/bot-hq.db` — sqlite
+- `.local/lock` — single-instance lock
+- `.local/session-policies/<sid>.yaml` — per-session policy snapshots
+- `.local/violations.jsonl` — policy audit trail
+- `library/custom-instructions.md` (all agents),
+  `library/custom-general-rules.md` (optional additions — the universal rules
+  are compiled into the binary, `agents::general_rules`),
+  `library/projects/<p>/{conventions,notes,decisions,policy.yaml,…}` — CL content
+
+---
+
+## How a typical session looks
+
+1. Read ARCHITECTURE.md and CHANGELOG.md (the `[Unreleased]` block +
+   latest release) to refresh context, and CODEBASE.md before touching
+   code.
+2. Identify the task. If it's in-flight per CHANGELOG.md `[Unreleased]`
+   or the Context Library, pick up where it left off. Otherwise scope it.
+3. Write code in small chunks. Run `cargo test` + `cargo build` after
+   each chunk.
+4. For multi-file or multi-day work, record it in CHANGELOG.md under
+   `[Unreleased]` — user-facing wording, grouped Added/Fixed/Changed.
+5. When the work is ready for the user to see, mark the task complete
+   and surface a summary.
+
+---
+
+## Working tree state
+
+The working tree is normal. The original autonomous-build commit landed
+long ago; Go-file deletions from the rebuild are already in history.
+Don't expect "unstaged deletions" from a prior architecture — that was
+the rebuild milestone state, not current.
+
+In-flight work appears as standard staged/unstaged changes plus
+untracked files. If you encounter an unexpected file or branch,
+investigate before deleting (it might be the user's WIP from another
+session).
+
+---
+
+## Handling ambiguity
+
+If something is genuinely ambiguous and NOT decided in ARCHITECTURE.md
+or the Context Library's decisions log:
+
+1. Ask the user via `ask_user_choice` with 2–4 concrete options.
+2. If the user is offline / unresponsive, default to the simplest
+   reasonable choice consistent with the documented direction and
+   note your call in CHANGELOG.md's `[Unreleased]` block.
+3. Don't block on minor choices the user can revise later.
+
+---
+
+## Prerequisites
+
+- Rust stable toolchain (rustup, latest stable).
+- Node.js 22+ and npm (for the React frontend; pnpm works too).
+- `claude-code` CLI installed and authed. It is the ONLY model connector
+  (rc3 D9) — every agent is a subprocess, whatever model it runs — and it
+  is needed for live tests.
+- macOS (primary), with Windows + Linux supported since 1.0.1 (their
+  remaining gaps are the changelog's Deferred list).
+
+If a prerequisite is missing, document it and continue with
+non-blocked work.

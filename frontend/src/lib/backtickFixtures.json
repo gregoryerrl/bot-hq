@@ -1,0 +1,37 @@
+[
+  {
+    "text": "a `b` c",
+    "index": 3,
+    "inside": true
+  },
+  {
+    "text": "a `b` c",
+    "index": 6,
+    "inside": false
+  },
+  {
+    "text": "write `@eyes` to summon",
+    "index": 7,
+    "inside": true
+  },
+  {
+    "text": "run `x` then @eyes go",
+    "index": 13,
+    "inside": false
+  },
+  {
+    "text": "see ` @eyes",
+    "index": 6,
+    "inside": true
+  },
+  {
+    "text": "``@eyes",
+    "index": 2,
+    "inside": false
+  },
+  {
+    "text": "plain @eyes",
+    "index": 6,
+    "inside": false
+  }
+]

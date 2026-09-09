@@ -1,0 +1,13 @@
+-- 0079: a saved model may carry claude-code settings bot-hq injects at spawn.
+--
+-- `cli_settings` is a JSON object merged into the `--settings` argument every
+-- participant is spawned with. Its first use is `modelOverrides`: a model id
+-- the installed CLI's catalog does not know (`claude-fable-5-1` on 2.1.251)
+-- resolves to a 200,000-token window whatever the registry says, because the
+-- CLI decides the window from its own catalog and bot-hq passed only
+-- ANTHROPIC_MODEL. Measured 2026-09-03 (session s-e919d08c): 40 minutes and
+-- three auto-compactions at ~170k before the user found it.
+--
+-- NULL = nothing to inject. Free-form on purpose: the CLI's settings schema
+-- moves faster than this table.
+ALTER TABLE models ADD COLUMN cli_settings TEXT;

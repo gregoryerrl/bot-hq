@@ -1,0 +1,918 @@
+//! Global **Tool Gate** keyword config + matcher + executor.
+//!
+//! A single, GLOBAL keyword list (one for every session/project; a session
+//! snapshot may override it — `resolve_keywords`) that decides how an
+//! edit-capable participant's Bash tool calls are handled (the PreToolUse hook
+//! is injected only for roles holding `edit_files`; a read-only participant's
+//! Bash is bounded by `--disallowedTools` instead). Each entry is a `{keyword,
+//! mode}`: a `gate` keyword makes the command require an Approve/Reject
+//! round-trip (surfaced via the `action_gate` MCP tool, which then EXECUTES
+//! the command on approval), while an `auto_allow` keyword lets a matching
+//! command run with no prompt (the frictionless path for `git commit` /
+//! `git push`).
+//!
+//! Stored as `<data_dir>/config/tool-gate.json` — bot-hq-side, NEVER written into a
+//! working repo. The same `load`
+//! is read by THREE callers: the Tauri Settings commands (in-process), the
+//! `action_gate` bridge method (in-process), and the PreToolUse hook
+//! subprocess (which gets `--data-dir` on its command line). They must all
+//! agree, so the matching logic lives here once.
+//!
+//! Matching (per the locked design): **case-insensitive substring** of the
+//! keyword against the tool name (`bash` → gates the whole Bash tool) OR the
+//! command string (`gh`/`git`/`push` → those commands). This is deliberately
+//! NOT the case-sensitive prefix matching the legacy per-project
+//! `tool_blocklist` used (that matcher has since been removed).
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use specta::Type;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+/// How a matching Bash command is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum GateMode {
+    /// Block the agent's direct Bash call (PreToolUse exit 2) and route it to
+    /// the `action_gate` MCP tool, which surfaces Approve/Reject and — on
+    /// approve — executes the command server-side.
+    Gate,
+    /// Let the command run normally (PreToolUse exit 0). Used to make
+    /// `git commit` / `git push` frictionless.
+    AutoAllow,
+}
+
+/// One global keyword entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct GatedKeyword {
+    /// Case-insensitive substring matched against the tool name OR command.
+    pub keyword: String,
+    pub mode: GateMode,
+}
+
+/// Default execution timeout for a gate-approved / auto-allowed command run by
+/// `action_gate`. Generous enough for `git push` / `gh` round-trips, short
+/// enough that a command waiting on stdin can't hang the session forever.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Whether `shell` (a bare name or a path) runs `-c true` from here. Memoised
+/// per NAME for the life of the process — the answer can't change mid-run in
+/// any way we care about. (Round 9 found the earlier `bash_present()` memoised
+/// into ONE unkeyed cell under a `name` parameter; keyed now, because the
+/// shell choice below asks about more than one.)
+// Unix-only in production since `gate_shell` short-circuits on Windows, but
+// still exercised by tests on every platform — keep it, silence the warning.
+#[cfg_attr(windows, allow(dead_code))]
+fn shell_present(shell: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static PRESENT: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let cache = PRESENT.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(&known) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(shell) {
+        return known;
+    }
+    let present = std::process::Command::new(shell)
+        .arg("-c")
+        .arg("true")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(shell.to_string(), present);
+    present
+}
+
+/// Shells `$SHELL` is allowed to nominate for a gated command: POSIX-family
+/// only. A fish / nu / csh login shell would break strictly more of the
+/// `$(…)` / heredoc shapes agents write than any of these do.
+// Unix-only in production since `gate_shell` short-circuits on Windows, but
+// still exercised by tests on every platform — keep it, silence the warning.
+#[cfg_attr(windows, allow(dead_code))]
+const GATE_SHELL_ALLOWLIST: [&str; 5] = ["zsh", "bash", "sh", "dash", "ksh"];
+
+/// The shell an approved gated command runs under — **the shell the agent
+/// validated the command in**, as far as it can be known (round 10, B2).
+///
+/// claude-code's own Bash tool runs each command through the user's LOGIN
+/// shell (`/bin/zsh -c … eval '<cmd>'` on this Mac), so an agent's command has
+/// only ever been proven under `$SHELL`. Round 7 moved this from `sh` to `bash`
+/// for exactly the failure that came back in `s-766f4ab9`: a heredoc inside
+/// `$(…)` whose body carries an apostrophe (`Dependabot's`) is fine under zsh
+/// and dies under macOS's `/bin/bash` **3.2** with "unexpected EOF while
+/// looking for matching `''" — two APPROVED PR-creating gates ran, exited 2,
+/// created nothing, and their approvals were spent.
+///
+/// Order: `$SHELL` when its basename is on [`GATE_SHELL_ALLOWLIST`] and it
+/// runs from here; else `zsh`, `bash`, `sh` by presence. `SHELL` may be unset
+/// (a Finder-launched .app) or non-POSIX (fish), which is why the fallback
+/// chain and the allowlist are both here rather than a bare `$SHELL`.
+pub(crate) fn gate_shell() -> String {
+    // Windows: the `$SHELL` + allowlist path cannot apply. `$SHELL` is unset for
+    // a GUI process, `shell_present` can spawn none of zsh/bash/sh, and the
+    // shell we DO resolve is an absolute `…\usr\bin\sh.exe` whose basename is
+    // `sh.exe` — not on GATE_SHELL_ALLOWLIST, which holds bare `sh`. Adding
+    // `.exe` entries would widen the allowlist on every platform; short-
+    // circuiting here keeps it POSIX-only where it still means something.
+    #[cfg(windows)]
+    {
+        return match posix_shell() {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            // The actionable message is surfaced by `run_in_repo`; this
+            // fallback only keeps `action_gate`'s result footer readable.
+            Err(_) => "sh".to_string(),
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        gate_shell_for(std::env::var_os("SHELL").as_deref(), shell_present)
+    }
+}
+
+/// [`gate_shell`] reduced to a DISPLAY label — the basename, never the full
+/// path.
+///
+/// On Windows the resolved shell is absolute, and the Scoop and
+/// `%LOCALAPPDATA%\Programs` layouts carry the USERNAME inside it. Gate results
+/// are written into session transcripts, which get archived and pasted into
+/// issues, so the footer prints `sh.exe` rather than
+/// `C:\Users\<name>\scoop\…\sh.exe`. Still derived from the same resolution, so
+/// the label cannot drift from what actually ran.
+pub(crate) fn gate_shell_label() -> String {
+    let shell = gate_shell();
+    Path::new(&shell)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or(shell)
+}
+
+/// Resolve the POSIX shell that runs gated commands **on Windows**.
+///
+/// A GUI-launched process has no `sh` on its PATH — Git-for-Windows puts its
+/// shells there only inside a Git Bash session — so `Command::new("sh")` cannot
+/// spawn and every approved gated command silently fails to run. Locate
+/// Git-for-Windows' bundled MSYS2 shell instead, derived from `git --exec-path`
+/// rather than a hardcoded layout (Program Files, Program Files (x86),
+/// `%LOCALAPPDATA%\Programs`, Scoop and Chocolatey all differ). Git-for-Windows
+/// is already an effective prerequisite: claude-code is the only model connector
+/// and its own Bash tool runs through that shell.
+///
+/// NOT `cmd.exe`/PowerShell: agents author gated commands as POSIX shell, so
+/// `$(…)`, heredocs and quoting would break, and `gate_shell`'s whole intent is
+/// to run the command in the shell the agent validated it in.
+///
+/// The ancestor walk is BOUNDED by the Git install-root marker `cmd/git.exe`.
+/// Unbounded it reaches `C:\` and would happily select a stray `C:\bin\sh.exe`
+/// left behind by an MSYS2/Cygwin install.
+///
+/// Only SUCCESS is cached. Caching the failure would mean a user who hits the
+/// error, installs Git-for-Windows exactly as the message instructs, keeps
+/// failing until they restart the app — and nothing tells them to.
+#[cfg(windows)]
+fn posix_shell() -> Result<PathBuf, String> {
+    use std::sync::OnceLock;
+    static SH: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(found) = SH.get() {
+        return Ok(found.clone());
+    }
+    let resolved = (|| {
+        let out = std::process::Command::new("git")
+            .arg("--exec-path")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        // e.g. `C:/Program Files/Git/mingw64/libexec/git-core` — the install
+        // root is the ancestor carrying `cmd/git.exe`, and the MSYS shell sits
+        // at `usr/bin/sh.exe` (preferred) or `bin/sh.exe` beneath it.
+        // The `cmd/git.exe` marker IS the bound — an ancestor is only ever
+        // SELECTED if it carries one, so `C:\` cannot be picked. A depth cap on
+        // top of it would add nothing but a false negative: an install nested
+        // deeper than the cap would report "install Git for Windows" while Git
+        // is installed, which is the one message here that must stay truthful.
+        let exec_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        for ancestor in Path::new(&exec_path).ancestors() {
+            if !ancestor.join("cmd/git.exe").is_file() {
+                continue;
+            }
+            for rel in ["usr/bin/sh.exe", "bin/sh.exe"] {
+                let candidate = ancestor.join(rel);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    })();
+    match resolved {
+        Some(p) => {
+            let _ = SH.set(p.clone());
+            Ok(p)
+        }
+        None => Err("could not locate a POSIX `sh` (Git-for-Windows' bundled shell) — install \
+                     Git for Windows (https://git-scm.com/download/win), a documented bot-hq \
+                     prerequisite"
+            .to_string()),
+    }
+}
+
+/// [`gate_shell`] with its two inputs injected, so the choice is a pure
+/// function a test can drive through every branch.
+// Unix-only in production since `gate_shell` short-circuits on Windows, but
+// still exercised by tests on every platform — keep it, silence the warning.
+#[cfg_attr(windows, allow(dead_code))]
+fn gate_shell_for(
+    env_shell: Option<&std::ffi::OsStr>,
+    present: impl Fn(&str) -> bool,
+) -> String {
+    if let Some(shell) = env_shell.and_then(|s| s.to_str()) {
+        let allowed = std::path::Path::new(shell)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| GATE_SHELL_ALLOWLIST.contains(&name));
+        if allowed && present(shell) {
+            return shell.to_string();
+        }
+    }
+    for candidate in ["zsh", "bash", "sh"] {
+        if present(candidate) {
+            return candidate.to_string();
+        }
+    }
+    "sh".to_string()
+}
+
+/// Combined result of executing a command in the session's working repo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub code: i32,
+}
+
+/// `<data_dir>/config/tool-gate.json`.
+pub fn config_path(data_dir: &Path) -> PathBuf {
+    crate::paths::config_dir_path(data_dir).join("tool-gate.json")
+}
+
+/// Load the global keyword list. **FAIL-OPEN**: a missing file, an unreadable
+/// file, or malformed JSON all resolve to an empty list (logged) rather than
+/// an error — a config glitch must never brick every Bash call through the
+/// PreToolUse hook, which mirrors `run_tool_gate`'s fail-open posture.
+pub fn load(data_dir: &Path) -> Vec<GatedKeyword> {
+    let path = config_path(data_dir);
+    let body = match std::fs::read_to_string(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            tracing::warn!(?e, path = %path.display(), "tool-gate.json read failed; treating as empty");
+            return Vec::new();
+        }
+    };
+    match serde_json::from_str::<Vec<GatedKeyword>>(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(?e, path = %path.display(), "tool-gate.json parse failed; treating as empty");
+            Vec::new()
+        }
+    }
+}
+
+/// Two-tier keyword resolution shared by every in-process gate check: the
+/// session's FROZEN Tool-Gate list from its policy snapshot first (seeded at
+/// spawn, gear-tab-editable), the global `tool-gate.json` only as fallback
+/// (no session id / no snapshot / read error — fail-open like `load`). This
+/// is the same resolution order the PreToolUse hook (`run_tool_gate`) uses;
+/// keeping it here once means `action_gate`, `terminal_exec`, and the hook
+/// can't drift apart on which list they enforce.
+pub fn resolve_keywords(data_dir: &Path, session_id: Option<&str>) -> Vec<GatedKeyword> {
+    match session_id.and_then(|sid| {
+        crate::policy::session_policy::read_session_policy(data_dir, sid)
+            .ok()
+            .flatten()
+    }) {
+        Some(sp) => sp.tool_gate,
+        None => load(data_dir),
+    }
+}
+
+/// Persist the global keyword list (pretty JSON). Creates the data dir if
+/// needed. Errors are returned (the Settings command surfaces them to the UI).
+/// Atomic — temp + rename through the shared config writer (round 11): a bare
+/// `std::fs::write` truncates before it fills, and `load` fails OPEN on a torn
+/// or empty file, which reads as "no keywords" — no gating at all — until the
+/// next save.
+pub fn save(data_dir: &Path, keywords: &[GatedKeyword]) -> Result<()> {
+    let path = config_path(data_dir);
+    let body = serde_json::to_string_pretty(keywords).context("serializing tool-gate keywords")?;
+    crate::policy::write_config_atomically(&path, &body)
+}
+
+/// Decide how a Bash call is handled. Case-insensitive substring of each
+/// keyword against `tool_name` OR `command`. **Gate wins over AutoAllow** when
+/// a command matches both (fail-safe: prefer asking over silently running).
+/// Empty/whitespace-only keywords are ignored (they'd otherwise match
+/// everything). `None` = no keyword matched → run normally.
+pub fn match_keyword(
+    tool_name: &str,
+    command: &str,
+    keywords: &[GatedKeyword],
+) -> Option<GateMode> {
+    let tool_lc = tool_name.to_lowercase();
+    let cmd_lc = command.to_lowercase();
+    let hits = |kw: &str| -> bool {
+        let kw_lc = kw.trim().to_lowercase();
+        !kw_lc.is_empty() && (tool_lc.contains(&kw_lc) || cmd_lc.contains(&kw_lc))
+    };
+    if keywords
+        .iter()
+        .any(|k| k.mode == GateMode::Gate && hits(&k.keyword))
+    {
+        return Some(GateMode::Gate);
+    }
+    if keywords
+        .iter()
+        .any(|k| k.mode == GateMode::AutoAllow && hits(&k.keyword))
+    {
+        return Some(GateMode::AutoAllow);
+    }
+    None
+}
+
+/// WHY a command is gated: the first `gate` keyword that hits it, and the
+/// character offset of that hit in the command (`None` when the keyword hit the
+/// tool NAME rather than the command). Case-insensitive like [`match_keyword`].
+///
+/// Exists so the refusal and the approval card can say what matched (feedback
+/// #29, week 35): the match is lexical, so a destructive string appearing as
+/// DATA — `grep -cF "bq rm -r"` inside a read-only verification — parks the
+/// same as the command itself, and a 400-character command gives the user
+/// nothing to approve confidently by. Naming the keyword and where it landed
+/// turns "why is this gated?" into one glance, without loosening the match.
+pub fn gate_match_detail(
+    tool_name: &str,
+    command: &str,
+    keywords: &[GatedKeyword],
+) -> Option<GateMatch> {
+    let tool_lc = tool_name.to_lowercase();
+    let cmd_lc = command.to_lowercase();
+    keywords
+        .iter()
+        .filter(|k| k.mode == GateMode::Gate)
+        .find_map(|k| {
+            let kw_lc = k.keyword.trim().to_lowercase();
+            if kw_lc.is_empty() {
+                return None;
+            }
+            if let Some(byte) = cmd_lc.find(&kw_lc) {
+                // A char offset, so the number means "column" in what the user
+                // reads even when the command carries multibyte text before it.
+                let col = cmd_lc[..byte].chars().count();
+                return Some(GateMatch { keyword: k.keyword.trim().to_string(), col: Some(col) });
+            }
+            tool_lc
+                .contains(&kw_lc)
+                .then(|| GateMatch { keyword: k.keyword.trim().to_string(), col: None })
+        })
+}
+
+/// A gate hit, for the human-facing texts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateMatch {
+    pub keyword: String,
+    /// Character offset of the hit in the command; `None` = the tool name hit.
+    pub col: Option<usize>,
+}
+
+impl GateMatch {
+    /// `matched Tool-Gate keyword `bq rm` at col 212` — the one line both the
+    /// refusal and the card carry.
+    pub fn describe(&self) -> String {
+        match self.col {
+            Some(col) => format!("matched Tool-Gate keyword `{}` at col {col}", self.keyword),
+            None => format!("matched Tool-Gate keyword `{}` on the tool name", self.keyword),
+        }
+    }
+}
+
+/// Execute `command` via the agent's shell (`gate_shell`) in `cwd`, capturing combined stdout/stderr +
+/// exit code, bounded by `timeout`. stdin is `/dev/null` so a command that
+/// expects input (e.g. `gh issue comment` with no `--body`) fails fast instead
+/// of hanging. On timeout the child is killed (kill-on-drop) and `code` is 124.
+///
+/// `envs` are set on the child on top of the app's own environment. **The
+/// session's identity rides here** (round 12): the agent subprocess
+/// (`spawn.rs`) and the session PTY (`terminal.rs`) both export
+/// `BOT_HQ_SESSION_ID`, and the git hooks read it to find whose session a
+/// commit or push belongs to — a gated `git commit` run from here with the
+/// APP's bare environment skipped the findings gate (fail-open on no session)
+/// and resolved the blueprint policy instead of the session's snapshot, and a
+/// gated `git push` was refused as "no session context". Callers pass the
+/// session id; the tests pass nothing.
+pub async fn run_in_repo(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    envs: &[(&str, &str)],
+) -> CommandOutput {
+    // The agent's own shell, not a fixed one — see `gate_shell`. (Round 7's
+    // sh→bash for s-06a3c60b was the same lesson one shell short: macOS's bash
+    // IS 3.2, and the command was proven under zsh.)
+    //
+    // Windows: surface `posix_shell`'s actionable message (install Git for
+    // Windows) instead of letting `gate_shell`'s "sh" fallback reach the
+    // spawner and report a bare "program not found".
+    #[cfg(windows)]
+    if let Err(e) = posix_shell() {
+        return CommandOutput {
+            stdout: String::new(),
+            stderr: format!("failed to run `{command}`: {e}"),
+            code: -1,
+        };
+    }
+    run_in_shell(&gate_shell(), command, cwd, timeout, envs).await
+}
+
+/// Env pairs for a gated command run on behalf of `session_id` — the one
+/// place the gate runner's child environment is decided, so every caller
+/// (`execute_gated`, the late re-run) sets the same identity.
+pub fn session_envs(session_id: &str) -> Vec<(&'static str, String)> {
+    vec![("BOT_HQ_SESSION_ID", session_id.to_string())]
+}
+
+/// [`run_in_repo`] with the shell named by the caller — the seam the
+/// heredoc test drives with `zsh` directly, so no test mutates `SHELL`.
+async fn run_in_shell(
+    shell: &str,
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    envs: &[(&str, &str)],
+) -> CommandOutput {
+    let mut cmd = tokio::process::Command::new(shell);
+    // A gated command is the user's own approved shell line, so it must
+    // behave exactly as it would outside bot-hq — the payload's library paths
+    // do not travel into it. A no-op off a payload. See `appimage_env`.
+    crate::appimage_env::scrub_tokio(&mut cmd);
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // Git-for-Windows' `sh.exe -c` does NOT put its own bin dir on PATH (a Git
+    // Bash *login* shell does), so the MSYS coreutils a gated command leans on
+    // (`ls`, `cat`, `touch`, `sleep`, …) would not resolve — finding `sh` alone
+    // is only half the fix. Prepend the shell's own directory; the inherited
+    // system PATH (git, gh, …) is preserved after it. Set BEFORE the caller's
+    // `envs` loop so an explicit PATH from the caller still wins.
+    #[cfg(windows)]
+    {
+        let bin_dir = Path::new(shell).parent().unwrap_or_else(|| Path::new(""));
+        if !bin_dir.as_os_str().is_empty() {
+            let existing = std::env::var_os("PATH").unwrap_or_default();
+            let mut dirs = vec![bin_dir.to_path_buf()];
+            dirs.extend(std::env::split_paths(&existing));
+            if let Ok(joined) = std::env::join_paths(dirs) {
+                cmd.env("PATH", joined);
+            }
+        }
+    }
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandOutput {
+                stdout: String::new(),
+                stderr: format!("failed to spawn `{command}`: {e}"),
+                code: -1,
+            }
+        }
+    };
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(out)) => CommandOutput {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            code: out.status.code().unwrap_or(-1),
+        },
+        Ok(Err(e)) => CommandOutput {
+            stdout: String::new(),
+            stderr: format!("error running `{command}`: {e}"),
+            code: -1,
+        },
+        Err(_) => CommandOutput {
+            stdout: String::new(),
+            stderr: format!("`{command}` timed out after {}s", timeout.as_secs()),
+            code: 124,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The POSIX `sh` the shell-semantics tests pin deliberately (they assert
+    /// `sh` behaviour, not `$SHELL` behaviour, so they must not go through
+    /// [`gate_shell`]). A bare `"sh"` cannot spawn from a native Windows
+    /// process — Git-for-Windows puts its shells on PATH only inside a Git Bash
+    /// session — so resolve the same bundled shell the gate resolves rather
+    /// than skipping the coverage on the one platform that needed it.
+    fn test_sh() -> String {
+        #[cfg(windows)]
+        {
+            return posix_shell()
+                .expect("Git-for-Windows `sh` — a documented bot-hq prerequisite")
+                .to_string_lossy()
+                .into_owned();
+        }
+        #[cfg(not(windows))]
+        {
+            "sh".to_string()
+        }
+    }
+    use tempfile::tempdir;
+
+    fn kw(keyword: &str, mode: GateMode) -> GatedKeyword {
+        GatedKeyword {
+            keyword: keyword.into(),
+            mode,
+        }
+    }
+
+    /// F6 (feedback #29): the detail names the FIRST gate keyword that hit and
+    /// the character column of the hit — a data-string match (`bq rm` inside
+    /// a grep pattern) is then recognisable as one. Case-insensitive like the
+    /// matcher, tool-name hits carry no column, auto_allow keywords and misses
+    /// give nothing.
+    #[test]
+    fn gate_match_detail_names_the_keyword_and_its_column() {
+        let kws = vec![
+            kw("echo", GateMode::AutoAllow),
+            kw("gh pr merge", GateMode::Gate),
+            kw("BQ RM", GateMode::Gate),
+        ];
+        let data = "for f in \"MERGE COMMIT\" \"bq rm -r -d -f\"; do grep -cF \"$f\" tasks.md; done";
+        let hit = gate_match_detail("Bash", data, &kws).expect("a gate keyword hits inside the data");
+        assert_eq!(hit.keyword, "BQ RM");
+        assert_eq!(hit.col, Some(data.find("bq rm").unwrap()));
+        assert_eq!(hit.describe(), format!("matched Tool-Gate keyword `BQ RM` at col {}", data.find("bq rm").unwrap()));
+        // Column counts CHARS, not bytes, so a multibyte prefix does not shift it.
+        let wide = "échec — gh pr merge 5";
+        let hit = gate_match_detail("Bash", wide, &kws).unwrap();
+        let byte = wide.find("gh pr merge").unwrap();
+        let chars = wide[..byte].chars().count();
+        assert!(chars < byte, "fixture: the prefix must be multibyte");
+        assert_eq!(hit.col, Some(chars));
+        // A tool-name hit has no column.
+        let by_tool = gate_match_detail("gh pr merge", "anything", &kws).unwrap();
+        assert_eq!(by_tool.col, None);
+        assert!(by_tool.describe().ends_with("on the tool name"));
+        // auto_allow and misses give nothing.
+        assert!(gate_match_detail("Bash", "echo hi", &kws).is_none());
+        assert!(gate_match_detail("Bash", "cargo test", &kws).is_none());
+    }
+
+    #[test]
+    fn load_missing_returns_empty() {
+        let dir = tempdir().unwrap();
+        assert!(load(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn save_then_load_roundtrip() {
+        let dir = tempdir().unwrap();
+        let kws = vec![
+            kw("gh", GateMode::Gate),
+            kw("git push", GateMode::AutoAllow),
+        ];
+        save(dir.path(), &kws).unwrap();
+        assert_eq!(load(dir.path()), kws);
+    }
+
+    /// **`save` is atomic** (round 11): temp + rename through the shared config
+    /// writer, no `.tmp` left behind, and a rewrite keeps the file's mode —
+    /// `load` fails OPEN on a torn file, so a truncate-then-fill write was a
+    /// window in which every Bash call ran ungated.
+    #[cfg(unix)]
+    #[test]
+    fn save_is_atomic_and_keeps_the_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        save(dir.path(), &[kw("gh", GateMode::Gate)]).unwrap();
+        let path = config_path(dir.path());
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&path, perms).unwrap();
+        save(dir.path(), &[kw("gh", GateMode::Gate), kw("rm -rf", GateMode::Gate)]).unwrap();
+        assert_eq!(load(dir.path()).len(), 2);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "a rewrite keeps the existing mode (rename replaces the inode)"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp file survives the rename");
+    }
+
+    #[test]
+    fn load_corrupt_returns_empty_fail_open() {
+        // A malformed config must NOT error — the hook fails open so a bad
+        // file can't brick every Bash call.
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(config_path(dir.path()).parent().unwrap()).unwrap();
+        std::fs::write(config_path(dir.path()), "{ not valid json ]").unwrap();
+        assert!(load(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn mode_serializes_snake_case() {
+        let j = serde_json::to_string(&kw("x", GateMode::AutoAllow)).unwrap();
+        assert!(j.contains("\"auto_allow\""), "got {j}");
+        let g = serde_json::to_string(&GateMode::Gate).unwrap();
+        assert_eq!(g, "\"gate\"");
+    }
+
+    #[test]
+    fn bash_keyword_gates_the_whole_tool() {
+        // A `bash` keyword matches the tool name → gates ANY Bash command.
+        let kws = vec![kw("bash", GateMode::Gate)];
+        assert_eq!(match_keyword("Bash", "ls -la", &kws), Some(GateMode::Gate));
+        assert_eq!(
+            match_keyword("Bash", "echo hi", &kws),
+            Some(GateMode::Gate)
+        );
+    }
+
+    #[test]
+    fn gh_keyword_gates_only_matching_command() {
+        let kws = vec![kw("gh issue", GateMode::Gate)];
+        assert_eq!(
+            match_keyword("Bash", "gh issue comment 41 --body x", &kws),
+            Some(GateMode::Gate)
+        );
+        // Read-only / unrelated commands don't match.
+        assert_eq!(match_keyword("Bash", "ls", &kws), None);
+        assert_eq!(match_keyword("Bash", "gh pr view 7", &kws), None);
+    }
+
+    #[test]
+    fn matching_is_case_insensitive() {
+        let kws = vec![kw("GH", GateMode::Gate)];
+        assert_eq!(
+            match_keyword("Bash", "gh issue list", &kws),
+            Some(GateMode::Gate)
+        );
+        let kws = vec![kw("PuSh", GateMode::AutoAllow)];
+        assert_eq!(
+            match_keyword("Bash", "git push origin main", &kws),
+            Some(GateMode::AutoAllow)
+        );
+    }
+
+    #[test]
+    fn gate_wins_over_auto_allow_on_conflict() {
+        // "git" gates broadly; "git push" auto-allows. A push matches both —
+        // the conservative rule gates it.
+        let kws = vec![
+            kw("git", GateMode::Gate),
+            kw("git push", GateMode::AutoAllow),
+        ];
+        assert_eq!(
+            match_keyword("Bash", "git push origin main", &kws),
+            Some(GateMode::Gate)
+        );
+    }
+
+    #[test]
+    fn auto_allow_matches_when_no_gate() {
+        let kws = vec![kw("git push", GateMode::AutoAllow)];
+        assert_eq!(
+            match_keyword("Bash", "git push origin main", &kws),
+            Some(GateMode::AutoAllow)
+        );
+    }
+
+    #[test]
+    fn empty_keyword_is_ignored() {
+        let kws = vec![kw("   ", GateMode::Gate)];
+        assert_eq!(match_keyword("Bash", "anything at all", &kws), None);
+    }
+
+    #[test]
+    fn no_keywords_means_no_match() {
+        assert_eq!(match_keyword("Bash", "gh issue comment", &[]), None);
+    }
+
+    #[tokio::test]
+    async fn run_in_repo_captures_stdout_and_zero_code() {
+        let dir = tempdir().unwrap();
+        let out = run_in_repo("echo hello-gate", dir.path(), Duration::from_secs(5), &[]).await;
+        assert_eq!(out.code, 0);
+        assert!(out.stdout.contains("hello-gate"), "stdout: {:?}", out.stdout);
+    }
+
+    #[tokio::test]
+    async fn run_in_repo_propagates_nonzero_code() {
+        let dir = tempdir().unwrap();
+        let out = run_in_repo("exit 3", dir.path(), Duration::from_secs(5), &[]).await;
+        assert_eq!(out.code, 3);
+    }
+
+    #[tokio::test]
+    async fn run_in_repo_captures_stderr() {
+        // action_gate returns stderr to the agent, so confirm it's captured
+        // independently of stdout (Rain's A1 review gap).
+        let dir = tempdir().unwrap();
+        let out = run_in_repo("echo oops 1>&2; exit 1", dir.path(), Duration::from_secs(5), &[]).await;
+        assert_eq!(out.code, 1);
+        assert!(out.stderr.contains("oops"), "stderr: {:?}", out.stderr);
+        assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
+    }
+
+    #[tokio::test]
+    async fn run_in_repo_runs_in_cwd() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("marker.txt"), "x").unwrap();
+        let out = run_in_repo("ls", dir.path(), Duration::from_secs(5), &[]).await;
+        assert!(out.stdout.contains("marker.txt"), "stdout: {:?}", out.stdout);
+    }
+
+    /// Round 12: the gate runner's child carries the session's identity. Delete
+    /// the `cmd.env(k, v)` loop in `run_in_shell` and this goes red — which is
+    /// the mutation that reproduces the hole: the git hooks inside a gated
+    /// `git commit` / `git push` read `BOT_HQ_SESSION_ID`, and the app's bare
+    /// environment has none.
+    #[tokio::test]
+    async fn run_in_repo_sets_the_envs_it_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let envs = session_envs("s-test-env");
+        let envs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let out = run_in_repo(
+            "printf 'sid=%s' \"$BOT_HQ_SESSION_ID\"",
+            dir.path(),
+            Duration::from_secs(5),
+            &envs,
+        )
+        .await;
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+        assert_eq!(out.stdout, "sid=s-test-env");
+    }
+
+    #[tokio::test]
+    async fn run_in_repo_times_out() {
+        let dir = tempdir().unwrap();
+        let out = run_in_repo("sleep 5", dir.path(), Duration::from_millis(150), &[]).await;
+        assert_eq!(out.code, 124, "stderr: {:?}", out.stderr);
+        assert!(out.stderr.contains("timed out"));
+    }
+
+    /// The gate runs the command in the AGENT's shell (round 10, B2). Every
+    /// branch of the choice, with presence injected.
+    #[test]
+    fn gate_shell_prefers_a_posix_login_shell_and_falls_back_by_presence() {
+        use std::ffi::OsStr;
+        let all = |_: &str| true;
+        // A POSIX login shell that runs from here is the shell — the command
+        // was proven under it by the agent's own Bash tool.
+        assert_eq!(gate_shell_for(Some(OsStr::new("/bin/zsh")), all), "/bin/zsh");
+        assert_eq!(gate_shell_for(Some(OsStr::new("/usr/bin/bash")), all), "/usr/bin/bash");
+        assert_eq!(gate_shell_for(Some(OsStr::new("dash")), all), "dash");
+        // A non-POSIX login shell is not nominated: fish would break strictly
+        // more `$()` / heredoc shapes than bash 3.2 does.
+        assert_eq!(gate_shell_for(Some(OsStr::new("/opt/homebrew/bin/fish")), all), "zsh");
+        assert_eq!(gate_shell_for(Some(OsStr::new("/usr/bin/nu")), all), "zsh");
+        // A login shell that is on the list but does not run from here (a
+        // stale SHELL after an uninstall) falls through too.
+        let no_login = |s: &str| s != "/opt/local/bin/ksh";
+        assert_eq!(gate_shell_for(Some(OsStr::new("/opt/local/bin/ksh")), no_login), "zsh");
+        // Unset (a Finder-launched .app inherits no login SHELL): by presence.
+        assert_eq!(gate_shell_for(None, all), "zsh");
+        let no_zsh = |s: &str| s != "zsh";
+        assert_eq!(gate_shell_for(None, no_zsh), "bash");
+        let only_sh = |s: &str| s == "sh";
+        assert_eq!(gate_shell_for(None, only_sh), "sh");
+        // Nothing answers — `sh` is still named, so the spawn error says why.
+        assert_eq!(gate_shell_for(None, |_: &str| false), "sh");
+    }
+
+    /// The exact shape that killed two approved gates in `s-766f4ab9`: a
+    /// heredoc inside `$(…)` whose body carries an apostrophe. macOS's
+    /// `/bin/bash` 3.2 dies on it ("unexpected EOF while looking for matching
+    /// `''"); zsh runs it. Skipped where no zsh is installed — the shell under
+    /// test is the one `gate_shell` resolves, and the assertion is that the
+    /// gate's shell agrees with the agent's.
+    #[tokio::test]
+    async fn run_in_repo_survives_a_heredoc_inside_command_substitution() {
+        if !shell_present("zsh") {
+            eprintln!("skipped: no zsh on this machine");
+            return;
+        }
+        // The shell the agent's Bash tool would have proven the command under.
+        let dir = tempdir().unwrap();
+        let command = "printf '%s' \"$(cat <<'BODY'\nDependabot's #507 was closed as \"no longer updatable\"\nBODY\n)\"";
+        let out = run_in_shell("zsh", command, dir.path(), Duration::from_secs(5), &[]).await;
+        assert_eq!(out.code, 0, "stderr: {:?}", out.stderr);
+        assert!(
+            out.stdout.contains("Dependabot's #507"),
+            "the heredoc body must come through intact: {:?}",
+            out.stdout
+        );
+    }
+
+    /// The mechanism behind gate `525af951` (s-43567984, dissect item 3): the
+    /// parked script set `FILES="a b …"` and looped `for f in $FILES`, and the
+    /// delivered output was `0 files` with exit 0 — read at the time as "the
+    /// variable didn't survive". It did survive. **zsh does not word-split an
+    /// unquoted parameter expansion** (no `SH_WORD_SPLIT`), so under the
+    /// gate's shell the loop ran ONCE with the whole string as one path,
+    /// every `git cat-file -e` missed, nothing copied, and the last command
+    /// exited 0. bash and sh split it into N words. The command was authored
+    /// against bash semantics and executed under zsh: not a state-loss bug,
+    /// not a truncation bug — a shell-semantics divergence. Batch 8 acts on
+    /// this by surfacing the shell + exit code on every gate result, not by
+    /// swapping the shell (the heredoc test above is the counter-case where
+    /// zsh is the one that works).
+    #[tokio::test]
+    async fn unquoted_expansion_word_splits_in_bash_and_sh_but_not_in_zsh() {
+        let dir = tempdir().unwrap();
+        let command = "FILES=\"alpha beta gamma\"\nn=0\nfor f in $FILES; do n=$((n+1)); done\necho COUNT=$n";
+        let sh = run_in_shell(&test_sh(), command, dir.path(), Duration::from_secs(5), &[]).await;
+        assert_eq!(sh.code, 0, "stderr: {:?}", sh.stderr);
+        assert!(sh.stdout.contains("COUNT=3"), "sh splits: {:?}", sh.stdout);
+        if shell_present("bash") {
+            let bash = run_in_shell("bash", command, dir.path(), Duration::from_secs(5), &[]).await;
+            assert!(bash.stdout.contains("COUNT=3"), "bash splits: {:?}", bash.stdout);
+        }
+        if shell_present("zsh") {
+            let zsh = run_in_shell("zsh", command, dir.path(), Duration::from_secs(5), &[]).await;
+            assert_eq!(zsh.code, 0, "stderr: {:?}", zsh.stderr);
+            assert!(
+                zsh.stdout.contains("COUNT=1"),
+                "zsh does NOT split an unquoted expansion — one iteration, whole string: {:?}",
+                zsh.stdout
+            );
+        }
+    }
+
+    /// Exonerates the exec layer for dissect items 3/12: one `shell -c` gets
+    /// the WHOLE multi-line command, an assignment on line 2 is readable on
+    /// the last line, and nothing truncates at the first newline. (The
+    /// first-line rendering in the chat row is a display choice in
+    /// `bridge/util.rs`, not an execution property — Batch 8's T8.)
+    #[tokio::test]
+    async fn a_multi_line_command_executes_past_its_first_line_with_state_intact() {
+        let dir = tempdir().unwrap();
+        let command = "true\nMARK=\"deep-state-7c3\"\necho line-three\necho line-four\necho line-five\necho line-six\necho line-seven\necho line-eight\necho line-nine\necho line-ten\necho line-eleven\necho line-twelve\necho line-thirteen\necho line-fourteen\necho \"tail:$MARK\"";
+        let out = run_in_shell(&test_sh(), command, dir.path(), Duration::from_secs(5), &[]).await;
+        assert_eq!(out.code, 0, "stderr: {:?}", out.stderr);
+        assert!(
+            out.stdout.contains("tail:deep-state-7c3"),
+            "line-2 state must reach line 15 of one -c invocation: {:?}",
+            out.stdout
+        );
+    }
+
+    #[test]
+    fn resolve_keywords_falls_back_to_global() {
+        let dir = tempdir().unwrap();
+        save(dir.path(), &[kw("push", GateMode::Gate)]).unwrap();
+        // No session id → global list.
+        let global = resolve_keywords(dir.path(), None);
+        assert_eq!(global, vec![kw("push", GateMode::Gate)]);
+        // Session id without a snapshot on disk → global list too.
+        let no_snap = resolve_keywords(dir.path(), Some("nope"));
+        assert_eq!(no_snap, vec![kw("push", GateMode::Gate)]);
+    }
+
+    #[test]
+    fn resolve_keywords_prefers_session_snapshot() {
+        let dir = tempdir().unwrap();
+        save(dir.path(), &[kw("push", GateMode::Gate)]).unwrap();
+        let sp = crate::policy::session_policy::SessionPolicy {
+            policy: crate::policy::Policy::default(),
+            tool_gate: vec![kw("deploy", GateMode::Gate)],
+        };
+        crate::policy::session_policy::write_session_policy(dir.path(), "s1", &sp).unwrap();
+        // The frozen session list wins over the global file entirely
+        // (replace, not merge — matching the gear-tab snapshot semantics).
+        let got = resolve_keywords(dir.path(), Some("s1"));
+        assert_eq!(got, vec![kw("deploy", GateMode::Gate)]);
+        assert_eq!(
+            resolve_keywords(dir.path(), None),
+            vec![kw("push", GateMode::Gate)]
+        );
+    }
+}

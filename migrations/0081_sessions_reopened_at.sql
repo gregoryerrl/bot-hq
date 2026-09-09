@@ -1,0 +1,18 @@
+-- 0081: when a closed session was last reopened — the bound an agent's close
+-- approval must postdate.
+--
+-- `close_session` from an agent used to be gated on the capability alone;
+-- "once the user approves the close" was prose. Two closes in the week of
+-- 2026-08-31 had no user approval — one re-used an "if all green, reclose"
+-- given BEFORE a reopen (s-34a1b88e 08:56; the user: "reopening again, please
+-- don't close without my permission"). The REOPENED notice already said a
+-- pre-close instruction is void; both agents read it and closed anyway.
+--
+-- An agent close now parks a close card unless a user Approve on such a card
+-- exists after COALESCE(reopened_at, created_at). COALESCE, not max(): SQLite's
+-- scalar max() is NULL when any argument is NULL, and this column is NULL for
+-- every never-reopened session (EYES P3).
+--
+-- RFC3339-Z, written by `now_utc()` like `created_at` and the tray's
+-- `answered_at`, so the SQL compare is chronological.
+ALTER TABLE sessions ADD COLUMN reopened_at TEXT;

@@ -1,0 +1,37 @@
+-- Round-4 follow-on: what a participant was ACTUALLY spawned with, recorded
+-- rather than re-derived.
+--
+-- rc3 D12 gave each participant an `effort` / `ultracode` override, and
+-- `tauri_cmd/sessions.rs` says why they are on the view: "the New Session dialog
+-- writes both this and `ultracode` per row and nothing could read them back, so
+-- the session view had no way to show what a running participant was actually
+-- spawned with." The columns already here answer a DIFFERENT question — they are
+-- the user's CHOICE, and a choice of "inherit" is what 94 of 94 live rows hold.
+--
+-- The effective value cannot be recovered from those columns, and it cannot be
+-- computed by the frontend: `claude-overrides.json` keys its scopes by ROLE
+-- SLUG, which `ParticipantView` does not carry, and the real chain is four
+-- layers deep — per-role, `_all`, the `env.CLAUDE_CODE_EFFORT_LEVEL` knob, then
+-- the per-session pick — followed by a reconciliation that can FLIP either knob,
+-- because claude-code treats `effort=max` and `ultracode` as mutually exclusive.
+--
+-- Re-resolving it at READ time would also answer the wrong tense: "what it would
+-- be spawned with now", which diverges from the truth the moment Claude Config
+-- is edited mid-session. `sessions.slot0_model_at_spawn` / `slot1_model_at_spawn`
+-- already settled this shape for the sibling fact — spawn-time values are
+-- RECORDED so a later config change cannot rewrite history. These follow it.
+--
+-- `spawn_knobs_recorded` is the one non-obvious column, and it exists because
+-- NULL is otherwise ambiguous in exactly the common case. The reconciliation
+-- resolves to `None` for a participant that inherits everything — which is all
+-- of them today — so `effort_at_spawn IS NULL` would be indistinguishable from
+-- "this row predates 0061". With the flag, `recorded = 1, effort_at_spawn NULL`
+-- reads "spawned, with no override in force", and `recorded = 0` reads "spawned
+-- before this shipped, unknown". A badge can say the first honestly and must say
+-- nothing for the second.
+--
+-- Nullable / defaulted so every existing INSERT keeps working untouched — a NOT
+-- NULL column with no default is what stopped the app booting in 0044.
+ALTER TABLE session_participants ADD COLUMN effort_at_spawn TEXT;
+ALTER TABLE session_participants ADD COLUMN ultracode_at_spawn INTEGER;
+ALTER TABLE session_participants ADD COLUMN spawn_knobs_recorded INTEGER NOT NULL DEFAULT 0;

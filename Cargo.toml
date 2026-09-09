@@ -1,0 +1,80 @@
+[package]
+name = "bot-hq"
+version = "1.0.6"
+edition = "2021"
+description = "Desktop GUI for AI-assisted coding sessions (Tauri v2 + React + Rust)"
+license = "MIT"
+publish = false
+default-run = "bot-hq"
+
+[[bin]]
+name = "bot-hq"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate", "chrono"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+anyhow = "1"
+directories = "5"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+futures = "0.3"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+tempfile = "3"
+# Already present transitively (via sqlx/hyper), so declaring it direct adds no
+# compilation cost. (`regex` sat beside it with zero uses in the tree — two
+# sites even say they hand-rolled to avoid it; dropped in round 12.)
+subtle = "2"
+# Content hashing for the policy-mutation audit (policy/audit.rs): a stable,
+# collision-resistant hash (vs the non-cryptographic, toolchain-unstable
+# DefaultHasher it replaces). Already in the lockfile transitively.
+sha2 = "0.10"
+tauri = { version = "2", features = ["custom-protocol"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+specta = "=2.0.0-rc.22"
+specta-typescript = "=0.0.9"
+tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+semver = "1"
+# Filesystem watcher for live CL freshness (re-exports `notify`).
+notify-debouncer-mini = "0.6"
+# Per-session terminal subtab: cross-platform PTY (spawn/resize/kill) for the
+# agent-drivable session terminal (core/terminal.rs).
+portable-pty = "0.9"
+# PTY output rides Tauri events as JSON — base64 keeps raw escape bytes intact.
+base64 = "0.22"
+
+# Platform-split deps for the child reaper (spawn.rs::kill_child): unix
+# SIGKILLs via libc; Windows opens a PROCESS_TERMINATE handle via windows-sys.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_StationsAndDesktops", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[features]
+# The web inspector on the privileged main webview. Opt-in so a SHIPPED build
+# (release.yml → `tauri build`) cannot open it against the origin that holds
+# the whole Tauri IPC surface; `./start` passes it for local runs.
+devtools = ["tauri/devtools"]

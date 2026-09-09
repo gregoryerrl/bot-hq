@@ -1,0 +1,947 @@
+//! Free helper functions shared across the bridge submodules. Pure functions
+//! (no `&self`); `pub(super)` so sibling submodules can call them. `walk_cl_dir`
+//! reads each CL file once into a [`WalkedFile`] (snippet for the index + full
+//! body for atom splitting); [`split_into_atoms`] turns a body into FTS atoms.
+
+use super::*;
+use crate::paths::IGNORED_BUILD_DIRS;
+use crate::policy::ViolationOutcome;
+use crate::storage::{Atom, Project};
+
+/// One indexed CL file as seen on disk by [`walk_cl_dir`]: its mtime (RFC3339),
+/// the short `description` snippet (first H1 / first 80 chars), and the FULL body
+/// (for atom splitting). The file is read exactly once to fill all three.
+pub(super) struct WalkedFile {
+    pub(super) mtime: String,
+    pub(super) snippet: String,
+    pub(super) body: String,
+}
+
+/// Walk `dir` recursively; for each text-ish file (.md, .yaml, .txt) populate
+/// `out` with `relative_path -> WalkedFile { mtime, snippet, body }`. Skips
+/// hidden files/dirs (anything starting with '.') and a few well-known noise
+/// directories (`projects` at the CL-dir (`library/`) level is handled by
+/// per-project rescans, not here).
+/// Normalize a CALLER-SUPPLIED CL path to the stored `/` key form.
+///
+/// **Direction matters, and it is the OPPOSITE of the superseded design.** An
+/// earlier plan normalized inbound paths to native separators (`/` → `\`),
+/// which was right only while keys were stored natively. Keys are now `/`-form
+/// on every platform (see [`rel_key`]), so an inbound `\` spelling must be
+/// converted **to** `/`. Carrying the old direction forward would break every
+/// lookup and re-open the `agent_visible` bypass in mirror image.
+///
+/// `#[cfg(windows)]` only, and one-directional: on Unix `\` is a legal filename
+/// character, so a path containing one names a real, different file and must be
+/// left exactly as given.
+///
+/// Uses a plain `replace`, not [`rel_key`]'s component join, and that is
+/// deliberate: this is a flat string spelling-fix on an already-relative
+/// caller key, not a path being decomposed. `\` cannot appear in a Windows
+/// filename, so the replace is unambiguous there.
+pub(super) fn normalize_cl_path_input(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        return path.replace('\\', "/");
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string()
+    }
+}
+
+/// Build a CL index KEY for `path` relative to `root`.
+///
+/// CL keys are LOGICAL, cross-platform identifiers, not native paths: they are
+/// the `cl_index` / `cl_atoms` primary-key values, they are matched against
+/// caller-supplied paths, and the frontend splits them on `/`
+/// (`contextLibraryShared.tsx:93`/`:200`/`:205`, and
+/// `ContextLibraryEditor.tsx:23` keys `policy.yaml` off the basename). A native
+/// `to_string_lossy()` emits `\` on Windows, which collapses the Library tree to
+/// flat nodes and makes `policy.yaml` unrecognisable — so join with `/`.
+///
+/// **Joins `Component::Normal` only, and REJECTS anything else.** Two reasons,
+/// both learned the hard way:
+///   - a plain `replace('\\', "/")` is WRONG on Unix, where `\` is a legal
+///     filename character: it rewrites a key that then no longer matches the
+///     file on disk, and the rescan's orphan branch purges the row (taking
+///     `agent_visible` and user tags with it).
+///   - returning `None` beats silently dropping `CurDir`/`ParentDir`. At the
+///     non-walker call sites the input is NOT pre-normalized by `strip_prefix`,
+///     and `a/../b.md` must not quietly become `a/b.md` — this is a key builder,
+///     not a path flattener.
+pub(super) fn rel_key(path: &Path, root: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let mut parts = Vec::new();
+    for component in rel.components() {
+        match component {
+            std::path::Component::Normal(s) => parts.push(s.to_string_lossy().into_owned()),
+            _ => return None,
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("/"))
+}
+
+pub(super) fn walk_cl_dir(
+    dir: &Path,
+    root: &Path,
+    project: &str,
+    out: &mut HashMap<String, WalkedFile>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        // At the _globals root (the CL dir, `<data_dir>/library/`), the
+        // per-project subdirectories show up under `projects/` — skip them;
+        // they'll be rescanned with their own project name.
+        if project == Project::GLOBALS && dir == root && name == "projects" {
+            continue;
+        }
+        if path.is_dir() {
+            // Skip build/dependency dirs — a repo-rooted cl_path otherwise pulls
+            // every node_modules/target text file into the index.
+            if IGNORED_BUILD_DIRS.contains(&name) {
+                continue;
+            }
+            walk_cl_dir(&path, root, project, out);
+            continue;
+        }
+        // Only index human-readable text-ish files. Binary / large data files
+        // don't belong in the agent's discovery surface.
+        let is_text = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("md" | "yaml" | "yml" | "txt" | "toml" | "json")
+        );
+        if !is_text {
+            continue;
+        }
+        let rel = match rel_key(&path, root) {
+            Some(r) => r,
+            None => continue,
+        };
+        let mtime = match entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(chrono::DateTime::<chrono::Utc>::from)
+        {
+            Some(t) => t.to_rfc3339(),
+            None => continue,
+        };
+        // Read the file ONCE: derive the index snippet and keep the full body so
+        // cl_rescan can split it into atoms without a second read.
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let snippet = extract_description(&content);
+        out.insert(rel, WalkedFile { mtime, snippet, body: content });
+    }
+}
+
+/// First H1 (`# ...`) line; failing that, the first non-empty line trimmed
+/// to 80 chars. Used to seed `cl_index.description` when an entry is auto-
+/// added during a rescan. Takes the already-read file `content` so
+/// [`walk_cl_dir`] reads each file only once. User can edit later via the UI.
+fn extract_description(content: &str) -> String {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            return rest.trim().to_string();
+        }
+    }
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.chars().count() <= 80 {
+            return trimmed.to_string();
+        }
+        return trimmed.chars().take(80).collect::<String>() + "…";
+    }
+    "(empty file)".to_string()
+}
+
+/// A line-start ATX heading (`#`/`##`/`###` then a space/tab then text). Returns
+/// the level (1–3) and trimmed heading text. NOT a heading: indented `#`, `#tag`
+/// (no space), `####`+ (h4+ falls through to body), or a `#` mid-line.
+fn heading_level(line: &str) -> Option<(usize, &str)> {
+    let hashes = line.bytes().take_while(|&b| b == b'#').count();
+    if (1..=3).contains(&hashes) {
+        let rest = &line[hashes..];
+        if rest.starts_with(' ') || rest.starts_with('\t') {
+            return Some((hashes, rest.trim()));
+        }
+    }
+    None
+}
+
+/// Split markdown `content` into heading-delimited [`Atom`]s for the FTS index.
+/// Each `#`/`##`/`###` heading opens a section whose `heading_path` is the
+/// "H1 > H2" breadcrumb of the enclosing headings; content before the first
+/// heading becomes an `(intro)` atom. Empty sections (a heading with no body of
+/// its own — e.g. a parent that only holds sub-headings) are dropped; the heading
+/// still appears in its children's paths. h4+ and non-line-start `#` are body.
+pub(super) fn split_into_atoms(content: &str) -> Vec<Atom> {
+    fn flush(path: &Option<String>, body: &[&str], atoms: &mut Vec<Atom>) {
+        let trimmed = body.join("\n").trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        let heading_path = path.clone().unwrap_or_else(|| "(intro)".to_string());
+        // Fast path: a section within the token bound stays ONE atom with its
+        // original text intact (preserves prior behavior). Only an over-long
+        // section — e.g. an ever-growing `## Learnings` list — is sub-split into
+        // token-bounded atoms at block boundaries so it can't become a single
+        // unbounded atom that crowds the retrieval budget. Sub-atoms share the
+        // section heading_path; retrieval's rowid tie-break keeps them ordered.
+        if crate::storage::estimate_tokens(&trimmed) <= MAX_ATOM_TOKENS {
+            atoms.push(Atom { heading_path, body: trimmed, code_hash: None });
+            return;
+        }
+        for chunk in pack_blocks(split_into_blocks(&trimmed)) {
+            atoms.push(Atom { heading_path: heading_path.clone(), body: chunk, code_hash: None });
+        }
+    }
+
+    let mut atoms = Vec::new();
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    let mut path: Option<String> = None; // None until the first heading → "(intro)"
+    let mut body: Vec<&str> = Vec::new();
+
+    for line in content.lines() {
+        if let Some((level, text)) = heading_level(line) {
+            flush(&path, &body, &mut atoms);
+            body.clear();
+            while stack.last().is_some_and(|(l, _)| *l >= level) {
+                stack.pop();
+            }
+            stack.push((level, text.to_string()));
+            path = Some(stack.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(" > "));
+        } else {
+            body.push(line);
+        }
+    }
+    flush(&path, &body, &mut atoms);
+    atoms
+}
+
+/// Token ceiling for a single atom. A heading-delimited section larger than this
+/// is sub-split at block boundaries so one ever-growing section can't become a
+/// single unbounded atom that crowds the retrieval budget. ~200 tokens is a few
+/// bullet entries; re-atomization is free (boot rescan re-splits).
+const MAX_ATOM_TOKENS: i64 = 200;
+
+/// Break a section body into blocks: each top-level (column-0) markdown list item
+/// starts a new block, and blank lines separate paragraphs. Fence-aware — lines
+/// inside a fenced code block (delimited by triple backticks) never start a block,
+/// so fenced code is not split mid-block. Indented continuation / sub-bullets stay
+/// with their parent block.
+fn split_into_blocks(text: &str) -> Vec<String> {
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    let mut in_fence = false;
+    for line in text.lines() {
+        let is_fence = line.trim_start().starts_with("```");
+        if !in_fence && !is_fence {
+            if line.trim().is_empty() {
+                if !cur.is_empty() {
+                    blocks.push(std::mem::take(&mut cur));
+                }
+                continue; // drop the blank separator
+            }
+            if is_top_level_list_item(line) && !cur.is_empty() {
+                blocks.push(std::mem::take(&mut cur));
+            }
+        }
+        if is_fence {
+            in_fence = !in_fence;
+        }
+        cur.push(line);
+    }
+    if !cur.is_empty() {
+        blocks.push(cur);
+    }
+    blocks.into_iter().map(|b| b.join("\n")).collect()
+}
+
+/// True if `line` begins (at column 0) with a markdown list marker: `- `, `* `,
+/// `+ `, or an ordered `N.` / `N)` followed by a space. Indented markers are not
+/// top-level — they belong to the enclosing block.
+fn is_top_level_list_item(line: &str) -> bool {
+    if line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ") {
+        return true;
+    }
+    let digits = line.bytes().take_while(|b| b.is_ascii_digit()).count();
+    digits > 0 && (line[digits..].starts_with(". ") || line[digits..].starts_with(") "))
+}
+
+/// Greedily pack blocks into atoms of <= [`MAX_ATOM_TOKENS`], breaking only at
+/// block boundaries. A single block that alone exceeds the bound becomes its own
+/// atom (we never split mid-block). Returns at least one chunk for non-empty input.
+fn pack_blocks(blocks: Vec<String>) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_tokens = 0i64;
+    for block in blocks {
+        let bt = crate::storage::estimate_tokens(&block);
+        if !cur.is_empty() && cur_tokens + bt > MAX_ATOM_TOKENS {
+            chunks.push(std::mem::take(&mut cur));
+            cur_tokens = 0;
+        }
+        if !cur.is_empty() {
+            cur.push('\n');
+        }
+        cur.push_str(&block);
+        cur_tokens += bt;
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+
+/// Map a picked option string to an outcome enum for a `request_approval`
+/// row with CUSTOM option labels — the AUDIT verdict (violations.jsonl), not
+/// an execution decision. A label that OPENS with an approving word —
+/// `approve…`, `yes…`, `ok…`, `allow…` (case-insensitive) — is Approved;
+/// everything else is Denied (the safe default). Abandoned isn't reachable
+/// via resolve_choice (that path requires a pick).
+///
+/// Round 12: `yes` and `ok` were matched as whole strings only, so an
+/// agent's own approving label "Yes, deploy" audited as Denied after the
+/// user approved it and the latch lifted (round 8 recorded the quirk and
+/// left it). Prefixes now; the agent is still told to lead approving labels
+/// with "Approve" (the descriptor's convention).
+///
+/// NOT the verdict for an Approve/Reject GATE — see [`gate_verdict`].
+pub(super) fn outcome_from_picked(picked: &str) -> ViolationOutcome {
+    let lower = picked.trim().to_lowercase();
+    // `approve` as any prefix (approve / approved / approving — the round-8
+    // rule); `yes` / `ok` / `allow` as a WORD that opens the label, so
+    // "yesterday's build" and "okay" stay Denied.
+    let opens_with_word = |w: &str| {
+        lower.strip_prefix(w).is_some_and(|rest| !rest.chars().next().is_some_and(|c| c.is_alphanumeric()))
+    };
+    if lower.starts_with("approve") || ["yes", "ok", "allow"].iter().any(|w| opens_with_word(w)) {
+        ViolationOutcome::Approved
+    } else {
+        ViolationOutcome::Denied
+    }
+}
+
+/// The verdict of an Approve/Reject GATE — a parked `action_gate` command, a
+/// push gate, a reviewer-down override request: rows whose menu is exactly
+/// `["Approve","Reject"]`. **Only the LISTED `Approve` approves.** Anything
+/// else — `Reject`, or the user typing in their own words — is Denied, and a
+/// parked command does not run.
+///
+/// Until round 8 these rows shared [`outcome_from_picked`], so a typed
+/// `"approve but dry-run first"` (or a bare `ok` / `yes`) EXECUTED the
+/// original command while the tray-answer body told the agent to "honor the
+/// words, not the menu" — the host had already overridden the words. A gate
+/// is a yes/no on one exact command; the words go to the agent, the menu
+/// decides the run. Fail-closed on the verdict.
+pub(super) fn gate_verdict(picked: &str) -> ViolationOutcome {
+    if picked == "Approve" {
+        ViolationOutcome::Approved
+    } else {
+        ViolationOutcome::Denied
+    }
+}
+
+/// A resolution older than this gets an explicit re-verify warning in the OOB
+/// body: a mooted question answered hours later once read as CURRENT repo
+/// state and produced three fabricated "not pushed yet" assertions
+/// (2026-06-23, s-bb938f62 — issues.md #18).
+const STALE_ANSWER_WARN_MINS: i64 = 10;
+
+/// Parse a tray timestamp (`asked_at` / `answered_at`): RFC3339 (app-written
+/// rows) or sqlite's `datetime('now')` format (schema default). Returns None on
+/// anything else — the OOB body then simply omits the line that needed it.
+pub(super) fn parse_tray_ts(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|n| n.and_utc())
+}
+
+/// "3m" / "2h 24m" / "3d 1h" — coarse, for the OOB age line.
+fn render_age(mins: i64) -> String {
+    match (mins / 1440, (mins % 1440) / 60, mins % 60) {
+        (0, 0, m) => format!("{m}m"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
+/// At most this many overtaking commands are listed in the OOB body — enough to
+/// show the premise moved without burying the answer itself.
+const MAX_MOOTING_LISTED: usize = 5;
+
+/// Render the "approved since you asked" block (issues.md #18). `mooting` is
+/// `(command, answered_at)` for gated commands APPROVED after this question was
+/// parked, oldest-first; `asked` anchors the "N later" deltas.
+///
+/// Wording is load-bearing. A tray row proves the user APPROVED the command —
+/// it does not prove the command SUCCEEDED: `maybe_run_gated` writes the
+/// failure into the out-of-band message body, not back onto the row, so an
+/// approved-but-failed gate is indistinguishable here from an approved-and-run
+/// one. Claiming "ran" would assert an outcome this data cannot support, which
+/// is the same class of error the block exists to prevent.
+fn mooting_block(mooting: &[(String, String)], asked: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    if mooting.is_empty() {
+        return String::new();
+    }
+    let lines = mooting
+        .iter()
+        .take(MAX_MOOTING_LISTED)
+        .map(|(command, answered_at)| {
+            let delta = asked
+                .zip(parse_tray_ts(answered_at))
+                .map(|(a, b)| format!(" ({} later)", render_age((b - a).num_minutes().max(0))))
+                .unwrap_or_default();
+            format!("- `{command}`{delta}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let more = mooting
+        .len()
+        .checked_sub(MAX_MOOTING_LISTED)
+        .filter(|n| *n > 0)
+        .map(|n| format!("\n- …and {n} more"))
+        .unwrap_or_default();
+    format!(
+        "**Approved in this session after you asked:**\n{lines}{more}\n\
+         bot-hq ran each at approval time; whether it succeeded is not recorded \
+         on the tray row, so check the outcome rather than assuming either way. \
+         This question's premise may already be settled.\n"
+    )
+}
+
+/// The user-side row an answered tray item becomes — what the asking agent
+/// reads at its next turn boundary.
+///
+/// **This is the PRIMARY delivery for every `ask_user_choice`, not a fallback**
+/// (rc3 D35 made the tool non-blocking; the receiver is dropped at park time,
+/// so 100 % of answers arrive this way). Its previous shape was written for the
+/// old fallback case — it opened "(out-of-band) Your earlier `ask_user_choice`
+/// … resolved while you were no longer waiting on the tool call", restated the
+/// full menu every time, age-stamped every answer and closed with a three-line
+/// instruction — and for an approval it repeated the whole gated command
+/// twice. Measured in `s-a4e6da79` (2026-08-17): 28 such rows / 37,293 chars
+/// against 7 typed rows / 2,140 chars — 94.6 % of the user-voice channel was
+/// envelope, ≈9.3k tokens in one session; one row was 1,394 chars to convey
+/// `Approve` + `exit 0`.
+///
+/// Compact by rule (the user's call, round 7): the id, the question, the pick.
+/// The menu is restated ONLY when the pick is not one of the options — that is
+/// the one case the archive study's "keep the decision frame" argument holds
+/// (the agent must know its menu was overruled); the age line ONLY when the
+/// answer is old enough that its premise may have moved (`STALE_ANSWER_WARN_
+/// MINS`); the "approved since you asked" block ONLY when non-empty. A gate
+/// (`command` present) prints its verdict and the command's first line once —
+/// the executed output that follows carries the exit code.
+///
+/// `id8` is the choice id's first eight characters — enough to correlate with
+/// the parked ack (`{status:"parked", choice_id}`) and `gate_status`.
+pub(super) fn oob_resolution_body(
+    choice_id: &str,
+    question: &str,
+    options: &[String],
+    picked: &str,
+    asked_at: Option<&str>,
+    command: Option<&str>,
+    mooting: &[(String, String)],
+) -> String {
+    let id8: String = choice_id.chars().take(8).collect();
+    let asked_ts = asked_at.and_then(parse_tray_ts);
+    // Only a stale answer earns an age line: the fresh case is the common one
+    // and the line then says nothing the agent can act on.
+    let stale_block = match asked_ts {
+        Some(ts) => {
+            let mins = (chrono::Utc::now() - ts).num_minutes().max(0);
+            if mins >= STALE_ANSWER_WARN_MINS {
+                format!(
+                    "Asked {} ago — state may have moved since; re-verify anything this \
+                     question describes (pushes, merges, deploys, file state) before \
+                     treating its premise as current.\n",
+                    render_age(mins)
+                )
+            } else {
+                String::new()
+            }
+        }
+        None => String::new(),
+    };
+    let mooting_block = mooting_block(mooting, asked_ts);
+    if let Some(command) = command {
+        // A gate: the prompt IS the command, so print the verdict and the
+        // command's first line once; the executed output (appended by the
+        // caller on Approve) carries the rest and the exit code.
+        let verdict = match gate_verdict(picked) {
+            crate::policy::ViolationOutcome::Approved => "approved".to_string(),
+            _ => format!("rejected ({picked})"),
+        };
+        let first = command.lines().next().unwrap_or("").trim();
+        let shown: String = if first.chars().count() > 160 {
+            format!("{}…", first.chars().take(160).collect::<String>())
+        } else {
+            first.to_string()
+        };
+        // The gate's menu is exactly Approve/Reject; anything else is the user
+        // typing — `gate_verdict` refuses it (the command does NOT run: fail-
+        // closed on the verdict), and the agent is told to act on the words,
+        // as for a question. So the "honor the words" line below never
+        // accompanies an execution.
+        let typed = if options.iter().any(|o| o == picked) {
+            String::new()
+        } else {
+            "The pick is the user answering in their own words; honor the words, \
+             not the menu.\n"
+                .to_string()
+        };
+        // A MULTI-LINE command echoes in full below the verdict line (1.0.0
+        // Batch 8 T8, dissect #12): the first line alone — usually a bare
+        // `cd` — once cost a reviewer a confident wrong finding about what
+        // "the gate ate", because the actual script was visible nowhere in
+        // the channel. Single-line commands are already complete on the
+        // verdict line; round 7's A5 concern (repeating a long command into
+        // the user-voice channel) loses to a channel that misrepresents what
+        // ran.
+        let full = if command.lines().count() > 1 {
+            format!("```\n{}\n```\n", command.trim_end())
+        } else {
+            String::new()
+        };
+        return format!("Gate {id8} {verdict}: `{shown}`\n{full}{typed}{stale_block}{mooting_block}");
+    }
+    let listed = options.iter().any(|o| o == picked);
+    let free_text_block = if options.is_empty() || listed {
+        String::new()
+    } else {
+        format!(
+            "Options were: {} — the pick is the user answering in their own words; \
+             honor the words, not the menu.\n",
+            options.join(" | ")
+        )
+    };
+    format!(
+        "Tray answer {id8} — Q: {question}\nPicked: {picked}\n\
+         {free_text_block}{stale_block}{mooting_block}"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    /// `rel_key` builds a LOGICAL key, not a native path, and must reject
+    /// anything that isn't a plain component rather than flattening it.
+    ///
+    /// The `ParentDir` case is the one that matters: at the non-walker call
+    /// sites the input is not pre-normalized by `strip_prefix`, so silently
+    /// turning `a/../b.md` into `a/b.md` would make this a path flattener
+    /// pointed at a database key.
+    #[test]
+    fn rel_key_joins_with_forward_slashes_and_rejects_non_normal_components() {
+        use std::path::Path;
+        let root = Path::new("/cl");
+
+        assert_eq!(
+            super::rel_key(&root.join("agents").join("rain").join("x.md"), root).as_deref(),
+            Some("agents/rain/x.md"),
+            "nested keys are `/`-joined on EVERY platform, not native-separated"
+        );
+        assert_eq!(
+            super::rel_key(&root.join("notes.md"), root).as_deref(),
+            Some("notes.md")
+        );
+        // `..` must be refused, not flattened away.
+        assert_eq!(
+            super::rel_key(&root.join("a").join("..").join("b.md"), root),
+            None,
+            "a ParentDir component must be rejected, never silently dropped"
+        );
+        // Outside the root, and the root itself, are both non-keys.
+        assert_eq!(super::rel_key(Path::new("/elsewhere/x.md"), root), None);
+        assert_eq!(super::rel_key(root, root), None, "the root is not a key");
+    }
+
+    /// The two mappers are different on purpose (round 8, R3): a GATE approves
+    /// only on the listed `Approve`; a custom-labelled `request_approval` row
+    /// keeps the prefix map. Kill-tested: make `gate_verdict` delegate to
+    /// `outcome_from_picked` and the typed rows below flip to Approved.
+    #[test]
+    fn a_gate_approves_only_on_the_listed_approve() {
+        use super::{gate_verdict, outcome_from_picked};
+        use crate::policy::ViolationOutcome::{Approved, Denied};
+        assert!(matches!(gate_verdict("Approve"), Approved));
+        for typed in ["approve but dry-run first", "approved", "approved?", "ok", "yes", "Reject", "sure", ""] {
+            assert!(matches!(gate_verdict(typed), Denied), "{typed:?} is not the listed Approve");
+        }
+        // The custom-label map: an approving word opens the label.
+        assert!(matches!(outcome_from_picked("approved"), Approved));
+        assert!(matches!(outcome_from_picked("Approve — proceed"), Approved));
+        assert!(matches!(outcome_from_picked("Yes, deploy"), Approved), "round 12: was Denied");
+        assert!(matches!(outcome_from_picked("OK — run it"), Approved));
+        assert!(matches!(outcome_from_picked("Allow: read only"), Approved));
+        assert!(matches!(outcome_from_picked("sure"), Denied));
+        assert!(matches!(outcome_from_picked("Deny — read the diff first"), Denied));
+        assert!(matches!(outcome_from_picked("yesterday's build"), Denied), "a prefix is a word, not a substring");
+        assert!(matches!(outcome_from_picked("okay"), Denied));
+    }
+
+    use super::{split_into_atoms, walk_cl_dir, WalkedFile};
+    use std::collections::HashMap;
+    use std::fs;
+
+    #[test]
+    fn walk_cl_dir_skips_build_and_dependency_dirs() {
+        let base = std::env::temp_dir().join(format!("bot-hq-walk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(base.join("target")).unwrap();
+        fs::create_dir_all(base.join("docs")).unwrap();
+        fs::write(base.join("README.md"), "# readme").unwrap();
+        fs::write(base.join("docs/guide.md"), "# guide").unwrap();
+        fs::write(base.join("node_modules/pkg/package.json"), "{}").unwrap();
+        fs::write(base.join("target/out.json"), "{}").unwrap();
+        // macOS temp_dir is a /var -> /private/var symlink; canonicalize so the
+        // strip_prefix in walk_cl_dir matches.
+        let root = base.canonicalize().unwrap();
+
+        let mut out: HashMap<String, WalkedFile> = HashMap::new();
+        walk_cl_dir(&root, &root, "p", &mut out);
+
+        let mut keys: Vec<_> = out.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["README.md".to_string(), "docs/guide.md".to_string()]
+        );
+        // The full body is captured (not just the snippet) for atom splitting.
+        assert_eq!(out["README.md"].body, "# readme");
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn split_into_atoms_builds_heading_paths_and_intro() {
+        let md = "preamble line\n# Title\nunder title\n## Section A\ncontent A\n### Deep\ndeep text\n## Section B\ncontent B\n";
+        let atoms = split_into_atoms(md);
+        let pairs: Vec<(&str, &str)> = atoms
+            .iter()
+            .map(|a| (a.heading_path.as_str(), a.body.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("(intro)", "preamble line"),
+                ("Title", "under title"),
+                ("Title > Section A", "content A"),
+                ("Title > Section A > Deep", "deep text"),
+                ("Title > Section B", "content B"),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_into_atoms_splits_oversized_bulleted_section() {
+        // A `## Learnings` list that outgrows the token bound is sub-split into
+        // several atoms — instead of one ever-growing atom — all keeping the real
+        // section heading_path (no synthetic "(entry N)" suffix).
+        let mut md = String::from("## Learnings\n");
+        for i in 0..14 {
+            md.push_str(&format!(
+                "- Learning {i}: a reasonably long one-line note about a specific gotcha somewhere in the codebase that we had to infer.\n"
+            ));
+        }
+        let atoms = split_into_atoms(&md);
+        assert!(atoms.len() >= 2, "oversized section should split, got {}", atoms.len());
+        assert!(atoms.iter().all(|a| a.heading_path == "Learnings"));
+        // No single atom holds the whole list, and every bullet survives somewhere.
+        assert!(atoms
+            .iter()
+            .all(|a| !(a.body.contains("Learning 0:") && a.body.contains("Learning 13:"))));
+        for i in 0..14 {
+            assert!(
+                atoms.iter().any(|a| a.body.contains(&format!("Learning {i}:"))),
+                "bullet {i} missing after split"
+            );
+        }
+    }
+
+    #[test]
+    fn split_into_atoms_keeps_small_section_verbatim() {
+        // Under the token bound → one atom with the original text (incl. its blank
+        // line) preserved exactly: the fast path does not reflow content.
+        let md = "## Notes\nfirst paragraph\n\nsecond paragraph\n";
+        let atoms = split_into_atoms(md);
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].heading_path, "Notes");
+        assert_eq!(atoms[0].body, "first paragraph\n\nsecond paragraph");
+    }
+
+    #[test]
+    fn split_into_atoms_does_not_split_inside_code_fence() {
+        // An over-long section whose bulk is a fenced code block (with blank lines
+        // and bullet-like lines inside) stays a single atom — the fence is one
+        // indivisible block.
+        let mut md = String::from("## Example\n```\n");
+        for i in 0..40 {
+            md.push_str(&format!("- looks like a bullet but is code line {i} with padding text\n\n"));
+        }
+        md.push_str("```\n");
+        let atoms = split_into_atoms(&md);
+        assert_eq!(atoms.len(), 1, "fenced block must not be split, got {}", atoms.len());
+        assert!(atoms[0].body.starts_with("```"));
+        assert!(atoms[0].body.trim_end().ends_with("```"));
+    }
+
+    #[test]
+    fn split_into_atoms_ignores_non_headings_and_drops_empty() {
+        // mid-line '#', '#tag' (no space), and h4+ are body text, not splits; a
+        // heading with no body of its own (Empty) is dropped — its path still
+        // rides on the next child.
+        let md = "# Real\nbody with # mid-line hash\n#nospace stays body\n#### h4 stays body\n## Empty\n## Has Body\nx\n";
+        let atoms = split_into_atoms(md);
+        let pairs: Vec<(&str, &str)> = atoms
+            .iter()
+            .map(|a| (a.heading_path.as_str(), a.body.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("Real", "body with # mid-line hash\n#nospace stays body\n#### h4 stays body"),
+                ("Real > Has Body", "x"),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_into_atoms_empty_or_blank_is_no_atoms() {
+        assert!(split_into_atoms("").is_empty());
+        assert!(split_into_atoms("   \n\n  ").is_empty());
+    }
+
+    /// The compact shape (round 7): id, question, pick — and NOTHING else for
+    /// the common case. The old body opened with a fallback-era preamble,
+    /// restated the whole menu, age-stamped every answer and closed with a
+    /// three-line instruction; 94.6 % of one session's user-voice channel was
+    /// that envelope.
+    #[test]
+    fn oob_resolution_body_is_compact_for_a_listed_pick() {
+        let body = super::oob_resolution_body(
+            "c6f79538-1a55-4353-bce7-a19b827f932a",
+            "Push now?",
+            &["Push 9a07930".to_string(), "Hold for review".to_string()],
+            "Hold for review",
+            None,
+            None,
+            &[],
+        );
+        assert_eq!(body, "Tray answer c6f79538 — Q: Push now?\nPicked: Hold for review\n");
+        // None of the old envelope: no preamble, no menu, no trailer.
+        assert!(!body.contains("out-of-band"));
+        assert!(!body.contains("no longer waiting"));
+        assert!(!body.contains("Options were"));
+        assert!(!body.contains("Continue from here"));
+    }
+
+    /// The menu comes back exactly when it carries information: the pick is
+    /// not one of the options, so the agent must know its menu was overruled
+    /// (the archive study's "decision frame" argument, kept for this case only).
+    #[test]
+    fn oob_resolution_body_restates_the_menu_only_for_a_free_text_pick() {
+        let free = super::oob_resolution_body(
+            "abcdefgh-1",
+            "Push now?",
+            &["Push".to_string(), "Hold".to_string()],
+            "hold on, let me check something first",
+            None,
+            None,
+            &[],
+        );
+        assert!(free.contains("Picked: hold on, let me check something first"));
+        assert!(free.contains("Options were: Push | Hold"));
+        assert!(free.contains("honor the words, not the menu"));
+        // No options at all (halt shapes): nothing to restate.
+        let bare = super::oob_resolution_body("abcdefgh-1", "Anything else?", &[], "done", None, None, &[]);
+        assert!(!bare.contains("Options were"));
+    }
+
+    /// A gate prints its verdict and the command's first line ONCE; the output
+    /// the caller appends carries the exit code. The old shape carried the
+    /// whole `gh … --body` twice — 1,394 chars to say `Approve` + `exit 0`.
+    #[test]
+    fn oob_resolution_body_for_a_gate_names_the_command_once() {
+        let approved = super::oob_resolution_body(
+            "621f164e-2ffb",
+            "Run gated command in this session's repo?\n\n`git push origin main`",
+            &["Approve".to_string(), "Reject".to_string()],
+            "Approve",
+            None,
+            Some("git push origin main"),
+            &[],
+        );
+        assert_eq!(approved, "Gate 621f164e approved: `git push origin main`\n");
+        assert_eq!(approved.matches("git push origin main").count(), 1);
+        let rejected = super::oob_resolution_body(
+            "621f164e-2ffb",
+            "Run gated command in this session's repo?",
+            &["Approve".to_string(), "Reject".to_string()],
+            "Reject",
+            None,
+            Some("git push origin main\n# a second line"),
+            &[],
+        );
+        assert!(rejected.starts_with("Gate 621f164e rejected (Reject): `git push origin main`"));
+        // Batch 8 T8 inverted the old "first line only" pin for MULTI-LINE
+        // commands: hiding the script cost a reviewer a confident wrong
+        // finding about what "the gate ate" (dissect #12) — the channel must
+        // not misrepresent what ran. Single-line commands (above) still name
+        // the command exactly once; multi-line ones carry the full fenced
+        // script.
+        assert!(rejected.contains("# a second line"), "the full script is in the channel");
+        assert!(rejected.contains("```"), "fenced, so it renders as the script it is");
+        assert!(!rejected.contains("honor the words"), "a listed pick needs no clause");
+        // Typed on a gate: refused on the verdict line, and the agent is told to
+        // act on the words (the tray permits typing on any row).
+        let typed = super::oob_resolution_body(
+            "621f164e-2ffb",
+            "Run gated command in this session's repo?",
+            &["Approve".to_string(), "Reject".to_string()],
+            "use gh edit instead of a new comment",
+            None,
+            Some("git push origin main"),
+            &[],
+        );
+        assert!(typed.starts_with("Gate 621f164e rejected (use gh edit instead of a new comment): `git push origin main`"));
+        assert!(typed.contains("honor the words, not the menu"));
+        // A very long single-line command is truncated at 160 chars.
+        let long = "x".repeat(400);
+        let cut = super::oob_resolution_body("id", "q", &[], "Approve", None, Some(&long), &[]);
+        assert!(cut.contains(&format!("`{}…`", "x".repeat(160))));
+    }
+
+    /// The age line appears ONLY once the answer is old enough that its
+    /// premise may have moved (`STALE_ANSWER_WARN_MINS`); a fresh answer says
+    /// nothing about time. Both timestamp shapes parse; garbage is ignored.
+    #[test]
+    fn oob_resolution_body_age_stamps_only_stale_answers() {
+        // 2.5h-old ask (the s-bb938f62 shape): age + re-verify warning.
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(150)).to_rfc3339();
+        let body = super::oob_resolution_body("id", "Re-push to staging?", &[], "discard", Some(&old), None, &[]);
+        assert!(body.contains("Asked 2h 30m ago"));
+        assert!(body.contains("re-verify"));
+
+        // Fresh ask: no age line at all.
+        let fresh = chrono::Utc::now().to_rfc3339();
+        let quick = super::oob_resolution_body("id", "Close?", &[], "yes", Some(&fresh), None, &[]);
+        assert!(!quick.contains("Asked "));
+        assert!(!quick.contains("re-verify"));
+
+        // Sqlite datetime('now') format parses too.
+        let sqlite_ts = (chrono::Utc::now() - chrono::Duration::minutes(75))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let s = super::oob_resolution_body("id", "Q?", &[], "ok", Some(&sqlite_ts), None, &[]);
+        assert!(s.contains("Asked 1h 15m ago"));
+
+        // Garbage timestamp: line omitted, body still well-formed.
+        let g = super::oob_resolution_body("id", "Q?", &[], "ok", Some("not-a-time"), None, &[]);
+        assert!(!g.contains("Asked "));
+        assert!(g.contains("Picked: ok"));
+    }
+
+    #[test]
+    fn oob_resolution_body_lists_commands_approved_after_the_ask() {
+        // The s-bb938f62 shape: question parked 2h30m ago, the command it was
+        // about approved 2h1m later, answer arrives now.
+        let asked = chrono::Utc::now() - chrono::Duration::minutes(150);
+        let approved = asked + chrono::Duration::minutes(121);
+        let body = super::oob_resolution_body(
+            "id",
+            "Re-push to staging?",
+            &[],
+            "discard",
+            Some(&asked.to_rfc3339()),
+            None,
+            &[(
+                "git push origin staging".to_string(),
+                approved.to_rfc3339(),
+            )],
+        );
+        assert!(body.contains("**Approved in this session after you asked:**"));
+        assert!(body.contains("`git push origin staging` (2h 1m later)"));
+        // Must NOT claim the command succeeded — the tray row only proves the
+        // user approved it (an approved-but-failed gate looks identical here).
+        assert!(body.contains("whether it succeeded is not recorded"));
+        assert!(!body.contains("Ran in this session"));
+        // The stale-age line still renders alongside it.
+        assert!(body.contains("Asked 2h 30m ago"));
+
+        // No overtaking commands → no block at all.
+        let clean = super::oob_resolution_body(
+            "id",
+            "Re-push?",
+            &[],
+            "discard",
+            Some(&asked.to_rfc3339()),
+            None,
+            &[],
+        );
+        assert!(!clean.contains("**Approved in this session"));
+    }
+
+    #[test]
+    fn mooting_block_caps_the_list_and_survives_bad_timestamps() {
+        let asked = chrono::Utc::now() - chrono::Duration::minutes(60);
+        let many: Vec<(String, String)> = (0..7)
+            .map(|i| {
+                (
+                    format!("cmd-{i}"),
+                    (asked + chrono::Duration::minutes(i + 1)).to_rfc3339(),
+                )
+            })
+            .collect();
+        let body = super::oob_resolution_body(
+            "id",
+            "Q?",
+            &[],
+            "ok",
+            Some(&asked.to_rfc3339()),
+            None,
+            &many,
+        );
+        assert!(body.contains("`cmd-4` (5m later)"));
+        assert!(!body.contains("`cmd-5`"));
+        assert!(body.contains("…and 2 more"));
+
+        // Unparseable answered_at: the command is still named, the delta is
+        // simply omitted — never a wrong "(0m later)".
+        let junk = super::oob_resolution_body(
+            "id",
+            "Q?",
+            &[],
+            "ok",
+            Some(&asked.to_rfc3339()),
+            None,
+            &[("git push".to_string(), "not-a-time".to_string())],
+        );
+        assert!(junk.contains("- `git push`\n"));
+        assert!(!junk.contains("later)"));
+    }
+}

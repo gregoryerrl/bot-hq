@@ -1,0 +1,968 @@
+//! Per-project policy: machine-readable subset of CL rules that the enforcement
+//! layer (signaling bridge + UI dialogs) reads to decide which agent actions
+//! need user approval, which words to grep out of commits, etc.
+//!
+//! Layout under `<data_dir>/`:
+//!
+//! ```text
+//! config/general-policy.yaml                (defaults — overlay base)
+//! library/projects/<project>/policy.yaml    (per-project overrides)
+//! .local/session-policies/<sid>.yaml        (per-session canonical snapshot)
+//! ```
+//!
+//! Missing files are not errors. A project with no `policy.yaml` resolves to
+//! [`Policy::default()`] (auto push, no forbidden words, no gates).
+//!
+//! Resolution: a session's policy is CANONICAL — once seeded at spawn from
+//! general+project it is the sole source for that session (wired in
+//! [`session_policy`]). Outside a session, project overlays general; lists are
+//! *replaced* not merged (explicit per-project lists win).
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+pub mod audit;
+pub mod hooks;
+pub mod presets;
+pub mod secret_scan;
+pub mod session_policy;
+pub mod tool_gate;
+pub mod violations;
+
+pub use audit::{audit_policy_files, audit_policy_files_at_root, MutationOutcome};
+pub use hooks::{install_hooks, HookInstallReport};
+pub use session_policy::SessionPolicy;
+pub use tool_gate::{GateMode, GatedKeyword};
+pub use violations::{ViolationKind, ViolationOutcome, ViolationsLog};
+
+/// Resolved policy for a (general + per-project) overlay, or a session snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, specta::Type)]
+pub struct Policy {
+    /// Words/phrases that must not appear in commit messages or staged diffs.
+    /// Pre-commit grep blocks the commit if any match.
+    #[serde(default)]
+    pub forbidden_in_commits: Vec<String>,
+
+    /// `git push` gate. `auto` = pushes go through; `ask` = the pre-push hook
+    /// surfaces a per-push Approve/Reject prompt to the user and blocks on their
+    /// pick (the user may also flip the Session Settings toggle to `auto`).
+    #[serde(default)]
+    pub push_gate: PushGateMode,
+
+    /// Force-push gate. `blocked` = `git push --force`/`--force-with-lease`
+    /// denied; `allowed` = permitted (still subject to `push_gate`).
+    #[serde(default)]
+    pub force_push: ForcePushMode,
+
+    /// Bash commands that always require approval — `request_approval`
+    /// kind="per_action", every invocation.
+    #[serde(default)]
+    pub per_action_approval: Vec<String>,
+
+    /// Regex pattern branch names must match. Empty = no constraint.
+    #[serde(default)]
+    pub branch_pattern: String,
+
+    /// Free-form commit style note.
+    /// Surfaced to the agent in its system prompt.
+    #[serde(default)]
+    pub commit_style: String,
+
+    /// Turn-cycle round cap, in LAPS of the ring
+    /// ([`crate::core::sequencer::DEFAULT_ROUND_CAP_LAPS`] documents the unit
+    /// and the number). A backstop the sequencer enforces, NOT an enforcement
+    /// rule the agents are told about — it is deliberately absent from
+    /// [`Policy::render_system_prompt_block`] and from
+    /// [`Policy::is_effectively_empty`], both of which are about what the
+    /// agents must obey.
+    ///
+    /// **Three-valued on purpose, which is why it is an `Option` and the other
+    /// scalars are not.** `None` = not set at this tier, so the next tier down
+    /// (and finally the built-in default) decides; `Some(0)` = the backstop is
+    /// OFF, for a deliberate unattended run; `Some(n)` = halt after `n` laps.
+    /// A plain `u32` would collapse the first two — a missing key deserializes
+    /// as `0`, which is the one value that means "never halt", so every policy
+    /// file that had never heard of this key would silently disarm the cap.
+    #[serde(default)]
+    pub round_cap: Option<u32>,
+}
+
+/// `git push` gate. Set per tier (global/project/session); a session inherits
+/// the resolved value at spawn then can flip it in the gear tab. No per-branch
+/// memory — the user toggles `auto` to enable pushes for the session.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PushGateMode {
+    /// No prompt — pushes go through.
+    #[default]
+    Auto,
+    /// Pushes are gated — the pre-push hook surfaces a per-push Approve/Reject
+    /// prompt and blocks on the user's pick (fail-closed if the app is
+    /// unreachable). The user may also flip the session toggle to `auto`.
+    Ask,
+}
+
+/// Force-push gate.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ForcePushMode {
+    /// `git push --force` / `--force-with-lease` denied.
+    Blocked,
+    /// Permissive default — no policy file = no enforcement. The user opts into
+    /// blocking by writing `force_push: blocked` in policy.yaml.
+    #[default]
+    Allowed,
+}
+
+impl Policy {
+    /// Load + resolve policy for `project` against `data_dir`.
+    /// - Reads `<data_dir>/config/general-policy.yaml` as the base.
+    /// - If `project` is `Some(p)`, overlays `<data_dir>/library/projects/<p>/policy.yaml`.
+    /// - Either missing → contribute nothing (no error).
+    /// - Parse errors return Err (loud — the user needs to know their YAML is broken).
+    pub fn resolve(
+        data_dir: &Path,
+        project: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<Self> {
+        Self::resolve_at_root(data_dir, project, None, session_id)
+    }
+
+    /// Like [`resolve`] but accepts an explicit `project_root` override so
+    /// callers that have already resolved a project's `cl_path` don't pay a
+    /// second DB lookup. `None` for `project_root` reverts to the default
+    /// convention (`<data_dir>/projects/<name>/`), which is what the CLI hook
+    /// context uses (no storage handle available).
+    ///
+    /// When `session_id` is `Some` AND a canonical session-policy snapshot
+    /// exists for it (seeded at spawn under
+    /// `<data_dir>/.local/session-policies/<sid>.yaml`), that snapshot's
+    /// [`Policy`] is returned VERBATIM — the general+project blueprints are NOT
+    /// re-merged, because the snapshot (incl. any gear-tab user edits) is the
+    /// sole source of truth for a live session. Fail-open: an unreadable /
+    /// malformed snapshot is logged and we fall back to the general+project
+    /// overlay so a glitchy file can't brick a session's policy resolution.
+    pub fn resolve_at_root(
+        data_dir: &Path,
+        project: Option<&str>,
+        project_root: Option<&Path>,
+        session_id: Option<&str>,
+    ) -> Result<Self> {
+        if let Some(sid) = session_id {
+            match session_policy::read_session_policy(data_dir, sid) {
+                Ok(Some(sp)) => return Ok(sp.policy),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    session_id = sid,
+                    error = %e,
+                    "session-policy unreadable; falling back to general+project"
+                ),
+            }
+        }
+
+        let general_path = general_policy_path(data_dir);
+        let base = load_one(&general_path)?.unwrap_or_default();
+
+        let overlay = match project {
+            Some(p) => {
+                let proj_path = match project_root {
+                    Some(root) => root.join("policy.yaml"),
+                    None => crate::paths::Paths::for_data_dir(data_dir.to_path_buf())
+                        .project_dir(p)
+                        .join("policy.yaml"),
+                };
+                load_one(&proj_path)?
+            }
+            None => None,
+        };
+
+        Ok(merge(base, overlay))
+    }
+
+    /// Returns the first forbidden word found in `text`, if any.
+    ///
+    /// Case-INsensitive — a forbidden-word check must not be evadable by re-casing
+    /// (a forbidden term written in another case must still be caught, since
+    /// downstream systems may treat differing cases as equivalent). A forbidden
+    /// word may therefore also match lowercase occurrences in diffs — curate the
+    /// list to avoid legitimate-substring false-positives. Matches on WORD
+    /// BOUNDARIES (regex `\b` semantics, word char = `[A-Za-z0-9_]`), so a
+    /// forbidden word only trips when it stands alone: `Acme` matches "Acme" /
+    /// "Acme:" but NOT "AcmeWidget"; a forbidden `art` no longer matches inside
+    /// "start". Non-word chars *inside* a forbidden word are fine — a
+    /// hyphenated marker (e.g. `Foo-Bar-Baz`) is matched literally; boundaries
+    /// are only checked at the match edges, so it still trips even when written
+    /// inline among surrounding text.
+    pub fn first_forbidden_word(&self, text: &str) -> Option<&str> {
+        self.forbidden_in_commits
+            .iter()
+            .find(|w| contains_word(text, w.as_str()))
+            .map(String::as_str)
+    }
+
+    /// Render the system-prompt directive block. Agents see this prepended
+    /// to their per-project context. Empty if the policy has no enforceable
+    /// content (i.e., default policy).
+    pub fn render_system_prompt_block(&self) -> String {
+        if self.is_effectively_empty() {
+            return String::new();
+        }
+
+        let mut out = String::from("## Enforcement policy (load-bearing)\n\n");
+        out.push_str(
+            "bot-hq enforces these rules at the tool-call boundary. The MCP \
+             tools below are NOT optional: skipping them will trigger a denied \
+             violation logged in `violations.jsonl`. Call them BEFORE the \
+             corresponding bash command runs.\n\n",
+        );
+
+        if !self.forbidden_in_commits.is_empty() {
+            out.push_str("### Forbidden words in commits (pre-commit grep)\n\n");
+            out.push_str(
+                "Before every `git commit`, call \
+                 `mcp__bot-hq-signaling__check_commit_message` with the proposed \
+                 message. The tool returns either `ok` or `forbidden_word:<word>`. \
+                 If a forbidden word is found, REWRITE the message — do not bypass.\n\n",
+            );
+            out.push_str("Forbidden words:\n");
+            for w in &self.forbidden_in_commits {
+                out.push_str(&format!("- `{w}`\n"));
+            }
+            out.push('\n');
+        }
+
+        if matches!(self.push_gate, PushGateMode::Ask) {
+            out.push_str("### Push gate\n\n");
+            out.push_str(
+                "Pushes are GATED this session. Just run `git push` normally — the \
+                 pre-push hook surfaces an Approve/Reject prompt to the user for each \
+                 push and blocks until they pick. On approve the push proceeds; on \
+                 reject it's blocked. You do NOT call any grant tool and you do NOT \
+                 flip a toggle — the prompt is automatic. (The user can set the push \
+                 toggle to `auto` in Session Settings to make pushes frictionless.)\n\n",
+            );
+        }
+
+        if matches!(self.force_push, ForcePushMode::Blocked) {
+            out.push_str("### Force-push\n\n");
+            out.push_str(
+                "Force-push is BLOCKED. Do not run `git push --force` / \
+                 `--force-with-lease` under any circumstances.\n\n",
+            );
+        }
+
+        if !self.per_action_approval.is_empty() {
+            out.push_str("### Per-action approval (every time)\n\n");
+            out.push_str(
+                "Each of the following requires `request_approval` with \
+                 kind=\"per_action\" — every single invocation, no remembered \
+                 approval:\n\n",
+            );
+            for cmd in &self.per_action_approval {
+                out.push_str(&format!("- `{cmd}`\n"));
+            }
+            out.push('\n');
+        }
+
+        if !self.branch_pattern.is_empty() {
+            out.push_str(&format!(
+                "### Branch naming\n\nBranches must match: `{}`\n\n",
+                self.branch_pattern
+            ));
+        }
+
+        if !self.commit_style.is_empty() {
+            out.push_str(&format!("### Commit style\n\n{}\n\n", self.commit_style));
+        }
+
+        out
+    }
+
+    fn is_effectively_empty(&self) -> bool {
+        self.forbidden_in_commits.is_empty()
+            && matches!(self.push_gate, PushGateMode::Auto)
+            && matches!(self.force_push, ForcePushMode::Allowed)
+            && self.per_action_approval.is_empty()
+            && self.branch_pattern.is_empty()
+            && self.commit_style.is_empty()
+    }
+}
+
+/// Top-level keys a standalone policy file may carry. serde silently ignores
+/// anything else (every field is `#[serde(default)]`), so a typo like
+/// `push-gate:` would resolve to the permissive default with no signal — we warn
+/// instead (see [`check_unknown_policy_keys`]). `tool_blocklist` is the retired
+/// 3-tier key (gating moved to the global Tool Gate); it's tolerated so old
+/// on-disk files don't warn.
+pub(crate) const POLICY_KNOWN_KEYS: &[&str] = &[
+    "forbidden_in_commits",
+    "push_gate",
+    "force_push",
+    "per_action_approval",
+    "branch_pattern",
+    "commit_style",
+    "round_cap",
+    "tool_blocklist",
+];
+
+/// As [`POLICY_KNOWN_KEYS`] but for a session snapshot (flattened `Policy` plus
+/// the `tool_gate` block).
+pub(crate) const SESSION_POLICY_KNOWN_KEYS: &[&str] = &[
+    "forbidden_in_commits",
+    "push_gate",
+    "force_push",
+    "per_action_approval",
+    "branch_pattern",
+    "commit_style",
+    "round_cap",
+    "tool_blocklist",
+    "tool_gate",
+];
+
+/// Warn (do NOT fail) on top-level YAML keys outside `known`, returning the
+/// offenders. Non-breaking by design: parse still succeeds and unknown keys fall
+/// back to defaults — but the operator gets a log line instead of a silent
+/// disarm (a mistyped `tool_gate:` / `push_gate:` otherwise vanishes with no
+/// signal). Deliberately NOT `#[serde(deny_unknown_fields)]`: that would (a)
+/// break older on-disk files carrying the retired `tool_blocklist`, silently
+/// failing policy parse → disarming the git-hook enforcement, and (b) is
+/// unsupported alongside `SessionPolicy`'s `#[serde(flatten)]`.
+pub(crate) fn check_unknown_policy_keys(path: &Path, body: &str, known: &[&str]) -> Vec<String> {
+    let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(body)
+    else {
+        return Vec::new();
+    };
+    let mut unknown: Vec<String> = map
+        .keys()
+        .filter_map(|k| k.as_str())
+        .filter(|k| !known.contains(k))
+        .map(|k| k.to_string())
+        .collect();
+    unknown.sort();
+    for key in &unknown {
+        tracing::warn!(
+            file = %path.display(),
+            key = %key,
+            "policy file has an unrecognized top-level key — it is SILENTLY \
+             IGNORED (typo?); that setting falls back to the permissive default"
+        );
+    }
+    unknown
+}
+
+/// The canonical `action` string for a push-gate violation/approval. The
+/// git-hook denial path (`policy::hooks`) and the live approval prompt
+/// (`signaling::server`) both record this, so they must agree on its shape —
+/// build it in one place.
+pub fn push_gate_action(branch: Option<&str>) -> String {
+    match branch {
+        Some(b) => format!("git push ({b})"),
+        None => "git push".to_string(),
+    }
+}
+
+/// One ref update of a push as git hands it to the pre-push hook on stdin
+/// (`<local ref> <local oid> <remote ref> <remote oid>`), in the shape the hook
+/// POSTs to `/hooks/pre-push` and the app re-runs from (round 12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushRef {
+    pub local_ref: String,
+    pub local_oid: String,
+    pub remote_ref: String,
+    pub remote_oid: String,
+}
+
+/// git's all-zero object id — the remote side of a ref create, the local side
+/// of a delete.
+pub fn is_zero_oid(oid: &str) -> bool {
+    !oid.is_empty() && oid.bytes().all(|b| b == b'0')
+}
+
+/// The refspecs a late re-run pushes: `<local_oid>:<remote_ref>` per update —
+/// **sha-pinned** (EYES F2), so the commit the user approved is the commit
+/// that ships even if the branch moved on after the park. `None` when nothing
+/// can be re-run faithfully: no updates, a delete (`:ref` — not re-issued on
+/// the user's behalf), or a component that is not a plain ref/oid token.
+pub fn push_refspecs(updates: &[PushRef]) -> Option<Vec<String>> {
+    if updates.is_empty() {
+        return None;
+    }
+    let safe = |s: &str| {
+        !s.is_empty()
+            && s
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+' | '@'))
+    };
+    updates
+        .iter()
+        .map(|u| {
+            if is_zero_oid(&u.local_oid) || !safe(&u.local_oid) || !safe(&u.remote_ref) {
+                None
+            } else {
+                Some(format!("{}:{}", u.local_oid, u.remote_ref))
+            }
+        })
+        .collect()
+}
+
+/// The command a late approve re-runs on the agent's behalf: `git push
+/// <remote> <local_oid>:<remote_ref> …` — plain, never `--force` (a
+/// non-fast-forward original re-runs as a rejected push, loudly), over the
+/// remote NAME git handed the hook. `None` when the push cannot be rebuilt
+/// faithfully (see [`push_refspecs`]) or the remote name is not a plain token.
+pub fn push_rerun_command(remote: &str, updates: &[PushRef]) -> Option<String> {
+    let remote_ok = !remote.is_empty()
+        && remote
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':' | '@'));
+    if !remote_ok {
+        return None;
+    }
+    let refspecs = push_refspecs(updates)?;
+    Some(format!("git push {remote} {}", refspecs.join(" ")))
+}
+
+/// The refspecs a re-run command pushes, read back off the command
+/// [`push_rerun_command`] built (the tray row carries only the command).
+/// Tokens after the remote that carry a `:`; `None` for any other command.
+pub fn push_rerun_refspecs(command: &str) -> Option<Vec<String>> {
+    let rest = command.strip_prefix("git push ")?;
+    let mut parts = rest.split_whitespace();
+    let _remote = parts.next()?;
+    let refspecs: Vec<String> = parts.map(str::to_string).collect();
+    if refspecs.is_empty() || refspecs.iter().any(|r| !r.contains(':')) {
+        return None;
+    }
+    Some(refspecs)
+}
+
+fn load_one(path: &Path) -> Result<Option<Policy>> {
+    let body = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    check_unknown_policy_keys(path, &body, POLICY_KNOWN_KEYS);
+    let parsed: Policy = serde_yaml::from_str(&body)
+        .with_context(|| format!("parsing {} as YAML", path.display()))?;
+    Ok(Some(parsed))
+}
+
+/// Path to the global blueprint policy file (`<data_dir>/config/general-policy.yaml`).
+pub fn general_policy_path(data_dir: &Path) -> PathBuf {
+    crate::paths::config_dir_path(data_dir).join("general-policy.yaml")
+}
+
+/// Read a single blueprint policy file (global or project) as a [`Policy`].
+/// Returns [`Policy::default`] when the file is absent — an unwritten blueprint
+/// resolves to the permissive default, matching [`Policy::resolve`]. Parse
+/// errors surface loud (the user needs to know their YAML is broken).
+pub fn read_policy_file(path: &Path) -> Result<Policy> {
+    Ok(load_one(path)?.unwrap_or_default())
+}
+
+/// Write a [`Policy`] to `path` as YAML, creating parent dirs. Overwrites any
+/// existing file. Used by the user-only Tauri policy editors (global +
+/// project); callers should follow with [`audit::record_policy_write`] so the
+/// write doesn't read back as an unauthorized mutation on the next audit.
+pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<()> {
+    let body = serde_yaml::to_string(policy).with_context(|| "serializing policy")?;
+    write_config_atomically(path, &body)
+}
+
+/// Write `body` to `path` — creating parent dirs — through a same-directory
+/// temp + rename, keeping an existing file's mode (round 10). The two policy
+/// writers (this file's and `session_policy.rs`'s) used a bare
+/// `std::fs::write`, which truncates the file before it fills it; a crash or a
+/// concurrent reader in that window sees an empty or torn YAML, and
+/// `Policy::resolve` fails OPEN on a malformed file — so a torn write of
+/// `policy.yaml` silently dropped the forbidden-word list, the push gate and
+/// the force-push block until the next save. `claude_config` already had the
+/// atomic primitive; both writers now share it — and so do the JSON config
+/// files (`tool-gate.json`, the policy hash cache) since round 11, which had
+/// the same torn-write shape: `tool_gate::load` fails OPEN on a malformed file
+/// (an empty keyword list = no gating at all).
+pub(crate) fn write_config_atomically(path: &Path, body: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent dir for {}", path.display()))?;
+    }
+    let mode = crate::claude_config::existing_mode_or(path, 0o644);
+    crate::claude_config::replace_file_atomically(path, body.as_bytes(), mode)
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// True iff `needle` occurs in `haystack` bounded by non-word chars on both
+/// edges — regex `\b{needle}\b` semantics, where a word char is `[A-Za-z0-9_]`
+/// (so `_` IS a word char: `rain` does not match "eyes_check"). Case-INsensitive.
+/// An empty needle never matches.
+///
+/// `match_indices` yields the byte offset where `needle` starts; that offset and
+/// `idx + needle.len()` are both on char boundaries (the start and end of a
+/// matched substring), so the slices below are always valid even when the
+/// surrounding chars are multi-byte.
+pub fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    // Lowercase both sides so a forbidden term is caught in any casing (a
+    // forbidden-word check must not be evadable by re-casing). Match AND boundary-check
+    // against the SAME lowercased string so byte offsets stay aligned even when a
+    // case fold changes byte length.
+    let hay_lc = haystack.to_lowercase();
+    let needle_lc = needle.to_lowercase();
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    hay_lc.match_indices(needle_lc.as_str()).any(|(idx, _)| {
+        let before_ok = hay_lc[..idx].chars().next_back().is_none_or(|c| !is_word(c));
+        let after_ok = hay_lc[idx + needle_lc.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_word(c));
+        before_ok && after_ok
+    })
+}
+
+/// Overlay `overlay` onto `base`. Lists are replaced not merged when the
+/// overlay sets them non-empty (so projects can carry their own exact list).
+/// Scalar gates are replaced when the overlay sets a non-default value (so a
+/// project that omits a gate inherits general's; a project can tighten to
+/// `ask`/`blocked` but a default `auto`/`allowed` reads as "not set").
+fn merge(base: Policy, overlay: Option<Policy>) -> Policy {
+    let Some(o) = overlay else { return base };
+    Policy {
+        forbidden_in_commits: if o.forbidden_in_commits.is_empty() {
+            base.forbidden_in_commits
+        } else {
+            o.forbidden_in_commits
+        },
+        push_gate: if matches!(o.push_gate, PushGateMode::Auto) {
+            base.push_gate
+        } else {
+            o.push_gate
+        },
+        force_push: if matches!(o.force_push, ForcePushMode::Allowed) {
+            base.force_push
+        } else {
+            o.force_push
+        },
+        per_action_approval: if o.per_action_approval.is_empty() {
+            base.per_action_approval
+        } else {
+            o.per_action_approval
+        },
+        branch_pattern: if o.branch_pattern.is_empty() {
+            base.branch_pattern
+        } else {
+            o.branch_pattern
+        },
+        commit_style: if o.commit_style.is_empty() {
+            base.commit_style
+        } else {
+            o.commit_style
+        },
+        // `or`, not a "non-default wins" test like the scalars above. The
+        // three-valued encoding is exactly what buys that: `None` is
+        // unambiguously "this tier said nothing", so a project setting `0`
+        // (cap off) overrides a general `500` rather than reading as unset —
+        // which is the case the `matches!(.., Auto)` shape below cannot
+        // express for a gate whose permissive value is also a real choice.
+        round_cap: o.round_cap.or(base.round_cap),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write(p: &Path, body: &str) {
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// **Policy files are written atomically** (round 10): the write lands as a
+    /// rename (no truncate-then-fill window), keeps an existing file's mode,
+    /// creates missing parents, and leaves no temp behind. Round-tripped
+    /// through the real writer + loader.
+    #[test]
+    fn write_policy_file_is_atomic_and_keeps_the_mode() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested").join("policy.yaml");
+        let policy = Policy {
+            forbidden_in_commits: vec!["Foo-Bar-Baz".into()],
+            ..Policy::default()
+        };
+        write_policy_file(&path, &policy).unwrap();
+        assert_eq!(read_policy_file(&path).unwrap().forbidden_in_commits, vec!["Foo-Bar-Baz".to_string()]);
+        assert!(
+            !path.with_file_name("policy.yaml.tmp").exists(),
+            "the temp is renamed away, not left beside the file"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            write_policy_file(&path, &Policy::default()).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "a rewrite keeps the file's existing mode (rename replaces the inode)"
+            );
+        }
+        // And the session snapshot writer shares the same path.
+        let src = include_str!("session_policy.rs");
+        assert!(
+            src.contains("write_config_atomically(&path, &body)"),
+            "write_session_policy must go through the shared atomic writer"
+        );
+        assert!(
+            !src.split("pub fn write_session_policy").nth(1).unwrap().split("\n}\n").next().unwrap().contains("std::fs::write("),
+            "no bare std::fs::write left in write_session_policy"
+        );
+    }
+
+    #[test]
+    fn missing_files_resolve_to_default() {
+        let dir = tempdir().unwrap();
+        let p = Policy::resolve(dir.path(), Some("nope"), None).unwrap();
+        assert_eq!(p, Policy::default());
+        assert!(p.is_effectively_empty());
+    }
+
+    #[test]
+    fn default_gates_are_auto_and_allowed() {
+        let p = Policy::default();
+        assert!(matches!(p.push_gate, PushGateMode::Auto));
+        assert!(matches!(p.force_push, ForcePushMode::Allowed));
+    }
+
+    #[test]
+    fn unknown_policy_keys_are_reported() {
+        let path = Path::new("policy.yaml");
+        // Typo'd `push_gate` (hyphen) + a bogus key are flagged; valid keys and
+        // the retired-but-tolerated `tool_blocklist` are not.
+        let body =
+            "push-gate: ask\nforbidden_in_commits: [foo]\ntool_blocklist: [x]\nbogus: 1\n";
+        let unknown = check_unknown_policy_keys(path, body, POLICY_KNOWN_KEYS);
+        assert_eq!(unknown, vec!["bogus".to_string(), "push-gate".to_string()]);
+    }
+
+    #[test]
+    fn known_policy_keys_are_silent() {
+        let path = Path::new("policy.yaml");
+        // `round_cap` is here rather than in its own test because the failure
+        // mode is this function's: a key serde parses but this list omits warns
+        // "SILENTLY IGNORED — that setting falls back to the permissive
+        // default", which for the round cap would be advice to disarm it.
+        let body =
+            "push_gate: ask\nforce_push: blocked\ncommit_style: house-style\nround_cap: 500\n";
+        assert!(check_unknown_policy_keys(path, body, POLICY_KNOWN_KEYS).is_empty());
+        assert!(check_unknown_policy_keys(path, body, SESSION_POLICY_KNOWN_KEYS).is_empty());
+        // tool_gate is allowed only for the session-snapshot key set.
+        let with_gate = "tool_gate: []\npush_gate: auto\n";
+        assert!(check_unknown_policy_keys(path, with_gate, POLICY_KNOWN_KEYS)
+            == vec!["tool_gate".to_string()]);
+        assert!(
+            check_unknown_policy_keys(path, with_gate, SESSION_POLICY_KNOWN_KEYS).is_empty()
+        );
+    }
+
+    #[test]
+    fn project_overlays_general() {
+        let dir = tempdir().unwrap();
+        write(
+            &general_policy_path(dir.path()),
+            "forbidden_in_commits:\n  - Acme\n  - Zeta\n",
+        );
+        write(
+            &dir.path().join("library/projects/foo/policy.yaml"),
+            "forbidden_in_commits:\n  - bot-hq\n  - hands\n",
+        );
+        let p = Policy::resolve(dir.path(), Some("foo"), None).unwrap();
+        // overlay replaces (not merges): only project list wins
+        assert_eq!(p.forbidden_in_commits, vec!["bot-hq", "hands"]);
+    }
+
+    #[test]
+    fn project_tightens_push_gate_over_general() {
+        let dir = tempdir().unwrap();
+        // general omits push_gate (defaults auto); project tightens to ask.
+        write(
+            &dir.path().join("library/projects/foo/policy.yaml"),
+            "push_gate: ask\n",
+        );
+        let p = Policy::resolve(dir.path(), Some("foo"), None).unwrap();
+        assert!(matches!(p.push_gate, PushGateMode::Ask));
+    }
+
+    #[test]
+    fn a_project_round_cap_overrides_general_including_turning_it_off() {
+        // The round cap rides the same general -> project -> session chain as
+        // `push_gate`, but with a three-valued field, and the difference shows
+        // exactly here. `0` means OFF, so a project has to be able to override
+        // a general 500 DOWN to it — which the "non-default value wins" test
+        // the scalar gates use cannot express, because `0` is `u32::default()`.
+        let dir = tempdir().unwrap();
+        write(&general_policy_path(dir.path()), "round_cap: 500\n");
+        write(
+            &dir.path().join("library/projects/off/policy.yaml"),
+            "round_cap: 0\n",
+        );
+        write(
+            &dir.path().join("library/projects/tight/policy.yaml"),
+            "round_cap: 40\n",
+        );
+        // A project that says nothing about it inherits general's.
+        write(
+            &dir.path().join("library/projects/quiet/policy.yaml"),
+            "push_gate: ask\n",
+        );
+
+        assert_eq!(
+            Policy::resolve(dir.path(), Some("off"), None)
+                .unwrap()
+                .round_cap,
+            Some(0),
+            "a project can turn the backstop off over an inherited 500"
+        );
+        assert_eq!(
+            Policy::resolve(dir.path(), Some("tight"), None)
+                .unwrap()
+                .round_cap,
+            Some(40)
+        );
+        assert_eq!(
+            Policy::resolve(dir.path(), Some("quiet"), None)
+                .unwrap()
+                .round_cap,
+            Some(500),
+            "and a project that omits it inherits, rather than reading as 0"
+        );
+        assert_eq!(
+            Policy::default().round_cap,
+            None,
+            "unset at every tier is None — the sequencer, not this file, owns \
+             the number that means"
+        );
+    }
+
+    #[test]
+    fn session_snapshot_wins_verbatim_over_blueprints() {
+        // With a session-policy snapshot present, resolve returns it VERBATIM —
+        // the general+project blueprints (which DIFFER here) are ignored.
+        let dir = tempdir().unwrap();
+        write(
+            &general_policy_path(dir.path()),
+            "forbidden_in_commits:\n  - Acme\n",
+        );
+        write(
+            &dir.path().join("library/projects/foo/policy.yaml"),
+            "forbidden_in_commits:\n  - bot-hq\n",
+        );
+        let snapshot = session_policy::SessionPolicy {
+            policy: Policy {
+                forbidden_in_commits: vec!["SNAPSHOT-ONLY".into()],
+                push_gate: PushGateMode::Ask,
+                ..Policy::default()
+            },
+            tool_gate: Vec::new(),
+        };
+        session_policy::write_session_policy(dir.path(), "sess-1", &snapshot).unwrap();
+
+        let p = Policy::resolve(dir.path(), Some("foo"), Some("sess-1")).unwrap();
+        assert_eq!(p.forbidden_in_commits, vec!["SNAPSHOT-ONLY"]);
+        assert!(matches!(p.push_gate, PushGateMode::Ask));
+    }
+
+    #[test]
+    fn no_snapshot_falls_back_to_blueprint_merge() {
+        // Absent snapshot → the general+project overlay is unchanged, even when
+        // a session_id is threaded through.
+        let dir = tempdir().unwrap();
+        write(
+            &general_policy_path(dir.path()),
+            "forbidden_in_commits:\n  - Acme\n",
+        );
+        write(
+            &dir.path().join("library/projects/foo/policy.yaml"),
+            "forbidden_in_commits:\n  - bot-hq\n",
+        );
+        let p = Policy::resolve(dir.path(), Some("foo"), Some("no-snapshot")).unwrap();
+        assert_eq!(p.forbidden_in_commits, vec!["bot-hq"]);
+    }
+
+    #[test]
+    fn general_only_when_no_project_overlay() {
+        let dir = tempdir().unwrap();
+        write(
+            &general_policy_path(dir.path()),
+            "forbidden_in_commits:\n  - Acme\n",
+        );
+        let p = Policy::resolve(dir.path(), Some("nope"), None).unwrap();
+        assert_eq!(p.forbidden_in_commits, vec!["Acme"]);
+    }
+
+    #[test]
+    fn parse_error_is_loud() {
+        let dir = tempdir().unwrap();
+        write(
+            &general_policy_path(dir.path()),
+            "this: is\n  :: not valid yaml\n  - mixed\n",
+        );
+        let err = Policy::resolve(dir.path(), None, None).unwrap_err();
+        assert!(err.to_string().contains("parsing"));
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn first_forbidden_word_finds_match() {
+        let mut p = Policy::default();
+        p.forbidden_in_commits = vec!["bot-hq".into(), "Acme".into()];
+        assert_eq!(p.first_forbidden_word("released by Acme"), Some("Acme"));
+        assert_eq!(p.first_forbidden_word("clean commit"), None);
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn first_forbidden_word_matches_on_word_boundaries() {
+        let mut p = Policy::default();
+        // "Hyphen-Joined-Tag" stands in for the real hyphenated footer marker
+        // bot-hq forbids — written synthetically so this test file doesn't itself
+        // trip the (now word-boundary) pre-commit scan it's testing.
+        p.forbidden_in_commits =
+            vec!["eyes".into(), "Acme".into(), "Hyphen-Joined-Tag".into(), "Zeta".into()];
+
+        // The reported false positives no longer trip (substring, not whole word).
+        for ok in [
+            "add a constraint to the schema",
+            "drain the queue",
+            "brain dump",
+            "it was raining earlier",
+            "wire up AcmeConfig.tsx",
+            "the AcmeOverrides store",
+            "eyes_check is a word char boundary", // `_` is a word char
+        ] {
+            assert_eq!(p.first_forbidden_word(ok), None, "should NOT trip: {ok:?}");
+        }
+
+        // Genuine whole-word brand/footer mentions still caught.
+        assert_eq!(p.first_forbidden_word("let it eyes"), Some("eyes"));
+        assert_eq!(p.first_forbidden_word("(eyes)"), Some("eyes"));
+        assert_eq!(p.first_forbidden_word("ship Acme Opus"), Some("Acme"));
+        assert_eq!(p.first_forbidden_word("the Acme: model"), Some("Acme"));
+        assert_eq!(
+            p.first_forbidden_word("Add Hyphen-Joined-Tag footer"),
+            Some("Hyphen-Joined-Tag")
+        );
+        assert_eq!(p.first_forbidden_word("uses Zeta-4 here"), Some("Zeta"));
+    }
+
+    #[test]
+    fn contains_word_boundary_semantics() {
+        assert!(contains_word("let it eyes", "eyes"));
+        assert!(contains_word("eyes.", "eyes"));
+        assert!(!contains_word("constraint", "eyes"));
+        assert!(!contains_word("AcmeConfig", "Acme"));
+        assert!(!contains_word("eyes_check", "eyes")); // `_` is a word char
+        assert!(contains_word("bot-hq is here", "bot-hq")); // hyphen edges are boundaries
+        assert!(!contains_word("anything", "")); // empty needle never matches
+    }
+
+    #[test]
+    fn contains_word_is_case_insensitive() {
+        // A forbidden-word check must catch ALL casings, else re-casing evades it (the
+        // load-bearing real case is a git trailer whose lowercase form is honored
+        // identically). "Hyphen-Joined-Tag" stands in for the real hyphenated
+        // footer marker so this file doesn't itself trip the scan it tests.
+        assert!(contains_word("add hyphen-joined-tag footer", "Hyphen-Joined-Tag"));
+        assert!(contains_word("HYPHEN-JOINED-TAG", "Hyphen-Joined-Tag"));
+        assert!(contains_word("a Hyphen-Joined-By line", "hyphen-joined-by"));
+        assert!(contains_word("ship acme opus", "Acme"));
+        assert!(contains_word("uses zeta-4 here", "Zeta"));
+        // Word boundaries STILL apply case-insensitively — an embedded
+        // identifier does not trip.
+        assert!(!contains_word("fooacmeconfig", "Acme"));
+        assert!(!contains_word("acme_config", "Acme")); // `_` is a word char
+        assert!(!contains_word("constraint", "eyes"));
+    }
+
+    #[test]
+    fn render_system_prompt_block_empty_for_default() {
+        let p = Policy::default();
+        assert_eq!(p.render_system_prompt_block(), "");
+    }
+
+    #[test]
+    fn render_system_prompt_block_includes_forbidden_words() {
+        let p = Policy {
+            forbidden_in_commits: vec!["bot-hq".into()],
+            ..Policy::default()
+        };
+        let block = p.render_system_prompt_block();
+        assert!(block.contains("check_commit_message"));
+        assert!(block.contains("bot-hq"));
+    }
+
+    #[test]
+    fn render_system_prompt_block_includes_push_gate() {
+        let p = Policy {
+            push_gate: PushGateMode::Ask,
+            ..Policy::default()
+        };
+        let block = p.render_system_prompt_block();
+        assert!(block.contains("Push gate"));
+        assert!(block.contains("Session Settings"));
+    }
+
+    #[test]
+    fn render_system_prompt_block_force_push_blocked() {
+        let p = Policy {
+            force_push: ForcePushMode::Blocked,
+            ..Policy::default()
+        };
+        let block = p.render_system_prompt_block();
+        assert!(block.contains("Force-push"));
+        assert!(block.contains("BLOCKED"));
+    }
+
+    #[test]
+    fn push_rerun_command_is_sha_pinned_and_refuses_what_it_cannot_rebuild() {
+        let up = |l: &str, lo: &str, r: &str, ro: &str| PushRef {
+            local_ref: l.into(),
+            local_oid: lo.into(),
+            remote_ref: r.into(),
+            remote_oid: ro.into(),
+        };
+        let a = up("refs/heads/a", "1111aaaa", "refs/heads/a", "0000");
+        let b = up("refs/heads/b", "2222bbbb", "refs/heads/b", "3333cccc");
+        // Two refs: each pinned to the oid git reported, never the ref name.
+        assert_eq!(
+            push_rerun_command("origin", &[a.clone(), b.clone()]).as_deref(),
+            Some("git push origin 1111aaaa:refs/heads/a 2222bbbb:refs/heads/b")
+        );
+        assert_eq!(
+            push_refspecs(&[a.clone()]),
+            Some(vec!["1111aaaa:refs/heads/a".to_string()])
+        );
+        // Nothing to push, a delete, or a remote/ref that is not a plain token.
+        assert_eq!(push_rerun_command("origin", &[]), None);
+        let del = up("(delete)", "0000000000000000000000000000000000000000", "refs/heads/x", "4444");
+        assert_eq!(push_rerun_command("origin", &[a.clone(), del]), None);
+        assert_eq!(push_rerun_command("origin; rm -rf /", &[a.clone()]), None);
+        let bad = up("refs/heads/a", "1111aaaa", "refs/heads/a b", "0000");
+        assert_eq!(push_rerun_command("origin", &[bad]), None);
+        // The refspecs read back off the command round-trip.
+        assert_eq!(
+            push_rerun_refspecs("git push origin 1111aaaa:refs/heads/a 2222bbbb:refs/heads/b"),
+            Some(vec!["1111aaaa:refs/heads/a".to_string(), "2222bbbb:refs/heads/b".to_string()])
+        );
+        assert_eq!(push_rerun_refspecs("gh pr create"), None);
+        assert_eq!(push_rerun_refspecs("git push origin main"), None);
+        assert!(is_zero_oid("0000000000000000000000000000000000000000"));
+        assert!(!is_zero_oid("0000a"));
+        assert!(!is_zero_oid(""));
+    }
+}

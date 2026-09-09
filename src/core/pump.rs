@@ -1,0 +1,3763 @@
+//! Per-agent event pump. Persists every event of one participant's claude-code
+//! stream as a channel row (text, tool use/result, completion) and reports each
+//! turn's completion to the ring; the ring delivers rows off each peer's cursor
+//! (rc3 D19 — no fan-out lives here since the router's deletion).
+
+use crate::agents::{AgentEvent, AgentHealth};
+use crate::core::activity::ActivityTracker;
+use crate::core::ipav::{IpavPhase, IpavState};
+use crate::signaling::SignalingBridge;
+use crate::storage::{MessageKind, Storage};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+// Test-only since Batch 6 removed the buffered-window timer (the sole non-test
+// `Duration` user); the test sleeps below still need it.
+#[cfg(test)]
+use std::time::Duration;
+use tokio::sync::{mpsc, Mutex};
+use tracing::{debug, warn};
+
+/// Borrow-serialized row shapes for the message log (O3): serialized directly with
+/// `serde_json::to_string` instead of building an intermediate `serde_json::json!`
+/// `Value` (which re-boxes the already-owned `input`/`content`) only to
+/// `.to_string()` it. Fields are declared in the key order `serde_json` emits for a
+/// `json!` map (alphabetical — no `preserve_order` feature), so the stored JSON is
+/// byte-identical to the previous output.
+#[derive(serde::Serialize)]
+struct ToolUseRow<'a> {
+    input: &'a serde_json::Value,
+    name: &'a str,
+    tool_use_id: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct ToolResultRow<'a> {
+    content: &'a str,
+    is_error: bool,
+    tool_use_id: &'a str,
+}
+
+#[derive(Clone)]
+pub struct PumpConfig {
+    /// `Arc<str>` (not `String`): cloned once per persisted message on the hottest
+    /// path (`notify_persisted` fires on every Text / ToolUse / ToolResult), so a
+    /// refcount bump beats a heap copy. Threaded as `Arc<str>` through
+    /// `MessagePersisted` into the `BatchEmitter` dirty-set / watermark keys (O5).
+    pub session_id: Arc<str>,
+    /// This participant's roster slug — its `messages.author` string, its
+    /// `ActivityTracker` key, and its handle in the tray.
+    pub slug: Arc<str>,
+    /// `session_participants.id` for this pump's agent.
+    ///
+    /// `None` on the test/hardcoded paths and whenever the roster read failed —
+    /// same degradation as [`SessionAgent::participant_id`].
+    pub participant_id: Option<i64>,
+    /// Does this participant hold `edit_files`? The capability predicate that
+    /// replaced `matches!(cfg.author, Author::Brian)` on the pre-Apply mutation
+    /// nudge — bot-hq must gate on the ticked boxes, never on which role a name
+    /// implies (rc3 D11).
+    pub edits_files: bool,
+    /// Optional bridge for firing MessagePersisted events after every
+    /// successful storage.insert_message. None in tests that don't need
+    /// event-driven readers.
+    pub bridge: Option<Arc<SignalingBridge>>,
+    /// Whether this pump posts the A3a self-nudge when its participant mutates
+    /// before Apply. Set at spawn for a participant that can mutate (the
+    /// `edit_files` predicate); `false` in tests that don't want the nudge.
+    ///
+    /// **Was `self_input_tx: Option<ParticipantInput>`** — the participant's
+    /// own stdin, cloned into every mutating pump and then read only as
+    /// `.is_some()`: the nudge stopped writing to it when it became a persisted
+    /// row (rc3 D19), so the pump held a stdin it could not use. Holding none
+    /// is what makes "the reminder must not open a generation outside the
+    /// ring" structurally true rather than asserted.
+    pub self_nudges: bool,
+    /// Per-session activity tracker (interrupt redesign, Batch 2). The pump
+    /// clears this agent's `busy` on `TurnComplete`/`Exited` — and only clears:
+    /// the ring is the one busy-TRUE writer (rc3 D19b), so nothing here marks a
+    /// peer. `None` in tests / solo configs that don't drive the input lock.
+    pub activity: Option<Arc<ActivityTracker>>,
+    /// Shared "this agent is mid-atomic-tool" flag (interrupt redesign, Batch
+    /// 3.1 Part 1). The pump sets it on an atomic `ToolUse` (git commit/push/
+    /// migration) and clears it on the matching `ToolResult`/`TurnComplete`, so
+    /// `cancel_session_turn` can DEFER a kill until the op completes (no
+    /// half-written worktree). Shared session-level; only HANDS trips it. `None`
+    /// in tests / solo configs that don't drive cancel deferral.
+    pub in_atomic_tool: Option<Arc<AtomicBool>>,
+    /// Per-agent liveness for the Batch 7 stall watchdog — the pump touches it on
+    /// every event and tracks tools-in-flight. `None` in tests / solo configs
+    /// that don't run the watchdog.
+    pub liveness: Option<Arc<crate::core::watchdog::AgentLiveness>>,
+    /// Sender to the turn sequencer (`core::sequencer`). The pump emits one
+    /// `TurnComplete` per finished turn, carrying the ending `turn_ending()`
+    /// derives from the turn's `peer_ack` / `pass_turn` signals. `None` = this
+    /// pump does not feed a ring (test shapes). It replaced the deleted router's
+    /// `router_tx` (task 14, 2026-08-13).
+    pub sequencer_tx: Option<mpsc::Sender<crate::core::sequencer::SequencerCommand>>,
+    /// The context window the registry says this participant's model has
+    /// (`models.context_window`), so the pump can notice when the CLI reports
+    /// a different one. `None` = unknown / test shapes: no comparison, no
+    /// notice. The reading itself is never substituted from this — the meter
+    /// shows what the CLI said (rc3 P7); this only lets the disagreement be
+    /// said out loud once (0079's companion).
+    pub configured_context_window: Option<u64>,
+    /// The epoch of the turn this participant currently holds, written by the
+    /// sequencer at handover.
+    ///
+    /// **Read at the START of a turn, never at its end**, and the difference is
+    /// the whole reason this is a cell rather than a value on the completion. A
+    /// user message mid-turn resets the ring and moves the epoch while this
+    /// participant still holds; a completion that read the cell on its way out
+    /// would carry the NEW epoch, pass the sequencer's guard, and step a ring
+    /// that had just been re-pointed at it — two participants on a turn at once,
+    /// the one invariant that loop exists to keep. Snapshotting on the first
+    /// event of the turn makes the stale completion carry the OLD epoch, which is
+    /// exactly what the guard is there to reject.
+    ///
+    /// # A STRAGGLER must not open a turn (rc3 D24)
+    ///
+    /// "The first event after a completion" is not the same thing as "the first
+    /// event of the next turn", and treating them as one wedged a live session.
+    /// A participant that emits anything in the gap between completing and being
+    /// handed its next turn snapshots the cell as it stands — which is still the
+    /// epoch it just completed with. The real turn then arrives, the guard sees
+    /// `turn_epoch` already set, and every completion from that point carries a
+    /// number the ring retired. They are all discarded, the ring cannot step past
+    /// a participant it is waiting on, and nothing in the loop recovers.
+    ///
+    /// Measured in `s-206e8921`: the reviewer completed at 03:56:01 carrying
+    /// epoch 9, was handed epoch 11 at 03:56:28, and completed again at 04:01:51
+    /// **still carrying 9**. A 27-second window was all it took, and the session
+    /// stopped dead for the twenty minutes until the user noticed.
+    ///
+    /// The fix is `pump_agent`'s `last_completed_epoch`: a cell that still reads
+    /// what this pump last completed with means no new turn has been handed out,
+    /// so the event is a straggler and opens nothing. The epoch strictly
+    /// increases at every handover, so "unchanged" is an exact test rather than a
+    /// heuristic.
+    pub turn_epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// The epoch bot-hq last INTERRUPTED this participant in — the handle's
+    /// [`AgentHandle::interrupted_epoch`](crate::agents::AgentHandle::interrupted_epoch)
+    /// cell, stamped by `core::session::SessionAgent::interrupt` for a Pause,
+    /// a typed-Send preempt or the agent's own halt (D35). claude-code reports
+    /// an aborted turn as `is_error:true`; when that completion's epoch equals
+    /// this cell the pump knows the failure is bot-hq's doing and keeps it out
+    /// of the back-to-back-error streak. Not optional: a fresh cell (never
+    /// interrupted) is what a pump gets when nothing wires the handle's, so the
+    /// construction site cannot compile with the wiring line missing — the one
+    /// deletion that would silently make every interrupt an error again.
+    pub interrupted_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// True while this participant is ORIENTING rather than holding a turn
+    /// (rc3 **D21**). Set before the primer goes out, cleared before the ring
+    /// hands out turn one.
+    ///
+    /// **The explicit signal D21 asks for, replacing an inference that is simply
+    /// wrong during boot.** The pump learns a turn started from its own first
+    /// event ([`Self::turn_epoch`]) — but during boot no turn has been handed
+    /// out, so the cell still reads its initial `0`, `last_completed_epoch` is
+    /// `None`, and the pump happily opens a turn on epoch 0. The completion that
+    /// follows carries 0, which the ring discards forever: precisely the class
+    /// D24 fixed, reached through a different door. D21 names this the hard part
+    /// and *"where this will break if rushed"*.
+    ///
+    /// An `AtomicBool` rather than a message because the pump reads it once per
+    /// EVENT and must not take a channel in that path, and because one store
+    /// flips every participant at once — boot ends for the session, not per
+    /// agent.
+    pub booting: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Where this pump reports that it finished orienting (rc3 **D21**),
+    /// carrying its participant id.
+    ///
+    /// The boot counterpart of [`Self::sequencer_tx`], and deliberately NOT the
+    /// same channel: a `TurnComplete` during boot would carry epoch 0 and be
+    /// discarded, so the ring would never learn anyone was ready. D21 §4 needs
+    /// exactly this signal — *"when every participant has finished orienting …
+    /// the ring starts"*.
+    pub boot_done: Option<tokio::sync::mpsc::Sender<i64>>,
+    /// The transient-error retry ladder (round 12): how long to wait before
+    /// re-dealing this participant after an errored turn whose last line is a
+    /// transient network/upstream failure — one entry per attempt, then the
+    /// back-to-back halt. Production passes [`RETRY_LADDER`]; tests pass
+    /// milliseconds.
+    pub retry_ladder: Vec<std::time::Duration>,
+}
+
+impl PumpConfig {
+    pub fn new(session_id: impl Into<Arc<str>>, slug: impl Into<Arc<str>>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            slug: slug.into(),
+            edits_files: false,
+            participant_id: None,
+            bridge: None,
+            self_nudges: false,
+            activity: None,
+            in_atomic_tool: None,
+            liveness: None,
+            sequencer_tx: None,
+            configured_context_window: None,
+            turn_epoch: None,
+            interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(
+                crate::agents::NO_INTERRUPT_EPOCH,
+            )),
+            booting: None,
+            boot_done: None,
+            retry_ladder: RETRY_LADDER.to_vec(),
+        }
+    }
+
+    /// Whether this participant is orienting rather than holding a turn (rc3
+    /// D21). `false` whenever no flag was wired, so every existing caller keeps
+    /// today's behaviour exactly.
+    fn is_booting(&self) -> bool {
+        self.booting
+            .as_ref()
+            .is_some_and(|b| b.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    fn notify_persisted(&self, message_id: i64) {
+        if let Some(bridge) = &self.bridge {
+            bridge.notify_message_persisted(self.session_id.clone(), message_id);
+        }
+    }
+}
+
+/// True for a tool call that performs an atomic, hard-to-resume mutation — a
+/// `git commit`/`git push` or a DB migration. A cancel arriving mid-flight
+/// should DEFER the agent kill until such an op finishes, so the working tree /
+/// repo isn't left half-written (interrupt redesign, Batch 3.1 Part 1). Matches
+/// HANDS's two atomic-op surfaces: a direct `Bash` command, or an `action_gate`
+/// (a gated command — surfaced MCP-prefixed as
+/// `mcp__bot-hq-signaling__action_gate`, so match by suffix). A read-only
+/// participant never trips this. The `migrate` match is deliberately broad (sqlx /
+/// artisan / rails / npm): a false positive only defers a kill briefly (8s-
+/// capped, self-clears on the ToolResult); a false negative is the exact bug
+/// this prevents.
+fn is_atomic_command(name: &str, input: &serde_json::Value) -> bool {
+    let is_command_surface = name == "Bash" || name.ends_with("action_gate");
+    if !is_command_surface {
+        return false;
+    }
+    let cmd = input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    cmd.contains("git commit") || cmd.contains("git push") || cmd.contains("migrate")
+}
+
+/// True for the `peer_ack` MCP tool call — the bare alias (tests) or the
+/// MCP-prefixed wire name (`mcp__bot-hq-signaling__peer_ack`). When the pump
+/// sees this ToolUse it marks the turn as an ACK: the agent explicitly
+/// acknowledged its peer, and the ring counts that as a done vote toward
+/// consensus instead of dealing another lap. A behavioural layer ON TOP of the
+/// ring's own spin detection, never a replacement (weak models that never call
+/// it still hit the detector).
+fn is_peer_ack_tool(name: &str) -> bool {
+    name == "peer_ack" || name.ends_with("__peer_ack")
+}
+
+/// True for the two halt declarations — `mark_awaiting_user` and its alias
+/// `halt` — bare or MCP-prefixed (round 8, A1b).
+fn is_halt_tool(name: &str) -> bool {
+    name == "halt"
+        || name.ends_with("__halt")
+        || name == "mark_awaiting_user"
+        || name.ends_with("__mark_awaiting_user")
+}
+
+/// True for a `peer_ack` call that passed `final: true` — the agent asserting
+/// "this turn is my closing statement; record it, don't wake my peer".
+///
+/// Without it the ring can only INFER substance from length
+/// (`PEER_ACK_MAX_SUPPRESSED_LEN`), and that proxy misfires on the exact turn
+/// shape that ENDS an exchange: "I agree, and here is the one reason why" runs
+/// past 200 chars, so it counts as substantive, so the peer is dealt another
+/// turn and replies. Filed from a live session as feedback #6 with worked
+/// examples.
+///
+/// Suppression is safe to make explicit because it has never destroyed content —
+/// the turn's text is persisted by the `AgentEvent::Text` arm as it arrives,
+/// independent of how the turn ends ring-side. `final` changes the VOTE the
+/// turn ends with, not the record.
+fn peer_ack_is_final(name: &str, input: &serde_json::Value) -> bool {
+    is_peer_ack_tool(name) && input.get("final").and_then(|v| v.as_bool()) == Some(true)
+}
+
+/// True for the `pass_turn` MCP tool call — the bare alias (tests) or the
+/// MCP-prefixed wire name (`mcp__bot-hq-signaling__pass_turn`).
+///
+/// Observed here rather than acted on bridge-side for the same reason
+/// [`is_peer_ack_tool`] is: what a turn MEANT is a property of the whole turn,
+/// and the pump is the only place that sees the turn end. The bridge handler
+/// cannot know yet whether the pass will be overridden by text the agent has
+/// not written.
+///
+/// **Suffix match, not `contains`.** `ends_with` is what stops a tool merely
+/// NAMED after this one — or a differently-prefixed gateway's
+/// `foo__pass_turn_v2` — from being read as a pass; the peer_ack matrix above
+/// found the same class of near-miss worth pinning, and
+/// `is_pass_turn_tool_matches_bare_and_prefixed` pins it here.
+fn is_pass_turn_tool(name: &str) -> bool {
+    name == "pass_turn" || name.ends_with("__pass_turn")
+}
+
+/// The row a pass posts, so the pass is VISIBLE (design §1: "the pass is
+/// recorded in the channel so it is visible").
+///
+/// Prose (`MessageKind::Text`) under `origin = 'participant'`, which is the rc3
+/// decision, and it is what makes the row render today: `ChatMessage` dispatches
+/// on `kind`, and every kind it does not special-case falls through to the
+/// prose branch anyway — so a `pass` kind would render identically while
+/// costing a migration this slice does not take. `system_notice` was the
+/// alternative and is wrong twice over: it is documented as HOST-emitted and
+/// every writer of it in this crate posts under `origin = 'system'`, which is
+/// the origin rc3 decided against; and D7 already prices that lane as carrying
+/// five injections at one-line sizing.
+///
+/// Phrased as the participant's own line because that is whose row it is: the
+/// author header above it names them.
+const PASS_NOTICE: &str = "(passed — nothing to add this round)";
+
+/// The transient-error retry ladder — 30 s, 2 min, 10 min (round 12): an
+/// errored turn whose last line names a transient network / upstream failure
+/// is re-dealt after these waits, one per attempt, instead of counting toward
+/// the back-to-back halt; the failure after the third halts as before, with
+/// the banner saying the retries happened. Sized for an internet blip or an
+/// overloaded upstream to clear; bounded so a dead link still halts in ~13 min.
+pub const RETRY_LADDER: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(120),
+    std::time::Duration::from_secs(600),
+];
+
+/// A reported window has to differ from the configured one by more than this
+/// share of the configured value before the pump says anything: a provider
+/// rounding 1,000,000 to 1,048,576 is not a misconfiguration, a 200k report
+/// against a 1M row is.
+pub const WINDOW_MISMATCH_TOLERANCE: f64 = 0.20;
+
+/// The one-time channel notice for a participant whose CLI reports a context
+/// window that disagrees with the registry's (`models.context_window`). `None`
+/// when there is nothing to compare (no configured value, no usable reading)
+/// or the two agree within [`WINDOW_MISMATCH_TOLERANCE`]. Pure, so the
+/// wording and the threshold are pinned by tests instead of by a live spawn.
+pub fn window_mismatch_notice(
+    slug: &str,
+    configured: Option<u64>,
+    report: &crate::agents::spawn::ContextReport,
+) -> Option<String> {
+    let configured = configured?;
+    let usage = report.usable()?;
+    if configured == 0 {
+        return None;
+    }
+    let diff = (usage.context_window as f64 - configured as f64).abs();
+    if diff <= configured as f64 * WINDOW_MISMATCH_TOLERANCE {
+        return None;
+    }
+    Some(format!(
+        "⚠ {slug}'s CLI reports a {reported}-token context window for `{model}`, but the \
+         registry row says {configured}. The installed claude CLI does not recognise this \
+         model id and is using its default window — the meter above is right, the registry \
+         is not what the agent has. Fix: Settings → Models → this model → \"Claude CLI \
+         settings\" → {{\"modelOverrides\":{{\"<a model id the CLI knows>\":\"{model}\"}}}}, \
+         then respawn. Every participant on this model is affected.",
+        reported = usage.context_window,
+        model = usage.model,
+    ))
+}
+
+/// The context-occupancy bands, in percent, at which a participant's pump
+/// posts one channel row each (F2d, week 35). 85 is where a hand-off still
+/// has room to be written; 95 is the last call before claude-code compacts.
+pub const CONTEXT_NOTICE_BANDS: [u8; 2] = [85, 95];
+
+/// The one-per-band channel row for a participant whose context has crossed
+/// a [`CONTEXT_NOTICE_BANDS`] threshold. `last_band` is the highest band
+/// already announced by this pump: the row fires when the reading's band is
+/// ABOVE it, and the latch then ratchets up to that band. It is never
+/// lowered — an auto-compaction drops the meter, and re-arming on the drop
+/// would post a fresh row every time a session hovering at 95 % compacts and
+/// climbs back. A respawn starts the latch at zero, which is right: a new
+/// process is a new window.
+///
+/// `None` when there is no usable reading, the reported window is zero (the
+/// non-zero promise on `reported_window` is a doc comment, not a type — a
+/// hand-built report can carry one), or no new band was crossed. Pure, so the
+/// bands and the wording are pinned by tests instead of by a live session.
+///
+/// The wording is a STATE line about the named participant, not an
+/// instruction: every participant reads the channel, and an imperative
+/// ("write your handoff now") addressed to no one derails whoever is
+/// mid-turn. One line, because the row is charged to the very context it is
+/// warning about.
+pub fn context_threshold_notice(
+    slug: &str,
+    report: &crate::agents::spawn::ContextReport,
+    last_band: &mut u8,
+) -> Option<String> {
+    let usage = report.usable()?;
+    if usage.context_window == 0 {
+        return None;
+    }
+    let pct = (usage.used_tokens.saturating_mul(100) / usage.context_window).min(u8::MAX as u64) as u8;
+    let band = CONTEXT_NOTICE_BANDS
+        .iter()
+        .copied()
+        .filter(|b| *b <= pct)
+        .max()?;
+    if band <= *last_band {
+        return None;
+    }
+    *last_band = band;
+    Some(format!(
+        "⚠ {slug}'s context is at {pct} % ({used} of {window} tokens) as of its last turn — \
+         the point to hand off to a successor session is near. One notice per band; a \
+         compaction lowers the meter but does not repeat it.",
+        used = usage.used_tokens,
+        window = usage.context_window,
+    ))
+}
+
+/// Is `last_line` (an errored turn's last non-empty line) a TRANSIENT failure
+/// worth retrying? Specific tokens only (EYES F17): the socket-level errnos and
+/// undici's `fetch failed`, the upstream's `overloaded`, and the HTTP codes
+/// 502/503/504/529 — the codes on WORD boundaries (`policy::contains_word`) AND
+/// only beside an HTTP shape (`status`/`http`/`upstream`/`api error`/`service
+/// unavailable`/`bad gateway`/`gateway timeout` — not a bare "error"), so a sha
+/// prefix `529a…`, a port, or "compilation failed: 503 errors" do not retry
+/// (EYES F20). Bare "timed out" / "network" are deliberately NOT here:
+/// a permanent failure that merely mentions one would burn the whole ladder
+/// before the halt the user gets today on strike two.
+pub fn transient_error(last_line: &str) -> bool {
+    let lower = last_line.to_lowercase();
+    const TOKENS: &[&str] = &[
+        "econnreset",
+        "econnrefused",
+        "econnaborted",
+        "enotfound",
+        "etimedout",
+        "eai_again",
+        "fetch failed",
+        "overloaded",
+    ];
+    if TOKENS.iter().any(|t| lower.contains(t)) {
+        return true;
+    }
+    const CODES: &[&str] = &["502", "503", "504", "529"];
+    // The HTTP shape beside the code: not a bare "error" (which "compilation
+    // failed: 503 errors" also carries) but the words an upstream status line
+    // actually uses.
+    const HTTP_SHAPE: &[&str] = &[
+        "status",
+        "http",
+        "upstream",
+        "api error",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+    ];
+    CODES.iter().any(|c| crate::policy::contains_word(&lower, c))
+        && HTTP_SHAPE.iter().any(|w| lower.contains(w))
+}
+
+/// Provider quota/limit phrases, matched case-insensitively against each text
+/// chunk. Deliberately a plain substring net over ALL provider eras: the
+/// archive study found these render as ordinary agent speech — Brian sat dead
+/// 3h13m across two quota deaths while the session looked merely quiet, and
+/// the reviewer kept reviewing into the void. The net is over TEXT, not over a
+/// status code, which is why it covered a second backend without a second
+/// implementation and why it keeps working now there is one.
+/// Misclassification cost is a spurious tray notice.
+const PROVIDER_LIMIT_PATTERNS: &[&str] = &[
+    "out of usage credits",
+    "hit your session limit",
+    "usage limit reached",
+    "insufficient balance",
+    "payment required",
+    "quota exceeded",
+    "credit balance is too low",
+];
+
+/// A provider error arrives as a terse, standalone chunk; agent ANALYSIS that
+/// quotes one arrives inside prose. Only chunks at or under this length are
+/// candidates — without the bound, an agent discussing a quota incident (or a
+/// reviewer quoting the detector's own patterns) self-trips the halt.
+const PROVIDER_LIMIT_MAX_CHUNK: usize = 240;
+
+/// The first line of `text` containing a provider-limit phrase, if any.
+/// Terse chunks only (see [`PROVIDER_LIMIT_MAX_CHUNK`]).
+fn detect_provider_limit(text: &str) -> Option<String> {
+    if text.trim().len() > PROVIDER_LIMIT_MAX_CHUNK {
+        return None;
+    }
+    // One pass: the first line carrying a pattern IS the answer, so there is
+    // no whole-text pre-check to lowercase separately (round 10 — it
+    // lowercased the chunk twice on the hot text path).
+    text.lines()
+        .find(|l| {
+            let ll = l.to_lowercase();
+            PROVIDER_LIMIT_PATTERNS.iter().any(|p| ll.contains(p))
+        })
+        .map(|l| l.trim().to_string())
+}
+
+/// Re-notification window for a single limit incident: a quota death can emit
+/// its message on several consecutive nudged turns; one notice per window.
+const LIMIT_NOTICE_DEDUPE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Pump events from one agent. Each text chunk is persisted as a row; the ring
+/// delivers rows to peers off their cursors (rc3 D19), so nothing here forwards.
+/// `TurnComplete` reports the turn to the ring with its ending (spoke / passed /
+/// done) and clears this agent's busy flag.
+pub async fn pump_agent(
+    cfg: PumpConfig,
+    mut event_rx: mpsc::Receiver<AgentEvent>,
+    storage: Storage,
+    ipav_state: Arc<Mutex<IpavState>>,
+) {
+    let mut buffer = String::new();
+    // peer_ack (behavioral layer): set when the agent calls the `peer_ack` tool
+    // during this turn; consumed at the turn's flush to suppress that turn's
+    // peer-forward. Per-turn — reset after every TurnComplete (success OR error).
+    let mut peer_ack_pending = false;
+    let mut peer_ack_final_pending = false;
+    // pass_turn (design §1): set when the agent declines this turn. Per-turn and
+    // reset alongside the peer_ack pair below — a pass that leaked into the next
+    // turn would make a participant that DID speak look like it had passed, and
+    // the pass is the one ending that leaves the tally standing.
+    let mut pass_pending = false;
+    // A3a: one-shot guard so the executor gets at most one "you're mutating
+    // before Apply" nudge per session (posted as a host row it reads next turn).
+    let mut mutate_nudged = false;
+    // Batch 3.1 Part 1: the tool_use_id of an in-flight atomic op (git commit/
+    // push/migration), so a cancel can defer the kill until it completes. We
+    // match the clearing ToolResult by id — claude-code can emit parallel tool
+    // calls, so clearing on ANY result would race a still-running commit.
+    let mut atomic_tool_id: Option<String> = None;
+    // A1b (round 8): the tool_use_id of an in-flight `halt` /
+    // `mark_awaiting_user` call. Its ID-matched, non-error ToolResult is the
+    // moment the D35 self-interrupt fires (`HaltAcked` → `halt_declared`): the
+    // ack is in the declarer's transcript by then, so the interrupt cannot
+    // turn it into a rejection. Id-matched like the atomic flag (parallel tool
+    // calls), cleared with it at turn end so a stranded id cannot fire on the
+    // next turn's unrelated result.
+    let mut halt_tool_id: Option<String> = None;
+    // Provider-limit detection: the first matching line seen this turn, and the
+    // last time a notice fired (per-incarnation dedupe — one notice per
+    // incident, not one per nudged retry).
+    let mut limit_line: Option<String> = None;
+    let mut last_limit_notice: Option<std::time::Instant> = None;
+    // 0079's companion: has this pump already said that the CLI's reported
+    // context window disagrees with the registry's? Once per incarnation — the
+    // disagreement does not change between turns, and a row per turn would be
+    // the nag the notice exists to replace.
+    let mut window_mismatch_noticed = false;
+    // The highest context band (`CONTEXT_NOTICE_BANDS`) this pump has already
+    // announced — a ratchet, never lowered, so a compaction that drops the
+    // meter cannot re-arm the row (see `context_threshold_notice`).
+    let mut context_band_notified: u8 = 0;
+    // s-f6a441ff: consecutive errored turns for THIS pump. ONE errored turn
+    // ends `Spoke` and the ring steps past it — a failure is not a claim there
+    // is nothing left to do (see the ending derivation below). But a SECOND in
+    // a row means the participant cannot work at all, and letting the ring
+    // keep dealing turned a context-blown pair into an error volley: 11
+    // "Prompt is too long" turns in 5 minutes before the text-repeat net
+    // halted the cycle — silently. Two in a row → host-declared halt with the
+    // error as the visible reason, the provider-limit stall's route. A turn
+    // bot-hq interrupted itself (Pause, preempt, the agent's own halt) is NOT
+    // an errored turn and does not count — see `cfg.interrupted_epoch`.
+    let mut consecutive_errored_turns: usize = 0;
+    // Round 12: the transient-error retry ladder's position for THIS pump —
+    // reset by a clean turn, advanced by each transient errored turn; past the
+    // ladder's end the next transient failure halts like any other.
+    let mut retry_attempt: usize = 0;
+    // B5: the epoch of the turn in flight, snapshotted from `cfg.turn_epoch` on
+    // this turn's FIRST event and cleared when it completes. See the field's doc
+    // for why reading it at completion time instead would defeat the guard it
+    // exists to pass.
+    let mut turn_epoch: Option<u64> = None;
+    // The epoch this pump last COMPLETED with (rc3 D24). A cell still reading
+    // this value means the ring has not handed out a turn since, so whatever
+    // event is being processed is a straggler from the turn that ended and must
+    // not open a new one. See `PumpConfig::turn_epoch`.
+    let mut last_completed_epoch: Option<u64> = None;
+    // Why this pump stopped, when it said so. `AgentEvent::Exited` carries the
+    // process's own account; a channel that simply closes carries none, and the
+    // post-loop says so rather than inventing one.
+    let mut exit_msg: Option<String> = None;
+    // When this pump last had a turn CLOSED, so the next turn's first event can
+    // report how long the model took to produce anything (rc3 D26). Reset at
+    // completion rather than at delivery because the pump is not told about the
+    // handover — its first event IS how it learns.
+    let mut turn_opened_at = std::time::Instant::now();
+
+    loop {
+        let Some(event) = event_rx.recv().await else { break };
+
+        // Batch 7: any event means the agent is alive — reset the stall timer.
+        if let Some(liveness) = &cfg.liveness {
+            liveness.touch();
+        }
+        // First event of a turn: bind it to whichever epoch the sequencer had
+        // handed out when the agent started speaking. Deliberately BEFORE the
+        // match, so every event kind opens a turn — the agent may lead with a
+        // tool call rather than prose, and a turn opened only by text would
+        // snapshot late and miss exactly the reset this guards against.
+        // **Boot opens no turn** (rc3 D21). No turn has been handed out, so the
+        // cell still reads its initial 0 and the straggler guard below cannot
+        // see that: `last_completed_epoch` is `None`, `Some(0) != None`, and the
+        // pump would bind epoch 0 and then complete with it — discarded forever
+        // by the ring, which is the exact class D24 fixed. The flag is the
+        // explicit signal D21 asks for in place of that inference.
+        if turn_epoch.is_none() && !cfg.is_booting() {
+            if let Some(cell) = &cfg.turn_epoch {
+                let live = cell.load(std::sync::atomic::Ordering::Acquire);
+                // **Unchanged since this pump's last completion = no new turn.**
+                // Binding here would tie the NEXT turn to a retired epoch, and
+                // every completion after it would be discarded — see the field
+                // doc for the session that died this way.
+                if last_completed_epoch == Some(live) {
+                    debug!(
+                        agent = %cfg.slug,
+                        epoch = live,
+                        "straggler event after a completed turn; not opening a turn on it"
+                    );
+                } else {
+                    turn_epoch = Some(live);
+                    // **How long the model took to say anything** (rc3 D26).
+                    // The gap between the ring handing a turn out and its first
+                    // event is the one stretch bot-hq records nothing for, and
+                    // it is exactly the stretch a user stares at wondering
+                    // whether the session is thinking or wedged. A live one ran
+                    // 565 seconds on 2026-08-13 and the only way to find out
+                    // afterwards was to diff two tables.
+                    //
+                    // INFO because it is once per turn and it is the number
+                    // `scripts/turn-latency.py` calls `start` — measurable from
+                    // the log now, not only by reconstruction.
+                    // NOTE (round 10): `turn_opened_at` resets at THIS pump's
+                    // last completion, so on a ring of N ≥ 2 the figure spans
+                    // the peers' turns as well as the handover gap — a bound
+                    // on prefill, not the gap itself (`scripts/turn-latency.py`
+                    // measures SPLIT from `participant_deliveries` for that).
+                    // Stamping the handover instant is a listed follow-up.
+                    tracing::info!(
+                        agent = %cfg.slug,
+                        epoch = live,
+                        since_last_completion_ms = turn_opened_at.elapsed().as_millis() as u64,
+                        "turn opened: first event since this pump's last completion"
+                    );
+                }
+            }
+        }
+
+        match event {
+            AgentEvent::Text(text) => {
+                match storage
+                    // `text` is read again below (limit detection, buffer), so
+                    // this one borrows; the tool payloads further down move.
+                    // The session id is an `Arc<str>` clone — a refcount bump,
+                    // not the per-chunk allocation `&*cfg.session_id` would
+                    // have cost once the parameter stopped being `&str`.
+                    // rc3 D21: what a participant says while ORIENTING is a
+                    // `boot` row — persisted and shown to the user, filtered out
+                    // of every peer's backlog by `channel_page`.
+                    .post_to_channel(
+                        cfg.session_id.clone(),
+                        "participant",
+                        Some(&cfg.slug),
+                        if cfg.is_booting() {
+                            MessageKind::Boot.as_str()
+                        } else {
+                            MessageKind::Text.as_str()
+                        },
+                        &text,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(m) => cfg.notify_persisted(m.message_id()),
+                    Err(e) => warn!(?e, "persisting text"),
+                }
+                if limit_line.is_none() {
+                    limit_line = detect_provider_limit(&text);
+                }
+
+                buffer.push_str(&text);
+                buffer.push('\n');
+            }
+            AgentEvent::ToolUse { id, name, input } => {
+                // peer_ack: the agent explicitly acked its peer this turn — flag it
+                // so this turn's ending is reported to the ring as an ack.
+                if is_peer_ack_tool(&name) {
+                    peer_ack_pending = true;
+                    // `final: true` = the agent ASSERTS this is its closing turn,
+                    // so the ring counts the ack regardless of length instead of
+                    // inferring substance from a byte count.
+                    if peer_ack_is_final(&name, &input) {
+                        peer_ack_final_pending = true;
+                    }
+                }
+                // pass_turn: the agent declined this turn. Flagged, not acted on
+                // — `turn_ending` decides at the flush whether the pass stands
+                // or the turn's own text overrode it.
+                if is_pass_turn_tool(&name) {
+                    pass_pending = true;
+                }
+                // A1b: remember a halt declaration's id — the interrupt waits
+                // for ITS result (see `halt_tool_id`).
+                if is_halt_tool(&name) {
+                    halt_tool_id = Some(id.clone());
+                }
+                // Batch 7: a tool call started — suppress stall detection until
+                // its ToolResult (a long build/install emits no events meanwhile).
+                if let Some(liveness) = &cfg.liveness {
+                    liveness.tool_started();
+                }
+                // Batch 3.1 Part 1: flag an atomic op (git commit/push/
+                // migration) so a cancel defers the kill until it completes.
+                // Shared session flag; only an editing participant trips it.
+                if let Some(flag) = cfg.in_atomic_tool.as_ref() {
+                    if is_atomic_command(&name, &input) {
+                        flag.store(true, Ordering::Release);
+                        atomic_tool_id = Some(id.clone());
+                    }
+                }
+                // A3a (adherence): catch the executor mutating before the Apply
+                // phase — a one-time nudge to advance first. Editing participants
+                // only, gated by adherence_nudges, fired at most once.
+                if !mutate_nudged
+                    && cfg.edits_files
+                    && matches!(name.as_str(), "Edit" | "Write" | "NotebookEdit")
+                {
+                    // `self_nudges` says this pump belongs to a live mutating
+                    // participant rather than a test harness; the reminder is a
+                    // persisted row (see below), never a stdin write.
+                    if cfg.self_nudges {
+                        let phase = ipav_state.lock().await.current_phase;
+                        if matches!(phase, IpavPhase::Investigate | IpavPhase::Plan)
+                            && storage.adherence_nudges_enabled().await
+                        {
+                            // Host-authored, so it posts as `system` with a NULL
+                            // participant: it is not the executor's turn output
+                            // even though it is addressed to it. No envelope —
+                            // this site never wrapped the text, and B5 Task 2 is
+                            // a plumbing change, not a prompt change.
+                            // Persisted only. The direct write went into the
+                            // stdin of the agent that is mid-EDIT, which cannot
+                            // read it mid-generation anyway: it opened a fresh
+                            // generation the ring never dealt, whose completion
+                            // was discarded, and the row then arrived again off
+                            // the cursor. Read at this agent's next dealt turn
+                            // instead — later than the edit, and still the first
+                            // moment it can act (advance the phase, or say why
+                            // the edit was intended). Burnt on a successful
+                            // post; not burnt when nothing was recorded (the
+                            // helper warns), so the one-shot is still unspent.
+                            if crate::core::post_system_notice(
+                                &storage,
+                                cfg.bridge.as_deref(),
+                                &cfg.session_id,
+                                MessageKind::SystemNotice,
+                                "🔔 You're editing files before the Apply phase. Per IPAV, \
+                                 mutations belong in Apply — call advance_phase(\"Apply\") \
+                                 first, or note why this edit is intentional. (One-time \
+                                 reminder.)",
+                                None,
+                            )
+                            .await
+                            .is_some()
+                            {
+                                mutate_nudged = true;
+                            }
+                        }
+                    }
+                }
+                let payload = serde_json::to_string(&ToolUseRow {
+                    input: &input,
+                    name: &name,
+                    tool_use_id: &id,
+                })
+                .unwrap_or_else(|_| "{}".to_string());
+                match storage
+                    // `payload` MOVES: it is not read again, and a tool_use
+                    // input can be large. Borrowing here would copy the whole
+                    // body into the receipt on every tool call.
+                    .post_to_channel(
+                        cfg.session_id.clone(),
+                        "participant",
+                        Some(&cfg.slug),
+                        MessageKind::ToolUse.as_str(),
+                        payload,
+                        None,
+                        )
+                    .await
+                {
+                    Ok(m) => cfg.notify_persisted(m.message_id()),
+                    Err(e) => warn!(?e, "persisting tool_use"),
+                }
+            }
+            AgentEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                // Batch 7: tool result returned — one fewer tool in flight.
+                if let Some(liveness) = &cfg.liveness {
+                    liveness.tool_finished();
+                }
+                // Batch 3.1 Part 1: clear the atomic-op flag once THIS op's
+                // result returns (id-matched → parallel-call safe).
+                if atomic_tool_id.as_deref() == Some(tool_use_id.as_str()) {
+                    if let Some(flag) = cfg.in_atomic_tool.as_ref() {
+                        flag.store(false, Ordering::Release);
+                    }
+                    atomic_tool_id = None;
+                }
+                // A1b: the declarer's halt was acked in its own stream — now
+                // the residual generation can be interrupted (rc3 D35). Only a
+                // NON-error result: a halt that failed took no effect, and a
+                // declarer whose halt never landed must not be cut off. The
+                // id match, not the position: parallel tool calls.
+                if halt_tool_id.as_deref() == Some(tool_use_id.as_str()) {
+                    halt_tool_id = None;
+                    if !is_error {
+                        if let Some(bridge) = &cfg.bridge {
+                            bridge.notify_halt_acked(&cfg.session_id, &cfg.slug);
+                        }
+                    }
+                }
+                let payload = serde_json::to_string(&ToolResultRow {
+                    content: content.as_str(),
+                    is_error,
+                    tool_use_id: &tool_use_id,
+                })
+                .unwrap_or_else(|_| "{}".to_string());
+                match storage
+                    // `payload` MOVES — same reason, and this is the biggest
+                    // body of the three: a tool result can carry a whole file.
+                    .post_to_channel(
+                        cfg.session_id.clone(),
+                        "participant",
+                        Some(&cfg.slug),
+                        MessageKind::ToolResult.as_str(),
+                        payload,
+                        None,
+                        )
+                    .await
+                {
+                    Ok(m) => cfg.notify_persisted(m.message_id()),
+                    Err(e) => warn!(?e, "persisting tool_result"),
+                }
+            }
+            AgentEvent::TurnComplete {
+                is_error, context, ..
+            } => {
+                // Context occupancy rides the turn-complete event because that
+                // is the only place claude-code reports `contextWindow`.
+                // Publish it BEFORE the error branch below: a failed turn still
+                // consumed context, and the meter going stale exactly when a
+                // session starts erroring would hide the most useful reading.
+                if let (Some(c), Some(bridge)) = (context.usable(), &cfg.bridge) {
+                    bridge.notify_agent_context(
+                        cfg.session_id.to_string(),
+                        &cfg.slug,
+                        c.used_tokens,
+                        c.context_window,
+                    );
+                }
+                // …and record EVERY report, usable or not (rc3 P7). The meter
+                // above is live-only: it is forwarded to a UI that may not be
+                // open, it is overwritten by the next turn, and it dies with the
+                // session — which is why a participant that died with `Prompt is
+                // too long` on 2026-08-12 left no evidence of what its context
+                // was doing beforehand. The unusable reports are the load-bearing
+                // half: without a row for them, "the provider never sent a
+                // window" and "the agent never finished a turn" are the same
+                // empty query result.
+                //
+                // Best-effort, exactly like the rows above it: a failed insert is
+                // warned about and never interrupts a turn.
+                if let Err(e) = storage
+                    .record_context_reading(&cfg.session_id, &cfg.slug, &context)
+                    .await
+                {
+                    warn!(?e, agent = %cfg.slug, "persisting context reading");
+                }
+                // The registry said one window, the CLI reports another: say so
+                // ONCE, in the channel, with the fix. This is how
+                // `claude-fable-5-1` ran 40 minutes at 200k on 2026-09-03 while
+                // the header showed 1M — the CLI's catalog did not know the
+                // name and nothing compared the two numbers.
+                if !window_mismatch_noticed {
+                    if let Some(notice) = window_mismatch_notice(
+                        &cfg.slug,
+                        cfg.configured_context_window,
+                        &context,
+                    ) {
+                        window_mismatch_noticed = true;
+                        if crate::core::post_system_notice(
+                            &storage,
+                            cfg.bridge.as_deref(),
+                            &cfg.session_id,
+                            MessageKind::SystemNotice,
+                            notice,
+                            None,
+                        )
+                        .await
+                        .is_none()
+                        {
+                            warn!(agent = %cfg.slug, "the context-window mismatch notice was not posted");
+                        }
+                    }
+                }
+                // F2d (week 35): four of seven day-long sessions ran the
+                // executor past 92 % of its window with nothing in the channel
+                // saying so — the meter is a header pill the user may not be
+                // watching, and "can you compact?" is not something bot-hq can
+                // act on. One row per band, ratcheted, so it is a state
+                // announcement and never a per-turn nag.
+                if let Some(notice) = context_threshold_notice(
+                    &cfg.slug,
+                    &context,
+                    &mut context_band_notified,
+                ) {
+                    if crate::core::post_system_notice(
+                        &storage,
+                        cfg.bridge.as_deref(),
+                        &cfg.session_id,
+                        MessageKind::SystemNotice,
+                        notice,
+                        None,
+                    )
+                    .await
+                    .is_none()
+                    {
+                        warn!(agent = %cfg.slug, "the context threshold notice was not posted");
+                    }
+                }
+                // Provider limit hit this turn: surface it as a real state
+                // instead of letting it pass as agent speech. Peer notice FIRST
+                // (the awaiting flag set below latches the ring — this one row
+                // is deliberate, so the reviewer stops reviewing into the void
+                // when it next reads the channel), then health + a tray halt so the user sees a
+                // needs-input signal instead of a merely-quiet session.
+                if let Some(line) = limit_line.take() {
+                    let deduped = last_limit_notice
+                        .is_some_and(|t| t.elapsed() < LIMIT_NOTICE_DEDUPE);
+                    if !deduped {
+                        last_limit_notice = Some(std::time::Instant::now());
+                        warn!(agent = %cfg.slug, %line, "provider limit detected; pausing session on the user");
+                        let notice = format!(
+                            "⚠ [bot-hq] {} hit a provider limit and is paused: \
+                             \"{line}\". Do not expect replies from them, and do \
+                             not take over their work — the session waits on the \
+                             user to resume.",
+                            &cfg.slug
+                        );
+                        // Host-authored, so the row posts as `system` with a NULL
+                        // participant like the other host injections. The ring
+                        // delivers it to every peer off its cursor — no separate
+                        // wire copy, and none of the hold/drop ladder the router
+                        // used to put between this row and the peer reading it.
+                        // A lost row (the helper warns) gates nothing: the
+                        // health mark and the tray halt below tell the USER the
+                        // session is parked, which stays true either way.
+                        crate::core::post_system_notice(
+                            &storage,
+                            cfg.bridge.as_deref(),
+                            &cfg.session_id,
+                            MessageKind::SystemNotice,
+                            notice.as_str(),
+                            None,
+                        )
+                        .await;
+                        if let Some(bridge) = &cfg.bridge {
+                            bridge.notify_agent_health(
+                                cfg.session_id.to_string(),
+                                &cfg.slug,
+                                "stalled",
+                            );
+                            // Host-initiated halt: discard the repeat-halt hint.
+                            // That warning is for an AGENT yielding twice on one
+                            // state; a provider-limit stall is the host parking
+                            // the session and there is no agent turn to advise.
+                            let _ = bridge
+                                .mark_awaiting_user_for(
+                                    cfg.session_id.to_string(),
+                                    cfg.slug.to_string(),
+                                    format!(
+                                        "{prefix} \"{line}\" — the agent can't \
+                                         continue until it resets. Send any message (e.g. \
+                                         'proceed') once it's resumable.",
+                                        prefix =
+                                            crate::core::close_learnings::PROVIDER_LIMIT_HALT_PREFIX,
+                                    ),
+                                )
+                                .await;
+                        }
+                    }
+                }
+                // Self-idle: the pump clears its own `busy` below once the turn
+                // has ended, and the ring sets the next participant's `busy` at
+                // handover (D19b) — no momentary all-idle unlock in between.
+                // B5: what this ending MEANS, derived before the buffer is taken
+                // below. An errored turn ends `Spoke` — it produced nothing, but
+                // the ring has to step or the cycle stalls on a participant that
+                // already failed; a failure is not a claim that there is nothing
+                // left to do.
+                //
+                // **Nor is it a PASS**, and the distinction is the reason
+                // `pass_pending` is not consulted here. A pass is a deliberate
+                // "not me this round" that leaves every other participant's done
+                // vote standing; an errored turn is a participant that could not
+                // speak at all, and letting a crash preserve a tally it never
+                // read would be a halt built on votes cast about a session the
+                // failed participant never saw. `Spoke` clears the tally, which
+                // is the conservative answer of the two.
+                let ending = if is_error {
+                    crate::core::sequencer::TurnEnding::Spoke
+                } else {
+                    crate::core::sequencer::turn_ending(
+                        peer_ack_pending,
+                        peer_ack_final_pending,
+                        pass_pending,
+                        &buffer,
+                    )
+                };
+                if is_error {
+                    // Failed turn. The error text is already persisted per-chunk
+                    // above for UI visibility; the buffer is drained rather than
+                    // handed anywhere, because bouncing an error line to a peer
+                    // was an unbounded error-spam loop (2026-05-29).
+                    //
+                    // **A turn bot-hq itself aborted is not a failed turn.**
+                    // claude-code ends an interrupted turn `is_error:true` (a
+                    // `result` with `terminal_reason:"aborted_streaming"`), so a
+                    // user Pause, a typed-Send preempt or the agent's OWN halt
+                    // (D35 interrupts the declarer) all arrive here looking like
+                    // an API error. Counting them turned steering a session into
+                    // "back-to-back errors": the banner below fired 3× on
+                    // 2026-08-17, every one over ordinary prose, and each time it
+                    // REPLACED the reason the agent had just declared. The stamp
+                    // is compared to THIS turn's epoch — an interrupt with no
+                    // turn in flight stamps the epoch last completed with, which
+                    // the next completion cannot carry, so a stale stamp cannot
+                    // hide a genuine error (a bare flag could).
+                    let this_turn = turn_epoch.or_else(|| {
+                        cfg.turn_epoch
+                            .as_ref()
+                            .map(|c| c.load(std::sync::atomic::Ordering::Acquire))
+                    });
+                    let stamp = cfg
+                        .interrupted_epoch
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let host_interrupted =
+                        stamp != crate::agents::NO_INTERRUPT_EPOCH && Some(stamp) == this_turn;
+                    // The errored turn's last line — what the halt banner
+                    // quotes, and (round 12) what the retry ladder classifies.
+                    let last_line: String = buffer
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("unknown error")
+                        .chars()
+                        .take(200)
+                        .collect();
+                    let mut retried = false;
+                    if host_interrupted {
+                        debug!(
+                            agent = %cfg.slug,
+                            epoch = ?this_turn,
+                            "interrupted turn (bot-hq's own interrupt); not counted as an error"
+                        );
+                    } else if transient_error(&last_line) && retry_attempt < cfg.retry_ladder.len() {
+                        // **A transient failure retries before it halts** (round
+                        // 12, the user's Q3). Not counted toward the two-strike
+                        // halt: the ring steps past this turn as before, a
+                        // notice says what happens next, and after the ladder's
+                        // wait the pump posts a nudge row and SUMMONS this
+                        // participant (no ring reset; `SequencerCommand::Summon`)
+                        // so it gets a fresh turn with the backlog it failed on.
+                        // Only for a LIVE process that reported an errored
+                        // result — a process that died is the supervisor's
+                        // (the event channel closing), never this ladder's.
+                        let delay = cfg.retry_ladder[retry_attempt];
+                        retry_attempt += 1;
+                        retried = true;
+                        let attempt = retry_attempt;
+                        let total = cfg.retry_ladder.len();
+                        let notice = format!(
+                            "⚠ transient error on {}'s turn ({last_line}) — retrying in {}s \
+                             (attempt {attempt}/{total}; halting after the {}).",
+                            cfg.slug,
+                            delay.as_secs(),
+                            match total { 1 => "first", 2 => "second", 3 => "third", _ => "last" }
+                        );
+                        warn!(agent = %cfg.slug, attempt, %last_line, "transient errored turn; retry scheduled");
+                        if crate::core::post_system_notice(
+                            &storage,
+                            cfg.bridge.as_deref(),
+                            &cfg.session_id,
+                            MessageKind::SystemNotice,
+                            notice,
+                            None,
+                        )
+                        .await
+                        .is_none()
+                        {
+                            warn!(agent = %cfg.slug, "the retry notice was not posted");
+                        }
+                        if let (Some(seq), Some(pid)) = (cfg.sequencer_tx.clone(), cfg.participant_id) {
+                            let storage = storage.clone();
+                            let bridge = cfg.bridge.clone();
+                            let session_id = cfg.session_id.clone();
+                            let slug = cfg.slug.clone();
+                            let line = last_line.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(delay).await;
+                                let nudge = format!(
+                                    "[System: {slug}'s previous turn failed with a transient \
+                                     error ({line}) — attempt {attempt}/{total}. The backlog \
+                                     above still stands; continue where you left off.]"
+                                );
+                                let _ = crate::core::post_system_notice(
+                                    &storage,
+                                    bridge.as_deref(),
+                                    &session_id,
+                                    MessageKind::SystemNotice,
+                                    nudge,
+                                    None,
+                                )
+                                .await;
+                                if seq
+                                    .send(crate::core::sequencer::SequencerCommand::Summon {
+                                        participant_id: pid,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    warn!(agent = %slug, "retry summons did not reach the ring (session gone)");
+                                }
+                            });
+                        }
+                    } else {
+                        debug!(agent = %cfg.slug, "errored turn; draining buffer, nothing handed on");
+                        consecutive_errored_turns += 1;
+                        if transient_error(&last_line) {
+                            // The ladder is spent: this transient failure halts
+                            // like any other, now — not after a second strike.
+                            consecutive_errored_turns = consecutive_errored_turns.max(2);
+                        }
+                        // F11 (week 35): a FIRST errored turn used to vanish —
+                        // the ring stepped past it and the only trace was the
+                        // error text persisted as if the agent had said it
+                        // ("Request timed out", twice, 09-03 09:54, with the
+                        // user's Resume instruction swallowed). One row says the
+                        // turn produced nothing and what was lost with it; the
+                        // second strike's halt below still carries the reason.
+                        if consecutive_errored_turns < 2 {
+                            if crate::core::post_system_notice(
+                                &storage,
+                                cfg.bridge.as_deref(),
+                                &cfg.session_id,
+                                MessageKind::SystemNotice,
+                                format!(
+                                    "[System: {}'s turn ended in an error and was discarded — nothing \
+                                     it may have been doing reached the channel (last line: \
+                                     \"{last_line}\"). The ring moved on; whatever it was asked on \
+                                     this turn still stands, and a second error in a row halts the \
+                                     session.]",
+                                    cfg.slug
+                                ),
+                                None,
+                            )
+                            .await
+                            .is_none()
+                            {
+                                warn!(agent = %cfg.slug, "the discarded-turn notice was not posted");
+                            }
+                        }
+                    }
+                    if !retried && consecutive_errored_turns >= 2 {
+                        // `last_line` was read above, before the buffer is
+                        // cleared below: the error line is the turn's tail, and
+                        // it is what the banner must say — a stop with no reason
+                        // is the silence the repeat-net's halt already taught us
+                        // not to repeat.
+                        warn!(
+                            agent = %cfg.slug,
+                            %last_line,
+                            "back-to-back errored turns; declaring the session's halt"
+                        );
+                        if let Some(bridge) = &cfg.bridge {
+                            let _ = bridge
+                                .mark_awaiting_user_for(
+                                    cfg.session_id.to_string(),
+                                    cfg.slug.to_string(),
+                                    format!(
+                                        "⚠ {}'s {streak_marker} \
+                                         (last error: \"{last_line}\"{}). The session \
+                                         stopped so you can steer. If the error is \
+                                         about prompt/context size, this \
+                                         participant's context is likely \
+                                         unrecoverable — close the session and \
+                                         open a fresh one.",
+                                        &cfg.slug,
+                                        if retry_attempt > 0 {
+                                            format!(
+                                                "; {retry_attempt} transient-error retr{} already made",
+                                                if retry_attempt == 1 { "y" } else { "ies" }
+                                            )
+                                        } else {
+                                            String::new()
+                                        },
+                                        streak_marker =
+                                            crate::core::close_learnings::ERROR_STREAK_HALT_MARKER
+                                    ),
+                                )
+                                .await;
+                        }
+                        // Re-arm rather than latch: the halt already stops the
+                        // ring, so the next errors are a NEW incident — the
+                        // user's release attempt — and deserve a fresh banner.
+                        consecutive_errored_turns = 0;
+                    }
+                    buffer.clear();
+                } else {
+                    consecutive_errored_turns = 0;
+                    retry_attempt = 0;
+                    // The turn's prose is already posted as rows by the pump
+                    // above; the ring delivers those to every peer off its
+                    // cursor. Nothing extra to hand anywhere — the router that
+                    // used to own this second delivery path is gone (task 14),
+                    // and it was already bypassed on every sequencer session.
+                    buffer.clear();
+                }
+                // A pass gets a ROW, so declining a turn is something the user can
+                // see rather than a gap in the transcript (design §1).
+                //
+                // **Written at the ending, not at the tool call, and BEFORE the
+                // completion goes out.** Both halves are ordering decisions:
+                //
+                // - at the ending, because `turn_ending` may OVERRIDE the pass —
+                //   a row posted when the tool fired would sit above the agent's
+                //   own 900-character review claiming it had nothing to add;
+                // - before the completion, because the completion is what steps
+                //   the ring, and the sequencer reads the next participant's
+                //   backlog straight out of storage. Send first and the two
+                //   become a RACE between this insert and that read — and the
+                //   losing side hands the next participant a backlog with no
+                //   pass in it, so the row surfaces a round late. Awaiting the
+                //   insert first is what removes the race rather than winning
+                //   it; `a_pass_posts_its_row_before_the_completion_goes_out`
+                //   is the pin, and it fails on the reordered form.
+                //
+                // Failure posts nothing and still completes the turn: a lost row
+                // costs visibility, whereas a completion withheld over it would
+                // freeze the ring on this participant for the rest of the
+                // session. Same trade every host injection in this file makes.
+                if matches!(ending, crate::core::sequencer::TurnEnding::Passed) {
+                    match storage
+                        .post_to_channel(
+                            cfg.session_id.clone(),
+                            "participant",
+                            Some(&cfg.slug),
+                            MessageKind::Text.as_str(),
+                            PASS_NOTICE,
+                            None,
+                            )
+                        .await
+                    {
+                        Ok(m) => cfg.notify_persisted(m.message_id()),
+                        Err(e) => warn!(?e, agent = %cfg.slug, "persisting the pass row"),
+                    }
+                }
+                // B5: tell the ring the turn ended. Sent for BOTH branches and
+                // whether or not there was prose — the sequencer steps on the
+                // completion, not on the text, so a silent turn that never
+                // reported would freeze the cycle on this participant.
+                // **Boot reports readiness, not a completion** (rc3 D21). The
+                // epoch would be 0 — never issued — so a `TurnComplete` here is
+                // dropped by the ring and nothing learns this participant is
+                // ready. `boot_done` is the signal D21 §4 starts the ring on.
+                if cfg.is_booting() {
+                    if let (Some(done), Some(participant_id)) =
+                        (&cfg.boot_done, cfg.participant_id)
+                    {
+                        if done.send(participant_id).await.is_err() {
+                            warn!(
+                                agent = %cfg.slug,
+                                "boot completion DROPPED: the boot channel closed — the \
+                                 session starts on its timeout instead"
+                            );
+                        }
+                    }
+                } else if let (Some(sequencer_tx), Some(participant_id)) =
+                    (&cfg.sequencer_tx, cfg.participant_id)
+                {
+                    // 0080: settle the queued outward publishes THIS participant
+                    // was summoned to read — BEFORE the ring is told the turn is
+                    // over, so the gate latch (opened by a promotion) is set
+                    // before the next deal is decided. The bridge skips rows
+                    // whose reviewer is someone else and rows whose body this
+                    // participant's cursor has not passed.
+                    if let Some(bridge) = &cfg.bridge {
+                        bridge
+                            .settle_queued_outward(&cfg.session_id, participant_id)
+                            .await;
+                    }
+                    let epoch = turn_epoch.unwrap_or(0);
+                    if sequencer_tx
+                        .send(crate::core::sequencer::SequencerCommand::TurnComplete {
+                            participant_id,
+                            epoch,
+                            ending,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        warn!(
+                            agent = %cfg.slug,
+                            "turn completion DROPPED: sequencer channel closed — the ring \
+                             will not step past this participant"
+                        );
+                    }
+                }
+                // Opened by the next event, from whatever epoch is live then —
+                // unless the cell has not moved, which means no turn was handed
+                // out and the event is a straggler (rc3 D24).
+                last_completed_epoch = turn_epoch;
+                turn_epoch = None;
+                // The clock for the NEXT turn's "how long until it spoke"
+                // starts here — the ring hands the next turn out within
+                // microseconds of this completion.
+                turn_opened_at = std::time::Instant::now();
+                // peer_ack is per-turn — reset after BOTH branches so an errored
+                // turn can't leak the flag into the next.
+                peer_ack_pending = false;
+                peer_ack_final_pending = false;
+                pass_pending = false;
+                // Turn ended → this agent is idle. The ring marks the next
+                // participant busy at handover, so the input does not unlock
+                // for the sub-second gap between two turns.
+                {
+                    if let Some(activity) = &cfg.activity {
+                        activity.set_busy_slug(&cfg.slug, false);
+                    }
+                }
+                // Batch 7: turn done → no tools can still be in flight; reset so a
+                // stranded ToolUse-without-ToolResult can't wedge stall detection.
+                if let Some(liveness) = &cfg.liveness {
+                    liveness.reset_tools();
+                }
+                // Batch 3.1 Part 1: safety-clear a stranded atomic-op flag at
+                // turn end (an atomic ToolUse with no matching ToolResult
+                // shouldn't happen, but never strand the flag → never wedge a
+                // future cancel). Guarded by our own id so this pump can't clear
+                // a flag it didn't set (a read-only participant's pump never
+                // holds an id).
+                if atomic_tool_id.is_some() {
+                    if let Some(flag) = cfg.in_atomic_tool.as_ref() {
+                        flag.store(false, Ordering::Release);
+                    }
+                    atomic_tool_id = None;
+                }
+                // A1b: same for a halt declaration whose result never came —
+                // it must not fire on the next turn's unrelated result.
+                halt_tool_id = None;
+            }
+            AgentEvent::Init { session_id, .. } => {
+                debug!(agent = %cfg.slug, ?session_id, "init received");
+                // Persist the claude-code session UUID so the next reopen of
+                // this bot-hq session can resume each agent's prior context
+                // via `--resume <uuid>`. Idempotent UPDATE — on a resume spawn
+                // the same UUID comes back and we just overwrite with itself.
+                // Stored on the PARTICIPANT row, not in one of two `sessions`
+                // columns keyed by agent name (rc3 D10). The old setter could
+                // only address two agents and returned `Err` for any other, so a
+                // third participant's conversation was dropped and it restarted
+                // blank on every respawn.
+                if let (Some(claude_id), Some(pid)) = (session_id, cfg.participant_id) {
+                    if let Err(e) = storage.set_participant_claude_id(pid, &claude_id).await {
+                        warn!(?e, agent = %cfg.slug, "persisting claude session id");
+                    }
+                }
+            }
+            AgentEvent::Exited(msg) => {
+                warn!(agent = %cfg.slug, msg = %msg, "agent exited");
+                exit_msg = Some(msg.clone());
+                // Trailing prose is already in the channel as rows; a peer
+                // reads it off its cursor whenever it next takes a turn, so a
+                // dying agent no longer needs to push a final copy anywhere.
+                buffer.clear();
+                // The agent is dying → force self-idle unconditionally (the
+                // post-loop cleanup also clears it; idempotent).
+                if let Some(activity) = &cfg.activity {
+                    activity.set_busy_slug(&cfg.slug, false);
+                }
+                break;
+            }
+            AgentEvent::Health(state) => {
+                // B2: relay the retry-supervisor's liveness transition to the
+                // UI as a health dot. Not persisted — purely a status signal.
+                if let Some(bridge) = &cfg.bridge {
+                    bridge.notify_agent_health(
+                        cfg.session_id.to_string(),
+                        &cfg.slug,
+                        state.as_str(),
+                    );
+                }
+            }
+        }
+    }
+
+    // Pump terminated (channel closed — the supervisor suppresses per-incarnation
+    // Exited events, so a closed channel is the reliable "agent stopped" signal).
+    // Clear its busy unconditionally so a crashed/stopped agent can't strand the
+    // session `Busy` with the chat input locked.
+    if let Some(activity) = &cfg.activity {
+        activity.set_busy_slug(&cfg.slug, false);
+    }
+    // Batch 3.1 Part 1: crashed/stopped mid-atomic-tool → clear the flag so a
+    // pending deferred cancel can proceed (the agent's already dead) and a
+    // respawn isn't blocked. Guarded by our own id (a read-only pump never sets it).
+    if atomic_tool_id.is_some() {
+        if let Some(flag) = cfg.in_atomic_tool.as_ref() {
+            flag.store(false, Ordering::Release);
+        }
+    }
+    // B2: the event loop ended → the agent's supervisor returned (exhausted
+    // retries / permanent error / process exit / intentional close). Flag it
+    // dead so the UI dot goes red. On an intentional close the session is being
+    // removed anyway, so a late "dead" is harmless.
+    if let Some(bridge) = &cfg.bridge {
+        bridge.notify_agent_health(
+            cfg.session_id.to_string(),
+            &cfg.slug,
+            AgentHealth::Dead.as_str(),
+        );
+    }
+    // **A pump that dies HOLDING a turn has to end it.** Clearing busy above is
+    // half the job: the ring still has this participant as its holder, waiting
+    // for a completion from a process that no longer exists, and it steps on
+    // nothing else. Nothing was minted here before — the health dot went red and
+    // that was the whole account — so the cycle sat parked with an empty halt
+    // slot until the next user message, which is the same wedge the ring's own
+    // unreachable path used to leave.
+    //
+    // Declared under this agent's OWN slug, not "system": the ring resolves the
+    // asker to a participant and only the HOLDER declaring ends the turn in
+    // flight (rc3 D35), which is exactly what this is. `mark_awaiting_user`
+    // fills the halt slot and parks the ring in one call.
+    if turn_epoch.is_some() {
+        let closed = matches!(
+            storage.get_session(&cfg.session_id).await,
+            Ok(Some(s)) if s.closed_at.is_some()
+        );
+        if let (false, Some(bridge)) = (closed, &cfg.bridge) {
+            let detail = exit_msg
+                .as_deref()
+                .map(|m| format!(" ({m})"))
+                .unwrap_or_default();
+            let _ = bridge
+                .mark_awaiting_user_for(
+                    cfg.session_id.to_string(),
+                    cfg.slug.to_string(),
+                    format!(
+                        "{} stopped mid-turn{detail} — the turn it was holding cannot \
+                         end. Send a message to respawn them and deal a fresh turn.",
+                        cfg.slug
+                    ),
+                )
+                .await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::spawn::{ContextReport, ContextVerdict};
+
+    /// `recv()` with a deadline.
+    ///
+    /// A bare `rx.recv().await` turns a regression into a HANG rather than a
+    /// failure: the test waits forever for a wire the broken code never sends,
+    /// and prints nothing. This batch produced two — one wedged a run for seven
+    /// minutes, and one hung `cargo test` outright when a session-id mismatch
+    /// made a scope check refuse every wire. Both would have been a clean
+    /// failure in seconds through this.
+    async fn next_wire<T>(rx: &mut tokio::sync::mpsc::Receiver<T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected a wire within 2s; none arrived")
+            .expect("the sender was dropped before a wire arrived")
+    }
+
+    use crate::core::ipav::IpavPhase;
+
+    async fn setup() -> (Storage, Arc<Mutex<IpavState>>) {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "test", None).await.unwrap();
+        let st = Arc::new(Mutex::new(IpavState::default()));
+        (s, st)
+    }
+
+    /// `slug` is the roster slug a real session carries (`"hands"` / `"eyes"`).
+    ///
+    /// It used to be an `Author`, from which both the slug and `edits_files`
+    /// were derived — the retired two-party discriminant standing in for "which
+    /// of the seeded roles". Taking the slug directly is what rc3 D10 says
+    /// identity is, and `edits_files` stays a capability question rather than a
+    /// name question.
+    fn fast_cfg(slug: &str) -> PumpConfig {
+        PumpConfig {
+            session_id: "s1".into(),
+            slug: slug.into(),
+            edits_files: slug == "hands",
+            participant_id: None,
+            bridge: None,
+            self_nudges: false,
+            activity: None,
+            in_atomic_tool: None,
+            liveness: None,
+            sequencer_tx: None,
+            configured_context_window: None,
+            turn_epoch: None,
+            interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(
+                crate::agents::NO_INTERRUPT_EPOCH,
+            )),
+            booting: None,
+            boot_done: None,
+            retry_ladder: vec![std::time::Duration::from_millis(30); 3],
+        }
+    }
+
+    /// A pump wired to the ring. `participant_id` is required: the pump only
+    /// reports a turn end when it knows which participant ended it.
+    ///
+    /// The paragraph that used to sit above this one said the forward/suppress/
+    /// break decision "is tested in `core::router`" — a module task 14 deleted,
+    /// so it pointed a reader at coverage that cannot be there (round 3). The
+    /// decision itself moved into the ring with everything else; what this
+    /// helper still pins is the pump's own half, which is emitting the right
+    /// turn-end signal.
+    fn cfg_with_ring(
+        slug: &str,
+    ) -> (
+        PumpConfig,
+        mpsc::Receiver<crate::core::sequencer::SequencerCommand>,
+    ) {
+        let (tx, rx) = mpsc::channel(16);
+        let cfg = PumpConfig {
+            sequencer_tx: Some(tx),
+            participant_id: Some(1),
+            ..fast_cfg(slug)
+        };
+        (cfg, rx)
+    }
+
+    /// A plain end-of-turn event.
+    fn turn_end() -> AgentEvent {
+        AgentEvent::TurnComplete {
+            stop_reason: None,
+            subtype: None,
+            is_error: false,
+            api_error_status: None,
+            context: ContextReport::none(ContextVerdict::NoWindow),
+        }
+    }
+
+    /// The epoch the next `TurnComplete` on the ring channel carries.
+    async fn next_epoch(
+        rx: &mut mpsc::Receiver<crate::core::sequencer::SequencerCommand>,
+    ) -> u64 {
+        match next_wire(rx).await {
+            crate::core::sequencer::SequencerCommand::TurnComplete { epoch, .. } => epoch,
+            other => panic!("expected a TurnComplete, got {other:?}"),
+        }
+    }
+
+    /// Pull one `TurnComplete` off the ring channel → its [`TurnEnding`].
+    ///
+    /// Replaces the old `next_forward`, which read the body off a
+    /// `RouterCommand::Forward`. The prose is no longer on this wire at all —
+    /// it is a channel ROW, so body assertions read storage (see
+    /// [`turn_bodies`]) and this returns only how the turn ended.
+    fn next_turn_end(
+        rx: &mut mpsc::Receiver<crate::core::sequencer::SequencerCommand>,
+    ) -> Option<crate::core::sequencer::TurnEnding> {
+        match rx.try_recv() {
+            Ok(crate::core::sequencer::SequencerCommand::TurnComplete { ending, .. }) => {
+                Some(ending)
+            }
+            _ => None,
+        }
+    }
+
+    /// [`next_turn_end`], polled for up to ~2 s (the pump runs on the same
+    /// current-thread runtime, so the wait must yield).
+    async fn wait_turn_end(
+        rx: &mut mpsc::Receiver<crate::core::sequencer::SequencerCommand>,
+    ) -> Option<crate::core::sequencer::TurnEnding> {
+        for _ in 0..200 {
+            if let Some(ending) = next_turn_end(rx) {
+                return Some(ending);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        None
+    }
+
+    /// The agent-authored text rows this pump persisted, in order.
+    async fn turn_bodies(storage: &Storage) -> Vec<String> {
+        storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == MessageKind::Text.as_str())
+            .map(|m| m.content)
+            .collect()
+    }
+
+    /// rc3 **P7**: the pump writes a reading for EVERY completed turn, and the
+    /// unusable ones are the reason it exists.
+    ///
+    /// The wire this pins is the one that was missing entirely: `ContextUsage`
+    /// reached the UI and was never written down, so a participant that died
+    /// with `Prompt is too long` on 2026-08-12 left no record of what its meter
+    /// had shown. Asserting `ContextReport` parses correctly would not catch a
+    /// pump that never persists it — the parse is one half of the join and this
+    /// is the other.
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_completed_turn_records_a_context_reading() {
+        let (storage, state) = setup().await;
+        let (cfg, _ring_rx) = cfg_with_ring("hands");
+        let slug = cfg.slug.to_string();
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        // A turn the meter can show…
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: Some("success".into()),
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport {
+                    model: Some("claude-opus-5".into()),
+                    used_tokens: Some(620_000),
+                    reported_window: Some(1_000_000),
+                    verdict: ContextVerdict::Usable,
+                },
+            })
+            .await
+            .unwrap();
+        // …and one it cannot, because the provider reported no window. This is
+        // the state the dead participant was in, and it must leave a row.
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: Some("success".into()),
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let history = storage
+            .context_readings_for_participant("s1", &slug, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            history.iter().map(|r| r.verdict.as_str()).collect::<Vec<_>>(),
+            ["usable", "no_window"],
+            "both turns must leave a reading — the unusable one especially"
+        );
+        assert_eq!(history[0].used_tokens, Some(620_000));
+        assert_eq!(history[0].reported_window, Some(1_000_000));
+    }
+
+    /// rc3 **D21** — a participant that is ORIENTING opens no turn, completes
+    /// no turn, and does not speak to its peers.
+    ///
+    /// D21 names this the hard part and *"where this will break if rushed"*, and
+    /// the failure is specific: during boot no turn has been handed out, so the
+    /// epoch cell still reads its initial `0` and `last_completed_epoch` is
+    /// `None`. D24's straggler guard cannot see that — `Some(0) != None` — so
+    /// the pump binds epoch 0 and completes with it, and the ring discards it
+    /// forever. The session would then wait for a readiness signal that was
+    /// silently thrown away.
+    ///
+    /// Three assertions, one per thing boot must change. Note what this does
+    /// NOT pin: the `!cfg.is_booting()` guard on the epoch BIND is invisible
+    /// here, because the completion arm is guarded separately, so no
+    /// `TurnComplete` is emitted either way. That guard is pinned by
+    /// `a_participant_still_booting_when_the_ring_starts_binds_the_real_epoch`
+    /// below — verified by deleting it and watching only that test redden.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_booting_participant_reports_readiness_instead_of_completing_a_turn() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        // The cell as it actually is before the ring starts: nothing handed out.
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(0)));
+        cfg.booting = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+        let (boot_tx, mut boot_rx) = mpsc::channel::<i64>(4);
+        cfg.boot_done = Some(boot_tx);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Text("CL loaded for bot-hq".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+
+        // 1. Readiness reaches the host, carrying who is ready.
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), boot_rx.recv())
+                .await
+                .expect("the pump never reported that boot finished"),
+            Some(1),
+        );
+        // 2. And NOT as a turn completion. An epoch-0 completion is the
+        //    discarded-forever case; the ring must not see one at all.
+        assert!(
+            next_turn_end(&mut ring_rx).is_none(),
+            "boot must not report a turn completion — epoch 0 was never issued"
+        );
+        // 3. What it said while orienting is a `boot` row, so `channel_page`
+        //    keeps it out of every peer's backlog while the user still sees it.
+        let kinds: Vec<String> = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.content == "CL loaded for bot-hq")
+            .map(|m| m.kind)
+            .collect();
+        assert_eq!(kinds, vec![MessageKind::Boot.as_str().to_string()]);
+
+        drop(ev_tx);
+        let _ = task.await;
+    }
+
+    /// **A pump that dies HOLDING a turn fills the halt slot.**
+    ///
+    /// Clearing busy on the way out was only half the unwind: the RING still had
+    /// this participant as its holder, waiting on a completion from a process
+    /// that no longer exists, and it steps on nothing else. What the session
+    /// showed was a red health dot and an empty halt slot — idle, unflagged, and
+    /// indistinguishable from a session that had simply finished. The idle nudge
+    /// could not cover it either, because for most of that window the flag still
+    /// read Busy.
+    ///
+    /// Declared under the agent's OWN slug, not "system", because only the
+    /// HOLDER declaring ends the turn in flight (rc3 D35) — the same call the
+    /// error-streak halt above makes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pump_that_dies_holding_a_turn_declares_the_halt() {
+        let (storage, state) = setup().await;
+        let (mut cfg, _ring_rx) = cfg_with_ring("hands");
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(4)));
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        // One event binds the epoch — from here the pump is holding a turn.
+        ev_tx.send(AgentEvent::Text("half a thought".into())).await.unwrap();
+        // And the process dies with the turn still open.
+        ev_tx
+            .send(AgentEvent::Exited("provider limit".into()))
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let halt = storage.session_halt("s1").await.unwrap();
+        assert!(
+            halt.as_ref().is_some_and(|(by, reason, _)| by == "hands"
+                && reason.contains("stopped mid-turn")
+                && reason.contains("provider limit")),
+            "a pump that died holding a turn left the slot empty: {halt:?}"
+        );
+    }
+
+    /// The other half, and the one that keeps the declaration honest: a pump
+    /// that ends BETWEEN turns has nothing to unwind, and a halt there would
+    /// banner every ordinary shutdown — including the close path, which kills
+    /// every agent on purpose.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pump_that_ends_between_turns_declares_nothing() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(4)));
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Text("done".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        // The completion clears the epoch, so the pump holds nothing when it
+        // stops.
+        let mut ended = None;
+        for _ in 0..200 {
+            ended = next_turn_end(&mut ring_rx);
+            if ended.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(ended.is_some(), "the turn completed");
+        drop(ev_tx);
+        task.await.unwrap();
+
+        assert!(
+            storage.session_halt("s1").await.unwrap().is_none(),
+            "a pump with no turn in flight must not declare a halt on its way out"
+        );
+    }
+
+    /// The other half: with boot OVER, the pump behaves exactly as it always
+    /// did. Without this the guard above could be a deletion rather than a
+    /// guard, and every turn in the session would report readiness to nobody.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_participant_that_has_finished_booting_completes_turns_normally() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(7)));
+        // Wired, but CLEARED — the state the session is in from turn one on.
+        cfg.booting = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let (boot_tx, mut boot_rx) = mpsc::channel::<i64>(4);
+        cfg.boot_done = Some(boot_tx);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Text("working".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(
+            next_epoch(&mut ring_rx).await,
+            7,
+            "a cleared boot flag must leave the epoch binding untouched"
+        );
+        assert!(
+            boot_rx.try_recv().is_err(),
+            "readiness is a boot-only signal; a normal turn must not send one"
+        );
+        assert_eq!(turn_bodies(&storage).await, vec!["working"], "and its prose is `text`");
+
+        drop(ev_tx);
+        let _ = task.await;
+    }
+
+    /// The BOOT TIMEOUT path, which is where D21's hard part actually bites.
+    ///
+    /// D21 §4: the ring starts *"when every participant has finished orienting —
+    /// or a timeout fires, because one slow agent must not hold the session"*.
+    /// So a participant CAN still be mid-boot when the ring hands out turn one,
+    /// and that is the case the epoch-bind guard exists for.
+    ///
+    /// Without it the pump binds `turn_epoch = Some(0)` on its first boot event.
+    /// `turn_epoch` is only re-read when it is `None`, so when the real turn
+    /// arrives the pump is still holding 0 — and every completion from then on
+    /// carries an epoch the ring never issued and discards. That is the
+    /// `s-206e8921` wedge exactly, reached through boot instead of through a
+    /// straggler.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_participant_still_booting_when_the_ring_starts_binds_the_real_epoch() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let booting = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        cfg.turn_epoch = Some(Arc::clone(&cell));
+        cfg.booting = Some(Arc::clone(&booting));
+        let (boot_tx, _boot_rx) = mpsc::channel::<i64>(4);
+        cfg.boot_done = Some(boot_tx);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        // A slow agent: it has SAID something while orienting but has not
+        // finished. No `turn_end`.
+        ev_tx.send(AgentEvent::Text("still reading the CL".into())).await.unwrap();
+
+        // **Wait for that event to be PROCESSED before the ring moves**, or the
+        // test proves nothing: `send` only queues, so flipping the cell first
+        // would have the pump read the new epoch when it finally got here and
+        // the race this exists to catch would never happen. The same trap the
+        // D24 test below documents; the persisted row is the synchronisation
+        // point.
+        for _ in 0..200 {
+            let rows = storage.messages_for_session("s1", None).await.unwrap();
+            if rows.iter().any(|m| m.content == "still reading the CL") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // The timeout fires: boot ends and the ring hands out turn one.
+        booting.store(false, std::sync::atomic::Ordering::Release);
+        cell.store(1, std::sync::atomic::Ordering::Release);
+
+        ev_tx.send(AgentEvent::Text("now working".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+
+        assert_eq!(
+            next_epoch(&mut ring_rx).await,
+            1,
+            "a participant caught mid-boot by the timeout must complete on the epoch \
+             it was actually handed — carrying 0 here is the s-206e8921 wedge"
+        );
+
+        drop(ev_tx);
+        let _ = task.await;
+    }
+
+    /// rc3 **D24** — the wedge that killed `s-206e8921`.
+    ///
+    /// A pump binds its turn to the epoch cell on the first event after a
+    /// completion. If that event is a STRAGGLER — output from the turn that just
+    /// ended, arriving before the ring has handed out another — the cell still
+    /// reads the epoch just completed, and the next real turn inherits it. Every
+    /// completion from then on carries a retired number, is discarded by the
+    /// sequencer's guard, and the ring can never step past a participant it is
+    /// waiting on. Nothing recovers it; the session stops for good.
+    ///
+    /// Observed live: completed at 03:56:01 carrying epoch 9, handed epoch 11 at
+    /// 03:56:28, completed again at 04:01:51 **still carrying 9**.
+    ///
+    /// Delete the `last_completed_epoch` guard and the last assertion here reads
+    /// 9 — which is the wedge, reproduced.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_straggler_after_a_completed_turn_does_not_bind_the_next_one() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(9));
+        cfg.turn_epoch = Some(Arc::clone(&cell));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        // Turn one, on epoch 9.
+        ev_tx.send(AgentEvent::Text("working".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(
+            next_epoch(&mut ring_rx).await,
+            9,
+            "the turn in flight completes on the epoch it was handed"
+        );
+
+        // **The straggler.** One more event, before the ring hands anything out —
+        // the cell has not moved. This must NOT open a turn on epoch 9.
+        //
+        // **And it has to be PROCESSED before the cell moves**, or the test
+        // proves nothing: `send` only queues, so storing 11 first would have the
+        // pump read 11 when it eventually gets here and the race would never
+        // happen. An earlier draft did exactly that and passed with the guard
+        // deleted. Waiting for the row the straggler persists is the barrier —
+        // the pump cannot have written it without having run the binding code
+        // above it.
+        ev_tx.send(AgentEvent::Text("a late word".into())).await.unwrap();
+        for _ in 0..200 {
+            let rows = storage.messages_for_session("s1", None).await.unwrap();
+            if rows.iter().any(|m| m.content.contains("a late word")) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // Only now does the ring hand out the next turn: the cell moves to 11.
+        cell.store(11, std::sync::atomic::Ordering::Release);
+        ev_tx.send(AgentEvent::Text("turn two".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+
+        drop(ev_tx);
+        task.await.unwrap();
+        assert_eq!(
+            next_epoch(&mut ring_rx).await,
+            11,
+            "the second turn completes on the epoch the RING handed it, not on the \
+             one a straggler bound it to"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn errored_turn_still_ends_the_turn_ring_side() {
+        // Regression (Rain on the DeepSeek gateway, 2026-05-29): a turn that ends
+        // in an API error must not bounce to the peer: the peer replies, and that
+        // re-triggers the failing agent — an unbounded error-spam loop.
+        //
+        // **Under the ring this assertion inverts, and that is the point.** The
+        // router was told "do not forward"; the sequencer must still be told the
+        // turn ENDED, or the cycle freezes on this participant forever. The loop
+        // is prevented by the ending being `done: false` with no prose row to
+        // wake anyone with — not by withholding the completion.
+        let (storage, state) = setup().await;
+        let (cfg, mut ring_rx) = cfg_with_ring("eyes");
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        let err = "API Error: 400 Failed to deserialize the JSON body into the \
+                   target type: messages[17].role: unknown variant `system`, \
+                   expected `user` or `assistant` at line 1 column 49275";
+        ev_tx.send(AgentEvent::Text(err.into())).await.unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: Some("error_during_execution".into()),
+                is_error: true,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+
+        drop(ev_tx);
+        task.await.unwrap();
+        assert!(
+            next_turn_end(&mut ring_rx).is_some(),
+            "an errored turn must still report its end, or the ring never steps past it"
+        );
+        // Persisted for UI visibility even though not forwarded — AND (F11)
+        // followed by one system row saying the turn was discarded, so the
+        // error text no longer reads as the agent's only word on the matter
+        // and the loss is visible to the user and the peer.
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(msgs.len(), 2, "the error text and the discarded-turn notice: {msgs:?}");
+        assert!(msgs[0].content.contains("API Error"));
+        assert_eq!(msgs[1].kind, "system_notice");
+        assert!(msgs[1].content.contains("eyes's turn ended in an error and was discarded"), "got: {}", msgs[1].content);
+        assert!(msgs[1].content.contains("unknown variant `system`"), "the notice carries the last line");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn back_to_back_errored_turns_declare_a_visible_halt() {
+        // s-f6a441ff: a 2.9 MB paste blew both participants' context windows;
+        // every dealt turn ended "Prompt is too long", the ring stepped past
+        // each one (a single errored turn is survivable by design — the test
+        // above), and the volley ran 11 error turns across 5 minutes before
+        // the text-repeat net halted the cycle SILENTLY. Two errored turns in
+        // a row from one pump = this participant cannot work: the pump fills
+        // the session's halt slot so the stop has a banner, not a shrug.
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        let send_error_turn = |ev_tx: mpsc::Sender<AgentEvent>| async move {
+            ev_tx
+                .send(AgentEvent::Text("Prompt is too long".into()))
+                .await
+                .unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: Some("error_during_execution".into()),
+                    is_error: true,
+                    api_error_status: None,
+                    context: ContextReport::none(ContextVerdict::NoWindow),
+                })
+                .await
+                .unwrap();
+        };
+
+        // Turn one errors. The halt write (if any) lands BEFORE the completion
+        // is reported, so once the completion is visible the absence is proof.
+        send_error_turn(ev_tx.clone()).await;
+        let mut first = None;
+        for _ in 0..200 {
+            first = next_turn_end(&mut ring_rx);
+            if first.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(first.is_some(), "the first errored turn reports its end");
+        assert!(
+            storage.session_halt("s1").await.unwrap().is_none(),
+            "ONE errored turn is survivable and must not halt the session"
+        );
+
+        // Turn two errors — the streak trips and the halt slot fills.
+        send_error_turn(ev_tx.clone()).await;
+        let mut second = None;
+        for _ in 0..200 {
+            second = next_turn_end(&mut ring_rx);
+            if second.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(second.is_some(), "the second errored turn still reports its end");
+        let halt = storage.session_halt("s1").await.unwrap();
+        assert!(
+            halt.as_ref()
+                .is_some_and(|(_, reason, _)| reason.contains("Prompt is too long")
+                    && reason.contains("failing back-to-back")),
+            "the halt slot carries the error as the visible reason: {halt:?}"
+        );
+        // rc3 D35 holds here too: a halt is SESSION state, never a tray row.
+        let tray = storage.tray_entries_for_session("s1").await.unwrap();
+        assert!(
+            !tray.iter().any(|q| q.kind == "halt"),
+            "the error halt writes no tray rows: {tray:?}"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    fn usable_report(model: &str, window: u64) -> ContextReport {
+        ContextReport {
+            model: Some(model.into()),
+            used_tokens: Some(1_000),
+            reported_window: Some(window),
+            verdict: ContextVerdict::Usable,
+        }
+    }
+
+    /// 0079's companion: the registry says 1M, the CLI reports 200k — the
+    /// exact shape of 2026-09-03 (`claude-fable-5-1`, s-e919d08c). The notice
+    /// names both numbers, the model, and the fix; agreement within the
+    /// tolerance, a missing registry value, or an unusable reading say nothing.
+    #[test]
+    fn window_mismatch_notice_fires_on_a_real_disagreement_only() {
+        let n = window_mismatch_notice("hands", Some(1_000_000), &usable_report("claude-fable-5-1", 200_000))
+            .expect("200k against a 1M row is a mismatch");
+        for needle in ["hands", "200000", "1000000", "claude-fable-5-1", "modelOverrides", "Settings → Models"] {
+            assert!(n.contains(needle), "notice lacks {needle:?}: {n}");
+        }
+        // A provider rounding to a power of two is not a misconfiguration.
+        assert!(window_mismatch_notice("hands", Some(1_000_000), &usable_report("m", 1_048_576)).is_none());
+        // Exactly at the tolerance edge stays quiet; one token past it speaks.
+        assert!(window_mismatch_notice("hands", Some(1_000_000), &usable_report("m", 800_000)).is_none());
+        assert!(window_mismatch_notice("hands", Some(1_000_000), &usable_report("m", 799_999)).is_some());
+        // Nothing to compare against, or nothing usable to compare.
+        assert!(window_mismatch_notice("hands", None, &usable_report("m", 200_000)).is_none());
+        assert!(window_mismatch_notice("hands", Some(0), &usable_report("m", 200_000)).is_none());
+        assert!(window_mismatch_notice("hands", Some(1_000_000), &ContextReport::none(ContextVerdict::NoWindow)).is_none());
+    }
+
+    fn reading(used: u64, window: u64) -> ContextReport {
+        ContextReport {
+            model: Some("m".into()),
+            used_tokens: Some(used),
+            reported_window: Some(window),
+            verdict: ContextVerdict::Usable,
+        }
+    }
+
+    /// F2d (week 35): one row per band, ratcheted, never re-armed by a
+    /// compaction; nothing on an unusable reading or a zero window (EYES R2 —
+    /// the non-zero promise is a doc comment, and this table builds the report
+    /// field-wise exactly as a caller could).
+    #[test]
+    fn context_threshold_notice_fires_once_per_band_and_never_re_arms() {
+        let mut band = 0u8;
+        assert!(context_threshold_notice("hands", &reading(84, 100), &mut band).is_none());
+        assert_eq!(band, 0);
+        let n = context_threshold_notice("hands", &reading(850_000, 1_000_000), &mut band)
+            .expect("85 % crosses the first band");
+        for needle in ["hands", "85 %", "850000", "1000000", "hand off", "does not repeat"] {
+            assert!(n.contains(needle), "notice lacks {needle:?}: {n}");
+        }
+        assert!(!n.contains("Write your"), "a state line, not an instruction: {n}");
+        assert_eq!(band, 85);
+        // The same band again says nothing.
+        assert!(context_threshold_notice("hands", &reading(86, 100), &mut band).is_none());
+        // The next band speaks once.
+        let n = context_threshold_notice("hands", &reading(95, 100), &mut band).expect("95 % is the second band");
+        assert!(n.contains("95 %"), "got: {n}");
+        assert_eq!(band, 95);
+        // A compaction drops the meter; climbing back does NOT re-arm.
+        assert!(context_threshold_notice("hands", &reading(50, 100), &mut band).is_none());
+        assert!(context_threshold_notice("hands", &reading(96, 100), &mut band).is_none());
+        assert_eq!(band, 95, "the latch never lowers");
+        // A fresh latch that lands straight at 97 % announces the 95 band only.
+        let mut fresh = 0u8;
+        let n = context_threshold_notice("eyes", &reading(97, 100), &mut fresh).unwrap();
+        assert!(n.contains("97 %") && n.starts_with("⚠ eyes"), "got: {n}");
+        assert_eq!(fresh, 95);
+        // Nothing usable, or a zero window, says nothing and moves nothing.
+        let mut quiet = 0u8;
+        assert!(context_threshold_notice("hands", &ContextReport::none(ContextVerdict::NoWindow), &mut quiet).is_none());
+        assert!(context_threshold_notice("hands", &reading(90, 0), &mut quiet).is_none());
+        assert_eq!(quiet, 0);
+    }
+
+    /// The wire: a completed turn at 90 % leaves exactly one system row in the
+    /// channel naming the band, and a second turn at the same band leaves no
+    /// more. Deleting the `context_threshold_notice` call at the reading site
+    /// turns this red.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_turn_past_85_percent_posts_one_context_notice_row() {
+        let (storage, state) = setup().await;
+        let (cfg, _ring_rx) = cfg_with_ring("hands");
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        for used in [900_000u64, 910_000] {
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: Some("success".into()),
+                    is_error: false,
+                    api_error_status: None,
+                    context: reading(used, 1_000_000),
+                })
+                .await
+                .unwrap();
+        }
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let notices: Vec<String> = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == MessageKind::SystemNotice.as_str() && m.content.contains("context is at"))
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(notices.len(), 1, "one row for the 85 band, none for the repeat: {notices:?}");
+        assert!(notices[0].contains("hands's context is at 90 %"), "got: {}", notices[0]);
+    }
+
+    /// Round 12 (the user's Q3): the transient-error classifier — specific
+    /// tokens, word-bounded codes beside an HTTP shape, and nothing that a
+    /// permanent failure merely mentions (EYES F17/F20).
+    #[test]
+    fn transient_error_matches_network_failures_and_not_their_look_alikes() {
+        for yes in [
+            "fetch failed",
+            "API Error: 503 Service Unavailable",
+            "Error: upstream returned HTTP 529",
+            "request to https://api.anthropic.com failed, reason: ECONNRESET",
+            "getaddrinfo ENOTFOUND api.anthropic.com",
+            "connect ETIMEDOUT 1.2.3.4:443",
+            "the upstream is overloaded right now",
+            "error: status 502 from the gateway",
+        ] {
+            assert!(transient_error(yes), "should retry: {yes:?}");
+        }
+        for no in [
+            "Prompt is too long",
+            "compilation failed: 503 errors",
+            "at commit 529a1b2c the build broke",
+            "listening on port 5030",
+            "the request timed out waiting for the user",
+            "network share unmounted",
+            "Error 4043: bad request",
+            "",
+        ] {
+            assert!(!transient_error(no), "must not retry: {no:?}");
+        }
+    }
+
+    /// Round 12 (the user's Q3): a transient errored turn RETRIES instead of
+    /// counting toward the two-strike halt — a notice row at once, then after
+    /// the ladder's wait a nudge row and a `Summon` for this participant; the
+    /// ring still sees the turn end. After the ladder is spent the next
+    /// transient failure halts, and the banner says the retries happened.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_transient_errored_turn_retries_before_it_halts() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        let send_error_turn = |ev_tx: mpsc::Sender<AgentEvent>| async move {
+            ev_tx
+                .send(AgentEvent::Text("API Error: 503 Service Unavailable".into()))
+                .await
+                .unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: Some("error_during_execution".into()),
+                    is_error: true,
+                    api_error_status: None,
+                    context: ContextReport::none(ContextVerdict::NoWindow),
+                })
+                .await
+                .unwrap();
+        };
+
+        for attempt in 1..=3usize {
+            send_error_turn(ev_tx.clone()).await;
+            // The turn still ends ring-side.
+            match next_wire(&mut ring_rx).await {
+                crate::core::sequencer::SequencerCommand::TurnComplete { .. } => {}
+                other => panic!("expected TurnComplete, got {other:?}"),
+            }
+            // …and after the (30 ms test) ladder wait, the retry: a Summon.
+            match next_wire(&mut ring_rx).await {
+                crate::core::sequencer::SequencerCommand::Summon { participant_id } => {
+                    assert_eq!(participant_id, 1)
+                }
+                other => panic!("attempt {attempt}: expected Summon, got {other:?}"),
+            }
+            assert!(
+                storage.session_halt("s1").await.unwrap().is_none(),
+                "attempt {attempt}: a transient error retries, it does not halt"
+            );
+        }
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        let notices: Vec<&str> = rows
+            .iter()
+            .filter(|m| m.kind == "system_notice")
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(
+            notices.iter().filter(|n| n.contains("retrying")).count(),
+            3,
+            "one notice per retry: {notices:?}"
+        );
+        assert!(
+            notices.iter().any(|n| n.contains("attempt 1/3") && n.contains("halting after the third")),
+            "the notice names the ladder position: {notices:?}"
+        );
+        assert_eq!(
+            notices.iter().filter(|n| n.contains("still stands")).count(),
+            3,
+            "one nudge row per retry, for the summoned participant to read: {notices:?}"
+        );
+
+        // The ladder is spent: the fourth transient failure halts, saying so.
+        send_error_turn(ev_tx.clone()).await;
+        match next_wire(&mut ring_rx).await {
+            crate::core::sequencer::SequencerCommand::TurnComplete { .. } => {}
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+        let halt = storage.session_halt("s1").await.unwrap();
+        assert!(
+            halt.as_ref().is_some_and(|(_, reason, _)| {
+                reason.contains("failing back-to-back") && reason.contains("3 transient-error retries")
+            }),
+            "after the ladder the transient failure halts, and the banner says the retries happened: {halt:?}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), ring_rx.recv()).await.is_err(),
+            "no fourth Summon — the ladder is spent"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    /// A clean turn resets the ladder: after one transient retry and a good
+    /// turn, the count starts over (three more retries before the halt).
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_clean_turn_resets_the_retry_ladder() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+        let error_turn = |ev_tx: mpsc::Sender<AgentEvent>| async move {
+            ev_tx.send(AgentEvent::Text("fetch failed".into())).await.unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: Some("error_during_execution".into()),
+                    is_error: true,
+                    api_error_status: None,
+                    context: ContextReport::none(ContextVerdict::NoWindow),
+                })
+                .await
+                .unwrap();
+        };
+        // Three retries, then a clean turn, then three MORE retries before a halt.
+        for _ in 0..3 {
+            error_turn(ev_tx.clone()).await;
+            assert!(matches!(next_wire(&mut ring_rx).await, crate::core::sequencer::SequencerCommand::TurnComplete { .. }));
+            assert!(matches!(next_wire(&mut ring_rx).await, crate::core::sequencer::SequencerCommand::Summon { .. }));
+        }
+        ev_tx.send(AgentEvent::Text("ok, continuing".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert!(matches!(next_wire(&mut ring_rx).await, crate::core::sequencer::SequencerCommand::TurnComplete { .. }));
+        for _ in 0..3 {
+            error_turn(ev_tx.clone()).await;
+            assert!(matches!(next_wire(&mut ring_rx).await, crate::core::sequencer::SequencerCommand::TurnComplete { .. }));
+            assert!(matches!(next_wire(&mut ring_rx).await, crate::core::sequencer::SequencerCommand::Summon { .. }));
+            assert!(storage.session_halt("s1").await.unwrap().is_none(), "the ladder restarted after the clean turn");
+        }
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn interrupted_turns_do_not_count_toward_the_errored_streak() {
+        // 2026-08-17: a user Pause and the agent's own `halt` (D35 interrupts
+        // the declarer) both end the turn `is_error:true`, exactly like an API
+        // failure — and the streak above fired its "failing back-to-back …
+        // close the session" halt three times that day, every one over ordinary
+        // prose, each time REPLACING the reason the agent had just declared.
+        // The complement of the test above: two host-interrupted completions
+        // in a row must NOT fill the halt slot, and a genuine streak after them
+        // still must.
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        // The ring's epoch cell for this participant, and the interrupt stamp
+        // `SessionAgent::interrupt` writes into the handle's cell — both wired
+        // exactly as `spawn_session_handle` wires them.
+        let epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let interrupted = Arc::new(std::sync::atomic::AtomicU64::new(
+            crate::agents::NO_INTERRUPT_EPOCH,
+        ));
+        cfg.turn_epoch = Some(Arc::clone(&epoch));
+        cfg.interrupted_epoch = Arc::clone(&interrupted);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        // A turn: the ring hands epoch N out (cell moves), the agent speaks
+        // (the pump binds N on that first event), then the turn ends
+        // `is_error:true`. `interrupt_at` is `Some(N)` when bot-hq interrupted
+        // it mid-turn — the stamp `SessionAgent::interrupt` writes.
+        let aborted_turn = |ev_tx: mpsc::Sender<AgentEvent>,
+                            epoch: Arc<std::sync::atomic::AtomicU64>,
+                            interrupted: Arc<std::sync::atomic::AtomicU64>,
+                            n: u64,
+                            interrupt_at: Option<u64>| async move {
+            epoch.store(n, std::sync::atomic::Ordering::Release);
+            ev_tx
+                .send(AgentEvent::Text(format!("ordinary prose of turn {n}")))
+                .await
+                .unwrap();
+            // Let the pump bind the epoch on the text before the interrupt lands.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if let Some(at) = interrupt_at {
+                interrupted.store(at, std::sync::atomic::Ordering::Release);
+            }
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: Some("error_during_execution".into()),
+                    is_error: true,
+                    api_error_status: None,
+                    context: ContextReport::none(ContextVerdict::NoWindow),
+                })
+                .await
+                .unwrap();
+        };
+        // Turn 5: Pause. Turn 6: the agent's own halt. Both interrupted by
+        // bot-hq, both `is_error`, back to back.
+        aborted_turn(ev_tx.clone(), Arc::clone(&epoch), Arc::clone(&interrupted), 5, Some(5)).await;
+        assert!(wait_turn_end(&mut ring_rx).await.is_some(), "an interrupted turn still reports its end");
+        aborted_turn(ev_tx.clone(), Arc::clone(&epoch), Arc::clone(&interrupted), 6, Some(6)).await;
+        assert!(wait_turn_end(&mut ring_rx).await.is_some());
+        assert!(
+            storage.session_halt("s1").await.unwrap().is_none(),
+            "two turns bot-hq interrupted itself are not a streak of failures — the \
+             halt slot must stay empty (this is the false banner of 2026-08-17)"
+        );
+
+        // A stale stamp cannot hide a real error: turns 7 and 8 fail for real
+        // (nobody interrupted them; the stamp still reads 6) — the streak
+        // trips exactly as before this change.
+        aborted_turn(ev_tx.clone(), Arc::clone(&epoch), Arc::clone(&interrupted), 7, None).await;
+        assert!(wait_turn_end(&mut ring_rx).await.is_some());
+        assert!(
+            storage.session_halt("s1").await.unwrap().is_none(),
+            "one genuine error is survivable"
+        );
+        aborted_turn(ev_tx.clone(), Arc::clone(&epoch), Arc::clone(&interrupted), 8, None).await;
+        assert!(wait_turn_end(&mut ring_rx).await.is_some());
+        let halt = storage.session_halt("s1").await.unwrap();
+        assert!(
+            halt.as_ref()
+                .is_some_and(|(_, reason, _)| reason.contains("failing back-to-back")),
+            "two GENUINE errors in a row still fill the halt slot: {halt:?}"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn text_ends_the_turn_only_on_turn_complete() {
+        // I/P is turn-based: text does NOT end the turn mid-stream; the pump tells
+        // the ring the turn ended exactly once, on TurnComplete.
+        let (storage, state) = setup().await; // default phase = Investigate
+        let (cfg, mut ring_rx) = cfg_with_ring("hands");
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Text("hello".into())).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            next_turn_end(&mut ring_rx).is_none(),
+            "must not end the turn mid-stream (before TurnComplete)"
+        );
+
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let ending = next_turn_end(&mut ring_rx).expect("the turn end must reach the ring");
+        assert!(
+            matches!(ending, crate::core::sequencer::TurnEnding::Spoke),
+            "a substantive turn is not a done-vote — the cycle must continue: {ending:?}"
+        );
+        // The prose is a row now; `from` is implicit in the participant the
+        // completion carries, so there is no author field on this wire to check.
+        let bodies = turn_bodies(&storage).await;
+        assert!(bodies.iter().any(|b| b.contains("hello")));
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].author, "hands");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn apply_phase_hands_over_once_per_turn() {
+        let (storage, state) = setup().await;
+        state.lock().await.current_phase = IpavPhase::Apply;
+
+        let (cfg, mut ring_rx) = cfg_with_ring("hands");
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Text("step 1".into())).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            next_turn_end(&mut ring_rx).is_none(),
+            "no turn end mid-stream in Apply"
+        );
+
+        ev_tx.send(AgentEvent::Text("step 2".into())).await.unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: Some("end_turn".into()),
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        assert!(
+            next_turn_end(&mut ring_rx).is_some(),
+            "the turn end must reach the ring"
+        );
+        // What coalescing MEANS changed with the transport, so the assertion had
+        // to move rather than be dropped. The router coalesced a turn's text into
+        // one Forward so the peer was woken once; the ring gets that structurally
+        // — one turn is one handover however many Text events it carried. So the
+        // surviving property is that the ring stepped EXACTLY once.
+        assert!(
+            next_turn_end(&mut ring_rx).is_none(),
+            "one turn must hand over once, however many text events it carried"
+        );
+        // Each Text event still gets its own row: the user reads the turn as it
+        // arrives, and the peer reads the same rows off its cursor.
+        let bodies = turn_bodies(&storage).await;
+        assert!(bodies.iter().any(|b| b.contains("step 1")));
+        assert!(bodies.iter().any(|b| b.contains("step 2")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn turn_complete_ends_the_turn() {
+        let (storage, state) = setup().await;
+        let (cfg, mut ring_rx) = cfg_with_ring("hands");
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        ev_tx.send(AgentEvent::Text("quick".into())).await.unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: Some("end_turn".into()),
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        assert!(
+            next_turn_end(&mut ring_rx).is_some(),
+            "the turn end must reach the ring"
+        );
+        let bodies = turn_bodies(&storage).await;
+        assert!(bodies.iter().any(|b| b.contains("quick")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tool_use_persists_but_does_not_end_the_turn() {
+        let (storage, state) = setup().await;
+        let (cfg, mut ring_rx) = cfg_with_ring("hands");
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu1".into(),
+                name: "ask_user_choice".into(),
+                input: serde_json::json!({"question":"?","options":["a","b"]}),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        assert!(
+            next_turn_end(&mut ring_rx).is_none(),
+            "tool use alone does not end the turn"
+        );
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].kind, "tool_use");
+    }
+
+    #[test]
+    fn peer_ack_is_final_matrix() {
+        use serde_json::json;
+        // Only a peer_ack call with an explicit `final: true` counts.
+        assert!(peer_ack_is_final("peer_ack", &json!({"final": true})));
+        assert!(peer_ack_is_final(
+            "mcp__bot-hq-signaling__peer_ack",
+            &json!({"final": true})
+        ));
+        // Default / absent / false → the length proxy still governs.
+        assert!(!peer_ack_is_final("peer_ack", &json!({})));
+        assert!(!peer_ack_is_final("peer_ack", &json!({"final": false})));
+        // A non-peer_ack tool can't assert finality no matter what it passes.
+        assert!(!peer_ack_is_final("Bash", &json!({"final": true})));
+        // Non-boolean `final` is not a truthy opt-in — don't coerce.
+        assert!(!peer_ack_is_final("peer_ack", &json!({"final": "yes"})));
+        assert!(!peer_ack_is_final("peer_ack", &json!({"final": 1})));
+    }
+
+    #[test]
+    fn is_peer_ack_tool_matches_bare_and_prefixed() {
+        // Bare alias (tests) + the real MCP-prefixed wire name both match.
+        assert!(is_peer_ack_tool("peer_ack"));
+        assert!(is_peer_ack_tool("mcp__bot-hq-signaling__peer_ack"));
+        // Other tools + near-misses without the MCP `__` separator do NOT match.
+        assert!(!is_peer_ack_tool("ask_user_choice"));
+        assert!(!is_peer_ack_tool("Edit"));
+        assert!(!is_peer_ack_tool("keeper_ack"));
+        assert!(!is_peer_ack_tool("speer_ack"));
+    }
+
+    #[test]
+    fn is_pass_turn_tool_matches_bare_and_prefixed() {
+        // Bare alias (tests) + the real MCP-prefixed wire name both match.
+        assert!(is_pass_turn_tool("pass_turn"));
+        assert!(is_pass_turn_tool("mcp__bot-hq-signaling__pass_turn"));
+        // Near-misses. `bypass_turn` is the one that matters: a `contains`
+        // check would read it as a pass and silently throw the turn away.
+        assert!(!is_pass_turn_tool("bypass_turn"));
+        assert!(!is_pass_turn_tool("pass_turn_v2"));
+        assert!(!is_pass_turn_tool("peer_ack"));
+        assert!(!is_pass_turn_tool("Edit"));
+    }
+
+    /// A pass is a ROW plus a completion, and the row lands FIRST.
+    ///
+    /// Both halves are the slice's contract. The row is what makes the pass
+    /// visible (design §1) and it carries `origin = 'participant'` (rc3
+    /// decisions, locked) — asserted here through `unread_for_participant`,
+    /// which is the peer's real read path, so the row is proven visible to the
+    /// other participant and not merely present in a table.
+    ///
+    /// **The ordering is enforced by a channel with no room left**, which is
+    /// what makes it an assertion rather than a hope. The sequencer channel is
+    /// pre-filled to capacity, so the pump's completion send PARKS. If the row
+    /// were written after the send, the pump would be parked before writing it
+    /// and the poll below would time out; the row appearing while the
+    /// completion is still un-enqueued is the proof it was written first.
+    ///
+    /// That ordering is not cosmetic: the completion is what steps the ring,
+    /// and the sequencer reads the next participant's backlog straight out of
+    /// storage. Written after the send, the insert races that read, and the
+    /// losing side surfaces the pass a round late.
+    /// **The resume chain, through the one function that joins it** (rc3 D10).
+    ///
+    /// An agent's claude-code conversation id used to be stored in one of two
+    /// `sessions` columns picked by a `match agent { "brian" => …, "rain" => …,
+    /// other => bail }`. Under role-derived slugs every write would have hit the
+    /// `bail` arm and been dropped — silently, because the site only `warn`s —
+    /// and every respawn would start blank with a cold cache.
+    ///
+    /// Pinned through the PUMP rather than on `set_participant_claude_id`,
+    /// because the storage call and the `Init` handler are the two halves and it
+    /// was the join that broke: the setter alone would be green with nothing
+    /// calling it.
+    #[tokio::test]
+    async fn an_init_event_persists_the_resume_id_on_the_participants_own_row() {
+        let (storage, state) = setup().await;
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let eyes = storage
+            .participant_by_slug("s1", "eyes")
+            .await
+            .unwrap()
+            .expect("the seeded reviewer")
+            .id;
+        // Not slot 0, on purpose: the old two-column writer would have put a
+        // slot-1 id in the wrong column had it been keyed positionally.
+        let cfg = PumpConfig { participant_id: Some(eyes), ..fast_cfg("eyes") };
+
+        let (ev_tx, ev_rx) = mpsc::channel(4);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+        ev_tx
+            .send(AgentEvent::Init { session_id: Some("cc-uuid-42".into()) })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let roster = storage.participants_for_session("s1").await.unwrap();
+        let reviewer = roster.iter().find(|p| p.id == eyes).unwrap();
+        assert_eq!(
+            reviewer.claude_session_id.as_deref(),
+            Some("cc-uuid-42"),
+            "the resume id must land on this participant's own row"
+        );
+        // And nobody else's — a mis-keyed write would resume the wrong
+        // conversation into the wrong agent.
+        assert!(
+            roster.iter().filter(|p| p.id != eyes).all(|p| p.claude_session_id.is_none()),
+            "the id leaked onto another participant"
+        );
+        // The spawn path reads exactly this to decide `--resume` vs a cold
+        // start, so the round trip is what makes it load-bearing.
+        assert!(
+            roster.iter().any(|p| p.claude_session_id.is_some()),
+            "spawn would treat this as a first spawn and lose the warm cache"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pass_posts_its_row_before_the_completion_goes_out() {
+        let (storage, state) = setup().await;
+        // `create_session` seeds no roster; the participants have to exist for
+        // the row to resolve to one.
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let hands = storage
+            .participant_by_slug("s1", "hands")
+            .await
+            .unwrap()
+            .expect("ensure_session_roster seeds hands")
+            .id;
+        let eyes = storage
+            .participant_by_slug("s1", "eyes")
+            .await
+            .unwrap()
+            .expect("ensure_session_roster seeds eyes")
+            .id;
+
+        let (seq_tx, mut seq_rx) = mpsc::channel(1);
+        // The one slot, spent. Anything the pump sends now has to wait.
+        seq_tx
+            .send(crate::core::sequencer::SequencerCommand::UserMessage {
+                mentions: Vec::new(),
+                restarts_rotation: true,
+            })
+            .await
+            .unwrap();
+        let cfg = PumpConfig {
+            participant_id: Some(hands),
+            sequencer_tx: Some(seq_tx),
+            ..fast_cfg("hands")
+        };
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_pass".into(),
+                name: "mcp__bot-hq-signaling__pass_turn".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+
+        // Wait for the row WHILE the completion cannot yet be delivered.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let row = loop {
+            let unread = storage.unread_for_participant(eyes).await.unwrap();
+            if let Some(r) = unread.rows.iter().find(|r| r.content.contains("passed")) {
+                break r.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no pass row within 2s — the pump is parked on the full sequencer \
+                 channel, which means the completion was sent before the row was written"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(row.origin, "participant", "rc3: a pass row is the participant's");
+        assert_eq!(row.participant_id, Some(hands), "and attributed to the passer");
+        assert_eq!(row.kind, "text");
+
+        // Now let the completion through and read what it says.
+        assert!(matches!(
+            next_wire(&mut seq_rx).await,
+            crate::core::sequencer::SequencerCommand::UserMessage { .. }
+        ));
+        match next_wire(&mut seq_rx).await {
+            crate::core::sequencer::SequencerCommand::TurnComplete {
+                participant_id,
+                ending,
+                ..
+            } => {
+                assert_eq!(participant_id, hands);
+                assert_eq!(
+                    ending,
+                    crate::core::sequencer::TurnEnding::Passed,
+                    "the tool has to reach the ring as a PASS, not a done vote"
+                );
+            }
+            other => panic!("expected a TurnComplete, got {other:?}"),
+        }
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    /// A turn that calls `pass_turn` and then writes a substantive review is
+    /// NOT a pass: the text wins, the ring is told `Spoke`, and no pass row is
+    /// posted claiming the participant had nothing to add.
+    ///
+    /// The row half matters as much as the ending. `Passed` is the one ending
+    /// that leaves other participants' done votes standing, so a review read as
+    /// a pass would both mislabel the transcript and carry a stale tally over
+    /// the top of real output.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_substantive_turn_overrides_its_own_pass() {
+        let (storage, state) = setup().await;
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let hands = storage
+            .participant_by_slug("s1", "hands")
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+
+        let (seq_tx, mut seq_rx) = mpsc::channel(8);
+        let cfg = PumpConfig {
+            participant_id: Some(hands),
+            sequencer_tx: Some(seq_tx),
+            ..fast_cfg("hands")
+        };
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        let review = format!("BLOCKING: {}", "the retry loop never backs off. ".repeat(12));
+        assert!(review.len() > 200, "the body has to clear the content-free floor");
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_pass".into(),
+                name: "pass_turn".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        ev_tx.send(AgentEvent::Text(review.clone())).await.unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        match next_wire(&mut seq_rx).await {
+            crate::core::sequencer::SequencerCommand::TurnComplete { ending, .. } => assert_eq!(
+                ending,
+                crate::core::sequencer::TurnEnding::Spoke,
+                "a turn carrying a review is substantive output, pass or no pass"
+            ),
+            other => panic!("expected a TurnComplete, got {other:?}"),
+        }
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(
+            msgs.iter().any(|m| m.content.contains("BLOCKING")),
+            "the review itself is persisted"
+        );
+        assert!(
+            !msgs.iter().any(|m| m.content.contains("nothing to add")),
+            "an overridden pass must post NO row — it would contradict the review \
+             sitting next to it"
+        );
+    }
+
+    /// The pass flag is per-turn. Turn 1 passes, turn 2 says something — and
+    /// turn 2 must not inherit the pass.
+    ///
+    /// A leaked flag is not a cosmetic bug: `Passed` leaves the tally standing,
+    /// so a substantive turn wearing a stale pass would carry votes cast before
+    /// it into the next consensus check.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_pass_flag_does_not_leak_into_the_next_turn() {
+        let (storage, state) = setup().await;
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let hands = storage
+            .participant_by_slug("s1", "hands")
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+
+        let (seq_tx, mut seq_rx) = mpsc::channel(8);
+        let cfg = PumpConfig {
+            participant_id: Some(hands),
+            sequencer_tx: Some(seq_tx),
+            ..fast_cfg("hands")
+        };
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        let complete = || AgentEvent::TurnComplete {
+            stop_reason: None,
+            subtype: None,
+            is_error: false,
+            api_error_status: None,
+            context: ContextReport::none(ContextVerdict::NoWindow),
+        };
+        // Turn 1: a bare pass.
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_pass".into(),
+                name: "pass_turn".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        ev_tx.send(complete()).await.unwrap();
+        // Turn 2: short prose, no pass. Short on purpose — it is under the
+        // content-free floor, so ONLY a leaked flag could make it a pass.
+        ev_tx.send(AgentEvent::Text("on it".into())).await.unwrap();
+        ev_tx.send(complete()).await.unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let endings: Vec<_> = std::iter::from_fn(|| match seq_rx.try_recv() {
+            Ok(crate::core::sequencer::SequencerCommand::TurnComplete { ending, .. }) => {
+                Some(ending)
+            }
+            _ => None,
+        })
+        .collect();
+        assert_eq!(
+            endings,
+            vec![
+                crate::core::sequencer::TurnEnding::Passed,
+                crate::core::sequencer::TurnEnding::Spoke
+            ],
+            "turn 2 called nothing, so it is ordinary output"
+        );
+        let passes = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.content.contains("nothing to add"))
+            .count();
+        assert_eq!(passes, 1, "exactly one pass row, from turn 1");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn peer_ack_ends_the_turn_as_a_done_vote() {
+        // peer_ack reaches the ring as the turn's ENDING — a done vote
+        // (`TurnEnding::Done`), which is what the consensus halt counts. The
+        // text is still persisted. (Under the deleted router this was a
+        // `Forward` with `peer_ack=true` that suppressed the peer wake.)
+        let (storage, state) = setup().await;
+        let (cfg, mut ring_rx) = cfg_with_ring("hands");
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        ev_tx
+            .send(AgentEvent::Text("Agreed — nothing to add.".into()))
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_ack".into(),
+                // The real wire name is MCP-prefixed.
+                name: "mcp__bot-hq-signaling__peer_ack".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let ending = next_turn_end(&mut ring_rx).expect("turn end emitted");
+        assert!(
+            matches!(ending, crate::core::sequencer::TurnEnding::Done),
+            "a content-free peer_ack turn must end the turn as a done-vote: {ending:?}"
+        );
+        // The agent's text is still persisted for the user.
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(
+            msgs.iter()
+                .any(|m| m.content.contains("Agreed — nothing to add.")),
+            "peer_ack must still persist the agent's text"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn peer_ack_flag_is_per_turn() {
+        // The peer_ack flag applies only to the turn it was called in: turn 1
+        // ends as a done vote, turn 2 (no ack) ends as an ordinary spoken turn.
+        let (storage, state) = setup().await;
+        let (cfg, mut ring_rx) = cfg_with_ring("hands");
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        // Turn 1: peer_ack.
+        ev_tx.send(AgentEvent::Text("acked".into())).await.unwrap();
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_ack".into(),
+                name: "peer_ack".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+
+        // Turn 2: no peer_ack.
+        ev_tx
+            .send(AgentEvent::Text("real follow-up".into()))
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        // Turn 1 acked → a done-vote. Turn 2 did NOT ack, so the flag must have
+        // been reset between turns; if it leaked, turn 2 would vote done too.
+        let t1 = next_turn_end(&mut ring_rx).expect("turn 1 end");
+        assert!(
+            matches!(t1, crate::core::sequencer::TurnEnding::Done),
+            "an acked turn votes done: {t1:?}"
+        );
+        let t2 = next_turn_end(&mut ring_rx).expect("turn 2 end");
+        assert!(
+            matches!(t2, crate::core::sequencer::TurnEnding::Spoke),
+            "peer_ack must not leak into the next turn: {t2:?}"
+        );
+        let bodies = turn_bodies(&storage).await;
+        assert!(bodies.iter().any(|b| b.contains("acked")));
+        assert!(bodies.iter().any(|b| b.contains("real follow-up")));
+    }
+
+    #[test]
+    fn is_atomic_command_matrix() {
+        use serde_json::json;
+        // Bash + atomic git ops / migrations → true.
+        assert!(is_atomic_command("Bash", &json!({"command": "git commit -m x"})));
+        assert!(is_atomic_command(
+            "Bash",
+            &json!({"command": "git push origin main"})
+        ));
+        assert!(is_atomic_command(
+            "Bash",
+            &json!({"command": "cd repo && git commit -F /tmp/m"})
+        ));
+        assert!(is_atomic_command("Bash", &json!({"command": "sqlx migrate run"})));
+        assert!(is_atomic_command(
+            "Bash",
+            &json!({"command": "php artisan migrate"})
+        ));
+        // action_gate: the real wire name is MCP-prefixed; a bare alias also matches.
+        assert!(is_atomic_command(
+            "mcp__bot-hq-signaling__action_gate",
+            &json!({"command": "git push"})
+        ));
+        assert!(is_atomic_command(
+            "action_gate",
+            &json!({"command": "git commit -m x"})
+        ));
+        // Non-atomic commands on a command surface → false.
+        assert!(!is_atomic_command("Bash", &json!({"command": "git status"})));
+        assert!(!is_atomic_command("Bash", &json!({"command": "ls -la"})));
+        assert!(!is_atomic_command(
+            "mcp__bot-hq-signaling__action_gate",
+            &json!({"command": "git diff"})
+        ));
+        // Non-command tool surfaces → false even with a command-ish field.
+        assert!(!is_atomic_command("Edit", &json!({"command": "git commit"})));
+        assert!(!is_atomic_command("Read", &json!({})));
+        // Missing / null command → false (no panic).
+        assert!(!is_atomic_command("Bash", &json!({})));
+        assert!(!is_atomic_command("Bash", &json!({"command": null})));
+    }
+
+    /// **The D35 self-interrupt fires on the halt tool's own RESULT** (round 8,
+    /// A1b). Fired from the `AwaitingUser` state change it raced the tool ack
+    /// and usually won, so the declarer's transcript showed its own `halt`
+    /// answered with claude-code's cancellation text. Now: the ID-matched,
+    /// non-error `ToolResult` of a `halt` / `mark_awaiting_user` call emits
+    /// `HaltAcked` (main.rs → `halt_declared` → the interrupt); an unrelated
+    /// result does not; an ERROR result does not (a halt that failed took no
+    /// effect); a stranded halt id is cleared at turn end and cannot fire on
+    /// the next turn's result. Kill-tested: drop the emit → the first case
+    /// fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_halt_declaration_is_interrupted_when_its_own_result_lands() {
+        let (storage, state) = setup().await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let mut events = bridge.subscribe();
+        let cfg = PumpConfig {
+            bridge: Some(Arc::clone(&bridge)),
+            ..fast_cfg("hands")
+        };
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(16);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+        use crate::signaling::SignalingEvent;
+        let drain_acks = |events: &mut tokio::sync::broadcast::Receiver<SignalingEvent>| {
+            let mut n = 0;
+            while let Ok(ev) = events.try_recv() {
+                if matches!(ev, SignalingEvent::HaltAcked { .. }) {
+                    n += 1;
+                }
+            }
+            n
+        };
+        let tool_use = |id: &str, name: &str| AgentEvent::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input: serde_json::json!({"reason": "waiting on the user"}),
+        };
+        let result = |id: &str, is_error: bool| AgentEvent::ToolResult {
+            tool_use_id: id.into(),
+            content: "ok".into(),
+            is_error,
+        };
+        let complete = || AgentEvent::TurnComplete {
+            stop_reason: None,
+            subtype: None,
+            is_error: false,
+            api_error_status: None,
+            context: ContextReport::none(ContextVerdict::NoWindow),
+        };
+
+        // 1. A halt call, an UNRELATED result, then ITS result → exactly one ack,
+        //    and only at the id match (not the position).
+        ev_tx.send(tool_use("tu_halt", "mcp__bot-hq-signaling__halt")).await.unwrap();
+        ev_tx.send(result("tu_other", false)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(drain_acks(&mut events), 0, "an unrelated result must not fire the interrupt");
+        ev_tx.send(result("tu_halt", false)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(drain_acks(&mut events), 1, "the halt's own result fires exactly one HaltAcked");
+
+        // 2. An ERROR result for a halt call → nothing (the halt took no effect).
+        ev_tx.send(tool_use("tu_halt2", "mcp__bot-hq-signaling__mark_awaiting_user")).await.unwrap();
+        ev_tx.send(result("tu_halt2", true)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(drain_acks(&mut events), 0, "a failed halt must not interrupt the declarer");
+
+        // 3. A stranded halt call (turn ends without its result) → cleared; the
+        //    NEXT turn's unrelated result does not fire it.
+        ev_tx.send(tool_use("tu_halt3", "halt")).await.unwrap();
+        ev_tx.send(complete()).await.unwrap();
+        ev_tx.send(result("tu_halt3", false)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(drain_acks(&mut events), 0, "a stranded halt id must be cleared at turn end");
+
+        // 4. A plain tool → nothing.
+        ev_tx.send(tool_use("tu_read", "Read")).await.unwrap();
+        ev_tx.send(result("tu_read", false)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(drain_acks(&mut events), 0, "a plain tool result is not a halt ack");
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn is_halt_tool_matches_both_declarations_bare_and_prefixed() {
+        for name in [
+            "halt",
+            "mcp__bot-hq-signaling__halt",
+            "mark_awaiting_user",
+            "mcp__bot-hq-signaling__mark_awaiting_user",
+        ] {
+            assert!(is_halt_tool(name), "{name}");
+        }
+        for name in ["ask_user_choice", "Edit", "shalt", "halted", "peer_ack"] {
+            assert!(!is_halt_tool(name), "{name}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn atomic_tool_sets_and_clears_flag() {
+        // An atomic ToolUse sets the shared flag; a NON-matching ToolResult does
+        // NOT clear it (parallel-call safety); the id-matching ToolResult clears.
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let flag = Arc::new(AtomicBool::new(false));
+        let cfg = PumpConfig {
+            in_atomic_tool: Some(Arc::clone(&flag)),
+            ..fast_cfg("hands")
+        };
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_commit".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "git commit -m x"}),
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(flag.load(Ordering::Acquire), "atomic ToolUse sets the flag");
+
+        ev_tx
+            .send(AgentEvent::ToolResult {
+                tool_use_id: "tu_other".into(),
+                content: "ok".into(),
+                is_error: false,
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            flag.load(Ordering::Acquire),
+            "a non-matching ToolResult must NOT clear the flag"
+        );
+
+        ev_tx
+            .send(AgentEvent::ToolResult {
+                tool_use_id: "tu_commit".into(),
+                content: "ok".into(),
+                is_error: false,
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "the id-matching ToolResult clears the flag"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    /// 0080's pump→bridge wire: the reviewer's `TurnComplete` is what settles a
+    /// queued outward publish. The bridge-level tests call
+    /// `settle_queued_outward` directly; this one proves the pump calls it —
+    /// kill-test: delete the `settle_queued_outward` call in the TurnComplete
+    /// arm and this goes red while every bridge test stays green.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_reviewers_turn_complete_settles_a_queued_outward_publish() {
+        let (storage, state) = setup().await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        storage
+            .ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS)
+            .await
+            .unwrap();
+        bridge.register_session_reviewers("s1".to_string(), vec!["eyes".to_string()]);
+        let eyes = storage.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
+        let (ring_tx, mut ring_rx) = mpsc::channel(16);
+        bridge.register_session_sequencer("s1".into(), ring_tx.clone()).await;
+
+        // A queued row whose body the reviewer HAS read (cursor past it).
+        storage
+            .insert_queued_gate("s1", "q-1", "hands", "Run gated command?", "gh pr merge 7 --merge")
+            .await
+            .unwrap();
+        let body = storage
+            .post_to_channel("s1", "system", None, "system_notice", "queued body", None)
+            .await
+            .unwrap();
+        storage.set_tray_body_row("q-1", body.message_id()).await.unwrap();
+        storage.commit_delivery(eyes, &[(body.message_id(), None)]).await.unwrap();
+        while ring_rx.try_recv().is_ok() {}
+
+        let cfg = PumpConfig {
+            bridge: Some(Arc::clone(&bridge)),
+            participant_id: Some(eyes),
+            sequencer_tx: Some(ring_tx),
+            ..fast_cfg("eyes")
+        };
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let row = storage.get_tray_entry("q-1").await.unwrap().unwrap();
+        assert_eq!(row.status, "pending", "the reviewer's completed turn promotes the queued row");
+        // The latch opened BEFORE the ring learned the turn was over.
+        let mut seen = Vec::new();
+        while let Ok(cmd) = ring_rx.try_recv() {
+            seen.push(cmd);
+        }
+        let opened = seen.iter().position(|c| matches!(c, crate::core::sequencer::SequencerCommand::GateOpened { choice_id } if choice_id == "q-1"));
+        let completed = seen.iter().position(|c| matches!(c, crate::core::sequencer::SequencerCommand::TurnComplete { .. }));
+        assert!(opened.is_some(), "GateOpened must reach the ring: {seen:?}");
+        assert!(opened < completed, "latch before completion: {seen:?}");
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn turn_complete_safety_clears_atomic_flag() {
+        // A turn that ends with an atomic op still "in flight" (no ToolResult)
+        // must not strand the flag — TurnComplete safety-clears it.
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let flag = Arc::new(AtomicBool::new(false));
+        let cfg = PumpConfig {
+            in_atomic_tool: Some(Arc::clone(&flag)),
+            ..fast_cfg("hands")
+        };
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_push".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "git push"}),
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(flag.load(Ordering::Acquire));
+
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "TurnComplete safety-clears a stranded atomic flag"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn edit_during_investigate_self_nudges_the_editor() {
+        // A3a: an executor editing in Investigate gets a one-time reminder
+        // pointing it at Apply.
+        //
+        // **The reminder is a ROW now, not a stdin write.** It used to go into
+        // this pump's own `self_input_tx` while the agent was mid-edit — which
+        // it cannot read mid-generation anyway: the write opened a fresh
+        // generation the ring never dealt, whose completion carried a stale
+        // epoch and was discarded, and the same row then arrived a second time
+        // off the cursor. Persisted, it reaches the agent at its next dealt
+        // turn, which is the first moment it can act on it (advance the phase,
+        // or say why the edit was intended).
+        let (storage, state) = setup().await; // default phase = Investigate
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let cfg = PumpConfig {
+            self_nudges: true,
+            ..fast_cfg("hands")
+        };
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu1".into(),
+                name: "Edit".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let nudges: Vec<String> = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.content)
+            .filter(|c| c.contains("editing files before the Apply phase"))
+            .collect();
+        assert_eq!(nudges.len(), 1, "the reminder is persisted once: {nudges:?}");
+        assert!(nudges[0].contains("Apply"));
+        // The reminder cannot open a generation outside the ring: the pump holds
+        // no stdin at all any more (see `PumpConfig::self_nudges`) — it rides
+        // the cursor like every other row.
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn edit_during_apply_does_not_nudge() {
+        // A3a: editing in Apply is correct — no nudge.
+        let (storage, state) = setup().await;
+        state.lock().await.current_phase = IpavPhase::Apply;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let cfg = PumpConfig {
+            self_nudges: true,
+            ..fast_cfg("hands")
+        };
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu1".into(),
+                name: "Write".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Same collection as the positive test above — the nudge is a
+        // `system_notice` row, which `turn_bodies` (text rows only) would not
+        // see, so filtering that would pass vacuously.
+        let nudges: Vec<String> = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.content)
+            .filter(|c| c.contains("editing files before the Apply phase"))
+            .collect();
+        assert!(nudges.is_empty(), "no nudge in Apply: {nudges:?}");
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn provider_limit_detection_matches_known_shapes() {
+        // The two archive incidents, verbatim shapes.
+        assert_eq!(
+            detect_provider_limit(
+                "You're out of usage credits. Run /usage-credits to keep using Fable 5."
+            )
+            .as_deref(),
+            Some("You're out of usage credits. Run /usage-credits to keep using Fable 5.")
+        );
+        assert!(detect_provider_limit(
+            "You've hit your session limit \u{b7} resets 7pm (Asia/Manila)"
+        )
+        .is_some());
+        // Native-era provider bodies.
+        assert!(detect_provider_limit("Error: 402 Insufficient Balance").is_some());
+        // Ordinary prose must not trip it.
+        assert_eq!(detect_provider_limit("the rate limiter test now passes"), None);
+        assert_eq!(detect_provider_limit("credits to the reviewer for the catch"), None);
+        // Analysis QUOTING a limit line inside a longer chunk must not trip it
+        // (Rain's advisory b657bf79: the detector matched agent speech, so a
+        // review discussing the incident would self-halt the session).
+        let analysis = format!(
+            "The archive study found the message \"You're out of usage credits\" \
+             rendered as ordinary agent speech, so the session looked merely \
+             quiet while the agent sat dead for hours. {}",
+            "The fix classifies it into a health state instead. ".repeat(2)
+        );
+        assert!(analysis.len() > PROVIDER_LIMIT_MAX_CHUNK);
+        assert_eq!(detect_provider_limit(&analysis), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_limit_turn_notifies_peer_once_and_halts() {
+        // A quota death must produce: one peer notice (not one per retry), the
+        // stalled health mark, and an awaiting-user halt row — instead of
+        // rendering as ordinary speech in a merely-quiet session (3h13m dead in
+        // the archive study).
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        for _ in 0..2 {
+            ev_tx
+                .send(AgentEvent::Text(
+                    "You're out of usage credits. Run /usage-credits to continue.".into(),
+                ))
+                .await
+                .unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: None,
+                    is_error: false,
+                    api_error_status: None,
+                    context: ContextReport::none(ContextVerdict::NoWindow),
+                })
+                .await
+                .unwrap();
+        }
+        // Assert health BEFORE dropping the channel: the pump's exit path
+        // (channel closed = process death) legitimately overwrites health with
+        // "dead", which in this test would mask the stalled mark. Poll until
+        // the async limit handling lands.
+        for _ in 0..100 {
+            if bridge.current_agent_health("s1", "hands").as_deref() == Some("stalled") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            bridge.current_agent_health("s1", "hands").as_deref(),
+            Some("stalled")
+        );
+        drop(ev_tx);
+        task.await.unwrap();
+
+        // Exactly ONE notice despite two limit turns (dedupe window). Counted on
+        // ROWS now: the ring delivers the row off each peer's cursor, so the row
+        // is both the record and the delivery, and a duplicate would be visible
+        // to the user rather than only on a wire.
+        let notices = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.content.contains("hit a provider limit"))
+            .count();
+        assert_eq!(notices, 1, "one notice per incident, not per retry");
+        // The turn still has to be reported, or the ring freezes on a
+        // participant the provider has stopped answering for — the same property
+        // the errored-turn test pins, on the other path that can strand a turn.
+        assert!(
+            next_turn_end(&mut ring_rx).is_some(),
+            "a limit-stalled turn must still report its end to the ring"
+        );
+        // rc3 D35: a halt is SESSION state, not a tray row — the provider-limit
+        // yield fills the session's one halt slot, and the tray stays empty.
+        let halt = storage.session_halt("s1").await.unwrap();
+        assert!(
+            halt.as_ref()
+                .is_some_and(|(_, reason, _)| reason.contains("Provider limit")),
+            "the session's halt slot carries the provider-limit reason: {halt:?}"
+        );
+        let tray = storage.tray_entries_for_session("s1").await.unwrap();
+        assert!(
+            !tray.iter().any(|q| q.kind == "halt"),
+            "nothing writes halt ROWS any more: {tray:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_provider_limit_notice_is_a_host_row_that_names_the_agent_and_quotes_the_line() {
+        // B5 Task 2's remaining gap: this was the one (deleted) `RouterCommand::Forward`
+        // producer whose text existed nowhere but the wire — an inline `format!`
+        // straight onto a peer's stdin. It now posts a row of its own.
+        //
+        // **Renamed in round 2.** This was
+        // `..._is_a_row_and_the_forward_is_unchanged`, and the forward half went
+        // with `core::router` in task 14 — the body says so itself, three
+        // paragraphs down. The name kept promising a pairing the test no longer
+        // checks, and the receiver it bound to check it sat unread (clippy:
+        // unused variable). What the test actually pins is below: a host-owned
+        // row, and the interpolation the peer will read.
+        //
+        // `_ring_rx` stays BOUND rather than dropped — dropping it closes the
+        // channel under the pump's `sequencer_tx`, which is a different code
+        // path from the one being tested.
+        let (storage, state) = setup().await;
+        let (cfg, _ring_rx) = cfg_with_ring("hands");
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx
+            .send(AgentEvent::Text("Error: 402 Insufficient Balance".into()))
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let notice = storage
+            .channel_after("s1", 0, 100)
+            .await
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|m| m.content.contains("hit a provider limit"))
+            .expect("the notice must have a row of its own");
+        // Host-authored, so it is nobody's turn output — NOT attributed to the
+        // agent it is about, whatever the wire's peer tag says.
+        assert_eq!(notice.origin, "system");
+        assert_eq!(notice.participant_id, None);
+        // No envelope. The phase and banner the peer reads are read at FORWARD
+        // time, which a hold can put long after this row was written, so writing
+        // one here would record a wire the peer may never get.
+        assert_eq!(notice.envelope, None);
+
+        // The router copy this used to assert is gone with `core::router`
+        // (task 14): the notice is a row, and the ring delivers rows off each
+        // peer's cursor. What still matters — and is checked below — is that the
+        // row's TEXT is the thing the peer will read.
+        // So pin the interpolation itself, which is the part that can change
+        // under both at once. The peer is told WHO stalled and WHAT the provider
+        // said; `as_str()` quietly becoming a display name, or the quoted
+        // `{line}` being dropped, would leave the equality above green while the
+        // peer reads something else.
+        let body = &notice.content;
+        assert!(
+            body.contains("hands"),
+            "the notice must name the stalled agent: {body}"
+        );
+        assert!(
+            body.contains("Error: 402 Insufficient Balance"),
+            "the notice must quote the provider's line verbatim: {body}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_provider_limit_writes_its_notice_row_even_with_no_peer() {
+        // The post sits INSIDE the `router_tx` guard, so a solo session still
+        // records nothing here. Parity: there is no peer to notify, the notice
+        // text is addressed to one ("do not take over their work"), and this
+        // batch is a plumbing change — surfacing it to a solo user would be a
+        // product decision, not a serialisation one.
+        //
+        // The bridge IS wired, so this also pins that skipping the notice does
+        // not skip the halt: a solo user must still be told the session is
+        // parked, which is the whole reason the peer notice is not what carries
+        // that news.
+        let (storage, state) = setup().await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let cfg = PumpConfig {
+            bridge: Some(Arc::clone(&bridge)),
+            ..fast_cfg("hands") // no router_tx
+        };
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx
+            .send(AgentEvent::Text("Error: 402 Insufficient Balance".into()))
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        // **This assertion inverted with task 14, deliberately.** The post used
+        // to sit inside the `router_tx` guard, so a solo session hit a provider
+        // limit and wrote NOTHING — the record was conflated with the delivery,
+        // and with nobody to deliver to there was also nothing to see. That is
+        // the exact defect rc3 exists to remove. The row is now written
+        // unconditionally; whether anyone is there to read it is the ring's
+        // question, not the recording's.
+        let notice = storage
+            .channel_after("s1", 0, 100)
+            .await
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|m| m.content.contains("hit a provider limit"));
+        let notice = notice.expect("a solo session must still record the limit it hit");
+        assert_eq!(notice.origin, "system");
+        assert_eq!(notice.participant_id, None);
+    }
+}

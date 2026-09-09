@@ -1,0 +1,409 @@
+//! `session_documents` table: per-session scratch docs, optionally tagged
+//! with an IPAV phase for the session view's document tabs.
+
+use super::*;
+
+/// Full column projection for a `SessionDocument` row — shared by
+/// `session_documents_for` and `session_document_by_slug`.
+const DOCUMENT_COLUMNS: &str = "id, session_id, slug, body, created_at, updated_at, phase";
+
+impl Storage {
+    /// Upsert a per-session document by (session_id, slug). On conflict the
+    /// body is overwritten, `phase` is replaced, and `updated_at` is refreshed;
+    /// `created_at` is preserved. `phase` is the IPAV phase tag — one of
+    /// `investigate` / `plan` / `apply` / `verify` — used by the session view's
+    /// document tabs and by phase-filtered searches. Untagged docs (`None`)
+    /// are custom documents — each gets its own tab beside I/P/A/V, named by
+    /// its slug (round 11) — except the phase docs' archived versions
+    /// (`<slug>@<n>`), which stay out of the tabs; neither kind answers a
+    /// phase-filtered search. Returns the row id.
+    pub async fn upsert_session_document(
+        &self,
+        session_id: &str,
+        slug: &str,
+        body: &str,
+        phase: Option<&str>,
+    ) -> Result<i64> {
+        // Project standard: RFC3339-Z via now_utc() (matches every other write
+        // site + the time.rs baseline), not chrono's `+00:00` offset form.
+        let now = now_utc();
+        // `RETURNING id` yields the row id for BOTH the INSERT and the DO
+        // UPDATE branch (SQLite >= 3.35), so we never trust `last_insert_rowid()`
+        // here: on an upsert that takes the UPDATE branch it can report the
+        // bumped AUTOINCREMENT value of the attempted-but-unused insert rowid
+        // instead of the real row id (observed in prod: a rewrite returned a
+        // five-digit id while actually updating the existing low-id row).
+        let row: (i64,) = sqlx::query_as(
+            "INSERT INTO session_documents (session_id, slug, body, created_at, updated_at, phase) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(session_id, slug) DO UPDATE SET \
+               body = excluded.body, \
+               updated_at = excluded.updated_at, \
+               phase = excluded.phase \
+             RETURNING id",
+        )
+        .bind(session_id)
+        .bind(slug)
+        .bind(body)
+        .bind(&now)
+        .bind(&now)
+        .bind(phase)
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("upsert session_documents session={session_id} slug={slug}"))?;
+        Ok(row.0)
+    }
+
+    /// Search a session's documents. Optional `query` is a case-insensitive
+    /// substring filter across slug + body. Optional `phase` filters to a
+    /// specific IPAV phase tag. Ordered newest-first.
+    pub async fn session_documents_for(
+        &self,
+        session_id: &str,
+        query: Option<&str>,
+        phase: Option<&str>,
+    ) -> Result<Vec<SessionDocument>> {
+        let like = query.map(crate::storage::like_pattern);
+        let mut sql = format!(
+            "SELECT {DOCUMENT_COLUMNS} FROM session_documents WHERE session_id = ?"
+        );
+        if like.is_some() {
+            sql.push_str(" AND (LOWER(slug) LIKE ? ESCAPE '\\' OR LOWER(body) LIKE ? ESCAPE '\\')");
+        }
+        if phase.is_some() {
+            sql.push_str(" AND phase = ?");
+        }
+        sql.push_str(" ORDER BY updated_at DESC");
+
+        let mut q = sqlx::query_as::<_, SessionDocument>(&sql).bind(session_id);
+        if let Some(l) = like.as_deref() {
+            q = q.bind(l).bind(l);
+        }
+        if let Some(p) = phase {
+            q = q.bind(p);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows)
+    }
+
+    /// Convenience wrapper: all docs tagged with `phase` for `session_id`,
+    /// newest-first (the session view's tabs read `session_documents_for`
+    /// with a phase filter directly). Test-only since round 7 (2026-08-17):
+    /// no production caller — kept as a test seam, not shipped.
+    #[cfg(test)]
+    pub async fn session_documents_for_phase(
+        &self,
+        session_id: &str,
+        phase: &str,
+    ) -> Result<Vec<SessionDocument>> {
+        self.session_documents_for(session_id, None, Some(phase))
+            .await
+    }
+
+    /// The occupied archive slots of a phase doc — the `n` of every
+    /// `{slug}@{n}` row in the session (round 10). One query where the
+    /// bridge's `archive_superseded_doc` used to probe `{slug}@1`,
+    /// `{slug}@2`, … one `SELECT` each until it found a free one, up to fifty
+    /// round-trips per phase-doc rewrite. `%`, `_` and `\` in the slug are
+    /// escaped so a slug like `plan_v2` cannot match `planXv2@1`; rows whose
+    /// suffix is not a number are ignored (a scratch doc the agent happened
+    /// to name `plan@final`).
+    pub async fn session_document_archive_slots(
+        &self,
+        session_id: &str,
+        slug: &str,
+    ) -> Result<Vec<u32>> {
+        let mut pattern = String::with_capacity(slug.len() + 3);
+        for ch in slug.chars() {
+            if matches!(ch, '%' | '_' | '\\') {
+                pattern.push('\\');
+            }
+            pattern.push(ch);
+        }
+        pattern.push_str("@%");
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT slug FROM session_documents \
+             WHERE session_id = ? AND slug LIKE ? ESCAPE '\\'",
+        )
+        .bind(session_id)
+        .bind(&pattern)
+        .fetch_all(&self.pool)
+        .await?;
+        let prefix = format!("{slug}@");
+        let mut slots: Vec<u32> = rows
+            .into_iter()
+            .filter_map(|(s,)| s.strip_prefix(&prefix)?.parse().ok())
+            .collect();
+        slots.sort_unstable();
+        Ok(slots)
+    }
+
+    /// Delete a CUSTOM (untagged) document by (session_id, slug). Returns
+    /// whether a row went. A phase-tagged doc never matches — the I/P/A/V docs
+    /// are the agents' and the UI's delete button exists for custom documents
+    /// only (round 12, the user's `ideas.md` entry); the `phase IS NULL` in the
+    /// WHERE is that rule in SQL, so no caller can delete a phase doc by
+    /// mistake.
+    pub async fn delete_session_document(&self, session_id: &str, slug: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "DELETE FROM session_documents WHERE session_id = ? AND slug = ? AND phase IS NULL",
+        )
+        .bind(session_id)
+        .bind(slug)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("delete session_documents session={session_id} slug={slug}"))?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Fetch one document by (session_id, slug). None when not found.
+    pub async fn session_document_by_slug(
+        &self,
+        session_id: &str,
+        slug: &str,
+    ) -> Result<Option<SessionDocument>> {
+        let row = sqlx::query_as::<_, SessionDocument>(&format!(
+            "SELECT {DOCUMENT_COLUMNS} FROM session_documents \
+             WHERE session_id = ? AND slug = ?"
+        ))
+        .bind(session_id)
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+}
+
+#[cfg(test)]
+mod session_doc_tests {
+    use super::*;
+
+    /// Round 12: the delete reaches custom (untagged) docs only. A phase doc
+    /// asked for by slug is left alone and the call says so (`false`).
+    #[tokio::test]
+    async fn delete_session_document_removes_custom_docs_and_never_phase_docs() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.upsert_session_document("s1", "checklist", "- [ ] a", None).await.unwrap();
+        s.upsert_session_document("s1", "plan", "the plan", Some("plan")).await.unwrap();
+        assert!(s.delete_session_document("s1", "checklist").await.unwrap());
+        assert!(s.session_document_by_slug("s1", "checklist").await.unwrap().is_none());
+        assert!(!s.delete_session_document("s1", "plan").await.unwrap(), "phase docs are not deletable");
+        assert!(s.session_document_by_slug("s1", "plan").await.unwrap().is_some());
+        assert!(!s.delete_session_document("s1", "checklist").await.unwrap(), "gone is gone");
+        // Scoped to the session.
+        s.create_session("s2", "t", None).await.unwrap();
+        s.upsert_session_document("s2", "checklist", "other", None).await.unwrap();
+        assert!(!s.delete_session_document("s1", "checklist").await.unwrap());
+        assert!(s.session_document_by_slug("s2", "checklist").await.unwrap().is_some());
+    }
+
+    /// The archive-slot read is one query and reads only THIS slug's numbered
+    /// archives (round 10): a slug with a LIKE metacharacter is matched
+    /// literally, a non-numeric suffix is ignored, and a sibling slug that
+    /// shares a prefix is not counted.
+    #[tokio::test]
+    async fn archive_slots_are_read_in_one_query_for_this_slug_only() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        for slug in ["plan@1", "plan@3", "plan@final", "plan_v2@2", "planning@1", "plan"] {
+            s.upsert_session_document("s1", slug, "x", None).await.unwrap();
+        }
+        assert_eq!(s.session_document_archive_slots("s1", "plan").await.unwrap(), vec![1, 3]);
+        assert_eq!(s.session_document_archive_slots("s1", "plan_v2").await.unwrap(), vec![2]);
+        assert!(s.session_document_archive_slots("s1", "apply").await.unwrap().is_empty());
+        assert!(
+            s.session_document_archive_slots("s2", "plan").await.unwrap().is_empty(),
+            "another session's archives are not this session's"
+        );
+    }
+
+    /// `%` and `_` in a search are LITERALS (round 8, N3): the pattern is
+    /// escaped and every `LIKE` carries `ESCAPE '\\'`. Before this a search for
+    /// `_` matched every document and `foo_bar` matched `fooXbar`.
+    #[tokio::test]
+    async fn a_search_for_a_wildcard_character_matches_it_literally() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.upsert_session_document("s1", "a", "progress 100% done", None).await.unwrap();
+        s.upsert_session_document("s1", "b", "snake_case names", None).await.unwrap();
+        s.upsert_session_document("s1", "c", "snakeXcase names", None).await.unwrap();
+        s.upsert_session_document("s1", "d", "plain prose", None).await.unwrap();
+        let slugs = |docs: Vec<SessionDocument>| {
+            let mut v: Vec<String> = docs.into_iter().map(|d| d.slug).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(slugs(s.session_documents_for("s1", Some("%"), None).await.unwrap()), vec!["a"]);
+        assert_eq!(slugs(s.session_documents_for("s1", Some("snake_case"), None).await.unwrap()), vec!["b"]);
+        assert_eq!(slugs(s.session_documents_for("s1", Some("_"), None).await.unwrap()), vec!["b"]);
+        assert_eq!(slugs(s.session_documents_for("s1", Some("names"), None).await.unwrap()), vec!["b", "c"]);
+        assert_eq!(crate::storage::like_pattern("a%b_c\\d"), "%a\\%b\\_c\\\\d%");
+    }
+
+    async fn seeded() -> (Storage, &'static str, &'static str) {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("sess-a", "a", None).await.unwrap();
+        s.create_session("sess-b", "b", None).await.unwrap();
+        (s, "sess-a", "sess-b")
+    }
+
+    #[tokio::test]
+    async fn upsert_then_read_by_slug() {
+        let (s, a, _) = seeded().await;
+        let id = s
+            .upsert_session_document(a, "plan-v1", "first body", None)
+            .await
+            .unwrap();
+        assert!(id > 0);
+        let doc = s
+            .session_document_by_slug(a, "plan-v1")
+            .await
+            .unwrap()
+            .expect("doc should exist");
+        assert_eq!(doc.slug, "plan-v1");
+        assert_eq!(doc.body, "first body");
+        assert_eq!(doc.session_id, "sess-a");
+    }
+
+    #[tokio::test]
+    async fn upsert_is_idempotent_overwrites_body() {
+        let (s, a, _) = seeded().await;
+        let id1 = s
+            .upsert_session_document(a, "findings", "v1", None)
+            .await
+            .unwrap();
+        let id2 = s
+            .upsert_session_document(a, "findings", "v2", None)
+            .await
+            .unwrap();
+        assert_eq!(id1, id2, "same slug should return same row id");
+        let doc = s
+            .session_document_by_slug(a, "findings")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.body, "v2");
+        // Only one row total for this slug.
+        let all = s.session_documents_for(a, None, None).await.unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_filters_by_query_across_slug_and_body() {
+        let (s, a, _) = seeded().await;
+        s.upsert_session_document(a, "plan-v1", "rewrites broadcast.rs", None)
+            .await
+            .unwrap();
+        s.upsert_session_document(a, "findings-perf", "irrelevant", None)
+            .await
+            .unwrap();
+        let hits_slug = s
+            .session_documents_for(a, Some("plan"), None)
+            .await
+            .unwrap();
+        assert_eq!(hits_slug.len(), 1);
+        assert_eq!(hits_slug[0].slug, "plan-v1");
+        let hits_body = s
+            .session_documents_for(a, Some("broadcast"), None)
+            .await
+            .unwrap();
+        assert_eq!(hits_body.len(), 1);
+        assert_eq!(hits_body[0].slug, "plan-v1");
+        let no_query = s.session_documents_for(a, None, None).await.unwrap();
+        assert_eq!(no_query.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn docs_are_isolated_per_session() {
+        let (s, a, b) = seeded().await;
+        s.upsert_session_document(a, "plan", "for a", None)
+            .await
+            .unwrap();
+        let in_b = s.session_documents_for(b, None, None).await.unwrap();
+        assert!(in_b.is_empty(), "session B sees no docs from A: {in_b:?}");
+        let read_in_b = s.session_document_by_slug(b, "plan").await.unwrap();
+        assert!(read_in_b.is_none(), "session B can't read A's slug");
+    }
+
+    #[tokio::test]
+    async fn unknown_slug_returns_none() {
+        let (s, a, _) = seeded().await;
+        let row = s
+            .session_document_by_slug(a, "nope")
+            .await
+            .unwrap();
+        assert!(row.is_none());
+    }
+
+    #[tokio::test]
+    async fn phase_filter_returns_only_matching_docs() {
+        let (s, a, _) = seeded().await;
+        s.upsert_session_document(a, "plan-v1", "x", Some("plan"))
+            .await
+            .unwrap();
+        s.upsert_session_document(a, "find-1", "y", Some("investigate"))
+            .await
+            .unwrap();
+        s.upsert_session_document(a, "scratch", "z", None)
+            .await
+            .unwrap();
+        let plans = s.session_documents_for_phase(a, "plan").await.unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].slug, "plan-v1");
+        assert_eq!(plans[0].phase.as_deref(), Some("plan"));
+        let all = s.session_documents_for(a, None, None).await.unwrap();
+        assert_eq!(all.len(), 3, "no filter returns all docs including untagged");
+    }
+
+    #[tokio::test]
+    async fn upsert_overwrites_phase() {
+        let (s, a, _) = seeded().await;
+        s.upsert_session_document(a, "doc", "v1", Some("plan"))
+            .await
+            .unwrap();
+        s.upsert_session_document(a, "doc", "v2", Some("apply"))
+            .await
+            .unwrap();
+        let doc = s
+            .session_document_by_slug(a, "doc")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.body, "v2");
+        assert_eq!(doc.phase.as_deref(), Some("apply"));
+    }
+
+    #[tokio::test]
+    async fn upsert_returns_real_row_id_after_autoincrement_bump() {
+        // Regression: a rewrite (DO UPDATE branch) used to return the bumped
+        // AUTOINCREMENT value from `last_insert_rowid()` instead of the real
+        // row id. Insert two docs (bumping the sequence), then rewrite the
+        // first — the returned id must be the first doc's real id.
+        let (s, a, _) = seeded().await;
+        let id_a = s
+            .upsert_session_document(a, "doc-a", "v1", None)
+            .await
+            .unwrap();
+        let id_b = s
+            .upsert_session_document(a, "doc-b", "v1", None)
+            .await
+            .unwrap();
+        assert_ne!(id_a, id_b);
+        let id_a2 = s
+            .upsert_session_document(a, "doc-a", "v2", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            id_a2, id_a,
+            "rewrite must return doc-a's real id, not a bumped autoincrement value"
+        );
+        let doc = s
+            .session_document_by_slug(a, "doc-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.id, id_a);
+        assert_eq!(doc.body, "v2");
+    }
+}

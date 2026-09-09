@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en" style=""><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Dashboard - bot-hq</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600;700&amp;family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "inverse-surface": "#dae2fd",
+                        "on-primary-fixed-variant": "#753400",
+                        "secondary-container": "#6f00be",
+                        "on-surface": "#dae2fd",
+                        "surface-container-low": "#131b2e",
+                        "surface-container-high": "#222a3d",
+                        "background": "#0b1326",
+                        "on-tertiary-fixed": "#001a42",
+                        "surface-variant": "#2d3449",
+                        "on-primary-container": "#5c2800",
+                        "primary-container": "#ff7a00",
+                        "error-container": "#93000a",
+                        "outline": "#a78b7c",
+                        "on-tertiary": "#002e6a",
+                        "primary-fixed-dim": "#ffb68b",
+                        "surface-bright": "#31394d",
+                        "surface": "#0b1326",
+                        "surface-container-highest": "#2d3449",
+                        "surface-container": "#171f33",
+                        "on-secondary-container": "#d6a9ff",
+                        "primary": "#ffb68b",
+                        "error": "#ffb4ab",
+                        "surface-dim": "#0b1326",
+                        "tertiary": "#adc6ff",
+                        "on-primary": "#522300",
+                        "on-error-container": "#ffdad6",
+                        "on-secondary-fixed": "#2c0051",
+                        "inverse-primary": "#994700",
+                        "on-tertiary-container": "#003577",
+                        "on-secondary-fixed-variant": "#6900b3",
+                        "secondary-fixed-dim": "#ddb7ff",
+                        "on-surface-variant": "#e0c0af",
+                        "secondary": "#ddb7ff",
+                        "inverse-on-surface": "#283044",
+                        "tertiary-fixed-dim": "#adc6ff",
+                        "outline-variant": "#584235",
+                        "on-error": "#690005",
+                        "surface-tint": "#ffb68b",
+                        "surface-container-lowest": "#060e20",
+                        "tertiary-fixed": "#d8e2ff",
+                        "on-tertiary-fixed-variant": "#004395",
+                        "tertiary-container": "#6d9fff",
+                        "on-secondary": "#490080",
+                        "primary-fixed": "#ffdbc8",
+                        "on-primary-fixed": "#321200",
+                        "on-background": "#dae2fd",
+                        "secondary-fixed": "#f0dbff"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "spacing": {
+                        "grid-margin": "1rem",
+                        "gutter": "0.75rem",
+                        "stack-md": "0.5rem",
+                        "stack-tight": "0.25rem",
+                        "panel-padding": "1rem"
+                    },
+                    "fontFamily": {
+                        "headline-md": ["Hanken Grotesk"],
+                        "label-caps": ["JetBrains Mono"],
+                        "headline-lg": ["Hanken Grotesk"],
+                        "body-md": ["Inter"],
+                        "code-sm": ["JetBrains Mono"]
+                    },
+                    "fontSize": {
+                        "headline-md": ["18px", {"lineHeight": "24px", "fontWeight": "600"}],
+                        "label-caps": ["11px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "700"}],
+                        "headline-lg": ["24px", {"lineHeight": "32px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                        "body-md": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+                        "code-sm": ["12px", {"lineHeight": "18px", "fontWeight": "400"}]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+<style data-stitch-cursor=""></style><style data-stitch-scroll-lock=""></style></head>
+<body class="bg-background text-on-background min-h-screen flex flex-col font-body-md overflow-x-hidden">
+<!-- TopAppBar -->
+<header class="bg-surface dark:bg-surface fixed top-0 w-full h-[48px] border-b border-outline-variant flex items-center justify-between px-grid-margin w-full z-50">
+<div class="flex items-center gap-6">
+<h1 class="text-headline-lg font-headline-lg text-primary dark:text-primary tracking-tighter">bot-hq</h1>
+<!-- Navigation Links -->
+<nav class="hidden md:flex items-center gap-4 h-full pt-1">
+<a class="text-primary border-b-2 border-primary pb-1 font-headline-md text-headline-md hover:bg-surface-variant/50 transition-colors h-full flex items-center opacity-80" href="#">Dashboard</a>
+<a class="text-on-surface-variant font-headline-md text-headline-md hover:bg-surface-variant/50 transition-colors h-full flex items-center" href="#">Context Library</a>
+<a class="text-on-surface-variant font-headline-md text-headline-md hover:bg-surface-variant/50 transition-colors h-full flex items-center" href="#">Settings</a>
+</nav>
+</div>
+<div class="flex items-center gap-4">
+<!-- Search Bar (on_right) -->
+<div class="relative hidden sm:block">
+<span class="material-symbols-outlined absolute left-2 top-1/2 -translate-y-1/2 text-on-surface-variant text-[18px]">search</span>
+<input class="bg-surface-container border border-outline-variant rounded pl-8 pr-3 py-1 text-code-sm font-code-sm text-on-surface placeholder:text-on-surface-variant focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary w-64" placeholder="Search sessions..." type="text"/>
+</div>
+<!-- Trailing Icons -->
+<!-- Trailing Primary Action -->
+<div class="flex items-center border-l border-outline-variant pl-4 ml-2">
+<button class="bg-primary-container border border-primary text-on-primary-container px-3 py-1 rounded flex items-center gap-2 font-code-sm text-code-sm transition-colors shadow-inner ring-1 ring-primary/primary/50">
+<span class="material-symbols-outlined text-[16px]">person</span>
+Emma</button>
+</div>
+</div>
+</header>
+<!-- SideNavBar (Hidden on Mobile, visible on lg screens as part of desktop layout if needed, but TopAppBar is primary here. We include it per JSON but visually integrate it into the dashboard layout) -->
+<!-- Main Content Area -->
+<main class="flex-1 mt-[48px] p-grid-margin lg:p-6 overflow-y-auto pb-12">
+<div class="flex items-center justify-between mb-6">
+<h2 class="font-headline-lg text-headline-lg text-on-surface">Active Sessions</h2>
+<div class="flex items-center gap-2">
+<button class="bg-surface-container-high hover:bg-surface-variant border border-outline-variant text-on-surface px-3 py-1.5 rounded flex items-center gap-2 font-code-sm text-code-sm transition-colors">
+<span class="material-symbols-outlined text-[16px]">filter_list</span> Filter
+                </button>
+<button class="bg-primary hover:bg-primary-fixed border border-primary text-on-primary px-3 py-1.5 rounded flex items-center gap-2 font-code-sm text-code-sm transition-colors shadow-sm">
+<span class="material-symbols-outlined text-[16px]">add</span> New Session
+                </button>
+</div>
+</div>
+<!-- Dashboard Grid -->
+<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-gutter">
+<!-- Session Tile 1: Need User Input -->
+<div class="bg-[#0F172A] border border-primary rounded-lg overflow-hidden flex flex-col hover:border-primary-container transition-colors relative group">
+<div class="absolute top-0 left-0 w-full h-1 bg-primary"></div>
+<div class="p-4 border-b border-outline-variant/30 flex-1">
+<div class="flex justify-between items-start mb-3">
+<div class="flex items-center gap-2">
+<span class="text-code-sm font-code-sm text-on-surface-variant">S-9021</span>
+<div class="bg-primary/15 text-primary px-2 py-0.5 rounded font-label-caps text-label-caps border border-primary/30">PLAN</div>
+</div>
+<span class="text-code-sm font-code-sm text-on-surface-variant">2m ago</span>
+</div>
+<h3 class="font-headline-md text-headline-md text-on-surface mb-2">Refactor Auth Service</h3>
+<p class="text-code-sm font-code-sm text-on-surface-variant line-clamp-2 mb-4">Analyzing dependency graph for JWT token rotation implementation.</p>
+<div class="inline-flex items-center gap-1.5 bg-error-container/20 text-error px-2 py-1 rounded border border-error/30 font-label-caps text-label-caps">
+<span class="material-symbols-outlined text-[14px]">priority_high</span>
+                        [Need User Input]
+                    </div>
+</div>
+<div class="bg-surface-container-low p-3 border-t border-outline-variant/50">
+<div class="text-code-sm font-code-sm text-on-surface mb-2">Confirm dependency override for jsonwebtoken v9.0.0?</div>
+<div class="flex gap-2">
+<button class="flex-1 bg-primary/20 hover:bg-primary/30 text-primary border border-primary/50 py-1 rounded font-code-sm text-code-sm transition-colors">Approve</button>
+<button class="flex-1 bg-surface-variant hover:bg-surface-container-high text-on-surface border border-outline-variant py-1 rounded font-code-sm text-code-sm transition-colors">Reject</button>
+<div class="w-full mt-2"><input class="w-full bg-surface-container-lowest border border-outline-variant rounded px-2 py-1 text-code-sm font-code-sm text-on-surface focus:outline-none focus:border-primary" placeholder="Other: " type="text"/></div></div>
+<div class="mt-3 pt-3 border-t border-outline-variant/30"><div class="text-label-caps font-label-caps text-on-surface-variant mb-1">Quickview</div><div class="text-code-sm font-code-sm text-on-surface italic truncate">Rain: Found 14 instances of AUTOINCREMENT...</div></div></div>
+</div>
+<!-- Session Tile 2: Executing -->
+<div class="bg-[#0F172A] border border-[#1E293B] rounded-lg overflow-hidden flex flex-col hover:border-secondary transition-colors relative group">
+<div class="absolute top-0 left-0 w-full h-1 bg-secondary opacity-0 group-hover:opacity-100 transition-opacity"></div>
+<div class="p-4 flex-1">
+<div class="flex justify-between items-start mb-3">
+<div class="flex items-center gap-2">
+<span class="text-code-sm font-code-sm text-on-surface-variant">S-9044</span>
+<div class="bg-secondary/15 text-secondary px-2 py-0.5 rounded font-label-caps text-label-caps border border-secondary/30">APPLY</div>
+</div>
+<span class="text-code-sm font-code-sm text-on-surface-variant">Just now</span>
+</div>
+<h3 class="font-headline-md text-headline-md text-on-surface mb-2">Fix Bug #12: Race Condition</h3>
+<p class="text-code-sm font-code-sm text-on-surface-variant line-clamp-2">Patching db connection pool limits in worker_node.py</p>
+<div class="mt-4 space-y-2">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-secondary text-[16px] animate-spin">autorenew</span>
+<span class="text-code-sm font-code-sm text-on-surface font-mono">Running tests (4/12)...</span>
+</div>
+<div class="w-full bg-surface-container-high rounded-full h-1.5">
+<div class="bg-secondary h-1.5 rounded-full" style="width: 33%"></div>
+</div>
+</div>
+<div class="mt-3 pt-3 border-t border-outline-variant/30"><div class="text-label-caps font-label-caps text-on-surface-variant mb-1">Quickview</div><div class="text-code-sm font-code-sm text-on-surface italic truncate">Running tests (4/12)...</div></div></div>
+<div class="bg-surface-container-low px-4 py-2 border-t border-outline-variant/30 flex justify-between items-center">
+<span class="text-code-sm font-code-sm text-on-surface-variant truncate">user: rain</span>
+<button class="text-on-surface-variant hover:text-on-surface p-1 rounded transition-colors">
+<span class="material-symbols-outlined text-[16px]">open_in_new</span>
+</button>
+</div>
+</div>
+<!-- Session Tile 3: Completed -->
+<div class="bg-[#0F172A] border border-[#1E293B] rounded-lg overflow-hidden flex flex-col relative opacity-80 hover:opacity-100 transition-opacity">
+<div class="p-4 flex-1">
+<div class="flex justify-between items-start mb-3">
+<div class="flex items-center gap-2">
+<span class="text-code-sm font-code-sm text-on-surface-variant">S-8991</span>
+<div class="bg-tertiary/15 text-tertiary px-2 py-0.5 rounded font-label-caps text-label-caps border border-tertiary/30">DONE</div>
+</div>
+<span class="text-code-sm font-code-sm text-on-surface-variant">1h ago</span>
+</div>
+<h3 class="font-headline-md text-headline-md text-on-surface mb-2">Update API Docs</h3>
+<p class="text-code-sm font-code-sm text-on-surface-variant line-clamp-2">Regenerated swagger definitions from latest endpoints.</p>
+<div class="mt-3 pt-3 border-t border-outline-variant/30"><div class="text-label-caps font-label-caps text-on-surface-variant mb-1">Quickview</div><div class="text-code-sm font-code-sm text-on-surface italic truncate">Merged in PR #402</div></div></div>
+<div class="bg-surface-container-lowest px-4 py-2 border-t border-outline-variant/30 text-code-sm font-code-sm text-on-surface-variant">
+                    Merged in PR #402
+                </div>
+</div>
+<!-- Session Tile 4: Need User Input (Multiple Choice) -->
+<div class="bg-[#0F172A] border border-primary rounded-lg overflow-hidden flex flex-col hover:border-primary-container transition-colors relative group">
+<div class="absolute top-0 left-0 w-full h-1 bg-primary"></div>
+<div class="p-4 border-b border-outline-variant/30 flex-1">
+<div class="flex justify-between items-start mb-3">
+<div class="flex items-center gap-2">
+<span class="text-code-sm font-code-sm text-on-surface-variant">S-9050</span>
+<div class="bg-primary/15 text-primary px-2 py-0.5 rounded font-label-caps text-label-caps border border-primary/30">VERIFY</div>
+</div>
+<span class="text-code-sm font-code-sm text-on-surface-variant">5m ago</span>
+</div>
+<h3 class="font-headline-md text-headline-md text-on-surface mb-2">Optimize Image Loader</h3>
+<p class="text-code-sm font-code-sm text-on-surface-variant line-clamp-2 mb-4">Caching strategy options generated.</p>
+<div class="inline-flex items-center gap-1.5 bg-error-container/20 text-error px-2 py-1 rounded border border-error/30 font-label-caps text-label-caps">
+<span class="material-symbols-outlined text-[14px]">priority_high</span>
+                        [Need User Input]
+                    </div>
+</div>
+<div class="bg-surface-container-low p-3 border-t border-outline-variant/50 space-y-2">
+<div class="text-code-sm font-code-sm text-on-surface mb-1">Select caching backend:</div>
+<button class="w-full text-left px-3 py-2 bg-surface-container hover:bg-surface-variant border border-outline-variant rounded font-code-sm text-code-sm text-on-surface transition-colors flex justify-between items-center group/btn">
+<span class="">Redis (Distributed)</span>
+<span class="material-symbols-outlined text-[16px] text-primary opacity-0 group-hover/btn:opacity-100">chevron_right</span>
+</button>
+<button class="w-full text-left px-3 py-2 bg-surface-container hover:bg-surface-variant border border-outline-variant rounded font-code-sm text-code-sm text-on-surface transition-colors flex justify-between items-center group/btn">
+<span class="">Memcached (Local)</span>
+<span class="material-symbols-outlined text-[16px] text-primary opacity-0 group-hover/btn:opacity-100">chevron_right</span>
+</button>
+<div class="mt-3 pt-3 border-t border-outline-variant/30"><div class="text-label-caps font-label-caps text-on-surface-variant mb-1">Quickview</div><div class="text-code-sm font-code-sm text-on-surface italic truncate">Waiting for Redis selection...</div></div><div class="w-full mt-2"><input class="w-full bg-surface-container-lowest border border-outline-variant rounded px-2 py-1 text-code-sm font-code-sm text-on-surface focus:outline-none focus:border-primary" placeholder="Other: " type="text"/></div></div>
+</div>
+<!-- Session Tile 5: Planning -->
+<div class="bg-[#0F172A] border border-[#1E293B] rounded-lg overflow-hidden flex flex-col hover:border-tertiary transition-colors relative group">
+<div class="absolute top-0 left-0 w-full h-1 bg-tertiary opacity-0 group-hover:opacity-100 transition-opacity"></div>
+<div class="p-4 flex-1">
+<div class="flex justify-between items-start mb-3">
+<div class="flex items-center gap-2">
+<span class="text-code-sm font-code-sm text-on-surface-variant">S-9055</span>
+<div class="bg-tertiary/15 text-tertiary px-2 py-0.5 rounded font-label-caps text-label-caps border border-tertiary/30">PLAN</div>
+</div>
+<span class="text-code-sm font-code-sm text-on-surface-variant">12m ago</span>
+</div>
+<h3 class="font-headline-md text-headline-md text-on-surface mb-2">Migrate DB to Postgres</h3>
+<p class="text-code-sm font-code-sm text-on-surface-variant line-clamp-2">Scanning schema for SQLite specific syntax...</p>
+<div class="mt-4 p-2 bg-surface-container rounded border border-outline-variant/30">
+<div class="font-code-sm text-code-sm text-tertiary mb-1">&gt; brian_agent</div>
+<div class="font-code-sm text-code-sm text-on-surface-variant break-all">Found 14 instances of AUTOINCREMENT. Converting to SERIAL.</div>
+</div>
+<div class="mt-3 pt-3 border-t border-outline-variant/30"><div class="text-label-caps font-label-caps text-on-surface-variant mb-1">Quickview</div><div class="text-code-sm font-code-sm text-on-surface italic truncate">brian_agent: Converting to SERIAL.</div></div></div>
+</div>
+</div>
+</main>
+<!-- Footer -->
+<footer class="bg-surface-container-lowest fixed bottom-0 right-0 w-full border-t border-outline-variant flex justify-between items-center px-4 z-50 h-10">
+<div class="font-label-caps text-label-caps text-primary">© 2024 BOT-HQ INDUSTRIAL ORCHESTRATION</div>
+<div class="flex items-center gap-4">
+<a class="font-code-sm text-code-sm text-on-surface-variant hover:text-primary cursor-pointer flex items-center gap-1" href="#">
+<span class="w-2 h-2 rounded-full bg-[#10B981]"></span> Status: Online
+            </a>
+<a class="font-code-sm text-code-sm text-on-surface-variant hover:text-primary cursor-pointer hidden sm:block" href="#">API Docs</a>
+<a class="font-code-sm text-code-sm text-on-surface-variant hover:text-primary cursor-pointer hidden sm:block" href="#">Support</a>
+</div>
+</footer>
+<div class="fixed inset-0 z-[60] flex pointer-events-none" id="emma-terminal-overlay">
+<div class="flex-1 hidden md:block"></div>
+<div class="w-full md:w-1/2 h-full bg-surface-container-low border-l border-outline-variant shadow-2xl flex flex-col pointer-events-auto overflow-hidden animate-in slide-in-from-right duration-300">
+<div class="h-[48px] bg-surface-container border-b border-outline-variant flex items-center justify-between px-4">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-primary text-[20px]">terminal</span>
+<h2 class="font-headline-md text-headline-md text-on-surface">Emma Terminal</h2>
+</div>
+<button class="text-on-surface-variant hover:text-on-surface transition-colors p-1" onclick="document.getElementById('emma-terminal-overlay').remove()">
+<span class="material-symbols-outlined">close</span>
+</button>
+</div>
+<div class="flex-1 overflow-y-auto p-4 space-y-6 no-scrollbar">
+<div class="flex flex-col gap-2">
+<div class="flex items-center gap-2">
+<div class="w-6 h-6 rounded bg-primary flex items-center justify-center">
+<span class="material-symbols-outlined text-[14px] text-on-primary">person</span>
+</div>
+<span class="text-label-caps font-label-caps text-primary uppercase">Emma</span>
+<span class="text-code-sm font-code-sm text-on-surface-variant">14:20:01</span>
+</div>
+<div class="bg-surface-container-high rounded-lg p-3 border border-outline-variant/30">
+<p class="text-code-sm font-code-sm text-on-surface mb-2">Initiating deep scan of cluster <code>node-set-09-alpha</code>. Searching for orphan worker processes.</p>
+<div class="bg-surface-container-lowest p-2 rounded font-code-sm text-code-sm text-on-surface-variant border border-outline-variant/20">
+                        $ kubectl get pods -n production | grep worker
+                    </div>
+</div>
+</div>
+<div class="flex flex-col gap-2">
+<div class="flex items-center gap-2">
+<div class="w-6 h-6 rounded bg-tertiary flex items-center justify-center">
+<span class="material-symbols-outlined text-[14px] text-on-tertiary">robot_2</span>
+</div>
+<span class="text-label-caps font-label-caps text-tertiary uppercase">System</span>
+<span class="text-code-sm font-code-sm text-on-surface-variant">14:20:15</span>
+</div>
+<div class="bg-surface-container-high rounded-lg p-3 border border-outline-variant/30">
+<p class="text-code-sm font-code-sm text-on-surface">Scan complete. 128 nodes verified. 3 nodes flagged for inconsistent state.</p>
+<ul class="mt-2 space-y-1 text-code-sm font-code-sm text-tertiary">
+<li>• node-09-alpha-02 (High Memory)</li>
+<li>• node-09-alpha-14 (Unresponsive)</li>
+<li>• node-09-alpha-44 (Auth Failure)</li>
+</ul>
+</div>
+</div>
+<div class="flex flex-col gap-2">
+<div class="flex items-center gap-2">
+<div class="w-6 h-6 rounded bg-primary flex items-center justify-center">
+<span class="material-symbols-outlined text-[14px] text-on-primary">person</span>
+</div>
+<span class="text-label-caps font-label-caps text-primary uppercase">Emma</span>
+<span class="text-code-sm font-code-sm text-on-surface-variant">14:21:00</span>
+</div>
+<div class="bg-surface-container-high rounded-lg p-3 border border-outline-variant/30">
+<p class="text-code-sm font-code-sm text-on-surface">Checking auth failure on <code>node-09-alpha-44</code>. It looks like the JWT rotation failed during the last session.</p>
+</div>
+</div>
+</div>
+<div class="p-4 bg-surface-container border-t border-outline-variant">
+<div class="relative flex items-center">
+<span class="absolute left-3 font-code-sm text-primary text-code-sm">$</span>
+<input class="w-full bg-surface-container-lowest border border-outline-variant rounded pl-8 pr-3 py-2 text-code-sm font-code-sm text-on-surface placeholder:text-on-surface-variant focus:outline-none focus:border-primary" placeholder="Type command..." type="text"/>
+<button class="absolute right-2 p-1 text-primary hover:text-primary-fixed transition-colors">
+<span class="material-symbols-outlined text-[18px]">send</span>
+</button>
+</div>
+</div>
+</div>
+</div></body></html>

@@ -1,0 +1,9 @@
+# `cargo audit` policy. Everything not listed here is a real finding.
+[advisories]
+ignore = [
+    # rsa 0.9 Marvin timing side-channel (no patched release). Lockfile-only:
+    # `rsa` enters Cargo.lock via sqlx-mysql, which bot-hq never compiles —
+    # sqlx is built with the `sqlite` feature set alone (`cargo tree -i rsa`
+    # is empty). Re-check when sqlx drops it or the crate ships a fix.
+    "RUSTSEC-2023-0071",
+]

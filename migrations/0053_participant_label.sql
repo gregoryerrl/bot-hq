@@ -1,0 +1,21 @@
+-- rc3 D20's remaining half — a participant's NAME is the user's choice.
+--
+-- NULL (or blank) means "take the ordinal": `EYES`, `EYES-2`, `EYES-3`, derived
+-- from the slug `first_free_slug` already assigned at invite time. That is what
+-- ships today and it stays the default, because it needs nobody to configure
+-- anything and it cannot drift from the internal key.
+--
+-- A value replaces the role-and-ordinal half of the displayed name for this
+-- participant only. The model suffix survives it (`Skeptic · DeepSeek V4 Pro`),
+-- because what a participant RUNS is not what the user named it.
+--
+-- Not a copy of `roles.display_name`: that names the ROLE, and two participants
+-- of one role share it — which is the whole reason the ordinal exists. This
+-- names one seat in one session.
+--
+-- Unvalidated, exactly as `color` is (0052). The label is also matched by
+-- `@mention` alongside the slug, and mention syntax only carries [A-Za-z0-9-];
+-- a label outside that is simply not typeable as a mention, and the slug still
+-- is. Constraining the column instead would teach the database about mention
+-- syntax to buy a failure the fallback already handles.
+ALTER TABLE session_participants ADD COLUMN label TEXT;

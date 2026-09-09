@@ -1,0 +1,11 @@
+# Normalize line endings in the repository.
+#
+# Without this, a Windows checkout with core.autocrlf=true produces a CRLF
+# working tree (~439 of 466 tracked files), which broke several tests that read
+# repo files through `include_str!` and one exported frontend utility. Those
+# were fixed in code where the contract is genuinely "handle either ending";
+# this pins the repo's own files so the question stops arising.
+#
+# `text=auto` lets git DETECT text vs binary, so the 27 files it already treats
+# as binary are untouched. `eol=lf` checks text out as LF on every platform.
+* text=auto eol=lf

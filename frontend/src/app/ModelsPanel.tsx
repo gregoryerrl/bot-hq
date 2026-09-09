@@ -1,0 +1,484 @@
+import { useState } from "react";
+import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
+import { Button } from "../components/ui/Button";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useEscapeKey } from "../hooks/useEscapeKey";
+import { cn } from "../lib/cn";
+import { formatTimestamp } from "../lib/time";
+import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
+import { SaveIcon } from "../components/icons";
+import type { ModelView, ValidateResult } from "../lib/bindings";
+import { invoke } from "@tauri-apps/api/core";
+import { selectClass } from "../components/ui/Select";
+import { Skeleton } from "../components/ui/Skeleton";
+
+const PROVIDERS = ["anthropic", "openai", "deepseek", "local"] as const;
+
+// Shared 5-column grid for the header row + each model row. Every track has a
+// compressible minmax floor (no fixed-width tracks): the old fixed
+// 8rem/9rem/12rem columns gave the row a ~51rem hard minimum, which clipped
+// the trailing actions column on narrow windows now that containers hide
+// horizontal overflow instead of scrolling.
+const rowGridClass =
+  "grid grid-cols-[minmax(8rem,1.4fr)_minmax(4.5rem,8rem)_minmax(6rem,1fr)_minmax(5rem,9rem)_minmax(7.5rem,12rem)] items-center gap-3 px-4";
+
+/**
+ * Settings → Models. A pure registry of saved LLM endpoints (display name +
+ * provider + model id + optional base_url/auth_token). A role names one of
+ * these as its default on the Roles tab; the New Session dialog can override it
+ * per participant at create time. No default lives here.
+ *
+ * Rendered as a list; create/edit go through ModelDialog. The row is only
+ * upserted when the dialog confirms, so cancelling "Add model" leaves no
+ * ghost "New model" entry behind (the old card grid pre-created one).
+ */
+export function ModelsPanel() {
+  const { data: models = [], refetch, isLoading } =
+    useTauriQuery<ModelView[]>("list_models");
+  const del = useTauriMutation<void, { id: string }>("delete_model");
+
+  const [dialog, setDialog] = useState<
+    { mode: "create" } | { mode: "edit"; model: ModelView } | null
+  >(null);
+  const [deleteTarget, setDeleteTarget] = useState<ModelView | null>(null);
+  // Inline delete error so a rejected delete_model surfaces in the confirm
+  // dialog instead of silently failing (the dialog stays open to show it).
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  // B5: per-model pre-flight "Test connection" state + last result.
+  const [testing, setTesting] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<Record<string, ValidateResult>>({});
+
+  const onTest = async (id: string) => {
+    setTesting(id);
+    setTestResult((r) => {
+      const next = { ...r };
+      delete next[id];
+      return next;
+    });
+    try {
+      const res = await invoke<ValidateResult>("validate_model", {
+        modelId: id,
+      });
+      setTestResult((r) => ({ ...r, [id]: res }));
+    } catch (e) {
+      setTestResult((r) => ({
+        ...r,
+        [id]: { ok: false, message: errorMessage(e) },
+      }));
+    } finally {
+      setTesting(null);
+    }
+  };
+
+  return (
+    <div className="mx-auto h-full max-w-7xl overflow-y-auto overflow-x-hidden px-6 py-6">
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <h2 className="font-headline-lg text-headline-lg text-on-surface">
+            Models
+          </h2>
+          <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+            Saved LLM endpoints. Name one as a role's default on the Roles
+            tab, or pick per participant when you create a session.
+          </p>
+        </div>
+        <Button variant="primary" onClick={() => setDialog({ mode: "create" })}>
+          + Add model
+        </Button>
+      </div>
+
+      {isLoading ? (
+        <Skeleton
+          className="space-y-1"
+          rowClassName="h-11 rounded border border-outline-variant bg-surface-container"
+        />
+      ) : models.length === 0 ? (
+        <p className="font-body-md text-body-md text-on-surface-variant">
+          No saved models yet. Add one to assign it to an agent.
+        </p>
+      ) : (
+        <div className="overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+          <div
+            className={cn(
+              rowGridClass,
+              "border-b border-outline-variant py-2",
+            )}
+          >
+            <span className="font-label-caps text-label-caps text-on-surface-variant">
+              Name
+            </span>
+            <span className="font-label-caps text-label-caps text-on-surface-variant">
+              Provider
+            </span>
+            <span className="font-label-caps text-label-caps text-on-surface-variant">
+              Model id
+            </span>
+            <span className="font-label-caps text-label-caps text-on-surface-variant">
+              Updated
+            </span>
+            <span aria-hidden />
+          </div>
+          <div className="divide-y divide-outline-variant/40">
+            {models.map((m) => (
+              <div key={m.id}>
+                <div className={cn(rowGridClass, "py-2.5")}>
+                  <span className="truncate font-body-md text-body-md text-on-surface">
+                    {m.display_name || "Untitled model"}
+                  </span>
+                  <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
+                    {m.provider || "—"}
+                  </span>
+                  <span
+                    className="flex min-w-0 items-center gap-1.5 font-code-sm text-code-sm text-on-surface-variant"
+                    title={m.model_name}
+                  >
+                    <span className="truncate">{m.model_name || "—"}</span>
+                  </span>
+                  <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
+                    {m.updated_at ? formatTimestamp(m.updated_at) : "—"}
+                  </span>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Button
+                      size="sm"
+                      disabled={testing === m.id}
+                      title="Pre-flight check this model's token + gateway"
+                      onClick={() => onTest(m.id)}
+                    >
+                      {testing === m.id ? "…" : "Test"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => setDialog({ mode: "edit", model: m })}
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      disabled={del.isPending}
+                      onClick={() => {
+                        setDeleteError(null);
+                        setDeleteTarget(m);
+                      }}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                </div>
+                {testResult[m.id] && (
+                  <div
+                    className={cn(
+                      "px-4 pb-2 font-code-sm text-code-sm",
+                      testResult[m.id].ok ? "text-success" : "text-error",
+                    )}
+                  >
+                    {testResult[m.id].ok ? "✓ " : "✗ "}
+                    {testResult[m.id].message}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {dialog && (
+        <ModelDialog
+          initial={dialog.mode === "edit" ? dialog.model : null}
+          onClose={() => setDialog(null)}
+          onSaved={() => {
+            setDialog(null);
+            refetch();
+          }}
+        />
+      )}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete saved model?"
+        message={
+          <>
+            Delete{" "}
+            <strong className="text-on-surface">
+              {deleteTarget?.display_name || "this model"}
+            </strong>
+            ? This also removes its stored auth token and can&apos;t be undone.
+            {deleteError && (
+              <span className="mt-3 block rounded border border-error/40 bg-error-container/20 px-3 py-2 text-on-error-container">
+                Delete failed: {deleteError}
+              </span>
+            )}
+          </>
+        }
+        confirmLabel="Delete"
+        confirmVariant="danger"
+        onConfirm={async () => {
+          if (!deleteTarget) return;
+          setDeleteError(null);
+          try {
+            await del.mutateAsync({ id: deleteTarget.id });
+            setDeleteTarget(null);
+            refetch();
+          } catch (e) {
+            // Keep the dialog open so the inline error is visible.
+            setDeleteError(errorMessage(e));
+          }
+        }}
+        onCancel={() => {
+          setDeleteError(null);
+          setDeleteTarget(null);
+        }}
+      />
+    </div>
+  );
+}
+
+function emptyDraft(): ModelView {
+  return {
+    id: "",
+    display_name: "",
+    provider: "anthropic",
+    model_name: "",
+    base_url: null,
+    auth_token: null,
+    created_at: "",
+    updated_at: "",
+    context_window: null,
+    cli_settings: null,
+  };
+}
+
+// ============================================================================
+// ModelDialog — create (initial=null) or edit one saved model. The id is
+// generated at save time for creates, so cancelling never persists anything.
+// ============================================================================
+
+function ModelDialog({
+  initial,
+  onClose,
+  onSaved,
+}: {
+  initial: ModelView | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [draft, setDraft] = useState<ModelView>(initial ?? emptyDraft());
+  const [tokenVisible, setTokenVisible] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const upsert = useTauriMutation<void, { model: ModelView }>("upsert_model");
+  const trapRef = useFocusTrap<HTMLDivElement>();
+  // Escape closes, mirroring ConfirmDialog (conditionally mounted — no guard).
+  useEscapeKey(onClose);
+
+  const title = initial ? "Edit model" : "Add model";
+  const providerIsCustom = !PROVIDERS.includes(
+    draft.provider as (typeof PROVIDERS)[number],
+  );
+  const canSave = !upsert.isPending && draft.display_name.trim().length > 0;
+
+  const submit = async () => {
+    if (!canSave) return;
+    setError(null);
+    try {
+      await upsert.mutateAsync({
+        model: { ...draft, id: draft.id || crypto.randomUUID() },
+      });
+      onSaved();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={onClose}
+    >
+      <div
+        ref={trapRef}
+        tabIndex={-1}
+        className="w-full max-w-md rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="mb-4 font-headline-md text-headline-md text-on-surface">
+          {title}
+        </h2>
+
+        <div className="flex flex-col gap-4">
+          <label className="block">
+            <FieldLabel>Display name</FieldLabel>
+            <input
+              type="text"
+              value={draft.display_name}
+              onChange={(e) =>
+                setDraft({ ...draft, display_name: e.target.value })
+              }
+              placeholder="e.g. Opus (Anthropic)"
+              autoFocus
+              className={terminalInputClass}
+            />
+          </label>
+
+          <label className="block">
+            <FieldLabel>Provider</FieldLabel>
+            <select
+              value={providerIsCustom ? "other" : draft.provider}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  provider: e.target.value === "other" ? "" : e.target.value,
+                })
+              }
+              className={selectClass}
+            >
+              <option value="anthropic">Anthropic</option>
+              <option value="openai">OpenAI</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="local">Local (llama.cpp)</option>
+              <option value="other">Other (custom)</option>
+            </select>
+            {providerIsCustom && (
+              <input
+                type="text"
+                value={draft.provider}
+                onChange={(e) =>
+                  setDraft({ ...draft, provider: e.target.value })
+                }
+                placeholder="Custom provider"
+                className={cn("mt-2", terminalInputClass)}
+              />
+            )}
+          </label>
+
+          <label className="block">
+            <FieldLabel>Model id</FieldLabel>
+            <input
+              type="text"
+              value={draft.model_name}
+              onChange={(e) =>
+                setDraft({ ...draft, model_name: e.target.value })
+              }
+              placeholder="claude-opus-5"
+              className={terminalInputClass}
+            />
+          </label>
+
+          <label className="block">
+            <FieldLabel>Base URL</FieldLabel>
+            <input
+              type="text"
+              value={draft.base_url ?? ""}
+              onChange={(e) =>
+                setDraft({ ...draft, base_url: e.target.value || null })
+              }
+              placeholder="(provider default)"
+              className={terminalInputClass}
+            />
+          </label>
+
+          <label className="block">
+            <FieldLabel>Auth token</FieldLabel>
+            <div className="relative">
+              <input
+                type={tokenVisible ? "text" : "password"}
+                value={draft.auth_token ?? ""}
+                onChange={(e) =>
+                  setDraft({ ...draft, auth_token: e.target.value || null })
+                }
+                placeholder="(unset — uses provider env vars)"
+                className={cn(terminalInputClass, "pr-12")}
+              />
+              <button
+                type="button"
+                onClick={() => setTokenVisible((v) => !v)}
+                className="absolute inset-y-0 right-0 px-2 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface"
+              >
+                {tokenVisible ? "Hide" : "Show"}
+              </button>
+            </div>
+          </label>
+
+          <label className="block">
+            <FieldLabel>Context window</FieldLabel>
+            <input
+              type="number"
+              min={1}
+              value={draft.context_window ?? ""}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  context_window: e.target.value
+                    ? Number(e.target.value)
+                    : null,
+                })
+              }
+              placeholder="(unknown — meter shows a gap)"
+              className={terminalInputClass}
+            />
+            <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
+              Total tokens this specific model accepts. The context meter still
+              takes its window from claude-code, which reports one per turn; this
+              value is what that report is checked <strong>against</strong> — when
+              the two disagree, the session gets a notice naming both numbers.
+            </span>
+          </label>
+
+          <label className="block">
+            <FieldLabel>Claude CLI settings (JSON)</FieldLabel>
+            <textarea
+              value={draft.cli_settings ?? ""}
+              onChange={(e) =>
+                setDraft({ ...draft, cli_settings: e.target.value || null })
+              }
+              placeholder='{"modelOverrides":{"claude-fable-5":"claude-fable-5-1"}}'
+              rows={3}
+              spellCheck={false}
+              className={cn(terminalInputClass, "resize-y whitespace-pre-wrap break-all")}
+            />
+            <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
+              Merged into every participant&apos;s <code>--settings</code> at
+              spawn, executor and reviewer alike. Use it when the installed claude
+              CLI does not know this model id and runs it at its 200k default:
+              map a model id the CLI does know to this one under{" "}
+              <code>modelOverrides</code>. Must be a JSON object; a role&apos;s own
+              Claude-config override wins on any key both set.
+            </span>
+          </label>
+
+          {/* The "Native loop" checkbox lived here until rc3 D9. bot-hq now has
+              one connector, so there is no runtime to choose — but the choice it
+              used to make still has a consequence the user has to be able to
+              see, which is what this says. */}
+          <p className="break-words rounded border border-outline-variant/60 bg-surface-container-lowest p-2 font-body text-code-sm text-on-surface-variant">
+            Every saved model is spawned through the <strong>claude CLI</strong>,
+            so its endpoint has to speak the Anthropic Messages API. A gateway
+            that does not will fail at spawn — press <strong>Test</strong> above
+            to find out now instead of mid-session.
+          </p>
+        </div>
+
+        {error && (
+          <p className="mt-3 font-code-sm text-code-sm text-error">{error}</p>
+        )}
+
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            disabled={!canSave}
+            onClick={submit}
+          >
+            <SaveIcon />
+            {upsert.isPending ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}

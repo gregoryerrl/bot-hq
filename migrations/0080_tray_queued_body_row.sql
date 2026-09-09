@@ -1,0 +1,21 @@
+-- 0080: an outward publish the reviewer has not yet read is QUEUED, durably.
+--
+-- Until now the outward-review precondition REFUSED an `action_gate` park until
+-- the reviewer had been dealt a turn and had read the exact body ("End your
+-- turn — the ring deals the reviewer next — then park on your following turn").
+-- Measured over the seven client-project sessions of 2026-08-31 → 09-05: 83 refused
+-- attempts, one deadlock (#32: each user message restarted the rotation at the
+-- executor, so the reviewer was never dealt), three idle nudges caused by the
+-- two-turn ritual, and a 25 KB issue body re-emitted as a session doc so it
+-- would count as "delivered".
+--
+-- A refused park now becomes a tray row with `status = 'queued'`: bot-hq posts
+-- the body as a row for the reviewer, summons the reviewer, and flips the row
+-- to `pending` (the user's card) only after the reviewer's cursor has passed
+-- that body row. `body_row_id` is the `messages.id` of that posted body — the
+-- settlement key. NULL on every row that is not a queued outward publish.
+--
+-- Durable on purpose: an in-memory queue would strand on relaunch with the
+-- executor told "nothing for you to do" (the 2026-08-27 review-layer lesson:
+-- precondition-not-hold, never state that a restart can lose).
+ALTER TABLE session_tray ADD COLUMN body_row_id INTEGER;

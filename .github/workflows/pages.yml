@@ -1,0 +1,52 @@
+name: Deploy GitHub Pages
+
+# Publishes the static landing site in site/ to GitHub Pages.
+# One-time setup: repo Settings → Pages → Source = "GitHub Actions".
+#
+# Pages is unavailable to a PRIVATE repository on the Free plan, so the job
+# is gated on visibility: while the repo is private it is skipped (no red
+# run beside the test jobs, no billed minutes) and it resumes on its own
+# when the repo is public again. Actions are pinned to commit shas; the
+# `# vX.Y.Z` beside each is the tag the sha was resolved from.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Allow the workflow to publish to Pages via OIDC.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One concurrent deploy; don't cancel an in-progress publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

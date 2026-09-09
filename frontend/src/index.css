@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Hanken Grotesk — Industrial Terminal headline font (variable wght). */
+@font-face {
+  font-family: "Hanken Grotesk";
+  src: url("/fonts/HankenGrotesk.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Inter — Industrial Terminal body font (variable wght). */
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* JetBrains Mono — variable-weight TTF bundled at build time.
+
+   All three faces are referenced by ROOT-ABSOLUTE public path (`/fonts/…`):
+   the files live in `public/fonts/`, which Vite copies to the dist root, and
+   with the relative `base` Vite rewrites these to `url(../fonts/…)` beside the
+   built stylesheet. They used to be CSS-relative (`./fonts/…`), which Vite
+   could not resolve and emitted verbatim — so the built app 404'd every font
+   and fell back to generic families from the migration until 2026-08-17.
+   `lib/fonts.test.ts` pins the shape and the files. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono.ttf") format("truetype-variations");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Tighter, app-shell scrollbars instead of the OS default. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #2d2d2d;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #404040;
+}
+
+/* Native UA controls — `<select>` popups, scrollbars, spinners, date pickers —
+   are drawn by the platform, not by this stylesheet, and default to LIGHT
+   unless the page declares its scheme. bot-hq has no light mode (zero `dark:`
+   variants, no `darkMode` in the Tailwind config, no `dark` class on <html>),
+   so a light popup over a dark app is always wrong.
+
+   Found on Fedora/KDE 2026-08-25: the AppImage's GTK hook probes GNOME's
+   `org.gnome.desktop.interface gtk-theme`, reads `'Breeze'`, finds no "dark"
+   substring and exports `GTK_THEME=Adwaita:light` — so WebKitGTK drew every
+   `<select>` popup light on a desktop that is dark. That hook is regenerated
+   by linuxdeploy on every build and cannot be patched from this repo; this
+   declaration is the portable lever, and it covers the same latent bug on a
+   light-mode Windows or macOS host. `lib/theme.test.ts` pins it. */
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  background: #0b1326;
+  color: #e5e5e5;
+  /* Hard backstop for the app-wide no-horizontal-scroll rule: nothing may
+     widen the page itself, whatever a descendant does. */
+  overflow-x: hidden;
+}

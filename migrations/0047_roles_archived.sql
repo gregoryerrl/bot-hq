@@ -1,0 +1,48 @@
+-- ============================================================================
+-- 0047 — roles.archived: removing a role is ARCHIVAL, never a hard delete.
+--
+-- The Roles tab (rc3 decision D8) is the only place a role is created, edited
+-- or removed, and it needs a "remove" that does not destroy history. This adds
+-- the one column that makes removal expressible.
+--
+-- WHY NOT `DELETE FROM roles`:
+--   * `session_participants.role_id INTEGER REFERENCES roles(id)` (0044) has no
+--     `ON DELETE` clause, so it is `NO ACTION`, and both `Storage::open` and
+--     `Storage::memory` connect with `.foreign_keys(true)` (storage/mod.rs).
+--     A DELETE of a referenced role is therefore REFUSED, not cascaded.
+--     Verified 2026-08-11 on a scratch database with that exact pair of tables:
+--     `DELETE FROM roles WHERE id = 1` fails with
+--     `FOREIGN KEY constraint failed`, exit 19, and the row survives.
+--   * That is not a rare corner. Measured 2026-08-11, read-only, against the
+--     live database (~/.bot-hq/.local/bot-hq.db): the two seeded roles `hands`
+--     and `eyes` are referenced by 390 participants each. Every role that
+--     exists today is in the refusing case, so a hard-delete button would be an
+--     error dialog on every row it was offered for.
+--   * Even where a delete would succeed — a role invited into nothing yet — it
+--     is the wrong outcome. A participant carries an invite-time SNAPSHOT of
+--     its capabilities (0044), and `role_id` is the only record of WHICH
+--     template that snapshot came from. Dropping the row would leave the
+--     provenance of every past session's roster unanswerable.
+--
+-- WHAT ARCHIVING DOES NOT FREE: `roles.slug` is `NOT NULL UNIQUE` over the
+-- WHOLE table, and this migration does not scope that to live rows. So an
+-- archived role keeps its slug reserved, and slug generation must count
+-- archived rows as taken (`Storage::taken_slugs` does). Deliberate: an archived
+-- role can be un-archived, and a new role that had taken its slug in the
+-- meantime would make that impossible.
+--
+-- DEFAULT 0 = not archived, so every existing row keeps exactly the meaning it
+-- has today and no backfill runs.
+--
+-- ADDITIVE — one `ALTER TABLE … ADD COLUMN`. No table rebuild, so none of
+-- 0044's 2×-disk precondition, and no guard table: following 0045's reasoning,
+-- a single DDL statement either applies or does not, leaving nothing
+-- half-applied to protect against.
+--
+-- DRY RUN, 2026-08-11: applied to a COPY of the live database (510 MB, 2 roles)
+-- — exit 0, both rows land on `archived = 0`, `PRAGMA integrity_check` = ok,
+-- `PRAGMA foreign_key_check` empty. It also applies from scratch on every
+-- `Storage::memory()` in the suite, which is what the roles-CRUD tests run on.
+-- ============================================================================
+
+ALTER TABLE roles ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;

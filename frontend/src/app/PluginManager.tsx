@@ -1,0 +1,767 @@
+import { useState } from "react";
+import { Link } from "react-router-dom";
+import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
+import { Button } from "../components/ui/Button";
+import { Card, CardDescription, CardTitle } from "../components/ui/Card";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { cn } from "../lib/cn";
+import type {
+  AppError,
+  CspExtraOrigins,
+  InstalledPluginView,
+  PluginManifestPreview,
+  PluginStatus,
+} from "../lib/bindings";
+
+/**
+ * Consent copy per CSP directive, in user terms. Order matters: code first
+ * (the scariest grant), then styles/fonts/images. Origins are validated
+ * https-only server-side, so the scheme is stripped for display — the
+ * user sees the EXACT hosts, not a summary.
+ */
+const CSP_CONSENT_LINES: Array<{
+  directive: keyof CspExtraOrigins;
+  label: string;
+}> = [
+  { directive: "script-src", label: "Can load and run code from" },
+  { directive: "style-src", label: "Can load styles from" },
+  { directive: "font-src", label: "Can load fonts from" },
+  { directive: "img-src", label: "Can load images from" },
+];
+
+export function CspConsentSection({ csp }: { csp: CspExtraOrigins }) {
+  const lines = CSP_CONSENT_LINES.map(({ directive, label }) => ({
+    directive,
+    label,
+    // Empty directives are omitted from the wire format despite the
+    // generated type — read defensively.
+    origins: (csp[directive] ?? []).map((o) => o.replace(/^https:\/\//, "")),
+  })).filter((l) => l.origins.length > 0);
+  if (lines.length === 0) return null;
+  return (
+    <div className="mt-3">
+      <p className="mb-1">It also asks to load remote content:</p>
+      <ul className="space-y-1">
+        {lines.map((l) => (
+          <li key={l.directive} className="flex gap-2">
+            <code className="shrink-0 rounded bg-surface-container-high px-1 py-0.5 font-code-sm text-code-sm text-on-surface">
+              {l.directive}
+            </code>
+            <span className="text-on-surface-variant">
+              {l.label}: {l.origins.join(", ")}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * Live PluginManager: list installed plugins, install new ones (URL or
+ * local path), enable/disable/uninstall, watch heartbeat status updates
+ * via Tauri events.
+ */
+export function PluginManager() {
+  const [installSource, setInstallSource] = useState("");
+  const [linkedInstall, setLinkedInstall] = useState(false);
+  const [installError, setInstallError] = useState<AppError | null>(null);
+  // Enable/disable + uninstall both fire-and-forget mutate; capture their
+  // rejections so a failed toggle/uninstall isn't silently swallowed.
+  const [toggleError, setToggleError] = useState<AppError | null>(null);
+  const [uninstallError, setUninstallError] = useState<AppError | null>(null);
+  const [updateError, setUpdateError] = useState<AppError | null>(null);
+  const [confirmUninstall, setConfirmUninstall] =
+    useState<InstalledPluginView | null>(null);
+  // Consent gate: install is two-step — preview the manifest (nothing lands
+  // on disk), show what the plugin requests, install only on explicit confirm.
+  // Re-approve (linked drift) rides the SAME dialog: `reapprove` carries the
+  // plugin id and the confirm routes to reapprove_linked_plugin instead.
+  // Reinstall (in-place refresh / mode switch) rides it too: `reinstall`
+  // carries the plugin id, `linked` becomes the TARGET mode (toggleable
+  // inside the dialog), and confirm routes to reinstall_plugin.
+  const [pendingInstall, setPendingInstall] = useState<{
+    source: string;
+    preview: PluginManifestPreview;
+    linked: boolean;
+    reapprove: string | null;
+    reinstall: string | null;
+    wasLinked: boolean;
+  } | null>(null);
+
+  // The 10 s refetch is deliberate and is the ONLY fixed-interval backend poll
+  // left in the app: install / enable / disable / uninstall / crash all
+  // invalidate through events (`PLUGIN_KEYS` in Providers.tsx), but the
+  // heartbeat dot's `Slow { miss_count }` steps and its recovery to `Healthy`
+  // fire no event — the sweep only emits `plugin:crashed` — so without this
+  // the dot would freeze between crashes (checked, round 9).
+  const list = useTauriQuery<InstalledPluginView[]>(
+    "list_installed_plugins",
+    {},
+    { refetchInterval: 10_000 },
+  );
+  const plugins = list.data ?? [];
+
+  const preview = useTauriMutation<PluginManifestPreview, { source: string }>(
+    "preview_plugin_manifest",
+  );
+  const install = useTauriMutation<
+    InstalledPluginView,
+    { source: string; linked: boolean; cleanupOrphan: boolean }
+  >("install_plugin");
+  const reapprove = useTauriMutation<InstalledPluginView, { pluginId: string }>(
+    "reapprove_linked_plugin",
+  );
+  const reinstall = useTauriMutation<
+    InstalledPluginView,
+    { pluginId: string; source: string; linked: boolean }
+  >("reinstall_plugin");
+  const updateFromSource = useTauriMutation<
+    InstalledPluginView,
+    { pluginId: string }
+  >("update_plugin_from_source");
+  const enable = useTauriMutation<void, { pluginId: string }>("enable_plugin");
+  const disable = useTauriMutation<void, { pluginId: string }>("disable_plugin");
+  const uninstall = useTauriMutation<void, { pluginId: string }>(
+    "uninstall_plugin",
+  );
+
+  // Refetch on any backend state change: the `plugin:*` events invalidate
+  // `list_installed_plugins` from `Providers.tsx`'s GlobalEventSync (round 8),
+  // for this panel and the Shell's tab row alike.
+
+  const handleInstall = () => {
+    const source = installSource.trim();
+    if (!source || preview.isPending || install.isPending) return;
+    setInstallError(null);
+    const linked = linkedInstall && !/^https?:\/\//.test(source);
+    preview.mutate(
+      { source },
+      {
+        onSuccess: (p) =>
+          setPendingInstall({
+            source,
+            preview: p,
+            linked,
+            reapprove: null,
+            reinstall: null,
+            wasLinked: false,
+          }),
+        onError: (err) => setInstallError(err),
+      },
+    );
+  };
+
+  // Drift banner path: preview the LIVE source manifest, run the same
+  // consent dialog, confirm applies via reapprove (KV survives).
+  const handleReapprove = (plugin: InstalledPluginView) => {
+    if (preview.isPending || reapprove.isPending) return;
+    setInstallError(null);
+    preview.mutate(
+      { source: plugin.dir_path },
+      {
+        onSuccess: (p) =>
+          setPendingInstall({
+            source: plugin.dir_path,
+            preview: p,
+            linked: true,
+            reapprove: plugin.id,
+            reinstall: null,
+            wasLinked: true,
+          }),
+        onError: (err) => setInstallError(err),
+      },
+    );
+  };
+
+  // Reinstall path: in-place refresh / mode switch, KV survives. Source is
+  // the top input when the user typed one, else the linked source dir —
+  // copy-mode originals aren't recorded, so those need a typed path.
+  const handleReinstall = (plugin: InstalledPluginView) => {
+    if (preview.isPending || reinstall.isPending) return;
+    setInstallError(null);
+    const typed = installSource.trim();
+    const source =
+      typed || (plugin.linked ? plugin.dir_path : (plugin.source_path ?? ""));
+    if (!source) {
+      setInstallError({
+        kind: "Validation",
+        message:
+          "Enter the plugin's source path in the field above, then press Reinstall… again.",
+      } as AppError);
+      return;
+    }
+    preview.mutate(
+      { source },
+      {
+        onSuccess: (p) =>
+          setPendingInstall({
+            source,
+            preview: p,
+            // Target mode starts at the CURRENT mode; the dialog has the
+            // toggle for converting (URLs can't be linked, as at install).
+            linked: plugin.linked && !/^https?:\/\//.test(source),
+            reapprove: null,
+            reinstall: plugin.id,
+            wasLinked: plugin.linked,
+          }),
+        onError: (err) => setInstallError(err),
+      },
+    );
+  };
+
+  const confirmInstall = () => {
+    if (!pendingInstall) return;
+    const {
+      source,
+      preview: p,
+      linked,
+      reapprove: reapproveId,
+      reinstall: reinstallId,
+    } = pendingInstall;
+    setPendingInstall(null);
+    if (reapproveId) {
+      reapprove.mutate(
+        { pluginId: reapproveId },
+        {
+          onSuccess: () => void list.refetch(),
+          onError: (err) => setInstallError(err),
+        },
+      );
+      return;
+    }
+    if (reinstallId) {
+      reinstall.mutate(
+        { pluginId: reinstallId, source, linked },
+        {
+          onSuccess: () => {
+            setInstallSource("");
+            void list.refetch();
+          },
+          onError: (err) => setInstallError(err),
+        },
+      );
+      return;
+    }
+    // Confirming a dialog that showed the leftover-files notice IS the
+    // cleanup consent — the flag is only ever true when the notice rendered.
+    install.mutate(
+      { source, linked, cleanupOrphan: p.orphan_dir },
+      {
+        onSuccess: () => {
+          setInstallSource("");
+          setLinkedInstall(false);
+          void list.refetch();
+        },
+        onError: (err) => setInstallError(err),
+      },
+    );
+  };
+
+  return (
+    <div className="mx-auto h-full max-w-3xl overflow-y-auto overflow-x-hidden px-6 py-6">
+      <header className="mb-6 flex items-baseline gap-3">
+        <h2 className="font-headline-lg text-headline-lg">Plugins</h2>
+        <span className="font-code-sm text-code-sm text-on-surface-variant">
+          {plugins.length} installed
+        </span>
+      </header>
+
+      <section className="mb-6">
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={installSource}
+            onChange={(e) => setInstallSource(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                handleInstall();
+              }
+            }}
+            placeholder="URL to manifest.json or local directory path…"
+            className="flex-1 rounded-md border border-outline-variant bg-surface-container-high px-3 py-1.5 font-body-md text-body-md text-on-surface placeholder:text-on-surface-variant focus:outline-none focus:ring-1 focus:ring-primary"
+          />
+          <Button
+            variant="primary"
+            onClick={handleInstall}
+            disabled={!installSource.trim() || install.isPending}
+          >
+            {install.isPending ? "Installing…" : "Install"}
+          </Button>
+        </div>
+        <label
+          className={cn(
+            "mt-2 flex items-center gap-2 font-code-sm text-code-sm",
+            /^https?:\/\//.test(installSource.trim())
+              ? "text-outline-variant"
+              : "text-on-surface-variant",
+          )}
+        >
+          <input
+            type="checkbox"
+            checked={linkedInstall && !/^https?:\/\//.test(installSource.trim())}
+            disabled={/^https?:\/\//.test(installSource.trim())}
+            onChange={(e) => setLinkedInstall(e.target.checked)}
+          />
+          Linked — serve from this directory (no copy). Local paths only;
+          edits show on tab reload.
+        </label>
+        {installError && (
+          <div
+            role="alert"
+            className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
+          >
+            <div>
+              <span className="font-semibold">{installError.kind}:</span>{" "}
+              {installError.message}
+            </div>
+            <button
+              type="button"
+              className="underline"
+              onClick={() => setInstallError(null)}
+            >
+              dismiss
+            </button>
+          </div>
+        )}
+        {toggleError && (
+          <div
+            role="alert"
+            className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
+          >
+            <div>
+              <span className="font-semibold">{toggleError.kind}:</span>{" "}
+              Enable/disable failed: {toggleError.message}
+            </div>
+            <button type="button" className="underline" onClick={() => setToggleError(null)}>
+              dismiss
+            </button>
+          </div>
+        )}
+        {uninstallError && (
+          <div
+            role="alert"
+            className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
+          >
+            <div>
+              <span className="font-semibold">{uninstallError.kind}:</span>{" "}
+              Uninstall failed: {uninstallError.message}
+            </div>
+            <button
+              type="button"
+              className="underline"
+              onClick={() => setUninstallError(null)}
+            >
+              dismiss
+            </button>
+          </div>
+        )}
+        {updateError && (
+          <div
+            role="alert"
+            className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
+          >
+            <div>
+              <span className="font-semibold">{updateError.kind}:</span>{" "}
+              Update from source failed: {updateError.message}
+            </div>
+            <button type="button" className="underline" onClick={() => setUpdateError(null)}>
+              dismiss
+            </button>
+          </div>
+        )}
+      </section>
+
+      {list.isLoading ? (
+        <p className="font-body-md text-body-md text-on-surface-variant">Loading…</p>
+      ) : plugins.length === 0 ? (
+        <Card className="bg-surface">
+          <CardTitle>No plugins installed</CardTitle>
+          <CardDescription>
+            Paste a manifest URL or a local plugin directory above to install.
+            Plugins live at{" "}
+            <code className="rounded bg-surface-container-high px-1 py-0.5 font-code-sm text-code-sm text-on-surface">
+              ~/.bot-hq/plugins/&lt;id&gt;/
+            </code>{" "}
+            once installed.
+          </CardDescription>
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {plugins.map((p) => (
+            <PluginCard
+              key={p.id}
+              plugin={p}
+              onToggle={() => {
+                const action = p.enabled ? disable : enable;
+                setToggleError(null);
+                action.mutate(
+                  { pluginId: p.id },
+                  { onError: (err) => setToggleError(err) },
+                );
+              }}
+              onUninstall={() => setConfirmUninstall(p)}
+              onReapprove={() => handleReapprove(p)}
+              onReinstall={() => handleReinstall(p)}
+              onUpdateFromSource={() => {
+                setUpdateError(null);
+                updateFromSource.mutate(
+                  { pluginId: p.id },
+                  {
+                    onSuccess: () => void list.refetch(),
+                    onError: (err) => setUpdateError(err),
+                  },
+                );
+              }}
+              busy={
+                (p.enabled && disable.isPending) ||
+                (!p.enabled && enable.isPending) ||
+                uninstall.isPending ||
+                reinstall.isPending ||
+                updateFromSource.isPending
+              }
+            />
+          ))}
+        </div>
+      )}
+      <ConfirmDialog
+        open={pendingInstall !== null}
+        title={
+          pendingInstall?.reapprove
+            ? `Re-approve ${pendingInstall.preview.manifest.name}?`
+            : pendingInstall?.reinstall
+              ? `Reinstall ${pendingInstall.preview.manifest.name}?`
+              : `Install ${pendingInstall?.preview.manifest.name ?? "plugin"}?`
+        }
+        message={
+          pendingInstall && (
+            <div className="text-left">
+              {pendingInstall.reapprove && (
+                <p className="mb-2 rounded border border-warning/40 bg-warning/10 px-2 py-1 text-on-surface">
+                  The linked manifest changed since you last approved it.
+                  Review what it now requests:
+                </p>
+              )}
+              <p className="mb-2">
+                <code className="font-code-sm">
+                  {pendingInstall.preview.manifest.id}
+                </code>{" "}
+                v{pendingInstall.preview.manifest.version} — this plugin asks
+                to:
+              </p>
+              {pendingInstall.preview.capabilities.length === 0 ? (
+                <p className="text-on-surface-variant">
+                  Nothing — it renders its own panel and accesses no bot-hq
+                  data.
+                </p>
+              ) : (
+                <ul className="space-y-1">
+                  {pendingInstall.preview.capabilities.map((c) => (
+                    <li key={c.name} className="flex gap-2">
+                      <code className="shrink-0 rounded bg-surface-container-high px-1 py-0.5 font-code-sm text-code-sm text-on-surface">
+                        {c.name}
+                      </code>
+                      <span className="text-on-surface-variant">
+                        {c.description}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {pendingInstall.preview.manifest.csp_extra_origins && (
+                <CspConsentSection
+                  csp={pendingInstall.preview.manifest.csp_extra_origins}
+                />
+              )}
+              {pendingInstall.linked ? (
+                <p className="mt-3 text-on-surface-variant">
+                  Install mode: Linked — files are served directly from{" "}
+                  <code className="font-code-sm">{pendingInstall.source}</code>.
+                  Content changes take effect immediately; capability changes
+                  still require re-approval. Only link directories you
+                  control.
+                </p>
+              ) : (
+                <p className="mt-3 text-on-surface-variant">
+                  Install mode: Copy — files are copied into bot-hq's plugin
+                  data directory and only change when you reinstall.
+                </p>
+              )}
+              {pendingInstall.preview.orphan_dir && (
+                <p className="mt-3 rounded border border-warning/40 bg-warning/10 px-2 py-1 text-on-surface">
+                  Leftover files from a previous install of this plugin were
+                  found (it's not in the registry). Approving removes them
+                  and continues the install.
+                </p>
+              )}
+              {pendingInstall.reinstall && (
+                <>
+                  <label className="mt-3 flex items-center gap-2 font-code-sm text-code-sm text-on-surface-variant">
+                    <input
+                      type="checkbox"
+                      checked={pendingInstall.linked}
+                      disabled={/^https?:\/\//.test(pendingInstall.source)}
+                      onChange={(e) =>
+                        setPendingInstall(
+                          (pi) => pi && { ...pi, linked: e.target.checked },
+                        )
+                      }
+                    />
+                    Linked — serve directly from the source (no copy)
+                  </label>
+                  <p className="mt-2 text-on-surface-variant">
+                    {pendingInstall.linked
+                      ? pendingInstall.wasLinked
+                        ? ""
+                        : "The managed copy under ~/.bot-hq/plugins/ is removed — serving moves to the source directory. "
+                      : "The managed copy under ~/.bot-hq/plugins/ is replaced with files from the source. "}
+                    Saved plugin state is preserved.
+                  </p>
+                </>
+              )}
+            </div>
+          )
+        }
+        confirmLabel={
+          pendingInstall?.reapprove
+            ? "Re-approve"
+            : pendingInstall?.reinstall
+              ? "Reinstall"
+              : pendingInstall?.preview.orphan_dir
+                ? "Remove leftovers & install"
+                : "Install"
+        }
+        confirmVariant="primary"
+        onConfirm={confirmInstall}
+        onCancel={() => setPendingInstall(null)}
+      />
+      <ConfirmDialog
+        open={confirmUninstall !== null}
+        title="Uninstall plugin?"
+        message={
+          confirmUninstall?.linked ? (
+            <>
+              Uninstall{" "}
+              <strong className="text-on-surface">
+                {confirmUninstall?.name}
+              </strong>
+              ? Its registry entry and saved state are removed. The linked
+              source directory{" "}
+              <code className="text-on-surface">
+                {confirmUninstall?.dir_path}
+              </code>{" "}
+              is <strong className="text-on-surface">not touched</strong> —
+              it's your repo.
+            </>
+          ) : (
+            <>
+              Uninstall{" "}
+              <strong className="text-on-surface">
+                {confirmUninstall?.name}
+              </strong>
+              ? Its files under{" "}
+              <code className="text-on-surface">~/.bot-hq/plugins/</code> are
+              removed.
+            </>
+          )
+        }
+        confirmLabel="Uninstall"
+        confirmVariant="danger"
+        onConfirm={() => {
+          if (confirmUninstall) {
+            setUninstallError(null);
+            uninstall.mutate(
+              { pluginId: confirmUninstall.id },
+              { onError: (err) => setUninstallError(err) },
+            );
+          }
+          setConfirmUninstall(null);
+        }}
+        onCancel={() => setConfirmUninstall(null)}
+      />
+    </div>
+  );
+}
+
+interface PluginCardProps {
+  plugin: InstalledPluginView;
+  onToggle: () => void;
+  onUninstall: () => void;
+  onReapprove: () => void;
+  onReinstall: () => void;
+  onUpdateFromSource: () => void;
+  busy: boolean;
+}
+
+export function PluginCard({
+  plugin,
+  onToggle,
+  onUninstall,
+  onReapprove,
+  onReinstall,
+  onUpdateFromSource,
+  busy,
+}: PluginCardProps) {
+  const { manifest, status, enabled } = plugin;
+  const panelSlot = manifest.slots?.find((s) => s.panel_route);
+  const namedSlots = (manifest.slots ?? []).filter((s) => s.slot_name);
+  // URL-recorded sources re-fetch via Reinstall — no directory to copy from.
+  const updatableSource =
+    !plugin.linked &&
+    !!plugin.source_path &&
+    !/^https?:\/\//.test(plugin.source_path);
+
+  return (
+    <Card className="bg-surface">
+      <header className="mb-2 flex items-center gap-2">
+        <span
+          aria-hidden
+          className={cn("size-2 rounded-full", statusDotClass(status, enabled))}
+          title={statusLabel(status, enabled)}
+        />
+        <CardTitle>{plugin.name}</CardTitle>
+        <span className="rounded bg-surface-container-high px-1.5 py-0.5 font-code-sm text-code-sm text-on-surface">
+          v{plugin.version}
+        </span>
+        {plugin.linked && (
+          <span
+            className="rounded bg-tertiary/15 px-1.5 py-0.5 font-code-sm text-code-sm text-tertiary"
+            title={`Serving directly from ${plugin.dir_path}`}
+          >
+            linked
+          </span>
+        )}
+        <span className="ml-auto font-code-sm text-code-sm text-on-surface-variant">
+          {statusLabel(status, enabled)}
+        </span>
+      </header>
+
+      {plugin.manifest_drifted && (
+        <div className="mb-3 flex items-center justify-between gap-3 rounded border border-warning/40 bg-warning/10 px-3 py-2 font-code-sm text-code-sm text-on-surface">
+          <span>
+            Manifest changed on disk — grants stay as approved until you
+            review.
+          </span>
+          <Button variant="secondary" size="sm" onClick={onReapprove}>
+            Review &amp; re-approve
+          </Button>
+        </div>
+      )}
+
+      <div className="mb-3 font-code-sm text-code-sm text-on-surface-variant">
+        <code className="font-code-sm">{manifest.id}</code> · entry{" "}
+        <code className="font-code-sm">{manifest.entry}</code>
+        {!plugin.linked && plugin.source_path && (
+          <>
+            {" "}
+            · source{" "}
+            <code className="font-code-sm" title={plugin.source_path}>
+              {plugin.source_path}
+            </code>
+          </>
+        )}
+        {manifest.requested_capabilities &&
+          manifest.requested_capabilities.length > 0 && (
+            <>
+              {" "}
+              · caps:{" "}
+              {manifest.requested_capabilities.map((c) => (
+                <code
+                  key={c}
+                  className="ml-1 rounded bg-surface-container-high px-1 py-0.5 font-code-sm text-code-sm text-on-surface"
+                >
+                  {c}
+                </code>
+              ))}
+            </>
+          )}
+      </div>
+
+      {namedSlots.length > 0 && (
+        <div className="mb-3 font-code-sm text-code-sm text-on-surface-variant">
+          slots:{" "}
+          {namedSlots.map((s, i) => (
+            <code
+              key={i}
+              className="ml-1 rounded bg-surface-container-high px-1 py-0.5 font-code-sm text-on-surface"
+            >
+              {s.slot_name}
+            </code>
+          ))}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant={enabled ? "secondary" : "primary"}
+          size="sm"
+          onClick={onToggle}
+          disabled={busy}
+        >
+          {enabled ? "Disable" : "Enable"}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={onReinstall}
+          disabled={busy}
+          title="Refresh from a source or switch copy↔linked in place — saved state survives"
+        >
+          Reinstall…
+        </Button>
+        {updatableSource && (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onUpdateFromSource}
+            disabled={busy}
+            title={`Re-copy assets from ${plugin.source_path} — no consent needed while the manifest is unchanged`}
+          >
+            Update from source
+          </Button>
+        )}
+        <Button
+          variant="danger"
+          size="sm"
+          onClick={onUninstall}
+          disabled={busy}
+        >
+          Uninstall
+        </Button>
+        {panelSlot?.panel_route && enabled && (
+          <Link
+            to={`/plugins/view/${plugin.id}`}
+            className="ml-auto font-code-sm text-code-sm text-tertiary underline hover:text-tertiary"
+          >
+            Open panel →
+          </Link>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function statusDotClass(status: PluginStatus, enabled: boolean): string {
+  if (!enabled) return "bg-outline-variant";
+  switch (status.kind) {
+    case "Healthy":
+      return "bg-success";
+    case "Slow":
+      return "animate-pulse bg-warning";
+    case "Crashed":
+      return "bg-error";
+  }
+}
+
+function statusLabel(status: PluginStatus, enabled: boolean): string {
+  if (!enabled) return "disabled";
+  switch (status.kind) {
+    case "Healthy":
+      return "healthy";
+    case "Slow":
+      return `slow · ${status.miss_count} miss${status.miss_count === 1 ? "" : "es"}`;
+    case "Crashed":
+      return "crashed";
+  }
+}

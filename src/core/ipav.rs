@@ -1,0 +1,180 @@
+//! IPAV (Investigate → Plan → Apply → Verify) in-memory phase state.
+
+use serde::{Deserialize, Serialize};
+
+/// `Default` is `Investigate`, and it is derived here rather than written into
+/// `IpavState::default` so that "a session with no phase yet is Investigating" is
+/// one fact in one place. Migration 0063 added a second reader of it — a NULL
+/// `sessions.ipav_phase`, and an unparseable one — and a duplicated default is
+/// how those three drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum IpavPhase {
+    #[default]
+    Investigate,
+    Plan,
+    Apply,
+    Verify,
+}
+
+impl IpavPhase {
+    pub fn name(&self) -> &'static str {
+        match self {
+            IpavPhase::Investigate => "Investigate",
+            IpavPhase::Plan => "Plan",
+            IpavPhase::Apply => "Apply",
+            IpavPhase::Verify => "Verify",
+        }
+    }
+
+    /// Canonical lowercase tag persisted as the `session_documents.phase` value
+    /// and matched by the IPAV document tabs. The single source of truth for the
+    /// session-doc phase vocabulary (`signaling/jsonrpc.rs::parse_optional_phase`
+    /// normalizes any accepted casing/chip through here).
+    pub fn tag(&self) -> &'static str {
+        match self {
+            IpavPhase::Investigate => "investigate",
+            IpavPhase::Plan => "plan",
+            IpavPhase::Apply => "apply",
+            IpavPhase::Verify => "verify",
+        }
+    }
+
+    /// Accept either single-letter chips (`I`/`P`/`A`/`V`) or full names
+    /// (`Investigate`/`Plan`/`Apply`/`Verify`), case-INSENSITIVELY.
+    ///
+    /// **The chip forms are still live, and this note is why.** Their original
+    /// consumer was the external driver MCP, removed 2026-08-17 — which is what
+    /// left `IpavPhase::chip()` with no callers, deleted in the same commit as
+    /// this edit. The chip BRANCH outlives it: `advance_phase` accepts chip form
+    /// too, pinned by `jsonrpc.rs`'s `advance_phase_self_accepts_chip_form`.
+    /// Deleting these arms because the driver is gone would break a tested,
+    /// reachable input — read that test before touching them.
+    ///
+    /// Full names match what agents see in `[PHASE: …]` envelopes.
+    /// Case-insensitive so a lowercase `"apply"` arg (the form the session-doc
+    /// tools accept) can't be valid for one phase tool and rejected by another —
+    /// `signaling/jsonrpc.rs::parse_optional_phase` routes the session-doc phase
+    /// arg through here too.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "i" | "investigate" => IpavPhase::Investigate,
+            "p" | "plan" => IpavPhase::Plan,
+            "a" | "apply" => IpavPhase::Apply,
+            "v" | "verify" => IpavPhase::Verify,
+            _ => return None,
+        })
+    }
+
+    /// Canonical hint for INVALID_PARAMS error messages when `parse` rejects
+    /// a target. Single source of truth so the two parse sites (the tool
+    /// handlers and the Tauri command) can't drift apart on what they tell
+    /// agents is acceptable.
+    pub fn error_hint() -> &'static str {
+        "I/P/A/V or Investigate/Plan/Apply/Verify"
+    }
+
+    /// Strong-framed notice fed to agents when this phase becomes active.
+    /// Used by `AppState::advance_phase` so transitions carry weight instead
+    /// of degrading into a passive "phase advanced to X" log line.
+    pub fn transition_notice(&self) -> &'static str {
+        match self {
+            IpavPhase::Investigate => "[PHASE: Investigate] Gather facts only. No Edit, Write, or mutating Bash. Output understanding in chat.",
+            IpavPhase::Plan => "[PHASE: Plan] Propose the approach in chat — name files, functions, expected diffs. No Edit/Write yet.",
+            IpavPhase::Apply => "[PHASE: Apply] Participants granted `edit_files` execute Edit/Write/Bash. Participants without it review only — no writes. Apply output may be code or a document.",
+            IpavPhase::Verify => "[PHASE: Verify] Run tests, type-check, re-read, or describe the manual check. Cite the output.",
+        }
+    }
+}
+
+/// Per-session IPAV runtime state.
+///
+/// Held as `SessionHandle.ipav: Arc<Mutex<IpavState>>` — one per live handle, not
+/// a map on `AppState`. `signaling/bridge` keeps a parallel `Weak` registry
+/// (`session_phase`) so a tool call can read the phase without reaching through
+/// the session map.
+///
+/// **Persisted since migration 0063.** `AppState::advance_phase` writes the new
+/// phase's `tag()` through `Storage::set_persisted_ipav_phase`, and
+/// `core/session.rs` reads `persisted_ipav_phase` back when it builds the handle,
+/// so a restart resumes where the work actually is instead of at Investigate. A
+/// NULL or unparseable column falls back to `IpavPhase::default()`.
+///
+/// Two corrections live here because the same paragraph has now been wrong
+/// twice. It said `HashMap<SessionId, _>` with a `phase_log` field until round 5
+/// — neither has ever existed here, and ARCHITECTURE.md carried the identical
+/// sentence, so correcting one alone left the other to re-seed it (round 5, N2).
+/// And the "not persisted" claim that stood in this spot survived that fix by a
+/// round: it was still asserting an in-memory-only phase nine lines above the
+/// sentence below, which already named `sessions.ipav_phase` (round 6, F1). The
+/// rule that catches both, and the third copy in `tauri_cmd/sessions.rs` that
+/// pair-tracking could not have caught: **an edit correcting one claim in a block
+/// re-reads the whole block against what shipped that day.**
+///
+/// `Default` is DERIVED (see `IpavPhase`), so the default phase is stated once
+/// and read from there — 0063's NULL/unparseable column is its third reader, and
+/// a restated default is how three readers drift apart.
+#[derive(Debug, Clone, Default)]
+pub struct IpavState {
+    pub current_phase: IpavPhase,
+}
+
+impl IpavState {
+    pub fn advance(&mut self, target: IpavPhase) {
+        self.current_phase = target;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advance_sets_current_phase() {
+        let mut s = IpavState::default();
+        s.advance(IpavPhase::Plan);
+        assert_eq!(s.current_phase, IpavPhase::Plan);
+        s.advance(IpavPhase::Apply);
+        assert_eq!(s.current_phase, IpavPhase::Apply);
+    }
+
+    #[test]
+    fn parse_accepts_chips_and_full_names() {
+        assert_eq!(IpavPhase::parse("I"), Some(IpavPhase::Investigate));
+        assert_eq!(IpavPhase::parse("Investigate"), Some(IpavPhase::Investigate));
+        assert_eq!(IpavPhase::parse("P"), Some(IpavPhase::Plan));
+        assert_eq!(IpavPhase::parse("Plan"), Some(IpavPhase::Plan));
+        assert_eq!(IpavPhase::parse("A"), Some(IpavPhase::Apply));
+        assert_eq!(IpavPhase::parse("Apply"), Some(IpavPhase::Apply));
+        assert_eq!(IpavPhase::parse("V"), Some(IpavPhase::Verify));
+        assert_eq!(IpavPhase::parse("Verify"), Some(IpavPhase::Verify));
+        assert_eq!(IpavPhase::parse("Coffee"), None);
+    }
+
+    #[test]
+    fn parse_is_case_insensitive() {
+        // Lowercase full names (the form session_doc tools accept) now parse,
+        // so advance_phase and the session-doc phase arg can't drift on case.
+        assert_eq!(IpavPhase::parse("apply"), Some(IpavPhase::Apply));
+        assert_eq!(IpavPhase::parse("investigate"), Some(IpavPhase::Investigate));
+        assert_eq!(IpavPhase::parse("v"), Some(IpavPhase::Verify));
+        assert_eq!(IpavPhase::parse("PLAN"), Some(IpavPhase::Plan));
+    }
+
+    #[test]
+    fn transition_notice_starts_with_phase_envelope() {
+        for phase in [
+            IpavPhase::Investigate,
+            IpavPhase::Plan,
+            IpavPhase::Apply,
+            IpavPhase::Verify,
+        ] {
+            let notice = phase.transition_notice();
+            let expected_prefix = format!("[PHASE: {}]", phase.name());
+            assert!(
+                notice.starts_with(&expected_prefix),
+                "{} notice missing prefix {expected_prefix:?}: {notice}",
+                phase.name()
+            );
+        }
+    }
+}
