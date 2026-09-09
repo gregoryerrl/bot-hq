@@ -12,9 +12,9 @@ and in `docs/rebuild-archive/`.
 The first release built from the public repository,
 [`gregoryerrl/bot-hq`](https://github.com/gregoryerrl/bot-hq). The
 repository starts from a single commit; development history before it stays
-in a private archive, and this changelog is the public record of it. Nothing
-in the app's behaviour changed — the release exists so that the public tree,
-the published bundles and the update check all describe the same source.
+in a private archive, and this changelog is the public record of it. No
+feature changes — the release exists so that the public tree, the published
+bundles and the update check all describe the same source.
 
 ### Changed
 
@@ -32,10 +32,8 @@ the published bundles and the update check all describe the same source.
 
 ### Removed
 
-- **The captured stream-json samples** under `docs/stream-json-samples/`.
-  They were verbatim recordings of real sessions on the maintainer's machine
-  and documented a schema `docs/stream-json-events.md` already spells out;
-  no test loaded them.
+- **Unused captured fixtures** under `docs/stream-json-samples/`;
+  `docs/stream-json-events.md` documents the schema, and no test loaded them.
 
 ### Fixed
 
