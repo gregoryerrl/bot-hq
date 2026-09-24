@@ -900,8 +900,10 @@ async fn spawn_session_handle(
     // one binds its epoch normally. One cell for the whole session — boot ends
     // for the session, not per agent. Created before the ring so the ring can
     // hold a message staged during boot (feedback #10); a spawn that does not
-    // boot clears it below.
-    let booting = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    // boot clears it below. Starts as `is_first_spawn` — boot runs only then —
+    // so a resumed session's pumps never see it up, even for the moment before
+    // the no-boot branch clears it (EYES, C15 review).
+    let booting = Arc::new(std::sync::atomic::AtomicBool::new(is_first_spawn));
     let (sequencer_tx, ring_kick) = {
         let mut inputs = std::collections::HashMap::new();
         let mut epochs = std::collections::HashMap::new();
