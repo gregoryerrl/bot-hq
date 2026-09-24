@@ -308,6 +308,16 @@ impl SignalingBridge {
                 (Some(lib), true) => snapshot_unversioned(lib, &target),
                 _ => None,
             };
+            // A failed pre-snapshot REFUSES the write (EYES b80187af): writing
+            // anyway would destroy the only copy of content git never saw —
+            // the very loss #27/#28 is about.
+            if let Some(Snapshot::Failed(why)) = &pre {
+                anyhow::bail!(
+                    "'{fp}' holds content that was never versioned, and snapshotting it failed \
+                     ({why}) — nothing was written, so that content is intact on disk. Tell the \
+                     user; retry once the library's git works again."
+                );
+            }
             atomic_write(&target, &final_content)?;
             let snapshot = match library_root.as_deref() {
                 Some(lib) => git_version_library(lib, &commit_summary),
@@ -361,11 +371,7 @@ impl SignalingBridge {
                  cl_write_file); committed it first as {sha}, which holds what was there before \
                  this write"
             )),
-            Some(Snapshot::Failed(why)) => msg.push_str(&format!(
-                " — WARNING: the file held content that was never versioned, and snapshotting it \
-                 FAILED ({why}); what was there before this write is NOT recoverable from git"
-            )),
-            _ => {}
+            _ => {} // a failed pre-snapshot refused the write above
         }
         msg.push_str(&format!(" — {}", snapshot.describe()));
         if let Some(lint) = lint {
@@ -754,6 +760,17 @@ fn assert_not_suspicious_shrink(target: &Path, rel_path: &str, new_content: &str
 /// path): a sync mutex, held on the blocking thread for add + commit.
 static LIBRARY_GIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// `git` in the library the way bot-hq runs it on its own: the hardened
+/// invocation (repo hooks and fsmonitor off — `core::git`) plus signing off,
+/// so a global `commit.gpgsign` or a library hook cannot fail every CL
+/// snapshot (EYES b80187af). Identity is passed per commit.
+fn library_git(library_root: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    crate::core::git::hardened(library_root)
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+}
+
 /// Commit `target` ALONE when its on-disk content never reached git — written
 /// with a bare `Write`/`Bash`, or left uncommitted by an interrupted write —
 /// before a CL write replaces it (feedback #27/#28: a session recorded a
@@ -770,13 +787,7 @@ fn snapshot_unversioned(library_root: &Path, target: &Path) -> Option<Snapshot> 
         .strip_prefix(&root)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| target.to_string_lossy().to_string());
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(library_root)
-            .args(args)
-            .output()
-    };
+    let git = |args: &[&str]| library_git(library_root, args);
     let status = git(&["status", "--porcelain", "--", &rel]).ok()?;
     if !status.status.success() || status.stdout.is_empty() {
         return None; // clean: the current content is already a commit
@@ -809,13 +820,7 @@ fn snapshot_unversioned(library_root: &Path, target: &Path) -> Option<Snapshot> 
 }
 
 fn git_version_library(library_root: &Path, summary: &str) -> Snapshot {
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(library_root)
-            .args(args)
-            .output()
-    };
+    let git = |args: &[&str]| library_git(library_root, args);
     if !library_root.join(".git").exists() {
         match git(&["init", "-q"]) {
             Ok(out) if out.status.success() => {}
@@ -1240,6 +1245,66 @@ mod tests {
         assert_eq!(show("HEAD"), "the third generation, written by the tool\n");
         let again = write("the fourth generation, written by the tool\n").await;
         assert!(!again.contains("never versioned"), "a clean file takes no pre-snapshot: {again}");
+    }
+
+    /// EYES b80187af: a library whose git would fail a plain commit (global
+    /// or local `commit.gpgsign` with no usable signer, a repo hook) still
+    /// versions CL writes — bot-hq's own invocation turns both off.
+    #[tokio::test]
+    async fn library_snapshots_ignore_signing_config_and_repo_hooks() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let lib = tmp.path().join("library");
+        let write = |body: &str| {
+            let bridge = bridge.clone();
+            let body = body.to_string();
+            async move {
+                bridge
+                    .cl_write_file("s1".into(), "hands".into(), "bot-hq".into(), "notes.md".into(), body, false, false)
+                    .await
+                    .unwrap()
+            }
+        };
+        write("first body, which initialises the library\n").await;
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(&lib).args(args).output().unwrap()
+        };
+        git(&["config", "commit.gpgsign", "true"]);
+        git(&["config", "gpg.program", "/nonexistent-signer"]);
+        let hook = lib.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let msg = write("second body, committed despite the config\n").await;
+        assert!(msg.contains("snapshot ") && !msg.contains("NO SNAPSHOT"), "got: {msg}");
+    }
+
+    /// EYES b80187af: when snapshotting never-versioned content FAILS, the
+    /// write is refused — the only copy of that content stays on disk.
+    #[tokio::test]
+    async fn a_failed_pre_write_snapshot_refuses_the_write() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let lib = tmp.path().join("library");
+        let path = lib.join("projects/bot-hq/notes.md");
+        bridge
+            .cl_write_file("s1".into(), "hands".into(), "bot-hq".into(), "notes.md".into(), "versioned first body\n".into(), false, false)
+            .await
+            .unwrap();
+        std::fs::write(&path, "OUT-OF-BAND content, never committed\n").unwrap();
+        // A stale index lock makes every `git add` fail.
+        std::fs::write(lib.join(".git/index.lock"), "").unwrap();
+        let err = bridge
+            .cl_write_file("s1".into(), "hands".into(), "bot-hq".into(), "notes.md".into(), "the replacement body text\n".into(), false, false)
+            .await
+            .expect_err("a failed pre-snapshot must refuse the write");
+        assert!(err.to_string().contains("nothing was written"), "got: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "OUT-OF-BAND content, never committed\n",
+            "the unversioned content is intact"
+        );
     }
 
     #[tokio::test]
