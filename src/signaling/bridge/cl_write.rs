@@ -328,7 +328,8 @@ impl SignalingBridge {
         .await
         .context("CL write task panicked")??;
         let (done, lint, retired, pre, snapshot) = outcome;
-        self.record_retired_terms(&session_id, &project, retired).await;
+        self.record_retired_terms(&session_id, &project, retired, Some(&file_path)).await;
+        self.record_cl_write(&session_id, &project, &file_path).await;
         if let Err(err) = self.cl_rescan(&project).await {
             tracing::warn!(
                 %err,
@@ -581,7 +582,7 @@ const SWEEP_STOPWORDS: &[&str] = &[
     "need", "needs", "keep", "kept", "left", "right", "thing", "things",
 ];
 
-/// Concepts this write RETIRED: tokens present in `old` that no longer appear
+/// Concepts this write RETIRED: terms present in `old` that no longer appear
 /// anywhere in `new`. Seeds the close-out staleness sweep (issues.md #31) —
 /// a session that renames or drops a concept in one CL file should be told
 /// which OTHER files still cite the old one, mechanically, instead of relying
@@ -589,15 +590,14 @@ const SWEEP_STOPWORDS: &[&str] = &[
 /// in the old body (occurrence count, then length) and capped, so a wholesale
 /// rewrite yields the handful of real concepts rather than its whole vocabulary.
 ///
-/// **Distinctive-only, everywhere** (the user's pick a9f8c705, 2026-08-24,
-/// round 13): a candidate reports only when it is code-shaped
-/// (dash/underscore/digit) or the old body marked it structurally
-/// (backticks, bold, a heading). Plain unmarked prose words no longer report
-/// at ANY edit size — the former targeted-edit allowance produced five
-/// generic-English flags ("duplication", "permission", "half", "business",
-/// "properly") at s-a73699ec's close; the historic plain-word catch ("duo",
-/// 2026-08-05) is covered by CL convention, a real term being backticked,
-/// bolded or headed in a well-kept file.
+/// **Distinctive-only** (the user's pick a9f8c705, 2026-08-24, narrowed by
+/// their pick 4136edff, 2026-09-24): a word reports only when it is
+/// code-shaped (dash/underscore/digit) or BACKTICKED in the old body. Words in
+/// headings and bold no longer count — every EOD heading ("Tom", "Down",
+/// "Report") seeded the sweep, 609 false hits in one close (feedback #38).
+/// **Filenames and paths** (`eod.md`, `projects/x/notes.md`) always count:
+/// the word tokenizer splits them at the dot, which is how a renamed
+/// `eod.md` slipped past the sweep while it reported ordinary words.
 pub(super) fn retired_terms(old: &str, new: &str) -> Vec<String> {
     const MIN_LEN: usize = 3;
     const MAX_TERMS: usize = 12;
@@ -607,6 +607,7 @@ pub(super) fn retired_terms(old: &str, new: &str) -> Vec<String> {
             .filter(|t| t.len() >= MIN_LEN && t.chars().any(|c| c.is_alphabetic()))
     }
     let surviving: std::collections::HashSet<String> = tokens(new).collect();
+    let surviving_artifacts: std::collections::HashSet<String> = artifact_tokens(new).collect();
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for tok in tokens(old) {
         if surviving.contains(&tok) || SWEEP_STOPWORDS.contains(&tok.as_str()) {
@@ -614,14 +615,22 @@ pub(super) fn retired_terms(old: &str, new: &str) -> Vec<String> {
         }
         *counts.entry(tok).or_default() += 1;
     }
-    // DISTINCTIVE candidates only — term-shaped tokens (hyphen/underscore/
-    // digit: code and file names) or tokens the old body marked structurally
-    // (backticked, bolded, or in a heading). Formerly applied only above a
-    // 25-candidate bulk-rewrite threshold; the user's pick (a9f8c705) made it
-    // unconditional after the targeted-edit allowance flagged five
-    // generic-English words at one close.
     let old_lower = old.to_lowercase();
-    counts.retain(|tok, _| term_shaped(tok) || structurally_marked(&old_lower, tok));
+    counts.retain(|tok, _| term_shaped(tok) || backticked(&old_lower, tok));
+    let mut artifacts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for a in artifact_tokens(old) {
+        if !surviving_artifacts.contains(&a) {
+            *artifacts.entry(a).or_default() += 1;
+        }
+    }
+    // A word that is only a PIECE of a retired filename/path (`tool-gate` of
+    // `tool-gate.json`) would report the same reference twice.
+    counts.retain(|tok, _| {
+        !artifacts.keys().any(|a| {
+            a.split(['/', '.']).any(|piece| piece == tok)
+        })
+    });
+    counts.extend(artifacts);
     let mut terms: Vec<(String, usize)> = counts.into_iter().collect();
     // Most-used first (a concept the old body leaned on), longest as tiebreak
     // (more distinctive to grep), then alphabetical so the output is stable.
@@ -641,17 +650,74 @@ fn term_shaped(tok: &str) -> bool {
     tok.chars().any(|c| c == '-' || c == '_' || c.is_ascii_digit())
 }
 
-/// Did the (lowercased) old body mark this token structurally — backticks,
-/// bold, or a heading line? Structure is how a CL file says "this word is a
-/// TERM here"; prose vocabulary never gets it.
-fn structurally_marked(old_lower: &str, tok: &str) -> bool {
-    if old_lower.contains(&format!("`{tok}`")) || old_lower.contains(&format!("**{tok}**")) {
-        return true;
-    }
-    old_lower.lines().filter(|l| l.trim_start().starts_with('#')).any(|l| {
-        l.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
-            .any(|t| t.trim_matches(['-', '_']).eq_ignore_ascii_case(tok))
+/// Did the (lowercased) old body BACKTICK this token? Code spans are how a CL
+/// file says "this word is a TERM here"; headings and bold also carry plain
+/// prose, and counting them flooded the sweep (feedback #38).
+fn backticked(old_lower: &str, tok: &str) -> bool {
+    old_lower.contains(&format!("`{tok}`"))
+}
+
+/// Filenames (`eod.md`, `tool-gate.json`) and paths (`projects/x/notes.md`)
+/// in `body`, lowercased, trimmed of surrounding punctuation. A filename is a
+/// stem of 2+ characters and a 1–5 character extension with a letter in it
+/// (so `e.g`, `1.0.6` and `v1.2` are not files); a path has two or more
+/// segments. URLs are not artifacts.
+fn artifact_tokens(body: &str) -> impl Iterator<Item = String> + '_ {
+    body.split(|c: char| {
+        c.is_whitespace()
+            || matches!(c, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | '|' | '*' | '{' | '}')
     })
+    .map(|t| t.trim_matches(|c: char| matches!(c, '.' | ':' | '!' | '?' | '#')).to_lowercase())
+    .filter(|t| is_artifact(t))
+}
+
+fn is_artifact(t: &str) -> bool {
+    if t.len() < 4 || t.contains("://") || !t.chars().any(char::is_alphabetic) {
+        return false;
+    }
+    let last = t.rsplit('/').next().unwrap_or(t);
+    let is_file = last.rsplit_once('.').is_some_and(|(stem, ext)| {
+        stem.chars().count() >= 2
+            && (1..=5).contains(&ext.len())
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            && ext.chars().any(|c| c.is_ascii_alphabetic())
+    });
+    let is_path = t.split('/').filter(|seg| !seg.is_empty()).count() >= 2
+        && t.chars().any(|c| c == '/');
+    is_file || is_path
+}
+
+/// Is `term` a filename/path term (vs a word)? The two match differently.
+pub(super) fn is_artifact_term(term: &str) -> bool {
+    term.contains('.') || term.contains('/')
+}
+
+/// Does `line` cite `term`? Words match a whole token, case-insensitively;
+/// filenames/paths match as a case-insensitive substring bounded by
+/// non-name characters (a `/` before is fine: `x/eod.md` cites `eod.md`).
+pub(super) fn line_cites(line: &str, term: &str) -> bool {
+    if !is_artifact_term(term) {
+        return line
+            .split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+            .any(|tok| tok.trim_matches(['-', '_']).eq_ignore_ascii_case(term));
+    }
+    let lower = line.to_lowercase();
+    let name_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.');
+    let mut from = 0;
+    while let Some(pos) = lower[from..].find(term) {
+        let start = from + pos;
+        let end = start + term.len();
+        let before_ok = lower[..start].chars().next_back().is_none_or(|c| !name_char(c) || c == '/');
+        let after_ok = lower[end..].chars().next().is_none_or(|c| !name_char(c) || c == '.' && lower[end + 1..].chars().next().is_none_or(|n| !name_char(n)));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+        while !lower.is_char_boundary(from) {
+            from += 1;
+        }
+    }
+    false
 }
 
 /// Cap on the close-out sweep's reported hits — the point is to surface the
@@ -673,7 +739,12 @@ fn sweep_skips(file_name: &str) -> bool {
 /// `"<file>:<line> — <term>"` strings, at most one per (file, term) so a term
 /// repeated through a file reports once. Case-insensitive, whole-token match:
 /// substring matching would flag "duo" inside "duologue".
-pub(super) fn sweep_project(root: &Path, project: &str, terms: &[String]) -> Vec<String> {
+pub(super) fn sweep_project(
+    root: &Path,
+    project: &str,
+    terms: &[String],
+    own_files: &[String],
+) -> Vec<String> {
     fn md_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
         if depth > 4 || out.len() > 500 {
             return;
@@ -705,11 +776,16 @@ pub(super) fn sweep_project(root: &Path, project: &str, terms: &[String]) -> Vec
         // `/`-form so the reported hit path matches the CL key the reader will
         // search for, rather than a native `agents\rain\x.md` spelling.
         let rel = rel_key(&path, root).unwrap_or_else(|| path.display().to_string());
+        let own = own_files.iter().any(|f| f == &rel);
         for term in terms {
-            if let Some((lineno, _)) = body.lines().enumerate().find(|(_, line)| {
-                line.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
-                    .any(|tok| tok.trim_matches(['-', '_']).eq_ignore_ascii_case(term))
-            }) {
+            // A file this session itself wrote is skipped for WORD terms (it
+            // was just brought up to date by hand) — never for a filename or
+            // path: a partly-updated file is exactly where a stale `eod.md`
+            // survives (plan review M4).
+            if own && !is_artifact_term(term) {
+                continue;
+            }
+            if let Some((lineno, _)) = body.lines().enumerate().find(|(_, line)| line_cites(line, term)) {
                 hits.push(format!("  {project}/{rel}:{} — \"{term}\"", lineno + 1));
             }
         }
@@ -756,6 +832,56 @@ fn assert_not_suspicious_shrink(target: &Path, rel_path: &str, new_content: &str
 ///
 /// Returns what the versioning did, so the tool reply can carry the commit
 /// (the agent's real rollback point) or say plainly that there is none.
+/// The library's HEAD sha, when the library is a git repo with a commit.
+pub(super) fn library_head(library_root: &Path) -> Option<String> {
+    if !library_root.join(".git").exists() {
+        return None;
+    }
+    let out = library_git(library_root, &["rev-parse", "HEAD"]).ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `(project, term)` for every CL file deleted or renamed since `head` —
+/// committed or still only in the working tree — as the sweep's filename
+/// terms: the basename, and the project-relative path when it is nested.
+/// `projects/<p>/…` belongs to project `p`; anything else to `_globals`.
+/// The library is shared, so another session's removals in the same window
+/// are included — the sweep is advisory.
+pub(super) fn library_files_removed_since(library_root: &Path, head: &str) -> Vec<(String, String)> {
+    let Ok(out) = library_git(
+        library_root,
+        &["diff", "--no-ext-diff", "--name-status", "-M", "--diff-filter=DR", head],
+    ) else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let mut gone = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut cols = line.split('\t');
+        let status = cols.next().unwrap_or("");
+        let Some(old) = cols.next() else { continue };
+        if !(status.starts_with('D') || status.starts_with('R')) {
+            continue;
+        }
+        let (project, rel) = match old.strip_prefix("projects/").and_then(|r| r.split_once('/')) {
+            Some((p, rest)) => (p.to_string(), rest.to_lowercase()),
+            None => (crate::storage::Project::GLOBALS.to_string(), old.to_lowercase()),
+        };
+        let base = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+        if is_artifact(&base) {
+            gone.push((project.clone(), base.clone()));
+        }
+        if rel != base && is_artifact(&rel) {
+            gone.push((project, rel));
+        }
+    }
+    gone
+}
+
 /// Serialises every library git operation in this process (see the write
 /// path): a sync mutex, held on the blocking thread for add + commit.
 static LIBRARY_GIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -2044,9 +2170,12 @@ mod tests {
             ));
         }
         let terms = retired_terms(&old, "lean.");
+        // Since the user's pick 4136edff (2026-09-24) a HEADING no longer
+        // marks a term: EOD headings ("Tom", "Down", "Report") seeded 609
+        // false hits in one close (feedback #38). Backticks still do.
         assert!(
-            terms.iter().any(|t| t == "sandbox"),
-            "a heading-marked plain word is a TERM and survives: {terms:?}"
+            !terms.iter().any(|t| t == "sandbox"),
+            "a heading word is vocabulary, not a term: {terms:?}"
         );
         assert!(terms.iter().any(|t| t == "meta_reconcile_runs"), "got: {terms:?}");
         assert!(terms.iter().any(|t| t == "tmp-prod-logs"), "got: {terms:?}");
@@ -2059,6 +2188,98 @@ mod tests {
         // Since a9f8c705 (2026-08-24) the distinctive filter is unconditional
         // — no under-threshold allowance for plain words remains; the sibling
         // test pins the marked-term path that replaced it.
+    }
+
+    /// Feedback #38: filenames and paths are terms; bold and heading words
+    /// are not; `e.g.` and version numbers are not files.
+    #[test]
+    fn filenames_are_terms_and_headings_are_not() {
+        let old = "## Tom\n**Down** the line, see `eod.md` and projects/bcc/notes.md. \
+                   Also eod-cc.md, e.g. v1.0.6 and 1.2.3.\n";
+        let new = "## Tom\nsee eod-cc.md.\n";
+        let terms = retired_terms(old, new);
+        assert!(terms.contains(&"eod.md".to_string()), "got: {terms:?}");
+        assert!(terms.contains(&"projects/bcc/notes.md".to_string()), "got: {terms:?}");
+        for noise in ["down", "e.g", "v1.0.6", "1.2.3", "eod"] {
+            assert!(!terms.iter().any(|t| t == noise), "{noise} in {terms:?}");
+        }
+        assert!(!terms.contains(&"eod-cc.md".to_string()), "still cited in the new body");
+    }
+
+    #[test]
+    fn a_filename_term_is_cited_only_as_that_file() {
+        assert!(line_cites("cp eod.md /tmp/x", "eod.md"));
+        assert!(line_cites("see projects/x/eod.md.", "eod.md"));
+        assert!(line_cites("(`eod.md`)", "eod.md"));
+        assert!(!line_cites("the old-eod.md file", "eod.md"));
+        assert!(!line_cites("eod.mdx", "eod.md"));
+        assert!(!line_cites("the eod is done", "eod.md"));
+        // Words still match whole tokens only.
+        assert!(line_cites("The duo maintains it", "duo"));
+        assert!(!line_cites("duotone", "duo"));
+    }
+
+    /// Feedback #38's real miss: a CL file RENAMED during the session (here
+    /// with a bare `mv`, as the reporting session did) left other files citing
+    /// its old name. The sweep reports them from the library's git diff since
+    /// the session registered.
+    #[tokio::test]
+    async fn the_sweep_names_files_still_citing_a_renamed_cl_file() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let lib = tmp.path().join("library");
+        let proj = lib.join("projects/bot-hq");
+        std::fs::write(proj.join("runbook.md"), "Run `grep -n x eod.md` first.\n").unwrap();
+        std::fs::write(lib.join("eod.md"), "# EOD\n").unwrap();
+        // A first write initialises the library repo; the session registers
+        // after it (its HEAD is the baseline).
+        bridge
+            .cl_write_file("s0".into(), "hands".into(), "bot-hq".into(), "seed.md".into(), "seed body\n".into(), false, false)
+            .await
+            .unwrap();
+        bridge.register_session("s1".into(), Some("bot-hq".into())).await;
+        std::fs::rename(lib.join("eod.md"), lib.join("eod-cc.md")).unwrap();
+        let report = bridge.staleness_sweep("s1").await.expect("the rename is reported");
+        assert!(report.contains("runbook.md:1") && report.contains("\"eod.md\""), "got:\n{report}");
+    }
+
+    /// A file this session wrote is skipped for WORD terms (it was just
+    /// updated by hand) but never for a filename term (plan review M4); a
+    /// term a later write put back into its source file is dropped.
+    #[tokio::test]
+    async fn own_files_skip_words_but_not_filenames_and_restored_terms_drop() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let proj = tmp.path().join("library/projects/bot-hq");
+        std::fs::write(proj.join("a.md"), "The `widget-x` is here; see old-plan.md.\n").unwrap();
+        std::fs::write(proj.join("b.md"), "Mentions widget-x and old-plan.md.\n").unwrap();
+        let write = |file: &str, body: &str| {
+            let bridge = bridge.clone();
+            let (file, body) = (file.to_string(), body.to_string());
+            async move {
+                bridge
+                    .cl_write_file("s1".into(), "hands".into(), "bot-hq".into(), file, body, false, false)
+                    .await
+                    .unwrap();
+            }
+        };
+        // a.md drops both terms; the session also rewrites b.md (still citing both).
+        write("a.md", "The replacement text for this file, long enough.\n").await;
+        write("b.md", "Mentions widget-x and old-plan.md, rewritten.\n").await;
+        let report = bridge.staleness_sweep("s1").await.expect("the filename still reports");
+        assert!(report.contains("\"old-plan.md\""), "a filename is never skipped:\n{report}");
+        assert!(!report.contains("\"widget-x\""), "a word in an own-written file is:\n{report}");
+
+        // A term put back into its own source file is no longer retired.
+        let (bridge2, _s2, tmp2) = bridge_with_data_dir().await;
+        let proj2 = tmp2.path().join("library/projects/bot-hq");
+        std::fs::write(proj2.join("a.md"), "The `gizmo-9` rules.\n").unwrap();
+        std::fs::write(proj2.join("c.md"), "gizmo-9 is cited here.\n").unwrap();
+        for body in ["Other words entirely, a while.\n", "The `gizmo-9` rules, restored.\n"] {
+            bridge2
+                .cl_write_file("s2".into(), "hands".into(), "bot-hq".into(), "a.md".into(), body.into(), false, false)
+                .await
+                .unwrap();
+        }
+        assert!(bridge2.staleness_sweep("s2").await.is_none(), "a restored term is not stale");
     }
 
     #[test]

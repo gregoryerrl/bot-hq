@@ -341,10 +341,18 @@ struct CloseGateState {
     cl_written: bool,
     /// We've already nudged once on `close_session` — let the next close go.
     close_nudged: bool,
-    /// #31: `(project, term)` concepts this session's CL writes RETIRED —
-    /// present in a file's old body, gone from its new one. Seeds the
-    /// close-out staleness sweep.
-    retired: Vec<(String, String)>,
+    /// #31: `(project, term, source file)` concepts this session's CL writes
+    /// RETIRED — present in a file's old body, gone from its new one. Seeds
+    /// the close-out staleness sweep. The source lets the sweep drop a term a
+    /// later write put back.
+    retired: Vec<(String, String, Option<String>)>,
+    /// `(project, file_path)` of every CL file this session wrote — the sweep
+    /// does not report WORD terms in them (feedback #38).
+    written: Vec<(String, String)>,
+    /// The library's HEAD when the session registered: at close, the files
+    /// deleted or renamed since then seed the sweep with their names
+    /// (feedback #38 — a renamed `eod.md` left 14 files citing it).
+    library_head: Option<String>,
     /// We've already surfaced the staleness sweep once — like `close_nudged`,
     /// this makes the sweep advisory: it can never hold a close shut.
     sweep_nudged: bool,
@@ -681,10 +689,30 @@ impl SignalingBridge {
     /// project policy when this session's agents call policy-aware MCP tools.
     /// Idempotent — re-registering overwrites.
     pub async fn register_session(&self, session_id: String, project: Option<String>) {
+        // The library's HEAD now, so the close-out sweep can name the CL files
+        // deleted or renamed during the session (feedback #38).
+        if let Some(lib) = self.library_root() {
+            let head = tokio::task::spawn_blocking(move || cl_write::library_head(&lib))
+                .await
+                .ok()
+                .flatten();
+            let mut gate = self.session_close_gate.lock().await;
+            let state = gate.entry(session_id.clone()).or_default();
+            if state.library_head.is_none() {
+                state.library_head = head;
+            }
+        }
         self.session_projects
             .lock()
             .await
             .insert(session_id, project);
+    }
+
+    /// `<data_dir>/library`, when a data dir is configured.
+    fn library_root(&self) -> Option<PathBuf> {
+        self.data_dir
+            .as_ref()
+            .map(|d| crate::paths::Paths::for_data_dir(d.clone()).cl_dir)
     }
 
     /// Wire the storage handle so the bridge can write out-of-band messages
@@ -1269,7 +1297,14 @@ impl SignalingBridge {
     /// #31: remember the concepts a CL write retired, so `staleness_sweep` can
     /// check the rest of the project's library for files still citing them.
     /// Bounded per session — a long session of rewrites can't grow unboundedly.
-    pub async fn record_retired_terms(&self, session_id: &str, project: &str, terms: Vec<String>) {
+    /// `source` is the written file (project-relative).
+    pub async fn record_retired_terms(
+        &self,
+        session_id: &str,
+        project: &str,
+        terms: Vec<String>,
+        source: Option<&str>,
+    ) {
         const MAX_RETIRED_PER_SESSION: usize = 60;
         if terms.is_empty() {
             return;
@@ -1280,17 +1315,29 @@ impl SignalingBridge {
             if state.retired.len() >= MAX_RETIRED_PER_SESSION {
                 break;
             }
-            let entry = (project.to_string(), term);
-            if !state.retired.contains(&entry) {
-                state.retired.push(entry);
+            if !state.retired.iter().any(|(p, t, _)| p == project && t == &term) {
+                state.retired.push((project.to_string(), term, source.map(str::to_string)));
             }
         }
     }
 
+    /// Remember a CL file this session wrote (feedback #38): the sweep skips
+    /// it for WORD terms — it was just brought up to date by hand.
+    pub(crate) async fn record_cl_write(&self, session_id: &str, project: &str, file_path: &str) {
+        let mut gate = self.session_close_gate.lock().await;
+        let state = gate.entry(session_id.to_string()).or_default();
+        let entry = (project.to_string(), file_path.to_string());
+        if !state.written.contains(&entry) {
+            state.written.push(entry);
+        }
+    }
+
     /// #31 close-out staleness sweep: which OTHER CL files still cite a concept
-    /// this session retired? Returns a capped, human-readable report the
-    /// `close_session` handler surfaces ONCE, or `None` when there's nothing to
-    /// say (no retired terms, no surviving hits, or already surfaced).
+    /// this session retired — a term its writes removed, or the name of a CL
+    /// file deleted or renamed since the session registered? Returns a capped,
+    /// human-readable report the `close_session` handler surfaces ONCE, or
+    /// `None` when there's nothing to say (no retired terms, no surviving hits,
+    /// or already surfaced).
     ///
     /// Advisory by construction — it never blocks the close, it never edits, and
     /// it fires at most once per session. The gap it closes is mechanical, not
@@ -1298,18 +1345,47 @@ impl SignalingBridge {
     /// `decisions.md` and left `conventions.md:3` contradicting it for hours,
     /// with the "grep the old terms" rule live the whole time.
     pub async fn staleness_sweep(&self, session_id: &str) -> Option<String> {
-        let retired = {
+        let (mut retired, written, head) = {
             let mut gate = self.session_close_gate.lock().await;
             let state = gate.entry(session_id.to_string()).or_default();
-            if state.sweep_nudged || state.retired.is_empty() {
+            if state.sweep_nudged {
                 return None;
             }
-            state.sweep_nudged = true;
-            state.retired.clone()
+            (state.retired.clone(), state.written.clone(), state.library_head.clone())
         };
-        // Group by project so each library root is walked once.
+        // Files removed or renamed in the library since the session began:
+        // their names are retired terms too (feedback #38).
+        if let (Some(lib), Some(head)) = (self.library_root(), head) {
+            let gone = tokio::task::spawn_blocking(move || cl_write::library_files_removed_since(&lib, &head))
+                .await
+                .unwrap_or_default();
+            for (project, name) in gone {
+                if !retired.iter().any(|(p, t, _)| p == &project && t == &name) {
+                    retired.push((project, name, None));
+                }
+            }
+        }
+        if retired.is_empty() {
+            return None;
+        }
+        self.session_close_gate
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .sweep_nudged = true;
+        // Group by project so each library root is walked once; drop a term a
+        // later write put back into its own source file.
         let mut by_project: HashMap<String, Vec<String>> = HashMap::new();
-        for (project, term) in retired {
+        for (project, term, source) in retired {
+            if let (Some(source), Some(root)) = (&source, self.cl_project_root(&project).await) {
+                let back = std::fs::read_to_string(root.join(source))
+                    .map(|body| body.lines().any(|l| cl_write::line_cites(l, &term)))
+                    .unwrap_or(false);
+                if back {
+                    continue;
+                }
+            }
             by_project.entry(project).or_default().push(term);
         }
         let mut hits: Vec<String> = Vec::new();
@@ -1317,8 +1393,13 @@ impl SignalingBridge {
             let Some(root) = self.cl_project_root(&project).await else {
                 continue;
             };
+            let own: Vec<String> = written
+                .iter()
+                .filter(|(p, _)| p == &project)
+                .map(|(_, f)| f.clone())
+                .collect();
             let found = tokio::task::spawn_blocking(move || {
-                cl_write::sweep_project(&root, &project, &terms)
+                cl_write::sweep_project(&root, &project, &terms, &own)
             })
             .await
             .unwrap_or_default();
@@ -1336,12 +1417,11 @@ impl SignalingBridge {
             String::new()
         };
         Some(format!(
-            "Close-out staleness sweep — this session's CL writes retired terms that \
-             OTHER library files still use:\n{}{tail}\n\nEach hit is either (a) a file \
-             that should have been updated with the change, or (b) a legitimate \
-             historical mention. Fix the (a)s with cl_write_file, then call \
-             close_session again — this check does not repeat and will not hold the \
-             close.",
+            "Close-out staleness sweep — this session's CL writes retired terms (or CL files \
+             were deleted or renamed) that OTHER library files still cite:\n{}{tail}\n\nEach \
+             hit is either (a) a file that should have been updated with the change, or (b) a \
+             legitimate historical mention. Fix the (a)s with cl_edit_file, then call \
+             close_session again — this check does not repeat and will not hold the close.",
             hits.join("\n")
         ))
     }
