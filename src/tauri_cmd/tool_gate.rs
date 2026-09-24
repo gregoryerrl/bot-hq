@@ -4,8 +4,9 @@
 //! bridge's data dir. `<data_dir>/config/tool-gate.json` is the GLOBAL list: a
 //! session copies it into its policy snapshot when it spawns, and the
 //! PreToolUse hook and `action_gate` read that snapshot first — so a Settings
-//! edit reaches NEW sessions, and a running session's list is edited in its
-//! gear tab (feedback #34).
+//! edit reaches a session at its next spawn (snapshots are purged at app
+//! start), and a running session's list is edited in its gear tab (feedback
+//! #34).
 
 use crate::policy::tool_gate::{self, GatedKeyword};
 use crate::signaling::SignalingBridge;
