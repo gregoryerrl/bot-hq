@@ -434,6 +434,13 @@ pub fn transient_error(last_line: &str) -> bool {
     const TOKENS: &[&str] = &[
         "econnreset",
         "econnrefused",
+        // claude-code spells a refused connection out in words
+        // ("API Error: Connection refused … (ConnectionRefused)") — the line
+        // behind feedback #17/#18 never reached the retry ladder.
+        "connection refused",
+        "connectionrefused",
+        "connection reset",
+        "socket hang up",
         "econnaborted",
         "enotfound",
         "etimedout",
@@ -459,6 +466,80 @@ pub fn transient_error(last_line: &str) -> bool {
     ];
     CODES.iter().any(|c| crate::policy::contains_word(&lower, c))
         && HTTP_SHAPE.iter().any(|w| lower.contains(w))
+}
+
+/// The line an errored turn with NO text is reported by (feedback #18): the
+/// result's own subtype and HTTP status, instead of a bare "unknown error".
+fn errored_result_line(subtype: Option<&str>, api_error_status: Option<u16>) -> String {
+    match (subtype, api_error_status) {
+        (sub, Some(status)) => format!(
+            "API error HTTP {status}{}",
+            sub.map(|s| format!(" ({s})")).unwrap_or_default()
+        ),
+        (Some(sub), None) => format!("claude-code ended the turn `{sub}` with no error text"),
+        (None, None) => "claude-code reported a failed turn with no error text".to_string(),
+    }
+}
+
+/// What the error-streak halt tells the user to DO, by the error's class
+/// (feedback #17/#18). It used to advise closing the session for every
+/// streak — the most expensive remedy, next to an "unknown error", twice
+/// wrongly: the participant recovered on its own and did 85 rows of work.
+/// Only a context overflow is unrecoverable in place.
+fn streak_advice(last_line: &str, retry_attempt: usize) -> &'static str {
+    let lower = last_line.to_lowercase();
+    let overflow = ["prompt is too long", "context window", "context length", "too many tokens"]
+        .iter()
+        .any(|p| lower.contains(p));
+    if overflow {
+        "The conversation no longer fits this participant's context window — close the \
+         session and open a fresh one."
+    } else if retry_attempt > 0 || transient_error(last_line) {
+        "An upstream (API or network) failure, and the automatic retries are spent. Send a \
+         message to retry; if it keeps failing, check the provider's status before closing \
+         anything."
+    } else {
+        "The cause is not established from this error. Send a message to retry — this \
+         participant's context is intact; close the session only if the same error repeats \
+         on every try."
+    }
+}
+
+/// "This is eyes's 3rd error halt this session (the first 8h 35m ago); its
+/// last clean turn ended 1m ago." — the trend the user could only get from a
+/// hand-written SQL query before (feedback #19).
+fn error_halt_history(
+    slug: &str,
+    halts: &[std::time::Instant],
+    last_clean_turn: Option<std::time::Instant>,
+) -> String {
+    let n = halts.len();
+    let ordinal = match (n % 100, n % 10) {
+        (11..=13, _) => format!("{n}th"),
+        (_, 1) => format!("{n}st"),
+        (_, 2) => format!("{n}nd"),
+        (_, 3) => format!("{n}rd"),
+        _ => format!("{n}th"),
+    };
+    let first = match halts.first() {
+        Some(t) if n > 1 => format!(" (the first {} ago)", human_span(t.elapsed())),
+        _ => String::new(),
+    };
+    let clean = match last_clean_turn {
+        Some(t) => format!("its last clean turn ended {} ago", human_span(t.elapsed())),
+        None => "it has not completed a clean turn since this process started".to_string(),
+    };
+    format!("This is {slug}'s {ordinal} error halt this session{first}; {clean}.")
+}
+
+/// `8h 35m`, `12m`, `45s` — coarse on purpose: the trend, not a stopwatch.
+fn human_span(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        _ => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
+    }
 }
 
 /// Provider quota/limit phrases, matched case-insensitively against each text
@@ -572,6 +653,15 @@ pub async fn pump_agent(
     // reset by a clean turn, advanced by each transient errored turn; past the
     // ladder's end the next transient failure halts like any other.
     let mut retry_attempt: usize = 0;
+    // Feedback #19: every error halt this pump declared, and when its last
+    // clean turn ended — so the banner can say "3rd error halt in 8h 35m; last
+    // clean turn 1m ago" instead of each halt reading as the first. The pump
+    // outlives respawns, so this history does too.
+    let mut error_halts: Vec<std::time::Instant> = Vec::new();
+    let mut last_clean_turn: Option<std::time::Instant> = None;
+    // Did THIS turn already post a CLI notice (`AgentEvent::Notice`)? Then the
+    // discarded-turn row must not quote the same line again (EYES, C17 nit).
+    let mut turn_had_notice = false;
     // B5: the epoch of the turn in flight, snapshotted from `cfg.turn_epoch` on
     // this turn's FIRST event and cleared when it completes. See the field's doc
     // for why reading it at completion time instead would defeat the guard it
@@ -712,6 +802,7 @@ pub async fn pump_agent(
                 }
                 buffer.push_str(&text);
                 buffer.push('\n');
+                turn_had_notice = true;
             }
             AgentEvent::ToolUse { id, name, input } => {
                 // peer_ack: the agent explicitly acked its peer this turn — flag it
@@ -878,7 +969,11 @@ pub async fn pump_agent(
                 }
             }
             AgentEvent::TurnComplete {
-                is_error, context, ..
+                is_error,
+                context,
+                subtype,
+                api_error_status,
+                ..
             } => {
                 // Context occupancy rides the turn-complete event because that
                 // is the only place claude-code reports `contextWindow`.
@@ -1083,14 +1178,16 @@ pub async fn pump_agent(
                         stamp != crate::agents::NO_INTERRUPT_EPOCH && Some(stamp) == this_turn;
                     // The errored turn's last line — what the halt banner
                     // quotes, and (round 12) what the retry ladder classifies.
-                    let last_line: String = buffer
-                        .lines()
-                        .rev()
-                        .find(|l| !l.trim().is_empty())
-                        .unwrap_or("unknown error")
-                        .chars()
-                        .take(200)
-                        .collect();
+                    // Feedback #18: an errored turn with no text used to read
+                    // "unknown error" — the result's own subtype and HTTP status
+                    // were dropped on the floor. They are the fallback now.
+                    let last_line: String = match buffer.lines().rev().find(|l| !l.trim().is_empty()) {
+                        Some(line) => line.to_string(),
+                        None => errored_result_line(subtype.as_deref(), api_error_status),
+                    }
+                    .chars()
+                    .take(200)
+                    .collect();
                     let mut retried = false;
                     if host_interrupted {
                         debug!(
@@ -1114,8 +1211,15 @@ pub async fn pump_agent(
                         retried = true;
                         let attempt = retry_attempt;
                         let total = cfg.retry_ladder.len();
+                        // The error line is already the notice above when the
+                        // CLI reported it (EYES, C17 nit) — do not quote it twice.
+                        let what = if turn_had_notice {
+                            "the error above".to_string()
+                        } else {
+                            last_line.clone()
+                        };
                         let notice = format!(
-                            "⚠ transient error on {}'s turn ({last_line}) — retrying in {}s \
+                            "⚠ transient error on {}'s turn ({what}) — retrying in {}s \
                              (attempt {attempt}/{total}; halting after the {}).",
                             cfg.slug,
                             delay.as_secs(),
@@ -1189,14 +1293,28 @@ pub async fn pump_agent(
                                 cfg.bridge.as_deref(),
                                 &cfg.session_id,
                                 MessageKind::SystemNotice,
-                                format!(
-                                    "[System: {}'s turn ended in an error and was discarded — nothing \
-                                     it may have been doing reached the channel (last line: \
-                                     \"{last_line}\"). The ring moved on; whatever it was asked on \
-                                     this turn still stands, and a second error in a row halts the \
-                                     session.]",
-                                    cfg.slug
-                                ),
+                                if turn_had_notice {
+                                    // The error itself is the notice just above
+                                    // (EYES, C17 nit): say what the discard means,
+                                    // don't quote it twice.
+                                    format!(
+                                        "[System: {}'s turn ended in that error and was discarded — \
+                                         any work it had in progress did not reach the channel. \
+                                         The ring moved on; whatever it was asked on this turn \
+                                         still stands, and a second error in a row halts the \
+                                         session.]",
+                                        cfg.slug
+                                    )
+                                } else {
+                                    format!(
+                                        "[System: {}'s turn ended in an error and was discarded — \
+                                         nothing it may have been doing reached the channel (last \
+                                         line: \"{last_line}\"). The ring moved on; whatever it was \
+                                         asked on this turn still stands, and a second error in a \
+                                         row halts the session.]",
+                                        cfg.slug
+                                    )
+                                },
                                 None,
                             )
                             .await
@@ -1217,6 +1335,7 @@ pub async fn pump_agent(
                             %last_line,
                             "back-to-back errored turns; declaring the session's halt"
                         );
+                        error_halts.push(std::time::Instant::now());
                         if let Some(bridge) = &cfg.bridge {
                             let _ = bridge
                                 .mark_awaiting_user_for(
@@ -1225,11 +1344,7 @@ pub async fn pump_agent(
                                     format!(
                                         "⚠ {}'s {streak_marker} \
                                          (last error: \"{last_line}\"{}). The session \
-                                         stopped so you can steer. If the error is \
-                                         about prompt/context size, this \
-                                         participant's context is likely \
-                                         unrecoverable — close the session and \
-                                         open a fresh one.",
+                                         stopped so you can steer. {} {}",
                                         &cfg.slug,
                                         if retry_attempt > 0 {
                                             format!(
@@ -1239,6 +1354,8 @@ pub async fn pump_agent(
                                         } else {
                                             String::new()
                                         },
+                                        error_halt_history(&cfg.slug, &error_halts, last_clean_turn),
+                                        streak_advice(&last_line, retry_attempt),
                                         streak_marker =
                                             crate::core::close_learnings::ERROR_STREAK_HALT_MARKER
                                     ),
@@ -1254,6 +1371,7 @@ pub async fn pump_agent(
                 } else {
                     consecutive_errored_turns = 0;
                     retry_attempt = 0;
+                    last_clean_turn = Some(std::time::Instant::now());
                     // The turn's prose is already posted as rows by the pump
                     // above; the ring delivers those to every peer off its
                     // cursor. Nothing extra to hand anywhere — the router that
@@ -1261,6 +1379,7 @@ pub async fn pump_agent(
                     // and it was already bypassed on every sequencer session.
                     buffer.clear();
                 }
+                turn_had_notice = false;
                 // A pass gets a ROW, so declining a turn is something the user can
                 // see rather than a gap in the transcript (design §1).
                 //
@@ -2070,7 +2189,7 @@ mod tests {
         let (cfg, mut ring_rx) = cfg_with_ring("eyes");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
-        let err = "API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)";
+        let err = "API Error: 400 The request body could not be parsed";
         ev_tx.send(AgentEvent::Notice(err.into())).await.unwrap();
         ev_tx
             .send(AgentEvent::TurnComplete {
@@ -2087,11 +2206,52 @@ mod tests {
         assert!(next_turn_end(&mut ring_rx).is_some());
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs[0].kind, "system_notice", "{msgs:?}");
-        assert!(msgs[0].content.starts_with("⚠ eyes — API Error: Connection refused"), "got: {}", msgs[0].content);
+        assert!(msgs[0].content.starts_with("⚠ eyes — API Error: 400"), "got: {}", msgs[0].content);
         assert!(
             !msgs.iter().any(|m| m.kind == "text" && m.content.contains("API Error")),
             "the error is not stored as the participant's speech: {msgs:?}"
         );
+        // EYES' C17 nit: the discard row does not quote the notice's line again.
+        let discard = msgs.iter().find(|m| m.content.contains("was discarded")).expect("discard row");
+        assert!(!discard.content.contains("could not be parsed"), "no duplicate quote: {}", discard.content);
+    }
+
+    /// Feedback #17/#18: advice follows the error's class — only a context
+    /// overflow advises a fresh session; an unknown cause says so and offers
+    /// the cheap remedy first.
+    #[test]
+    fn streak_advice_names_a_cause_only_when_it_has_one() {
+        assert!(streak_advice("Prompt is too long", 0).contains("open a fresh one"));
+        let unknown = streak_advice("something odd happened", 0);
+        assert!(unknown.contains("not established") && !unknown.contains("open a fresh one"));
+        let upstream = streak_advice("API error HTTP 503 (error_during_execution)", 3);
+        assert!(upstream.contains("upstream") && !upstream.contains("open a fresh one"));
+        // #17's exact line now reaches the retry ladder.
+        assert!(transient_error(
+            "API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)"
+        ));
+    }
+
+    #[test]
+    fn an_errored_turn_with_no_text_reports_what_the_result_said() {
+        assert_eq!(
+            errored_result_line(Some("error_during_execution"), Some(529)),
+            "API error HTTP 529 (error_during_execution)"
+        );
+        assert!(errored_result_line(Some("error_max_turns"), None).contains("`error_max_turns`"));
+        assert!(!errored_result_line(None, None).contains("unknown error"));
+    }
+
+    #[test]
+    fn the_halt_history_counts_and_spans() {
+        let now = std::time::Instant::now();
+        let one = error_halt_history("eyes", &[now], None);
+        assert!(one.contains("eyes's 1st error halt") && one.contains("not completed a clean turn"), "{one}");
+        let three = error_halt_history("eyes", &[now, now, now], Some(now));
+        assert!(three.contains("3rd error halt") && three.contains("(the first 0s ago)"), "{three}");
+        assert!(three.contains("last clean turn ended 0s ago"), "{three}");
+        assert!(error_halt_history("e", &vec![now; 11], None).contains("11th"));
+        assert_eq!(human_span(std::time::Duration::from_secs(8 * 3600 + 35 * 60)), "8h 35m");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2163,6 +2323,11 @@ mod tests {
                     && reason.contains("failing back-to-back")),
             "the halt slot carries the error as the visible reason: {halt:?}"
         );
+        // Feedback #17-#19: a context overflow is the ONE class that advises a
+        // fresh session, and the banner counts the incident.
+        let reason = halt.map(|(_, r, _)| r).unwrap_or_default();
+        assert!(reason.contains("open a fresh one"), "overflow → close advice: {reason}");
+        assert!(reason.contains("hands's 1st error halt"), "the incident is counted: {reason}");
         // rc3 D35 holds here too: a halt is SESSION state, never a tray row.
         let tray = storage.tray_entries_for_session("s1").await.unwrap();
         assert!(
