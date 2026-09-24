@@ -586,6 +586,13 @@ impl SignalingBridge {
             ));
         }
         let cursor = storage.cursor_for(reviewer.id).await?;
+        // A publish a blocking finding WITHDREW is re-reviewed, never re-parked
+        // on its old coverage: its body row was delivered when it first
+        // queued, so coverage (or the timeline check, for a content-free
+        // command) would put the vetoed publish straight on the user's card.
+        if storage.latest_gate_withdrawn_by_finding(session_id, command).await? {
+            return Ok(OutwardReview::Queued { reviewer_id: reviewer.id });
+        }
         if bodies.is_empty() {
             // Content-free outward: timeline check — a reviewer deal strictly
             // between the caller's previous and current deals.
@@ -723,8 +730,10 @@ impl SignalingBridge {
             "📨 Outward publish queued for review (gate {gate_id}) — {agent} wants to run:\n\
              `{command}`\n\n{body}\n\n\
              [Reviewer: this content publishes under the user's identity. Read it on this \
-             turn; a `blocking` finding withdraws the gate, anything else lets it park for \
-             the user after your turn.]"
+             turn. To stop THIS publish, file a `blocking` finding with \
+             gate_id \"{gate_id}\". A `blocking` finding with NO gate_id withdraws EVERY \
+             queued publish, so a blocking finding about something else should pass \
+             gate_id \"none\". Anything else lets it park for the user after your turn.]"
         );
         let Some(row) = crate::core::post_system_notice(
             &storage,
@@ -820,25 +829,35 @@ impl SignalingBridge {
                 continue;
             }
             let command = row.command_text.clone().unwrap_or_default();
-            let vetoed = findings.iter().any(|f| {
-                f.severity == "blocking" && f.created_at > row.asked_at
-            });
-            if vetoed {
+            if let Some(veto) = findings.iter().find(|f| vetoes_queued_gate(f, &row)) {
                 if storage
-                    .withdraw_queued_gate(&row.choice_id, "withdrawn: the reviewer filed a blocking finding")
+                    .withdraw_queued_gate(&row.choice_id, crate::storage::FINDING_WITHDRAWAL_REASON)
                     .await
                     .unwrap_or(0)
                     == 1
                 {
+                    let finding = &veto.finding_uid[..veto.finding_uid.len().min(8)];
+                    let why = if veto.gate_id.is_some() {
+                        format!(
+                            "the reviewer's blocking finding {finding} names this publish. Fix \
+                             what it raises, then re-issue — the re-issue queues for a fresh review"
+                        )
+                    } else {
+                        format!(
+                            "the reviewer filed blocking finding {finding} naming no gate, which \
+                             withdraws every queued publish. If it is about this content, fix it \
+                             and re-issue; if it is about something else, re-issue unchanged — \
+                             the re-issue queues for a fresh review and the earlier finding does \
+                             not veto it, so there is no need to disposition it first"
+                        )
+                    };
                     let _ = crate::core::post_system_notice(
                         &storage,
                         Some(self),
                         session_id,
                         crate::storage::MessageKind::SystemNotice,
                         format!(
-                            "⛔ Queued outward publish {} withdrawn — the reviewer filed a blocking \
-                             finding after it was queued. Disposition the finding, then re-issue \
-                             the command: `{command}`",
+                            "⛔ Queued outward publish {} withdrawn — {why}: `{command}`",
                             row.choice_id
                         ),
                         None,
@@ -951,6 +970,25 @@ fn parked_gate_text(
          NOT re-issue the command or assume it ran — call gate_status(\"{gate_id}\") \
          if you need the current state before continuing."
     )
+}
+
+/// Does this finding withdraw this queued publish at settlement? Only an OPEN
+/// BLOCKING finding vetoes (one already dispositioned has been answered). A
+/// finding that names a gate (0083) vetoes exactly that gate; `"none"` vetoes
+/// nothing; one that names no gate keeps the fail-closed default — it
+/// withdraws every publish queued before it was filed (feedback #42/#43).
+fn vetoes_queued_gate(
+    f: &crate::storage::Finding,
+    row: &crate::storage::SessionTrayEntry,
+) -> bool {
+    if f.severity != "blocking" || f.status != "open" {
+        return false;
+    }
+    match f.gate_id.as_deref() {
+        None => f.created_at > row.asked_at,
+        Some("none") => false,
+        Some(gate) => gate == row.choice_id,
+    }
 }
 
 /// "row #12" / "rows #12, #15" — the message ids a coverage hit cites.
@@ -1929,6 +1967,205 @@ mod tests {
         let status = bridge.gate_status(&gate_id).await.unwrap();
         assert!(status.starts_with("withdrawn"), "got: {status}");
         assert!(status.contains("did not run"));
+    }
+
+    /// Two publishes queued in one turn, both bodies read by the reviewer —
+    /// the #42/#43 shape. Returns `(gate_a, gate_b, cmd_a)`.
+    async fn two_queued_and_read(
+        bridge: &std::sync::Arc<SignalingBridge>,
+        storage: &crate::storage::Storage,
+        eyes: i64,
+        repo: &tempfile::TempDir,
+        path_a: &str,
+    ) -> (String, String, String) {
+        let path_b = repo.path().join("comment.md");
+        std::fs::write(&path_b, "An answer to the stakeholder.\n").unwrap();
+        let cmd_a = format!("gh issue create --title t --body-file {path_a}");
+        let cmd_b = format!("gh issue comment 749 --body-file {}", path_b.display());
+        let (gate_a, _) = queued(bridge.park_gated_command("s1", "hands", &cmd_a).await.unwrap());
+        let (gate_b, _) = queued(bridge.park_gated_command("s1", "hands", &cmd_b).await.unwrap());
+        for g in [&gate_a, &gate_b] {
+            let row = storage.get_tray_entry(g).await.unwrap().unwrap().body_row_id.unwrap();
+            storage.commit_delivery(eyes, &[(row, None)]).await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        (gate_a, gate_b, cmd_a)
+    }
+
+    async fn status_of(storage: &crate::storage::Storage, gate: &str) -> String {
+        storage.get_tray_entry(gate).await.unwrap().unwrap().status
+    }
+
+    /// #42: a finding that NAMES one queued publish withdraws that one only —
+    /// by its full id or a unique 8-char prefix.
+    #[tokio::test]
+    async fn a_finding_naming_one_gate_withdraws_only_that_gate() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let (gate_a, gate_b, _) = two_queued_and_read(&bridge, &storage, eyes, &repo, &path).await;
+        let uid = bridge
+            .eyes_flag_for_gate(
+                "s1".into(),
+                "eyes".into(),
+                crate::storage::FindingSeverity::Blocking,
+                "date range attributed to the wrong rows".into(),
+                None,
+                Some(gate_a[..8].to_string()),
+            )
+            .await
+            .unwrap();
+        let f = storage.get_finding(&uid).await.unwrap().unwrap();
+        assert_eq!(f.gate_id.as_deref(), Some(gate_a.as_str()), "a prefix resolves to the full id");
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(status_of(&storage, &gate_a).await, "withdrawn");
+        assert_eq!(status_of(&storage, &gate_b).await, "pending", "the other publish parks");
+        let rows = storage.recent_row_bodies_upto("s1", i64::MAX, 20).await.unwrap();
+        assert!(
+            rows.iter().any(|r| r.contains(&gate_a) && r.contains("names this publish")),
+            "the withdrawal says it was targeted: {rows:?}"
+        );
+    }
+
+    /// #43: a blocking finding about something else entirely, filed with
+    /// `gate_id: "none"`, leaves every queued publish to park.
+    #[tokio::test]
+    async fn a_finding_with_gate_none_withdraws_no_queued_publish() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let (gate_a, gate_b, _) = two_queued_and_read(&bridge, &storage, eyes, &repo, &path).await;
+        bridge
+            .eyes_flag_for_gate(
+                "s1".into(),
+                "eyes".into(),
+                crate::storage::FindingSeverity::Blocking,
+                "data loss in bin/export".into(),
+                None,
+                Some("none".into()),
+            )
+            .await
+            .unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(status_of(&storage, &gate_a).await, "pending");
+        assert_eq!(status_of(&storage, &gate_b).await, "pending");
+        // The finding still gates commits — `none` scopes the PUBLISH veto only.
+        assert_eq!(storage.count_open_blocking_findings("s1").await.unwrap(), 1);
+    }
+
+    /// The fail-closed default stays: no `gate_id` withdraws every queued
+    /// publish, even when the summary MENTIONS one gate (plan review M2 —
+    /// prose never narrows the veto).
+    #[tokio::test]
+    async fn an_untargeted_finding_withdraws_every_queued_publish_even_if_it_names_one() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let (gate_a, gate_b, _) = two_queued_and_read(&bridge, &storage, eyes, &repo, &path).await;
+        bridge
+            .eyes_flag_for_gate(
+                "s1".into(),
+                "eyes".into(),
+                crate::storage::FindingSeverity::Blocking,
+                format!("gate {} has a wrong date", &gate_a[..8]),
+                Some(format!("gate {}", &gate_a[..8])),
+                None,
+            )
+            .await
+            .unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(status_of(&storage, &gate_a).await, "withdrawn");
+        assert_eq!(status_of(&storage, &gate_b).await, "withdrawn");
+        let rows = storage.recent_row_bodies_upto("s1", i64::MAX, 20).await.unwrap();
+        assert!(
+            rows.iter().any(|r| r.contains(&gate_b) && r.contains("no need to disposition")),
+            "an untargeted withdrawal must not push the executor to clear the finding: {rows:?}"
+        );
+    }
+
+    /// Only an OPEN finding vetoes: one already dispositioned was answered.
+    #[tokio::test]
+    async fn a_dispositioned_finding_no_longer_vetoes() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let (gate_a, gate_b, _) = two_queued_and_read(&bridge, &storage, eyes, &repo, &path).await;
+        storage
+            .insert_finding("s1", "f-old", "eyes", crate::storage::FindingSeverity::Blocking, "x", None)
+            .await
+            .unwrap();
+        storage
+            .disposition_finding("s1", "f-old", crate::storage::FindingStatus::Fixed, Some("abc"), "hands")
+            .await
+            .unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(status_of(&storage, &gate_a).await, "pending");
+        assert_eq!(status_of(&storage, &gate_b).await, "pending");
+    }
+
+    /// A gate id that is not QUEUED (mistyped, or already parked for the user)
+    /// is an error naming what is queued — never a veto that silently missed.
+    #[tokio::test]
+    async fn a_gate_id_that_is_not_queued_is_an_error() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let (gate_a, _gate_b, _) = two_queued_and_read(&bridge, &storage, eyes, &repo, &path).await;
+        let mistyped = gate_a[..8].replace(&gate_a[..1], "z");
+        for bad in ["deadbeef-0000", "abc", mistyped.as_str()] {
+            let err = bridge
+                .eyes_flag_for_gate(
+                    "s1".into(),
+                    "eyes".into(),
+                    crate::storage::FindingSeverity::Blocking,
+                    format!("bad target {bad}"),
+                    None,
+                    Some(bad.to_string()),
+                )
+                .await
+                .expect_err("an unknown gate must not file silently");
+            assert!(err.to_string().contains(&gate_a[..8]), "the error lists what is queued: {err}");
+        }
+        assert_eq!(storage.count_open_blocking_findings("s1").await.unwrap(), 0);
+    }
+
+    /// The veto cannot be undone by re-issuing the vetoed command unchanged:
+    /// its body row was delivered when it first queued, so coverage alone
+    /// would park it on the user's card. It queues for a FRESH review.
+    #[tokio::test]
+    async fn a_withdrawn_publish_reissued_unchanged_queues_for_a_fresh_review() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let (gate_a, _gate_b, cmd_a) = two_queued_and_read(&bridge, &storage, eyes, &repo, &path).await;
+        bridge
+            .eyes_flag_for_gate(
+                "s1".into(),
+                "eyes".into(),
+                crate::storage::FindingSeverity::Blocking,
+                "wrong claim".into(),
+                None,
+                Some(gate_a.clone()),
+            )
+            .await
+            .unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(status_of(&storage, &gate_a).await, "withdrawn");
+        let (again, existing) = queued(bridge.park_gated_command("s1", "hands", &cmd_a).await.unwrap());
+        assert!(!existing);
+        assert_ne!(again, gate_a);
+        // Read again without a new finding → it may park now: the old
+        // finding named the OLD gate, and each queued publish gets its own call.
+        let row = storage.get_tray_entry(&again).await.unwrap().unwrap().body_row_id.unwrap();
+        storage.commit_delivery(eyes, &[(row, None)]).await.unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(status_of(&storage, &again).await, "pending");
     }
 
     #[tokio::test]

@@ -1,0 +1,11 @@
+-- 0083_findings_gate_id.sql — a blocking finding can name the queued outward
+-- publish it is about (feedback #42/#43, 2026-09-24).
+--
+-- Until now ANY blocking finding filed after a publish was queued withdrew
+-- EVERY queued publish of the session — including an unrelated read-only one —
+-- because nothing linked a finding to a gate. NULL keeps that fail-closed
+-- default; a queued gate's full choice_id vetoes only that gate; the literal
+-- 'none' declares the finding is about no queued publish. Plain nullable
+-- column, no index: it is read only for the few blocking findings of one
+-- session at settlement time.
+ALTER TABLE findings ADD COLUMN gate_id TEXT;

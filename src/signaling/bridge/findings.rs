@@ -30,7 +30,32 @@ impl SignalingBridge {
         summary: String,
         code_ref: Option<String>,
     ) -> Result<String> {
+        self.eyes_flag_for_gate(session_id, agent, severity, summary, code_ref, None)
+            .await
+    }
+
+    /// [`Self::eyes_flag`] with the queued outward publish the finding is
+    /// about (feedback #42/#43). `gate_id` is a QUEUED gate's id (full, or a
+    /// unique 8+ prefix) → a blocking finding withdraws only that publish;
+    /// `"none"` → it withdraws no queued publish; omitted → the fail-closed
+    /// default, every publish queued before it. Only an EXPLICIT id narrows
+    /// the veto — never a gate id mentioned in the summary or code_ref (plan
+    /// review M2: prose that cites another gate must not mis-target).
+    pub async fn eyes_flag_for_gate(
+        &self,
+        session_id: String,
+        agent: String,
+        severity: FindingSeverity,
+        summary: String,
+        code_ref: Option<String>,
+        gate_id: Option<String>,
+    ) -> Result<String> {
         let storage = self.findings_storage().await?;
+        let gate = match gate_id.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(g) if g.eq_ignore_ascii_case("none") => Some("none".to_string()),
+            Some(g) => Some(Self::resolve_queued_gate_or_bail(&storage, &session_id, g).await?),
+        };
 
         // Re-raise dedup: if an OPEN finding with the same summary already exists,
         // don't insert a duplicate. Bump its raise_count — but ONLY if somebody
@@ -43,9 +68,14 @@ impl SignalingBridge {
         // question asked without naming an agent. (That predecessor,
         // `has_message_from_author_since`, was deleted in round 6 once this was
         // its only remaining reader; do not grep for it.)
+        //
+        // A re-raise that names a DIFFERENT gate is not a duplicate: it is the
+        // same defect found in a new publish (the executor re-issued without
+        // fixing it), and only a row of its own can veto that one.
         if let Some(existing) = storage
             .latest_open_finding_by_summary(&session_id, &summary)
             .await?
+            .filter(|existing| gate.is_none() || existing.gate_id == gate)
         {
             let peer_acted = storage
                 .has_message_from_other_participant_since(&session_id, &agent, &existing.updated_at)
@@ -63,12 +93,75 @@ impl SignalingBridge {
 
         let uid = Uuid::new_v4().to_string();
         storage
-            .insert_finding(&session_id, &uid, &agent, severity, &summary, code_ref.as_deref())
+            .insert_finding_for_gate(
+                &session_id,
+                &uid,
+                &agent,
+                severity,
+                &summary,
+                code_ref.as_deref(),
+                gate.as_deref(),
+            )
             .await?;
         let _ = self
             .event_tx
             .send(SignalingEvent::FindingsChanged { session_id });
         Ok(uid)
+    }
+
+    /// Resolve a finding's `gate_id` against this session's QUEUED outward
+    /// publishes — the only ones a finding can withdraw. Exact id, or a unique
+    /// prefix of 8+ characters (the id a reviewer reads in the queued row).
+    /// Anything else is an ERROR naming what is queued: a finding aimed at a
+    /// gate that cannot be withdrawn (already parked for the user, answered,
+    /// or mistyped) must not read as a veto that landed.
+    async fn resolve_queued_gate_or_bail(
+        storage: &Storage,
+        session_id: &str,
+        input: &str,
+    ) -> Result<String> {
+        let wanted = input.to_ascii_lowercase();
+        let queued = storage.queued_gates_for_session(session_id).await?;
+        if let Some(row) = queued.iter().find(|r| r.choice_id == wanted) {
+            return Ok(row.choice_id.clone());
+        }
+        let listing = if queued.is_empty() {
+            "no outward publish is queued in this session".to_string()
+        } else {
+            format!(
+                "queued now: {}",
+                queued
+                    .iter()
+                    .map(|r| format!(
+                        "{} `{}`",
+                        &r.choice_id[..r.choice_id.len().min(8)],
+                        r.command_text.as_deref().unwrap_or("")
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        };
+        if wanted.len() < 8 {
+            anyhow::bail!(
+                "gate_id '{input}' is shorter than 8 characters — pass the queued publish's gate \
+                 id (a unique 8+ prefix works), \"none\", or omit gate_id ({listing})"
+            );
+        }
+        let hits: Vec<&crate::storage::SessionTrayEntry> =
+            queued.iter().filter(|r| r.choice_id.starts_with(&wanted)).collect();
+        match hits.as_slice() {
+            [one] => Ok(one.choice_id.clone()),
+            [] => anyhow::bail!(
+                "gate_id '{input}' matches no QUEUED outward publish ({listing}). A finding can \
+                 only withdraw a publish still queued for review — a card already parked for \
+                 the user is theirs to reject; say so in chat. Pass \"none\" for a finding about \
+                 no queued publish, or omit gate_id to withdraw every queued publish."
+            ),
+            many => anyhow::bail!(
+                "gate_id prefix '{input}' matches {} queued publishes — use more characters ({listing})",
+                many.len()
+            ),
+        }
     }
 
     /// Resolve a caller-supplied finding id within `session_id` or bail with

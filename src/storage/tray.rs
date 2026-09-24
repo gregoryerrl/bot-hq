@@ -17,6 +17,12 @@ const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
 /// (`answer_tray_entry` flips `pending` only); settlement promotes it.
 pub const TRAY_STATUS_QUEUED: &str = "queued";
 
+/// The `picked_option` a queued gate carries when a reviewer's blocking
+/// finding withdrew it — written by settlement, read by
+/// [`Storage::latest_gate_withdrawn_by_finding`]. One constant so the two
+/// cannot drift apart (a drift would silently re-open the re-issue bypass).
+pub const FINDING_WITHDRAWAL_REASON: &str = "withdrawn: the reviewer filed a blocking finding";
+
 /// The statuses [`Storage::tray_entries_for_session`] returns — the rows the
 /// UI may render. An explicit allow-list, in SQL, so "a queued row is
 /// invisible" is a guarantee of the read and not of eight frontend filters
@@ -317,6 +323,32 @@ impl Storage {
         .await
         .with_context(|| format!("withdrawing queued gate {choice_id}"))?;
         Ok(res.rows_affected())
+    }
+
+    /// Was the NEWEST gate for this exact command withdrawn by a reviewer's
+    /// blocking finding? A re-issue of such a command must queue for a FRESH
+    /// review: its body row was delivered when it first queued, so the
+    /// content-keyed coverage check would otherwise park the vetoed publish
+    /// straight onto the user's card — the veto undone by re-issuing unchanged.
+    pub async fn latest_gate_withdrawn_by_finding(
+        &self,
+        session_id: &str,
+        command: &str,
+    ) -> Result<bool> {
+        let row: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT status, picked_option FROM session_tray \
+             WHERE session_id = ? AND command_text = ? \
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(command)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(matches!(
+            row,
+            Some((status, Some(reason)))
+                if status == "withdrawn" && reason == FINDING_WITHDRAWAL_REASON
+        ))
     }
 
     /// The choice_id of a still-PENDING gated command with this exact command

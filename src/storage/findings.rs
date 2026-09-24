@@ -29,7 +29,7 @@ pub const OPEN_BLOCKING_FOR_SESSION: &str =
 
 const FINDING_COLUMNS: &str = "id, session_id, finding_uid, agent, severity, summary, \
      code_ref, status, disposition_reason, disposed_by, created_at, updated_at, \
-     raise_count, reviewer_approved";
+     raise_count, reviewer_approved, gate_id";
 
 impl Storage {
     /// Insert a fresh finding in `open` status. Returns the row id. The session
@@ -43,11 +43,30 @@ impl Storage {
         summary: &str,
         code_ref: Option<&str>,
     ) -> Result<i64> {
+        self.insert_finding_for_gate(session_id, finding_uid, agent, severity, summary, code_ref, None)
+            .await
+    }
+
+    /// [`Self::insert_finding`] plus the queued outward publish the finding is
+    /// about (0083): a gate's full choice_id vetoes only that gate at
+    /// settlement, `"none"` vetoes no queued publish, `None` keeps the
+    /// fail-closed withdraw-all. The bridge resolves and validates the id.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_finding_for_gate(
+        &self,
+        session_id: &str,
+        finding_uid: &str,
+        agent: &str,
+        severity: FindingSeverity,
+        summary: &str,
+        code_ref: Option<&str>,
+        gate_id: Option<&str>,
+    ) -> Result<i64> {
         let now = now_utc();
         let res = sqlx::query(
             "INSERT INTO findings \
-                (session_id, finding_uid, agent, severity, summary, code_ref, status, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+                (session_id, finding_uid, agent, severity, summary, code_ref, status, created_at, updated_at, gate_id) \
+             VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
         )
         .bind(session_id)
         .bind(finding_uid)
@@ -57,6 +76,7 @@ impl Storage {
         .bind(code_ref)
         .bind(&now)
         .bind(&now)
+        .bind(gate_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("inserting finding {finding_uid} for session {session_id}"))?;

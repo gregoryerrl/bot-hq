@@ -426,6 +426,10 @@ pub struct Finding {
     /// `1` once EYES confirmed the resolution via `approve_finding` (clears the
     /// escalation signal); `0` otherwise. Orthogonal to `status`.
     pub reviewer_approved: i64,
+    /// The queued outward publish this finding is about (0083): a gate's full
+    /// choice_id, the literal `"none"` (about no queued publish), or `None` —
+    /// which withdraws every publish queued before it (the fail-closed default).
+    pub gate_id: Option<String>,
 }
 
 /// Aggregated `retrieval_events` telemetry (Stage 4b measurement). Raw counts

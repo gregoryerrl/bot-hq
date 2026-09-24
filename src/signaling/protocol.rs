@@ -376,7 +376,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "flag_finding",
-            description: gated_by("flag_finding", "File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until a participant holding `disposition_finding` resolves it (the mechanical sign-off gate, mirroring the commit-message gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id — an OPEN finding with an identical `summary` is a re-raise: its existing id comes back, no duplicate row is filed, and its raise count grows only if another participant has spoken since (change the summary to file a genuinely new finding). Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains the executor to ignore the gate). This is how a finding STICKS instead of relying on someone reading chat."),
+            description: gated_by("flag_finding", "File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until a participant holding `disposition_finding` resolves it (the mechanical sign-off gate, mirroring the commit-message gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id — an OPEN finding with an identical `summary` is a re-raise: its existing id comes back, no duplicate row is filed, and its raise count grows only if another participant has spoken since (change the summary to file a genuinely new finding). Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains the executor to ignore the gate). This is how a finding STICKS instead of relying on someone reading chat. A `blocking` finding filed while an outward publish is QUEUED for your review withdraws it: pass `gate_id` = that publish's gate id to withdraw only it, `gate_id=\"none\"` for a finding about something else, or omit it to withdraw EVERY queued publish."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -386,7 +386,8 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                         "description": "blocking = gates commit until dispositioned; advisory = never gates."
                     },
                     "summary": { "type": "string", "description": "What the finding is — concise + actionable (the bug and its impact)." },
-                    "code_ref": { "type": "string", "description": "Optional file:line or symbol the finding points at." }
+                    "code_ref": { "type": "string", "description": "Optional file:line or symbol the finding points at." },
+                    "gate_id": { "type": "string", "description": "Optional. The QUEUED outward publish this finding is about: its gate id (a unique 8+ character prefix works) withdraws only that publish; \"none\" withdraws no queued publish; omitted = every publish queued before this finding is withdrawn (the fail-closed default). An id that is not queued is an error." }
                 },
                 "required": ["severity", "summary"]
             }),

@@ -1028,13 +1028,15 @@ async fn call_tool(
             })?;
             let summary = arg_required_str(&args, "summary")?;
             let code_ref = arg_opt_str(&args, "code_ref");
+            let gate_id = arg_opt_str(&args, "gate_id");
             let uid = bridge
-                .eyes_flag(
+                .eyes_flag_for_gate(
                     caller.session_id.clone(),
                     caller.agent.clone(),
                     severity,
                     summary,
                     code_ref,
+                    gate_id,
                 )
                 .await
                 .map_err(internal_err_no_prefix)?;
