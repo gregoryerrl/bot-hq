@@ -44,6 +44,7 @@ pub use cl_staleness::RETIREMENT_MARKERS;
 mod cl_write;
 mod feedback;
 mod findings;
+mod outward_body;
 mod session_docs;
 mod terminal_tools;
 mod tray;

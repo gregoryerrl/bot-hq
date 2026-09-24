@@ -311,7 +311,8 @@ lives in 14 registries on one struct (12 keyed by session id, 2 by `(session, ag
 |---|---|---|
 | `src/signaling/bridge/mod.rs` | struct + 14 registries, `SignalingEvent` (17 variants), register/`unregister_session`, `notify_*` emitters, close-gate + retired-terms, policy resolution, reviewer-override request | XL |
 | `src/signaling/bridge/tray.rs` | `ask_user_choice_inner` (`kind = approval` for a host GATE = the ring's gate marker; `kind = request` for an agent's `request_approval` — tray, audited, no latch, round 12), `request_approval(_parked)`, supersede/withdraw (owner-scoped), `resolve_choice_confirmable`, `deliver_oob`, `emit_halt_row`/`mark_awaiting_user`, `request_phase_advance` | XL |
-| `src/signaling/bridge/action_gate.rs` | `park_gated_command` (dedupe) / `execute_gated` (`tool_gate::run_in_repo`), `gate_status` | L |
+| `src/signaling/bridge/action_gate.rs` | `park_gated_command` (dedupe) / `execute_gated` (`tool_gate::run_in_repo`), `gate_status`; the outward-review hold (coverage over the rows the reviewer RECEIVED, queue + settlement, gate-scoped finding veto) | L |
+| `src/signaling/bridge/outward_body.rs` | what an outward command publishes: quote/wrapper-aware `is_outward` (env assignments, `env`/`command`/`sudo`, `sh -c`/`eval`), per-subcommand body-flag table `extract`; refuses shell-computed, stdin, same-command-written and unknown-file-flag bodies | M |
 | `src/signaling/bridge/findings.rs` | `eyes_flag`/`approve`/`disposition`/`check_open_findings` + reviewer-down gate + override | M |
 | `src/signaling/bridge/session_docs.rs` | doc write (phase-keyed, `-eyes` twin), search, read, archive-on-rewrite (cap 50) | M |
 | `src/signaling/bridge/terminal_tools.rs` | `terminal_exec`/`terminal_read` over the PTY registry + Tool-Gate parity | M |

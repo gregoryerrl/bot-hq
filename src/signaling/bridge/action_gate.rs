@@ -366,6 +366,18 @@ impl SignalingBridge {
     /// The session's `working_repo_path` from storage — the source of truth on
     /// the session row (no parallel bridge map to keep in sync). None when the
     /// session is unknown, storage isn't wired, or the row has no repo path.
+    /// A body path as the command will read it: relative paths resolve
+    /// against the session's working repo — where `execute_gated` runs it.
+    pub(super) async fn resolve_body_path(&self, session_id: &str, p: &str) -> PathBuf {
+        let path = std::path::Path::new(p);
+        if path.is_relative() {
+            if let Some(repo) = self.session_working_repo(session_id).await {
+                return repo.join(path);
+            }
+        }
+        path.to_path_buf()
+    }
+
     async fn session_working_repo(&self, session_id: &str) -> Option<PathBuf> {
         let storage = self.storage.lock().await.clone()?;
         let session = storage.get_session(session_id).await.ok()??;
@@ -431,54 +443,11 @@ pub(crate) fn queued_gate_text(gate_id: &str, command: &str, existing: bool) -> 
     )
 }
 
-/// OUTWARD classifier, v1: a command publishes under the user's identity when
-/// any segment's FIRST WORD is `gh` or `curl`. Segment-anchored both ways (the
-/// FileViewerDialog over-match lesson): `echo "gh issue"` is not outward, and
-/// `true && gh issue edit …` is. `git push` is deliberately absent — the
-/// pre-push hook owns it end to end.
+/// OUTWARD classifier — see [`super::outward_body::is_outward`]: a simple
+/// command running `gh` or `curl`, seen through quotes, env assignments,
+/// wrappers (`env`, `command`, `sudo`) and `sh -c` / `eval` strings.
 fn outward_command(command: &str) -> bool {
-    command
-        .split(['\n', ';', '|'])
-        .flat_map(|s| s.split("&&"))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .any(|seg| {
-            matches!(seg.split_whitespace().next().unwrap_or(""), "gh" | "curl")
-        })
-}
-
-/// Body payloads an outward command carries: `--body-file <p>` /
-/// `--body-file=<p>` file references, and inline `--body "…"` / `--body '…'`
-/// strings. v1 covers the forms every real gate this week used.
-fn outward_bodies(command: &str) -> (Vec<String>, Vec<String>) {
-    let mut files = Vec::new();
-    let mut inline = Vec::new();
-    let toks: Vec<&str> = command.split_whitespace().collect();
-    for (i, t) in toks.iter().enumerate() {
-        if let Some(p) = t.strip_prefix("--body-file=") {
-            files.push(p.trim_matches(['"', '\'']).to_string());
-        } else if *t == "--body-file" {
-            if let Some(p) = toks.get(i + 1) {
-                files.push(p.trim_matches(['"', '\'']).to_string());
-            }
-        }
-    }
-    // Inline bodies keep their spaces, so they need the raw string, not the
-    // token walk: match the quoted span after `--body`.
-    for marker in ["--body \"", "--body '"] {
-        let quote = marker.chars().last().unwrap();
-        let mut rest = command;
-        while let Some(pos) = rest.find(marker) {
-            let after = &rest[pos + marker.len()..];
-            if let Some(end) = after.find(quote) {
-                inline.push(after[..end].to_string());
-                rest = &after[end..];
-            } else {
-                break;
-            }
-        }
-    }
-    (files, inline)
+    super::outward_body::is_outward(command)
 }
 
 impl SignalingBridge {
@@ -543,17 +512,17 @@ impl SignalingBridge {
                     .into(),
             )));
         };
-        let (files, mut bodies) = outward_bodies(command);
-        for p in files {
-            let path = std::path::Path::new(&p);
-            let resolved = if path.is_relative() {
-                match self.session_working_repo(session_id).await {
-                    Some(repo) => repo.join(path),
-                    None => path.to_path_buf(),
-                }
-            } else {
-                path.to_path_buf()
-            };
+        // WHAT publishes (feedback #35): the per-subcommand extractor, which
+        // REFUSES every form whose content cannot be read ahead of the run —
+        // shell-computed, stdin, written by the same command, or carried by a
+        // file flag it does not know.
+        let extracted = match super::outward_body::extract(command) {
+            Ok(b) => b,
+            Err(why) => return Ok(OutwardReview::Refuse(format!("outward publish held: {why}"))),
+        };
+        let mut bodies = extracted.inline;
+        for p in extracted.files {
+            let resolved = self.resolve_body_path(session_id, &p).await;
             match std::fs::read_to_string(&resolved) {
                 Ok(s) if s.len() <= 256 * 1024 => bodies.push(s),
                 Ok(_) => {
@@ -571,17 +540,21 @@ impl SignalingBridge {
                 }
             }
         }
-        // Fail CLOSED on the forms the extractor cannot evaluate (review
-        // round 2): a `--body`/`-b` the parser does not recognise must not
-        // silently downgrade to the timeline check while looking armed.
-        let mentions_body = command.contains("--body") // covers --body, --body=, --body-file…
-            || command.split_whitespace().any(|t| t == "-b");
+        // Defence in depth (review round 2): the extractor is the authority on
+        // body forms, so a body-carrying flag it returned NOTHING for means a
+        // form it mis-parsed — refuse rather than downgrade to the weaker
+        // timeline check while looking armed.
+        let mentions_body = command.split_whitespace().any(|t| {
+            let t = t.trim_start_matches(['"', '\'']);
+            ["--body", "--notes", "--input", "--data", "--field", "--raw-field", "--form"]
+                .iter()
+                .any(|f| t == *f || t.starts_with(&format!("{f}=")) || t.starts_with(&format!("{f}-file")))
+        });
         if bodies.is_empty() && mentions_body {
             return Ok(OutwardReview::Refuse(
                 "outward publish held: this command carries a body in a form the \
-                 coverage check cannot extract (-b, --body=…, or unquoted --body). \
-                 Use --body-file <path> or --body \"…\" so the reviewer-delivered \
-                 content can be verified."
+                 coverage check cannot extract. Use --body-file <path> (or --notes-file) \
+                 so the reviewer-delivered content can be verified."
                     .into(),
             ));
         }
@@ -685,25 +658,20 @@ impl SignalingBridge {
     /// failures degrade to a note rather than an error: the check above
     /// already refused unreadable and oversized files before we got here.
     async fn queued_body_text(&self, session_id: &str, command: &str) -> String {
-        let (files, inline) = outward_bodies(command);
+        // The check above already refused every form `extract` rejects; an
+        // error here degrades to the command line, which is still content.
+        let super::outward_body::OutwardBodies { files, inline } =
+            super::outward_body::extract(command).unwrap_or_default();
         let mut parts: Vec<String> = Vec::new();
         for p in files {
-            let path = std::path::Path::new(&p);
-            let resolved = if path.is_relative() {
-                match self.session_working_repo(session_id).await {
-                    Some(repo) => repo.join(path),
-                    None => path.to_path_buf(),
-                }
-            } else {
-                path.to_path_buf()
-            };
+            let resolved = self.resolve_body_path(session_id, &p).await;
             match std::fs::read_to_string(&resolved) {
                 Ok(s) => parts.push(format!("--- {p} ---\n{}", s.trim_end())),
                 Err(e) => parts.push(format!("--- {p} --- (unreadable at queue time: {e})")),
             }
         }
         for s in inline {
-            parts.push(format!("--- --body ---\n{s}"));
+            parts.push(format!("--- inline ---\n{s}"));
         }
         if parts.is_empty() {
             format!("(content-free command — the command line is the content)\n{command}")
@@ -2498,26 +2466,47 @@ mod tests {
 
     #[tokio::test]
     async fn an_unextractable_body_form_refuses_instead_of_downgrading() {
-        // `-b`, `--body=…` and unquoted `--body text` are body-carrying forms
-        // the extractor does not parse; they must refuse, not silently fall to
-        // the weaker timeline check while looking armed.
+        // Content that cannot be read BEFORE the run — shell-computed, stdin,
+        // written by the same command line, or behind a file flag the
+        // extractor does not know — refuses; it never falls to the weaker
+        // timeline check while looking armed.
         let data = tempdir().unwrap();
         let repo = tempdir().unwrap();
-        let (bridge, _s, _eyes, _path, _body) = outward_fixture(&data, &repo).await;
-        for cmd in [
-            "gh issue comment 5 -b \"quick note\"",
-            "gh issue comment 5 --body=inline",
-            "gh issue comment 5 --body unquoted words",
+        let (bridge, _s, _eyes, path, _body) = outward_fixture(&data, &repo).await;
+        for (cmd, why) in [
+            ("gh issue comment 5 --body \"$(cat notes.md)\"".to_string(), "computed by the shell"),
+            ("gh issue comment 5 --body-file -".to_string(), "stdin"),
+            ("gh pr create --title t --fill".to_string(), "commit messages"),
+            ("gh issue create --template-file t.md".to_string(), "does not know"),
+            (format!("cp other.md {path} && gh issue comment 5 --body-file {path}"), "same command"),
         ] {
             let err = bridge
-                .park_gated_command("s1", "hands", cmd)
+                .park_gated_command("s1", "hands", &cmd)
                 .await
                 .unwrap_err()
                 .to_string();
-            assert!(
-                err.contains("cannot extract"),
-                "{cmd} must refuse, not downgrade; got: {err}"
-            );
+            assert!(err.contains(why), "{cmd} must refuse ({why}); got: {err}");
+        }
+    }
+
+    /// #35: forms the old extractor missed now reach the reviewer — a release
+    /// body (`--notes-file`), `-b`, `--body=` — queued with their content
+    /// posted, never parked as content-free.
+    #[tokio::test]
+    async fn release_notes_and_short_body_flags_queue_with_their_content() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, _eyes, path, body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        for (cmd, needle) in [
+            (format!("gh release edit v1.0.5 --notes-file {path}"), body.as_str()),
+            ("gh issue comment 5 -b \"quick note\"".to_string(), "quick note"),
+            ("gh issue comment 6 --body=inline-words".to_string(), "inline-words"),
+        ] {
+            let (gate_id, _) = queued(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
+            let row = storage.get_tray_entry(&gate_id).await.unwrap().unwrap().body_row_id.unwrap();
+            let posted = message_by_id(&storage, row).await;
+            assert!(posted.content.contains(needle), "{cmd}: the reviewer gets the content: {}", posted.content);
         }
     }
 
