@@ -9,6 +9,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
     onDragDropEvent: async () => () => {},
   }),
 }));
+import { useChatStore } from "../stores/chat";
 import { ChatInput } from "./ChatInput";
 
 const DRAFT_KEY = "bothq:draft:s-test1234";
@@ -256,6 +257,33 @@ describe("ChatInput turn-status + Stop", () => {
     );
     expect(screen.getByTestId("turn-age")).toHaveTextContent(/· \d+s · 0 tools/);
     expect(screen.getByTestId("staged-caption")).toHaveTextContent("lands when this turn ends");
+  });
+
+  it("reads a turn's age from the chat, so mounting mid-turn is not '0s'", () => {
+    // EYES 172d8082: the clock started at mount — a user coming back to a
+    // 45-minute turn saw "· 0s · 0 tools".
+    const at = (minsAgo: number) => new Date(Date.now() - minsAgo * 60_000).toISOString();
+    const row = (id: number, author: string, kind: string, minsAgo: number) => ({
+      id, session_id: "s1", author, kind, content: "x", created_at: at(minsAgo),
+    });
+    useChatStore.setState({
+      messages: {
+        s1: [
+          row(1, "user", "text", 50),
+          row(2, "hands", "text", 45),
+          row(3, "hands", "tool_use", 44),
+          row(4, "", "system_notice", 30),
+          row(5, "hands", "tool_use", 20),
+          row(6, "hands", "tool_use", 1),
+        ],
+      },
+    });
+    render(
+      <ChatInput activity="busy" busy={{ hands: true }} busyLabel={LABEL} sessionId="s1"
+        onSend={() => {}} onStage={() => {}} onCancel={() => {}} />,
+    );
+    expect(screen.getByTestId("turn-age")).toHaveTextContent("· 45m · 3 tools");
+    useChatStore.setState({ messages: {} }); // module-global store: leave it clean
   });
 
   it("clears the draft when the staged delivery lands", () => {

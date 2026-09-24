@@ -1025,14 +1025,21 @@ function WorkerLine({
     return () => clearInterval(t);
   }, [workers.length]);
   const messages = useChatStore((s) => (sessionId ? s.messages[sessionId] : undefined));
-  const toolsSince = (slug: string, from: number) => {
-    let n = 0;
+  // The turn as the CHAT records it (EYES 172d8082): the participant's
+  // unbroken run of rows at the end of the chat — host notices do not break
+  // it — so a remount, a session switch or a reload mid-turn still shows the
+  // real age, not "0s". Before its first row the busy flip above stands in.
+  const currentRun = (slug: string): { start: number | null; tools: number } => {
+    let start: number | null = null;
+    let tools = 0;
     for (let i = (messages?.length ?? 0) - 1; i >= 0; i--) {
       const m = messages![i];
-      if (Date.parse(m.created_at) < from) break;
-      if (m.author === slug && m.kind === "tool_use") n += 1;
+      if (m.kind === "system_notice" || m.kind === "phase_change") continue;
+      if (m.author !== slug) break;
+      start = Date.parse(m.created_at);
+      if (m.kind === "tool_use") tools += 1;
     }
-    return n;
+    return { start, tools };
   };
   return (
     <>
@@ -1050,8 +1057,8 @@ function WorkerLine({
             </span>
             <span>is working</span>
             <span className="text-on-surface-variant/70" data-testid="turn-age">
-              · {formatElapsed(now - (since.current[key] ?? now))}
-              {sessionId ? ` · ${toolsSince(key, since.current[key] ?? now)} tools` : ""}
+              · {formatElapsed(now - (currentRun(key).start ?? since.current[key] ?? now))}
+              {sessionId ? ` · ${currentRun(key).tools} tools` : ""}
             </span>
           </span>
         );
