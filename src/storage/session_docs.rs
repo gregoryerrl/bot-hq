@@ -138,6 +138,35 @@ impl Storage {
         Ok(slots)
     }
 
+    /// Make room at the top of a FULL archive run: drop `{slug}@1` (the
+    /// oldest) and shift `@2..=@cap` down one, in one transaction, so
+    /// `{slug}@cap` is free for the newest superseded body. Keeps the NEWEST
+    /// `cap` versions — overwriting the last slot instead kept the oldest and
+    /// lost the recent middle, where a revert shows up (EYES, C13 review).
+    pub async fn rotate_session_document_archives(
+        &self,
+        session_id: &str,
+        slug: &str,
+        cap: u32,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM session_documents WHERE session_id = ? AND slug = ?")
+            .bind(session_id)
+            .bind(format!("{slug}@1"))
+            .execute(&mut *tx)
+            .await?;
+        for k in 2..=cap {
+            sqlx::query("UPDATE session_documents SET slug = ? WHERE session_id = ? AND slug = ?")
+                .bind(format!("{slug}@{}", k - 1))
+                .bind(session_id)
+                .bind(format!("{slug}@{k}"))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Delete a CUSTOM (untagged) document by (session_id, slug). Returns
     /// whether a row went. A phase-tagged doc never matches — the I/P/A/V docs
     /// are the agents' and the UI's delete button exists for custom documents

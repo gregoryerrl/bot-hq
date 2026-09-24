@@ -44,9 +44,9 @@ fn effective_slug<'a>(slug: &'a str, phase: Option<&'a str>) -> &'a str {
     phase.unwrap_or(slug)
 }
 
-/// Cap on archived versions per phase doc. Past this the oldest slot is left
-/// alone and the newest archive is overwritten — bounded storage beats an
-/// unbounded loop on a doc rewritten hundreds of times.
+/// Cap on archived versions per phase doc. Past this the oldest archive is
+/// dropped and the rest shift down, so the newest versions survive — bounded
+/// storage beats an unbounded loop on a doc rewritten hundreds of times.
 const MAX_DOC_ARCHIVES: u32 = 50;
 
 /// Cap on archived versions per UNTAGGED (custom) doc — lower, because a
@@ -155,14 +155,24 @@ impl SignalingBridge {
         }
         // One read of the occupied slots (round 10) — this used to probe
         // `{slug}@1`, `{slug}@2`, … with a SELECT each until it found a free
-        // one, up to fifty round-trips per phase-doc rewrite. Same slot rule as
-        // before: the first free number, and past the cap the newest archive
-        // (`@MAX`) is overwritten so storage stays bounded.
+        // one, up to fifty round-trips per phase-doc rewrite. Slot rule: the
+        // first free number; past the cap, the rotation below.
         let occupied = storage
             .session_document_archive_slots(session_id, slug)
             .await
             .unwrap_or_default();
-        let n = (1..=cap).find(|n| !occupied.contains(n)).unwrap_or(cap);
+        // The first free number; with every slot taken, the oldest archive is
+        // dropped and the rest shift down, so the NEWEST `cap` versions survive.
+        let n = match (1..=cap).find(|n| !occupied.contains(n)) {
+            Some(free) => free,
+            None => {
+                storage
+                    .rotate_session_document_archives(session_id, slug, cap)
+                    .await
+                    .ok()?;
+                cap
+            }
+        };
         let candidate = format!("{slug}@{n}");
         storage
             .upsert_session_document(session_id, &candidate, &existing.body, None)
@@ -751,12 +761,20 @@ mod tests {
             bridge.session_doc_read("s1", "scratch@1").await.unwrap().map(|d| d.body).as_deref(),
             Some("v1")
         );
-        // …at the lower cap: past 10 archives the newest slot is reused.
+        // …at the lower cap, keeping the NEWEST ten: v1..v18 were superseded,
+        // so @1..@10 hold v9..v18 (the recent middle survives).
         for i in 3..20 {
             bridge.session_doc_write("s1", "scratch", &format!("v{i}"), None, false).await.unwrap();
         }
-        assert!(bridge.session_doc_read("s1", "scratch@11").await.unwrap().is_none());
-        assert!(bridge.session_doc_read("s1", "scratch@10").await.unwrap().is_some());
+        let body = |n: u32| {
+            let bridge = &bridge;
+            async move {
+                bridge.session_doc_read("s1", &format!("scratch@{n}")).await.unwrap().map(|d| d.body)
+            }
+        };
+        assert_eq!(body(1).await.as_deref(), Some("v9"));
+        assert_eq!(body(10).await.as_deref(), Some("v18"));
+        assert!(body(11).await.is_none());
     }
 
     #[test]
