@@ -655,7 +655,8 @@ without polling.
 | `frontend/src/app/SessionView.tsx` | session container: header/roster, phase, halt/approval/chat/input orchestration, Stage delivery + tray-pick sync | L |
 | `frontend/src/app/SessionContextTab.tsx` | session-scoped CL tree + lean editor | M |
 | `frontend/src/app/SessionTerminalTab.tsx` | xterm.js over the session PTY | S |
-| `frontend/src/components/ChatPane.tsx` | virtualised message list; owns `agent:messages:batch` | M |
+| `frontend/src/components/ChatPane.tsx` | virtualised message list; owns `agent:messages:batch`; renders the compacted rows (a run of passes = one `PassLine`) | M |
+| `frontend/src/lib/chatRows.ts` | `compactRows`: hides `pass_turn` call/result rows and folds consecutive pass lines (`PASS_NOTICE`, mirrored from `pump.rs`) into one row (feedback #13) | S |
 | `frontend/src/components/ChatInput.tsx` | compose / Stage / Send / Pause / Resume, `@`-mention picker | L |
 | `frontend/src/components/ChatMessage.tsx` | one row incl. tool_use/tool_result pills | M |
 | `frontend/src/components/DocumentPane.tsx` | Tray tab + I/P/A/V doc tabs + custom-document tabs (untagged docs, round 11) + Apply-tab colored diff (memoised `groupDiffByFile`); `DocArticle` shared by phase and custom docs | L |

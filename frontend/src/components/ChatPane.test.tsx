@@ -133,6 +133,29 @@ describe("ChatPane", () => {
     expect(screen.getByText(/Bash/)).toBeInTheDocument();
   });
 
+  it("renders a run of passes as one compact line and hides the pass tool rows", async () => {
+    // Feedback #13: one pass was up to four rows. The call and its result go,
+    // and consecutive pass lines fold into one "passed — A · B" row.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "get_session_messages")
+        return Promise.resolve([
+          msg(1, "the work so far"),
+          msg(2, JSON.stringify({ input: {}, name: "mcp__bot-hq-signaling__pass_turn", tool_use_id: "p1" }), "tool_use", "eyes"),
+          msg(3, JSON.stringify({ content: '[{"text":"pass noted — recorded"}]', tool_use_id: "p1" }), "tool_result", "eyes"),
+          msg(4, "(passed — nothing to add this round)", "text", "eyes"),
+          msg(5, "(passed — nothing to add this round)", "text", "hands"),
+        ]);
+      if (cmd === "list_session_participants") return Promise.resolve(PARTICIPANTS);
+      return Promise.resolve([]);
+    });
+    renderPane();
+    const line = await screen.findByTestId("pass-line");
+    expect(line).toHaveTextContent("passed — EYES · DeepSeek R2 · HANDS · Claude Opus 5");
+    expect(screen.queryByText("(passed — nothing to add this round)")).toBeNull();
+    expect(screen.queryByText(/pass_turn/)).toBeNull();
+    expect(screen.getByText("the work so far")).toBeInTheDocument();
+  });
+
   it("bylines each message as ROLE · Model, resolved through the roster", async () => {
     // rc3 D10, tested as ONE chain: the stored `author` slug goes through
     // `list_session_participants` and comes out as the rendered byline. Pinning

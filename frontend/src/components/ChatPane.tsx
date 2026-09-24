@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -13,6 +14,7 @@ import { useChatStore } from "../stores/chat";
 import { ChatMessage } from "./ChatMessage";
 import { cn } from "../lib/cn";
 import { authorLabel, useParticipantLabels } from "../lib/participants";
+import { compactRows } from "../lib/chatRows";
 import type { AgentMessage } from "../lib/bindings";
 
 // Stable reference so the zustand selector doesn't return a fresh array per
@@ -132,14 +134,19 @@ export function ChatPane({
     });
   }, []);
 
+  // Passes compacted (feedback #13): `pass_turn` call/result rows hidden and a
+  // run of pass lines folded into one "passed — A · B" row. The virtualizer
+  // counts the ROWS it renders, not the raw messages.
+  const rows = useMemo(() => compactRows(messages), [messages]);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
-    count: messages.length,
+    count: rows.length,
     getScrollElement: () => scrollRef.current,
     // Rough single-message height; measureElement corrects per row.
     estimateSize: () => 64,
     overscan: 8,
-    getItemKey: (i) => messages[i].id,
+    getItemKey: (i) => rows[i].key,
   });
   const totalSize = virtualizer.getTotalSize();
 
@@ -219,8 +226,23 @@ export function ChatPane({
           style={{ height: `${totalSize}px` }}
         >
           {items.map((vi) => {
-            const m = messages[vi.index];
-            const prev = vi.index > 0 ? messages[vi.index - 1] : null;
+            const row = rows[vi.index];
+            const prevRow = vi.index > 0 ? rows[vi.index - 1] : null;
+            if (row.kind === "passes") {
+              return (
+                <div
+                  key={vi.key}
+                  data-index={vi.index}
+                  ref={virtualizer.measureElement}
+                  className="absolute left-0 top-0 w-full"
+                  style={{ transform: `translateY(${vi.start}px)` }}
+                >
+                  <PassLine authors={row.authors} labels={labels} />
+                </div>
+              );
+            }
+            const m = row.message;
+            const prev = prevRow && prevRow.kind === "message" ? prevRow.message : null;
             return (
               <div
                 key={vi.key}
@@ -265,6 +287,36 @@ export function ChatPane({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * A run of passes as one muted line (feedback #13): "⏭ passed — HANDS · EYES".
+ * The same participant passing several times in a row reads "HANDS ×3".
+ */
+function PassLine({
+  authors,
+  labels,
+}: {
+  authors: string[];
+  labels: Parameters<typeof authorLabel>[1];
+}) {
+  const runs: { author: string; count: number }[] = [];
+  for (const a of authors) {
+    const last = runs[runs.length - 1];
+    if (last && last.author === a) last.count += 1;
+    else runs.push({ author: a, count: 1 });
+  }
+  const text = runs
+    .map((r) => `${authorLabel(r.author, labels)}${r.count > 1 ? ` ×${r.count}` : ""}`)
+    .join(" · ");
+  return (
+    <div
+      className="my-1.5 break-words text-center text-[0.7rem] text-on-surface-variant"
+      data-testid="pass-line"
+    >
+      ⏭ passed — {text}
     </div>
   );
 }
