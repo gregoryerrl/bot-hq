@@ -330,6 +330,7 @@ impl SignalingBridge {
         let (done, lint, retired, pre, snapshot) = outcome;
         self.record_retired_terms(&session_id, &project, retired, Some(&file_path)).await;
         self.record_cl_write(&session_id, &project, &file_path).await;
+        let concurrent = note_cl_writer(&project, &file_path, &session_id);
         if let Err(err) = self.cl_rescan(&project).await {
             tracing::warn!(
                 %err,
@@ -375,6 +376,9 @@ impl SignalingBridge {
             _ => {} // a failed pre-snapshot refused the write above
         }
         msg.push_str(&format!(" — {}", snapshot.describe()));
+        if let Some(warning) = concurrent {
+            msg.push_str(&warning);
+        }
         if let Some(lint) = lint {
             msg.push_str(&lint);
         }
@@ -893,6 +897,35 @@ pub(super) fn library_files_removed_since(library_root: &Path, head: &str) -> Ve
         }
     }
     gone
+}
+
+/// How recently another session's write to the same CL file counts as
+/// concurrent (feedback #44(3): two sessions edited the shared EOD files the
+/// same afternoon, and one chased a "change" that was the other's write).
+const CONCURRENT_WRITE_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// The last session to write each CL file, process-wide (every session runs in
+/// this one app).
+static CL_LAST_WRITER: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(String, String), (String, std::time::Instant)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Record this write and, when a DIFFERENT session wrote the same file within
+/// [`CONCURRENT_WRITE_WINDOW`], return the warning the reply carries.
+fn note_cl_writer(project: &str, file_path: &str, session_id: &str) -> Option<String> {
+    let mut map = CL_LAST_WRITER.lock().unwrap_or_else(|p| p.into_inner());
+    let key = (project.to_string(), file_path.to_string());
+    let warning = match map.get(&key) {
+        Some((other, at)) if other != session_id && at.elapsed() < CONCURRENT_WRITE_WINDOW => Some(format!(
+            " — ⚠ another session ({other}) wrote this file {} min ago: re-read it before \
+             relying on your copy, and check you did not replace its change (both versions are \
+             in the library's git history)",
+            at.elapsed().as_secs() / 60
+        )),
+        _ => None,
+    };
+    map.insert(key, (session_id.to_string(), std::time::Instant::now()));
+    warning
 }
 
 /// Serialises every library git operation in this process (see the write
@@ -1444,6 +1477,29 @@ mod tests {
             "OUT-OF-BAND content, never committed\n",
             "the unversioned content is intact"
         );
+    }
+
+    /// Feedback #44(3): a write to a CL file another session wrote minutes
+    /// ago says so; the same session writing again does not.
+    #[tokio::test]
+    async fn a_write_after_another_sessions_recent_write_warns() {
+        let (bridge, _storage, _tmp) = bridge_with_data_dir().await;
+        let write = |session: &str, body: &str| {
+            let bridge = bridge.clone();
+            let (session, body) = (session.to_string(), body.to_string());
+            async move {
+                bridge
+                    .cl_write_file(session, "hands".into(), "bot-hq".into(), "shared-c21.md".into(), body, false, false)
+                    .await
+                    .unwrap()
+            }
+        };
+        let first = write("s-a", "first version of the shared file\n").await;
+        assert!(!first.contains("another session"), "{first}");
+        let same = write("s-a", "second version, same session\n").await;
+        assert!(!same.contains("another session"), "{same}");
+        let other = write("s-b", "third version, another session\n").await;
+        assert!(other.contains("another session (s-a)"), "{other}");
     }
 
     #[tokio::test]
