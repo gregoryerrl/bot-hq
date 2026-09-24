@@ -2014,12 +2014,10 @@ impl Storage {
         Ok(row.0 > 0)
     }
 
-    /// Content of the newest `limit` channel rows at or below `max_id` — the
-    /// haystack for the outward-review coverage search, done in Rust rather
-    /// than SQL LIKE (bodies contain `%`/`_`). The window bound is a
-    /// documented limit: a body last posted more than `limit` rows before the
-    /// reviewer's cursor reads as uncovered and the park is refused — failing
-    /// closed, per the C spec.
+    /// Content of the newest `limit` channel rows at or below `max_id`, any
+    /// kind and any author — a test helper for "was this said out loud?".
+    /// NOT the coverage haystack: see [`Self::reviewer_received_bodies_upto`].
+    #[cfg(test)]
     pub async fn recent_row_bodies_upto(
         &self,
         session_id: &str,
@@ -2038,6 +2036,56 @@ impl Storage {
         .await
         .context("reading rows for coverage search")?;
         Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    /// The haystack for the outward-review coverage search: `(id, body)` of
+    /// the newest `limit` rows at or below `max_id` that `reviewer` actually
+    /// RECEIVED — every row its backlog delivers, as the wire delivers it.
+    /// Searched in Rust rather than SQL LIKE (bodies contain `%`/`_`).
+    ///
+    /// Mirrors the backlog's filter (`unread_for_participant` → `channel_page`):
+    /// a participant is never dealt a peer's `tool_use`/`tool_result`/`boot`
+    /// rows, so those count only when they are the reviewer's OWN (a file it
+    /// read, a doc it opened). The
+    /// body is the CLAMPED one ([`WIRE_BODY_CLAMP_BYTES`]): content past the
+    /// cut never reached the reviewer's context. Reading every row here was the
+    /// hole beside feedback #40 — a body the executor merely wrote with a tool
+    /// counted as reviewed though the reviewer never saw it.
+    ///
+    /// The window bound is a documented limit: a body last delivered more than
+    /// `limit` rows before the reviewer's cursor reads as uncovered and the
+    /// publish queues for review again — failing closed.
+    pub async fn reviewer_received_bodies_upto(
+        &self,
+        session_id: &str,
+        reviewer: i64,
+        max_id: i64,
+        limit: i64,
+    ) -> Result<Vec<(i64, String)>> {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, content FROM messages
+             WHERE session_id = ? AND id <= ?
+               AND (kind NOT IN ('tool_use', 'tool_result', 'boot') OR participant_id = ?)
+             ORDER BY id DESC LIMIT ?",
+        )
+        .bind(session_id)
+        .bind(max_id)
+        .bind(reviewer)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading rows for coverage search")?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, body)| {
+                if body.len() <= WIRE_BODY_CLAMP_BYTES {
+                    (id, body)
+                } else {
+                    let cut = clamped_body(&body).into_owned();
+                    (id, cut)
+                }
+            })
+            .collect())
     }
 
     /// How many PEER text rows sit past this participant's cursor — other

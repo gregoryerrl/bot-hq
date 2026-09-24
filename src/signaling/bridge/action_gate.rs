@@ -108,19 +108,52 @@ impl SignalingBridge {
                 }
             }
         }
-        let note = match self.outward_review_check(session_id, agent, command).await? {
+        let (note, covered) = match self.outward_review_check(session_id, agent, command).await? {
             OutwardReview::Refuse(text) => return Err(anyhow::anyhow!(text)),
             OutwardReview::Queued { reviewer_id } => {
                 let (gate_id, existing) =
                     self.queue_outward_park(session_id, agent, command, reviewer_id).await?;
                 return Ok(ParkOutcome::Queued { gate_id, existing });
             }
-            OutwardReview::Proceed(note) => note,
+            OutwardReview::Proceed(note) => {
+                if let Some(n) = &note {
+                    tracing::warn!(session_id, agent, note = %n, "outward park proceeding with review precondition skipped");
+                }
+                (note, None)
+            }
+            OutwardReview::Covered { reviewer, rows } => {
+                let cited = covered_rows_text(&rows);
+                (
+                    Some(format!(
+                        "coverage: the reviewer ({reviewer}) already received this exact body \
+                         ({cited}), so it parks without a new review turn."
+                    )),
+                    Some((reviewer, cited)),
+                )
+            }
         };
-        if let Some(n) = &note {
-            tracing::warn!(session_id, agent, note = %n, "outward park proceeding with review precondition skipped");
-        }
         let (gate_id, existing) = self.park_reviewed_command(session_id, agent, command).await?;
+        // Feedback #40: a publish that parks on PRIOR review used to leave no
+        // row at all — the reviewer could not tell it had gone to the user.
+        // Say it in the channel, once per fresh park.
+        if let (Some((reviewer, cited)), false) = (covered, existing) {
+            let storage = self.storage.lock().await.clone();
+            if let Some(storage) = storage {
+                let _ = crate::core::post_system_notice(
+                    &storage,
+                    Some(self),
+                    session_id,
+                    crate::storage::MessageKind::SystemNotice,
+                    format!(
+                        "📨 Outward publish {gate_id} parked for the user on PRIOR review — the \
+                         reviewer ({reviewer}) already received this exact body ({cited}): \
+                         `{command}`"
+                    ),
+                    None,
+                )
+                .await;
+            }
+        }
         Ok(ParkOutcome::Parked { gate_id, existing, note })
     }
 
@@ -350,6 +383,11 @@ pub(crate) enum OutwardReview {
     Proceed(Option<String>),
     Refuse(String),
     Queued { reviewer_id: i64 },
+    /// Every body was already RECEIVED by the reviewer — `rows` are the
+    /// covering message ids, oldest first. Parks straight for the user, and
+    /// says so in the channel (feedback #40: a publish that parked on prior
+    /// review left no trace the reviewer could see).
+    Covered { reviewer: String, rows: Vec<i64> },
 }
 
 /// What [`SignalingBridge::park_gated_command`] did with a command. `Parked` is
@@ -572,9 +610,13 @@ impl SignalingBridge {
                 },
             );
         }
-        // Coverage window: the newest 500 rows at or below the cursor. A body
-        // older than that reads as uncovered — failing closed, documented.
-        let haystack = storage.recent_row_bodies_upto(session_id, cursor, 500).await?;
+        // Coverage window: the newest 500 rows at or below the cursor that the
+        // reviewer RECEIVED (its backlog's own filter, clamped as delivered).
+        // A body older than that reads as uncovered — failing closed, documented.
+        let haystack = storage
+            .reviewer_received_bodies_upto(session_id, reviewer.id, cursor, 500)
+            .await?;
+        let mut covering: Vec<i64> = Vec::new();
         for body in &bodies {
             let trimmed = body.trim();
             if trimmed.is_empty() {
@@ -591,10 +633,16 @@ impl SignalingBridge {
             }
             let escaped = serde_json::to_string(trimmed).unwrap_or_default();
             let escaped = escaped.trim_matches('"');
+            // Newest first, so the id recorded is the latest delivery.
             let covered = haystack
                 .iter()
-                .any(|row| row.contains(trimmed) || row.contains(escaped));
-            if !covered {
+                .find(|(_, row)| row.contains(trimmed) || row.contains(escaped))
+                .map(|(id, _)| *id);
+            if let Some(id) = covered {
+                if !covering.contains(&id) {
+                    covering.push(id);
+                }
+            } else {
                 // Not read yet → QUEUE (0080): bot-hq posts THIS body as a row
                 // and parks once the reviewer's cursor has passed it — the
                 // executor no longer re-emits a 25 KB `--body-file` into a
@@ -604,7 +652,8 @@ impl SignalingBridge {
                 return Ok(OutwardReview::Queued { reviewer_id: reviewer.id });
             }
         }
-        Ok(OutwardReview::Proceed(None))
+        covering.sort_unstable();
+        Ok(OutwardReview::Covered { reviewer: reviewer_slug.clone(), rows: covering })
     }
 
     /// The body a queued outward command carries, as the reviewer should read
@@ -890,9 +939,10 @@ fn parked_gate_text(
     } else {
         "action_gate: parked for the user's approval"
     };
-    // The outward-review skip note rides the ack LOUDLY (batch 2 C): a solo
-    // roster or an overridden-down reviewer parks without the precondition,
-    // and the agent must see that the guard was not watching.
+    // The outward-review note rides the ack LOUDLY (batch 2 C): either a SKIP
+    // note (a solo roster or an overridden-down reviewer parks without the
+    // precondition, and the agent must see that the guard was not watching)
+    // or a COVERAGE note naming the rows the reviewer already received.
     let note_line = note.map(|n| format!("\n{n}")).unwrap_or_default();
     format!(
         "{lead} (gate_id: {gate_id}).{note_line}\n\
@@ -901,6 +951,16 @@ fn parked_gate_text(
          NOT re-issue the command or assume it ran — call gate_status(\"{gate_id}\") \
          if you need the current state before continuing."
     )
+}
+
+/// "row #12" / "rows #12, #15" — the message ids a coverage hit cites.
+fn covered_rows_text(rows: &[i64]) -> String {
+    let ids = rows.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", ");
+    if rows.len() == 1 {
+        format!("row {ids}")
+    } else {
+        format!("rows {ids}")
+    }
 }
 
 /// The agent-facing text for whatever the park did.
@@ -1971,7 +2031,18 @@ mod tests {
         let (gate_id, existing, note) =
             parked(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
         assert!(!existing);
-        assert!(note.is_none(), "a real review pass carries no skip note");
+        let note = note.expect("a coverage park cites what covered it");
+        assert!(
+            note.starts_with("coverage:") && note.contains(&format!("#{}", m.message_id())),
+            "the note names the covering row, never a skip: {note}"
+        );
+        // #40: the park on prior review is said in the channel, where the
+        // reviewer reads it.
+        let rows = storage.recent_row_bodies_upto("s1", i64::MAX, 20).await.unwrap();
+        assert!(
+            rows.iter().any(|r| r.contains("PRIOR review") && r.contains(&gate_id)),
+            "a covered park posts its row: {rows:?}"
+        );
 
         // Reject, then re-park the UNCHANGED content: coverage is keyed on
         // the content, so no re-review is demanded (a later refactor must not
@@ -1981,6 +2052,67 @@ mod tests {
             parked(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
         assert_ne!(gate2, gate_id, "a post-reject re-fire parks fresh");
         assert!(!existing2);
+    }
+
+    /// The hole beside feedback #40: the body sat only in the EXECUTOR's own
+    /// tool row (a `Write`, a `session_doc_write`), which no peer's backlog
+    /// ever delivers. That is not review — it queues.
+    #[tokio::test]
+    async fn a_body_only_in_the_executors_tool_row_is_not_coverage() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let m = storage
+            .post_to_channel(
+                "s1",
+                "participant",
+                Some("hands"),
+                "tool_use",
+                format!("{{\"file_path\":\"{path}\",\"content\":{}}}", serde_json::to_string(&body).unwrap()),
+                None,
+            )
+            .await
+            .unwrap();
+        // Even with the reviewer's cursor PAST the row, it was never dealt it.
+        storage.commit_delivery(eyes, &[(m.message_id(), None)]).await.unwrap();
+        let cmd = format!("gh issue edit 5 --body-file {path}");
+        queued(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
+    }
+
+    /// The reviewer's OWN tool row is its own context — it read the file.
+    #[tokio::test]
+    async fn the_reviewers_own_tool_row_counts_as_coverage() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, body) = outward_fixture(&data, &repo).await;
+        let m = storage
+            .post_to_channel("s1", "participant", Some("eyes"), "tool_result", body.clone(), None)
+            .await
+            .unwrap();
+        storage.commit_delivery(eyes, &[(m.message_id(), None)]).await.unwrap();
+        let cmd = format!("gh issue edit 5 --body-file {path}");
+        let (_gate, _existing, note) =
+            parked(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
+        assert!(note.is_some_and(|n| n.contains(&format!("#{}", m.message_id()))));
+    }
+
+    /// Delivery clamps a row at `WIRE_BODY_CLAMP_BYTES`: text past the cut
+    /// never reached the reviewer, so it cannot cover a publish.
+    #[tokio::test]
+    async fn a_body_past_the_wire_clamp_is_not_coverage() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let padding = "x".repeat(crate::storage::WIRE_BODY_CLAMP_BYTES + 10);
+        let m = storage
+            .post_to_channel("s1", "participant", Some("hands"), "text", format!("{padding}\n{body}"), None)
+            .await
+            .unwrap();
+        storage.commit_delivery(eyes, &[(m.message_id(), None)]).await.unwrap();
+        let cmd = format!("gh issue edit 5 --body-file {path}");
+        queued(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
     }
 
     #[tokio::test]
