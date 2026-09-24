@@ -929,6 +929,21 @@ pub struct SequencerDeps {
     /// `Option` for the same reason [`Self::bridge`] is: the unit rings
     /// construct deps directly and most of them are not about the input lock.
     pub activity: Option<Arc<crate::core::activity::ActivityTracker>>,
+    /// The session's boot flag (rc3 D21): `true` while the participants are
+    /// orienting. A message STAGED then must not be delivered at once — the
+    /// ring has no holder during boot, and a turn dealt to a pump that is
+    /// still booting reports to the readiness channel, never to the ring: a
+    /// turn nothing can complete (feedback #10). It waits for
+    /// [`SequencerCommand::BootEnded`]. `None` in unit rings (no boot).
+    pub booting: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl SequencerDeps {
+    fn is_booting(&self) -> bool {
+        self.booting
+            .as_ref()
+            .is_some_and(|b| b.load(std::sync::atomic::Ordering::Acquire))
+    }
 }
 
 /// A wake for the sequencer.
@@ -1082,6 +1097,11 @@ pub enum SequencerCommand {
     /// still the only interrupt; staging changes WHEN the user may compose,
     /// not when a message may land.
     MessageStaged,
+    /// Boot is over (every exit of `boot_then_start`, and the no-boot spawn
+    /// path): a message staged DURING boot is delivered now (feedback #10).
+    /// Deals no turn by itself — without a staged message the ring stays
+    /// waiting for the user, as rc3 D29 requires.
+    BootEnded,
     /// The user un-toggled Stage to edit: clear the flag. The content was
     /// already removed from `AppState` by the caller, so a boundary that
     /// races this command finds nothing to deliver and simply yields — an
@@ -1955,6 +1975,21 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     continue;
                 }
                 release_ring(&deps, &mut rx, &mut state, mentions, restarts_rotation).await;
+            }
+            SequencerCommand::MessageStaged if deps.is_booting() => {
+                // No holder during boot, but no boundary either: every pump is
+                // still orienting and a turn dealt now could never complete.
+                // Held until `BootEnded` (feedback #10).
+                state.staged_pending = true;
+                debug!(
+                    session = %deps.session_id,
+                    "sequencer: message staged during boot; delivers when boot ends"
+                );
+            }
+            SequencerCommand::BootEnded => {
+                if state.holder.is_none() {
+                    deliver_staged_if_pending(&deps, &mut state.staged_pending).await;
+                }
             }
             SequencerCommand::MessageStaged => {
                 if state.holder.is_none() {
@@ -4556,6 +4591,7 @@ mod tests {
             data_dir: None,
             bridge: None,
             activity: None,
+            booting: None,
         };
         (deps, storage, seats)
     }
@@ -6849,6 +6885,38 @@ mod tests {
         );
         drop(tx);
         assert!(exited(task).await);
+    }
+
+    /// Feedback #10: during boot the ring has no holder, but a message the
+    /// user STAGES then must not be delivered at once — every pump is still
+    /// orienting, so a dealt turn could never complete. It is held until
+    /// `BootEnded`; a `BootEnded` with nothing staged deals nothing (D29).
+    #[tokio::test]
+    async fn a_stage_during_boot_waits_for_boot_to_end() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        let booting = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        deps.booting = Some(Arc::clone(&booting));
+        let mut events = bridge.subscribe();
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        // A BootEnded with nothing staged deals no turn and emits nothing.
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert!(next_due_quick(&mut events).await.is_none());
+        booting.store(true, std::sync::atomic::Ordering::Release);
+
+        send(&tx, SequencerCommand::MessageStaged).await;
+        assert!(next_due_quick(&mut events).await.is_none(), "held while booting");
+        booting.store(false, std::sync::atomic::Ordering::Release);
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert_eq!(next_due(&mut events).await.as_deref(), Some("s1"), "delivered at boot end");
+        drop(tx);
+        assert!(exited(task).await);
+        // The delivery itself is the app's (a UserMessage); BootEnded dealt no turn.
+        assert!(seats[0].drain().is_empty() && seats[1].drain().is_empty());
     }
 
     /// Same pin at the round cap: the capping turn's completion parks and
@@ -10984,6 +11052,7 @@ mod tests {
             data_dir: None,
             bridge: None,
             activity: None,
+            booting: None,
         };
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));

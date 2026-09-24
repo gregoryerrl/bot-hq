@@ -895,6 +895,13 @@ async fn spawn_session_handle(
     // so a pump can be handed its own.
     let mut turn_epochs: Vec<Option<Arc<std::sync::atomic::AtomicU64>>> =
         vec![None; handles.len()];
+    // rc3 **D21**: every participant orients in PARALLEL before the ring starts.
+    // Flipped false by `boot_then_start` immediately before the kick, so turn
+    // one binds its epoch normally. One cell for the whole session — boot ends
+    // for the session, not per agent. Created before the ring so the ring can
+    // hold a message staged during boot (feedback #10); a spawn that does not
+    // boot clears it below.
+    let booting = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let (sequencer_tx, ring_kick) = {
         let mut inputs = std::collections::HashMap::new();
         let mut epochs = std::collections::HashMap::new();
@@ -921,6 +928,9 @@ async fn spawn_session_handle(
         }
         let ring = inputs.len();
         let deps = crate::core::sequencer::SequencerDeps {
+            // The ring must know boot is running, so a message the user stages
+            // meanwhile is held instead of dealt (feedback #10).
+            booting: Some(Arc::clone(&booting)),
             session_id: session.id.as_str().into(),
             storage: storage.clone(),
             inputs,
@@ -949,11 +959,6 @@ async fn spawn_session_handle(
     // `Option` around this pair whose `None` arm nothing could reach — the
     // block above always spawns the ring.
     let (sequencer_tx, ring_kick) = (Some(sequencer_tx), Some(ring_kick));
-    // rc3 **D21**: every participant orients in PARALLEL before the ring starts.
-    // Flipped false by `boot_then_start` immediately before the kick, so turn
-    // one binds its epoch normally. One cell for the whole session — boot ends
-    // for the session, not per agent.
-    let booting = Arc::new(std::sync::atomic::AtomicBool::new(ring_kick.is_some()));
     let (boot_done_tx, boot_done_rx) = tokio::sync::mpsc::channel::<i64>(8);
     // One pump per spawned agent. The two hand-written pump blocks this replaced
     // differed in exactly three things — the author, the participant id, and
@@ -1075,6 +1080,11 @@ async fn spawn_session_handle(
         // `booting` sends every completion down the readiness channel instead of
         // to the ring, which is a session that can never take a turn.
         booting.store(false, std::sync::atomic::Ordering::Release);
+        // …and a message the user staged in the moment the flag was still up
+        // is delivered now rather than stranded (feedback #10).
+        if let Some(tx) = sequencer_tx.as_ref() {
+            let _ = tx.try_send(crate::core::sequencer::SequencerCommand::BootEnded);
+        }
     }
 
     // Batch 7: spawn the per-session stall watchdog (any roster size). It holds Weak
@@ -2170,8 +2180,9 @@ async fn boot_then_start(
             // and no task deals a turn nobody can use — the pass-volley shape
             // D29 exists to prevent, reached through a storage hiccup. A
             // session with an unfired kick is not stranded; the user's first
-            // message starts it.
-            drop(kick);
+            // message starts it. `boot_ended` only delivers a message the user
+            // staged during boot (feedback #10).
+            kick.boot_ended();
             return;
         }
     };
@@ -2258,9 +2269,10 @@ async fn boot_then_start(
     // re-ran boot on the next message.
     //
     // So the ring waits. It is spawned and idle, holding no turn; the user's
-    // first message starts it with something real in the backlog. The `kick` is
-    // dropped unfired, which is what "the session is ready and waiting" IS.
-    drop(kick);
+    // first message starts it with something real in the backlog. The `kick`
+    // deals nothing: `boot_ended` only delivers a message the user STAGED during
+    // boot (feedback #10) — that is a real task, not an empty turn.
+    kick.boot_ended();
     let notice = if ready == want {
         format!(
             "[System: READY — {ready} participant(s) oriented and waiting. \
@@ -2310,8 +2322,21 @@ async fn boot_then_start(
 /// is the ring channel's LAST sender, so the ring's `recv` seeing the channel
 /// CLOSE is the proof the kick was dropped unfired rather than fired late.
 pub(crate) struct RingKick {
-    /// The sender this token keeps alive until boot yields. Never sent on.
+    /// The sender this token keeps alive until boot yields. Sends exactly one
+    /// command, [`crate::core::sequencer::SequencerCommand::BootEnded`] — which
+    /// deals no turn by itself (see [`RingKick::boot_ended`]).
     _held: tokio::sync::mpsc::Sender<crate::core::sequencer::SequencerCommand>,
+}
+
+impl RingKick {
+    /// Boot is over: tell the ring, so a message the user STAGED during boot is
+    /// delivered now (feedback #10), then drop the token. Deals no turn — with
+    /// nothing staged, the ring keeps waiting for the user (rc3 D29).
+    fn boot_ended(self) {
+        let _ = self
+            ._held
+            .try_send(crate::core::sequencer::SequencerCommand::BootEnded);
+    }
 }
 
 /// One participant's finished spawn config — **the whole D8 model chain in one
@@ -4623,6 +4648,16 @@ mod tests {
         // dropped kick is. Not a timeout: asserting `is_err()` here passes for a
         // sender that is merely slow, and fails for the very behaviour being
         // pinned. (It did, on the first run.)
+        // The ONE command boot sends is `BootEnded` (feedback #10: it delivers
+        // a message the user staged during boot) — it deals no turn. After it,
+        // the channel closes with nothing else on it.
+        assert!(
+            matches!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), ring_rx.recv()).await,
+                Ok(Some(crate::core::sequencer::SequencerCommand::BootEnded))
+            ),
+            "boot ends by telling the ring so, and by nothing else"
+        );
         assert!(
             matches!(
                 tokio::time::timeout(std::time::Duration::from_millis(200), ring_rx.recv()).await,
@@ -4702,6 +4737,13 @@ mod tests {
         assert!(
             matches!(
                 tokio::time::timeout(std::time::Duration::from_secs(2), ring_rx.recv()).await,
+                Ok(Some(crate::core::sequencer::SequencerCommand::BootEnded))
+            ),
+            "the timeout exit ends boot like every exit: BootEnded (feedback #10, plan A4)"
+        );
+        assert!(
+            matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), ring_rx.recv()).await,
                 Ok(None)
             ),
             "boot must not start the ring, timeout or not — the kick is dropped, so the \
@@ -4768,6 +4810,7 @@ mod tests {
             data_dir: None,
             bridge: Some(Arc::clone(&bridge)),
             activity: None,
+            booting: None,
         };
         let _tx = spawn_ring(deps, &bridge, "s1").await;
 
