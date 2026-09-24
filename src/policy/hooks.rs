@@ -799,20 +799,51 @@ fn run_pre_push(
             );
             eprintln!(
                 "{}",
-                blocked_banner(
-                    "pre-push",
-                    &format!(
-                        "Push blocked: {reason}.\n\
-                         \n\
-                         push_gate='ask' needs the bot-hq app running to surface the approval \
-                         prompt. Make sure bot-hq is running, or ask the user to flip the push \
-                         toggle to 'auto' in Session Settings.\n"
-                    )
-                )
+                blocked_banner("pre-push", &push_block_text(&reason, data_dir))
             );
             Ok(1)
         }
     }
+}
+
+/// The advice under a blocked push, chosen by WHY it was blocked (feedback
+/// #36). The old text blamed "the app not running" for every reason — while
+/// the commonest real one was a 30-minute approval timeout whose card was
+/// still live in the user's tray, so the agent re-issued the push through
+/// another path and the late Approve ran it a second time. Each class says
+/// what the hook actually tried.
+fn push_block_text(reason: &str, data_dir: &Path) -> String {
+    let addr_file = data_dir.join(".local").join("signaling-addr");
+    let addr = crate::paths::read_signaling_addr(data_dir);
+    let tried = format!(
+        "The hook read the app's address from {} ({}).",
+        addr_file.display(),
+        addr.as_deref().unwrap_or("missing")
+    );
+    let advice = if reason.contains("timed out") {
+        "Nobody answered the push card within the hook's wait. The card is STILL in the user's \
+         tray: a later Approve runs this exact push itself (pinned by sha). Do NOT re-issue the \
+         push by another route — wait for the user, then confirm with `git ls-remote`."
+            .to_string()
+    } else if reason.contains("HTTP 401") {
+        format!(
+            "The running app refused the hook's token — this hook binary and the running app are \
+             from different builds. Ask the user to relaunch bot-hq so they match; never bypass \
+             the hook. {tried}"
+        )
+    } else if reason.contains("not running") || reason.contains("could not connect") {
+        format!(
+            "push_gate='ask' needs the bot-hq app running to surface the approval prompt, and \
+             the hook could not reach it. {tried} Make sure bot-hq is running, or ask the user to \
+             flip the push toggle to 'auto' in Session Settings."
+        )
+    } else {
+        format!(
+            "The app answered in a way the hook could not use, so the push stays blocked \
+             (fail-closed). {tried} Tell the user the reason above; do not bypass the hook."
+        )
+    };
+    format!("Push blocked: {reason}.\n\n{advice}\n")
 }
 
 /// Outcome of asking the running app to approve a push.
@@ -2407,6 +2438,23 @@ mod tests {
             "an unreadable policy let the push through — `push_gate` and \
              `force_push` both silently stopped applying"
         );
+    }
+
+    /// Feedback #36: the advice matches the reason. A timeout says the card
+    /// is still live and forbids a re-issue; only a reachability failure talks
+    /// about the app not running; every class names what the hook tried.
+    #[test]
+    fn a_blocked_push_gets_advice_for_its_actual_reason() {
+        let data = tempdir().unwrap();
+        let timeout = push_block_text("approval timed out (no answer)", data.path());
+        assert!(timeout.contains("STILL in the user's tray") && timeout.contains("Do NOT re-issue"));
+        assert!(!timeout.contains("not running"), "a timeout is not an app outage: {timeout}");
+        let down = push_block_text("bot-hq is not running (no signaling address)", data.path());
+        assert!(down.contains("needs the bot-hq app running") && down.contains("(missing)"));
+        let stale = push_block_text("bot-hq returned HTTP 401: stale hook", data.path());
+        assert!(stale.contains("different builds"));
+        let odd = push_block_text("malformed bot-hq response: x", data.path());
+        assert!(odd.contains("fail-closed") && odd.contains("signaling-addr"));
     }
 
     #[tokio::test]
