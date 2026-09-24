@@ -93,6 +93,13 @@ s-84c59f27). Three migrations apply at the next launch: 0083
   (feedback #13).
 - **The starter Tool Gate gates history rewrites** (`git filter-branch`,
   `git filter-repo`, `git reflog expire`, `git gc --prune`).
+- **A long turn says it is working.** The composer's status line reads
+  "HANDS is working · 12m · 37 tools" (taken from the chat, so it survives
+  a reload mid-turn), a staged message shows that it lands when the turn
+  ends, and a turn past twenty minutes posts one row saying so and that
+  Pause interrupts it (feedback #44/#45).
+- **A Context Library write warns when another session wrote the same file
+  in the last fifteen minutes** (feedback #44).
 
 ### Changed
 
