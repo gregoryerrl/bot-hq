@@ -27,6 +27,9 @@ use std::path::Path;
 ///   FIRST (hooks check it before the gate), so a keyword here would park an
 ///   approval the hook then denies — approve-then-refuse is worse than either
 ///   guard alone.
+/// - History rewrites are irreversible the same way (feedback #34): a
+///   `filter-branch` / `filter-repo` rewrite, an expired reflog or a pruning
+///   gc destroys the recovery path the rest of the list relies on.
 pub fn starter_gate_keywords() -> Vec<GatedKeyword> {
     [
         "rm -r",
@@ -36,6 +39,10 @@ pub fn starter_gate_keywords() -> Vec<GatedKeyword> {
         "mkfs",
         "git reset --hard",
         "git clean -f",
+        "git filter-branch",
+        "git filter-repo",
+        "git reflog expire",
+        "git gc --prune",
     ]
     .into_iter()
     .map(|k| GatedKeyword {
@@ -129,6 +136,9 @@ mod tests {
         assert!(!kws.iter().any(|k| k.keyword.contains("push --force")),
             "force-push is the policy's job; a gate here parks an approval the hook then denies");
         assert!(kws.iter().any(|k| k.keyword == "sudo "), "trailing space, or 'pseudo' matches");
+        for rewrite in ["git filter-branch", "git filter-repo", "git reflog expire", "git gc --prune"] {
+            assert!(kws.iter().any(|k| k.keyword == rewrite), "history rewrites are gated: {rewrite}");
+        }
     }
 
     #[tokio::test]

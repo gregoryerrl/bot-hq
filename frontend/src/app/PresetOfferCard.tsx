@@ -18,7 +18,9 @@ const OFFERS = {
     title: "Want a starting point?",
     body:
       "Install the basic safety gates: destructive commands (rm -r, sudo, " +
-      "disk writers, git reset --hard, git clean -f) park for your " +
+      "disk writers, git reset --hard, git clean -f, and history rewrites: " +
+      "git filter-branch / filter-repo, git reflog expire, git gc --prune) " +
+      "park for your " +
       "Approve/Reject before they run. A gated command pauses the session " +
       "until you answer. Note the sudo gate also catches package installs " +
       "(sudo dnf / sudo apt) — if that's too chatty for your machine, edit " +
