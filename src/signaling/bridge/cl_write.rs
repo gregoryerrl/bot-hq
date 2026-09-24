@@ -174,7 +174,7 @@ impl SignalingBridge {
         let proj = project.clone();
         let commit_summary = format!("cl: {project}/{file_path} ({agent})");
         let outcome =
-            tokio::task::spawn_blocking(move || -> Result<(Done, Option<String>, Vec<String>, Snapshot)> {
+            tokio::task::spawn_blocking(move || -> Result<(Done, Option<String>, Vec<String>, Option<Snapshot>, Snapshot)> {
             let root_real = project_root.canonicalize().with_context(|| {
                 format!("canonicalizing CL project root {}", project_root.display())
             })?;
@@ -296,16 +296,28 @@ impl SignalingBridge {
                 }
                 _ => Vec::new(),
             };
+            // One library git operation at a time, process-wide: the library
+            // is shared by every project's sessions, and two interleaved
+            // add/commit pairs can each sweep the other's file or collide on
+            // the index lock (feedback #27/#28).
+            let _library_git = LIBRARY_GIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            // Content on disk that never reached git (a bare Write/Bash) is
+            // committed ALONE before this write replaces it — otherwise the
+            // "rollback point" an agent records is a generation stale.
+            let pre = match (library_root.as_deref(), exists) {
+                (Some(lib), true) => snapshot_unversioned(lib, &target),
+                _ => None,
+            };
             atomic_write(&target, &final_content)?;
-            let snapshot = match library_root {
-                Some(lib) => git_version_library(&lib, &commit_summary),
+            let snapshot = match library_root.as_deref() {
+                Some(lib) => git_version_library(lib, &commit_summary),
                 None => Snapshot::NotARepo,
             };
-            Ok((done, lint, retired, snapshot))
+            Ok((done, lint, retired, pre, snapshot))
         })
         .await
         .context("CL write task panicked")??;
-        let (done, lint, retired, snapshot) = outcome;
+        let (done, lint, retired, pre, snapshot) = outcome;
         self.record_retired_terms(&session_id, &project, retired).await;
         if let Err(err) = self.cl_rescan(&project).await {
             tracing::warn!(
@@ -343,6 +355,18 @@ impl SignalingBridge {
         // full-file replace, and that commit was a generation stale because a
         // write had never been snapshotted at all. The sha here is the baseline
         // to record; "no snapshot" is a fact to act on, not a silent gap.
+        match &pre {
+            Some(Snapshot::Committed(sha)) => msg.push_str(&format!(
+                " — the file held content that was never versioned (written outside \
+                 cl_write_file); committed it first as {sha}, which holds what was there before \
+                 this write"
+            )),
+            Some(Snapshot::Failed(why)) => msg.push_str(&format!(
+                " — WARNING: the file held content that was never versioned, and snapshotting it \
+                 FAILED ({why}); what was there before this write is NOT recoverable from git"
+            )),
+            _ => {}
+        }
         msg.push_str(&format!(" — {}", snapshot.describe()));
         if let Some(lint) = lint {
             msg.push_str(&lint);
@@ -726,6 +750,64 @@ fn assert_not_suspicious_shrink(target: &Path, rel_path: &str, new_content: &str
 ///
 /// Returns what the versioning did, so the tool reply can carry the commit
 /// (the agent's real rollback point) or say plainly that there is none.
+/// Serialises every library git operation in this process (see the write
+/// path): a sync mutex, held on the blocking thread for add + commit.
+static LIBRARY_GIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Commit `target` ALONE when its on-disk content never reached git — written
+/// with a bare `Write`/`Bash`, or left uncommitted by an interrupted write —
+/// before a CL write replaces it (feedback #27/#28: a session recorded a
+/// rollback point that was a generation stale because the latest content had
+/// never been snapshotted). Only this path is committed (`git commit -- <p>`):
+/// the library is shared, and another session's pending edits must not ride
+/// along under this message. `None` when there is nothing to do.
+fn snapshot_unversioned(library_root: &Path, target: &Path) -> Option<Snapshot> {
+    if !library_root.join(".git").exists() {
+        return None; // the first write's `git init` sweeps everything in
+    }
+    let root = library_root.canonicalize().unwrap_or_else(|_| library_root.to_path_buf());
+    let rel = target
+        .strip_prefix(&root)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| target.to_string_lossy().to_string());
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(library_root)
+            .args(args)
+            .output()
+    };
+    let status = git(&["status", "--porcelain", "--", &rel]).ok()?;
+    if !status.status.success() || status.stdout.is_empty() {
+        return None; // clean: the current content is already a commit
+    }
+    match git(&["add", "--", &rel]) {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => return Some(Snapshot::Failed(format!(
+            "git add: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))),
+        Err(e) => return Some(Snapshot::Failed(e.to_string())),
+    }
+    let message = format!("cl: {rel} (unversioned content found before a write)");
+    match git(&[
+        "-c", "user.name=bot-hq", "-c", "user.email=bot-hq@local",
+        "commit", "-q", "-m", &message, "--", &rel,
+    ]) {
+        Ok(out) if out.status.success() => Some(match git(&["rev-parse", "--short=7", "HEAD"]) {
+            Ok(rev) if rev.status.success() => {
+                Snapshot::Committed(String::from_utf8_lossy(&rev.stdout).trim().to_string())
+            }
+            _ => Snapshot::Committed("(sha unreadable)".into()),
+        }),
+        Ok(out) => Some(Snapshot::Failed(format!(
+            "git commit: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))),
+        Err(e) => Some(Snapshot::Failed(e.to_string())),
+    }
+}
+
 fn git_version_library(library_root: &Path, summary: &str) -> Snapshot {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
@@ -750,6 +832,17 @@ fn git_version_library(library_root: &Path, summary: &str) -> Snapshot {
             return Snapshot::Failed("git add failed".into());
         }
     }
+    // "Nothing to commit" is decided HERE, by git itself — not inferred from a
+    // failed commit, which would report a lock clash or a hook refusal as "the
+    // library already held this content" (feedback #27/#28).
+    match git(&["diff", "--cached", "--quiet"]) {
+        Ok(out) if out.status.success() => return Snapshot::NothingToCommit,
+        Ok(out) if out.status.code() == Some(1) => {} // staged changes — commit them
+        other => {
+            tracing::warn!(?other, "CL git diff --cached failed; skipping version commit");
+            return Snapshot::Failed("git diff --cached failed".into());
+        }
+    }
     match git(&[
         "-c",
         "user.name=bot-hq",
@@ -766,14 +859,11 @@ fn git_version_library(library_root: &Path, summary: &str) -> Snapshot {
             }
             _ => Snapshot::Committed("(sha unreadable)".into()),
         },
-        // "nothing to commit" (identical content) is routine, not a failure —
-        // but it IS "no new snapshot", and the reply says so.
+        // Staged changes and a failed commit: a real failure, said as one.
         Ok(out) => {
-            tracing::debug!(
-                stderr = %String::from_utf8_lossy(&out.stderr),
-                "CL git commit made no commit"
-            );
-            Snapshot::NothingToCommit
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            tracing::warn!(%stderr, "CL git commit failed");
+            Snapshot::Failed(format!("git commit: {stderr}"))
         }
         Err(err) => {
             tracing::warn!(%err, "CL git commit failed");
@@ -1103,6 +1193,53 @@ mod tests {
             .await
             .unwrap();
         assert!(again.contains("no new snapshot"), "got: {again}");
+    }
+
+    /// Feedback #27/#28: content written OUTSIDE cl_write_file (a bare Write
+    /// the library's git never saw) is committed ALONE before a write replaces
+    /// it — so the parent of the write's snapshot really holds what was there —
+    /// and the reply says so. A clean file takes no pre-write snapshot.
+    #[tokio::test]
+    async fn unversioned_content_is_snapshotted_before_a_write_replaces_it() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let lib = tmp.path().join("library");
+        let path = lib.join("projects/bot-hq/notes.md");
+        let write = |body: &str| {
+            let bridge = bridge.clone();
+            let body = body.to_string();
+            async move {
+                bridge
+                    .cl_write_file(
+                        "s1".to_string(),
+                        "hands".to_string(),
+                        "bot-hq".to_string(),
+                        "notes.md".to_string(),
+                        body,
+                        false,
+                        false,
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        write("versioned body, the first generation\n").await;
+        std::fs::write(&path, "OUT-OF-BAND body, the second generation\n").unwrap();
+        let msg = write("the third generation, written by the tool\n").await;
+        assert!(msg.contains("never versioned"), "the reply names the pre-write snapshot: {msg}");
+        let show = |rev: &str| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&lib)
+                .arg("show")
+                .arg(format!("{rev}:projects/bot-hq/notes.md"))
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        assert_eq!(show("HEAD~1"), "OUT-OF-BAND body, the second generation\n");
+        assert_eq!(show("HEAD"), "the third generation, written by the tool\n");
+        let again = write("the fourth generation, written by the tool\n").await;
+        assert!(!again.contains("never versioned"), "a clean file takes no pre-snapshot: {again}");
     }
 
     #[tokio::test]
