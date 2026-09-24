@@ -593,6 +593,17 @@ impl SignalingBridge {
             .await
         {
             tracing::warn!(?e, choice_id, "persist_question failed");
+            return;
+        }
+        // A gated command's body hash (0084) is recorded HERE — before the
+        // card's event goes out — so an approval can never land on a row
+        // that has no hash yet (EYES 16629ec7 nit).
+        if let Some(command) = command_text {
+            if let Some(Ok(sha)) = self.body_files_digest(session_id, command).await {
+                if let Err(e) = storage.set_tray_body_sha(choice_id, &sha).await {
+                    tracing::warn!(?e, choice_id, "could not record the gate's body hash");
+                }
+            }
         }
     }
 
@@ -1362,15 +1373,11 @@ impl SignalingBridge {
         // Re-hash and refuse on any change or a missing file (0084). A row
         // with no recorded hash (parked before 0084) runs, and says so.
         if let Some(current) = self.body_files_digest(session_id, command).await {
-            let recorded = match self.storage.lock().await.clone() {
-                Some(storage) => storage
-                    .get_tray_entry(choice_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|row| row.body_sha256),
+            let row = match self.storage.lock().await.clone() {
+                Some(storage) => storage.get_tray_entry(choice_id).await.ok().flatten(),
                 None => None,
             };
+            let recorded = row.as_ref().and_then(|r| r.body_sha256.clone());
             let refusal = match (&recorded, &current) {
                 (_, Err(path)) => Some(format!(
                     "NOT RUN: the body file `{path}` is missing at approval, so nothing was \
@@ -1386,7 +1393,28 @@ impl SignalingBridge {
             };
             if let Some(refusal) = refusal {
                 body.push_str(&refusal);
+                // Audit + durable state (EYES 16629ec7): the row still reads
+                // Approve, so without this `gate_status` would say "executed".
+                if let Some(log) = self.violations.as_ref() {
+                    let _ = log
+                        .record(
+                            session_id.to_string(),
+                            row.as_ref().map(|r| r.agent.clone()).unwrap_or_default(),
+                            crate::policy::ViolationKind::ToolBlocklist,
+                            command.to_string(),
+                            crate::policy::ViolationOutcome::Denied,
+                            Some("approved but NOT RUN: body file changed or missing after review".into()),
+                        )
+                        .await;
+                }
                 if let Some(storage) = self.storage.lock().await.clone() {
+                    let short = match &current {
+                        Err(path) => format!("the body file `{path}` was missing at approval"),
+                        Ok(_) => "a body file changed after it was reviewed".to_string(),
+                    };
+                    if let Err(e) = storage.set_tray_run_refusal(choice_id, &short).await {
+                        tracing::warn!(?e, choice_id, "could not record the run refusal");
+                    }
                     let _ = crate::core::post_system_notice(
                         &storage,
                         Some(self),

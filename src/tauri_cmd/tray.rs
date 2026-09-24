@@ -424,6 +424,7 @@ mod tests {
             command_text: Some("gh api user".into()),
             body_row_id: None,
             body_sha256: None,
+            run_refusal: None,
         };
         let view: SessionTrayView = entry.into();
         assert_eq!(view.options, vec!["Approve", "Reject"]);

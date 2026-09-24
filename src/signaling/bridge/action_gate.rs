@@ -146,10 +146,9 @@ impl SignalingBridge {
                 )
             }
         };
+        // (The body hash is recorded as the row is written — `persist_question`
+        // — before the card is visible.)
         let (gate_id, existing) = self.park_reviewed_command(session_id, agent, command).await?;
-        if !existing {
-            self.record_body_digest(session_id, &gate_id, command).await;
-        }
         // Feedback #40: a publish that parks on PRIOR review used to leave no
         // row at all — the reviewer could not tell it had gone to the user.
         // Say it in the channel, once per fresh park.
@@ -299,7 +298,16 @@ impl SignalingBridge {
             ),
             "answered" => {
                 let picked = row.picked_option.as_deref().unwrap_or("");
-                if matches!(gate_verdict(picked), ViolationOutcome::Approved) {
+                if let (ViolationOutcome::Approved, Some(refusal)) =
+                    (gate_verdict(picked), row.run_refusal.as_deref())
+                {
+                    // 0085 (EYES 16629ec7): approved, then refused at run time.
+                    format!(
+                        "approved but NOT RUN — {refusal}, so bot-hq refused to run `{command}` \
+                         and nothing was published. Re-issue the command; the reviewer reads \
+                         the current body first."
+                    )
+                } else if matches!(gate_verdict(picked), ViolationOutcome::Approved) {
                     format!(
                         "approved — bot-hq executed `{command}` at approval time; the \
                          output was delivered as an out-of-band message (check your \
@@ -879,7 +887,15 @@ impl SignalingBridge {
             return;
         }
         let Ok(cursor) = storage.cursor_for(participant_id).await else { return };
-        let findings = storage.findings_for_session(session_id).await.unwrap_or_default();
+        // A findings read that FAILS is not "no vetoes": skip this settlement
+        // (the next one retries) rather than park publishes a veto may cover.
+        let findings = match storage.findings_for_session(session_id).await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(session_id, error = %e, "settlement skipped: findings unreadable");
+                return;
+            }
+        };
         for row in queued {
             let Some(reviewer) = self.queued_reviewer(session_id, &row.agent).await else {
                 continue;
@@ -1011,7 +1027,15 @@ impl SignalingBridge {
     pub(crate) async fn release_queued_outward_unreviewed(&self, session_id: &str) -> usize {
         let Some(storage) = self.storage.lock().await.clone() else { return 0 };
         let Ok(queued) = storage.queued_gates_for_session(session_id).await else { return 0 };
-        let findings = storage.findings_for_session(session_id).await.unwrap_or_default();
+        // As in settlement: an unreadable findings table releases NOTHING —
+        // a DB error must not hand vetoed publishes to the user "unreviewed".
+        let findings = match storage.findings_for_session(session_id).await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(session_id, error = %e, "override release skipped: findings unreadable");
+                return 0;
+            }
+        };
         let mut released = 0;
         for row in queued {
             // A publish the reviewer VETOED before it went down was reviewed —
@@ -2822,13 +2846,18 @@ mod tests {
                 _ => {}
             }
             let out = approve_oob(&bridge, &gate).await;
+            let status = bridge.gate_status(&gate).await.unwrap();
             if case == "unchanged" {
                 assert!(out.contains("Output:") && marker.exists(), "{case}: runs — {out}");
+                assert!(status.starts_with("approved — bot-hq executed"), "{case}: {status}");
             } else {
                 assert!(out.contains("NOT RUN"), "{case}: refused — {out}");
                 assert!(!marker.exists(), "{case}: nothing ran");
                 let rows = storage.recent_row_bodies_upto("s1", i64::MAX, 10).await.unwrap();
                 assert!(rows.iter().any(|r| r.contains("did not run") && r.contains(&gate)));
+                // EYES 16629ec7: gate_status must not call the refused run
+                // "executed — do not re-run it".
+                assert!(status.starts_with("approved but NOT RUN"), "{case}: {status}");
             }
         }
     }

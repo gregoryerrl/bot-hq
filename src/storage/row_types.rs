@@ -277,6 +277,12 @@ pub struct SessionTrayEntry {
     #[serde(default)]
     #[sqlx(default)]
     pub body_sha256: Option<String>,
+    /// Set when an APPROVED gate was refused at run time (0085 — its body file
+    /// changed or vanished after review): what `gate_status` must report
+    /// instead of "executed". NULL on every row that ran or was rejected.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub run_refusal: Option<String>,
 }
 
 impl SessionTrayEntry {
