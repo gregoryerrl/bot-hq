@@ -154,7 +154,9 @@ export function ApprovalGate({
         )}
       </div>
 
-      <p className="mt-1.5 text-sm text-on-surface">{gatePrompt(row)}</p>
+      <p className="mt-1.5 whitespace-pre-wrap break-words text-sm text-on-surface">
+        {gatePrompt(row)}
+      </p>
 
       {/* The command verbatim. Never truncated — approving something you were
           shown half of is not approval. It scrolls VERTICALLY; the page does
@@ -402,16 +404,24 @@ function GateDetailsDialog({
 /**
  * What to print above the buttons.
  *
- * An action-gate row's prompt is the boilerplate "Run gated command in this
- * session's repo?" followed by the command in a fenced block — and the command
- * gets its own `<pre>` here, so repeating it would show it twice. A push gate
- * has no command and its prompt IS the question ("Allow `git push` to `staging`
- * …"), so that one is printed as written.
+ * An action-gate row's prompt is the question ("Run gated command in this
+ * session's repo?"), the command in a fenced block, then the lines that say
+ * WHY it was gated ("matched Tool-Gate keyword `rm -r` at col 42") and whether
+ * this exact command was rejected before. The command gets its own `<pre>`
+ * here, so repeating it would show it twice — but the lines after it are what
+ * the user decides on at a glance, so they stay on the card face (feedback
+ * #29: a destructive keyword inside a grep pattern reads as one only when the
+ * match is shown). A push gate has no command and its prompt IS the question
+ * ("Allow `git push` to `staging` …"), so that one is printed as written.
  */
 function gatePrompt(row: TrayRow): string {
   if (!row.command_text) return row.prompt;
-  const firstLine = row.prompt.split("\n", 1)[0]?.trim();
-  return firstLine || "Run gated command in this session's repo?";
+  const question =
+    row.prompt.split("\n", 1)[0]?.trim() || "Run gated command in this session's repo?";
+  const fenced = `\`${row.command_text}\``;
+  const at = row.prompt.indexOf(fenced);
+  const after = at >= 0 ? row.prompt.slice(at + fenced.length).trim() : "";
+  return after ? `${question}\n${after}` : question;
 }
 
 /**

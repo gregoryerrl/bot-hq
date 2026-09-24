@@ -190,34 +190,12 @@ impl SignalingBridge {
         // live to the end of the statement in edition 2021, i.e. across the
         // await below. `let` drops the guard before the body runs.
         let storage = self.storage.lock().await.clone();
-        let mut prior_rejection: Option<(String, String)> = None;
         if let Some(storage) = storage {
             if let Ok(Some(existing)) = storage.pending_gate_for_command(session_id, command).await {
                 return Ok((existing, true));
             }
-            prior_rejection = storage
-                .last_rejection_for_command(session_id, command)
-                .await
-                .ok()
-                .flatten();
         }
-        // What the user is approving, in one glance (F6, feedback #29): the
-        // keyword the Tool Gate matched and where — a destructive literal
-        // inside a grep pattern reads as one — and, when this exact command was
-        // rejected before, that verdict (E6): a re-park is a fresh card by
-        // design, and must not read as a first ask.
-        let why = self
-            .data_dir
-            .as_ref()
-            .map(|d| tool_gate::resolve_keywords(d, Some(session_id)))
-            .and_then(|kws| tool_gate::gate_match_detail("Bash", command, &kws))
-            .map(|m| format!("\n\n{}.", m.describe()))
-            .unwrap_or_default();
-        let rejected = prior_rejection
-            .map(|(at, picked)| {
-                format!("\n\n⚠ You REJECTED this identical command at {at}: \"{picked}\"")
-            })
-            .unwrap_or_default();
+        let prompt = self.gate_card_prompt(session_id, command).await;
         // Park and return IMMEDIATELY (same contract as ask_user_choice). The
         // old design held the RPC open and the MCP client timed out at ~60s
         // while the human was still deciding — the agent saw "The operation
@@ -227,7 +205,7 @@ impl SignalingBridge {
             .ask_user_choice_inner(
                 session_id.to_string(),
                 agent.to_string(),
-                format!("Run gated command in this session's repo?\n\n`{command}`{why}{rejected}"),
+                prompt,
                 vec!["Approve".to_string(), "Reject".to_string()],
                 Some(ApprovalContext {
                     kind: ViolationKind::ToolBlocklist,
@@ -458,6 +436,39 @@ impl SignalingBridge {
                 tracing::warn!(%gate_id, error = %e, "could not record the gate's body hash");
             }
         }
+    }
+
+    /// The card question for a gated command — built ONCE for the direct
+    /// park and the queued outward publish alike (feedback #29): the question,
+    /// the fenced command, then what the user is approving in one glance — the
+    /// Tool-Gate keyword that matched and where (a destructive literal inside a
+    /// grep pattern reads as one), and, when this exact command was rejected
+    /// before, that verdict (E6: a re-park is a fresh card by design and must
+    /// not read as a first ask). The card face shows the lines after the
+    /// command; the command itself has its own block.
+    async fn gate_card_prompt(&self, session_id: &str, command: &str) -> String {
+        let why = self
+            .data_dir
+            .as_ref()
+            .map(|d| tool_gate::resolve_keywords(d, Some(session_id)))
+            .and_then(|kws| tool_gate::gate_match_detail("Bash", command, &kws))
+            .map(|m| format!("\n\n{}.", m.describe()))
+            .unwrap_or_default();
+        let storage = self.storage.lock().await.clone();
+        let prior_rejection = match storage {
+            Some(storage) => storage
+                .last_rejection_for_command(session_id, command)
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        let rejected = prior_rejection
+            .map(|(at, picked)| {
+                format!("\n\n⚠ You REJECTED this identical command at {at}: \"{picked}\"")
+            })
+            .unwrap_or_default();
+        format!("Run gated command in this session's repo?\n\n`{command}`{why}{rejected}")
     }
 
     /// A body path as the command will read it: relative paths resolve
@@ -803,7 +814,9 @@ impl SignalingBridge {
             return Ok((existing, true));
         }
         let gate_id = uuid::Uuid::new_v4().to_string();
-        let prompt = format!("Run gated command in this session's repo?\n\n`{command}`");
+        // The same card text a direct park builds — so a promoted queued card
+        // also says why it was gated and whether it was rejected before.
+        let prompt = self.gate_card_prompt(session_id, command).await;
         storage
             .insert_queued_gate(session_id, &gate_id, agent, &prompt, command)
             .await?;
@@ -2938,6 +2951,28 @@ mod tests {
         assert!(bridge.park_gated_command("s1", "hands", &cmd_a).await.is_err(), "unchanged: refused");
         std::fs::write(&path, "The corrected claim.\n").unwrap();
         queued(bridge.park_gated_command("s1", "hands", &cmd_a).await.unwrap());
+    }
+
+    /// Feedback #29: a QUEUED outward card carries the same "why it was
+    /// gated" line a direct park does — the prompt is built once for both.
+    #[tokio::test]
+    async fn a_queued_card_says_which_keyword_gated_it() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[gk("gh issue edit", GateMode::Gate)], "s1", repo.path()).await;
+        let storage = bridge.storage.lock().await.clone().unwrap();
+        storage
+            .ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS)
+            .await
+            .unwrap();
+        bridge.register_session_reviewers("s1".to_string(), vec!["eyes".to_string()]);
+        let _ring = ring_for(&bridge).await;
+        let path = repo.path().join("b.md");
+        std::fs::write(&path, "body text\n").unwrap();
+        let cmd = format!("gh issue edit 5 --body-file {}", path.display());
+        let (gate, _) = queued(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
+        let prompt = storage.get_tray_entry(&gate).await.unwrap().unwrap().prompt;
+        assert!(prompt.contains("matched Tool-Gate keyword `gh issue edit`"), "got: {prompt}");
     }
 
     #[tokio::test]

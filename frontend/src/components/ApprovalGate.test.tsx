@@ -306,6 +306,31 @@ describe("ApprovalGate", () => {
     expect(screen.getAllByText("gh pr create --base main")).toHaveLength(1);
   });
 
+  it("shows WHY a command was gated on the card face, not only under Details", () => {
+    // Feedback #29: the Tool Gate's match line and a prior rejection are what
+    // the user decides on at a glance — a destructive keyword that is only
+    // DATA inside a grep pattern reads as one when the match is shown.
+    const cmd = "grep -cF 'bq rm -r -d -f' tasks.md";
+    render(
+      <ApprovalGate
+        rows={[
+          approval({
+            prompt:
+              "Run gated command in this session's repo?\n\n`" +
+              cmd +
+              "`\n\nmatched Tool-Gate keyword `rm -r` at col 13.\n\n⚠ You REJECTED this identical command at 2026-09-24T01:00:00Z: \"not now\"",
+            command_text: cmd,
+          }),
+        ]}
+        onResolve={resolved()}
+      />,
+    );
+    expect(screen.getByText(/matched Tool-Gate keyword `rm -r` at col 13/)).toBeInTheDocument();
+    expect(screen.getByText(/You REJECTED this identical command/)).toBeInTheDocument();
+    // The command itself is still rendered exactly once.
+    expect(screen.getAllByText(cmd)).toHaveLength(1);
+  });
+
   it("Details surfaces absolutely everything about the gate", () => {
     // vision.md: "Full transparency. Every bit of information the agents see
     // is visible to the user." The card clamps the command to a short scroll
