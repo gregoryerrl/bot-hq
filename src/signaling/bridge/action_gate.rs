@@ -307,6 +307,16 @@ impl SignalingBridge {
                          and nothing was published. Re-issue the command; the reviewer reads \
                          the current body first."
                     )
+                } else if matches!(gate_verdict(picked), ViolationOutcome::Approved)
+                    && self.is_gate_running(&row.session_id, &row.choice_id)
+                {
+                    // Feedback #15: the answer flips before the command ends —
+                    // "output delivered" while it is still running sends the
+                    // agent looking for a message that has not arrived yet.
+                    format!(
+                        "approved — RUNNING now: bot-hq is executing `{command}`; its output \
+                         arrives as an out-of-band message when it finishes. Do not re-run it."
+                    )
                 } else if matches!(gate_verdict(picked), ViolationOutcome::Approved) {
                     format!(
                         "approved — bot-hq executed `{command}` at approval time; the \
@@ -1541,6 +1551,29 @@ mod tests {
         assert!(marker.exists(), "approved command should have run");
         let status = bridge.gate_status(&cid).await.unwrap();
         assert!(status.starts_with("approved"), "got: {status}");
+    }
+
+    /// Feedback #15: while an approved command is still executing,
+    /// `gate_status` says RUNNING — not "output delivered", which sends the
+    /// agent hunting for a message that has not arrived.
+    #[tokio::test]
+    async fn gate_status_reports_an_approved_command_still_running() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[gk("true", GateMode::Gate)], "s1", repo.path()).await;
+        let parked = bridge
+            .action_gate("s1".into(), "hands".into(), "true".into(), false)
+            .await
+            .unwrap();
+        let cid = parked.split("gate_id: ").nth(1).and_then(|s| s.split(')').next()).unwrap().to_string();
+        bridge.resolve_choice(&cid, "Approve".into()).await.unwrap();
+        {
+            let _running = bridge.note_gate_running("s1", &cid);
+            let status = bridge.gate_status(&cid).await.unwrap();
+            assert!(status.starts_with("approved — RUNNING now"), "got: {status}");
+        }
+        let status = bridge.gate_status(&cid).await.unwrap();
+        assert!(status.starts_with("approved — bot-hq executed"), "after it ends: {status}");
     }
 
     /// **`gate_status` answers only for the caller's own session** (round 11).

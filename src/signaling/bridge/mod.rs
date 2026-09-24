@@ -774,6 +774,16 @@ impl SignalingBridge {
         RunningGateGuard { set: Arc::clone(&self.running_gates), key }
     }
 
+    /// Is THIS approved gated command still executing? `gate_status` asks, so
+    /// a long-running approved command reads "running", not "delivered"
+    /// (feedback #15).
+    pub fn is_gate_running(&self, session_id: &str, choice_id: &str) -> bool {
+        self.running_gates
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&(session_id.to_string(), choice_id.to_string()))
+    }
+
     /// Is any approved gated command of this session still executing?
     pub fn has_running_gate(&self, session_id: &str) -> bool {
         self.running_gates
