@@ -147,6 +147,9 @@ impl SignalingBridge {
             }
         };
         let (gate_id, existing) = self.park_reviewed_command(session_id, agent, command).await?;
+        if !existing {
+            self.record_body_digest(session_id, &gate_id, command).await;
+        }
         // Feedback #40: a publish that parks on PRIOR review used to leave no
         // row at all — the reviewer could not tell it had gone to the user.
         // Say it in the channel, once per fresh park.
@@ -397,6 +400,48 @@ impl SignalingBridge {
         }
     }
 
+    /// SHA-256 over the command's body FILES as they are on disk now —
+    /// `(path, NUL, bytes, NUL)` per file, in the command's order — or the
+    /// first path that cannot be read. `None` when the command publishes no
+    /// body file (the inline ones are in the command text itself, which
+    /// cannot change after review). Feedback #22.
+    pub(crate) async fn body_files_digest(
+        &self,
+        session_id: &str,
+        command: &str,
+    ) -> Option<Result<String, String>> {
+        use sha2::{Digest, Sha256};
+        let files = super::outward_body::extract(command).ok()?.files;
+        if files.is_empty() {
+            return None;
+        }
+        let mut hasher = Sha256::new();
+        for p in &files {
+            let resolved = self.resolve_body_path(session_id, p).await;
+            match std::fs::read(&resolved) {
+                Ok(bytes) => {
+                    hasher.update(p.as_bytes());
+                    hasher.update([0u8]);
+                    hasher.update(&bytes);
+                    hasher.update([0u8]);
+                }
+                Err(_) => return Some(Err(p.clone())),
+            }
+        }
+        Some(Ok(format!("{:x}", hasher.finalize())))
+    }
+
+    /// Record the body hash on a freshly parked or queued gate (0084).
+    async fn record_body_digest(&self, session_id: &str, gate_id: &str, command: &str) {
+        let Some(Ok(sha)) = self.body_files_digest(session_id, command).await else { return };
+        let storage = self.storage.lock().await.clone();
+        if let Some(storage) = storage {
+            if let Err(e) = storage.set_tray_body_sha(gate_id, &sha).await {
+                tracing::warn!(%gate_id, error = %e, "could not record the gate's body hash");
+            }
+        }
+    }
+
     /// A body path as the command will read it: relative paths resolve
     /// against the session's working repo — where `execute_gated` runs it.
     pub(super) async fn resolve_body_path(&self, session_id: &str, p: &str) -> PathBuf {
@@ -590,13 +635,22 @@ impl SignalingBridge {
         // re-issue of the exact command it withdrew is refused while that
         // finding is open. Fix it (disposition `fixed`) or rebut it first —
         // either is on the record the user reads.
-        if let Some((finding, gate)) =
-            storage.open_targeted_veto_for_command(session_id, command).await?
-        {
+        let veto = storage.open_targeted_veto_for_command(session_id, command).await?;
+        // A body FILE that changed since the vetoed version is new content —
+        // it goes to a fresh review instead (0084).
+        let body_changed = match veto.as_ref().and_then(|(_, _, sha)| sha.as_deref()) {
+            Some(vetoed_sha) => matches!(
+                self.body_files_digest(session_id, command).await,
+                Some(Ok(now)) if now != vetoed_sha
+            ),
+            None => false,
+        };
+        let veto = if body_changed { None } else { veto };
+        if let Some((finding, gate, _)) = veto {
             return Ok(OutwardReview::Refuse(format!(
                 "outward publish held: open blocking finding {} vetoed this exact publish (gate \
-                 {}). Fix what it raises and disposition it `fixed`, or rebut it, then re-issue — \
-                 the re-issue queues for a fresh review.",
+                 {}). Fix what it raises (a changed body file goes to a fresh review) and \
+                 disposition it `fixed`, or rebut it, then re-issue.",
                 &finding[..finding.len().min(8)],
                 &gate[..gate.len().min(8)]
             )));
@@ -735,6 +789,7 @@ impl SignalingBridge {
         storage
             .insert_queued_gate(session_id, &gate_id, agent, &prompt, command)
             .await?;
+        self.record_body_digest(session_id, &gate_id, command).await;
         let body = self.queued_body_text(session_id, command).await;
         let notice = format!(
             "📨 Outward publish queued for review (gate {gate_id}) — {agent} wants to run:\n\
@@ -2713,6 +2768,114 @@ mod tests {
         assert_eq!(bridge.release_queued_outward_unreviewed("s1").await, 1);
         assert_eq!(status_of(&storage, &gate_a).await, "withdrawn", "the vetoed one is withdrawn");
         assert_eq!(status_of(&storage, &gate_b).await, "pending", "the other is released");
+    }
+
+    /// Park an outward command that is COVERED (the reviewer received its
+    /// body) and so parks straight for the user with its body hash recorded.
+    /// The command is harmless if it ever runs: a `curl` to a closed local
+    /// port, then a `touch` of `marker` — so "did it run?" is a file check.
+    async fn covered_curl_park(
+        bridge: &std::sync::Arc<SignalingBridge>,
+        storage: &crate::storage::Storage,
+        eyes: i64,
+        path: &str,
+        body: &str,
+        marker: &std::path::Path,
+    ) -> String {
+        let m = storage
+            .post_to_channel("s1", "participant", Some("hands"), "text", format!("Draft:\n{body}"), None)
+            .await
+            .unwrap();
+        storage.commit_delivery(eyes, &[(m.message_id(), None)]).await.unwrap();
+        let cmd = format!(
+            "curl -s --max-time 1 -d @{path} http://127.0.0.1:9/ ; touch {}",
+            posix_path(marker)
+        );
+        let (gate, _existing, _note) = parked(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
+        gate
+    }
+
+    async fn approve_oob(bridge: &std::sync::Arc<SignalingBridge>, gate: &str) -> String {
+        match bridge.resolve_choice(gate, "Approve".into()).await.unwrap() {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => body,
+            other => panic!("expected OOB delivery, got {other:?}"),
+        }
+    }
+
+    /// Feedback #22: the review covered the body FILE as it was at park time.
+    /// Unchanged → it runs; edited or deleted after review → NOTHING runs.
+    #[tokio::test]
+    async fn an_approved_publish_whose_body_file_changed_does_not_run() {
+        for case in ["unchanged", "edited", "deleted"] {
+            let data = tempdir().unwrap();
+            let repo = tempdir().unwrap();
+            let (bridge, storage, eyes, path, body) = outward_fixture(&data, &repo).await;
+            let marker = repo.path().join("ran.txt");
+            let gate = covered_curl_park(&bridge, &storage, eyes, &path, &body, &marker).await;
+            assert!(
+                storage.get_tray_entry(&gate).await.unwrap().unwrap().body_sha256.is_some(),
+                "the park records the reviewed body's hash"
+            );
+            match case {
+                "edited" => std::fs::write(&path, format!("{body}\nA line added after review.")).unwrap(),
+                "deleted" => std::fs::remove_file(&path).unwrap(),
+                _ => {}
+            }
+            let out = approve_oob(&bridge, &gate).await;
+            if case == "unchanged" {
+                assert!(out.contains("Output:") && marker.exists(), "{case}: runs — {out}");
+            } else {
+                assert!(out.contains("NOT RUN"), "{case}: refused — {out}");
+                assert!(!marker.exists(), "{case}: nothing ran");
+                let rows = storage.recent_row_bodies_upto("s1", i64::MAX, 10).await.unwrap();
+                assert!(rows.iter().any(|r| r.contains("did not run") && r.contains(&gate)));
+            }
+        }
+    }
+
+    /// A gate parked before 0084 has no recorded hash: it runs as before, and
+    /// the output says the body was not re-checked.
+    #[tokio::test]
+    async fn a_pre_upgrade_gate_without_a_hash_runs_with_a_note() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, body) = outward_fixture(&data, &repo).await;
+        let marker = repo.path().join("ran.txt");
+        let gate = covered_curl_park(&bridge, &storage, eyes, &path, &body, &marker).await;
+        sqlx::query("UPDATE session_tray SET body_sha256 = NULL WHERE choice_id = ?")
+            .bind(&gate)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let out = approve_oob(&bridge, &gate).await;
+        assert!(out.contains("not re-checked") && marker.exists(), "got: {out}");
+    }
+
+    /// EYES 891e0eb1, second half: while a TARGETED veto is open, the same
+    /// command is refused — unless its body FILE changed since the vetoed
+    /// version, which is new content and goes to a fresh review.
+    #[tokio::test]
+    async fn a_targeted_veto_lets_a_changed_body_file_through_to_review() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let (gate_a, _gate_b, cmd_a) = two_queued_and_read(&bridge, &storage, eyes, &repo, &path).await;
+        bridge
+            .eyes_flag_for_gate(
+                "s1".into(),
+                "eyes".into(),
+                crate::storage::FindingSeverity::Blocking,
+                "wrong claim".into(),
+                None,
+                Some(gate_a.clone()),
+            )
+            .await
+            .unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert!(bridge.park_gated_command("s1", "hands", &cmd_a).await.is_err(), "unchanged: refused");
+        std::fs::write(&path, "The corrected claim.\n").unwrap();
+        queued(bridge.park_gated_command("s1", "hands", &cmd_a).await.unwrap());
     }
 
     #[tokio::test]

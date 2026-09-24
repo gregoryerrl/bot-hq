@@ -9,7 +9,7 @@ use super::*;
 /// `tray_entries_for_session` and `get_tray_entry` so the two can't drift.
 const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text, \
-     body_row_id";
+     body_row_id, body_sha256";
 
 /// The statuses a tray row passes through. `queued` (0080) is the one that is
 /// NOT a user-facing item: an outward publish waiting for the reviewer to read
@@ -325,6 +325,18 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
+    /// Record the SHA-256 of a gated command's body files (0084) — the content
+    /// its review covered, re-checked when the user approves it.
+    pub async fn set_tray_body_sha(&self, choice_id: &str, sha: &str) -> Result<()> {
+        sqlx::query("UPDATE session_tray SET body_sha256 = ? WHERE choice_id = ?")
+            .bind(sha)
+            .bind(choice_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("recording the body hash of gate {choice_id}"))?;
+        Ok(())
+    }
+
     /// Was the NEWEST gate for this exact command withdrawn by a reviewer's
     /// blocking finding? A re-issue of such a command must queue for a FRESH
     /// review: its body row was delivered when it first queued, so the
@@ -352,7 +364,8 @@ impl Storage {
     }
 
     /// The newest OPEN blocking finding that TARGETED a gate with this exact
-    /// command text (0083 `findings.gate_id`) — `(finding_uid, gate_id)`. A
+    /// command text (0083 `findings.gate_id`) — `(finding_uid, gate_id, the
+    /// vetoed gate's body_sha256)`. A
     /// targeted veto is about that content by definition, so it keeps holding
     /// a re-issue of the same command until the finding is fixed or rebutted
     /// (EYES advisory 891e0eb1: a veto that holds once is a veto a re-issue
@@ -361,9 +374,9 @@ impl Storage {
         &self,
         session_id: &str,
         command: &str,
-    ) -> Result<Option<(String, String)>> {
-        let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT f.finding_uid, f.gate_id FROM findings f \
+    ) -> Result<Option<(String, String, Option<String>)>> {
+        let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT f.finding_uid, f.gate_id, t.body_sha256 FROM findings f \
              JOIN session_tray t ON t.choice_id = f.gate_id \
              WHERE f.session_id = ? AND f.status = 'open' AND f.severity = 'blocking' \
                AND t.session_id = f.session_id AND t.command_text = ? \

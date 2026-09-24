@@ -1,0 +1,11 @@
+-- 0084_tray_body_sha.sql — the body a gated outward publish was reviewed with
+-- (feedback #22, 2026-09-24).
+--
+-- A `gh … --body-file <path>` publish is reviewed against the file's content
+-- when it parks or queues, but the command runs at the user's Approve —
+-- possibly much later. An edit to the file in between used to publish content
+-- nobody reviewed. This column holds a SHA-256 over the command's body files
+-- at park/queue time; Approve re-hashes them and refuses to run on any change
+-- or a missing file. NULL on every non-outward row and on rows parked before
+-- this migration (those run as before, with a note that nothing was checked).
+ALTER TABLE session_tray ADD COLUMN body_sha256 TEXT;

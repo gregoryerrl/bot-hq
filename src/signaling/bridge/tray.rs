@@ -1357,6 +1357,55 @@ impl SignalingBridge {
             }
             return;
         }
+        // Feedback #22: the review covered the body FILES as they were when
+        // this parked; an edit since then would publish content nobody read.
+        // Re-hash and refuse on any change or a missing file (0084). A row
+        // with no recorded hash (parked before 0084) runs, and says so.
+        if let Some(current) = self.body_files_digest(session_id, command).await {
+            let recorded = match self.storage.lock().await.clone() {
+                Some(storage) => storage
+                    .get_tray_entry(choice_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|row| row.body_sha256),
+                None => None,
+            };
+            let refusal = match (&recorded, &current) {
+                (_, Err(path)) => Some(format!(
+                    "NOT RUN: the body file `{path}` is missing at approval, so nothing was \
+                     published. Re-issue the command once it exists — the reviewer reads it first."
+                )),
+                (Some(then), Ok(now)) if then != now => Some(
+                    "NOT RUN: a body file of this command changed after it was reviewed, so \
+                     nothing was published — the approved card no longer matches what would go \
+                     out. Re-issue the command; the reviewer reads the new body first."
+                        .to_string(),
+                ),
+                _ => None,
+            };
+            if let Some(refusal) = refusal {
+                body.push_str(&refusal);
+                if let Some(storage) = self.storage.lock().await.clone() {
+                    let _ = crate::core::post_system_notice(
+                        &storage,
+                        Some(self),
+                        session_id,
+                        crate::storage::MessageKind::SystemNotice,
+                        format!("⛔ Approved gate {choice_id} did not run — {refusal}: `{command}`"),
+                        None,
+                    )
+                    .await;
+                }
+                return;
+            }
+            if recorded.is_none() {
+                body.push_str(
+                    "Note: no body hash was recorded when this was parked (it predates the \
+                     check), so the body file was not re-checked before running.\n",
+                );
+            }
+        }
         // The verdict line above already says "approved" and names the command;
         // this is the output, headed by one short line so an empty stdout is
         // still visibly a result rather than nothing.

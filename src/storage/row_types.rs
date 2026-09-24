@@ -271,6 +271,12 @@ pub struct SessionTrayEntry {
     #[serde(default)]
     #[sqlx(default)]
     pub body_row_id: Option<i64>,
+    /// SHA-256 over an outward command's body FILES when it parked or queued
+    /// (0084): the content the review covered. Approve re-hashes and refuses
+    /// on any change. NULL on non-outward rows and on pre-0084 rows.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub body_sha256: Option<String>,
 }
 
 impl SessionTrayEntry {
