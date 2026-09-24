@@ -100,6 +100,20 @@ impl SignalingBridge {
         // must not queue twice and summon the reviewer twice (EYES P8) — and
         // must not re-run the check, which would find the body unread and
         // queue again.
+        //
+        // A DOWN reviewer is reported before the dedupe (feedback #32): "already
+        // queued, nothing to do" would leave the executor waiting on a read
+        // that can never happen.
+        if outward_command(command) && self.reviewer_override_reason(session_id).is_none() {
+            if let Some((reviewer, health)) = self.session_reviewer_down(session_id, agent) {
+                anyhow::bail!(
+                    "outward publish held: the reviewer ({reviewer}) is {health} and not \
+                     recently active. Respawn it, or ask the user to approve \
+                     override_reviewer_block — approving it also releases any publish already \
+                     queued for review to the user, marked unreviewed."
+                );
+            }
+        }
         {
             let storage = self.storage.lock().await.clone();
             if let Some(storage) = storage {
@@ -366,6 +380,23 @@ impl SignalingBridge {
     /// The session's `working_repo_path` from storage — the source of truth on
     /// the session row (no parallel bridge map to keep in sync). None when the
     /// session is unknown, storage isn't wired, or the row has no repo path.
+    /// `(reviewer slug, health)` when this session's reviewer (anyone but
+    /// `agent`) is stalled or dead AND has made no recent MCP call — the
+    /// liveness test the commit gate's reviewer-down branch uses.
+    fn session_reviewer_down(&self, session_id: &str, agent: &str) -> Option<(String, String)> {
+        let reviewer = self
+            .session_reviewers(session_id)
+            .into_iter()
+            .find(|slug| slug != agent)?;
+        let health = self.current_agent_health(session_id, &reviewer);
+        let recent =
+            self.agent_rpc_recent(session_id, &reviewer, super::findings::REVIEWER_LIVENESS_WINDOW);
+        match health.as_deref() {
+            Some(h @ ("stalled" | "dead")) if !recent => Some((reviewer, h.to_string())),
+            _ => None,
+        }
+    }
+
     /// A body path as the command will read it: relative paths resolve
     /// against the session's working repo — where `execute_gated` runs it.
     pub(super) async fn resolve_body_path(&self, session_id: &str, p: &str) -> PathBuf {
@@ -481,10 +512,7 @@ impl SignalingBridge {
         };
         // Reviewer down → the same escape hatch the commit gate has: a
         // user-approved override, never a timer.
-        let health = self.current_agent_health(session_id, reviewer_slug);
-        let recent =
-            self.agent_rpc_recent(session_id, reviewer_slug, super::findings::REVIEWER_LIVENESS_WINDOW);
-        if matches!(health.as_deref(), Some("stalled") | Some("dead")) && !recent {
+        if let Some((_, health)) = self.session_reviewer_down(session_id, agent) {
             return Ok(match self.reviewer_override_reason(session_id) {
                 Some(_) => OutwardReview::Proceed(Some(
                     "note: reviewer down — user-approved override in effect; outward review \
@@ -493,9 +521,8 @@ impl SignalingBridge {
                 )),
                 None => OutwardReview::Refuse(format!(
                     "outward publish held: the reviewer ({reviewer_slug}) is \
-                     {} and not recently active. Respawn it, or ask the user to \
-                     approve override_reviewer_block.",
-                    health.as_deref().unwrap_or("down")
+                     {health} and not recently active. Respawn it, or ask the user to \
+                     approve override_reviewer_block."
                 )),
             });
         }
@@ -851,41 +878,85 @@ impl SignalingBridge {
                 }
                 continue;
             }
-            if storage.promote_queued_gate(&row.choice_id).await.unwrap_or(0) != 1 {
-                continue; // a racing settlement won the flip
-            }
-            // The side effects a fresh park has (`ask_user_choice_inner`), minus
-            // the in-memory oneshot: a pending row with no parked oneshot is the
-            // post-restart shape `resolve_choice` already handles.
-            self.set_session_awaiting(session_id, &row.agent, false).await;
-            self.notify_ring_gate(session_id, &row.choice_id, true).await;
-            let _ = self.event_tx.send(SignalingEvent::PendingChoice(PendingChoice {
-                choice_id: row.choice_id.clone(),
-                session_id: session_id.to_string(),
-                agent: row.agent.clone(),
-                question: row.prompt.clone(),
-                options: vec!["Approve".to_string(), "Reject".to_string()],
-                approval: Some(ApprovalContext {
-                    kind: ViolationKind::ToolBlocklist,
-                    action: command.clone(),
-                    detail: Some("tool-gate".to_string()),
-                    command: None,
-                }),
-            }));
-            let _ = crate::core::post_system_notice(
+            self.promote_queued_row(
                 &storage,
-                Some(self),
                 session_id,
-                crate::storage::MessageKind::SystemNotice,
+                &row,
                 format!(
                     "✅ Queued outward publish {} is now PARKED for the user's approval (the \
                      reviewer read it and filed nothing blocking): `{command}`",
                     row.choice_id
                 ),
-                None,
             )
             .await;
         }
+    }
+
+    /// Flip one queued row to a PENDING user card with the side effects a
+    /// fresh park has (`ask_user_choice_inner`), minus the in-memory oneshot —
+    /// a pending row with no parked oneshot is the post-restart shape
+    /// `resolve_choice` already handles — then post `notice`. A lost race
+    /// (another settlement already flipped it) does nothing.
+    async fn promote_queued_row(
+        &self,
+        storage: &crate::storage::Storage,
+        session_id: &str,
+        row: &crate::storage::SessionTrayEntry,
+        notice: String,
+    ) -> bool {
+        if storage.promote_queued_gate(&row.choice_id).await.unwrap_or(0) != 1 {
+            return false;
+        }
+        let command = row.command_text.clone().unwrap_or_default();
+        self.set_session_awaiting(session_id, &row.agent, false).await;
+        self.notify_ring_gate(session_id, &row.choice_id, true).await;
+        let _ = self.event_tx.send(SignalingEvent::PendingChoice(PendingChoice {
+            choice_id: row.choice_id.clone(),
+            session_id: session_id.to_string(),
+            agent: row.agent.clone(),
+            question: row.prompt.clone(),
+            options: vec!["Approve".to_string(), "Reject".to_string()],
+            approval: Some(ApprovalContext {
+                kind: ViolationKind::ToolBlocklist,
+                action: command,
+                detail: Some("tool-gate".to_string()),
+                command: None,
+            }),
+        }));
+        let _ = crate::core::post_system_notice(
+            storage,
+            Some(self),
+            session_id,
+            crate::storage::MessageKind::SystemNotice,
+            notice,
+            None,
+        )
+        .await;
+        true
+    }
+
+    /// Feedback #32 / D36: the user approved a reviewer-down override, so the
+    /// publishes queued for the downed reviewer's read can no longer settle —
+    /// settlement runs only on the reviewer's own TurnComplete. Release each
+    /// to the user as its OWN Approve card, loudly marked unreviewed. Never a
+    /// timer: this runs only on the user's Approve of the override.
+    pub(crate) async fn release_queued_outward_unreviewed(&self, session_id: &str) -> usize {
+        let Some(storage) = self.storage.lock().await.clone() else { return 0 };
+        let Ok(queued) = storage.queued_gates_for_session(session_id).await else { return 0 };
+        let mut released = 0;
+        for row in queued {
+            let command = row.command_text.clone().unwrap_or_default();
+            let notice = format!(
+                "⚠ Queued outward publish {} released to the user UNREVIEWED — the user approved \
+                 a reviewer-down override, so the reviewer will not read it. It parks as its own \
+                 Approve card: `{command}`",
+                row.choice_id
+            );
+            if self.promote_queued_row(&storage, session_id, &row, notice).await {
+                released += 1;
+            }
+        }
+        released
     }
 
     /// Relaunch / respawn re-arm (0080): a queued row's summons lived in the
@@ -2536,6 +2607,62 @@ mod tests {
                 .unwrap(),
         );
         assert!(note.as_deref().unwrap_or("").contains("override"), "note: {note:?}");
+    }
+
+    /// Feedback #32: a reviewer that went down AFTER a publish queued is
+    /// reported on the re-issue — never "already queued, nothing to do", which
+    /// would wait forever on a read that cannot happen.
+    #[tokio::test]
+    async fn a_down_reviewer_is_reported_before_the_queue_dedupe() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, _storage, _eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let cmd = format!("gh issue edit 5 --body-file {path}");
+        queued(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
+        bridge.notify_agent_health("s1".to_string(), "eyes", "dead");
+        let err = bridge.park_gated_command("s1", "hands", &cmd).await.unwrap_err().to_string();
+        assert!(err.contains("override_reviewer_block") && err.contains("releases any publish already"), "got: {err}");
+    }
+
+    /// Feedback #32 / D36: the user's Approve of a reviewer-down override
+    /// releases every publish stranded in the queue as its OWN Approve card,
+    /// loudly marked unreviewed; a Reject releases nothing.
+    #[tokio::test]
+    async fn an_approved_override_releases_stranded_queued_publishes() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, _eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let cmd = format!("gh issue edit 5 --body-file {path}");
+        let (gate_id, _) = queued(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
+        bridge.notify_agent_health("s1".to_string(), "eyes", "dead");
+        let override_card = |bridge: std::sync::Arc<SignalingBridge>| async move {
+            bridge
+                .list_questions_for_session("s1")
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|r| r.status == "pending" && r.prompt.contains("override the review block"))
+                .expect("the override parked its card")
+        };
+
+        // Reject first: the queued row stays queued.
+        bridge.override_reviewer_block("s1", "hands", "reviewer crashed").await;
+        let card = override_card(bridge.clone()).await;
+        assert!(card.prompt.contains("skip the reviewer's read"), "the prompt says what it waives");
+        bridge.resolve_choice_confirmable(&card.choice_id, "Reject".into(), false).await.unwrap();
+        assert_eq!(status_of(&storage, &gate_id).await, "queued");
+
+        bridge.override_reviewer_block("s1", "hands", "reviewer crashed").await;
+        let card = override_card(bridge.clone()).await;
+        bridge.resolve_choice_confirmable(&card.choice_id, "Approve".into(), false).await.unwrap();
+        assert_eq!(status_of(&storage, &gate_id).await, "pending", "released to the user");
+        let rows = storage.recent_row_bodies_upto("s1", i64::MAX, 20).await.unwrap();
+        assert!(
+            rows.iter().any(|r| r.contains(&gate_id) && r.contains("UNREVIEWED")),
+            "the release is said out loud: {rows:?}"
+        );
     }
 
     #[tokio::test]

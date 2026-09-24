@@ -2088,8 +2088,12 @@ impl SignalingBridge {
                 format!(
                     "Reviewer is down — {agent} asks to override the review block.\n\n\
                      Reason: {reason}\n\nApprove lifts the commit block for this \
-                     down-incident (auto-clears when the reviewer recovers); Reject \
-                     keeps commits blocked until the reviewer is back."
+                     down-incident AND lets outward publishes (GitHub comments, PRs, \
+                     releases) skip the reviewer's read: each still parks as its own \
+                     Approve card for you, marked unreviewed, and any publish already \
+                     queued for review is released to you now. It auto-clears when the \
+                     reviewer recovers. Reject keeps commits and outward publishes blocked \
+                     until the reviewer is back."
                 ),
                 vec!["Approve".to_string(), "Reject".to_string()],
                 Some(ApprovalContext {

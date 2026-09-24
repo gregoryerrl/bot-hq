@@ -888,7 +888,11 @@ impl SignalingBridge {
                     self.reviewer_override
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
-                        .insert(session_id, reason);
+                        .insert(session_id.clone(), reason);
+                    // Publishes queued for the downed reviewer's read can never
+                    // settle now — release them to the user, marked unreviewed
+                    // (feedback #32).
+                    self.release_queued_outward_unreviewed(&session_id).await;
                 } else {
                     tracing::info!(
                         session = %session_id,
