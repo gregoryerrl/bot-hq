@@ -454,6 +454,8 @@ impl SignalingBridge {
                             .replace_atoms_for_file(project, rel, &atoms_with_code_hash(body, repo_root.as_deref()), mtime)
                             .await?;
                         report.touched.push(rel.clone());
+                    } else {
+                        report.unchanged += 1;
                     }
                 }
             }
@@ -669,6 +671,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n.0, 2, "two non-empty heading sections → two atoms");
+
+        // #20/#24: a pass over an index that already matches disk — the shape
+        // an agent's call sees after the fs-watcher refreshed the row first —
+        // reports the row as UNCHANGED, not as nothing at all.
+        let again = bridge.cl_rescan("_globals").await.unwrap();
+        assert!(again.added.is_empty() && again.touched.is_empty(), "{again:?}");
+        assert!(again.unchanged >= 1, "the matched row is counted: {again:?}");
 
         // ORPHAN → removing the file purges its atoms alongside the index row.
         std::fs::remove_file(&file).unwrap();

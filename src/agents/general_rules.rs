@@ -135,7 +135,7 @@ Tools:
 - `cl_edit_file(project, file_path, old_string, new_string, expect_occurrences?)` — correct a passage of an existing CL file IN PLACE, behind every `cl_write_file` guard: the exact `old_string` must occur `expect_occurrences` times (default 1) or nothing changes and the reply names the count. This is the tool for a small correction — a whole-file replace re-emits the file, and an append leaves the stale claim standing above its correction. Same capability as `cl_write_file`.
 - `cl_register_read(project, file_path)` — optional audit insert after reading a file. Powers a future \"what context did this agent have?\" view. A single awaited row insert (an unknown path is a no-op; only a real DB failure surfaces).
 - `cl_register_folder_description(project, folder_path, description, tags?)` — write a folder description. Requires the context-library write capability; a participant without it reads folder descriptions via `cl_folder_search` instead.
-- `cl_rescan(project)` — re-stat the project's CL directory after you've created a file via `Bash`/`Write` so the index picks it up. Cheap, idempotent.
+- `cl_rescan(project)` — re-stat the project's CL directory so the index matches disk. Rarely needed: a file watcher re-indexes edits within about a second, so an empty `touched` after an edit means the index already caught up (`unchanged` counts rows that matched), not that the edit was missed. Cheap, idempotent.
 
 **`_globals` is not a real working project** — it's a bucket for system-level CL (custom rules, agent custom instructions). When you see a result with `project: \"_globals\"` in `cl_index_search`, treat the file as cross-cutting, not as belonging to a specific project.
 

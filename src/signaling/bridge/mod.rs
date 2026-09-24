@@ -82,6 +82,12 @@ pub struct ClRescanReport {
     pub touched: Vec<String>,
     /// Index entries pointing at files that no longer exist on disk.
     pub orphaned: Vec<String>,
+    /// Index entries that already matched disk — nothing to do. The library's
+    /// fs-watcher runs its own rescan within ~1 s of any edit, so after an
+    /// edit the refreshed row is usually counted HERE, not in `touched`:
+    /// empty lists plus a count mean "the index already matched", never "the
+    /// edit went unseen" (feedback #20/#24).
+    pub unchanged: usize,
 }
 
 /// What happened when a parked choice was resolved.
