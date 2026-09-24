@@ -716,6 +716,11 @@ pub async fn pump_agent(
                     );
                 } else {
                     turn_epoch = Some(live);
+                    // The long-turn notice's clock starts with the turn
+                    // (feedback #44/#45).
+                    if let Some(liveness) = &cfg.liveness {
+                        liveness.turn_opened();
+                    }
                     // **How long the model took to say anything** (rc3 D26).
                     // The gap between the ring handing a turn out and its first
                     // event is the one stretch bot-hq records nothing for, and
@@ -2179,6 +2184,32 @@ mod tests {
         assert_eq!(msgs[1].kind, "system_notice");
         assert!(msgs[1].content.contains("eyes's turn ended in an error and was discarded"), "got: {}", msgs[1].content);
         assert!(msgs[1].content.contains("unknown variant `system`"), "the notice carries the last line");
+    }
+
+    /// Feedback #44/#45, the wire: a turn's FIRST event starts the long-turn
+    /// clock the watchdog reads — cut the `turn_opened` call and no long turn
+    /// is ever announced.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_turns_first_event_starts_the_long_turn_clock() {
+        let (storage, state) = setup().await;
+        let (mut cfg, _ring_rx) = cfg_with_ring("hands");
+        let lv = crate::core::watchdog::AgentLiveness::new();
+        cfg.liveness = Some(Arc::clone(&lv));
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(4)));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+        ev_tx.send(AgentEvent::Text("working".into())).await.unwrap();
+        let mut started = false;
+        for _ in 0..200 {
+            if lv.take_long_turn(Duration::ZERO).is_some() {
+                started = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(started, "the turn's first event opened the long-turn clock");
+        drop(ev_tx);
+        task.await.unwrap();
     }
 
     /// Feedback #17(3): claude-code's own error text (a `<synthetic>`

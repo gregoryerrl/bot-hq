@@ -35,14 +35,49 @@ pub const IDLE_GRACE: Duration = Duration::from_secs(90);
 pub struct AgentLiveness {
     last_event: Mutex<Instant>,
     tools_in_flight: AtomicU32,
+    /// When the turn in flight opened (its first event), `None` between turns
+    /// — the long-turn notice's clock (feedback #44/#45).
+    turn_started: Mutex<Option<Instant>>,
+    /// Tool calls made in the turn in flight.
+    turn_tools: AtomicU32,
+    /// The long-turn notice already went out for this turn.
+    long_turn_noticed: std::sync::atomic::AtomicBool,
 }
+
+/// How long one turn may run before the chat says so (feedback #44/#45): a
+/// turn holding the ring for this long reads, from the tray, like a session
+/// that stopped — and a typed message only lands at the turn's end.
+pub const LONG_TURN: Duration = Duration::from_secs(20 * 60);
 
 impl AgentLiveness {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             last_event: Mutex::new(Instant::now()),
             tools_in_flight: AtomicU32::new(0),
+            turn_started: Mutex::new(None),
+            turn_tools: AtomicU32::new(0),
+            long_turn_noticed: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// The pump opened a turn (its first event). Idempotent within a turn.
+    pub fn turn_opened(&self) {
+        let mut started = self.turn_started.lock().unwrap_or_else(|p| p.into_inner());
+        if started.is_none() {
+            *started = Some(Instant::now());
+            self.turn_tools.store(0, Ordering::Release);
+            self.long_turn_noticed.store(false, Ordering::Release);
+        }
+    }
+
+    /// Once per turn: `(age, tool calls)` when the turn in flight has run past
+    /// `threshold` and has not been announced yet.
+    pub fn take_long_turn(&self, threshold: Duration) -> Option<(Duration, u32)> {
+        let age = (*self.turn_started.lock().unwrap_or_else(|p| p.into_inner()))?.elapsed();
+        if age < threshold || self.long_turn_noticed.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        Some((age, self.turn_tools.load(Ordering::Acquire)))
     }
 
     /// Any event from the agent → it's alive; reset the silence timer.
@@ -55,6 +90,7 @@ impl AgentLiveness {
     /// A counter (not a bool) because claude-code can emit parallel tool calls.
     pub fn tool_started(&self) {
         self.tools_in_flight.fetch_add(1, Ordering::Release);
+        self.turn_tools.fetch_add(1, Ordering::Release);
     }
 
     /// A tool call's result returned (ToolResult). Saturating — never underflow.
@@ -71,6 +107,8 @@ impl AgentLiveness {
     /// can't wedge stall detection off forever.
     pub fn reset_tools(&self) {
         self.tools_in_flight.store(0, Ordering::Release);
+        // …and the turn is over: the long-turn clock stops with it.
+        *self.turn_started.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     pub fn tools_in_flight(&self) -> u32 {
@@ -234,6 +272,30 @@ pub async fn run_stall_watchdog(
             );
             if let Some(next) = decision {
                 bridge.notify_agent_health(session_id.clone(), slug, next);
+            }
+            // Feedback #44/#45: a turn this long reads, from the tray, like a
+            // stopped session. Say so ONCE per turn — as a row, which lands in
+            // the chat now and interrupts nothing.
+            if activity.is_busy_slug(slug) {
+                if let Some((age, tools)) = liveness.take_long_turn(LONG_TURN) {
+                    if let Some(storage) = bridge.storage_handle().await {
+                        let _ = crate::core::post_system_notice(
+                            &storage,
+                            Some(&bridge),
+                            &session_id,
+                            crate::storage::MessageKind::SystemNotice,
+                            format!(
+                                "⏳ {slug} has been on one turn for {} min ({tools} tool call{} so \
+                                 far) — it is working, not stopped. A typed message lands when \
+                                 the turn ends; Pause interrupts it now.",
+                                age.as_secs() / 60,
+                                if tools == 1 { "" } else { "s" }
+                            ),
+                            None,
+                        )
+                        .await;
+                    }
+                }
             }
         }
         // ── Idle-unflagged watchdog (the "What happened?" fix) ──────────────
@@ -460,6 +522,25 @@ mod tests {
     const T: Duration = Duration::from_secs(90);
     const PAST: Duration = Duration::from_secs(120); // > threshold
     const FRESH: Duration = Duration::from_secs(5); // < threshold
+
+    /// Feedback #44/#45: a long turn is announced ONCE, counts its tool calls,
+    /// and the clock stops at the turn's end.
+    #[test]
+    fn a_long_turn_is_announced_once_per_turn() {
+        let lv = AgentLiveness::new();
+        assert!(lv.take_long_turn(Duration::ZERO).is_none(), "no turn in flight");
+        lv.turn_opened();
+        lv.tool_started();
+        lv.tool_started();
+        assert_eq!(lv.take_long_turn(Duration::ZERO).map(|(_, t)| t), Some(2));
+        assert!(lv.take_long_turn(Duration::ZERO).is_none(), "once per turn");
+        lv.reset_tools();
+        assert!(lv.take_long_turn(Duration::ZERO).is_none(), "the turn ended");
+        lv.turn_opened();
+        assert_eq!(lv.take_long_turn(Duration::ZERO).map(|(_, t)| t), Some(0), "a new turn re-arms");
+        lv.turn_opened();
+        assert!(lv.take_long_turn(Duration::from_secs(3600)).is_none(), "not long yet");
+    }
 
     #[test]
     fn stall_decision_flags_busy_silent_no_tool() {
