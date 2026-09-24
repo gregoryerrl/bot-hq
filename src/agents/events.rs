@@ -78,6 +78,9 @@ fn short_line(s: &str) -> String {
     }
 }
 
+/// The model name claude-code gives the messages it writes itself.
+pub const SYNTHETIC_MODEL: &str = "<synthetic>";
+
 /// Translate a wire `StreamEvent` to zero or more `AgentEvent`s.
 /// `assistant` events with multiple content blocks fan out to multiple events.
 ///
@@ -103,10 +106,18 @@ pub fn translate(
             if let Some(u) = asst.message.usage.clone() {
                 *last_assistant_usage = Some(u);
             }
+            // claude-code marks its OWN messages — an API error, a usage limit —
+            // with the model `<synthetic>` (its binary tests
+            // `isApiErrorMessage && message.model === "<synthetic>"`, probed on
+            // CLI 2.1.281). That text is not the participant speaking
+            // (feedback #17); a participant's own prose that merely starts
+            // "API Error:" stays its speech.
+            let synthetic = asst.message.model.as_deref() == Some(SYNTHETIC_MODEL);
             asst.message
             .content
             .into_iter()
             .filter_map(|block| match block {
+                ContentBlock::Text { text } if synthetic => Some(AgentEvent::Notice(text)),
                 ContentBlock::Text { text } => Some(AgentEvent::Text(text)),
                 ContentBlock::ToolUse { id, name, input } => Some(AgentEvent::ToolUse {
                     id,
@@ -476,6 +487,26 @@ mod tests {
             }] => assert_eq!(*api_error_status, None),
             other => panic!("expected TurnComplete, got {other:?}"),
         }
+    }
+
+    /// Feedback #17(3): claude-code's own messages carry the model
+    /// `<synthetic>`; their text is a Notice, not the participant's prose. A
+    /// real model's text that merely starts "API Error:" stays Text.
+    #[test]
+    fn synthetic_messages_become_notices_and_real_prose_stays_text() {
+        let mut carry = None;
+        let parse = |line: &str| -> StreamEvent { serde_json::from_str(line).unwrap() };
+        let synthetic = parse(
+            r#"{"type":"assistant","message":{"id":"m1","model":"<synthetic>","content":[{"type":"text","text":"API Error: Connection refused"}]}}"#,
+        );
+        assert!(matches!(
+            translate(synthetic, &mut carry).as_slice(),
+            [AgentEvent::Notice(t)] if t == "API Error: Connection refused"
+        ));
+        let quoting = parse(
+            r#"{"type":"assistant","message":{"id":"m2","model":"claude-opus-5-5","content":[{"type":"text","text":"API Error: that is what the log said"}]}}"#,
+        );
+        assert!(matches!(translate(quoting, &mut carry).as_slice(), [AgentEvent::Text(_)]));
     }
 
     #[tokio::test]

@@ -126,6 +126,12 @@ impl AgentHealth {
 pub enum AgentEvent {
     /// Plain prose chunk from the assistant.
     Text(String),
+    /// Text that is NOT the model's speech: claude-code's own synthetic
+    /// message (`message.model == "<synthetic>"` — an API error, a usage
+    /// limit) and this supervisor's notes. Persisted as a system notice that
+    /// names the participant, never as the participant talking (feedback #17:
+    /// "API Error: Connection refused" read as the reviewer saying it).
+    Notice(String),
     /// Agent invoked a tool (typically `ask_user_choice` or `mark_awaiting_user`).
     ToolUse {
         id: String,
@@ -1075,8 +1081,8 @@ async fn supervise<S, Fut>(
                 Err(e) => {
                     warn!(agent = %agent, error = %e, "respawn failed after transient error");
                     let _ = out_event_tx
-                        .send(AgentEvent::Text(format!(
-                            "⚠️ Could not resume after a transient API error (HTTP {status}): {e}. \
+                        .send(AgentEvent::Notice(format!(
+                            "could not resume after a transient API error (HTTP {status}): {e}. \
                              Reopen the session to retry."
                         )))
                         .await;
@@ -1090,8 +1096,8 @@ async fn supervise<S, Fut>(
             let status = last_error_status.unwrap_or(0);
             warn!(agent = %agent, status, retries = consecutive_transient, "transient API errors exhausted retry budget");
             let _ = out_event_tx
-                .send(AgentEvent::Text(format!(
-                    "⚠️ Stopped after {consecutive_transient} consecutive transient API errors \
+                .send(AgentEvent::Notice(format!(
+                    "Stopped after {consecutive_transient} consecutive transient API errors \
                      (last: HTTP {status}). The upstream API stayed unavailable — reopen the \
                      session to resume from here."
                 )))
@@ -2538,7 +2544,7 @@ mod tests {
         )));
         assert!(
             !got.iter()
-                .any(|e| matches!(e, AgentEvent::Text(t) if t.contains("Stopped after"))),
+                .any(|e| matches!(e, AgentEvent::Notice(t) if t.contains("Stopped after"))),
             "permanent error must not emit the transient give-up message"
         );
     }
@@ -2592,7 +2598,7 @@ mod tests {
         assert!(
             got.iter().any(|e| matches!(
                 e,
-                AgentEvent::Text(t) if t.contains("Stopped after") && t.contains('2')
+                AgentEvent::Notice(t) if t.contains("Stopped after") && t.contains('2')
             )),
             "expected the give-up message after exhausting 2 retries; got {got:?}"
         );

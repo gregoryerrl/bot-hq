@@ -687,6 +687,32 @@ pub async fn pump_agent(
                 buffer.push_str(&text);
                 buffer.push('\n');
             }
+            AgentEvent::Notice(text) => {
+                // Not the participant speaking (feedback #17): claude-code's
+                // own synthetic message or the retry supervisor's note. A
+                // system row that NAMES the participant — the line used to be
+                // stored as their prose, so "API Error: Connection refused"
+                // read as the reviewer talking. It still feeds limit detection
+                // and the buffer: the halt banner quotes the turn's last line.
+                if crate::core::post_system_notice(
+                    &storage,
+                    cfg.bridge.as_deref(),
+                    &cfg.session_id,
+                    MessageKind::SystemNotice,
+                    format!("⚠ {} — {}", cfg.slug, text.trim()),
+                    None,
+                )
+                .await
+                .is_none()
+                {
+                    warn!(agent = %cfg.slug, "persisting a CLI notice failed");
+                }
+                if limit_line.is_none() {
+                    limit_line = detect_provider_limit(&text);
+                }
+                buffer.push_str(&text);
+                buffer.push('\n');
+            }
             AgentEvent::ToolUse { id, name, input } => {
                 // peer_ack: the agent explicitly acked its peer this turn — flag it
                 // so this turn's ending is reported to the ring as an ack.
@@ -2033,6 +2059,39 @@ mod tests {
         assert_eq!(msgs[1].kind, "system_notice");
         assert!(msgs[1].content.contains("eyes's turn ended in an error and was discarded"), "got: {}", msgs[1].content);
         assert!(msgs[1].content.contains("unknown variant `system`"), "the notice carries the last line");
+    }
+
+    /// Feedback #17(3): claude-code's own error text (a `<synthetic>`
+    /// message, translated to `AgentEvent::Notice`) is stored as a SYSTEM row
+    /// naming the participant — never as the participant's prose.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_cli_error_is_a_system_row_not_the_participant_speaking() {
+        let (storage, state) = setup().await;
+        let (cfg, mut ring_rx) = cfg_with_ring("eyes");
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+        let err = "API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)";
+        ev_tx.send(AgentEvent::Notice(err.into())).await.unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: Some("error_during_execution".into()),
+                is_error: true,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+        assert!(next_turn_end(&mut ring_rx).is_some());
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(msgs[0].kind, "system_notice", "{msgs:?}");
+        assert!(msgs[0].content.starts_with("⚠ eyes — API Error: Connection refused"), "got: {}", msgs[0].content);
+        assert!(
+            !msgs.iter().any(|m| m.kind == "text" && m.content.contains("API Error")),
+            "the error is not stored as the participant's speech: {msgs:?}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
