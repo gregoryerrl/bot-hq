@@ -7,6 +7,101 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+Fixes for the accumulated agent-feedback queue (items #10–#45, session
+s-84c59f27). Three migrations apply at the next launch: 0083
+(`findings.gate_id`), 0084 (`session_tray.body_sha256`) and 0085
+(`session_tray.run_refusal`).
+
+### Fixed
+
+- **A body only the executor had handled no longer counts as reviewed.**
+  The outward-publish coverage check searched every row, including the
+  executor's own tool rows, which no reviewer ever receives — a body merely
+  written with a tool parked for your approval as if reviewed. Coverage now
+  reads only the rows the reviewer's backlog delivered, clamped at the
+  200 KB wire cut, and a publish that parks on prior review says so in the
+  chat, naming the covering row (feedback #40).
+- **A reviewer's blocking finding can name the publish it vetoes.**
+  `flag_finding` takes an optional `gate_id`: a queued publish's id
+  withdraws only that one, `"none"` withdraws none, and no id keeps the
+  withdraw-everything default. Only open findings veto; a publish withdrawn
+  by a finding is re-reviewed rather than re-parked on its old coverage;
+  while a targeted finding is open, re-issuing the exact command is refused
+  unless its body file changed; and the withdrawal notice no longer tells
+  the executor to clear an unrelated finding first (feedback #42/#43).
+- **Every outward body form reaches the reviewer.** Release notes
+  (`--notes-file`, `--notes`), `gh api` fields read from a file, curl data,
+  gist files, `-b` and `--body=` are extracted per `gh` subcommand and for
+  curl; bodies that cannot be read up front — computed by the shell, read
+  from stdin, written by the same command, `pr create --fill`, templates,
+  unknown file flags — are refused instead of parking as content-free. The
+  outward check also sees through env prefixes, `env`/`command`/`sudo`,
+  `sh -c`/`eval`, scripts fed to a shell, command substitution, grouping
+  and wrappers such as `timeout`, `xargs` and `find -exec` (feedback #35).
+- **A reviewer that goes down no longer strands queued publishes.** The
+  down-reviewer refusal comes before "already queued", and approving
+  `override_reviewer_block` releases queued publishes to you as their own
+  cards marked unreviewed — except any the reviewer had vetoed, which are
+  withdrawn. The override prompt now says it also waives publish review
+  (feedback #32).
+- **An approved publish whose body file changed after review does not run.**
+  The body files are hashed when a publish parks or queues and re-hashed at
+  your Approve; a change or a missing file refuses the run with a chat row,
+  and `gate_status` reports "approved but NOT RUN" (feedback #22).
+- **`gate_status` says RUNNING** while an approved command is still
+  executing, instead of "output delivered" (feedback #15).
+- **The approval card shows why a command was gated** — the matched keyword
+  and its column, and a prior rejection — on the card face, including for
+  queued publishes (feedback #29).
+- **A blocked push says why.** A 30-minute approval timeout now says the
+  card is still live and not to re-issue the push; a token mismatch names
+  the build mismatch; only an unreachable app says "not running"
+  (feedback #36).
+- **Context Library writes keep a real rollback point.** Content a CL file
+  held that never reached git is committed alone before a write replaces
+  it; if that snapshot fails, the write is refused. "Nothing to commit" is
+  decided by git, a failed commit is reported as a failure, library git
+  ignores signing config and repo hooks, and writes are serialised
+  (feedback #27/#28).
+- **The close-out staleness sweep reports stale references, not
+  vocabulary.** Words count as retired terms only when backticked or
+  code-shaped; filenames and anchored paths count; CL files deleted or
+  renamed during the session are swept for; files the session wrote are
+  skipped for words only; a restored term is dropped (feedback #21/#38).
+- **`cl_rescan` reports rows it found already current** (`unchanged`), and
+  says the file watcher keeps the index current (feedback #20/#24).
+- **A message staged while the agents are booting waits for boot to end**
+  instead of dealing a turn nothing could complete (feedback #10).
+- **Error halts give advice for the error they saw.** Only a context
+  overflow advises a fresh session; an upstream failure says the retries
+  are spent; an unknown cause says so. A failed turn with no text reports
+  the result's subtype and HTTP status, a refused connection is retried,
+  and the banner counts the participant's error halts and its last clean
+  turn (feedback #17/#18/#19).
+- **claude-code's own error text is a notice, not the agent speaking**, and
+  so are the retry supervisor's notes (feedback #17).
+
+### Added
+
+- **Custom session docs keep their earlier versions**: a replace archives
+  the previous body as `slug@n` (the newest 10 kept), and
+  `session_doc_read` takes `grep` and `lines` for a selective read; archives
+  stay out of an agent's `session_doc_search` unless asked for
+  (feedback #37).
+- **A run of passes is one compact chat line** — the `pass_turn` call and
+  result rows are hidden and consecutive passes read "passed — A · B"
+  (feedback #13).
+- **The starter Tool Gate gates history rewrites** (`git filter-branch`,
+  `git filter-repo`, `git reflog expire`, `git gc --prune`).
+
+### Changed
+
+- **The Tool Gate settings copy states the snapshot rule**: a session
+  copies the global list when it spawns (feedback #33/#34).
+- **The universal rules teach the shell traps** that produced false checks:
+  a native claude-code's `find`/`grep` wrappers, zsh's `"$r:path"` modifier,
+  unquoted globs, and a pipeline's exit status (feedback #41, #27/#28).
+
 ## [1.0.6] — 2026-09-09
 
 The first release built from the public repository,
