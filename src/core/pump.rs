@@ -505,9 +505,10 @@ fn streak_advice(last_line: &str, retry_attempt: usize) -> &'static str {
     }
 }
 
-/// "This is eyes's 3rd error halt this session (the first 8h 35m ago); its
-/// last clean turn ended 1m ago." — the trend the user could only get from a
-/// hand-written SQL query before (feedback #19).
+/// "This is eyes's 3rd error halt since bot-hq started (the first 8h 35m
+/// ago); its last clean turn ended 1m ago." — the trend the user could only get
+/// from a hand-written SQL query before (feedback #19). Kept in the pump, so it
+/// survives respawns but not an app relaunch — the wording says so.
 fn error_halt_history(
     slug: &str,
     halts: &[std::time::Instant],
@@ -527,9 +528,9 @@ fn error_halt_history(
     };
     let clean = match last_clean_turn {
         Some(t) => format!("its last clean turn ended {} ago", human_span(t.elapsed())),
-        None => "it has not completed a clean turn since this process started".to_string(),
+        None => "it has not completed a clean turn since bot-hq started".to_string(),
     };
-    format!("This is {slug}'s {ordinal} error halt this session{first}; {clean}.")
+    format!("This is {slug}'s {ordinal} error halt since bot-hq started{first}; {clean}.")
 }
 
 /// `8h 35m`, `12m`, `45s` — coarse on purpose: the trend, not a stopwatch.
@@ -2246,7 +2247,7 @@ mod tests {
     fn the_halt_history_counts_and_spans() {
         let now = std::time::Instant::now();
         let one = error_halt_history("eyes", &[now], None);
-        assert!(one.contains("eyes's 1st error halt") && one.contains("not completed a clean turn"), "{one}");
+        assert!(one.contains("eyes's 1st error halt since bot-hq started") && one.contains("not completed a clean turn"), "{one}");
         let three = error_halt_history("eyes", &[now, now, now], Some(now));
         assert!(three.contains("3rd error halt") && three.contains("(the first 0s ago)"), "{three}");
         assert!(three.contains("last clean turn ended 0s ago"), "{three}");
