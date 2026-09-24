@@ -49,6 +49,68 @@ fn effective_slug<'a>(slug: &'a str, phase: Option<&'a str>) -> &'a str {
 /// unbounded loop on a doc rewritten hundreds of times.
 const MAX_DOC_ARCHIVES: u32 = 50;
 
+/// Cap on archived versions per UNTAGGED (custom) doc — lower, because a
+/// custom doc is rewritten far more often than a phase doc (feedback #37: an
+/// EOD draft went through 15 full rewrites, and a correction applied at rev 6
+/// was silently reverted with no earlier revision left to diff against).
+const MAX_UNTAGGED_DOC_ARCHIVES: u32 = 10;
+
+/// Is `slug` an archived version (`name@<n>`)?
+pub(crate) fn is_archive_slug(slug: &str) -> bool {
+    slug.rsplit_once('@')
+        .is_some_and(|(_, n)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// `session_doc_read`'s selective views (feedback #37: every mechanical check
+/// of a doc used to round-trip its whole body through the transcript):
+/// `lines` = "a-b" / "a" (1-based, inclusive) narrows the body; `grep` then
+/// returns only the matching lines, case-insensitively, with their numbers.
+pub(crate) fn doc_excerpt(
+    body: &str,
+    grep: Option<&str>,
+    lines: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    let all: Vec<&str> = body.lines().collect();
+    let total = all.len();
+    let (from, to) = match lines {
+        None => (1, total.max(1)),
+        Some(spec) => {
+            let spec = spec.trim();
+            let parse = |n: &str| {
+                n.trim()
+                    .parse::<usize>()
+                    .map_err(|_| anyhow::anyhow!("`lines` must be \"a-b\" or \"a\" (1-based), got {spec:?}"))
+            };
+            let (a, b) = match spec.split_once('-') {
+                Some((a, b)) => (parse(a)?, parse(b)?),
+                None => {
+                    let a = parse(spec)?;
+                    (a, a)
+                }
+            };
+            if a == 0 || b < a {
+                anyhow::bail!("`lines` must be \"a-b\" with 1 <= a <= b, got {spec:?}");
+            }
+            (a, b.min(total.max(1)))
+        }
+    };
+    let window = || all.iter().enumerate().skip(from - 1).take(to.saturating_sub(from - 1));
+    match grep {
+        Some(pattern) => {
+            let needle = pattern.to_lowercase();
+            let matches: Vec<serde_json::Value> = window()
+                .filter(|(_, l)| l.to_lowercase().contains(&needle))
+                .map(|(i, l)| serde_json::json!({ "line": i + 1, "text": l }))
+                .collect();
+            Ok(serde_json::json!({ "total_lines": total, "matches": matches }))
+        }
+        None => {
+            let text = window().map(|(_, l)| *l).collect::<Vec<_>>().join("\n");
+            Ok(serde_json::json!({ "total_lines": total, "lines": format!("{from}-{to}"), "body": text }))
+        }
+    }
+}
+
 impl SignalingBridge {
     /// How one participant of a session is NAMED (rc3 D10's display rule), or
     /// `None` when storage isn't wired, the roster has no such slug, or the read
@@ -81,6 +143,7 @@ impl SignalingBridge {
         session_id: &str,
         slug: &str,
         new_body: &str,
+        cap: u32,
     ) -> Option<String> {
         let existing = storage
             .session_document_by_slug(session_id, slug)
@@ -99,9 +162,7 @@ impl SignalingBridge {
             .session_document_archive_slots(session_id, slug)
             .await
             .unwrap_or_default();
-        let n = (1..=MAX_DOC_ARCHIVES)
-            .find(|n| !occupied.contains(n))
-            .unwrap_or(MAX_DOC_ARCHIVES);
+        let n = (1..=cap).find(|n| !occupied.contains(n)).unwrap_or(cap);
         let candidate = format!("{slug}@{n}");
         storage
             .upsert_session_document(session_id, &candidate, &existing.body, None)
@@ -182,9 +243,11 @@ impl SignalingBridge {
             };
             // Archiving exists to preserve a body about to be REPLACED. An
             // append replaces nothing, so archiving it would just duplicate the
-            // prefix into the archive on every slice.
-            if phase.is_some() && !append {
-                Self::archive_superseded_doc(&storage, session_id, key, body).await;
+            // prefix into the archive on every slice. Untagged (custom) docs
+            // archive too, at a lower cap (feedback #37).
+            if !append {
+                let cap = if phase.is_some() { MAX_DOC_ARCHIVES } else { MAX_UNTAGGED_DOC_ARCHIVES };
+                Self::archive_superseded_doc(&storage, session_id, key, body, cap).await;
             }
             storage
                 .upsert_session_document(session_id, key, body, phase)
@@ -326,7 +389,8 @@ impl SignalingBridge {
                 None => format!("{heading}\n\n{body}"),
             };
             if !append {
-                Self::archive_superseded_doc(&storage, session_id, &slug, &composed).await;
+                Self::archive_superseded_doc(&storage, session_id, &slug, &composed, MAX_DOC_ARCHIVES)
+                    .await;
             }
             storage
                 .upsert_session_document(session_id, &slug, &composed, Some(phase))
@@ -679,10 +743,36 @@ mod tests {
         bridge.session_doc_write("s1", "plan", "same", Some("plan"), false).await.unwrap();
         assert!(bridge.session_doc_read("s1", "plan@1").await.unwrap().is_none());
 
-        // Untagged scratch docs are caller-managed: rewriting is routine, not loss.
+        // Untagged (custom) docs archive on replace too (feedback #37): a
+        // correction reverted by a later rewrite must stay detectable.
         bridge.session_doc_write("s1", "scratch", "v1", None, false).await.unwrap();
         bridge.session_doc_write("s1", "scratch", "v2", None, false).await.unwrap();
-        assert!(bridge.session_doc_read("s1", "scratch@1").await.unwrap().is_none());
+        assert_eq!(
+            bridge.session_doc_read("s1", "scratch@1").await.unwrap().map(|d| d.body).as_deref(),
+            Some("v1")
+        );
+        // …at the lower cap: past 10 archives the newest slot is reused.
+        for i in 3..20 {
+            bridge.session_doc_write("s1", "scratch", &format!("v{i}"), None, false).await.unwrap();
+        }
+        assert!(bridge.session_doc_read("s1", "scratch@11").await.unwrap().is_none());
+        assert!(bridge.session_doc_read("s1", "scratch@10").await.unwrap().is_some());
+    }
+
+    #[test]
+    fn doc_excerpt_greps_and_slices_without_the_whole_body() {
+        let body = "one\nTwo alpha\nthree\nfour ALPHA\nfive";
+        let g = doc_excerpt(body, Some("alpha"), None).unwrap();
+        assert_eq!(g["total_lines"], 5);
+        assert_eq!(g["matches"][0]["line"], 2);
+        assert_eq!(g["matches"][1]["line"], 4);
+        let l = doc_excerpt(body, None, Some("2-3")).unwrap();
+        assert_eq!(l["body"], "Two alpha\nthree");
+        let both = doc_excerpt(body, Some("alpha"), Some("3-5")).unwrap();
+        assert_eq!(both["matches"].as_array().unwrap().len(), 1, "grep runs inside the window");
+        assert!(doc_excerpt(body, None, Some("4-2")).is_err());
+        assert!(doc_excerpt(body, None, Some("x")).is_err());
+        assert!(is_archive_slug("plan@3") && !is_archive_slug("notes@home") && !is_archive_slug("plan"));
     }
 
     #[tokio::test]

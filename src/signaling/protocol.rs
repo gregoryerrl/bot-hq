@@ -504,7 +504,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "session_doc_write",
-            description: "Upsert a per-session scratch document (plan, investigation findings, notes — any free-form text). Isolated to THIS session; does NOT appear in cl_index_search and won't pollute the CL. **Tag with `phase` (one of `investigate`/`plan`/`apply`/`verify`) and the doc is keyed BY PHASE — exactly ONE rewritable doc per phase. Writing that phase again (even under a different slug) overwrites the single doc; if you found new info, rewrite the whole doc, never create a `-v2`.** Phase-tagged docs surface in the matching IPAV document tab and are retrievable via `session_doc_search(phase=...)`. Untagged docs are keyed by `slug` (many allowed) and are CUSTOM documents: each surfaces as its own tab beside I/P/A/V, named by its slug — for a document the IPAV set does not cover (a task checklist, an issue write-up), when the user asks or the work needs one; they stay out of phase-filtered searches. Two mechanics to know: a caller that files review findings (a reviewer) has its phase-tagged write redirected to the co-located `<phase>-eyes` doc, so the executor's doc is never overwritten by a review; and every phase REPLACE archives the previous body as an untagged `<slug>@<n>` doc (capped), which an unfiltered `session_doc_search` will list. Promote to CL by writing the body to a CL path with Write/Bash + cl_rescan(project) ONLY when the user asks.\n\n`mode: \"append\"` adds to the existing body under a timestamped separator instead of replacing it. Use it when a phase ships in SLICES: rewriting the whole doc per slice is what leaves it stale, and the phase key means you cannot open a second one. An append supersedes nothing, so nothing is archived. Default is `replace`.",
+            description: "Upsert a per-session scratch document (plan, investigation findings, notes — any free-form text). Isolated to THIS session; does NOT appear in cl_index_search and won't pollute the CL. **Tag with `phase` (one of `investigate`/`plan`/`apply`/`verify`) and the doc is keyed BY PHASE — exactly ONE rewritable doc per phase. Writing that phase again (even under a different slug) overwrites the single doc; if you found new info, rewrite the whole doc, never create a `-v2`.** Phase-tagged docs surface in the matching IPAV document tab and are retrievable via `session_doc_search(phase=...)`. Untagged docs are keyed by `slug` (many allowed) and are CUSTOM documents: each surfaces as its own tab beside I/P/A/V, named by its slug — for a document the IPAV set does not cover (a task checklist, an issue write-up), when the user asks or the work needs one; they stay out of phase-filtered searches. Two mechanics to know: a caller that files review findings (a reviewer) has its phase-tagged write redirected to the co-located `<phase>-eyes` doc, so the executor's doc is never overwritten by a review; and every REPLACE — of a phase doc or an untagged one — archives the previous body as an untagged `<slug>@<n>` doc (capped: 50 per phase doc, 10 per untagged doc), which `session_doc_search` lists only with `include_archives`. Promote to CL by writing the body to a CL path with Write/Bash + cl_rescan(project) ONLY when the user asks.\n\n`mode: \"append\"` adds to the existing body under a timestamped separator instead of replacing it. Use it when a phase ships in SLICES: rewriting the whole doc per slice is what leaves it stale, and the phase key means you cannot open a second one. An append supersedes nothing, so nothing is archived. Default is `replace`.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -544,6 +544,10 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                         "type": "string",
                         "enum": ["investigate", "plan", "apply", "verify"],
                         "description": "Optional. Filter results to docs tagged with this IPAV phase. Use for cross-phase context retrieval."
+                    },
+                    "include_archives": {
+                        "type": "boolean",
+                        "description": "Optional. Include archived versions (`<slug>@<n>`, the bodies a replace superseded). Default false; a query containing `@` includes them too."
                     }
                 },
                 "required": []
@@ -551,13 +555,21 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "session_doc_read",
-            description: "Fetch one session-scratch document by slug. Returns {id, slug, body, created_at, updated_at} or null when the slug isn't in this session.",
+            description: "Fetch one session-scratch document by slug. Returns {id, slug, body, created_at, updated_at} or null when the slug isn't in this session. For a mechanical check of a long doc, avoid pulling the whole body: `grep` returns only the matching lines (case-insensitive) with their numbers, `lines` (\"a-b\", 1-based) returns just that range; both together grep inside the range. An earlier version of a rewritten doc is `<slug>@<n>` (see session_doc_search include_archives).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "slug": {
                         "type": "string",
                         "description": "Slug from session_doc_search."
+                    },
+                    "grep": {
+                        "type": "string",
+                        "description": "Optional case-insensitive substring: return only matching lines as {line, text}, plus total_lines."
+                    },
+                    "lines": {
+                        "type": "string",
+                        "description": "Optional 1-based inclusive range \"a-b\" (or \"a\"): return only those lines."
                     }
                 },
                 "required": ["slug"]

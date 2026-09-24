@@ -46,6 +46,7 @@ mod feedback;
 mod findings;
 mod outward_body;
 mod session_docs;
+pub(crate) use session_docs::{doc_excerpt, is_archive_slug};
 mod terminal_tools;
 mod tray;
 pub use tray::{gate_age_secs, Withdrawal, STALE_GATE_MAX_AGE_SECS};

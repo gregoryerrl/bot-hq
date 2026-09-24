@@ -1245,12 +1245,18 @@ async fn call_tool(
         "session_doc_search" => {
             let query = args.get("query").and_then(Value::as_str);
             let phase = parse_optional_phase(&args)?;
+            // Archived versions (`slug@<n>`) stay out of a search unless asked
+            // for — one bare search would otherwise return up to ten old full
+            // bodies per rewritten custom doc (feedback #37, plan review M5).
+            let include_archives = args.get("include_archives").and_then(Value::as_bool).unwrap_or(false)
+                || query.is_some_and(|q| q.contains('@'));
             let rows = bridge
                 .session_doc_search(&caller.session_id, query, phase.as_deref())
                 .await
                 .map_err(internal_err_no_prefix)?;
             let trimmed: Vec<Value> = rows
                 .into_iter()
+                .filter(|d| include_archives || !crate::signaling::bridge::is_archive_slug(&d.slug))
                 .map(|d| {
                     json!({
                         "id": d.id,
@@ -1266,11 +1272,29 @@ async fn call_tool(
         }
         "session_doc_read" => {
             let slug = arg_required_str(&args, "slug")?;
+            let grep = args.get("grep").and_then(Value::as_str);
+            let lines = args.get("lines").and_then(Value::as_str);
             let row = bridge
                 .session_doc_read(&caller.session_id, &slug)
                 .await
                 .map_err(internal_err_no_prefix)?;
             match row {
+                // `grep` / `lines`: a selective view, not the whole body
+                // (feedback #37).
+                Some(d) if grep.is_some() || lines.is_some() => {
+                    let excerpt = crate::signaling::bridge::doc_excerpt(&d.body, grep, lines)
+                        .map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, e.to_string()))?;
+                    let mut out = json!({
+                        "id": d.id,
+                        "slug": d.slug,
+                        "created_at": d.created_at,
+                        "updated_at": d.updated_at,
+                    });
+                    if let (Some(o), Some(e)) = (out.as_object_mut(), excerpt.as_object()) {
+                        o.extend(e.clone());
+                    }
+                    Ok(ToolCallResult::text(out.to_string()))
+                }
                 Some(d) => Ok(ToolCallResult::text(
                     json!({
                         "id": d.id,
@@ -3569,6 +3593,36 @@ mod tests {
         r.id = None;
         let out = dispatch(r, &caller(), &bridge).await.unwrap();
         assert!(out.is_none());
+    }
+
+    /// Feedback #37: a bare `session_doc_search` hides archived versions; the
+    /// flag (or an `@` in the query) brings them back; `session_doc_read`'s
+    /// `grep` returns only matching lines.
+    #[tokio::test]
+    async fn doc_search_hides_archives_and_read_greps() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+        let call = |name: &str, args: Value| {
+            let bridge = &bridge;
+            let r = req("tools/call", json!({ "name": name, "arguments": args }), 1);
+            async move {
+                let out = dispatch(r, &caller(), bridge).await.unwrap().unwrap();
+                let v = serde_json::to_value(&out).unwrap();
+                v["result"]["content"][0]["text"].as_str().unwrap_or("").to_string()
+            }
+        };
+        call("session_doc_write", json!({"slug": "eod", "body": "Dug into it.\nsecond"})).await;
+        call("session_doc_write", json!({"slug": "eod", "body": "Confirmed it.\nsecond"})).await;
+        let bare = call("session_doc_search", json!({})).await;
+        assert!(bare.contains("\"eod\"") && !bare.contains("eod@1"), "got: {bare}");
+        let all = call("session_doc_search", json!({"include_archives": true})).await;
+        assert!(all.contains("eod@1"), "got: {all}");
+        let at = call("session_doc_search", json!({"query": "eod@"})).await;
+        assert!(at.contains("eod@1"), "got: {at}");
+        let hit = call("session_doc_read", json!({"slug": "eod@1", "grep": "dug"})).await;
+        assert!(hit.contains("\"line\":1") && !hit.contains("second"), "got: {hit}");
     }
 
     #[tokio::test]
