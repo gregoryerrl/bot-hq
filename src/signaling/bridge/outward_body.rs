@@ -17,6 +17,13 @@
 //! A refusal here is the reviewer's guarantee, not a limitation to route
 //! around: the alternative is a publish that parks for the user with its
 //! content unread.
+//!
+//! One deliberate exception: a shell running a script bot-hq cannot read
+//! (`./gen | bash`, `eval "$CMD"`) is OUTWARD but not refused — it routes to
+//! review as content-free, and the reviewer and the user read the command
+//! line itself. Refusing it would add no safety (the same script written to a
+//! file and run as `bash file.sh` is not opaque) and would leave a gated,
+//! non-publishing pipeline un-runnable even with the user's approval.
 
 /// One shell word as the shell would pass it, plus whether any part of it is
 /// computed at run time (`$VAR`, `$(…)`, `` `…` ``, `<(…)`) — a value bot-hq
@@ -361,13 +368,25 @@ fn skips_to_command(words: &[Word]) -> usize {
         let is_assignment = t
             .split_once('=')
             .is_some_and(|(name, _)| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
-        if is_assignment
-            || matches!(t, "command" | "exec" | "builtin" | "nohup" | "time" | "sudo" | "env")
-        {
+        if is_assignment {
             i += 1;
-            // `env -i`, `env -u NAME`, `sudo -u user`: skip their flags too.
+            continue;
+        }
+        // The transparent wrappers, each with ITS OWN value-taking flags
+        // (`time -p` and `command -p` are booleans; `sudo -p PROMPT` and
+        // `exec -a NAME` take values) — one shared list would swallow the
+        // command word as a flag value (EYES 7cc26d55).
+        let value_flags: Option<&[&str]> = match t {
+            "command" | "builtin" | "nohup" | "time" => Some(&[]),
+            "exec" => Some(&["-a"]),
+            "env" => Some(&["-u", "-C", "-S"]),
+            "sudo" => Some(&["-u", "-g", "-p", "-C", "-D", "-h", "-r", "-t", "-U", "-T"]),
+            _ => None,
+        };
+        if let Some(value_flags) = value_flags {
+            i += 1;
             while i < words.len() && words[i].text.starts_with('-') && !words[i].op {
-                let takes_value = matches!(words[i].text.as_str(), "-u" | "-g" | "-C" | "-S" | "-a" | "-p");
+                let takes_value = value_flags.contains(&words[i].text.as_str());
                 i += if takes_value { 2 } else { 1 };
             }
             continue;
@@ -428,8 +447,10 @@ fn simple_commands(command: &str, depth: usize) -> Vec<Cmd> {
         if primary < words.len() && !words[primary].op {
             starts.push(primary);
         }
-        for (k, w) in words.iter().enumerate().skip(primary + 1) {
-            if w.op {
+        // Every word, not only those after `primary`: a mis-read wrapper flag
+        // must not hide the command word it swallowed (EYES 7cc26d55).
+        for (k, w) in words.iter().enumerate() {
+            if w.op || k == primary || (k > 0 && words[k - 1].op) {
                 continue;
             }
             let b = basename(&w.text);
@@ -437,6 +458,8 @@ fn simple_commands(command: &str, depth: usize) -> Vec<Cmd> {
                 starts.push(k);
             }
         }
+        starts.sort_unstable();
+        starts.dedup();
         for (n, &k) in starts.iter().enumerate() {
             let end = starts.get(n + 1).copied().unwrap_or(words.len());
             let tool = basename(&words[k].text).to_string();
@@ -511,7 +534,18 @@ fn shell_script(args: &[Word], seg: &Segment, idx: usize, segs: &[Segment]) -> S
                 None => ShellScript::None,
             };
         }
-        if !t.starts_with('-') {
+        // Options that take a VALUE: `-o pipefail`, `-O extglob`, `+o …`,
+        // `-eo pipefail` (a cluster ending in o/O), `--rcfile f` — the value
+        // is not a script file (EYES 7cc26d55).
+        let cluster_takes_value = (t.starts_with('-') || t.starts_with('+'))
+            && !t.starts_with("--")
+            && t.len() > 1
+            && (t.ends_with('o') || t.ends_with('O'));
+        if cluster_takes_value || matches!(t, "--rcfile" | "--init-file") {
+            i += 2;
+            continue;
+        }
+        if !t.starts_with('-') && !t.starts_with('+') {
             script_file = true;
             break;
         }
@@ -1158,5 +1192,19 @@ mod tests {
         assert_eq!(ok("curl --data-urlencode q=hello https://x").inline, vec!["hello"]);
         assert_eq!(ok("curl --data-urlencode '=a@b' https://x").inline, vec!["a@b"]);
         assert!(refused("curl --data-urlencode body@- https://x").contains("stdin"));
+    }
+
+    /// EYES 7cc26d55: wrapper flags are per wrapper, and a shell's option
+    /// VALUES are not script files.
+    #[test]
+    fn wrapper_and_shell_option_values_do_not_hide_the_command() {
+        assert!(is_outward("time -p gh pr merge 1"));
+        assert!(is_outward("command -p gh issue close 5"));
+        assert!(is_outward("exec -a name gh pr merge 1"));
+        assert!(is_outward("sudo -u me -p pw gh pr merge 1"));
+        assert_eq!(ok("bash -o pipefail -c 'gh issue comment 5 --body-file b.md'").files, vec!["b.md"]);
+        assert_eq!(ok("bash -eo pipefail -c 'gh issue comment 5 -b x'").inline, vec!["x"]);
+        assert!(is_outward("bash -O extglob -c 'gh pr merge 1'"));
+        assert!(is_outward("bash --rcfile r.sh -c 'gh pr merge 1'"));
     }
 }
