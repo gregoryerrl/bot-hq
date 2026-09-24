@@ -976,6 +976,7 @@ export function SessionView() {
             <ChatInput
               key={sessionId}
               draftKey={draftKeyFor(sessionId)}
+              sessionId={sessionId}
               placeholder="Broadcast to every participant…"
               activity={activity}
               busy={busy}

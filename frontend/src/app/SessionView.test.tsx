@@ -222,7 +222,11 @@ beforeEach(() => {
 
 /** The worker's own line in the turn-status row: `<label> is working`. */
 function workerLine(): string {
-  return screen.getByText("is working").parentElement!.textContent!;
+  // The name + verb only: the turn-age/tool-count span (feedback #44/#45) is
+  // pinned by ChatInput's own test, not by these rc3 D10 naming checks.
+  const line = screen.getByText("is working").parentElement!;
+  const age = line.querySelector('[data-testid="turn-age"]')?.textContent ?? "";
+  return line.textContent!.replace(age, "");
 }
 
 describe("SessionView phase control (round 4)", () => {

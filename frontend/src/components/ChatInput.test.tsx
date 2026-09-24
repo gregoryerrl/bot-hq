@@ -237,6 +237,27 @@ describe("ChatInput turn-status + Stop", () => {
     localStorage.removeItem("bothq:draft:s-stage");
   });
 
+  it("shows a busy turn's age and tool count, and a staged message's place in line", () => {
+    // Feedback #44/#45: a long turn read as a stopped session, and a staged
+    // message said where it stood only in a tooltip.
+    render(
+      <ChatInput
+        activity="busy"
+        busy={{ hands: true }}
+        busyLabel={LABEL}
+        sessionId="s1"
+        onSend={() => {}}
+        onStage={() => {}}
+        onUnstage={() => {}}
+        onCancel={() => {}}
+        staged
+        stagedText="queued while they work"
+      />,
+    );
+    expect(screen.getByTestId("turn-age")).toHaveTextContent(/· \d+s · 0 tools/);
+    expect(screen.getByTestId("staged-caption")).toHaveTextContent("lands when this turn ends");
+  });
+
   it("clears the draft when the staged delivery lands", () => {
     const { rerender } = render(
       <ChatInput

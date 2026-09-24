@@ -7,6 +7,7 @@ import { cn } from "../lib/cn";
 import { authorColorClass } from "./authorColor";
 import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import { anyBusy, isLocked, type AgentBusy, type SessionActivity } from "../stores/activity";
+import { useChatStore } from "../stores/chat";
 import { uriListToPaths } from "../lib/filePaste";
 import {
   expandComposerTokens,
@@ -180,6 +181,11 @@ interface ChatInputProps {
    */
   draftKey?: string;
   /**
+   * The session this composer belongs to — lets the "is working" line count
+   * the working participant's tool calls from the chat (feedback #44/#45).
+   */
+  sessionId?: string;
+  /**
    * The Stage toggle (2026-08-15). While the ring runs the box stays
    * WRITABLE — composing was never the hazard; landing mid-turn was — and
    * the Send slot becomes **Stage**: toggled on, the message locks and the
@@ -256,6 +262,7 @@ export function ChatInput({
   onResume,
   onClose,
   draftKey,
+  sessionId,
   staged = false,
   stagedText = null,
   deliveredTick = 0,
@@ -888,9 +895,17 @@ export function ChatInput({
                 busy={busy}
                 label={busyLabel}
                 hues={authorHues}
+                sessionId={sessionId}
               />
             ) : (
               <StillWorkingNotice busy={busy} label={busyLabel} hues={authorHues} />
+            )}
+            {staged && (
+              // Feedback #45: a staged message said where it stood only in a
+              // tooltip; the user pressed Pause to be heard.
+              <span className="text-primary" data-testid="staged-caption">
+                · your message is queued — it lands when this turn ends (Pause interrupts)
+              </span>
             )}
             {stagedAnswers > 0 && (
               <span
@@ -972,18 +987,53 @@ export function ChatInput({
 // reviewing", which is bot-hq claiming to know what a role MEANS; it knows only
 // that a participant's turn is in flight (rc3 D10/D11). The colour still comes
 // from the slug, matching the same author's chat byline.
+/** "45s", "12m", "1h 5m" — a turn's age at a glance. */
+function formatElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
+
 function WorkerLine({
   busy,
   label,
   hues,
+  sessionId,
 }: {
   busy?: AgentBusy;
   label?: (slug: string) => string;
   hues?: Record<string, string>;
+  sessionId?: string;
 }) {
   const workers = Object.entries(busy ?? {})
     .filter(([, isBusy]) => isBusy)
     .map(([slug]) => slug);
+  // Feedback #44/#45: a long turn read as a stopped session. When each
+  // participant went busy (first seen here), re-rendered every 15 s, and its
+  // tool calls since then — counted from the chat, no extra payload.
+  const since = useRef<Record<string, number>>({});
+  const now = Date.now();
+  for (const slug of Object.keys(since.current)) {
+    if (!workers.includes(slug)) delete since.current[slug];
+  }
+  for (const slug of workers) since.current[slug] ??= now;
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (workers.length === 0) return;
+    const t = setInterval(() => setTick((n) => n + 1), 15_000);
+    return () => clearInterval(t);
+  }, [workers.length]);
+  const messages = useChatStore((s) => (sessionId ? s.messages[sessionId] : undefined));
+  const toolsSince = (slug: string, from: number) => {
+    let n = 0;
+    for (let i = (messages?.length ?? 0) - 1; i >= 0; i--) {
+      const m = messages![i];
+      if (Date.parse(m.created_at) < from) break;
+      if (m.author === slug && m.kind === "tool_use") n += 1;
+    }
+    return n;
+  };
   return (
     <>
       {workers.map((key, i) => {
@@ -999,6 +1049,10 @@ function WorkerLine({
               {shown}
             </span>
             <span>is working</span>
+            <span className="text-on-surface-variant/70" data-testid="turn-age">
+              · {formatElapsed(now - (since.current[key] ?? now))}
+              {sessionId ? ` · ${toolsSince(key, since.current[key] ?? now)} tools` : ""}
+            </span>
           </span>
         );
       })}
@@ -1051,11 +1105,13 @@ function TurnStatus({
   busy,
   label,
   hues,
+  sessionId,
 }: {
   activity?: SessionActivity;
   busy?: AgentBusy;
   label?: (slug: string) => string;
   hues?: Record<string, string>;
+  sessionId?: string;
 }) {
   // A cancel-in-flight reads as "Stopping…" regardless of who was busy.
   if (activity === "cancelling") {
@@ -1064,7 +1120,7 @@ function TurnStatus({
   return (
     <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
       {anyBusy(busy) ? (
-        <WorkerLine busy={busy} label={label} hues={hues} />
+        <WorkerLine busy={busy} label={label} hues={hues} sessionId={sessionId} />
       ) : (
         // Locked but no per-agent flag yet (e.g. a stale snapshot): stay generic.
         <span>A participant is working</span>
