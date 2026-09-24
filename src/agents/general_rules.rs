@@ -41,6 +41,7 @@ No house commit style ships by default — commit conventions come from the reso
 - **Your shell's cwd PERSISTS across Bash calls — nothing resets it for you.** After any `cd` — including into the Context Library, which is itself a git repo — later bare `git` or relative-path commands answer about the WRONG tree (a phantom-commit incident came from exactly this: `git rev-parse origin/main` run from the library answered about the library). Prefer absolute paths and `git -C <repo>`; if you must `cd`, return in the same compound command.
 - **`git push` is governed by the session's push gate.** `auto` → pushes go through; `ask` → just run `git push` and the pre-push hook surfaces an Approve/Reject prompt to the user per push (like `action_gate`): approve lets it through, reject blocks it. You don't call a grant tool and you don't flip a toggle — the prompt is automatic. (The user can set the push toggle to `auto` in Session Settings — the gear button in the session header — for frictionless pushes.)
 - Force-push, `git reset --hard`, branch deletion: per-action explicit user authorization — always ask.
+- **Your Bash tool is zsh, and `find`/`grep` in it are not the real tools.** They are claude-code shell functions (embedded bfs/ugrep): result order, regex dialect and some flags differ from the `/usr/bin` tools a script or `action_gate` runs — reproduce a script's behaviour with `command find` / `command grep` (`type find` shows which you have). zsh traps that produce false-clean checks: an unquoted `$VAR` is NOT word-split; `\"$r:path\"` applies the `:t` modifier (`HEAD:tasks.md` becomes `HEADasks.md`) — write `\"${r}:path\"`; an unquoted glob that matches nothing aborts the command (`no matches found`). A pipeline's exit status is its LAST command's, so `git show … | wc -l` exits 0 even when `git show` failed — read stderr, not only the status.
 
 ## Time and timezones (reason in UTC)
 
@@ -172,7 +173,7 @@ Use `session_doc_write(slug, body, phase?)` for plans, investigation findings, a
 
 **One rewritable doc per phase.** A phase-tagged write is keyed BY PHASE, not by slug — there is exactly ONE `investigate` / `plan` / `apply` / `verify` doc, and re-writing it (even under a different slug) overwrites that single doc. Found new information? REWRITE the whole doc; never spin up a `plan-v2`. Use the phase name as the slug for phase docs. Untagged scratch docs (no `phase`) are keyed by `slug` — pick one that reads well later (e.g. `findings-broadcast`); many are allowed.
 
-**Tag docs with `phase`** (one of `investigate` / `plan` / `apply` / `verify`) to surface them in the session view's matching IPAV document tab and enable cross-phase context retrieval via `session_doc_search(phase=<x>)`. **Untagged docs are CUSTOM documents**: each surfaces as its own tab beside I/P/A/V, named by its slug — use one for a document the IPAV set does not cover (a task checklist, an issue write-up, a running scratchpad) when the user asks for it or the work needs it; a session may have several or none. They stay out of phase-filtered searches; the phase docs' archived versions (`<slug>@<n>`) are not tabs. In Apply: `session_doc_search(phase=\"plan\")` finds the plan. In Verify: `session_doc_search(phase=\"apply\")` finds the apply summary. Prefer this over scrolling chat history.
+**Tag docs with `phase`** (one of `investigate` / `plan` / `apply` / `verify`) to surface them in the session view's matching IPAV document tab and enable cross-phase context retrieval via `session_doc_search(phase=<x>)`. **Untagged docs are CUSTOM documents**: each surfaces as its own tab beside I/P/A/V, named by its slug — use one for a document the IPAV set does not cover (a task checklist, an issue write-up, a running scratchpad) when the user asks for it or the work needs it; a session may have several or none. They stay out of phase-filtered searches; archived versions (`<slug>@<n>`, the bodies a replace superseded) are not tabs, and a search lists them only with `include_archives`. In Apply: `session_doc_search(phase=\"plan\")` finds the plan. In Verify: `session_doc_search(phase=\"apply\")` finds the apply summary. Prefer this over scrolling chat history.
 
 To promote a session doc to the shared CL — only when the user asks — write its body with `cl_write_file(project, file_path, content)` (the guarded, versioned CL write that auto-rescans; it needs the `write_context_library` capability, so a participant without it asks the one that has it). There's no dedicated promote tool; the CL write IS the promotion — never a bare `Write`/`Bash` into the library path, which skips the traversal guard, the size cap, the atomic write, the git snapshot and the rescan.
 
@@ -679,6 +680,15 @@ mod tests {
             !para.contains("via `Bash`/`Write` and call `cl_rescan(project)`"),
             "promotion no longer routes around cl_write_file: {para}"
         );
+    }
+
+    /// Feedback #41 and #27/#28: the two shell facts that produced wrong
+    /// CL entries and false-zero checks are in the universal layer.
+    #[test]
+    fn the_shell_traps_that_faked_results_are_taught() {
+        assert!(GENERAL_RULES.contains("`command find` / `command grep`"));
+        assert!(GENERAL_RULES.contains("`\"${r}:path\"`"));
+        assert!(GENERAL_RULES.contains("exit status is its LAST command's"));
     }
 
     #[test]
