@@ -736,7 +736,7 @@ fn run_pre_push(
                 eprintln!("bot-hq pre-push: pre-approved re-run (gate redeemed once); pushing.");
                 0
             }
-            PushDecision::Rejected | PushDecision::Blocked(_) => {
+            PushDecision::Rejected | PushDecision::Blocked(..) => {
                 eprintln!(
                     "{}",
                     blocked_banner(
@@ -785,7 +785,7 @@ fn run_pre_push(
             );
             Ok(1)
         }
-        PushDecision::Blocked(reason) => {
+        PushDecision::Blocked(kind, reason) => {
             // Fail-closed: the prompt couldn't be surfaced. The happy path's
             // violation is written by the bridge's resolve_choice; this records
             // our own so a blocked push still leaves an audit trail.
@@ -799,7 +799,7 @@ fn run_pre_push(
             );
             eprintln!(
                 "{}",
-                blocked_banner("pre-push", &push_block_text(&reason, data_dir))
+                blocked_banner("pre-push", &push_block_text(kind, &reason, data_dir))
             );
             Ok(1)
         }
@@ -812,7 +812,7 @@ fn run_pre_push(
 /// still live in the user's tray, so the agent re-issued the push through
 /// another path and the late Approve ran it a second time. Each class says
 /// what the hook actually tried.
-fn push_block_text(reason: &str, data_dir: &Path) -> String {
+fn push_block_text(kind: BlockKind, reason: &str, data_dir: &Path) -> String {
     let addr_file = data_dir.join(".local").join("signaling-addr");
     let addr = crate::paths::read_signaling_addr(data_dir);
     let tried = format!(
@@ -820,28 +820,26 @@ fn push_block_text(reason: &str, data_dir: &Path) -> String {
         addr_file.display(),
         addr.as_deref().unwrap_or("missing")
     );
-    let advice = if reason.contains("timed out") {
-        "Nobody answered the push card within the hook's wait. The card is STILL in the user's \
-         tray: a later Approve runs this exact push itself (pinned by sha). Do NOT re-issue the \
-         push by another route — wait for the user, then confirm with `git ls-remote`."
-            .to_string()
-    } else if reason.contains("HTTP 401") {
-        format!(
-            "The running app refused the hook's token — this hook binary and the running app are \
-             from different builds. Ask the user to relaunch bot-hq so they match; never bypass \
-             the hook. {tried}"
-        )
-    } else if reason.contains("not running") || reason.contains("could not connect") {
-        format!(
+    let advice = match kind {
+        BlockKind::Timeout => "Nobody answered the push card within the hook's wait. The card is \
+             STILL in the user's tray: a later Approve runs this exact push itself (pinned by \
+             sha). Do NOT re-issue the push by another route — wait for the user, then confirm \
+             with `git ls-remote`."
+            .to_string(),
+        BlockKind::Unauthorized => format!(
+            "The running app refused the hook's token — the hook binary and the app are from \
+             different builds. The reason above names which binary to rebuild; tell the user, \
+             and never bypass the hook. {tried}"
+        ),
+        BlockKind::Unreachable => format!(
             "push_gate='ask' needs the bot-hq app running to surface the approval prompt, and \
              the hook could not reach it. {tried} Make sure bot-hq is running, or ask the user to \
              flip the push toggle to 'auto' in Session Settings."
-        )
-    } else {
-        format!(
+        ),
+        BlockKind::Other => format!(
             "The app answered in a way the hook could not use, so the push stays blocked \
              (fail-closed). {tried} Tell the user the reason above; do not bypass the hook."
-        )
+        ),
     };
     format!("Push blocked: {reason}.\n\n{advice}\n")
 }
@@ -852,8 +850,23 @@ enum PushDecision {
     Approved,
     Rejected,
     /// The prompt couldn't be surfaced (app down / network / bad response). The
-    /// `String` is a human-readable reason for the audit trail + banner.
-    Blocked(String),
+    /// kind picks the advice (feedback #36); the `String` is a human-readable
+    /// reason for the audit trail + banner.
+    Blocked(BlockKind, String),
+}
+
+/// WHY a push was blocked — typed, so the banner's advice never depends on
+/// matching words inside the reason text (EYES, C8 review).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    /// No address file, or the connection was refused: the app is not reachable.
+    Unreachable,
+    /// Nobody answered within the hook's wait; the card may still be live.
+    Timeout,
+    /// The app refused the hook's token (a build mismatch).
+    Unauthorized,
+    /// Anything else the hook could not use — fail-closed.
+    Other,
 }
 
 /// POST `{session_id, agent, branch}` to the running app's `/hooks/pre-push`
@@ -921,7 +934,7 @@ async fn post_pre_push(
     timeout: std::time::Duration,
 ) -> PushDecision {
     let Some(addr) = crate::paths::read_signaling_addr(data_dir) else {
-        return PushDecision::Blocked("bot-hq is not running (no signaling address)".into());
+        return PushDecision::Blocked(BlockKind::Unreachable, "bot-hq is not running (no signaling address)".into());
     };
     let url = format!("http://{addr}/hooks/pre-push");
 
@@ -929,7 +942,7 @@ async fn post_pre_push(
     // time-critical.
     let client = match reqwest::Client::builder().timeout(timeout).build() {
         Ok(c) => c,
-        Err(e) => return PushDecision::Blocked(format!("approval client init failed: {e}")),
+        Err(e) => return PushDecision::Blocked(BlockKind::Other, format!("approval client init failed: {e}")),
     };
 
     let resp = match with_hook_token(client.post(&url), data_dir)
@@ -940,18 +953,18 @@ async fn post_pre_push(
     {
         Ok(r) => r,
         Err(e) if e.is_timeout() => {
-            return PushDecision::Blocked("approval timed out (no answer)".into())
+            return PushDecision::Blocked(BlockKind::Timeout, "approval timed out (no answer)".into())
         }
         Err(e) if e.is_connect() => {
-            return PushDecision::Blocked("could not connect to bot-hq".into())
+            return PushDecision::Blocked(BlockKind::Unreachable, "could not connect to bot-hq".into())
         }
-        Err(e) => return PushDecision::Blocked(format!("request to bot-hq failed: {e}")),
+        Err(e) => return PushDecision::Blocked(BlockKind::Other, format!("request to bot-hq failed: {e}")),
     };
 
     let status = resp.status();
     let txt = match resp.text().await {
         Ok(t) => t,
-        Err(e) => return PushDecision::Blocked(format!("could not read bot-hq response: {e}")),
+        Err(e) => return PushDecision::Blocked(BlockKind::Other, format!("could not read bot-hq response: {e}")),
     };
     classify_push_response(status, &txt)
 }
@@ -967,7 +980,12 @@ fn classify_push_response(status: reqwest::StatusCode, body: &str) -> PushDecisi
         // older than the running app), which the bare status would hide.
         let detail = body.trim();
         let detail: String = detail.chars().take(300).collect();
-        return PushDecision::Blocked(if detail.is_empty() {
+        let kind = if status == reqwest::StatusCode::UNAUTHORIZED {
+            BlockKind::Unauthorized
+        } else {
+            BlockKind::Other
+        };
+        return PushDecision::Blocked(kind, if detail.is_empty() {
             format!("bot-hq returned HTTP {}", status.as_u16())
         } else {
             format!("bot-hq returned HTTP {}: {detail}", status.as_u16())
@@ -975,12 +993,12 @@ fn classify_push_response(status: reqwest::StatusCode, body: &str) -> PushDecisi
     }
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(e) => return PushDecision::Blocked(format!("malformed bot-hq response: {e}")),
+        Err(e) => return PushDecision::Blocked(BlockKind::Other, format!("malformed bot-hq response: {e}")),
     };
     match v.get("approved").and_then(|b| b.as_bool()) {
         Some(true) => PushDecision::Approved,
         Some(false) => PushDecision::Rejected,
-        None => PushDecision::Blocked("bot-hq response missing 'approved'".into()),
+        None => PushDecision::Blocked(BlockKind::Other, "bot-hq response missing 'approved'".into()),
     }
 }
 
@@ -2446,14 +2464,14 @@ mod tests {
     #[test]
     fn a_blocked_push_gets_advice_for_its_actual_reason() {
         let data = tempdir().unwrap();
-        let timeout = push_block_text("approval timed out (no answer)", data.path());
+        let timeout = push_block_text(BlockKind::Timeout, "approval timed out (no answer)", data.path());
         assert!(timeout.contains("STILL in the user's tray") && timeout.contains("Do NOT re-issue"));
         assert!(!timeout.contains("not running"), "a timeout is not an app outage: {timeout}");
-        let down = push_block_text("bot-hq is not running (no signaling address)", data.path());
+        let down = push_block_text(BlockKind::Unreachable, "bot-hq is not running (no signaling address)", data.path());
         assert!(down.contains("needs the bot-hq app running") && down.contains("(missing)"));
-        let stale = push_block_text("bot-hq returned HTTP 401: stale hook", data.path());
-        assert!(stale.contains("different builds"));
-        let odd = push_block_text("malformed bot-hq response: x", data.path());
+        let stale = push_block_text(BlockKind::Unauthorized, "bot-hq returned HTTP 401: stale hook", data.path());
+        assert!(stale.contains("different builds") && stale.contains("names which binary to rebuild"));
+        let odd = push_block_text(BlockKind::Other, "malformed bot-hq response: x", data.path());
         assert!(odd.contains("fail-closed") && odd.contains("signaling-addr"));
     }
 
@@ -2463,11 +2481,27 @@ mod tests {
         // with a reason naming the cause (no network call attempted).
         let data = tempdir().unwrap();
         match decide_push(data.path(), "s1", "hands", Some("main"), Some("origin"), &[]).await {
-            PushDecision::Blocked(reason) => {
+            PushDecision::Blocked(kind, reason) => {
+                assert_eq!(kind, BlockKind::Unreachable);
                 assert!(reason.contains("not running"), "reason: {reason}");
             }
             _ => panic!("expected Blocked when no signaling addr is present"),
         }
+    }
+
+    /// The block KIND is decided where the failure is known, never re-derived
+    /// from the reason's words (EYES, C8 review): a 401 is Unauthorized, any
+    /// other non-2xx is Other.
+    #[test]
+    fn a_401_is_typed_unauthorized_and_other_statuses_other() {
+        assert!(matches!(
+            classify_push_response(reqwest::StatusCode::UNAUTHORIZED, "hook token rejected"),
+            PushDecision::Blocked(BlockKind::Unauthorized, _)
+        ));
+        assert!(matches!(
+            classify_push_response(reqwest::StatusCode::INTERNAL_SERVER_ERROR, ""),
+            PushDecision::Blocked(BlockKind::Other, _)
+        ));
     }
 
     #[test]
@@ -2490,7 +2524,7 @@ mod tests {
     fn push_response_missing_field_blocks() {
         assert!(matches!(
             classify_push_response(reqwest::StatusCode::OK, r#"{"other": 1}"#),
-            PushDecision::Blocked(_)
+            PushDecision::Blocked(..)
         ));
     }
 
@@ -2502,7 +2536,7 @@ mod tests {
                 reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                 r#"{"approved": true}"#
             ),
-            PushDecision::Blocked(_)
+            PushDecision::Blocked(..)
         ));
     }
 
@@ -2510,7 +2544,7 @@ mod tests {
     fn push_response_malformed_json_blocks() {
         assert!(matches!(
             classify_push_response(reqwest::StatusCode::OK, "not json {"),
-            PushDecision::Blocked(_)
+            PushDecision::Blocked(..)
         ));
     }
 
