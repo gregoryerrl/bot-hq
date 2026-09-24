@@ -586,6 +586,21 @@ impl SignalingBridge {
             ));
         }
         let cursor = storage.cursor_for(reviewer.id).await?;
+        // A TARGETED veto holds its content until the finding is answered: a
+        // re-issue of the exact command it withdrew is refused while that
+        // finding is open. Fix it (disposition `fixed`) or rebut it first —
+        // either is on the record the user reads.
+        if let Some((finding, gate)) =
+            storage.open_targeted_veto_for_command(session_id, command).await?
+        {
+            return Ok(OutwardReview::Refuse(format!(
+                "outward publish held: open blocking finding {} vetoed this exact publish (gate \
+                 {}). Fix what it raises and disposition it `fixed`, or rebut it, then re-issue — \
+                 the re-issue queues for a fresh review.",
+                &finding[..finding.len().min(8)],
+                &gate[..gate.len().min(8)]
+            )));
+        }
         // A publish a blocking finding WITHDREW is re-reviewed, never re-parked
         // on its old coverage: its body row was delivered when it first
         // queued, so coverage (or the timeline check, for a content-free
@@ -840,7 +855,9 @@ impl SignalingBridge {
                     let why = if veto.gate_id.is_some() {
                         format!(
                             "the reviewer's blocking finding {finding} names this publish. Fix \
-                             what it raises, then re-issue — the re-issue queues for a fresh review"
+                             what it raises and disposition the finding `fixed` (or rebut it), \
+                             then re-issue — a re-issue is refused while the finding is open, and \
+                             after that it queues for a fresh review"
                         )
                     } else {
                         format!(
@@ -2144,7 +2161,7 @@ mod tests {
         let (bridge, storage, eyes, path, _body) = outward_fixture(&data, &repo).await;
         let _ring = ring_for(&bridge).await;
         let (gate_a, _gate_b, cmd_a) = two_queued_and_read(&bridge, &storage, eyes, &repo, &path).await;
-        bridge
+        let finding = bridge
             .eyes_flag_for_gate(
                 "s1".into(),
                 "eyes".into(),
@@ -2157,6 +2174,17 @@ mod tests {
             .unwrap();
         bridge.settle_queued_outward("s1", eyes).await;
         assert_eq!(status_of(&storage, &gate_a).await, "withdrawn");
+        // EYES 891e0eb1: while the TARGETED finding is open, the same command
+        // is refused outright — a veto that holds once is one a re-issue undoes.
+        let err = bridge
+            .park_gated_command("s1", "hands", &cmd_a)
+            .await
+            .expect_err("an open targeted veto holds its content");
+        assert!(err.to_string().contains("vetoed this exact publish"), "got: {err}");
+        storage
+            .disposition_finding("s1", &finding, crate::storage::FindingStatus::Fixed, Some("body fixed"), "hands")
+            .await
+            .unwrap();
         let (again, existing) = queued(bridge.park_gated_command("s1", "hands", &cmd_a).await.unwrap());
         assert!(!existing);
         assert_ne!(again, gate_a);

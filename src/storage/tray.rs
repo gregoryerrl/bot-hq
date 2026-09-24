@@ -351,6 +351,31 @@ impl Storage {
         ))
     }
 
+    /// The newest OPEN blocking finding that TARGETED a gate with this exact
+    /// command text (0083 `findings.gate_id`) — `(finding_uid, gate_id)`. A
+    /// targeted veto is about that content by definition, so it keeps holding
+    /// a re-issue of the same command until the finding is fixed or rebutted
+    /// (EYES advisory 891e0eb1: a veto that holds once is a veto a re-issue
+    /// undoes).
+    pub async fn open_targeted_veto_for_command(
+        &self,
+        session_id: &str,
+        command: &str,
+    ) -> Result<Option<(String, String)>> {
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT f.finding_uid, f.gate_id FROM findings f \
+             JOIN session_tray t ON t.choice_id = f.gate_id \
+             WHERE f.session_id = ? AND f.status = 'open' AND f.severity = 'blocking' \
+               AND t.session_id = f.session_id AND t.command_text = ? \
+             ORDER BY f.id DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(command)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
     /// The choice_id of a still-PENDING gated command with this exact command
     /// text in this session, if one exists. Backs action_gate's duplicate
     /// suppression: re-parking an identical command while the first prompt is
