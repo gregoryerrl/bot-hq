@@ -840,42 +840,7 @@ impl SignalingBridge {
             }
             let command = row.command_text.clone().unwrap_or_default();
             if let Some(veto) = findings.iter().find(|f| vetoes_queued_gate(f, &row)) {
-                if storage
-                    .withdraw_queued_gate(&row.choice_id, crate::storage::FINDING_WITHDRAWAL_REASON)
-                    .await
-                    .unwrap_or(0)
-                    == 1
-                {
-                    let finding = &veto.finding_uid[..veto.finding_uid.len().min(8)];
-                    let why = if veto.gate_id.is_some() {
-                        format!(
-                            "the reviewer's blocking finding {finding} names this publish. Fix \
-                             what it raises and disposition the finding `fixed` (or rebut it), \
-                             then re-issue — a re-issue is refused while the finding is open, and \
-                             after that it queues for a fresh review"
-                        )
-                    } else {
-                        format!(
-                            "the reviewer filed blocking finding {finding} naming no gate, which \
-                             withdraws every queued publish. If it is about this content, fix it \
-                             and re-issue; if it is about something else, re-issue unchanged — \
-                             the re-issue queues for a fresh review and the earlier finding does \
-                             not veto it, so there is no need to disposition it first"
-                        )
-                    };
-                    let _ = crate::core::post_system_notice(
-                        &storage,
-                        Some(self),
-                        session_id,
-                        crate::storage::MessageKind::SystemNotice,
-                        format!(
-                            "⛔ Queued outward publish {} withdrawn — {why}: `{command}`",
-                            row.choice_id
-                        ),
-                        None,
-                    )
-                    .await;
-                }
+                self.withdraw_vetoed_row(&storage, session_id, &row, veto).await;
                 continue;
             }
             self.promote_queued_row(
@@ -890,6 +855,54 @@ impl SignalingBridge {
             )
             .await;
         }
+    }
+
+    /// Withdraw a queued row a blocking finding vetoes, and say why in the
+    /// channel — the ONE withdrawal both settlement and the reviewer-down
+    /// release use, so a vetoed publish can never reach the user as
+    /// "unreviewed" (EYES 12c739ec).
+    async fn withdraw_vetoed_row(
+        &self,
+        storage: &crate::storage::Storage,
+        session_id: &str,
+        row: &crate::storage::SessionTrayEntry,
+        veto: &crate::storage::Finding,
+    ) {
+        if storage
+            .withdraw_queued_gate(&row.choice_id, crate::storage::FINDING_WITHDRAWAL_REASON)
+            .await
+            .unwrap_or(0)
+            != 1
+        {
+            return;
+        }
+        let command = row.command_text.clone().unwrap_or_default();
+        let finding = &veto.finding_uid[..veto.finding_uid.len().min(8)];
+        let why = if veto.gate_id.is_some() {
+            format!(
+                "the reviewer's blocking finding {finding} names this publish. Fix what it \
+                 raises and disposition the finding `fixed` (or rebut it), then re-issue — a \
+                 re-issue is refused while the finding is open, and after that it queues for a \
+                 fresh review"
+            )
+        } else {
+            format!(
+                "the reviewer filed blocking finding {finding} naming no gate, which withdraws \
+                 every queued publish. If it is about this content, fix it and re-issue; if it \
+                 is about something else, re-issue unchanged — the re-issue queues for a fresh \
+                 review and the earlier finding does not veto it, so there is no need to \
+                 disposition it first"
+            )
+        };
+        let _ = crate::core::post_system_notice(
+            storage,
+            Some(self),
+            session_id,
+            crate::storage::MessageKind::SystemNotice,
+            format!("⛔ Queued outward publish {} withdrawn — {why}: `{command}`", row.choice_id),
+            None,
+        )
+        .await;
     }
 
     /// Flip one queued row to a PENDING user card with the side effects a
@@ -943,8 +956,16 @@ impl SignalingBridge {
     pub(crate) async fn release_queued_outward_unreviewed(&self, session_id: &str) -> usize {
         let Some(storage) = self.storage.lock().await.clone() else { return 0 };
         let Ok(queued) = storage.queued_gates_for_session(session_id).await else { return 0 };
+        let findings = storage.findings_for_session(session_id).await.unwrap_or_default();
         let mut released = 0;
         for row in queued {
+            // A publish the reviewer VETOED before it went down was reviewed —
+            // withdraw it exactly as settlement would, never release it as
+            // "unreviewed" (EYES 12c739ec).
+            if let Some(veto) = findings.iter().find(|f| vetoes_queued_gate(f, &row)) {
+                self.withdraw_vetoed_row(&storage, session_id, &row, veto).await;
+                continue;
+            }
             let command = row.command_text.clone().unwrap_or_default();
             let notice = format!(
                 "⚠ Queued outward publish {} released to the user UNREVIEWED — the user approved \
@@ -2663,6 +2684,35 @@ mod tests {
             rows.iter().any(|r| r.contains(&gate_id) && r.contains("UNREVIEWED")),
             "the release is said out loud: {rows:?}"
         );
+    }
+
+    /// EYES 12c739ec: the reviewer filed a blocking finding against a queued
+    /// publish and died before its settlement ran. The override release must
+    /// withdraw that publish (it WAS reviewed — and vetoed), not hand it to the
+    /// user as "unreviewed".
+    #[tokio::test]
+    async fn an_override_release_withdraws_a_publish_the_reviewer_vetoed() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let (gate_a, gate_b, _) = two_queued_and_read(&bridge, &storage, eyes, &repo, &path).await;
+        bridge
+            .eyes_flag_for_gate(
+                "s1".into(),
+                "eyes".into(),
+                crate::storage::FindingSeverity::Blocking,
+                "wrong claim in the body".into(),
+                None,
+                Some(gate_a.clone()),
+            )
+            .await
+            .unwrap();
+        // Dead before its TurnComplete — no settlement ran.
+        bridge.notify_agent_health("s1".to_string(), "eyes", "dead");
+        assert_eq!(bridge.release_queued_outward_unreviewed("s1").await, 1);
+        assert_eq!(status_of(&storage, &gate_a).await, "withdrawn", "the vetoed one is withdrawn");
+        assert_eq!(status_of(&storage, &gate_b).await, "pending", "the other is released");
     }
 
     #[tokio::test]
