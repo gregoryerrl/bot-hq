@@ -2220,6 +2220,18 @@ mod tests {
     /// Feedback #17/#18: advice follows the error's class — only a context
     /// overflow advises a fresh session; an unknown cause says so and offers
     /// the cheap remedy first.
+    /// The chat folds pass rows by matching this exact text (feedback #13,
+    /// `frontend/src/lib/chatRows.ts`). A reworded notice here would silently
+    /// stop the compaction — so the mirror is pinned (EYES, C18 nit).
+    #[test]
+    fn the_frontend_mirrors_the_pass_notice_exactly() {
+        let ts = include_str!("../../frontend/src/lib/chatRows.ts");
+        assert!(
+            ts.contains(&format!("export const PASS_NOTICE = \"{PASS_NOTICE}\";")),
+            "chatRows.ts must mirror PASS_NOTICE verbatim"
+        );
+    }
+
     #[test]
     fn streak_advice_names_a_cause_only_when_it_has_one() {
         assert!(streak_advice("Prompt is too long", 0).contains("open a fresh one"));
