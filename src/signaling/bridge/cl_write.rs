@@ -657,11 +657,9 @@ fn backticked(old_lower: &str, tok: &str) -> bool {
     old_lower.contains(&format!("`{tok}`"))
 }
 
-/// Filenames (`eod.md`, `tool-gate.json`) and paths (`projects/x/notes.md`)
-/// in `body`, lowercased, trimmed of surrounding punctuation. A filename is a
-/// stem of 2+ characters and a 1–5 character extension with a letter in it
-/// (so `e.g`, `1.0.6` and `v1.2` are not files); a path has two or more
-/// segments. URLs are not artifacts.
+/// Filenames (`eod.md`, `tool-gate.json`) and paths (`projects/x/notes.md`,
+/// `~/.bot-hq/library`) in `body`, lowercased, trimmed of surrounding
+/// punctuation. See [`is_artifact`] for what qualifies.
 fn artifact_tokens(body: &str) -> impl Iterator<Item = String> + '_ {
     body.split(|c: char| {
         c.is_whitespace()
@@ -671,19 +669,34 @@ fn artifact_tokens(body: &str) -> impl Iterator<Item = String> + '_ {
     .filter(|t| is_artifact(t))
 }
 
+/// Extensions a CL file names when it cites a FILE. An allow-list: `and/or`,
+/// `I/P/A/V` and `github.com` are prose, and counting them as filename terms
+/// brought back the very noise the sweep was narrowed to remove (EYES
+/// 8179f7cc).
+const FILE_EXTENSIONS: &[&str] = &[
+    "md", "markdown", "txt", "json", "jsonl", "yaml", "yml", "toml", "ini", "cfg", "conf", "env",
+    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rb", "go", "java", "kt", "swift", "c",
+    "h", "cpp", "hpp", "cs", "php", "sh", "zsh", "bash", "fish", "ps1", "sql", "csv", "tsv",
+    "html", "htm", "css", "scss", "xml", "svg", "png", "jpg", "jpeg", "gif", "pdf", "lock",
+    "log", "bak", "patch", "diff", "proto", "graphql", "vue", "svelte", "dart", "lua",
+    "ipynb", "sqlite", "db", "plist", "dmg", "zip", "gz", "tgz",
+];
+
+/// A filename is a stem of 2+ characters with a KNOWN extension (so `e.g`,
+/// `1.0.6`, `github.com` are not files); a path without a filename counts only
+/// when it is anchored like one (`/…`, `./…`, `~/…`, `projects/…`) — so prose
+/// slashes (`and/or`, `read/write`, `Added/Fixed/Changed`) never do. URLs are
+/// not artifacts.
 fn is_artifact(t: &str) -> bool {
     if t.len() < 4 || t.contains("://") || !t.chars().any(char::is_alphabetic) {
         return false;
     }
     let last = t.rsplit('/').next().unwrap_or(t);
     let is_file = last.rsplit_once('.').is_some_and(|(stem, ext)| {
-        stem.chars().count() >= 2
-            && (1..=5).contains(&ext.len())
-            && ext.chars().all(|c| c.is_ascii_alphanumeric())
-            && ext.chars().any(|c| c.is_ascii_alphabetic())
+        stem.chars().count() >= 2 && FILE_EXTENSIONS.contains(&ext)
     });
-    let is_path = t.split('/').filter(|seg| !seg.is_empty()).count() >= 2
-        && t.chars().any(|c| c == '/');
+    let anchored = ["/", "./", "~/", "projects/"].iter().any(|p| t.starts_with(p));
+    let is_path = anchored && t.split('/').filter(|seg| !seg.is_empty()).count() >= 2;
     is_file || is_path
 }
 
@@ -2202,6 +2215,13 @@ mod tests {
         assert!(terms.contains(&"projects/bcc/notes.md".to_string()), "got: {terms:?}");
         for noise in ["down", "e.g", "v1.0.6", "1.2.3", "eod"] {
             assert!(!terms.iter().any(|t| t == noise), "{noise} in {terms:?}");
+        }
+        // EYES 8179f7cc: prose slashes and bare domains are not artifacts.
+        for prose in ["and/or", "read/write", "i/p/a/v", "added/fixed/changed", "client/server", "github.com", "claude.ai"] {
+            assert!(!is_artifact(prose), "{prose} must not be a filename/path term");
+        }
+        for real in ["eod.md", "src/core/pump.rs", "~/.bot-hq/library", "projects/bcc/audit", "/tmp/x-dir", "tool-gate.json"] {
+            assert!(is_artifact(real), "{real} is a filename/path term");
         }
         assert!(!terms.contains(&"eod-cc.md".to_string()), "still cited in the new body");
     }
