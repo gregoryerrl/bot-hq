@@ -19,9 +19,10 @@
 //! content unread.
 
 /// One shell word as the shell would pass it, plus whether any part of it is
-/// computed at run time (`$VAR`, `$(…)`, `` `…` ``) — a value bot-hq cannot
-/// read ahead. `op` marks an unquoted redirection operator (`>`, `<<`, …),
-/// kept as its own word so a caller can tell `> file` from an argument.
+/// computed at run time (`$VAR`, `$(…)`, `` `…` ``, `<(…)`) — a value bot-hq
+/// cannot read ahead. `op` marks an unquoted redirection operator (`>`, `<<`,
+/// `<<<`, …), kept as its own word so a caller can tell `> file` from an
+/// argument.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Word {
     text: String,
@@ -29,28 +30,59 @@ struct Word {
     op: bool,
 }
 
-/// Split `command` into simple-command segments of words, the way a POSIX
-/// shell would: `'…'` literal; `"…"` with `\` escaping `" \ $ \``; `\` outside
-/// quotes; `;`, `&`, `|`, `&&`, `||` and newlines end a segment; `#` at a
-/// word start comments to end of line; heredoc bodies (`<<DELIM` … `DELIM`)
-/// are skipped, not parsed as commands. `$(…)`, `${…}` and backticks are
+/// One simple command's words, the heredoc BODIES it declared (in order), and
+/// whether its stdin is the previous segment's stdout (`a | b`).
+#[derive(Debug, Clone, Default)]
+struct Segment {
+    words: Vec<Word>,
+    heredocs: Vec<String>,
+    piped_from_prev: bool,
+}
+
+/// Split `command` into simple-command segments the way a POSIX shell would:
+/// `'…'` literal; `"…"` with `\` escaping `" \ $ \``; `\` outside quotes;
+/// `;`, `&`, `|`, `&&`, `||`, `(`, `)` and newlines end a segment; `#` at a
+/// word start comments to end of line. Heredoc bodies (`<<DELIM` … `DELIM`)
+/// are CAPTURED on the segment that declared them, never parsed as commands
+/// here — whether they are a script depends on who reads them (see
+/// [`simple_commands`]). `$(…)`, `${…}`, backticks and `<(…)`/`>(…)` are
 /// consumed whole and mark the word dynamic.
-fn segments(command: &str) -> Vec<Vec<Word>> {
+fn segments(command: &str) -> Vec<Segment> {
     let chars: Vec<char> = command.chars().collect();
-    let mut segs: Vec<Vec<Word>> = Vec::new();
-    let mut seg: Vec<Word> = Vec::new();
+    let mut segs: Vec<Segment> = Vec::new();
+    let mut seg = Segment::default();
     let mut cur = String::new();
     let mut dynamic = false;
     let mut started = false;
-    let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
+    // (delimiter, strip leading tabs, index of the declaring segment)
+    let mut pending_heredocs: Vec<(String, bool, usize)> = Vec::new();
+    let mut next_piped = false;
     let mut i = 0;
 
-    fn finish(cur: &mut String, dynamic: &mut bool, started: &mut bool, seg: &mut Vec<Word>) {
+    fn finish(cur: &mut String, dynamic: &mut bool, started: &mut bool, seg: &mut Segment) {
         if *started {
-            seg.push(Word { text: std::mem::take(cur), dynamic: *dynamic, op: false });
+            seg.words.push(Word { text: std::mem::take(cur), dynamic: *dynamic, op: false });
         }
         *dynamic = false;
         *started = false;
+    }
+    // Consume a balanced `open … close` span starting AT `open` into `cur`.
+    fn consume_balanced(chars: &[char], mut i: usize, cur: &mut String, open: char, close: char) -> usize {
+        let mut depth = 0usize;
+        while i < chars.len() {
+            let c = chars[i];
+            cur.push(c);
+            i += 1;
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        i
     }
     // Consume a `$(…)` / `${…}` / `` `…` `` span starting at `i` (pointing at
     // `$` or a backtick) into `cur`; returns the index after it.
@@ -74,27 +106,18 @@ fn segments(command: &str) -> Vec<Vec<Word>> {
         }
         cur.push('$');
         i += 1;
-        let (open, close) = match chars.get(i) {
-            Some('(') => ('(', ')'),
-            Some('{') => ('{', '}'),
-            _ => return i, // `$NAME` — the name reads as ordinary word chars
-        };
-        let mut depth = 0usize;
-        while i < chars.len() {
-            let c = chars[i];
-            cur.push(c);
-            i += 1;
-            if c == open {
-                depth += 1;
-            } else if c == close {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
+        match chars.get(i) {
+            Some('(') => consume_balanced(chars, i, cur, '(', ')'),
+            Some('{') => consume_balanced(chars, i, cur, '{', '}'),
+            _ => i, // `$NAME` — the name reads as ordinary word chars
         }
-        i
     }
+    let end_segment = |seg: &mut Segment, segs: &mut Vec<Segment>, piped_next: bool, next_piped: &mut bool| {
+        let mut done = std::mem::take(seg);
+        done.piped_from_prev = *next_piped;
+        segs.push(done);
+        *next_piped = piped_next;
+    };
 
     while i < chars.len() {
         let c = chars[i];
@@ -105,33 +128,58 @@ fn segments(command: &str) -> Vec<Vec<Word>> {
             }
             '\n' => {
                 finish(&mut cur, &mut dynamic, &mut started, &mut seg);
-                segs.push(std::mem::take(&mut seg));
+                end_segment(&mut seg, &mut segs, false, &mut next_piped);
                 i += 1;
-                // Heredoc bodies start on the line after their operator.
-                for (delim, strip_tabs) in std::mem::take(&mut pending_heredocs) {
+                // Heredoc bodies start on the line after their operator; each
+                // is captured onto the segment that declared it.
+                for (delim, strip_tabs, owner) in std::mem::take(&mut pending_heredocs) {
+                    let mut body = String::new();
                     loop {
                         let start = i;
                         while i < chars.len() && chars[i] != '\n' {
                             i += 1;
                         }
-                        let line: String = chars[start..i].iter().collect();
-                        if i < chars.len() {
+                        let raw: String = chars[start..i].iter().collect();
+                        let at_end = i >= chars.len();
+                        if !at_end {
                             i += 1;
                         }
-                        let line = if strip_tabs { line.trim_start_matches('\t') } else { &line };
-                        if line == delim || i >= chars.len() {
+                        let line = if strip_tabs { raw.trim_start_matches('\t').to_string() } else { raw };
+                        if line == delim {
+                            break;
+                        }
+                        body.push_str(&line);
+                        body.push('\n');
+                        if at_end {
                             break;
                         }
                     }
+                    if let Some(s) = segs.get_mut(owner) {
+                        s.heredocs.push(body);
+                    }
                 }
             }
-            ';' | '&' | '|' => {
+            ';' | '&' | '|' | '(' | ')' => {
                 finish(&mut cur, &mut dynamic, &mut started, &mut seg);
-                segs.push(std::mem::take(&mut seg));
+                // A single `|` (or `|&`) pipes into the next segment; `||`,
+                // `&&`, `;`, `&` and parens do not.
+                let pipe = c == '|' && chars.get(i + 1) != Some(&'|');
+                end_segment(&mut seg, &mut segs, pipe, &mut next_piped);
                 i += 1;
-                while i < chars.len() && matches!(chars[i], '&' | '|') {
-                    i += 1;
+                if c == '&' || c == '|' {
+                    while i < chars.len() && matches!(chars[i], '&' | '|') {
+                        i += 1;
+                    }
                 }
+            }
+            '<' | '>' if chars.get(i + 1) == Some(&'(') => {
+                // Process substitution `<(…)` / `>(…)`: a command whose output
+                // becomes a path — dynamic, and recursed into by the caller.
+                finish(&mut cur, &mut dynamic, &mut started, &mut seg);
+                started = true;
+                dynamic = true;
+                cur.push(c);
+                i = consume_balanced(&chars, i + 1, &mut cur, '(', ')');
             }
             '<' | '>' => {
                 // A leading fd number (`2>`) was a separate word already; the
@@ -159,21 +207,21 @@ fn segments(command: &str) -> Vec<Vec<Word>> {
                     op.push('-');
                     i += 1;
                 }
-                seg.push(Word { text: op, dynamic: false, op: true });
+                seg.words.push(Word { text: op, dynamic: false, op: true });
                 if heredoc {
                     // The delimiter word follows (quotes around it are removed).
                     while i < chars.len() && matches!(chars[i], ' ' | '\t') {
                         i += 1;
                     }
                     let mut delim = String::new();
-                    while i < chars.len() && !matches!(chars[i], ' ' | '\t' | '\n' | ';' | '&' | '|' | '<' | '>') {
+                    while i < chars.len() && !matches!(chars[i], ' ' | '\t' | '\n' | ';' | '&' | '|' | '<' | '>' | '(' | ')') {
                         if !matches!(chars[i], '\'' | '"' | '\\') {
                             delim.push(chars[i]);
                         }
                         i += 1;
                     }
-                    seg.push(Word { text: delim.clone(), dynamic: false, op: false });
-                    pending_heredocs.push((delim, strip_tabs));
+                    seg.words.push(Word { text: delim.clone(), dynamic: false, op: false });
+                    pending_heredocs.push((delim, strip_tabs, segs.len()));
                 }
             }
             '#' if !started => {
@@ -237,14 +285,61 @@ fn segments(command: &str) -> Vec<Vec<Word>> {
         }
     }
     finish(&mut cur, &mut dynamic, &mut started, &mut seg);
-    segs.push(seg);
-    segs.retain(|s| !s.is_empty());
+    end_segment(&mut seg, &mut segs, false, &mut next_piped);
     segs
 }
 
-/// Words that only precede the real command: `env` (with its assignments and
-/// flags), `command`, `exec`, `nohup`, `time`, `sudo`, and `NAME=value`
-/// assignments.
+/// The command texts inside a dynamic word's substitutions — `$(…)`,
+/// backticks, `<(…)`, `>(…)` — so `URL=$(gh pr create …)` is analysed like
+/// the `gh` it runs. `${…}` is a parameter, not a command.
+fn substitution_bodies(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let paren_open = match chars[i] {
+            '$' | '<' | '>' => chars.get(i + 1) == Some(&'('),
+            _ => false,
+        };
+        if paren_open {
+            let mut depth = 0usize;
+            let mut j = i + 1;
+            let start = j + 1;
+            while j < chars.len() {
+                match chars[j] {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            out.push(chars[start.min(j)..j.min(chars.len())].iter().collect());
+            i = j + 1;
+        } else if chars[i] == '`' {
+            let start = i + 1;
+            let mut j = start;
+            while j < chars.len() && chars[j] != '`' {
+                j += 1;
+            }
+            out.push(chars[start..j.min(chars.len())].iter().collect());
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Words that only precede the real command: shell keywords and grouping
+/// (`!`, `{`, `then`, `do`, …), `NAME=value` assignments, and the transparent
+/// wrappers `env`, `command`, `exec`, `builtin`, `nohup`, `time`, `sudo` with
+/// their flags. Other wrappers (`timeout 30 gh`, `xargs gh`, `nice gh`,
+/// `find -exec gh`) are caught by [`simple_commands`]' any-position rule.
 fn skips_to_command(words: &[Word]) -> usize {
     let mut i = 0;
     while i < words.len() {
@@ -255,15 +350,24 @@ fn skips_to_command(words: &[Word]) -> usize {
             continue;
         }
         let t = w.text.as_str();
+        if matches!(
+            t,
+            "!" | "{" | "}" | "if" | "then" | "else" | "elif" | "fi" | "do" | "done" | "while"
+                | "until" | "coproc"
+        ) {
+            i += 1;
+            continue;
+        }
         let is_assignment = t
             .split_once('=')
-            .is_some_and(|(name, _)| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-            && !t.starts_with('=');
-        if is_assignment || matches!(t, "command" | "exec" | "nohup" | "time" | "sudo" | "env") {
+            .is_some_and(|(name, _)| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+        if is_assignment
+            || matches!(t, "command" | "exec" | "builtin" | "nohup" | "time" | "sudo" | "env")
+        {
             i += 1;
             // `env -i`, `env -u NAME`, `sudo -u user`: skip their flags too.
             while i < words.len() && words[i].text.starts_with('-') && !words[i].op {
-                let takes_value = matches!(words[i].text.as_str(), "-u" | "-g" | "-C" | "-S");
+                let takes_value = matches!(words[i].text.as_str(), "-u" | "-g" | "-C" | "-S" | "-a" | "-p");
                 i += if takes_value { 2 } else { 1 };
             }
             continue;
@@ -278,41 +382,179 @@ fn basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
-const MAX_NESTING: usize = 3;
+const OUTWARD_TOOLS: &[&str] = &["gh", "curl"];
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh"];
+const MAX_NESTING: usize = 4;
 
-/// The simple commands a command line runs, one level of `sh -c "…"` / `eval`
-/// unwrapped per nesting step: `(tool, args)` for every segment.
-fn simple_commands(command: &str, depth: usize) -> Vec<(String, Vec<Word>)> {
+/// One simple command found in a command line. `opaque` marks a shell that
+/// runs a script bot-hq cannot read (a computed `-c` string, or stdin piped
+/// from something other than a literal `echo`/`printf`/heredoc) — it might
+/// publish anything, so it counts as outward.
+#[derive(Debug, Clone)]
+struct Cmd {
+    tool: String,
+    args: Vec<Word>,
+    opaque: bool,
+}
+
+/// Every simple command `command` runs, as `(tool, args)`, looking through:
+/// command substitutions in ANY word (`URL=$(gh pr create …)`); grouping and
+/// keywords; every word naming an outward tool or a shell at ANY position —
+/// so `timeout 30 gh …`, `xargs -I{} gh …`, `find … -exec gh … \;` and
+/// unknown wrappers are caught without a wrapper table (a command's args end
+/// where the next such word starts); `sh -c "…"`, `eval …` and
+/// `ssh host '…'` strings; and a shell's stdin script — its own heredoc or
+/// herestring, or a literal `cat <<EOF` / `echo` / `printf` piped into it.
+fn simple_commands(command: &str, depth: usize) -> Vec<Cmd> {
+    let segs = segments(command);
     let mut out = Vec::new();
-    for seg in segments(command) {
-        let start = skips_to_command(&seg);
-        let Some(first) = seg.get(start) else { continue };
-        let tool = basename(&first.text).to_string();
-        let args: Vec<Word> = seg[start + 1..].to_vec();
-        let nested = match tool.as_str() {
-            "sh" | "bash" | "zsh" | "dash" | "ksh" => args
-                .iter()
-                .position(|w| !w.op && w.text.starts_with('-') && !w.text.starts_with("--") && w.text.contains('c'))
-                .and_then(|p| args.get(p + 1))
-                .map(|w| w.text.clone()),
-            "eval" => Some(args.iter().filter(|w| !w.op).map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")),
-            _ => None,
-        };
-        if let (Some(inner), true) = (nested, depth < MAX_NESTING) {
-            out.extend(simple_commands(&inner, depth + 1));
+    for (idx, seg) in segs.iter().enumerate() {
+        let words = &seg.words;
+        if words.is_empty() {
+            continue;
         }
-        out.push((tool, args));
+        // Substitutions run first, wherever they sit — even in an assignment.
+        if depth < MAX_NESTING {
+            for w in words.iter().filter(|w| w.dynamic) {
+                for inner in substitution_bodies(&w.text) {
+                    out.extend(simple_commands(&inner, depth + 1));
+                }
+            }
+        }
+        // Where commands start: the primary command, plus every later word
+        // that names an outward tool, a shell, `eval` or `ssh`.
+        let primary = skips_to_command(words);
+        let mut starts: Vec<usize> = Vec::new();
+        if primary < words.len() && !words[primary].op {
+            starts.push(primary);
+        }
+        for (k, w) in words.iter().enumerate().skip(primary + 1) {
+            if w.op {
+                continue;
+            }
+            let b = basename(&w.text);
+            if OUTWARD_TOOLS.contains(&b) || SHELLS.contains(&b) || matches!(b, "eval" | "ssh") {
+                starts.push(k);
+            }
+        }
+        for (n, &k) in starts.iter().enumerate() {
+            let end = starts.get(n + 1).copied().unwrap_or(words.len());
+            let tool = basename(&words[k].text).to_string();
+            let args: Vec<Word> = words[k + 1..end].to_vec();
+            let mut opaque = false;
+            if depth < MAX_NESTING {
+                match tool.as_str() {
+                    t if SHELLS.contains(&t) => {
+                        match shell_script(&args, seg, idx, &segs) {
+                            ShellScript::Text(script) => out.extend(simple_commands(&script, depth + 1)),
+                            ShellScript::Opaque => opaque = true,
+                            ShellScript::None => {}
+                        }
+                    }
+                    "eval" => {
+                        if args.iter().any(|w| w.dynamic) {
+                            opaque = true;
+                        } else {
+                            let s = args.iter().filter(|w| !w.op).map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+                            out.extend(simple_commands(&s, depth + 1));
+                        }
+                    }
+                    "ssh" => {
+                        // `ssh [opts] host [command…]` — the remote command.
+                        let rest: Vec<&Word> = args.iter().filter(|w| !w.op && !w.text.starts_with('-')).skip(1).collect();
+                        if rest.iter().any(|w| w.dynamic) {
+                            opaque = true;
+                        } else if !rest.is_empty() {
+                            let s = rest.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+                            out.extend(simple_commands(&s, depth + 1));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out.push(Cmd { tool, args, opaque });
+        }
     }
     out
 }
 
-/// OUTWARD classifier: does any simple command run `gh` or `curl`? Quote- and
-/// wrapper-aware (see the module doc). `git push` is deliberately absent —
-/// the pre-push hook owns it end to end.
+enum ShellScript {
+    /// The script is readable: parse it as commands.
+    Text(String),
+    /// The shell runs a script bot-hq cannot read.
+    Opaque,
+    /// No script from the command line (a script FILE, or an interactive shell).
+    None,
+}
+
+/// What script a shell invocation runs, from its args and stdin: `-c STRING`;
+/// else, with no script-file operand, stdin — a herestring, its own heredoc,
+/// or a literal producer piped into it.
+fn shell_script(args: &[Word], seg: &Segment, idx: usize, segs: &[Segment]) -> ShellScript {
+    let mut i = 0;
+    let mut script_file = false;
+    let mut herestring: Option<&Word> = None;
+    while i < args.len() {
+        let w = &args[i];
+        if w.op {
+            if w.text == "<<<" {
+                herestring = args.get(i + 1);
+            }
+            i += 2;
+            continue;
+        }
+        let t = w.text.as_str();
+        if t.starts_with('-') && !t.starts_with("--") && t.len() > 1 && t.contains('c') {
+            return match args.get(i + 1) {
+                Some(s) if s.dynamic => ShellScript::Opaque,
+                Some(s) => ShellScript::Text(s.text.clone()),
+                None => ShellScript::None,
+            };
+        }
+        if !t.starts_with('-') {
+            script_file = true;
+            break;
+        }
+        i += 1;
+    }
+    if script_file {
+        return ShellScript::None;
+    }
+    if let Some(h) = herestring {
+        return if h.dynamic { ShellScript::Opaque } else { ShellScript::Text(h.text.clone()) };
+    }
+    if !seg.heredocs.is_empty() {
+        return ShellScript::Text(seg.heredocs.join("\n"));
+    }
+    if seg.piped_from_prev {
+        let Some(prev) = idx.checked_sub(1).and_then(|p| segs.get(p)) else {
+            return ShellScript::Opaque;
+        };
+        let start = skips_to_command(&prev.words);
+        let producer = prev.words.get(start).map(|w| basename(&w.text)).unwrap_or("");
+        let rest: Vec<&Word> = prev.words.iter().skip(start + 1).filter(|w| !w.op).collect();
+        return match producer {
+            "cat" if !prev.heredocs.is_empty() => ShellScript::Text(prev.heredocs.join("\n")),
+            "echo" | "printf" if rest.iter().all(|w| !w.dynamic) => ShellScript::Text(
+                rest.iter()
+                    .filter(|w| !(producer == "echo" && w.text.starts_with('-')))
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            _ => ShellScript::Opaque,
+        };
+    }
+    ShellScript::None
+}
+
+/// OUTWARD classifier: does the command line run `gh` or `curl` anywhere —
+/// or a shell whose script cannot be read (see [`Cmd::opaque`])? `git push`
+/// is deliberately absent: the pre-push hook owns it end to end.
 pub(crate) fn is_outward(command: &str) -> bool {
     simple_commands(command, 0)
         .iter()
-        .any(|(tool, _)| matches!(tool.as_str(), "gh" | "curl"))
+        .any(|c| c.opaque || OUTWARD_TOOLS.contains(&c.tool.as_str()))
 }
 
 /// The content an outward command publishes: body FILES (paths as written,
@@ -324,6 +566,7 @@ pub(crate) struct OutwardBodies {
 }
 
 impl OutwardBodies {
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.files.is_empty() && self.inline.is_empty()
     }
@@ -347,6 +590,9 @@ enum Carries {
     CurlData,
     /// `curl --data-raw v`: `v` inline, literally.
     CurlRaw,
+    /// `curl --data-urlencode v`: `content`, `=content`, `name=content`
+    /// inline; `@file` / `name@file` → a file.
+    CurlUrlencode,
     /// `curl -F k=v`: `v` inline, or `@path` / `<path` → a file.
     CurlForm,
     /// Takes a value that is not published (`--repo`, `-H`, `--jq`).
@@ -429,7 +675,7 @@ fn flag_table(tool: &str, group: &str, sub: &str) -> FlagTable {
         ("curl", _, _) => {
             flags = vec![
                 ("-d", CurlData), ("--data", CurlData), ("--data-ascii", CurlData),
-                ("--data-binary", CurlData), ("--data-urlencode", CurlData), ("--json", CurlData),
+                ("--data-binary", CurlData), ("--data-urlencode", CurlUrlencode), ("--json", CurlData),
                 ("--data-raw", CurlRaw), ("--form-string", CurlRaw),
                 ("-F", CurlForm), ("--form", CurlForm), ("-T", File), ("--upload-file", File),
                 ("-b", Skip), ("--cookie", Skip), ("-c", Skip), ("--cookie-jar", Skip),
@@ -467,7 +713,7 @@ pub(crate) fn extract(command: &str) -> Result<OutwardBodies, String> {
     // (`bash -c "…"`, `eval`) are skipped — their inner commands are analysed
     // on their own.
     let mut written: Vec<String> = Vec::new();
-    for (tool, args) in &commands {
+    for Cmd { tool, args, .. } in &commands {
         let mut i = 0;
         while i < args.len() {
             if args[i].op && args[i].text.starts_with('>') {
@@ -481,7 +727,8 @@ pub(crate) fn extract(command: &str) -> Result<OutwardBodies, String> {
             extract_one(tool, args, &mut out)?;
             continue;
         }
-        if matches!(tool.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh" | "eval")
+        if SHELLS.contains(&tool.as_str())
+            || matches!(tool.as_str(), "eval" | "ssh")
             || READ_ONLY_TOOLS.contains(&tool.as_str())
         {
             continue;
@@ -653,6 +900,24 @@ fn publish_value(flag: &str, carries: Carries, value: String, out: &mut OutwardB
             Some(path) => out.files.push(path.to_string()),
             None => out.inline.push(value),
         },
+        Carries::CurlUrlencode => {
+            // curl's rule: an `@` before any `=` means `[name]@filename`.
+            let at = value.find('@');
+            let eq = value.find('=');
+            match at {
+                Some(a) if eq.is_none_or(|e| a < e) => {
+                    let path = &value[a + 1..];
+                    if is_stdin(path) {
+                        return Err(stdin_refusal(&format!("{flag} @{path}")));
+                    }
+                    out.files.push(path.to_string());
+                }
+                _ => out.inline.push(match eq {
+                    Some(e) => value[e + 1..].to_string(),
+                    None => value,
+                }),
+            }
+        }
         Carries::CurlForm => {
             let v = field_value(value);
             match v.strip_prefix('@').or_else(|| v.strip_prefix('<')) {
@@ -679,7 +944,8 @@ mod tests {
     fn texts(command: &str) -> Vec<Vec<String>> {
         segments(command)
             .into_iter()
-            .map(|s| s.into_iter().map(|w| w.text).collect())
+            .map(|s| s.words.into_iter().map(|w| w.text).collect::<Vec<_>>())
+            .filter(|s| !s.is_empty())
             .collect()
     }
 
@@ -711,7 +977,7 @@ mod tests {
     fn expansions_mark_the_word_dynamic_and_stay_whole() {
         let segs = segments(r#"gh issue comment 5 --body "$(cat f; echo x)""#);
         assert_eq!(segs.len(), 1, "the `;` inside $(…) does not split");
-        let body = segs[0].last().unwrap();
+        let body = segs[0].words.last().unwrap();
         assert!(body.dynamic);
     }
 
@@ -826,5 +1092,71 @@ mod tests {
     #[test]
     fn nested_shell_strings_are_extracted_too() {
         assert_eq!(ok("bash -c 'gh issue comment 5 --body-file /tmp/b.md'").files, vec!["/tmp/b.md"]);
+    }
+
+    /// EYES 7d3d4f34: a publish inside a script a SHELL reads from stdin —
+    /// its own heredoc, a herestring, or a literal producer piped into it —
+    /// is outward, and its body is extracted. A heredoc that is only DATA
+    /// (`cat > f <<EOF`) still is not.
+    #[test]
+    fn scripts_fed_to_a_shell_are_parsed_as_commands() {
+        let heredoc = "bash <<'EOF'\ngh issue comment 5 --body-file b.md\nEOF";
+        assert!(is_outward(heredoc));
+        assert_eq!(ok(heredoc).files, vec!["b.md"]);
+        let piped = "cat <<'EOF' | bash\ngh issue comment 5 --body-file b.md\nEOF";
+        assert!(is_outward(piped));
+        assert_eq!(ok(piped).files, vec!["b.md"]);
+        assert_eq!(ok("bash -s <<< 'gh issue comment 5 -b hi'").inline, vec!["hi"]);
+        assert!(is_outward("echo 'gh pr merge 3' | sh"));
+        assert!(is_outward("printf 'gh pr merge 3\\n' | zsh"));
+        // A script bot-hq cannot read is outward, fail closed.
+        assert!(is_outward("./gen-script | bash"));
+        assert!(is_outward("sh -c \"$SCRIPT\""));
+        assert!(is_outward("eval \"$CMD\""));
+        // Data heredocs and script FILES are not scripts on the command line.
+        assert!(!is_outward("cat > /tmp/n.md <<'EOF'\ngh issue comment 9\nEOF"));
+        assert!(!is_outward("bash ./scripts/build.sh"));
+    }
+
+    #[test]
+    fn command_substitutions_are_analysed_as_commands() {
+        let cmd = "URL=$(gh pr create -t T --body-file b.md)";
+        assert!(is_outward(cmd));
+        assert_eq!(ok(cmd).files, vec!["b.md"]);
+        assert!(is_outward("echo \"$(gh issue comment 5 -b x)\""));
+        assert!(is_outward("echo `gh issue close 5`"));
+        assert!(is_outward("diff <(gh api repos/o/r) old.json"));
+    }
+
+    #[test]
+    fn grouping_keywords_and_wrappers_do_not_hide_gh() {
+        for cmd in [
+            "( gh issue comment 5 -b x )",
+            "{ gh issue comment 5 -b x; }",
+            "! gh pr merge 1",
+            "if true; then gh pr merge 1; fi",
+            "for i in 1 2; do gh issue close $i; done",
+            "timeout 30 gh pr merge 1",
+            "xargs -I{} gh issue close {}",
+            "nice -n 5 gh pr merge 1",
+            "find . -name x -exec gh issue close 5 \\;",
+            "ssh host 'gh issue close 5'",
+            "caffeinate -i gh release create v1",
+        ] {
+            assert!(is_outward(cmd), "{cmd}");
+        }
+        // The wrapper's args end where the gh command starts: its body is
+        // extracted, and nothing counts as written by the wrapper.
+        assert_eq!(ok("timeout 30 gh issue comment 5 --body-file b.md").files, vec!["b.md"]);
+        assert_eq!(ok("xargs -I{} gh issue comment {} -b hello").inline, vec!["hello"]);
+    }
+
+    #[test]
+    fn curl_urlencode_reads_a_file_when_curl_does() {
+        assert_eq!(ok("curl --data-urlencode name@/tmp/v.txt https://x").files, vec!["/tmp/v.txt"]);
+        assert_eq!(ok("curl --data-urlencode @/tmp/v.txt https://x").files, vec!["/tmp/v.txt"]);
+        assert_eq!(ok("curl --data-urlencode q=hello https://x").inline, vec!["hello"]);
+        assert_eq!(ok("curl --data-urlencode '=a@b' https://x").inline, vec!["a@b"]);
+        assert!(refused("curl --data-urlencode body@- https://x").contains("stdin"));
     }
 }
