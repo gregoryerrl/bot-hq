@@ -330,7 +330,12 @@ impl SignalingBridge {
         let (done, lint, retired, pre, snapshot) = outcome;
         self.record_retired_terms(&session_id, &project, retired, Some(&file_path)).await;
         self.record_cl_write(&session_id, &project, &file_path).await;
-        let concurrent = note_cl_writer(&project, &file_path, &session_id);
+        let library = self
+            .data_dir
+            .as_ref()
+            .map(|d| crate::paths::Paths::for_data_dir(d.clone()).cl_dir.display().to_string())
+            .unwrap_or_default();
+        let concurrent = note_cl_writer(&library, &project, &file_path, &session_id);
         if let Err(err) = self.cl_rescan(&project).await {
             tracing::warn!(
                 %err,
@@ -906,15 +911,17 @@ const CONCURRENT_WRITE_WINDOW: std::time::Duration = std::time::Duration::from_s
 
 /// The last session to write each CL file, process-wide (every session runs in
 /// this one app).
+/// Keyed by (library root, project, file): one app has one library, and the
+/// root keeps two libraries (tests, or a dev build beside a release) apart.
 static CL_LAST_WRITER: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<(String, String), (String, std::time::Instant)>>,
+    std::sync::Mutex<std::collections::HashMap<(String, String, String), (String, std::time::Instant)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Record this write and, when a DIFFERENT session wrote the same file within
 /// [`CONCURRENT_WRITE_WINDOW`], return the warning the reply carries.
-fn note_cl_writer(project: &str, file_path: &str, session_id: &str) -> Option<String> {
+fn note_cl_writer(library: &str, project: &str, file_path: &str, session_id: &str) -> Option<String> {
     let mut map = CL_LAST_WRITER.lock().unwrap_or_else(|p| p.into_inner());
-    let key = (project.to_string(), file_path.to_string());
+    let key = (library.to_string(), project.to_string(), file_path.to_string());
     let warning = match map.get(&key) {
         Some((other, at)) if other != session_id && at.elapsed() < CONCURRENT_WRITE_WINDOW => Some(format!(
             " — ⚠ another session ({other}) wrote this file {} min ago: re-read it before \
