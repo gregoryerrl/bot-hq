@@ -447,6 +447,54 @@ pub fn participant_display_name(
     }
 }
 
+/// One participant as [`distinct_labels`] sees it: the inputs of the display
+/// rule.
+pub(crate) struct LabelRow<'a> {
+    pub role: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub slug: &'a str,
+    pub label: Option<&'a str>,
+}
+
+/// Each participant's label, numbered where needed so no two participants
+/// DISPLAY the same name (feedback #11/#12 leftover): the chat's colour map is
+/// keyed by the displayed name, so two identical names share one entry — one
+/// hue, one byline, no telling them apart.
+///
+/// Compared by the name each will actually show (EYES P11), model half
+/// included, case-insensitively. Unlabeled names are reserved first and never
+/// change; a label that repeats one of them or an earlier label becomes
+/// `Reviewer 2`, `Reviewer 3`, … — the first keeps its name. A blank label is no
+/// label (the display rule's own `clean`) and passes through untouched.
+pub(crate) fn distinct_labels(rows: &[LabelRow<'_>]) -> Vec<Option<String>> {
+    fn clean(s: Option<&str>) -> Option<&str> {
+        s.map(str::trim).filter(|s| !s.is_empty())
+    }
+    let shown = |r: &LabelRow<'_>, label: Option<&str>| {
+        participant_display_name(r.role, r.model, r.slug, label).to_lowercase()
+    };
+    let mut in_use: HashSet<String> = rows
+        .iter()
+        .filter(|r| clean(r.label).is_none())
+        .map(|r| shown(r, None))
+        .collect();
+    rows.iter()
+        .map(|r| {
+            let Some(base) = clean(r.label) else {
+                return r.label.map(str::to_string);
+            };
+            let mut label = base.to_string();
+            let mut n = 2;
+            while in_use.contains(&shown(r, Some(&label))) {
+                label = format!("{base} {n}");
+                n += 1;
+            }
+            in_use.insert(shown(r, Some(&label)));
+            Some(label)
+        })
+        .collect()
+}
+
 /// The `-N` a duplicate slug carries, if any: `eyes-2` → `Some(2)`, `eyes` →
 /// `None` (rc3 **D20**).
 ///
@@ -1196,18 +1244,57 @@ impl Storage {
             );
         }
 
+        // Handles are allocated as the batch is built, so the SECOND participant
+        // of a role in this session takes `<role>-2` — see [`participant_slug`].
+        let mut taken: HashSet<String> = HashSet::new();
+        let slugs: Vec<String> = roles
+            .iter()
+            .map(|role| {
+                let slug = participant_slug(&role.slug, &taken);
+                taken.insert(slug.clone());
+                slug
+            })
+            .collect();
+        // **No two participants display the same name** (feedback #11/#12
+        // leftover): a label the user typed twice, or one that repeats another
+        // participant's role-and-model name, is numbered here, once, at
+        // creation — by the name each will actually DISPLAY (EYES P11), so the
+        // model half counts. Unlabeled names are never touched.
+        let mut models = Vec::with_capacity(drafts.len());
+        for (draft, role) in drafts.iter().zip(roles) {
+            let id = draft.model_id.as_deref().or(role.default_model_id.as_deref());
+            let name: Option<String> = match id {
+                Some(id) => sqlx::query_scalar("SELECT display_name FROM models WHERE id = ?")
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .with_context(|| format!("reading model {id}"))?,
+                None => None,
+            };
+            models.push(name);
+        }
+        let labels = distinct_labels(
+            &drafts
+                .iter()
+                .zip(roles)
+                .zip(slugs.iter().zip(&models))
+                .map(|((draft, role), (slug, model))| LabelRow {
+                    role: Some(role.display_name.as_str()),
+                    model: model.as_deref(),
+                    slug,
+                    label: draft.label.as_deref(),
+                })
+                .collect::<Vec<_>>(),
+        );
+
         let mut tx = self
             .pool
             .begin()
             .await
             .context("opening the roster transaction")?;
         let mut ids = Vec::with_capacity(drafts.len());
-        // Handles are allocated as the batch is built, so the SECOND participant
-        // of a role in this session takes `<role>-2` — see [`participant_slug`].
-        let mut taken: HashSet<String> = HashSet::new();
         for (slot, (draft, role)) in drafts.iter().zip(roles).enumerate() {
-            let slug = participant_slug(&role.slug, &taken);
-            taken.insert(slug.clone());
+            let slug = slugs[slot].clone();
             // The invite-time snapshot: `capabilities` and `participation_mode`
             // are COPIED off the role, so editing the role later cannot widen a
             // live participant mid-session. `role_id` records which template
@@ -1238,7 +1325,7 @@ impl Storage {
             .bind(i64::from(enabled.map(|e| e[slot]).unwrap_or(true)))
             .bind(&created_at)
             .bind(draft.color.as_deref())
-            .bind(draft.label.as_deref())
+            .bind(labels[slot].as_deref())
             .execute(&mut *tx)
             .await
             .with_context(|| format!("seeding participant {slug} into {session_id}"))?
@@ -5115,6 +5202,73 @@ mod tests {
             participant_display_name(Some("EYES"), None, "eyes-2", Some("  Skeptic  ")),
             "Skeptic"
         );
+    }
+
+    /// Feedback #11/#12 leftover (EYES P11): no two participants DISPLAY the
+    /// same name — labels are numbered by the displayed name, model half
+    /// included, and an unlabeled name is never the one that moves.
+    #[test]
+    fn labels_are_numbered_until_every_displayed_name_is_distinct() {
+        let row = |role, model, slug, label| LabelRow { role, model, slug, label };
+        let x = Some("Opus");
+        // The same label twice on one model: the second is numbered.
+        assert_eq!(
+            distinct_labels(&[
+                row(Some("EYES"), x, "eyes", Some("Reviewer")),
+                row(Some("EYES"), x, "eyes-2", Some("Reviewer")),
+                row(Some("EYES"), x, "eyes-3", Some("reviewer")),
+            ]),
+            vec![Some("Reviewer".into()), Some("Reviewer 2".into()), Some("reviewer 3".into())]
+        );
+        // On different models the names already differ — nothing to number.
+        assert_eq!(
+            distinct_labels(&[
+                row(Some("EYES"), x, "eyes", Some("Reviewer")),
+                row(Some("EYES"), Some("Sonnet"), "eyes-2", Some("Reviewer")),
+            ]),
+            vec![Some("Reviewer".into()), Some("Reviewer".into())]
+        );
+        // A label repeating another participant's role name on the same model
+        // is numbered — in either order, because the unlabeled name is reserved
+        // first and never changes.
+        assert_eq!(
+            distinct_labels(&[
+                row(Some("HANDS"), x, "hands", Some("EYES")),
+                row(Some("EYES"), x, "eyes", None),
+            ]),
+            vec![Some("EYES 2".into()), None]
+        );
+        // A blank label is no label and passes through untouched.
+        assert_eq!(
+            distinct_labels(&[row(Some("EYES"), x, "eyes", Some("  "))]),
+            vec![Some("  ".into())]
+        );
+    }
+
+    /// The roster INSERT applies it: two participants seeded with one label
+    /// are stored as `Reviewer` and `Reviewer 2`.
+    #[tokio::test]
+    async fn seeding_numbers_a_repeated_label() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let eyes = s.role_by_slug("eyes").await.unwrap().unwrap();
+        let draft = || ParticipantDraft {
+            role_id: eyes.id,
+            model_id: Some("sonnet".into()),
+            effort: None,
+            ultracode: None,
+            color: None,
+            label: Some("Reviewer".into()),
+        };
+        s.seed_session_roster("s1", &[draft(), draft()]).await.unwrap();
+        let labels: Vec<Option<String>> = s
+            .participants_for_session("s1")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.label)
+            .collect();
+        assert_eq!(labels, vec![Some("Reviewer".into()), Some("Reviewer 2".into())]);
     }
 
     /// rc3 **D20** (migration 0053): `@` resolves the user's label as well as
