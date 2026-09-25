@@ -1410,17 +1410,24 @@ struct RingState {
     /// keeps firing as D35 designed: it is what makes the completion arrive in
     /// milliseconds rather than at the residual generation's leisure.
     winding_down: Option<i64>,
-    /// The mentions of a `UserMessage` held back by `winding_down` (see above)
-    /// or by `boot_hold` (below); `None` = nothing held. Two releases in the
-    /// window merge into one — the rows are already in the channel, and one
-    /// restart drains them.
+    /// The mentions of a `UserMessage` held back by `winding_down` (see above);
+    /// `None` = nothing held. Two releases in the window merge into one — the
+    /// rows are already in the channel, and one restart drains them.
     stashed_release: Option<(Vec<i64>, bool)>,
     /// The ring's own boot latch (feedback #10): set at construction when the
     /// spawn boots ([`SequencerDeps::boots`]), cleared ONLY by `BootEnded`.
-    /// While set, a release is stashed and a stage is held — whatever sent it: a
-    /// typed Send, a plugin's first prompt, a tray release, Resume. Boot posts
-    /// READY before it sends `BootEnded`, so whatever was held lands after READY.
+    /// While set, a release is held in `boot_release` and a stage is held —
+    /// whatever sent it: a typed Send, a plugin's first prompt, a tray release,
+    /// Resume. Boot posts READY before it sends `BootEnded`, so whatever was
+    /// held lands after READY.
     boot_hold: bool,
+    /// A release held by `boot_hold` (folded like `stashed_release`: mentions
+    /// queue, a reset wins). **Its own field, never the wind-down stash**
+    /// (EYES ec633ff4): the loop times the stash with `HALT_WIND_DOWN_GRACE`
+    /// and deals it when 3 s pass, and boot takes about a minute — a boot
+    /// release in the stash was dealt to a pump still orienting, the #10
+    /// wedge. Only `BootEnded` releases this one.
+    boot_release: Option<(Vec<i64>, bool)>,
     /// Participants that have parked a question and cannot proceed until the user
     /// answers (rc3 D22). The ring skips no-one on account of this — it HALTS when
     /// it reaches one, which is what bounds the extra work at one lap. Cleared by
@@ -1470,6 +1477,19 @@ impl RingState {
                 *restarts |= restarts_rotation;
             }
             None => self.stashed_release = Some((mentions, restarts_rotation)),
+        }
+    }
+
+    /// Hold a release that arrived during boot (feedback #10). Folds exactly
+    /// like [`Self::stash_release`] — mentions queue behind each other and a
+    /// reset wins — but into `boot_release`, which no timer watches.
+    fn hold_for_boot(&mut self, mentions: Vec<i64>, restarts_rotation: bool) {
+        match self.boot_release.as_mut() {
+            Some((held, restarts)) => {
+                held.extend(mentions);
+                *restarts |= restarts_rotation;
+            }
+            None => self.boot_release = Some((mentions, restarts_rotation)),
         }
     }
 
@@ -1975,7 +1995,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         session = %deps.session_id,
                         "sequencer: a release arrived during boot; holding it until boot ends"
                     );
-                    state.stash_release(mentions, restarts_rotation);
+                    state.hold_for_boot(mentions, restarts_rotation);
                     continue;
                 }
                 // **A release that lands while the halted holder is still
@@ -2007,13 +2027,12 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
             }
             SequencerCommand::BootEnded => {
                 state.boot_hold = false;
-                // A release held during boot is dealt now — and drained HERE:
-                // `TurnComplete` replays any stash it finds, so one left behind
-                // would restart the rotation after turn one. A stage pending
-                // beside it stays pending and lands at the next boundary, the
-                // ordinary staged semantics; with no release held it is the
-                // release, delivered now.
-                if let Some((mentions, restarts)) = state.take_stashed_release() {
+                // A release held during boot is dealt now — and taken out of
+                // its slot HERE, so nothing is left for a later path to replay
+                // (E4). A stage pending beside it stays pending and lands at
+                // the next boundary, the ordinary staged semantics; with no
+                // release held it is the release, delivered now.
+                if let Some((mentions, restarts)) = state.boot_release.take() {
                     debug!(
                         session = %deps.session_id,
                         "sequencer: boot ended; dealing the release held during boot"
@@ -7001,10 +7020,36 @@ mod tests {
         assert!(seats[1].drain().is_empty(), "one turn, to the front of the rotation");
     }
 
+    /// EYES ec633ff4: boot takes about a minute, and the loop deals whatever
+    /// sits in the wind-down stash once `HALT_WIND_DOWN_GRACE` (3 s) passes. A
+    /// boot release held THERE was dealt mid-boot to a pump still orienting —
+    /// the #10 wedge — while every test above ends boot within milliseconds.
+    /// Held past the grace, it still waits for `BootEnded`.
+    #[tokio::test]
+    async fn a_release_during_boot_outlasts_the_wind_down_grace() {
+        let (deps, storage, mut seats, _events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
+        post(&storage, "user", None, "the plugin's first prompt").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, user_message()).await;
+        tokio::time::sleep(HALT_WIND_DOWN_GRACE + Duration::from_millis(500)).await;
+        assert!(
+            seats[0].extra_wire().await.is_none() && seats[1].extra_wire().await.is_none(),
+            "a release held during boot was dealt when the wind-down grace expired"
+        );
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert_eq!(seats[0].expect(1).await, vec!["the plugin's first prompt"]);
+        drop(tx);
+        assert!(exited(task).await);
+        assert!(seats[1].drain().is_empty());
+    }
+
     /// EYES E4: a release AND a stage held during boot. `BootEnded` deals the
-    /// release and drains the stash — a stash left for `TurnComplete` would
-    /// replay after turn one and restart the rotation mid-lap — while the stage
-    /// stays pending and lands at the first boundary, the ordinary staged rule.
+    /// release and takes it out of its slot — one left behind would replay
+    /// later and restart the rotation mid-lap — while the stage stays pending
+    /// and lands at the first boundary, the ordinary staged rule.
     #[tokio::test]
     async fn boot_ending_deals_the_held_release_and_keeps_the_stage_for_the_boundary() {
         let (deps, storage, mut seats, mut events) =
