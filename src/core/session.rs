@@ -1064,6 +1064,16 @@ async fn spawn_session_handle(
         // regardless — which is exactly why it has to be handled now.
         let boot_activity = Arc::clone(&activity);
         let boot_slugs: Vec<String> = live.iter().map(|p| p.slug.clone()).collect();
+        // The boot WATERMARK (feedback #10): every row a user posts from here on
+        // — a plugin's first prompt, a Send before or during boot — sits above
+        // it, and READY says such a message goes out next. Read before the boot
+        // task exists, so nothing the user writes can land below it. A failed
+        // read leaves READY's ordinary wording (the watermark reads as "above
+        // everything"); the held message is delivered either way.
+        let boot_watermark = storage.latest_message_id(&session.id).await.unwrap_or_else(|e| {
+            warn!(session_id = %session.id, ?e, "reading the boot watermark failed");
+            i64::MAX
+        });
         tokio::spawn(async move {
             boot_then_start(
                 &boot_session,
@@ -1076,6 +1086,7 @@ async fn spawn_session_handle(
                 BOOT_TIMEOUT,
                 boot_activity,
                 boot_slugs,
+                boot_watermark,
             )
             .await;
         });
@@ -1085,9 +1096,17 @@ async fn spawn_session_handle(
         // to the ring, which is a session that can never take a turn.
         booting.store(false, std::sync::atomic::Ordering::Release);
         // …and a message the user staged in the moment the flag was still up
-        // is delivered now rather than stranded (feedback #10).
+        // is delivered now rather than stranded (feedback #10). Awaited: the
+        // ring's latch drops only on this command, so a dropped send would
+        // strand whatever it holds (EYES E3a).
         if let Some(tx) = sequencer_tx.as_ref() {
-            let _ = tx.try_send(crate::core::sequencer::SequencerCommand::BootEnded);
+            if tx
+                .send(crate::core::sequencer::SequencerCommand::BootEnded)
+                .await
+                .is_err()
+            {
+                warn!(session_id = %session.id, "the ring is gone; BootEnded not delivered");
+            }
         }
     }
 
@@ -2152,6 +2171,9 @@ async fn boot_then_start(
     // has no other path that ever will.
     activity: Arc<crate::core::activity::ActivityTracker>,
     slugs: Vec<String>,
+    // The newest row id when the spawn began (feedback #10): a user row above
+    // it is a message held for boot's end, and READY says it goes out next.
+    watermark: i64,
 ) {
     let expected = inputs.len();
     // Posted as a `boot` row so `channel_page` keeps it out of every backlog:
@@ -2184,9 +2206,9 @@ async fn boot_then_start(
             // and no task deals a turn nobody can use — the pass-volley shape
             // D29 exists to prevent, reached through a storage hiccup. A
             // session with an unfired kick is not stranded; the user's first
-            // message starts it. `boot_ended` only delivers a message the user
-            // staged during boot (feedback #10).
-            kick.boot_ended();
+            // message starts it. `boot_ended` only releases what the ring held
+            // during boot (feedback #10).
+            kick.boot_ended().await;
             return;
         }
     };
@@ -2242,6 +2264,28 @@ async fn boot_then_start(
     // readiness to a receiver nobody is reading.
     booting.store(false, std::sync::atomic::Ordering::Release);
 
+    // **READY is posted next — before the busy flags drop and before the ring
+    // hears that boot ended** (feedback #10). The ring holds every release and
+    // stage until `BootEnded`, so whatever the user sent during boot lands
+    // BELOW this row, and the input stays locked until the row exists: a Send
+    // typed in that window is staged, not posted above it (EYES P3). Worded
+    // from durable state rather than asked of the ring, whose commands stall
+    // behind a Pause (EYES E3b).
+    let waiting = message_waiting_at_boot_end(storage, session_id, watermark).await;
+    // The session is usable either way — it is waiting, or about to deliver
+    // what it held. What a lost row costs is the sentence telling the user so,
+    // and a session that looks stopped for no reason is the report this whole
+    // arc began with (the helper warns).
+    crate::core::post_system_notice(
+        storage,
+        Some(bridge),
+        session_id,
+        crate::storage::MessageKind::SystemNotice,
+        ready_notice(ready, want, timeout.as_secs(), waiting),
+        None,
+    )
+    .await;
+
     // **Every participant is released here, ready or not.**
     //
     // Reached by all three exits: everyone oriented, the channel closed, or the
@@ -2251,7 +2295,7 @@ async fn boot_then_start(
     //
     // Releasing a participant that is still producing boot output is correct
     // rather than merely tolerable: boot is not a turn, the ring is idle, and
-    // the READY notice below already tells the user "the rest join as they
+    // the READY notice above already tells the user "the rest join as they
     // finish". The alternative is a window that can never be typed into.
     for slug in &slugs {
         activity.set_busy_slug(slug, false);
@@ -2274,36 +2318,52 @@ async fn boot_then_start(
     //
     // So the ring waits. It is spawned and idle, holding no turn; the user's
     // first message starts it with something real in the backlog. The `kick`
-    // deals nothing: `boot_ended` only delivers a message the user STAGED during
-    // boot (feedback #10) — that is a real task, not an empty turn.
-    kick.boot_ended();
-    let notice = if ready == want {
-        format!(
-            "[System: READY — {ready} participant(s) oriented and waiting. \
-             Send your task to begin; nobody takes a turn until you do.]"
-        )
+    // deals nothing of its own: `boot_ended` only releases what the ring held
+    // during boot (feedback #10) — a real task, not an empty turn. Sent LAST,
+    // after READY and after the busy flags drop: the turn it may deal marks its
+    // holder busy, and clearing the flags after it would unmark that holder.
+    kick.boot_ended().await;
+    tracing::info!(session_id, ready, want, waiting, "boot complete");
+}
+
+/// Whether a user message is waiting for boot to end (feedback #10): a stage in
+/// the slot, or a user row posted after the spawn began (`watermark`). Read
+/// from durable state — the ring holds the same messages, but asking it would
+/// stall behind a Pause. A read error counts as nothing waiting: only READY's
+/// wording depends on it, never the delivery.
+async fn message_waiting_at_boot_end(storage: &Storage, session_id: &str, watermark: i64) -> bool {
+    let staged = storage.staged_message(session_id).await.unwrap_or_else(|e| {
+        warn!(session_id, ?e, "reading the staged message at boot end failed");
+        None
+    });
+    if staged.is_some() {
+        return true;
+    }
+    storage.user_wrote_after(session_id, watermark).await.unwrap_or_else(|e| {
+        warn!(session_id, ?e, "checking for a message sent during boot failed");
+        false
+    })
+}
+
+/// The READY row boot ends with (rc3 D29), worded for what happens next. With
+/// a message waiting, the ring delivers it right after this row; otherwise the
+/// session waits for the user's first message.
+fn ready_notice(ready: usize, want: usize, timeout_secs: u64, waiting: bool) -> String {
+    let head = if ready == want {
+        format!("[System: READY — {ready} participant(s) oriented")
     } else {
         format!(
             "[System: READY — {ready} of {want} participant(s) oriented before the \
-             {}s boot timeout; the rest join as they finish. Send your task to \
-             begin; nobody takes a turn until you do.]",
-            timeout.as_secs()
+             {timeout_secs}s boot timeout; the rest join as they finish"
         )
     };
-    // The session is usable either way — it is waiting, which is its resting
-    // state. What a lost row costs is the sentence telling the user so, and a
-    // session that looks stopped for no reason is the report this whole arc
-    // began with (the helper warns).
-    crate::core::post_system_notice(
-        storage,
-        Some(bridge),
-        session_id,
-        crate::storage::MessageKind::SystemNotice,
-        notice,
-        None,
-    )
-    .await;
-    tracing::info!(session_id, ready, want, "boot complete; the session waits for the user");
+    if waiting {
+        format!("{head}. The message you sent during boot goes to them now.]")
+    } else if ready == want {
+        format!("{head} and waiting. Send your task to begin; nobody takes a turn until you do.]")
+    } else {
+        format!("{head}. Send your task to begin; nobody takes a turn until you do.]")
+    }
 }
 
 /// **The boot-scoped hold on the ring** (rc3 D21 → D29).
@@ -2333,13 +2393,24 @@ pub(crate) struct RingKick {
 }
 
 impl RingKick {
-    /// Boot is over: tell the ring, so a message the user STAGED during boot is
-    /// delivered now (feedback #10), then drop the token. Deals no turn — with
-    /// nothing staged, the ring keeps waiting for the user (rc3 D29).
-    fn boot_ended(self) {
-        let _ = self
+    /// Boot is over: tell the ring, so its boot latch drops and whatever it
+    /// held during boot lands (feedback #10), then drop the token. Deals nothing
+    /// of its own — with nothing held, the ring keeps waiting for the user
+    /// (rc3 D29).
+    ///
+    /// **Awaited, never `try_send`** (EYES E3a): the latch drops ONLY on this
+    /// command, so a send lost to a full channel would strand every held
+    /// message for the life of the session. It fails only when the ring is
+    /// gone, and then there is nothing left to deliver to.
+    async fn boot_ended(self) {
+        if self
             ._held
-            .try_send(crate::core::sequencer::SequencerCommand::BootEnded);
+            .send(crate::core::sequencer::SequencerCommand::BootEnded)
+            .await
+            .is_err()
+        {
+            tracing::warn!("boot ended but the ring is gone; nothing it held can be delivered");
+        }
     }
 }
 
@@ -4616,6 +4687,7 @@ mod tests {
                 std::time::Duration::from_secs(30),
                 Arc::clone(&act),
                 vec!["hands".to_string(), "eyes".to_string()],
+                0,
             )
             .await;
         });
@@ -4730,6 +4802,7 @@ mod tests {
                 std::time::Duration::from_millis(150),
                 boot_act,
                 vec!["hands".to_string(), "eyes".to_string()],
+                0,
             )
             .await;
         });
@@ -4782,6 +4855,177 @@ mod tests {
             !act.is_busy_slug("hands") && !act.is_busy_slug("eyes"),
             "boot must release every participant on the way out, ready or not —              a participant that never finishes orienting has no other path that will"
         );
+    }
+
+    /// A READY row read back from storage: its id and its text.
+    struct ReadyRow {
+        id: i64,
+        text: String,
+    }
+
+    /// Boot a one-participant session to its end (feedback #10). Returns the
+    /// READY row as it stood at the instant the ring heard `BootEnded`, and
+    /// every bridge event emitted up to that instant.
+    async fn boot_to_end(
+        s: &Storage,
+        watermark: i64,
+    ) -> (ReadyRow, Vec<crate::signaling::SignalingEvent>) {
+        let bridge = Arc::new(SignalingBridge::new());
+        bridge.set_storage(s.clone()).await;
+        let mut events = bridge.subscribe();
+        let (a_tx, _a_rx) = tokio::sync::mpsc::channel(8);
+        let inputs = vec![(1i64, crate::agents::ParticipantInput::new("s1", a_tx))];
+        let (done_tx, done_rx) = tokio::sync::mpsc::channel::<i64>(8);
+        let booting = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (ring_tx, mut ring_rx) = tokio::sync::mpsc::channel(8);
+        let act = crate::core::activity::ActivityTracker::new(
+            "s1",
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::clone(&bridge),
+            vec!["hands".to_string()],
+        );
+        act.set_busy_slug("hands", true);
+        let st = s.clone();
+        let br = Arc::clone(&bridge);
+        tokio::spawn(async move {
+            boot_then_start(
+                "s1", &st, &br, inputs, done_rx, booting, RingKick { _held: ring_tx },
+                std::time::Duration::from_secs(30),
+                act,
+                vec!["hands".to_string()],
+                watermark,
+            )
+            .await;
+        });
+        done_tx.send(1).await.unwrap();
+        let cmd = tokio::time::timeout(std::time::Duration::from_secs(2), ring_rx.recv())
+            .await
+            .expect("boot never told the ring it ended");
+        assert!(matches!(cmd, Some(crate::core::sequencer::SequencerCommand::BootEnded)));
+        // Read at the instant the ring hears it: READY has to exist already.
+        let ready = s
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.content.starts_with("[System: READY"))
+            .map(|m| ReadyRow { id: m.id, text: m.content })
+            .expect("READY is posted BEFORE the ring hears BootEnded (feedback #10)");
+        let mut seen = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            seen.push(ev);
+        }
+        (ready, seen)
+    }
+
+    /// READY's four wordings: all oriented or cut by the timeout, each with or
+    /// without a message waiting to go out right after it.
+    #[test]
+    fn ready_notice_words_what_happens_next() {
+        assert_eq!(
+            ready_notice(2, 2, 120, false),
+            "[System: READY — 2 participant(s) oriented and waiting. Send your task to \
+             begin; nobody takes a turn until you do.]"
+        );
+        assert_eq!(
+            ready_notice(2, 2, 120, true),
+            "[System: READY — 2 participant(s) oriented. The message you sent during \
+             boot goes to them now.]"
+        );
+        assert_eq!(
+            ready_notice(1, 2, 120, false),
+            "[System: READY — 1 of 2 participant(s) oriented before the 120s boot \
+             timeout; the rest join as they finish. Send your task to begin; nobody \
+             takes a turn until you do.]"
+        );
+        assert_eq!(
+            ready_notice(1, 2, 120, true),
+            "[System: READY — 1 of 2 participant(s) oriented before the 120s boot \
+             timeout; the rest join as they finish. The message you sent during boot \
+             goes to them now.]"
+        );
+    }
+
+    /// Feedback #10, the ordering: READY is posted BEFORE the input unlocks
+    /// (EYES P3) and before the ring hears `BootEnded` — so a message the ring
+    /// held lands below it, and a Send typed while READY is being written is
+    /// staged rather than posted above it. A stage in the slot is announced.
+    #[tokio::test]
+    async fn ready_is_posted_before_the_input_unlocks_and_before_the_ring_hears() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.set_staged_message("s1", Some("the task")).await.unwrap();
+
+        let (ready, events) = boot_to_end(&s, 0).await;
+        assert!(ready.text.contains("goes to them now"), "a stage is announced: {}", ready.text);
+        let persisted = events
+            .iter()
+            .position(|e| {
+                matches!(e, crate::signaling::SignalingEvent::MessagePersisted { message_id, .. }
+                    if *message_id == ready.id)
+            })
+            .expect("READY's persist event");
+        let unlocked = events
+            .iter()
+            .position(|e| {
+                matches!(e, crate::signaling::SignalingEvent::SessionActivity { busy_slots, .. }
+                    if busy_slots.is_empty())
+            })
+            .expect("boot releases the busy flag");
+        assert!(
+            persisted < unlocked,
+            "the input unlocked before READY existed — a Send in that gap posts above it"
+        );
+    }
+
+    /// A user row posted after the spawn began — a plugin's first prompt, a
+    /// Send during boot — is waiting for boot to end, and READY says it goes
+    /// out next. A row from before the spawn (a reopened session's history) is
+    /// not.
+    #[tokio::test]
+    async fn ready_announces_only_a_message_posted_after_the_spawn_began() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.insert_user_message("s1", crate::storage::MessageKind::Text, "an old message from before the reopen").await.unwrap();
+        let watermark = s.latest_message_id("s1").await.unwrap();
+        assert!(watermark > 0);
+        let (ready, _) = boot_to_end(&s, watermark).await;
+        assert!(ready.text.contains("Send your task to begin"), "old history is not waiting: {}", ready.text);
+
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        let watermark = s.latest_message_id("s1").await.unwrap();
+        s.insert_user_message("s1", crate::storage::MessageKind::Text, "the plugin's first prompt").await.unwrap();
+        let (ready, _) = boot_to_end(&s, watermark).await;
+        assert!(ready.text.contains("goes to them now"), "a message after the watermark waits: {}", ready.text);
+    }
+
+    /// **The ring's boot latch and the pumps' boot cell come from ONE value**
+    /// (feedback #10), and the watermark is read before the boot task exists.
+    /// The spawn path launches real subprocesses no test can follow, so these
+    /// joins are pinned at the source: a ring built with `boots: false` on a
+    /// booting spawn deals a turn to an orienting pump — the #10 failure —
+    /// with every ring test still green.
+    #[test]
+    fn the_rings_boot_latch_and_the_pumps_boot_cell_share_one_source() {
+        let src = include_str!("session.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        assert!(
+            prod.contains("AtomicBool::new(is_first_spawn)"),
+            "the pumps' boot cell starts at `is_first_spawn`"
+        );
+        assert!(
+            prod.contains("boots: is_first_spawn,"),
+            "the ring's boot latch starts at the SAME value"
+        );
+        let watermark = prod
+            .find(".latest_message_id(")
+            .expect("the spawn reads the boot watermark");
+        let boot = prod.find("&boot_session,").expect("the boot task's call site");
+        assert!(watermark < boot, "the watermark is read before the boot task is spawned");
     }
 
     /// **The join for the halt.** Starting the ring must register it with the

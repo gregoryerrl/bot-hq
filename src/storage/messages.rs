@@ -157,6 +157,36 @@ impl Storage {
         Ok(n as u64)
     }
 
+    /// The newest row id of a session, `0` when it has none. Captured when a
+    /// booting spawn begins, it is the boot WATERMARK (feedback #10): a user
+    /// row above it was posted after the spawn started — a plugin's first
+    /// prompt, a Send before or during boot — and waits for boot to end.
+    pub async fn latest_message_id(&self, session_id: &str) -> Result<i64> {
+        let id: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(id) FROM messages WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_one(&self.pool)
+                .await
+                .with_context(|| format!("reading the newest message id for {session_id}"))?;
+        Ok(id.unwrap_or(0))
+    }
+
+    /// Whether the user wrote a TEXT row in this session after `after_id` —
+    /// the predicate [`count_user_messages`](Self::count_user_messages) uses,
+    /// so a host artifact persisted as `author=user` never counts.
+    pub async fn user_wrote_after(&self, session_id: &str, after_id: i64) -> Result<bool> {
+        let hit: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM messages \
+             WHERE session_id = ? AND id > ? AND author = 'user' AND kind = 'text' LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(after_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("checking for user rows in {session_id} after {after_id}"))?;
+        Ok(hit.is_some())
+    }
+
     /// The NEWEST `limit` rows of a session, oldest-first, optionally those
     /// before `before_id` (exclusive) — the chat's mount read and its "load
     /// older" page (round 8, N2). `messages_for_session(sid, None)` has no
