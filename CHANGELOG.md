@@ -89,6 +89,15 @@ s-84c59f27 and s-bdc7d2de). Four migrations apply at the next launch: 0083
   post-commit check follows the same rule. The commit-message check is
   unchanged, and a configured external diff tool can no longer blank the scan
   (feedback #39).
+- **Dashboard cards and the notification bell show every kind of wait.**
+  An approval waiting, a halted session ("halted — your move", with its
+  reason) and questions are each named on their own, where before only
+  questions showed; a temporary halt shows a muted "wakes 14:05" until its
+  wake time passes.
+- **Dashboard cards can be swapped again.** Dragging one card onto another
+  swaps them — the drag now runs on pointer events, since the app window
+  never delivered the browser's own drop event — and a plain click still
+  opens the session.
 - **A participant colour you pick is yours alone.** Picked hues leave the
   rotation, the new-session dialog marks a colour another participant picked
   as taken, and two participants that would display the same name are
