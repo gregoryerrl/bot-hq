@@ -72,10 +72,14 @@ export function isApproval(r: {
  * Is this row a TRAY item — an ordinary question? (rc3 D35)
  *
  * The user: *"halt is not on tray anymore, its a declared state."* A halt is
- * the banner; an approval is the gate; only a question lives in the tray. Every
- * tray surface — the list, the pill badge, the dashboard tile, the header
- * bell — counts through this, so none of them can claim "one item on tray"
- * over a tray with nothing in it.
+ * the banner; an approval is the gate; only a question lives in the tray. The
+ * session's tray surfaces — the list and the pill badge — count through this,
+ * so neither can claim "one item on tray" over a tray with nothing in it.
+ *
+ * The cross-session NOTIFIERS (the dashboard card, the header bell) show more
+ * since 2026-09-25 — gates and halts too, at the user's word ("gates also
+ * don't show on notification bell") — but name each kind separately through
+ * `needsYouBySession` (lib/attention.ts), which uses this for the questions.
  */
 export function isTrayItem(r: {
   kind: string;

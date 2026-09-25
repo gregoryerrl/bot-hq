@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { SessionTile } from "../components/SessionTile";
-import { isTrayItem } from "../components/HaltBanner";
+import { needsYouBySession, type NeedsYou } from "../lib/attention";
+import { useNow } from "../hooks/useNow";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import type {
   ClaudeOverrides,
   ModelView,
+  OpenSessionHalt,
   ProjectView,
   RoleView,
   SessionInfo,
@@ -104,10 +106,10 @@ const QUICKVIEW_REFRESH_THROTTLE_MS = 2500;
  */
 function SessionTileLoader({
   session,
-  pendingCount,
+  needs,
 }: {
   session: SessionInfo;
-  pendingCount: number;
+  needs: NeedsYou | undefined;
 }) {
   const { data: phase = null } = useTauriQuery<string | null>(
     "get_session_phase",
@@ -117,7 +119,7 @@ function SessionTileLoader({
   return (
     <SessionTile
       session={session}
-      pendingCount={pendingCount}
+      needs={needs}
       phase={phase}
       authorLabels={labels}
       authorHues={hues}
@@ -169,12 +171,20 @@ export function Dashboard() {
   );
 
   // Durable pending-tray rows for all open sessions — the same source the
-  // header bell uses. Survives restart and includes halt waits
-  // (mark_awaiting_user / phase-advance), unlike the in-memory pending map.
+  // header bell uses: questions and approval gates, surviving a restart.
   const { data: pending = [] } = useTauriQuery<SessionTrayView[]>(
     "list_pending_tray",
     {},
   );
+  // Every open session's halt (the user, 2026-09-25: a halted session showed
+  // "your move" nowhere on the dashboard). The clock re-reads temporary halts
+  // whose wake time passes without a wake — nothing announces that.
+  const { data: haltRows } = useTauriQuery<OpenSessionHalt[] | null>(
+    "list_session_halts",
+    {},
+  );
+  const halts = useMemo(() => haltRows ?? [], [haltRows]);
+  const now = useNow(30_000);
 
   // Project dropdown source for the New Session dialog. Refreshed live via the
   // `project:changed` event (project register/unregister) — no poll needed.
@@ -295,16 +305,13 @@ export function Dashboard() {
     }
   >("create_session");
 
-  const pendingBySession = useMemo(() => {
-    // rc3 D35: tiles count tray QUESTIONS only — a halt is the session's
-    // declared state, an approval is the gate.
-    const acc: Record<string, number> = {};
-    for (const p of pending) {
-      if (!isTrayItem(p)) continue;
-      acc[p.session_id] = (acc[p.session_id] ?? 0) + 1;
-    }
-    return acc;
-  }, [pending]);
+  // What each session waits on the user for, by kind — questions, approval
+  // gates, a halt (the user's 2026-09-25 revision of rc3 D35 for these
+  // notifier surfaces; see `needsYouBySession`).
+  const needsBySession = useMemo(
+    () => needsYouBySession(pending, halts, now),
+    [pending, halts, now],
+  );
 
   const [creating, setCreating] = useState(false);
   // Inline create-session error so a rejected mutation doesn't leave the dialog
@@ -1118,7 +1125,7 @@ export function Dashboard() {
             >
               <SessionTileLoader
                 session={s}
-                pendingCount={pendingBySession[s.id] ?? 0}
+                needs={needsBySession[s.id]}
               />
             </div>
           ))}

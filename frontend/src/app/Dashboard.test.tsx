@@ -1,5 +1,5 @@
 import { PARTICIPANT_COLORS } from "../components/authorColor";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -851,6 +851,48 @@ describe("Dashboard tiles — drag to SWAP (ideas.md 2026-08-24, tray c38a216b)"
       }
     });
   }
+
+  // The user, 2026-09-25: a pending gate and a halted session showed nothing on
+  // their cards. The dashboard reads the halt list and the tray and hands each
+  // card what it waits on, by kind.
+  it("a card names a pending gate, and a halted session's card says it is your move", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "list_sessions":
+          return [session("s-1", "First"), session("s-2", "Second")];
+        case "list_pending_tray":
+          return [{ session_id: "s-1", kind: "approval", options: ["Approve", "Reject"] }];
+        case "list_session_halts":
+          return [
+            {
+              session_id: "s-2",
+              declared_by: "hands",
+              reason: "First launch passed",
+              declared_at: "2026-09-15T04:18:58Z",
+              wake_at: null,
+            },
+          ];
+        case "list_session_participants":
+        case "list_projects":
+        case "list_models":
+        case "list_roles":
+          return [];
+        case "get_claude_overrides":
+          return {};
+        case "claude_config_read":
+          return { core_knobs: [] };
+        default:
+          return null;
+      }
+    });
+    renderDashboard();
+    const first = await screen.findByTestId("tile-wrap-s-1");
+    const second = await screen.findByTestId("tile-wrap-s-2");
+    await waitFor(() =>
+      expect(within(first).getByTestId("needs-you")).toHaveTextContent("approval waiting"),
+    );
+    expect(within(second).getByTestId("needs-you")).toHaveTextContent("halted — your move");
+  });
 
   /** jsdom fires drag events without a native dataTransfer — supply one. */
   function dt() {

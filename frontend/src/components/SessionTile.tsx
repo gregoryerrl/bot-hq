@@ -6,6 +6,10 @@ import {
   ATTENTION_IDLE_LABEL,
   ATTENTION_IDLE_TOOLTIP,
   ATTENTION_IDLE_UNFLAGGED,
+  needsYou,
+  needsYouParts,
+  wakesLabel,
+  type NeedsYou,
 } from "../lib/attention";
 import type { SessionInfo } from "../lib/bindings";
 import { SessionPhaseChip, phaseTintClasses } from "./SessionPhaseChip";
@@ -17,9 +21,10 @@ import { authorLabel } from "../lib/participants";
 
 interface SessionTileProps {
   session: SessionInfo;
-  /** Count of items awaiting the user for this session (durable tray). The tile
-   *  only INDICATES — the user answers on the session's Tray tab. */
-  pendingCount?: number;
+  /** What this session is waiting on the user for, by kind — questions,
+   *  approval gates, a halt (the user, 2026-09-25). The tile only INDICATES;
+   *  the user answers inside the session. */
+  needs?: NeedsYou;
   /** Current IPAV phase (lowercase) from `get_session_phase`. Null when unknown. */
   phase?: string | null;
   /** Participant key → `ROLE · Model`, from the session's roster (rc3 D10).
@@ -35,14 +40,14 @@ const NO_LABELS: Record<string, string> = {};
 
 function SessionTileImpl({
   session,
-  pendingCount = 0,
+  needs,
   phase = null,
   authorLabels = NO_LABELS,
   authorHues,
 }: SessionTileProps) {
   const navigate = useNavigate();
   const closed = session.closed_at !== null;
-  const needsInput = pendingCount > 0;
+  const needsInput = needsYou(needs);
   const tint = phaseTintClasses(phase, closed);
   // B2: session-level health dot (problem-only on the tile). Worst of the
   // session's agents.
@@ -140,17 +145,33 @@ function SessionTileImpl({
           {describe(session)}
         </p>
 
-        {/* Slot 7: pending-input indicator. The tile only INDICATES that this
-            session has items awaiting the user (asks, gates, approvals); the
-            user answers them on the session's Tray tab — the single answer
-            surface — not inline here. */}
-        {needsInput && (
+        {/* Slot 7: what the session is waiting on the user for, one phrase
+            per kind — questions, approval gates, a halt (the user, 2026-09-25:
+            gates and halts showed nowhere on the dashboard). The tile only
+            INDICATES; the user answers inside the session. */}
+        {needsInput && needs && (
           <div
-            className="mt-3 inline-flex items-center gap-1.5 rounded border border-error/30 bg-error-container/20 px-2 py-1 font-label-caps text-label-caps text-error"
-            title="Open the session's Tray tab to respond"
+            className="mt-3 inline-flex max-w-full items-center gap-1.5 rounded border border-error/30 bg-error-container/20 px-2 py-1 font-label-caps text-label-caps text-error"
+            title={
+              needs.halt
+                ? `Halted by ${needs.halt.declaredBy}: ${needs.halt.reason}`
+                : "Open the session to respond"
+            }
+            data-testid="needs-you"
           >
-            <WarnIcon size={14} />
-            [Need User Input · {pendingCount}]
+            <WarnIcon size={14} className="shrink-0" />
+            <span className="truncate">[Needs you · {needsYouParts(needs).join(" · ")}]</span>
+          </div>
+        )}
+        {/* A temporary halt still ahead of its wake time waits on something
+            external, not on the user — shown muted, never as "needs you". */}
+        {!needsInput && needs?.wakesAt && (
+          <div
+            className="mt-3 inline-flex items-center rounded border border-outline-variant px-2 py-1 font-label-caps text-label-caps text-on-surface-variant"
+            title="A temporary halt — the session wakes itself then"
+            data-testid="wakes-at"
+          >
+            {wakesLabel(needs.wakesAt)}
           </div>
         )}
       </div>
@@ -185,7 +206,7 @@ function SessionTileImpl({
 }
 
 // Memoized: the dashboard re-renders the whole tile grid on store/query churn;
-// a tile only needs to re-render when its own props (session/pendingCount/phase)
+// a tile only needs to re-render when its own props (session/needs/phase)
 // change.
 export const SessionTile = memo(SessionTileImpl);
 

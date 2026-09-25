@@ -58,8 +58,10 @@ export function Providers({ children }: { children: ReactNode }) {
 const TRAY_KEYS = [
   "list_pending_tray",
   "list_session_tray",
-  // rc3 D35: the halt slot rides the same awaiting/halt-cleared events.
+  // rc3 D35: the halt slot rides the same awaiting/halt-cleared events —
+  // per session, and for the dashboard and bell, every open session's.
   "get_session_halt",
+  "list_session_halts",
 ] as const;
 // A phase advance changes only the chip, not doc data (docs refresh via DOC_KEYS
 // on a `doc_changed` event) — so `session_doc_search` belongs only in DOC_KEYS.
@@ -69,6 +71,7 @@ const CLOSE_KEYS = [
   "list_sessions",
   "list_closed_sessions",
   "list_pending_tray",
+  "list_session_halts",
 ] as const;
 // Filesystem-watcher CL freshness. `cl:changed` fires AFTER the watcher re-syncs
 // the SQLite index for the changed scope, so refetching here reads fresh rows.

@@ -3,7 +3,9 @@ import { Link } from "react-router-dom";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import { BellIcon } from "./icons";
-import { isTrayItem } from "./HaltBanner";
+import { needsYou, needsYouBySession, needsYouParts } from "../lib/attention";
+import { useNow } from "../hooks/useNow";
+import type { OpenSessionHalt } from "../lib/bindings";
 import { shortSessionId } from "../lib/sessionId";
 
 // `list_pending_tray` returns durable pending session_tray rows for open
@@ -17,14 +19,16 @@ interface PendingTrayRow {
 }
 
 /**
- * Topbar NOTIFIER for pending QUESTIONS across all open sessions (rc3 D35: the
- * bell counts questions; approvals take the input box and halts are session
- * state, neither is a tray row). Reads the durable `session_tray` (via
- * `list_pending_tray`) so it reflects input that piled up while the user was
- * AFK and survives a restart, unlike the in-memory pending map. Grouped by
- * session: one row per session ("Session-X needs your input [N]"). Notify-only
- * (per #7) — it links to the session; answering happens on that session's Tray
- * tab. Badge counts sessions awaiting + pulses when non-empty.
+ * Topbar NOTIFIER for everything the user is waiting on across open sessions —
+ * questions, approval gates and halts, named BY KIND (the user, 2026-09-25:
+ * "gates also don't show on notification bell"; this revises rc3 D35, which
+ * counted questions only because a blended count lied about an empty tray).
+ * Reads the durable `session_tray` (via `list_pending_tray`) and the halt slots
+ * (via `list_session_halts`), so it reflects what piled up while the user was
+ * AFK and survives a restart. Grouped by session: one row per session
+ * ("needs you: approval waiting · 1 question"). Notify-only (per #7) — it links
+ * to the session; answering happens there. Badge counts sessions awaiting +
+ * pulses when non-empty.
  */
 export function PendingTray() {
   const [open, setOpen] = useState(false);
@@ -36,19 +40,18 @@ export function PendingTray() {
     {},
   );
 
-  // Group pending by session so the notifier reads "Session-X needs your input
-  // [N]" instead of one row per item. The bell badge counts SESSIONS awaiting,
-  // not raw items. Stays notify-only — answering happens on that session's Tray
-  // tab; the CTA here is just "go to session".
-  // rc3 D35: the bell counts QUESTIONS. A halt announces itself in the
-  // session (the banner); an approval is the gate. Counting them here said
-  // "needs your input [1]" over a tray with nothing in it.
-  const bySession = new Map<string, number>();
-  for (const q of pending) {
-    if (!isTrayItem(q)) continue;
-    bySession.set(q.session_id, (bySession.get(q.session_id) ?? 0) + 1);
-  }
-  const sessions = [...bySession.entries()];
+  // Every open session's halt, and a clock for temporary halts whose wake
+  // time passes without a wake (nothing announces that).
+  const { data: haltRows } = useTauriQuery<OpenSessionHalt[] | null>("list_session_halts", {});
+  const halts = haltRows ?? [];
+  const now = useNow(30_000);
+
+  // Grouped by session: one row per session naming what it waits on, by kind
+  // ("approval waiting · halted — your move"). The badge counts SESSIONS, not
+  // items. Notify-only — answering happens inside the session.
+  const sessions = Object.entries(needsYouBySession(pending, halts, now)).filter(
+    ([, n]) => needsYou(n),
+  );
   const count = sessions.length;
 
   // Click outside + Escape to dismiss. The tray sits in a fixed topbar so
@@ -124,9 +127,16 @@ export function PendingTray() {
                   <span className="text-primary">Open →</span>
                 </div>
                 <p className="font-body-md text-body-md text-on-surface">
-                  needs your input{" "}
-                  <span className="font-semibold text-primary">[{n}]</span>
+                  needs you:{" "}
+                  <span className="font-semibold text-primary">
+                    {needsYouParts(n).join(" · ")}
+                  </span>
                 </p>
+                {n.halt && (
+                  <p className="mt-1 line-clamp-2 font-code-sm text-code-sm text-on-surface-variant">
+                    {n.halt.reason}
+                  </p>
+                )}
               </Link>
             ))
           )}

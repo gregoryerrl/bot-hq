@@ -19,6 +19,8 @@ const session: SessionInfo = {
   last_author: null,
 };
 
+const NONE = { questions: 0, approvals: 0, halt: null, wakesAt: null };
+
 function renderTile(props: Partial<React.ComponentProps<typeof SessionTile>> = {}) {
   return render(
     <MemoryRouter>
@@ -41,14 +43,32 @@ describe("SessionTile", () => {
     expect(screen.getByText("S-ABCD")).toBeInTheDocument();
   });
 
-  it("renders the [Need User Input] pill when pendingCount > 0", () => {
-    renderTile({ pendingCount: 1 });
-    expect(screen.getByText(/need user input/i)).toBeInTheDocument();
+  it("renders the needs-you indicator when the session waits on the user", () => {
+    renderTile({ needs: { ...NONE, questions: 1 } });
+    expect(screen.getByTestId("needs-you")).toHaveTextContent("[Needs you · 1 question]");
   });
 
-  it("hides the [Need User Input] pill when pendingCount is 0", () => {
+  it("hides the indicator when nothing is waiting", () => {
     renderTile();
-    expect(screen.queryByText(/need user input/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("needs-you")).not.toBeInTheDocument();
+    renderTile({ needs: NONE });
+    expect(screen.queryByTestId("needs-you")).not.toBeInTheDocument();
+  });
+
+  // The user, 2026-09-25: a gate and a halt showed nothing on the card.
+  it("names an approval gate and a halt, each on its own", () => {
+    renderTile({
+      needs: { ...NONE, approvals: 1, halt: { reason: "First launch passed", declaredBy: "hands" } },
+    });
+    const pill = screen.getByTestId("needs-you");
+    expect(pill).toHaveTextContent("[Needs you · approval waiting · halted — your move]");
+    expect(pill).toHaveAttribute("title", "Halted by hands: First launch passed");
+  });
+
+  it("shows a temporary halt's wake time muted, not as needs-you", () => {
+    renderTile({ needs: { ...NONE, wakesAt: new Date(2026, 8, 25, 14, 5).toISOString() } });
+    expect(screen.queryByTestId("needs-you")).not.toBeInTheDocument();
+    expect(screen.getByTestId("wakes-at")).toHaveTextContent("wakes 14:05");
   });
 
   it("carries the phase-tinted hover border as a literal class Tailwind can emit", () => {
@@ -64,15 +84,15 @@ describe("SessionTile", () => {
 
   it("indicates pending input without an inline answer surface", () => {
     // The tile only INDICATES a count; the question + options live on the Tray tab.
-    renderTile({ pendingCount: 1 });
+    renderTile({ needs: { ...NONE, approvals: 1 } });
     expect(
       screen.queryByRole("button", { name: /^approve$/i }),
     ).not.toBeInTheDocument();
   });
 
-  it("shows the pending count in the indicator", () => {
-    renderTile({ pendingCount: 2 });
-    expect(screen.getByText(/need user input · 2/i)).toBeInTheDocument();
+  it("shows the question count in the indicator", () => {
+    renderTile({ needs: { ...NONE, questions: 2 } });
+    expect(screen.getByTestId("needs-you")).toHaveTextContent("2 questions");
   });
 
   it("shows the first line of the latest message + author tag in Quickview", () => {
