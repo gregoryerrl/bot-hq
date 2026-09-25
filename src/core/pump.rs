@@ -836,7 +836,7 @@ pub async fn pump_agent(
                 // Batch 7: a tool call started — suppress stall detection until
                 // its ToolResult (a long build/install emits no events meanwhile).
                 if let Some(liveness) = &cfg.liveness {
-                    liveness.tool_started();
+                    liveness.tool_started(&name);
                 }
                 // Batch 3.1 Part 1: flag an atomic op (git commit/push/
                 // migration) so a cancel defers the kill until it completes.

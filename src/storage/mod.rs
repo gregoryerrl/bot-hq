@@ -49,7 +49,7 @@ pub use cl_atoms::{Atom, RetrievedAtom};
 pub use context_readings::ContextReading;
 pub(crate) use cl_atoms::estimate_tokens;
 pub use models::{DEFAULT_SPAWN_MODEL_NAME, WORKTREE_DEFAULT_KEY};
-pub use cancel_events::CancelEventRecord;
+pub use cancel_events::{CancelEventRecord, PressSnapshot};
 pub use participants::{
     participant_display_name, participant_slug, MODE_ACTIVE, render_wire, speaker_of, ChannelPage, Envelope,
     Participant,

@@ -225,6 +225,60 @@ impl UserSend {
     }
 }
 
+/// A liveness reading as the cancel row records it (feedback #44(2)).
+fn press_snapshot_from(
+    holder: &str,
+    s: &crate::core::watchdog::LivenessSnapshot,
+) -> crate::storage::PressSnapshot {
+    let ms = |d: std::time::Duration| i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
+    crate::storage::PressSnapshot {
+        holder: holder.to_string(),
+        turn_age_ms: s.turn_age.map(ms),
+        tools_in_flight: i64::from(s.tools_in_flight),
+        last_tool: s.last_tool.as_ref().map(|(name, _)| name.clone()),
+        last_tool_age_ms: s.last_tool.as_ref().map(|(_, ago)| ms(*ago)),
+        last_event_age_ms: ms(s.idle_for),
+    }
+}
+
+/// The chat row a Pause posts when a participant was mid-turn (feedback
+/// #44(2)): what the turn was doing when it was cut — for the user reading the
+/// chat, and for the agent reading it back on resume. A tool is called running
+/// only while one is in flight (EYES P7).
+fn pause_notice(s: &crate::storage::PressSnapshot) -> String {
+    let age = s
+        .turn_age_ms
+        .map(|ms| format!(" ({} in)", short_duration(ms)))
+        .unwrap_or_default();
+    let tool = match (s.last_tool.as_deref(), s.last_tool_age_ms) {
+        (Some(name), Some(ago)) if s.tools_in_flight > 0 => format!(
+            "{} running ({name}, started {} ago)",
+            if s.tools_in_flight == 1 { "1 tool".to_string() } else { format!("{} tools", s.tools_in_flight) },
+            short_duration(ago)
+        ),
+        (Some(name), Some(ago)) => {
+            format!("no tool running (the last, {name}, started {} ago)", short_duration(ago))
+        }
+        _ if s.tools_in_flight > 0 => format!("{} tool call(s) running", s.tools_in_flight),
+        _ => "no tool call yet this turn".to_string(),
+    };
+    format!(
+        "⏸ Paused while {} held the turn{age}: {tool}; last activity {} ago.",
+        s.holder,
+        short_duration(s.last_event_age_ms)
+    )
+}
+
+/// `45s`, `4m 02s`, `1h 07m` — a duration a person reads at a glance.
+fn short_duration(ms: i64) -> String {
+    let secs = ms.max(0) / 1000;
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m {:02}s", s / 60, s % 60),
+        s => format!("{}h {:02}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
 pub struct AppState {
     pub paths: Paths,
     pub storage: Storage,
@@ -793,7 +847,24 @@ impl AppState {
     /// the gap between the two is precisely what a user experiences as "Stop
     /// didn't do anything".
     pub async fn cancel_and_escalate(self: &Arc<Self>, session_id: &str, pressed_at: String) -> Result<()> {
-        match self.cancel_session_turn(session_id).await? {
+        // **What the turn was doing, read FIRST** (feedback #44(2), EYES G1):
+        // the interrupt ends the turn, and ending it clears its clock and tool
+        // record. Recorded on the cancel row and said in the chat.
+        let snapshot = self.press_snapshot(session_id).await;
+        let outcome = self.cancel_session_turn(session_id).await?;
+        if let Some(snap) = snapshot.as_ref() {
+            tracing::info!(session_id, ?snap, "cancel: what the turn was doing at the press");
+            crate::core::post_system_notice(
+                &self.storage,
+                Some(&self.bridge),
+                session_id,
+                MessageKind::SystemNotice,
+                pause_notice(snap),
+                None,
+            )
+            .await;
+        }
+        match outcome {
             CancelOutcome::Done => {}
             CancelOutcome::Interrupting => {
                 // The common path: interrupt every agent and drive the ~2s
@@ -803,7 +874,7 @@ impl AppState {
                 let this = Arc::clone(self);
                 let sid = session_id.to_string();
                 tokio::spawn(async move {
-                    this.interrupt_then_escalate(&sid, &pressed_at, 0, false).await;
+                    this.interrupt_then_escalate(&sid, &pressed_at, 0, false, snapshot).await;
                 });
             }
             CancelOutcome::Deferred(flag) => {
@@ -825,12 +896,27 @@ impl AppState {
                     // Recorded because this window is the leading candidate for
                     // "Stop kept working": it delays the interrupt by up to the
                     // cap before anything is even sent.
-                    this.interrupt_then_escalate(&sid, &pressed_at, deferred_ms, capped)
+                    this.interrupt_then_escalate(&sid, &pressed_at, deferred_ms, capped, snapshot)
                         .await;
                 });
             }
         }
         Ok(())
+    }
+
+    /// What the turn in flight is doing right now (feedback #44(2)). The holder
+    /// is the BUSY participant — the activity tracker's view, the one the
+    /// turn-status line shows. `None` when nobody is mid-turn, the session is
+    /// not live, or the participant's pump is gone.
+    pub async fn press_snapshot(&self, session_id: &str) -> Option<crate::storage::PressSnapshot> {
+        let sessions = self.sessions.lock().await;
+        let handle = sessions.get(session_id)?;
+        handle.liveness.iter().find_map(|(slug, liveness)| {
+            if !handle.activity.is_busy_slug(slug) {
+                return None;
+            }
+            Some(press_snapshot_from(slug, &liveness.upgrade()?.snapshot()))
+        })
     }
 
     /// The interrupt half of a cancel: send a `control_request` interrupt to both
@@ -846,6 +932,8 @@ impl AppState {
         pressed_at: &str,
         deferred_ms: u64,
         deferral_capped: bool,
+        // Read at the press, before this interrupt (feedback #44(2)).
+        snapshot: Option<crate::storage::PressSnapshot>,
     ) {
         let (activity, cancel_superseded, hands_queued, eyes_queued) = {
             let sessions = self.sessions.lock().await;
@@ -916,6 +1004,7 @@ impl AppState {
                 EscalationOutcome::Sigkill => "sigkill",
             }
             .to_string(),
+            snapshot,
         };
         if let Err(e) = self.storage.insert_cancel_event(&record).await {
             tracing::warn!(?e, session_id, "cancel: could not record cancel event");
@@ -2558,6 +2647,123 @@ mod tests {
 
     // Live session tests require RUN_LIVE_TESTS=1 (subprocesses spawn).
     // We unit-test the static pieces here.
+
+    /// An `AppState` with one stub session `s1` live in it, no subprocesses.
+    async fn state_with_stub() -> (AppState, Storage, tempfile::TempDir) {
+        let storage = Storage::memory().await.unwrap();
+        storage.create_session("s1", "t", None).await.unwrap();
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let server = crate::signaling::start_signaling_server(Arc::clone(&bridge))
+            .await
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            crate::paths::Paths::for_data_dir(tmp.path().to_path_buf()),
+            storage.clone(),
+            server,
+        )
+        .await;
+        let (handle, _stdin) = crate::core::session::stub_session_for_tests("s1", &bridge).await;
+        state.sessions.lock().await.insert("s1".into(), handle);
+        (state, storage, tmp)
+    }
+
+    fn snapshot(tools_in_flight: i64, last_tool: Option<&str>) -> crate::storage::PressSnapshot {
+        crate::storage::PressSnapshot {
+            holder: "hands".into(),
+            turn_age_ms: Some(1_390_000),
+            tools_in_flight,
+            last_tool: last_tool.map(String::from),
+            last_tool_age_ms: last_tool.map(|_| 242_000),
+            last_event_age_ms: 232_000,
+        }
+    }
+
+    /// Feedback #44(2): the Pause row says what the turn was doing, and calls
+    /// a tool running only while one is in flight (EYES P7).
+    #[test]
+    fn pause_notice_says_what_the_turn_was_doing() {
+        assert_eq!(
+            pause_notice(&snapshot(1, Some("Bash"))),
+            "⏸ Paused while hands held the turn (23m 10s in): 1 tool running \
+             (Bash, started 4m 02s ago); last activity 3m 52s ago."
+        );
+        assert_eq!(
+            pause_notice(&snapshot(0, Some("Bash"))),
+            "⏸ Paused while hands held the turn (23m 10s in): no tool running \
+             (the last, Bash, started 4m 02s ago); last activity 3m 52s ago."
+        );
+        assert_eq!(
+            pause_notice(&snapshot(0, None)),
+            "⏸ Paused while hands held the turn (23m 10s in): no tool call yet \
+             this turn; last activity 3m 52s ago."
+        );
+        assert_eq!(short_duration(45_900), "45s");
+        assert_eq!(short_duration(4_020_000), "1h 07m");
+    }
+
+    /// The snapshot reads the BUSY participant's liveness — the one the
+    /// turn-status line shows — and nothing when nobody is mid-turn.
+    #[tokio::test]
+    async fn press_snapshot_reads_the_busy_participants_liveness() {
+        let (state, _storage, _tmp) = state_with_stub().await;
+        let liveness = crate::core::watchdog::AgentLiveness::new();
+        liveness.turn_opened();
+        liveness.tool_started("Bash");
+        {
+            let mut sessions = state.sessions.lock().await;
+            let handle = sessions.get_mut("s1").unwrap();
+            handle.liveness = vec![("hands".into(), Arc::downgrade(&liveness))];
+        }
+        assert_eq!(state.press_snapshot("s1").await, None, "nobody busy: no holder");
+
+        state.sessions.lock().await["s1"].activity.set_busy_slug("hands", true);
+        let snap = state.press_snapshot("s1").await.expect("hands is mid-turn");
+        assert_eq!(snap.holder, "hands");
+        assert_eq!(snap.tools_in_flight, 1);
+        assert_eq!(snap.last_tool.as_deref(), Some("Bash"));
+        assert!(snap.turn_age_ms.is_some() && snap.last_tool_age_ms.is_some());
+        assert_eq!(state.press_snapshot("nope").await, None, "not live: nothing");
+    }
+
+    /// The press-time snapshot reaches the cancel row (feedback #44(2)).
+    #[tokio::test]
+    async fn a_stop_records_the_press_snapshot() {
+        let (state, storage, _tmp) = state_with_stub().await;
+        state
+            .interrupt_then_escalate("s1", "2026-09-25T03:00:00Z", 0, false, Some(snapshot(1, Some("Bash"))))
+            .await;
+        let rows = storage.list_cancel_events(Some("s1")).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].holder.as_deref(), Some("hands"));
+        assert_eq!(rows[0].last_tool.as_deref(), Some("Bash"));
+        assert_eq!(rows[0].tools_in_flight, Some(1));
+    }
+
+    /// EYES G1: the snapshot is read BEFORE the cancel starts — the interrupt
+    /// ends the turn and clears its clock — and it rides both escalation paths.
+    #[test]
+    fn a_stop_reads_the_snapshot_before_it_interrupts() {
+        let code = include_str!("state.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let at = code
+            .find("pub async fn cancel_and_escalate(")
+            .expect("cancel_and_escalate exists");
+        let body = &code[at..];
+        let body = &body[..body[1..].find("\n    pub ").map_or(body.len(), |n| n + 1)];
+        let read = body.find(".press_snapshot(").expect("the snapshot is read");
+        let cancel = body.find(".cancel_session_turn(").expect("the cancel starts");
+        assert!(read < cancel, "the snapshot must be read before the cancel begins");
+        assert_eq!(
+            body.matches(", snapshot)").count(),
+            2,
+            "both escalation paths carry the snapshot into the record"
+        );
+    }
 
     #[test]
     fn apply_nudge_never_tells_hands_to_park_on_the_user() {

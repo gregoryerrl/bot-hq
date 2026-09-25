@@ -143,6 +143,10 @@ pub struct SessionHandle {
     /// cleared by `boot_then_start` (rc3 D21). Read by [`Self::preempts`], so
     /// a typed send during boot does not interrupt orientation (feedback #10).
     pub booting: Arc<std::sync::atomic::AtomicBool>,
+    /// Each participant's liveness, by slug — the watchdog's own list. Weak,
+    /// like the watchdog's, so holding it changes no lifetime; read by the
+    /// Pause snapshot (feedback #44(2)).
+    pub liveness: Vec<(String, std::sync::Weak<crate::core::watchdog::AgentLiveness>)>,
     /// Keeps the mcp-config temp files alive for the lifetime of the session.
     _mcp_temp: TempDir,
 }
@@ -1162,6 +1166,8 @@ async fn spawn_session_handle(
         user_broadcasts: Arc::clone(&user_broadcasts),
     });
     let hands_slug = live.get(hands_slot).map(|p| p.slug.clone());
+    // The Pause snapshot reads the same list (feedback #44(2)).
+    let liveness = watchdog_agents.clone();
     tokio::spawn(crate::core::watchdog::run_stall_watchdog(
         session.id.clone(),
         watchdog_agents,
@@ -1204,6 +1210,7 @@ async fn spawn_session_handle(
         in_atomic_tool,
         cancel_superseded,
         booting,
+        liveness,
         _mcp_temp: mcp_temp,
     })
 }
@@ -5714,6 +5721,7 @@ pub(crate) async fn stub_session_for_tests(
         in_atomic_tool: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cancel_superseded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         booting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        liveness: Vec::new(),
         _mcp_temp: TempDir::new().unwrap(),
     };
     (handle, irx)

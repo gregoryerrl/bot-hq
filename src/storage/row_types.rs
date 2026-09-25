@@ -392,6 +392,14 @@ pub struct CancelEvent {
     pub idled_since_cancel: i64,
     /// `honored` | `superseded` | `sigkill`.
     pub outcome: String,
+    /// What the turn was doing AT THE PRESS (migration 0086, feedback #44(2));
+    /// all NULL on older rows and when no participant was mid-turn.
+    pub holder: Option<String>,
+    pub turn_age_ms: Option<i64>,
+    pub tools_in_flight: Option<i64>,
+    pub last_tool: Option<String>,
+    pub last_tool_age_ms: Option<i64>,
+    pub last_event_age_ms: Option<i64>,
 }
 
 /// A row from the `agent_feedback` table — an agent's issue or idea about

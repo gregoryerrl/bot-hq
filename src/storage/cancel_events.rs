@@ -26,18 +26,41 @@ pub struct CancelEventRecord {
     pub cancel_superseded: bool,
     pub idled_since_cancel: bool,
     pub outcome: String,
+    /// What the turn was doing at the press (feedback #44(2), migration 0086);
+    /// `None` when no participant was mid-turn.
+    pub snapshot: Option<PressSnapshot>,
+}
+
+/// What the turn in flight was doing when the user pressed Pause (feedback
+/// #44(2)). Read at the press, before the interrupt ends the turn and clears
+/// its clock.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PressSnapshot {
+    /// The busy participant's slug.
+    pub holder: String,
+    /// How long its turn had run; `None` when its turn clock had not opened.
+    pub turn_age_ms: Option<i64>,
+    pub tools_in_flight: i64,
+    /// The turn's latest tool call and how long ago it started.
+    pub last_tool: Option<String>,
+    pub last_tool_age_ms: Option<i64>,
+    /// Time since the agent's last event of any kind.
+    pub last_event_age_ms: i64,
 }
 
 impl Storage {
     /// Record one Stop. Best-effort by contract: the caller logs and continues
     /// on error, because losing telemetry must never block a cancel.
     pub async fn insert_cancel_event(&self, r: &CancelEventRecord) -> Result<i64> {
+        let snap = r.snapshot.as_ref();
         let res = sqlx::query(
             "INSERT INTO cancel_events \
              (session_id, pressed_at, settled_at, deferred_ms, deferral_capped, \
               slot0_interrupt_queued, slot1_interrupt_queued, both_idle, \
-              cancel_superseded, idled_since_cancel, outcome) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              cancel_superseded, idled_since_cancel, outcome, \
+              holder, turn_age_ms, tools_in_flight, last_tool, last_tool_age_ms, \
+              last_event_age_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&r.session_id)
         .bind(&r.pressed_at)
@@ -50,6 +73,12 @@ impl Storage {
         .bind(r.cancel_superseded as i64)
         .bind(r.idled_since_cancel as i64)
         .bind(&r.outcome)
+        .bind(snap.map(|s| s.holder.as_str()))
+        .bind(snap.and_then(|s| s.turn_age_ms))
+        .bind(snap.map(|s| s.tools_in_flight))
+        .bind(snap.and_then(|s| s.last_tool.as_deref()))
+        .bind(snap.and_then(|s| s.last_tool_age_ms))
+        .bind(snap.map(|s| s.last_event_age_ms))
         .execute(&self.pool)
         .await
         .with_context(|| format!("recording cancel event for {}", r.session_id))?;
@@ -63,7 +92,9 @@ impl Storage {
     pub async fn list_cancel_events(&self, session_id: Option<&str>) -> Result<Vec<CancelEvent>> {
         const COLS: &str = "id, session_id, pressed_at, settled_at, deferred_ms, \
                             deferral_capped, slot0_interrupt_queued, slot1_interrupt_queued, \
-                            both_idle, cancel_superseded, idled_since_cancel, outcome";
+                            both_idle, cancel_superseded, idled_since_cancel, outcome, \
+                            holder, turn_age_ms, tools_in_flight, last_tool, \
+                            last_tool_age_ms, last_event_age_ms";
         let rows = match session_id {
             Some(sid) => {
                 sqlx::query_as::<_, CancelEvent>(&format!(
@@ -103,7 +134,40 @@ mod tests {
             cancel_superseded: false,
             idled_since_cancel: outcome != "sigkill",
             outcome: outcome.into(),
+            snapshot: None,
         }
+    }
+
+    /// Feedback #44(2): the press-time snapshot survives the round trip, and a
+    /// row without one reads back all NULL.
+    #[tokio::test]
+    async fn round_trip_preserves_the_press_snapshot() {
+        let s = Storage::memory().await.unwrap();
+        let mut r = rec("s1", "honored");
+        r.snapshot = Some(PressSnapshot {
+            holder: "hands".into(),
+            turn_age_ms: Some(1_390_000),
+            tools_in_flight: 1,
+            last_tool: Some("Bash".into()),
+            last_tool_age_ms: Some(242_000),
+            last_event_age_ms: 232_000,
+        });
+        s.insert_cancel_event(&r).await.unwrap();
+        s.insert_cancel_event(&rec("s1", "sigkill")).await.unwrap();
+
+        let got = s.list_cancel_events(Some("s1")).await.unwrap();
+        let (bare, snap) = (&got[0], &got[1]);
+        assert_eq!(snap.holder.as_deref(), Some("hands"));
+        assert_eq!(snap.turn_age_ms, Some(1_390_000));
+        assert_eq!(snap.tools_in_flight, Some(1));
+        assert_eq!(snap.last_tool.as_deref(), Some("Bash"));
+        assert_eq!(snap.last_tool_age_ms, Some(242_000));
+        assert_eq!(snap.last_event_age_ms, Some(232_000));
+        assert_eq!(
+            (bare.holder.as_deref(), bare.turn_age_ms, bare.tools_in_flight, bare.last_event_age_ms),
+            (None, None, None, None),
+            "no participant mid-turn: nothing recorded"
+        );
     }
 
     #[tokio::test]

@@ -42,6 +42,27 @@ pub struct AgentLiveness {
     turn_tools: AtomicU32,
     /// The long-turn notice already went out for this turn.
     long_turn_noticed: std::sync::atomic::AtomicBool,
+    /// The latest tool call of the turn in flight and when it started —
+    /// feedback #44(2): what a turn was doing when Pause was pressed. Cleared
+    /// when a turn opens and when one ends, so a Pause early in a turn never
+    /// names the previous turn's tool (EYES P7).
+    last_tool: Mutex<Option<(String, Instant)>>,
+}
+
+/// What a participant's turn was doing at one instant (feedback #44(2)) — read
+/// when the user presses Pause, before the interrupt ends the turn and clears
+/// the clock.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LivenessSnapshot {
+    /// How long the turn in flight has run; `None` between turns.
+    pub turn_age: Option<Duration>,
+    /// Tool calls started and not yet returned.
+    pub tools_in_flight: u32,
+    /// The turn's latest tool call and how long ago it started. Running only
+    /// if `tools_in_flight > 0`; otherwise it has returned.
+    pub last_tool: Option<(String, Duration)>,
+    /// Time since the agent's last event of any kind.
+    pub idle_for: Duration,
 }
 
 /// How long one turn may run before the chat says so (feedback #44/#45): a
@@ -57,6 +78,7 @@ impl AgentLiveness {
             turn_started: Mutex::new(None),
             turn_tools: AtomicU32::new(0),
             long_turn_noticed: std::sync::atomic::AtomicBool::new(false),
+            last_tool: Mutex::new(None),
         })
     }
 
@@ -67,6 +89,26 @@ impl AgentLiveness {
             *started = Some(Instant::now());
             self.turn_tools.store(0, Ordering::Release);
             self.long_turn_noticed.store(false, Ordering::Release);
+            *self.last_tool.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
+    }
+
+    /// What the turn is doing right now (feedback #44(2)).
+    pub fn snapshot(&self) -> LivenessSnapshot {
+        LivenessSnapshot {
+            turn_age: self
+                .turn_started
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .map(|t| t.elapsed()),
+            tools_in_flight: self.tools_in_flight(),
+            last_tool: self
+                .last_tool
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .map(|(name, at)| (name.clone(), at.elapsed())),
+            idle_for: self.idle_for(),
         }
     }
 
@@ -88,9 +130,12 @@ impl AgentLiveness {
     /// A tool call started (ToolUse). While > 0, stall detection is suppressed —
     /// a long `cargo build` / `npm install` emits no events until its ToolResult.
     /// A counter (not a bool) because claude-code can emit parallel tool calls.
-    pub fn tool_started(&self) {
+    /// `name` is kept as the turn's latest tool, for the Pause snapshot.
+    pub fn tool_started(&self, name: &str) {
         self.tools_in_flight.fetch_add(1, Ordering::Release);
         self.turn_tools.fetch_add(1, Ordering::Release);
+        *self.last_tool.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((name.to_string(), Instant::now()));
     }
 
     /// A tool call's result returned (ToolResult). Saturating — never underflow.
@@ -107,8 +152,10 @@ impl AgentLiveness {
     /// can't wedge stall detection off forever.
     pub fn reset_tools(&self) {
         self.tools_in_flight.store(0, Ordering::Release);
-        // …and the turn is over: the long-turn clock stops with it.
+        // …and the turn is over: the long-turn clock stops with it, and its
+        // tool record goes too.
         *self.turn_started.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.last_tool.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     pub fn tools_in_flight(&self) -> u32 {
@@ -507,8 +554,8 @@ mod tests {
     fn liveness_touch_and_tools() {
         let l = AgentLiveness::new();
         assert_eq!(l.tools_in_flight(), 0);
-        l.tool_started();
-        l.tool_started();
+        l.tool_started("Bash");
+        l.tool_started("Bash");
         assert_eq!(l.tools_in_flight(), 2);
         l.tool_finished();
         assert_eq!(l.tools_in_flight(), 1);
@@ -525,13 +572,33 @@ mod tests {
 
     /// Feedback #44/#45: a long turn is announced ONCE, counts its tool calls,
     /// and the clock stops at the turn's end.
+    /// Feedback #44(2) / EYES P7: the snapshot names the turn's latest tool
+    /// while it runs, and once the turn ends the next one starts with none — a
+    /// Pause early in a turn must not name the previous turn's tool.
+    #[test]
+    fn a_snapshot_names_this_turns_tool_and_no_earlier_one() {
+        let l = AgentLiveness::new();
+        assert_eq!(l.snapshot().turn_age, None, "between turns there is no turn age");
+        l.turn_opened();
+        l.tool_started("Bash");
+        let s = l.snapshot();
+        assert_eq!(s.tools_in_flight, 1);
+        assert_eq!(s.last_tool.as_ref().map(|(n, _)| n.as_str()), Some("Bash"));
+        assert!(s.turn_age.is_some());
+        l.tool_finished();
+        assert_eq!(l.snapshot().tools_in_flight, 0, "returned, so no longer running");
+        l.reset_tools();
+        l.turn_opened();
+        assert_eq!(l.snapshot().last_tool, None, "a new turn starts with no tool");
+    }
+
     #[test]
     fn a_long_turn_is_announced_once_per_turn() {
         let lv = AgentLiveness::new();
         assert!(lv.take_long_turn(Duration::ZERO).is_none(), "no turn in flight");
         lv.turn_opened();
-        lv.tool_started();
-        lv.tool_started();
+        lv.tool_started("Bash");
+        lv.tool_started("Bash");
         assert_eq!(lv.take_long_turn(Duration::ZERO).map(|(_, t)| t), Some(2));
         assert!(lv.take_long_turn(Duration::ZERO).is_none(), "once per turn");
         lv.reset_tools();
