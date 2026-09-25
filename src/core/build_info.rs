@@ -143,6 +143,23 @@ mod tests {
         assert_eq!(short_commit(None), None);
     }
 
+    /// The version lives in four files and nothing kept them agreeing (the
+    /// 1.0.7 bump): the crate (telemetry, the hook binary), the Tauri config
+    /// (the footer and the update check read it), and the frontend package with
+    /// its lockfile root. A bump that misses one now fails here.
+    #[test]
+    fn every_version_file_names_the_same_version() {
+        let json = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let v = env!("CARGO_PKG_VERSION");
+        let tauri = json(include_str!("../../tauri.conf.json"));
+        let package = json(include_str!("../../frontend/package.json"));
+        let lock = json(include_str!("../../frontend/package-lock.json"));
+        assert_eq!(tauri["version"], v, "tauri.conf.json");
+        assert_eq!(package["version"], v, "frontend/package.json");
+        assert_eq!(lock["version"], v, "frontend/package-lock.json");
+        assert_eq!(lock["packages"][""]["version"], v, "frontend/package-lock.json packages[\"\"]");
+    }
+
     #[test]
     fn exe_state_flags_any_change_and_a_missing_file() {
         let dir = tempfile::tempdir().unwrap();

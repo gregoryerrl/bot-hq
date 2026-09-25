@@ -7,6 +7,8 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+## [1.0.7] — 2026-09-25
+
 Fixes for the accumulated agent-feedback queue (items #10–#45, sessions
 s-84c59f27 and s-bdc7d2de). Four migrations apply at the next launch: 0083
 (`findings.gate_id`), 0084 (`session_tray.body_sha256`), 0085
