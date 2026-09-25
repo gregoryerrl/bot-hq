@@ -256,7 +256,9 @@ describe("ChatInput turn-status + Stop", () => {
       />,
     );
     expect(screen.getByTestId("turn-age")).toHaveTextContent(/· \d+s · 0 tools/);
-    expect(screen.getByTestId("staged-caption")).toHaveTextContent("lands when this turn ends");
+    expect(screen.getByTestId("staged-caption")).toHaveTextContent(
+      "lands when the current turn or orientation ends",
+    );
   });
 
   it("reads a turn's age from the chat, so mounting mid-turn is not '0s'", () => {

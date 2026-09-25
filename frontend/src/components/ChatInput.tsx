@@ -904,7 +904,7 @@ export function ChatInput({
               // Feedback #45: a staged message said where it stood only in a
               // tooltip; the user pressed Pause to be heard.
               <span className="text-primary" data-testid="staged-caption">
-                · your message is queued — it lands when this turn ends (Pause interrupts)
+                · your message is queued — it lands when the current turn or orientation ends (Pause interrupts)
               </span>
             )}
             {stagedAnswers > 0 && (
