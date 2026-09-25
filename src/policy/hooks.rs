@@ -146,7 +146,7 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
         }
         // `"."` — every hook git invokes runs with the repo root as its CWD.
         "pre-commit" => run_pre_commit(&data_dir, project.as_deref(), Path::new("."), sid),
-        "post-commit" => run_post_commit(&data_dir, project.as_deref(), sid),
+        "post-commit" => run_post_commit(&data_dir, project.as_deref(), Path::new("."), sid),
         // git passes the remote NAME as $1 (and its URL as $2, not forwarded);
         // the re-run command is `git push <remote> <oid>:<ref>`, so the name
         // travels to the app with the ref updates.
@@ -241,8 +241,7 @@ fn run_pre_commit(
     if policy.forbidden_in_commits.is_empty() {
         return Ok(0);
     }
-    let diff = read_staged_diff(repo).unwrap_or_default();
-    let added_only = added_lines_only(&diff);
+    let added_only = staged_lines_to_screen(repo);
     match policy.first_forbidden_word(&added_only) {
         None => Ok(0),
         Some(word) => {
@@ -281,6 +280,133 @@ fn added_lines_only(diff: &str) -> String {
         .map(|l| &l[1..])
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The staged lines the pre-commit content scan screens.
+///
+/// Ordinarily every line the staged diff ADDS against HEAD. **During a merge
+/// (MERGE_HEAD present), only the lines new to EVERY parent** — feedback #39,
+/// the user's pick (tray 59a9fc5a): a conflicted merge finished with `git
+/// commit` restates the other branch's content in its staged diff, and a
+/// forbidden word someone already committed there (a client's own comment) was
+/// refused with only `--no-verify` left. Conflict resolutions and any new text
+/// are still screened; a line already on either side passes. A clean merge
+/// runs no pre-commit at all, so this brings the conflicted path in line with
+/// it. A diff that cannot be read falls back to the full scan — narrowing on a
+/// failed read would pass everything.
+fn staged_lines_to_screen(repo: &Path) -> String {
+    let against_head = read_staged_diff(repo).unwrap_or_default();
+    let heads = merge_heads(repo);
+    if heads.is_empty() {
+        return added_lines_only(&against_head);
+    }
+    let mut diffs = vec![against_head.clone()];
+    for head in &heads {
+        match git_output_in(repo, &["diff", "--cached", "--no-color", "--no-ext-diff", head]) {
+            Some(d) => diffs.push(d),
+            None => return added_lines_only(&against_head),
+        }
+    }
+    lines_new_to_every_side(&diffs)
+}
+
+/// The lines of the commit just made that post-commit screens: what HEAD adds,
+/// or for a merge HEAD (two or more parents) only the lines new to every
+/// parent — the pre-commit rule above, so the backstop agrees with the gate.
+/// (`git show` on a merge prints a combined diff whose `+ ` column lines came
+/// from one parent; the old scan read them as added.) A diff that cannot be
+/// read falls back to the plain `git show`.
+fn committed_lines_to_screen(repo: &Path) -> String {
+    let full = || {
+        added_lines_only(
+            &git_output_in(repo, &["show", "--no-color", "--no-ext-diff", "HEAD"])
+                .unwrap_or_default(),
+        )
+    };
+    let parents: Vec<String> = git_output_in(repo, &["rev-list", "--parents", "-n", "1", "HEAD"])
+        .unwrap_or_default()
+        .split_whitespace()
+        .skip(1)
+        .map(String::from)
+        .collect();
+    if parents.len() < 2 {
+        return full();
+    }
+    let mut diffs = Vec::with_capacity(parents.len());
+    for parent in &parents {
+        match git_output_in(repo, &["diff", "--no-color", "--no-ext-diff", parent, "HEAD"]) {
+            Some(d) => diffs.push(d),
+            None => return full(),
+        }
+    }
+    lines_new_to_every_side(&diffs)
+}
+
+/// The commits a merge in progress is bringing in — every line of MERGE_HEAD
+/// (one for an ordinary merge, several for an octopus) — or none when no merge
+/// is in progress. `--git-path` finds the file in a linked worktree too; in a
+/// normal checkout it prints a path RELATIVE to the repo, so it is joined onto
+/// `repo` (an absolute path replaces it in `join`, which is right as well).
+fn merge_heads(repo: &Path) -> Vec<String> {
+    let Some(path) = git_output_in(repo, &["rev-parse", "--git-path", "MERGE_HEAD"]) else {
+        return Vec::new();
+    };
+    std::fs::read_to_string(repo.join(path.trim()))
+        .map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The added lines of `diffs[0]` that EVERY other diff adds too, keyed by
+/// `(path, line)` (EYES J3) and kept in `diffs[0]`'s order. For a merge, each
+/// diff is the result against one parent: a line present on some parent is not
+/// added against it, so the survivors are the merge's own new lines. The key is
+/// content, not position, so a line that happens to match one added against
+/// another parent elsewhere in the file is kept — over-screening, the safe
+/// direction.
+fn lines_new_to_every_side(diffs: &[String]) -> String {
+    let Some((first, rest)) = diffs.split_first() else {
+        return String::new();
+    };
+    let others: Vec<std::collections::HashSet<(String, String)>> = rest
+        .iter()
+        .map(|d| added_lines_by_path(d).into_iter().collect())
+        .collect();
+    added_lines_by_path(first)
+        .into_iter()
+        .filter(|key| others.iter().all(|set| set.contains(key)))
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every added line of a unified diff with the path it lands in (the `+++ b/`
+/// header above it), in diff order. A `+++ ` line counts as a header only
+/// between `diff --git` and the first hunk, so an added line whose own text
+/// starts with `++ ` is still a line.
+fn added_lines_by_path(diff: &str) -> Vec<(String, String)> {
+    let mut path = String::new();
+    let mut in_header = false;
+    let mut out = Vec::new();
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            in_header = true;
+        } else if line.starts_with("@@") {
+            in_header = false;
+        } else if in_header {
+            if let Some(header) = line.strip_prefix("+++ ") {
+                path = header.strip_prefix("b/").unwrap_or(header).to_string();
+            }
+        } else if let Some(added) = line.strip_prefix('+') {
+            out.push((path.clone(), added.to_string()));
+        }
+    }
+    out
 }
 
 /// Files that are append-only once committed — a sweep/refactor must NEVER
@@ -366,6 +492,7 @@ fn check_immutable_artifacts(repo: &Path) -> i32 {
 fn run_post_commit(
     data_dir: &Path,
     project: Option<&str>,
+    repo: &Path,
     session_id: Option<&str>,
 ) -> Result<i32> {
     audit_at_hook(data_dir, project, "post-commit");
@@ -373,14 +500,15 @@ fn run_post_commit(
     if policy.forbidden_in_commits.is_empty() {
         return Ok(0);
     }
-    let msg = git_output(&["log", "-1", "--pretty=%B", "HEAD"]).unwrap_or_default();
-    let diff = git_output(&["show", "--no-color", "HEAD"]).unwrap_or_default();
-    let sha = git_output(&["rev-parse", "HEAD"]).unwrap_or_default();
+    let msg = git_output_in(repo, &["log", "-1", "--pretty=%B", "HEAD"]).unwrap_or_default();
+    let sha = git_output_in(repo, &["rev-parse", "HEAD"]).unwrap_or_default();
     let sha_short = sha.trim().chars().take(8).collect::<String>();
     // Mirror pre-commit's added-only filter — otherwise removing a forbidden
     // word from a file logs a spurious violation against the very commit that
-    // cleaned it up. The commit message stays in the scan as-is.
-    let combined = format!("{msg}\n{}", added_lines_only(&diff));
+    // cleaned it up — and its merge rule (#39), or every merge the pre-commit
+    // allowed would log a violation here. The commit message stays in the scan
+    // as-is.
+    let combined = format!("{msg}\n{}", committed_lines_to_screen(repo));
     if let Some(word) = policy.first_forbidden_word(&combined) {
         eprintln!(
             "bot-hq post-commit: forbidden word '{word}' slipped through \
@@ -1677,8 +1805,11 @@ fn findings_block_body(findings: &[(String, String, Option<String>)]) -> String 
 
 // ---- git helpers ----
 
+/// `--no-ext-diff` (EYES P6): with a `diff.external` tool configured, git
+/// hands the diff to it and prints no unified hunks — the scan would read
+/// nothing and pass everything. These hooks run in every registered project.
 fn read_staged_diff(repo: &Path) -> Option<String> {
-    git_output_in(repo, &["diff", "--cached", "--no-color"])
+    git_output_in(repo, &["diff", "--cached", "--no-color", "--no-ext-diff"])
 }
 
 fn current_branch() -> Option<String> {
@@ -2208,6 +2339,153 @@ mod tests {
             run_pre_commit(data.path(), Some("p"), repo.path(), None).unwrap(),
             1,
             "the forbidden-word gate went blind on a diff it could not decode"
+        );
+    }
+
+    /// Run git in `dir`, asserting it succeeded (a fixture step that silently
+    /// failed would leave a merge test proving nothing).
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A data dir whose project `p` forbids a stand-in word — never this repo's
+    /// real forbidden word, which would trip our own pre-commit hook on this
+    /// file (EYES P5).
+    fn stand_in_policy() -> tempfile::TempDir {
+        let data = tempdir().unwrap();
+        std::fs::create_dir_all(data.path().join("library/projects/p")).unwrap();
+        std::fs::write(
+            data.path().join("library/projects/p/policy.yaml"),
+            "forbidden_in_commits:\n  - Acme-Trailer\n",
+        )
+        .unwrap();
+        data
+    }
+
+    /// A repo mid-merge with a conflict in `a.txt`: our side added `ours`, the
+    /// other side added a line carrying the stand-in word — content already
+    /// committed THERE (a client's own comment, in #39's report).
+    fn conflicted_merge() -> tempfile::TempDir {
+        let repo = tempdir().unwrap();
+        let r = repo.path();
+        init_repo(r);
+        std::fs::write(r.join("a.txt"), "line1\n").unwrap();
+        git(r, &["add", "a.txt"]);
+        git(r, &["commit", "-qm", "base"]);
+        git(r, &["branch", "theirs"]);
+        std::fs::write(r.join("a.txt"), "line1\nours\n").unwrap();
+        git(r, &["commit", "-qam", "ours"]);
+        git(r, &["checkout", "-q", "theirs"]);
+        std::fs::write(r.join("a.txt"), "line1\ntheirs Acme-Trailer\n").unwrap();
+        git(r, &["commit", "-qam", "theirs"]);
+        git(r, &["checkout", "-q", "-"]);
+        let merged = Command::new("git").args(["merge", "theirs"]).current_dir(r).output().unwrap();
+        assert!(!merged.status.success(), "the fixture must conflict");
+        assert!(!merge_heads(r).is_empty(), "MERGE_HEAD is read through --git-path");
+        repo
+    }
+
+    #[test]
+    fn lines_new_to_every_side_keeps_only_what_every_parent_lacks() {
+        let vs_ours = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1,3 @@\n line1\n+theirs\n+resolved\n";
+        let vs_theirs = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1,3 @@\n line1\n+ours\n+resolved\n";
+        assert_eq!(lines_new_to_every_side(&[vs_ours.into(), vs_theirs.into()]), "resolved");
+        // Keyed by path: the same text added to a DIFFERENT file does not count.
+        let other_file = "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -0,0 +1 @@\n+resolved\n";
+        assert_eq!(lines_new_to_every_side(&[vs_ours.into(), other_file.into()]), "");
+        // One diff: every added line — the ordinary, non-merge scan.
+        assert_eq!(lines_new_to_every_side(&[vs_ours.into()]), "theirs\nresolved");
+        // An added line whose own text starts with `++ ` is a line, not a header.
+        let plus = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1,2 @@\n line1\n+++ looks like a header\n";
+        assert_eq!(added_lines_by_path(plus), vec![("a.txt".to_string(), "++ looks like a header".to_string())]);
+    }
+
+    /// Feedback #39 (the user's pick, tray 59a9fc5a): a conflicted merge
+    /// screens only the lines new to EVERY parent. Keeping the other side's
+    /// line verbatim passes; a resolution that ADDS the word is still refused.
+    #[test]
+    fn a_conflicted_merge_screens_only_its_own_new_lines() {
+        let data = stand_in_policy();
+        let repo = conflicted_merge();
+        let r = repo.path();
+
+        std::fs::write(r.join("a.txt"), "line1\nours\ntheirs Acme-Trailer\n").unwrap();
+        git(r, &["add", "a.txt"]);
+        assert_eq!(
+            run_pre_commit(data.path(), Some("p"), r, None).unwrap(),
+            0,
+            "a line already committed on the other side must not block the merge"
+        );
+
+        std::fs::write(r.join("a.txt"), "line1\nours\ntheirs Acme-Trailer\nnew Acme-Trailer\n").unwrap();
+        git(r, &["add", "a.txt"]);
+        assert_eq!(
+            run_pre_commit(data.path(), Some("p"), r, None).unwrap(),
+            1,
+            "a resolution that adds the word is the merge's own content and is screened"
+        );
+    }
+
+    /// The narrowing needs a merge IN PROGRESS: without MERGE_HEAD every added
+    /// line is screened, even one that exists verbatim on another branch.
+    #[test]
+    fn without_a_merge_every_added_line_is_screened() {
+        let data = stand_in_policy();
+        let repo = tempdir().unwrap();
+        let r = repo.path();
+        init_repo(r);
+        std::fs::write(r.join("a.txt"), "line1\n").unwrap();
+        git(r, &["add", "a.txt"]);
+        git(r, &["commit", "-qm", "base"]);
+        git(r, &["checkout", "-qb", "elsewhere"]);
+        std::fs::write(r.join("a.txt"), "line1\ntheirs Acme-Trailer\n").unwrap();
+        git(r, &["commit", "-qam", "elsewhere"]);
+        git(r, &["checkout", "-q", "-"]);
+        std::fs::write(r.join("a.txt"), "line1\ntheirs Acme-Trailer\n").unwrap();
+        git(r, &["add", "a.txt"]);
+        assert!(merge_heads(r).is_empty());
+        assert_eq!(run_pre_commit(data.path(), Some("p"), r, None).unwrap(), 1);
+    }
+
+    /// The post-commit backstop applies the same merge rule, or every merge
+    /// the gate allowed would log a violation — and it still logs one when the
+    /// merge's own resolution carries the word.
+    #[test]
+    fn post_commit_screens_a_merge_like_the_gate_does() {
+        let violations = |data: &Path| {
+            std::fs::read_to_string(
+                crate::paths::Paths::for_data_dir(data.to_path_buf()).violations_path,
+            )
+            .unwrap_or_default()
+        };
+
+        let data = stand_in_policy();
+        let repo = conflicted_merge();
+        let r = repo.path();
+        std::fs::write(r.join("a.txt"), "line1\nours\ntheirs Acme-Trailer\n").unwrap();
+        git(r, &["add", "a.txt"]);
+        git(r, &["commit", "-qm", "merge"]);
+        run_post_commit(data.path(), Some("p"), r, None).unwrap();
+        assert!(
+            !violations(data.path()).contains("detected post-commit"),
+            "a merge that kept the other side's line verbatim logged a violation"
+        );
+
+        let data = stand_in_policy();
+        let repo = conflicted_merge();
+        let r = repo.path();
+        std::fs::write(r.join("a.txt"), "line1\nours\ntheirs Acme-Trailer\nnew Acme-Trailer\n").unwrap();
+        git(r, &["add", "a.txt"]);
+        git(r, &["commit", "-qm", "merge"]);
+        run_post_commit(data.path(), Some("p"), r, None).unwrap();
+        assert!(
+            violations(data.path()).contains("detected post-commit"),
+            "the merge's own forbidden line must still be logged"
         );
     }
 
