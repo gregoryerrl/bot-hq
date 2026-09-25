@@ -2,7 +2,7 @@ import { PARTICIPANT_COLORS } from "../components/authorColor";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { Dashboard, MAX_PARTICIPANTS } from "./Dashboard";
 import { invoke } from "@tauri-apps/api/core";
 import type { ClaudeOverrides, ModelView, RoleView } from "../lib/bindings";
@@ -894,41 +894,76 @@ describe("Dashboard tiles — drag to SWAP (ideas.md 2026-08-24, tray c38a216b)"
     expect(within(second).getByTestId("needs-you")).toHaveTextContent("halted — your move");
   });
 
-  /** jsdom fires drag events without a native dataTransfer — supply one. */
-  function dt() {
-    return {
-      effectAllowed: "",
-      setData: () => {},
-      getData: () => "",
-    };
+  /** jsdom has neither `PointerEvent` nor `elementFromPoint`: dispatch
+   *  mouse-typed pointer events — React and the window listeners read the same
+   *  fields — and stub the hit test with the card the pointer is over. */
+  function pointer(type: string, target: Element | Window, x: number) {
+    fireEvent(target, new MouseEvent(type, { bubbles: true, clientX: x, clientY: 10, button: 0 }));
   }
+  function dragTile(from: HTMLElement, over: HTMLElement) {
+    const doc = document as unknown as { elementFromPoint?: (x: number, y: number) => Element | null };
+    doc.elementFromPoint = () => over;
+    pointer("pointerdown", from, 10);
+    pointer("pointermove", window, 60);
+    pointer("pointerup", window, 60);
+    delete doc.elementFromPoint;
+  }
+  function renderWithSessionRoute() {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/"]}>
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/sessions/:id" element={<div>SESSION PAGE</div>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+  const swaps = () => mockInvoke.mock.calls.filter(([cmd]) => cmd === "swap_session_order");
 
-  it("dropping tile A on tile B invokes the swap with exactly those ids", async () => {
+  // The user, 2026-09-25: "I'm not able to swap the cards places". The swap was
+  // HTML5 drag-and-drop, whose drop the Tauri webview never fires; these drive
+  // the pointer events it now runs on.
+  it("dragging card A onto card B swaps exactly those two", async () => {
     mockTwoTiles();
     renderDashboard();
     const a = await screen.findByTestId("tile-wrap-s-1");
     const b = await screen.findByTestId("tile-wrap-s-2");
-    fireEvent.dragStart(a, { dataTransfer: dt() });
-    fireEvent.dragOver(b, { dataTransfer: dt() });
-    fireEvent.drop(b, { dataTransfer: dt() });
+    dragTile(a, within(b).getByRole("link"));
     await waitFor(() =>
-      expect(mockInvoke).toHaveBeenCalledWith("swap_session_order", {
-        a: "s-1",
-        b: "s-2",
-      }),
+      expect(mockInvoke).toHaveBeenCalledWith("swap_session_order", { a: "s-1", b: "s-2" }),
     );
   });
 
-  it("a self-drop swaps nothing", async () => {
+  it("a drop back on the same card swaps nothing", async () => {
     mockTwoTiles();
     renderDashboard();
     const a = await screen.findByTestId("tile-wrap-s-1");
-    fireEvent.dragStart(a, { dataTransfer: dt() });
-    fireEvent.drop(a, { dataTransfer: dt() });
-    // The list read happened; the swap never did.
+    dragTile(a, a);
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("list_sessions", {}));
-    expect(
-      mockInvoke.mock.calls.filter(([cmd]) => cmd === "swap_session_order"),
-    ).toHaveLength(0);
+    expect(swaps()).toHaveLength(0);
+  });
+
+  it("a click without movement still opens the card, and swaps nothing", async () => {
+    mockTwoTiles();
+    renderWithSessionRoute();
+    const a = await screen.findByTestId("tile-wrap-s-1");
+    pointer("pointerdown", a, 10);
+    pointer("pointerup", window, 10);
+    fireEvent.click(within(a).getByRole("link"));
+    expect(await screen.findByText("SESSION PAGE")).toBeInTheDocument();
+    expect(swaps()).toHaveLength(0);
+  });
+
+  it("the click that ends a drag does not open the card", async () => {
+    mockTwoTiles();
+    renderWithSessionRoute();
+    const a = await screen.findByTestId("tile-wrap-s-1");
+    dragTile(a, a);
+    fireEvent.click(within(a).getByRole("link"));
+    expect(screen.queryByText("SESSION PAGE")).toBeNull();
+    expect(screen.getByTestId("tile-wrap-s-1")).toBeInTheDocument();
   });
 });

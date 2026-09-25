@@ -4,6 +4,7 @@ import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvok
 import { SessionTile } from "../components/SessionTile";
 import { needsYouBySession, type NeedsYou } from "../lib/attention";
 import { useNow } from "../hooks/useNow";
+import { usePointerSwap } from "../hooks/usePointerSwap";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import type {
@@ -244,27 +245,25 @@ export function Dashboard() {
 
   // Drag-to-SWAP (ideas.md 2026-08-24, tray c38a216b): dropping tile A on
   // tile B exchanges exactly those two slots server-side; the refetch
-  // re-renders the grid in the stored order. `dragId` doubles as the "a drag
-  // is live" flag; `dropTarget` only ever names a DIFFERENT tile, so the
-  // ring highlight cannot appear on the tile being dragged.
-  const [dragId, setDragId] = useState<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  // re-renders the grid in the stored order. POINTER-driven, not HTML5 DnD —
+  // the webview never fires an HTML5 drop (see `usePointerSwap`). `dragId`
+  // is the tile being dragged; `dropTarget` only ever names a DIFFERENT tile,
+  // so the ring highlight cannot appear on the tile being dragged.
   const swapOrder = useTauriMutation<boolean, { a: string; b: string }>(
     "swap_session_order",
   );
-  const handleTileDrop = useCallback(
-    (targetId: string) => {
-      const from = dragId;
-      setDragId(null);
-      setDropTarget(null);
-      if (!from || from === targetId) return;
-      swapOrder.mutate(
-        { a: from, b: targetId },
-        { onSettled: () => void refetch() },
-      );
+  const swapTiles = useCallback(
+    (from: string, to: string) => {
+      swapOrder.mutate({ a: from, b: to }, { onSettled: () => void refetch() });
     },
-    [dragId, swapOrder, refetch],
+    [swapOrder, refetch],
   );
+  const {
+    dragId,
+    dropTarget,
+    onPointerDown: onTilePointerDown,
+    onClickCapture: onTileClickCapture,
+  } = usePointerSwap(swapTiles);
 
   const createSession = useTauriMutation<
     SessionInfo,
@@ -1093,32 +1092,15 @@ export function Dashboard() {
           {filteredSessions.map((s) => (
             <div
               key={s.id}
-              draggable
+              // No `draggable`: WebKit would start its own drag and cancel the
+              // pointer stream (EYES Q2a).
+              data-session-tile={s.id}
               data-testid={`tile-wrap-${s.id}`}
-              onDragStart={(e) => {
-                setDragId(s.id);
-                e.dataTransfer.effectAllowed = "move";
-                // Some WebViews cancel the drag without payload data.
-                e.dataTransfer.setData("text/plain", s.id);
-              }}
-              onDragEnd={() => {
-                setDragId(null);
-                setDropTarget(null);
-              }}
-              onDragOver={(e) => {
-                // preventDefault is what makes this a legal drop target.
-                e.preventDefault();
-                if (dragId && dragId !== s.id) setDropTarget(s.id);
-              }}
-              onDragLeave={() =>
-                setDropTarget((t) => (t === s.id ? null : t))
-              }
-              onDrop={(e) => {
-                e.preventDefault();
-                handleTileDrop(s.id);
-              }}
+              onPointerDown={(e) => onTilePointerDown(e, s.id)}
+              onClickCapture={onTileClickCapture}
               className={cn(
                 "rounded-lg",
+                dragId !== null && "select-none",
                 dragId === s.id && "opacity-60",
                 dropTarget === s.id && "ring-2 ring-primary/60",
               )}
