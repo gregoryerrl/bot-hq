@@ -244,8 +244,12 @@ fn press_snapshot_from(
 /// The chat row a Pause posts when a participant was mid-turn (feedback
 /// #44(2)): what the turn was doing when it was cut — for the user reading the
 /// chat, and for the agent reading it back on resume. A tool is called running
-/// only while one is in flight (EYES P7).
-fn pause_notice(s: &crate::storage::PressSnapshot) -> String {
+/// only while one is in flight (EYES P7). During boot nobody holds a turn —
+/// every participant is orienting — so the row says that instead.
+fn pause_notice(s: &crate::storage::PressSnapshot, booting: bool) -> String {
+    if booting {
+        return "⏸ Paused during boot, while the participants were still orienting.".to_string();
+    }
     let age = s
         .turn_age_ms
         .map(|ms| format!(" ({} in)", short_duration(ms)))
@@ -851,15 +855,23 @@ impl AppState {
         // the interrupt ends the turn, and ending it clears its clock and tool
         // record. Recorded on the cancel row and said in the chat.
         let snapshot = self.press_snapshot(session_id).await;
+        // During boot every participant is busy orienting and nobody holds a
+        // turn, so the row must not say one was held (EYES, C20 review).
+        let booting = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .is_some_and(|h| h.booting.load(Ordering::Acquire));
         let outcome = self.cancel_session_turn(session_id).await?;
         if let Some(snap) = snapshot.as_ref() {
-            tracing::info!(session_id, ?snap, "cancel: what the turn was doing at the press");
+            tracing::info!(session_id, ?snap, booting, "cancel: what the turn was doing at the press");
             crate::core::post_system_notice(
                 &self.storage,
                 Some(&self.bridge),
                 session_id,
                 MessageKind::SystemNotice,
-                pause_notice(snap),
+                pause_notice(snap, booting),
                 None,
             )
             .await;
@@ -2685,22 +2697,27 @@ mod tests {
     #[test]
     fn pause_notice_says_what_the_turn_was_doing() {
         assert_eq!(
-            pause_notice(&snapshot(1, Some("Bash"))),
+            pause_notice(&snapshot(1, Some("Bash")), false),
             "⏸ Paused while hands held the turn (23m 10s in): 1 tool running \
              (Bash, started 4m 02s ago); last activity 3m 52s ago."
         );
         assert_eq!(
-            pause_notice(&snapshot(0, Some("Bash"))),
+            pause_notice(&snapshot(0, Some("Bash")), false),
             "⏸ Paused while hands held the turn (23m 10s in): no tool running \
              (the last, Bash, started 4m 02s ago); last activity 3m 52s ago."
         );
         assert_eq!(
-            pause_notice(&snapshot(0, None)),
+            pause_notice(&snapshot(0, None), false),
             "⏸ Paused while hands held the turn (23m 10s in): no tool call yet \
              this turn; last activity 3m 52s ago."
         );
         assert_eq!(short_duration(45_900), "45s");
         assert_eq!(short_duration(4_020_000), "1h 07m");
+        // During boot every participant is busy orienting; nobody holds a turn.
+        assert_eq!(
+            pause_notice(&snapshot(1, Some("Bash")), true),
+            "⏸ Paused during boot, while the participants were still orienting."
+        );
     }
 
     /// The snapshot reads the BUSY participant's liveness — the one the
@@ -2762,6 +2779,10 @@ mod tests {
             body.matches(", snapshot)").count(),
             2,
             "both escalation paths carry the snapshot into the record"
+        );
+        assert!(
+            body.contains("h.booting.load(") && body.contains("pause_notice(snap, booting)"),
+            "the Pause row is worded from the session's own boot flag"
         );
     }
 

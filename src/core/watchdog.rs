@@ -570,8 +570,6 @@ mod tests {
     const PAST: Duration = Duration::from_secs(120); // > threshold
     const FRESH: Duration = Duration::from_secs(5); // < threshold
 
-    /// Feedback #44/#45: a long turn is announced ONCE, counts its tool calls,
-    /// and the clock stops at the turn's end.
     /// Feedback #44(2) / EYES P7: the snapshot names the turn's latest tool
     /// while it runs, and once the turn ends the next one starts with none — a
     /// Pause early in a turn must not name the previous turn's tool.
@@ -592,6 +590,8 @@ mod tests {
         assert_eq!(l.snapshot().last_tool, None, "a new turn starts with no tool");
     }
 
+    /// Feedback #44/#45: a long turn is announced ONCE, counts its tool calls,
+    /// and the clock stops at the turn's end.
     #[test]
     fn a_long_turn_is_announced_once_per_turn() {
         let lv = AgentLiveness::new();
