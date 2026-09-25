@@ -139,11 +139,21 @@ pub struct SessionHandle {
     /// escalation skips its SIGKILL (the user superseded the cancel). Reset by
     /// `cancel_session_turn`. Shared with `interrupt_then_escalate`.
     pub cancel_superseded: Arc<std::sync::atomic::AtomicBool>,
+    /// The session's boot cell — the one the pumps route boot responses by,
+    /// cleared by `boot_then_start` (rc3 D21). Read by [`Self::preempts`], so
+    /// a typed send during boot does not interrupt orientation (feedback #10).
+    pub booting: Arc<std::sync::atomic::AtomicBool>,
     /// Keeps the mcp-config temp files alive for the lifetime of the session.
     _mcp_temp: TempDir,
 }
 
 impl SessionHandle {
+    /// Whether a user send of this kind interrupts the agents now. The
+    /// session's OWN boot flag decides, so no call site can pass a stale value
+    /// (EYES P4): while the participants orient, nothing preempts.
+    pub fn preempts(&self, send: crate::core::state::UserSend) -> bool {
+        send.preempts_while(self.booting.load(std::sync::atomic::Ordering::Acquire))
+    }
 
     /// Agents in turn order.
     pub fn agents(&self) -> impl Iterator<Item = &SessionAgent> {
@@ -1193,6 +1203,7 @@ async fn spawn_session_handle(
         activity,
         in_atomic_tool,
         cancel_superseded,
+        booting,
         _mcp_temp: mcp_temp,
     })
 }
@@ -5702,6 +5713,7 @@ pub(crate) async fn stub_session_for_tests(
         ),
         in_atomic_tool: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cancel_superseded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        booting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         _mcp_temp: TempDir::new().unwrap(),
     };
     (handle, irx)

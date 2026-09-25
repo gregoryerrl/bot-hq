@@ -212,6 +212,17 @@ impl UserSend {
     pub fn preempts(self) -> bool {
         matches!(self, UserSend::Typed)
     }
+
+    /// Whether this delivery may abort a turn RIGHT NOW: never while the
+    /// participants orient (feedback #10). An interrupt then aborts the boot
+    /// response, the pump reports it as oriented, and READY claims agents are
+    /// oriented that were cut off — every plugin-created session did this with
+    /// its first prompt. What the message needs is the ring's boot hold, which
+    /// delivers it after READY. Callers go through `SessionHandle::preempts`,
+    /// which reads the session's own flag.
+    pub fn preempts_while(self, booting: bool) -> bool {
+        self.preempts() && !booting
+    }
 }
 
 pub struct AppState {
@@ -1740,7 +1751,10 @@ impl AppState {
         // **A STAGED message takes none of this.** It is a queued message by the
         // user's own choice, released at a turn boundary — preempting it aborts
         // the turn it waited for. See [`UserSend`].
-        if send.preempts() {
+        //
+        // **Nor does any send while the participants orient** (feedback #10):
+        // the handle reads its own boot flag, so no caller can pass a stale one.
+        if handle.preempts(send) {
             for agent in handle.agents() {
                 agent.interrupt("user-preempt");
             }
@@ -3112,6 +3126,15 @@ mod tests {
             !UserSend::Staged.preempts(),
             "a staged message is queued by the user's own choice"
         );
+        // Feedback #10: nothing preempts while the participants orient — the
+        // interrupt would abort their boot responses and READY would claim
+        // agents oriented that were cut off.
+        assert!(UserSend::Typed.preempts_while(false));
+        assert!(
+            !UserSend::Typed.preempts_while(true),
+            "a typed send during boot must not interrupt orientation"
+        );
+        assert!(!UserSend::Staged.preempts_while(false));
 
         // Comments stripped: prose about a symbol is a record, not a wire —
         // `phase_vote_wiring_test.rs` pays for this lesson at length, and this
@@ -3128,14 +3151,32 @@ mod tests {
             .find(&needle)
             .expect("the typed-Send preempt must still exist");
         let before = &code[..at];
-        let guard = before
-            .rfind("if send.preempts() {")
-            .expect("the preempt must be guarded by the arrival mode, not fired unconditionally");
+        // Guarded through the HANDLE, which reads the session's own boot flag
+        // (EYES P4) — `send.preempts()` alone would interrupt orientation.
+        let guard = before.rfind("if handle.preempts(send) {").expect(
+            "the preempt must be guarded by the arrival mode AND the boot flag, through \
+             the session handle, not fired unconditionally",
+        );
         assert!(
             !before[guard..].contains('}'),
-            "the `if send.preempts()` block CLOSES before the preempt call, so \
+            "the `if handle.preempts(send)` block CLOSES before the preempt call, so \
              the interrupt is unconditional again and every staged message cuts \
              a turn"
+        );
+        // …and the handle's check consults its boot cell, not a constant.
+        let session_code = include_str!("session.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let method = session_code
+            .find("pub fn preempts(&self, send: crate::core::state::UserSend) -> bool {")
+            .expect("SessionHandle::preempts must exist");
+        let body = &session_code[method..];
+        let body = &body[..body.find("\n    }").expect("the method body closes")];
+        assert!(
+            body.contains("send.preempts_while(self.booting.load("),
+            "SessionHandle::preempts must read the session's own boot cell: {body}"
         );
 
         // The staged path must pick the non-preempting variant. Scoped to
