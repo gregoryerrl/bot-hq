@@ -930,9 +930,11 @@ async fn spawn_session_handle(
         }
         let ring = inputs.len();
         let deps = crate::core::sequencer::SequencerDeps {
-            // The ring must know boot is running, so a message the user stages
-            // meanwhile is held instead of dealt (feedback #10).
-            booting: Some(Arc::clone(&booting)),
+            // The ring holds every release and stage until boot tells it boot
+            // ended (feedback #10). Its OWN latch, from the same value the
+            // pumps' `booting` cell starts at — not the cell itself, which boot
+            // clears before READY is posted.
+            boots: is_first_spawn,
             session_id: session.id.as_str().into(),
             storage: storage.clone(),
             inputs,
@@ -4812,7 +4814,7 @@ mod tests {
             data_dir: None,
             bridge: Some(Arc::clone(&bridge)),
             activity: None,
-            booting: None,
+            boots: false,
         };
         let _tx = spawn_ring(deps, &bridge, "s1").await;
 

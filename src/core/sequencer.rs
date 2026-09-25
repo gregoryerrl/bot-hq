@@ -929,21 +929,19 @@ pub struct SequencerDeps {
     /// `Option` for the same reason [`Self::bridge`] is: the unit rings
     /// construct deps directly and most of them are not about the input lock.
     pub activity: Option<Arc<crate::core::activity::ActivityTracker>>,
-    /// The session's boot flag (rc3 D21): `true` while the participants are
-    /// orienting. A message STAGED then must not be delivered at once — the
-    /// ring has no holder during boot, and a turn dealt to a pump that is
-    /// still booting reports to the readiness channel, never to the ring: a
-    /// turn nothing can complete (feedback #10). It waits for
-    /// [`SequencerCommand::BootEnded`]. `None` in unit rings (no boot).
-    pub booting: Option<Arc<std::sync::atomic::AtomicBool>>,
-}
-
-impl SequencerDeps {
-    fn is_booting(&self) -> bool {
-        self.booting
-            .as_ref()
-            .is_some_and(|b| b.load(std::sync::atomic::Ordering::Acquire))
-    }
+    /// Whether this spawn boots (rc3 D21 — the first spawn of a roster). The
+    /// ring starts with its own boot latch set to this and holds every release
+    /// and every stage until [`SequencerCommand::BootEnded`]: the ring has no
+    /// holder during boot, and a turn dealt to a pump that is still orienting
+    /// reports to the readiness channel, never to the ring — a turn nothing can
+    /// complete (feedback #10).
+    ///
+    /// **A value, not the pumps' shared atomic.** Boot clears that atomic before
+    /// it posts READY and tells the ring, so a ring reading it would release a
+    /// message arriving in that gap AHEAD of READY — the race this latch exists
+    /// to close. The ring's latch drops only when the ring itself hears
+    /// `BootEnded`, which boot sends after READY is posted. `false` in unit rings.
+    pub boots: bool,
 }
 
 /// A wake for the sequencer.
@@ -1097,9 +1095,10 @@ pub enum SequencerCommand {
     /// still the only interrupt; staging changes WHEN the user may compose,
     /// not when a message may land.
     MessageStaged,
-    /// Boot is over (every exit of `boot_then_start`, and the no-boot spawn
-    /// path): a message staged DURING boot is delivered now (feedback #10).
-    /// Deals no turn by itself — without a staged message the ring stays
+    /// Boot is over (every exit of `boot_then_start`, AFTER its READY row, and
+    /// the no-boot spawn path): the ring's boot latch drops, and what it held
+    /// during boot lands now — a release is dealt, else a stage is delivered
+    /// (feedback #10). Deals nothing when nothing was held: the ring stays
     /// waiting for the user, as rc3 D29 requires.
     BootEnded,
     /// The user un-toggled Stage to edit: clear the flag. The content was
@@ -1411,10 +1410,17 @@ struct RingState {
     /// keeps firing as D35 designed: it is what makes the completion arrive in
     /// milliseconds rather than at the residual generation's leisure.
     winding_down: Option<i64>,
-    /// The mentions of a `UserMessage` held back by `winding_down` (see above);
-    /// `None` = nothing held. Two releases in the window merge into one — the
-    /// rows are already in the channel, and one restart drains them.
+    /// The mentions of a `UserMessage` held back by `winding_down` (see above)
+    /// or by `boot_hold` (below); `None` = nothing held. Two releases in the
+    /// window merge into one — the rows are already in the channel, and one
+    /// restart drains them.
     stashed_release: Option<(Vec<i64>, bool)>,
+    /// The ring's own boot latch (feedback #10): set at construction when the
+    /// spawn boots ([`SequencerDeps::boots`]), cleared ONLY by `BootEnded`.
+    /// While set, a release is stashed and a stage is held — whatever sent it: a
+    /// typed Send, a plugin's first prompt, a tray release, Resume. Boot posts
+    /// READY before it sends `BootEnded`, so whatever was held lands after READY.
+    boot_hold: bool,
     /// Participants that have parked a question and cannot proceed until the user
     /// answers (rc3 D22). The ring skips no-one on account of this — it HALTS when
     /// it reaches one, which is what bounds the extra work at one lap. Cleared by
@@ -1777,6 +1783,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     let mut state = RingState {
         open_gates,
         gate_seed_failed,
+        boot_hold: deps.boots,
         ..Default::default()
     };
     if !state.open_gates.is_empty() {
@@ -1959,6 +1966,18 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 mentions,
                 restarts_rotation,
             } => {
+                // **A release during boot waits for boot to end** (feedback
+                // #10). Every pump is still orienting, so a turn dealt now
+                // reports to the readiness channel and never completes. The
+                // rows are already in the channel; `BootEnded` deals them.
+                if state.boot_hold {
+                    debug!(
+                        session = %deps.session_id,
+                        "sequencer: a release arrived during boot; holding it until boot ends"
+                    );
+                    state.stash_release(mentions, restarts_rotation);
+                    continue;
+                }
                 // **A release that lands while the halted holder is still
                 // finishing waits for its completion** (round 10, B1) — see
                 // `RingState::winding_down` for the fold-in it prevents. Held
@@ -1976,7 +1995,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 }
                 release_ring(&deps, &mut rx, &mut state, mentions, restarts_rotation).await;
             }
-            SequencerCommand::MessageStaged if deps.is_booting() => {
+            SequencerCommand::MessageStaged if state.boot_hold => {
                 // No holder during boot, but no boundary either: every pump is
                 // still orienting and a turn dealt now could never complete.
                 // Held until `BootEnded` (feedback #10).
@@ -1987,7 +2006,20 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 );
             }
             SequencerCommand::BootEnded => {
-                if state.holder.is_none() {
+                state.boot_hold = false;
+                // A release held during boot is dealt now — and drained HERE:
+                // `TurnComplete` replays any stash it finds, so one left behind
+                // would restart the rotation after turn one. A stage pending
+                // beside it stays pending and lands at the next boundary, the
+                // ordinary staged semantics; with no release held it is the
+                // release, delivered now.
+                if let Some((mentions, restarts)) = state.take_stashed_release() {
+                    debug!(
+                        session = %deps.session_id,
+                        "sequencer: boot ended; dealing the release held during boot"
+                    );
+                    release_ring(&deps, &mut rx, &mut state, mentions, restarts).await;
+                } else if state.holder.is_none() {
                     deliver_staged_if_pending(&deps, &mut state.staged_pending).await;
                 }
             }
@@ -2120,8 +2152,12 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 }
                 // A staged response delivers AS THE RELEASE: the halt asked
                 // for the user's next message and one is already queued. The
-                // delivery clears the halt exactly as a typed answer would.
-                deliver_staged_if_pending(&deps, &mut state.staged_pending).await;
+                // delivery clears the halt exactly as a typed answer would —
+                // except during boot, when the stage waits for `BootEnded`
+                // like every other release (feedback #10).
+                if !state.boot_hold {
+                    deliver_staged_if_pending(&deps, &mut state.staged_pending).await;
+                }
             }
             SequencerCommand::GateOpened { choice_id } => {
                 state.open_gates.insert(choice_id);
@@ -4591,7 +4627,7 @@ mod tests {
             data_dir: None,
             bridge: None,
             activity: None,
-            booting: None,
+            boots: false,
         };
         (deps, storage, seats)
     }
@@ -6887,35 +6923,136 @@ mod tests {
         assert!(exited(task).await);
     }
 
-    /// Feedback #10: during boot the ring has no holder, but a message the
-    /// user STAGES then must not be delivered at once — every pump is still
-    /// orienting, so a dealt turn could never complete. It is held until
-    /// `BootEnded`; a `BootEnded` with nothing staged deals nothing (D29).
-    #[tokio::test]
-    async fn a_stage_during_boot_waits_for_boot_to_end() {
-        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+    /// A ring for a spawn that boots, wired to a bridge so a stage delivery
+    /// (`StagedDeliveryDue`) is observable.
+    async fn booting_ring(
+        roster: &[(&str, &str)],
+    ) -> (
+        SequencerDeps,
+        Storage,
+        Vec<Seat>,
+        tokio::sync::broadcast::Receiver<crate::signaling::SignalingEvent>,
+    ) {
+        let (mut deps, storage, seats) = ring(roster).await;
         let bridge = SignalingBridge::new();
         bridge.set_storage(storage.clone()).await;
         deps.bridge = Some(Arc::clone(&bridge));
-        let booting = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        deps.booting = Some(Arc::clone(&booting));
-        let mut events = bridge.subscribe();
+        deps.boots = true;
+        let events = bridge.subscribe();
+        (deps, storage, seats, events)
+    }
 
+    /// Feedback #10: during boot the ring has no holder, but a message the
+    /// user STAGES then must not be delivered at once — every pump is still
+    /// orienting, so a dealt turn could never complete. It is held until
+    /// `BootEnded`, and nothing else releases it: the latch is the ring's own.
+    #[tokio::test]
+    async fn a_stage_during_boot_waits_for_boot_to_end() {
+        let (deps, _storage, mut seats, mut events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
-        // A BootEnded with nothing staged deals no turn and emits nothing.
-        send(&tx, SequencerCommand::BootEnded).await;
-        assert!(next_due_quick(&mut events).await.is_none());
-        booting.store(true, std::sync::atomic::Ordering::Release);
 
         send(&tx, SequencerCommand::MessageStaged).await;
         assert!(next_due_quick(&mut events).await.is_none(), "held while booting");
-        booting.store(false, std::sync::atomic::Ordering::Release);
         send(&tx, SequencerCommand::BootEnded).await;
         assert_eq!(next_due(&mut events).await.as_deref(), Some("s1"), "delivered at boot end");
         drop(tx);
         assert!(exited(task).await);
         // The delivery itself is the app's (a UserMessage); BootEnded dealt no turn.
+        assert!(seats[0].drain().is_empty() && seats[1].drain().is_empty());
+    }
+
+    /// rc3 D29 survives the latch: a `BootEnded` with nothing held deals no
+    /// turn and delivers nothing — the session waits for the user.
+    #[tokio::test]
+    async fn boot_ending_with_nothing_held_deals_nothing() {
+        let (deps, _storage, mut seats, mut events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert!(next_due_quick(&mut events).await.is_none());
+        assert!(seats[0].extra_wire().await.is_none(), "no turn dealt at boot end");
+        drop(tx);
+        assert!(exited(task).await);
+        assert!(seats[1].drain().is_empty());
+    }
+
+    /// Feedback #10, the path `6752e9e` left open: a RELEASE during boot — a
+    /// typed Send, a plugin's first prompt, a tray release — dealt a turn to a
+    /// pump that was still orienting, a turn nothing could complete. It waits
+    /// for `BootEnded` like a stage, then deals exactly one turn.
+    #[tokio::test]
+    async fn a_release_during_boot_waits_for_boot_to_end() {
+        let (deps, storage, mut seats, _events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
+        post(&storage, "user", None, "the task").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, user_message()).await;
+        assert!(seats[0].extra_wire().await.is_none(), "no turn dealt while booting");
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert_eq!(seats[0].expect(1).await, vec!["the task"], "dealt at boot end");
+        drop(tx);
+        assert!(exited(task).await);
+        assert!(seats[1].drain().is_empty(), "one turn, to the front of the rotation");
+    }
+
+    /// EYES E4: a release AND a stage held during boot. `BootEnded` deals the
+    /// release and drains the stash — a stash left for `TurnComplete` would
+    /// replay after turn one and restart the rotation mid-lap — while the stage
+    /// stays pending and lands at the first boundary, the ordinary staged rule.
+    #[tokio::test]
+    async fn boot_ending_deals_the_held_release_and_keeps_the_stage_for_the_boundary() {
+        let (deps, storage, mut seats, mut events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        post(&storage, "user", None, "typed during boot").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, SequencerCommand::MessageStaged).await;
+        send(&tx, user_message()).await;
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert_eq!(seats[0].expect(1).await, vec!["typed during boot"]);
+        assert!(
+            next_due_quick(&mut events).await.is_none(),
+            "the stage does not cut the turn the held release just started"
+        );
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(
+            next_due(&mut events).await.as_deref(),
+            Some("s1"),
+            "the stage lands at the first boundary"
+        );
+        drop(tx);
+        assert!(exited(task).await);
+        assert!(seats[1].drain().is_empty(), "the boundary parked for the stage");
+    }
+
+    /// A halt declared during boot does not release a stage: the stage waits
+    /// for `BootEnded` like every other release (feedback #10).
+    #[tokio::test]
+    async fn a_halt_during_boot_does_not_release_a_stage() {
+        let (deps, _storage, mut seats, mut events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, SequencerCommand::MessageStaged).await;
+        send(&tx, parked_by_nobody()).await;
+        assert!(next_due_quick(&mut events).await.is_none(), "held through the halt");
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert_eq!(next_due(&mut events).await.as_deref(), Some("s1"));
+        drop(tx);
+        assert!(exited(task).await);
         assert!(seats[0].drain().is_empty() && seats[1].drain().is_empty());
     }
 
@@ -11052,7 +11189,7 @@ mod tests {
             data_dir: None,
             bridge: None,
             activity: None,
-            booting: None,
+            boots: false,
         };
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
