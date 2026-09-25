@@ -1008,6 +1008,14 @@ async getSessionHalt(sessionId: string) : Promise<Result<SessionHaltView | null,
     else return { status: "error", error: e  as any };
 }
 },
+async listSessionHalts() : Promise<Result<OpenSessionHalt[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_session_halts") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * **Stage a response for boundary delivery** (the Stage toggle,
  * 2026-08-15): the message + currently staged tray picks are held by the
@@ -1875,6 +1883,16 @@ context_window: number | null;
  * installed CLI's catalog its real window.
  */
 cli_settings: string | null }
+/**
+ * One open session's halt, for the cross-session surfaces — the dashboard
+ * cards and the header bell (the user, 2026-09-25: a halted session showed
+ * "your move" on neither).
+ */
+export type OpenSessionHalt = { session_id: string; declared_by: string; reason: string; declared_at: string; 
+/**
+ * Set for a TEMPORARY halt: the instant the host wakes the declarer.
+ */
+wake_at: string | null }
 /**
  * One row of the starvation-visibility chip (WS1c, 2026-08-27): how far
  * behind the ring's deliveries this participant is running. The session view

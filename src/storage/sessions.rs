@@ -212,6 +212,32 @@ impl Storage {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Every OPEN session's declared halt:
+    /// `(session_id, declared_by, reason, declared_at, wake_at)` — the one read
+    /// the dashboard cards and the header bell need to say "halted — your move"
+    /// (the user, 2026-09-25: halts showed on neither). Closed sessions and
+    /// sessions without a halt are left out; a halt with no `declared_by`
+    /// (a host halt written before that column was filled) reads as `system`.
+    pub async fn open_session_halts(
+        &self,
+    ) -> Result<Vec<(String, String, String, String, Option<String>)>> {
+        let rows: Vec<(String, Option<String>, String, Option<String>, Option<String>)> =
+            sqlx::query_as(
+                "SELECT id, halt_declared_by, halt_reason, halt_declared_at, halt_wake_at \
+                 FROM sessions WHERE closed_at IS NULL AND halt_reason IS NOT NULL \
+                 ORDER BY halt_declared_at",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .context("listing open sessions' halts")?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, by, reason, at, wake)| {
+                (id, by.unwrap_or_else(|| "system".into()), reason, at.unwrap_or_default(), wake)
+            })
+            .collect())
+    }
+
     /// The session's declared halt, if any: `(declared_by, reason, declared_at)`.
     pub async fn session_halt(
         &self,
@@ -1081,6 +1107,31 @@ mod tests {
     /// Round 12 (migration 0069): a TEMPORARY halt carries its wake instant in
     /// the same slot; an ordinary halt declared over it drops the instant; the
     /// clear drops everything; the boot re-arm sees only open sessions.
+    /// The dashboard's and bell's read (2026-09-25): every OPEN session's halt,
+    /// with its wake instant — none for a session without one, none for a
+    /// closed session.
+    #[tokio::test]
+    async fn open_session_halts_lists_only_open_halted_sessions() {
+        let s = Storage::memory().await.unwrap();
+        for id in ["halted", "temporary", "quiet", "closed"] {
+            s.create_session(id, "t", None).await.unwrap();
+        }
+        s.declare_session_halt("halted", "hands", "your move").await.unwrap();
+        s.declare_temporary_session_halt("temporary", "eyes", "CI", "2026-09-25T06:00:00.000Z")
+            .await
+            .unwrap();
+        s.declare_session_halt("closed", "hands", "done").await.unwrap();
+        s.close_session("closed", false).await.unwrap();
+
+        let halts = s.open_session_halts().await.unwrap();
+        let ids: Vec<&str> = halts.iter().map(|h| h.0.as_str()).collect();
+        assert_eq!(ids.len(), 2, "open, halted sessions only: {ids:?}");
+        let halted = halts.iter().find(|h| h.0 == "halted").unwrap();
+        assert_eq!((halted.1.as_str(), halted.2.as_str(), halted.4.as_deref()), ("hands", "your move", None));
+        let temporary = halts.iter().find(|h| h.0 == "temporary").unwrap();
+        assert_eq!(temporary.4.as_deref(), Some("2026-09-25T06:00:00.000Z"));
+    }
+
     #[tokio::test]
     async fn a_temporary_halt_carries_a_wake_instant_in_the_slot() {
         let s = Storage::memory().await.unwrap();

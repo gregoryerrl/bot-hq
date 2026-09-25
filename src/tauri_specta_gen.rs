@@ -125,6 +125,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         tray::resolve_choice,
         tray::send_user_response,
         tray::get_session_halt,
+        tray::list_session_halts,
         tray::stage_user_response,
         tray::unstage_user_response,
         tray::get_staged_response,

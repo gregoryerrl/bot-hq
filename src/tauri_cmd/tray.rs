@@ -73,6 +73,41 @@ pub async fn get_session_halt(
     }))
 }
 
+/// One open session's halt, for the cross-session surfaces — the dashboard
+/// cards and the header bell (the user, 2026-09-25: a halted session showed
+/// "your move" on neither).
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct OpenSessionHalt {
+    pub session_id: String,
+    pub declared_by: String,
+    pub reason: String,
+    pub declared_at: String,
+    /// Set for a TEMPORARY halt: the instant the host wakes the declarer.
+    pub wake_at: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_session_halts(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+) -> Result<Vec<OpenSessionHalt>, AppError> {
+    let Some(storage) = bridge.storage_handle().await else {
+        return Ok(Vec::new());
+    };
+    Ok(storage
+        .open_session_halts()
+        .await?
+        .into_iter()
+        .map(|(session_id, declared_by, reason, declared_at, wake_at)| OpenSessionHalt {
+            session_id,
+            declared_by,
+            reason,
+            declared_at,
+            wake_at,
+        })
+        .collect())
+}
+
 /// One staged tray pick, as the composer's Send hands it over (rc3 D34).
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct StagedPick {
