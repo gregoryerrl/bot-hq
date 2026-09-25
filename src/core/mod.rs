@@ -7,6 +7,7 @@
 //! - the per-session live agent handles
 
 pub mod activity;
+pub mod build_info;
 mod broadcast;
 pub use broadcast::post_system_notice;
 pub mod mentions;

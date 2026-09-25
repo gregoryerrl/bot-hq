@@ -94,7 +94,12 @@ fi
 
 if [[ "$PROFILE" == "release" ]]; then
   say "building release (this embeds the dist just built)"
-  cargo build --release --features devtools
+  # The footer's build stamp. Set on THIS command only: the app launches from
+  # this shell and the agents inherit its environment, so an exported value
+  # would reach their `cargo test` and change what it compiles. `--exclude`
+  # keeps a reachable release tag out of it — a bare hash, not `v1.0.6-42-g…`.
+  build_commit=$(git describe --always --dirty --abbrev=7 --exclude='*' 2>/dev/null || true)
+  BOTHQ_BUILD_COMMIT="$build_commit" cargo build --release --features devtools
   BIN=target/release/bot-hq
 else
   say "building debug"

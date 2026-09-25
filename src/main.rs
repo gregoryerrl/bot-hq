@@ -60,6 +60,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // The program file as it stands at launch, before anything could rebuild
+    // it — the footer compares against this to say "restart pending" when the
+    // git hooks are already running a newer file than this app (2026-09-25).
+    bot_hq::core::build_info::record_launch_stamp();
+
     // Everything from here on is the GUI launch, wrapped so a fatal error
     // before the window exists is REPORTED — log file + native dialog — and
     // not just returned to a stderr nobody is reading. See

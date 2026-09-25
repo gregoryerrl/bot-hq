@@ -203,6 +203,7 @@ check.
 | `src/core/terminal.rs` | `TerminalRegistry`/`SessionTerminal`: one PTY per session, bounded scrollback, `wait_settle` (Notify, not polling) | M |
 | `src/core/webview_watchdog.rs` | fail-loud startup watchdog: 30s no-page-load → stderr + log + telemetry error; cancelled by main.rs `on_page_load` (source-pinned) | S |
 | `src/core/updates.rs` | GitHub-releases version check (pure logic + thin fetch) → `UpdateBanner` | M |
+| `src/core/build_info.rs` | the footer's build stamp: `record_launch_stamp` (main.rs, before the GUI) + `exe_state` (the program file changed / missing since launch → "restart pending" / "rebuild"; any difference counts), `build_commit` from compile-time `BOTHQ_BUILD_COMMIT` (set by `./start` on the release cargo command only, and by release.yml), `profile` → `app_build_info` in `tauri_cmd/updates.rs` | S |
 | `src/core/telemetry.rs` | opt-in diagnostics: hash-only panic/error events, `$HOME`→`~` redaction, 1MB drop-oldest jsonl queue, never-blocks flusher (runtime-config endpoint), panic-capture chain, `TELEMETRY_ENABLED` atomic | M |
 | `src/core/loopback.rs` | `browser_originated(headers)`: the one test both loopback listeners (signaling server, LLM proxy) apply before doing anything — `Origin` / `Sec-Fetch-*` mean a browser page reached the port, and bot-hq's real clients never send them | S |
 

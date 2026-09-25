@@ -161,6 +161,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         plugin_api::plugin_invoke_proxy,
         // Updates (check GitHub Releases for a newer bot-hq)
         updates::check_for_update,
+        updates::app_build_info,
         notifications::windows_toast_enabled,
         // Diagnostics (opt-in telemetry: status / toggle / endpoint / asked)
         telemetry::get_telemetry_status,

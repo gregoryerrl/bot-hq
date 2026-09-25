@@ -3,8 +3,8 @@
 bot-hq's release builds are currently **unsigned**. They work for test users
 (macOS: right-click → Open — see [INSTALL.md](../INSTALL.md)), but a
 Gatekeeper-clean / SmartScreen-clean experience needs platform signing. This is
-the checklist to turn it on — no code changes beyond uncommenting the CI `env`
-block.
+the checklist to turn it on — no code changes beyond uncommenting the six
+`APPLE_*` lines in the CI `env` block.
 
 ## macOS — Developer ID signing + notarization
 
@@ -19,8 +19,9 @@ Application* certificate.
    - `APPLE_PASSWORD` — an app-specific password (NOT your Apple ID password)
    - `APPLE_TEAM_ID` — your 10-character team id
 2. Add them as **repository secrets** (Settings → Secrets and variables → Actions).
-3. Uncomment the `env:` block on the "Build bundles" step in
-   [`.github/workflows/release.yml`](../.github/workflows/release.yml). Tauri
+3. Uncomment the six `APPLE_*` lines in the `env:` block of the "Build bundles"
+   step in [`.github/workflows/release.yml`](../.github/workflows/release.yml)
+   (the block itself is already live: it carries the build stamp). Tauri
    signs the app and submits it to Apple's notary service during the build.
 4. Cut a release as usual. The `.dmg` is now notarized, and the Homebrew cask's
    Gatekeeper caveat can be dropped.

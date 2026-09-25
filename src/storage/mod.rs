@@ -410,6 +410,16 @@ impl Storage {
         &self.pool
     }
 
+    /// The highest migration applied to this database — the footer's
+    /// "database version" (2026-09-25). `None` when the table cannot be read.
+    pub async fn schema_version(&self) -> Option<i64> {
+        sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&self.pool)
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// Internal: parameterized 4-way search over cl_index / cl_folders.
     /// `path_column` is the column name varying between tables
     /// (`file_path` for cl_index, `folder_path` for cl_folders). Both

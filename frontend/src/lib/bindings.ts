@@ -1380,6 +1380,14 @@ async checkForUpdate() : Promise<Result<UpdateInfo, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async appBuildInfo() : Promise<Result<BuildInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("app_build_info") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * `Some(false)` = Windows says no app may toast (surface a warning beside
  * the test button). `Some(true)` = the OS switch is on. `None` = not
@@ -1516,6 +1524,31 @@ export type AppError =
  * target id is already on disk; frontend can offer "reinstall" UX.
  */
 { kind: "Conflict"; message: string }
+/**
+ * What build is running (the footer, 2026-09-25): the version, the commit it
+ * was built from, and whether its program file changed since launch — which
+ * on a source install means the git hooks already run newer code than the
+ * app does.
+ */
+export type BuildInfo = { version: string; 
+/**
+ * Seven hex characters (plus `-dirty`), or `null` for a build that did not
+ * stamp one — every debug build, and a release built outside `./start`.
+ */
+commit: string | null; 
+/**
+ * `release` | `debug`.
+ */
+profile: string; exe_path: string | null; 
+/**
+ * The program file's modified time AT LAUNCH (RFC 3339, UTC) — when it
+ * was built or installed.
+ */
+exe_built_at: string | null; exe_state: ExeState; data_dir: string; 
+/**
+ * The highest migration applied to the database.
+ */
+schema_version: number | null }
 /**
  * One consent-screen row: a requested capability + what granting it means,
  * in user terms (from the catalog).
@@ -1658,6 +1691,25 @@ export type CspExtraOrigins = { "script-src": string[]; "style-src": string[]; "
  * classification per [`parse_diff_lines`].
  */
 export type DiffLine = { kind: string; text: string }
+/**
+ * Where the program file stands against the one that was launched.
+ */
+export type ExeState = 
+/**
+ * Unchanged since launch — or unknowable (no launch stamp, e.g. inside a
+ * read-only AppImage mount), which shows nothing rather than a guess.
+ */
+"current" | 
+/**
+ * Rebuilt or replaced since launch: git hooks already run the new file,
+ * so restart the app to match it.
+ */
+"changed" | 
+/**
+ * Gone from disk (a `cargo clean`): nothing can run it, so every commit
+ * fails until a rebuild — restarting alone does not help.
+ */
+"missing"
 /**
  * Stat for a single config file (present / path / size).
  */

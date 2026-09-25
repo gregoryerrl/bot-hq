@@ -99,15 +99,17 @@ jobs:
         # cargo build --release, then bundles. Run from repo root so the CLI
         # discovers tauri.conf.json.
         run: ./frontend/node_modules/.bin/tauri build ${{ matrix.args }}
-        # To enable macOS signing + notarization, add these repo secrets and
-        # uncomment (see docs/SIGNING.md):
-        # env:
-        #   APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-        #   APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        #   APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        #   APPLE_ID: ${{ secrets.APPLE_ID }}
-        #   APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-        #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        env:
+          # The footer's build stamp: the commit this bundle was built from.
+          BOTHQ_BUILD_COMMIT: ${{ github.sha }}
+          # To enable macOS signing + notarization, add these repo secrets and
+          # uncomment (see docs/SIGNING.md):
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       # Always uploaded to the run: a manual run stops here (validation
       # build); a tag push hands them to the release job below.
