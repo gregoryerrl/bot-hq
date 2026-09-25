@@ -1999,7 +1999,7 @@ mod tests {
             "The deletion rule is conditional on Martin's answer.\nSecond line.".to_string();
         let path = repo.path().join("draft.md");
         std::fs::write(&path, &body).unwrap();
-        (bridge, storage, eyes, path.to_string_lossy().to_string(), body)
+        (bridge, storage, eyes, posix_path(&path), body)
     }
 
     /// The message row a queued gate points at.
@@ -2183,7 +2183,7 @@ mod tests {
         let path_b = repo.path().join("comment.md");
         std::fs::write(&path_b, "An answer to the stakeholder.\n").unwrap();
         let cmd_a = format!("gh issue create --title t --body-file {path_a}");
-        let cmd_b = format!("gh issue comment 749 --body-file {}", path_b.display());
+        let cmd_b = format!("gh issue comment 749 --body-file {}", posix_path(&path_b));
         let (gate_a, _) = queued(bridge.park_gated_command("s1", "hands", &cmd_a).await.unwrap());
         let (gate_b, _) = queued(bridge.park_gated_command("s1", "hands", &cmd_b).await.unwrap());
         for g in [&gate_a, &gate_b] {
@@ -2605,7 +2605,7 @@ mod tests {
                 .park_gated_command(
                     "s1",
                     "hands",
-                    &format!("gh issue comment 1 --body-file {}", path.display()),
+                    &format!("gh issue comment 1 --body-file {}", posix_path(&path)),
                 )
                 .await
                 .unwrap(),
@@ -2673,7 +2673,7 @@ mod tests {
             .park_gated_command(
                 "s1",
                 "hands",
-                &format!("gh pr create --base main --body-file {}", empty.display()),
+                &format!("gh pr create --base main --body-file {}", posix_path(&empty)),
             )
             .await
             .unwrap_err()
@@ -2969,7 +2969,7 @@ mod tests {
         let _ring = ring_for(&bridge).await;
         let path = repo.path().join("b.md");
         std::fs::write(&path, "body text\n").unwrap();
-        let cmd = format!("gh issue edit 5 --body-file {}", path.display());
+        let cmd = format!("gh issue edit 5 --body-file {}", posix_path(&path));
         let (gate, _) = queued(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
         let prompt = storage.get_tray_entry(&gate).await.unwrap().unwrap().prompt;
         assert!(prompt.contains("matched Tool-Gate keyword `gh issue edit`"), "got: {prompt}");
