@@ -5,9 +5,9 @@ import { PendingTray } from "../components/PendingTray";
 import { UpdateBanner } from "../components/UpdateBanner";
 import { DiagnosticsAskCard } from "../components/DiagnosticsAskCard";
 import { useHealthStore, appHealthSummary } from "../stores/health";
-import { useActivityStore } from "../stores/activity";
+import { useActivityStore, anyBusy } from "../stores/activity";
 import { useTauriQuery } from "../hooks/useInvoke";
-import type { InstalledPluginView } from "../lib/bindings";
+import type { BuildInfo, InstalledPluginView } from "../lib/bindings";
 
 // Topbar tabs for enabled plugins that contribute a panel (manifest
 // `slots[].panel_route`). The `plugin:*` events invalidate this query from
@@ -60,6 +60,91 @@ function FooterStatus() {
     >
       <span className={cn("size-2 rounded-full", cfg.dot)} />
       {cfg.label}
+    </span>
+  );
+}
+
+// The footer's left side (the user's ask, 2026-09-25): which build is running
+// — version, the commit it was built from, and whether its program file
+// changed since launch. The git hooks of every project exec the program file
+// the app was LAUNCHED from, so a rebuild without a relaunch leaves the hooks
+// on newer code than the app; the chip says so. Detail lives in the tooltip.
+export function BuildStamp() {
+  const { data } = useTauriQuery<BuildInfo | null>("app_build_info", {}, {
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+  });
+  const build = data ?? null;
+  const tag = build?.commit ?? (build?.profile === "debug" ? "dev" : null);
+  const detail = build
+    ? [
+        `Build: ${build.profile}${build.commit ? ` · ${build.commit}` : ""}`,
+        build.exe_path && `Program: ${build.exe_path}`,
+        build.exe_built_at && `Built: ${build.exe_built_at}`,
+        `Data: ${build.data_dir}`,
+        build.schema_version != null && `Database: migration ${build.schema_version}`,
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : undefined;
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <span
+        className="min-w-0 cursor-default truncate font-label-caps text-label-caps text-primary"
+        title={detail}
+        data-testid="build-stamp"
+      >
+        bot-hq{build ? ` v${build.version}` : ""}
+        {tag && <span className="text-on-surface-variant"> · {tag}</span>}
+      </span>
+      {build?.exe_state === "changed" && (
+        <span
+          className="shrink-0 cursor-default rounded bg-warning/15 px-1.5 py-0.5 font-code-sm text-code-sm text-warning"
+          title="The program file changed since this app launched. Git hooks already run the new one; restart bot-hq to match it."
+          data-testid="restart-pending"
+        >
+          restart pending
+        </span>
+      )}
+      {build?.exe_state === "missing" && (
+        <span
+          className="shrink-0 cursor-default rounded bg-error/15 px-1.5 py-0.5 font-code-sm text-code-sm text-error"
+          title="The program file is gone (a cargo clean?). Git hooks cannot run it, so every commit fails until it is rebuilt. Rebuild, then restart."
+          data-testid="rebuild-needed"
+        >
+          rebuild needed
+        </span>
+      )}
+    </div>
+  );
+}
+
+// How many live sessions have a turn in flight — the relaunch-safety signal: a
+// relaunch now would cut those turns off. Busy, cancelling, or any participant
+// still busy counts, so a paused session whose last tool is still finishing is
+// counted too (EYES P8). Hidden when no session is live (FooterStatus says so).
+export function WorkingSessions() {
+  const bySession = useActivityStore((s) => s.bySession);
+  const busyBySession = useActivityStore((s) => s.busyBySession);
+  const live = Object.keys(bySession);
+  if (live.length === 0) return null;
+  const working = live.filter(
+    (id) =>
+      bySession[id] === "busy" ||
+      bySession[id] === "cancelling" ||
+      anyBusy(busyBySession[id]),
+  ).length;
+  return (
+    <span
+      className="shrink-0 cursor-default font-code-sm text-code-sm text-on-surface-variant"
+      title={
+        working === 0
+          ? "No session has a turn in flight — a relaunch now interrupts nothing"
+          : `${working} session${working === 1 ? " has a turn" : "s have turns"} in flight — a relaunch now would cut ${working === 1 ? "it" : "them"} off`
+      }
+      data-testid="working-sessions"
+    >
+      {working} working
     </span>
   );
 }
@@ -120,14 +205,15 @@ export function Shell() {
       </main>
       <footer
         className={cn(
-          "flex h-10 flex-shrink-0 items-center justify-between",
+          "flex h-10 flex-shrink-0 items-center justify-between gap-4",
           "border-t border-outline-variant bg-surface-container-lowest px-4",
         )}
       >
-        <span className="font-label-caps text-label-caps text-primary">
-          &copy; {new Date().getFullYear()} BOT-HQ INDUSTRIAL ORCHESTRATION
-        </span>
-        <div className="flex items-center gap-4">
+        {/* Fixed height: the left side truncates rather than wrapping or
+            scrolling sideways (EYES F4). */}
+        <BuildStamp />
+        <div className="flex shrink-0 items-center gap-4">
+          <WorkingSessions />
           <FooterStatus />
         </div>
       </footer>
