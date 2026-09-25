@@ -450,7 +450,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/session_docs.rs` | per-session IPAV docs + archives | M |
 | `src/storage/activity_events.rs` | activity transition ledger (read only by tests + boot sweep) | S |
 | `src/storage/gc.rs` | boot-time retention purges for the five append-only telemetry tables (`participant_deliveries`, `context_readings`, `retrieval_events`, `cancel_events`, `cl_reads`), run by `main.rs` beside the tray/activity sweeps; `messages` is deliberately not swept | S |
-| `src/storage/cancel_events.rs` | Stop/interrupt escalation ledger | S |
+| `src/storage/cancel_events.rs` | Stop/interrupt escalation ledger + the press-time `PressSnapshot` (0086: holder, turn age, tools in flight, last tool, last event) | S |
 | `src/storage/retrieval_events.rs` | `cl_retrieve` telemetry | S |
 | `src/storage/context_readings.rs` | per-turn context-window readings (P7) | M |
 | `src/storage/feedback.rs` | agent-filed bot-hq feedback | S |
@@ -459,7 +459,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/projects.rs` | `projects` registry, CL path resolution | M |
 | `src/storage/plugins.rs`, `src/storage/plugin_kv.rs` | plugin registry + per-plugin kv | M / S |
 | `src/storage/cl_index.rs`, `src/storage/cl_atoms.rs` | CL index/folders/reads; FTS5 atoms + `cl_retrieve` | M / M |
-| `migrations/` | 0001…0078 (0056 absent) — append-only | — |
+| `migrations/` | 0001…0086 (0056 absent) — append-only | — |
 | `tests/storage_test.rs` | cross-cutting smoke: empty-DB migration, tray scoping, message since-id, session close/list, config round-trips | M |
 
 **Entry points.** `Storage::open` · `now_utc` · `next_active_participant` ·

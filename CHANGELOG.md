@@ -7,10 +7,11 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
-Fixes for the accumulated agent-feedback queue (items #10–#45, session
-s-84c59f27). Three migrations apply at the next launch: 0083
-(`findings.gate_id`), 0084 (`session_tray.body_sha256`) and 0085
-(`session_tray.run_refusal`).
+Fixes for the accumulated agent-feedback queue (items #10–#45, sessions
+s-84c59f27 and s-bdc7d2de). Four migrations apply at the next launch: 0083
+(`findings.gate_id`), 0084 (`session_tray.body_sha256`), 0085
+(`session_tray.run_refusal`) and 0086 (the Pause snapshot on
+`cancel_events`).
 
 ### Fixed
 
@@ -70,8 +71,26 @@ s-84c59f27). Three migrations apply at the next launch: 0083
   skipped for words only; a restored term is dropped (feedback #21/#38).
 - **`cl_rescan` reports rows it found already current** (`unchanged`), and
   says the file watcher keeps the index current (feedback #20/#24).
-- **A message staged while the agents are booting waits for boot to end**
-  instead of dealing a turn nothing could complete (feedback #10).
+- **A message sent while the agents are booting waits for boot to end, and
+  READY comes first.** Staged or typed, a plugin's first prompt, or Resume —
+  anything that arrives during boot is held until every participant has
+  oriented, instead of dealing a turn nothing could complete. READY is posted
+  before the message box unlocks and before the held message goes out, and it
+  says the message goes out now rather than asking for a task. A typed Send
+  during boot no longer interrupts the agents' orientation, and boot counts
+  each participant once, so one that answers twice cannot end boot early
+  (feedback #10).
+- **A merge commit is screened for its own lines only.** While a merge is in
+  progress, the pre-commit content scan checks only the lines new to every
+  parent — conflict resolutions and new text — so a forbidden word someone
+  already committed on the other branch no longer forces `--no-verify`; the
+  post-commit check follows the same rule. The commit-message check is
+  unchanged, and a configured external diff tool can no longer blank the scan
+  (feedback #39).
+- **A participant colour you pick is yours alone.** Picked hues leave the
+  rotation, the new-session dialog marks a colour another participant picked
+  as taken, and two participants that would display the same name are
+  numbered at creation — "Reviewer", "Reviewer 2" (feedback #11/#12).
 - **Error halts give advice for the error they saw.** Only a context
   overflow advises a fresh session; an upstream failure says the retries
   are spent; an unknown cause says so. A failed turn with no text reports
@@ -100,6 +119,16 @@ s-84c59f27). Three migrations apply at the next launch: 0083
   Pause interrupts it (feedback #44/#45).
 - **A Context Library write warns when another session wrote the same file
   in the last fifteen minutes** (feedback #44).
+- **Pause records what the turn was doing.** Pressing Pause posts a row
+  such as "Paused while hands held the turn (23m 10s in): 1 tool running
+  (Bash, started 4m 02s ago); last activity 3m 52s ago", and the cancel
+  record keeps the same facts for later diagnosis (feedback #44).
+- **The footer shows which build is running.** "bot-hq v1.0.6 · 9bb7e53"
+  replaces the old copyright line, with the build profile, program file,
+  build time, data folder and database version on hover. A "restart
+  pending" chip appears when the program file changed since launch — the
+  git hooks already run the new one — and "rebuild needed" when it is gone;
+  "N working" counts the sessions a relaunch would interrupt.
 
 ### Changed
 
@@ -108,6 +137,13 @@ s-84c59f27). Three migrations apply at the next launch: 0083
 - **The universal rules teach the shell traps** that produced false checks:
   a native claude-code's `find`/`grep` wrappers, zsh's `"$r:path"` modifier,
   unquoted globs, and a pipeline's exit status (feedback #41, #27/#28).
+- **The frontend builds with vite 8, vitest 5 and @vitejs/plugin-react 6**
+  (supersedes Dependabot #4). The build target stays at the old browser floor,
+  so older Linux webviews keep loading the app, and Node 22.12 is now the
+  minimum.
+- **Release builds stamp their commit**: `./start --release` and the release
+  workflow pass it to the build for the footer; the signing guide now says to
+  uncomment only the `APPLE_*` lines of the workflow's live `env` block.
 
 ## [1.0.6] — 2026-09-09
 
