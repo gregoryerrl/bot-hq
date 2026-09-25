@@ -2229,10 +2229,19 @@ async fn boot_then_start(
     // will never report, so it is counted as done rather than waited for.
     let want = expected - deaf.len();
     let mut ready = 0usize;
+    // Counted once per PARTICIPANT, not per report (EYES E5): a pump reports
+    // once per result while booting, so a participant handed a second response
+    // mid-boot would otherwise count twice and end boot while a peer is still
+    // orienting.
+    let mut oriented = std::collections::HashSet::new();
     let deadline = tokio::time::Instant::now() + timeout;
     while ready < want {
         match tokio::time::timeout_at(deadline, boot_done.recv()).await {
             Ok(Some(id)) => {
+                if !oriented.insert(id) {
+                    tracing::debug!(session_id, participant_id = id, "boot: repeat report ignored");
+                    continue;
+                }
                 ready += 1;
                 tracing::info!(session_id, participant_id = id, ready, want, "boot: oriented");
             }
@@ -4916,6 +4925,58 @@ mod tests {
             seen.push(ev);
         }
         (ready, seen)
+    }
+
+    /// EYES E5: boot waits for every PARTICIPANT, not for as many reports. A
+    /// participant that reports twice must not end boot while its peer is
+    /// still orienting.
+    #[tokio::test]
+    async fn a_repeat_report_does_not_end_boot_early() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        let bridge = Arc::new(SignalingBridge::new());
+        bridge.set_storage(s.clone()).await;
+        let (a_tx, _a_rx) = tokio::sync::mpsc::channel(8);
+        let (b_tx, _b_rx) = tokio::sync::mpsc::channel(8);
+        let inputs = vec![
+            (1i64, crate::agents::ParticipantInput::new("s1", a_tx)),
+            (2i64, crate::agents::ParticipantInput::new("s1", b_tx)),
+        ];
+        let (done_tx, done_rx) = tokio::sync::mpsc::channel::<i64>(8);
+        let (ring_tx, mut ring_rx) = tokio::sync::mpsc::channel(8);
+        let act = crate::core::activity::ActivityTracker::new(
+            "s1",
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::clone(&bridge),
+            vec!["hands".to_string(), "eyes".to_string()],
+        );
+        let st = s.clone();
+        let br = Arc::clone(&bridge);
+        tokio::spawn(async move {
+            boot_then_start(
+                "s1", &st, &br, inputs, done_rx,
+                Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                RingKick { _held: ring_tx },
+                std::time::Duration::from_secs(30),
+                act,
+                vec!["hands".to_string(), "eyes".to_string()],
+                0,
+            )
+            .await;
+        });
+        done_tx.send(1).await.unwrap();
+        done_tx.send(1).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), ring_rx.recv())
+                .await
+                .is_err(),
+            "boot ended on two reports from ONE participant while the other still orients"
+        );
+        done_tx.send(2).await.unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), ring_rx.recv()).await,
+            Ok(Some(crate::core::sequencer::SequencerCommand::BootEnded))
+        ));
     }
 
     /// READY's four wordings: all oriented or cut by the timeout, each with or
