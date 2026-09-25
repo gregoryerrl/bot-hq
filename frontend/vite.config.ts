@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
@@ -10,10 +11,14 @@ export default defineConfig({
   base: "./",
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
   clearScreen: false,
+  // Vite 5's old default; Vite 8's Safari 16.4+ floor would drop older WebKitGTK webviews.
+  build: {
+    target: ["es2020", "edge88", "firefox78", "chrome87", "safari14"],
+  },
   server: {
     port: 1420,
     strictPort: true,

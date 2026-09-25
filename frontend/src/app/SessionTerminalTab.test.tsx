@@ -13,21 +13,31 @@ const termInstance = {
   cols: 80,
   rows: 24,
 };
+// The component `new`s all three classes below, and since Vitest 4 a mock called
+// with `new` needs a `function` (or `class`) implementation — an arrow throws
+// "is not a constructor". For WebglAddon that throw would be swallowed by the
+// component's try/catch and silently take the no-WebGL path instead.
 vi.mock("@xterm/xterm", () => ({
-  Terminal: vi.fn().mockImplementation(() => termInstance),
+  Terminal: vi.fn().mockImplementation(function () {
+    return termInstance;
+  }),
 }));
 vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: vi.fn().mockImplementation(() => ({ fit: vi.fn() })),
+  FitAddon: vi.fn().mockImplementation(function () {
+    return { fit: vi.fn() };
+  }),
 }));
 // jsdom has no WebGL2, so the real WebglAddon logs a context-creation error to
 // stderr before the component's try/catch swallows it. Stub it as a no-op addon
 // (the mocked Terminal.loadAddon never calls activate) so the terminal-I/O tests
 // run cleanly through the WebGL-present path.
 vi.mock("@xterm/addon-webgl", () => ({
-  WebglAddon: vi.fn().mockImplementation(() => ({
-    onContextLoss: vi.fn(),
-    dispose: vi.fn(),
-  })),
+  WebglAddon: vi.fn().mockImplementation(function () {
+    return {
+      onContextLoss: vi.fn(),
+      dispose: vi.fn(),
+    };
+  }),
 }));
 
 const invokeMock = vi.fn((cmd: string, _args?: unknown) => {

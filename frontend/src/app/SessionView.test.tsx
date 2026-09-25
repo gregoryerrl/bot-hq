@@ -12,28 +12,37 @@ import { draftKeyFor } from "../components/ChatInput";
 // The Terminal panel mounts the real SessionTerminalTab on pill click — mock
 // xterm out (jsdom has no matchMedia/canvas); panel-switching is what's under
 // test here, not the terminal (SessionTerminalTab.test.tsx covers that).
+// `function`, not arrow, implementations: SessionTerminalTab `new`s all three,
+// and since Vitest 4 a mock called with `new` needs a constructible
+// implementation (an arrow throws "is not a constructor").
 vi.mock("@xterm/xterm", () => ({
-  Terminal: vi.fn().mockImplementation(() => ({
-    loadAddon: vi.fn(),
-    open: vi.fn(),
-    write: vi.fn((_d: unknown, cb?: () => void) => cb?.()),
-    writeln: vi.fn(),
-    onData: vi.fn((_cb: (data: string) => void) => ({ dispose: vi.fn() })),
-    dispose: vi.fn(),
-    cols: 80,
-    rows: 24,
-  })),
+  Terminal: vi.fn().mockImplementation(function () {
+    return {
+      loadAddon: vi.fn(),
+      open: vi.fn(),
+      write: vi.fn((_d: unknown, cb?: () => void) => cb?.()),
+      writeln: vi.fn(),
+      onData: vi.fn((_cb: (data: string) => void) => ({ dispose: vi.fn() })),
+      dispose: vi.fn(),
+      cols: 80,
+      rows: 24,
+    };
+  }),
 }));
 vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: vi.fn().mockImplementation(() => ({ fit: vi.fn() })),
+  FitAddon: vi.fn().mockImplementation(function () {
+    return { fit: vi.fn() };
+  }),
 }));
 // jsdom has no WebGL2 — stub the WebGL addon (no-op) so clicking the Terminal
 // pill doesn't run the real renderer and log a context-creation error.
 vi.mock("@xterm/addon-webgl", () => ({
-  WebglAddon: vi.fn().mockImplementation(() => ({
-    onContextLoss: vi.fn(),
-    dispose: vi.fn(),
-  })),
+  WebglAddon: vi.fn().mockImplementation(function () {
+    return {
+      onContextLoss: vi.fn(),
+      dispose: vi.fn(),
+    };
+  }),
 }));
 
 class ResizeObserverStub {
