@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useTauriQuery } from "../hooks/useInvoke";
-import { colorByName, participantHue } from "../components/authorColor";
+import { PARTICIPANT_COLORS, colorByName, participantHue } from "../components/authorColor";
 
 /**
  * How a participant is NAMED in the UI, and nothing else.
@@ -388,19 +388,48 @@ export function useParticipantLabels(sessionId: string) {
  * the turn-status line and the mention picker all resolve a participant to its
  * display string first, so the hue has to answer to the same key or one
  * participant gets two colours.
+ *
+ * **A pick reserves its hue** (feedback #11/#12 leftover). The rotation used to
+ * run by roster position regardless of picks, so a participant who picked
+ * nothing could land on the hue another had picked — EYES-2 wearing HANDS'
+ * orange. Picked hues now leave the rotation, and the rest rotate over what is
+ * left, numbered among THEMSELVES (EYES P10): by roster position the rotation
+ * could wrap onto a hue it had already handed out.
  */
 export function participantHueIndex(
   participants: readonly ParticipantView[],
 ): Record<string, string> {
   const out: Record<string, string> = {};
+  // The user's pick wins; the rotation is the default, not a fallback for
+  // failure. A name the palette no longer carries degrades to the rotation
+  // rather than to no colour — an unknown entry costs the override, never the
+  // participant.
+  const picked = participants.map((p) => colorByName(p.color)?.token ?? null);
+  const reserved = new Set(picked.filter((t): t is string => t !== null));
+  const free = PARTICIPANT_COLORS.map((c) => c.token).filter((t) => !reserved.has(t));
+  let rotated = 0;
   participants.forEach((p, i) => {
-    // The user's pick wins; the rotation is the default, not a fallback for
-    // failure. A name the palette no longer carries degrades to the rotation
-    // rather than to no colour — an unknown entry costs the override, never the
-    // participant.
-    out[participantLabel(p)] = colorByName(p.color)?.token ?? participantHue(i);
+    out[participantLabel(p)] =
+      picked[i] ?? (free.length > 0 ? free[rotated++ % free.length] : participantHue(i));
   });
   return out;
+}
+
+/**
+ * Which participant (1-based, as the dialog numbers them) has picked each
+ * colour NAME, other than `self` — the swatches the dialog marks taken so two
+ * participants cannot pick one hue (feedback #11/#12 leftover).
+ */
+export function takenColors(
+  rows: readonly { color: string | null }[],
+  self: number,
+): Map<string, number> {
+  const taken = new Map<string, number>();
+  rows.forEach((r, i) => {
+    const c = colorByName(r.color);
+    if (c && i !== self && !taken.has(c.name)) taken.set(c.name, i + 1);
+  });
+  return taken;
 }
 
 // ---------------------------------------------------------------------------

@@ -711,6 +711,26 @@ describe("New session dialog — participant colour (D20)", () => {
     );
   });
 
+  it("marks a colour another participant picked as taken (feedback #11/#12)", async () => {
+    mockBackend([role()]);
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    fireEvent.click(screen.getByRole("button", { name: /add participant/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /participant 1 colour: cyan/i }),
+    );
+    const theirs = screen.getByRole("button", { name: /participant 2 colour: cyan/i });
+    expect(theirs).toBeDisabled();
+    expect(theirs).toHaveAttribute("title", "Cyan — taken by participant 1");
+    // The row that picked it can still see — and unpick — its own choice.
+    expect(
+      screen.getByRole("button", { name: /participant 1 colour: cyan/i }),
+    ).not.toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /participant 2 colour: orange/i }),
+    ).not.toBeDisabled();
+  });
+
   it("sends the user's name for a participant, and blank means the ordinal", async () => {
     // rc3 D20's other half (migration 0053). The field is an OVERRIDE of
     // something that already works, so the untouched case has to reach the

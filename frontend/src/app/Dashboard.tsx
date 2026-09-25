@@ -31,6 +31,7 @@ import { selectClass } from "../components/ui/Select";
 import {
   rosterAdvisory,
   EDIT_FILES,
+  takenColors,
   useParticipantLabels,
 } from "../lib/participants";
 
@@ -713,23 +714,35 @@ export function Dashboard() {
                           >
                             <RescanIcon size={10} className="mx-auto" />
                           </button>
-                          {PARTICIPANT_COLORS.map((c) => (
-                            <button
-                              key={c.name}
-                              type="button"
-                              aria-label={`Participant ${index + 1} colour: ${c.name}`}
-                              aria-pressed={row.color === c.name}
-                              title={c.name}
-                              onClick={() => patchParticipant(index, { color: c.name })}
-                              className={cn(
-                                "size-5 rounded-full border",
-                                c.swatch,
-                                row.color === c.name
-                                  ? "border-primary ring-1 ring-primary"
-                                  : "border-outline-variant",
-                              )}
-                            />
-                          ))}
+                          {PARTICIPANT_COLORS.map((c) => {
+                            // Feedback #11/#12 leftover: a hue another row
+                            // picked is taken — two picks of one colour are
+                            // the collision the rotation exists to prevent.
+                            const takenBy = takenColors(participants, index).get(c.name);
+                            return (
+                              <button
+                                key={c.name}
+                                type="button"
+                                aria-label={`Participant ${index + 1} colour: ${c.name}`}
+                                aria-pressed={row.color === c.name}
+                                disabled={takenBy !== undefined}
+                                title={
+                                  takenBy !== undefined
+                                    ? `${c.name} — taken by participant ${takenBy}`
+                                    : c.name
+                                }
+                                onClick={() => patchParticipant(index, { color: c.name })}
+                                className={cn(
+                                  "size-5 rounded-full border",
+                                  c.swatch,
+                                  row.color === c.name
+                                    ? "border-primary ring-1 ring-primary"
+                                    : "border-outline-variant",
+                                  takenBy !== undefined && "cursor-not-allowed opacity-25",
+                                )}
+                              />
+                            );
+                          })}
                           {participants.length > 1 && (
                             <button
                               type="button"

@@ -7,6 +7,7 @@ import {
   participantLabel,
   participantHueIndex,
   participantRuntime,
+  takenColors,
   slugOrdinal,
   slotKey,
   spawnSlotOf,
@@ -475,6 +476,31 @@ describe("participantHueIndex", () => {
     expect(hues[labels[0]]).not.toBe(hues[labels[1]]);
     expect(hues[labels[1]]).not.toBe(hues[labels[2]]);
     expect(hues[labels[0]]).not.toBe(hues[labels[2]]);
+  });
+
+  it("keeps a picked hue out of the rotation (feedback #11/#12)", () => {
+    // The leftover: the rotation ran by roster position whatever was picked,
+    // so participant 1 rotated onto the orange participant 3 had picked.
+    const r = roster(3);
+    r[2] = { ...r[2], color: "Orange" };
+    const hues = Object.values(participantHueIndex(r));
+    expect(hues[2]).toBe("text-author-orange");
+    expect(new Set(hues).size).toBe(3);
+  });
+
+  it("numbers the rotation among the unpicked, so a full roster never repeats a hue (EYES P10)", () => {
+    // By roster position, participants 7 and 8 rotated onto Sky and Pink —
+    // the two hues participants 3 and 6 had picked.
+    const r = roster(8);
+    r[2] = { ...r[2], color: "Pink" };
+    r[5] = { ...r[5], color: "Sky" };
+    expect(new Set(Object.values(participantHueIndex(r))).size).toBe(8);
+  });
+
+  it("takenColors names who holds each picked colour, never the row asking", () => {
+    const rows = [{ color: "Orange" }, { color: null }, { color: " cyan " }];
+    expect([...takenColors(rows, 1)]).toEqual([["Orange", 1], ["Cyan", 3]]);
+    expect(takenColors(rows, 0).has("Orange")).toBe(false);
   });
 
   it("is what authorColorClass prefers when it has one", () => {
