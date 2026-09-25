@@ -94,7 +94,7 @@ s-84c59f27 and s-bdc7d2de). Four migrations apply at the next launch: 0083
   reason) and questions are each named on their own, where before only
   questions showed; a temporary halt shows a muted "wakes 14:05" until its
   wake time passes.
-- **Dashboard cards can be swapped again.** Dragging one card onto another
+- **Dashboard cards can now be swapped.** Dragging one card onto another
   swaps them — the drag now runs on pointer events, since the app window
   never delivered the browser's own drop event — and a plain click still
   opens the session.

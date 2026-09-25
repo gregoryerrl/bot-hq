@@ -1104,9 +1104,6 @@ mod tests {
         assert!(s.get_agent_config("emma").await.unwrap().is_none());
     }
 
-    /// Round 12 (migration 0069): a TEMPORARY halt carries its wake instant in
-    /// the same slot; an ordinary halt declared over it drops the instant; the
-    /// clear drops everything; the boot re-arm sees only open sessions.
     /// The dashboard's and bell's read (2026-09-25): every OPEN session's halt,
     /// with its wake instant — none for a session without one, none for a
     /// closed session.
@@ -1132,6 +1129,9 @@ mod tests {
         assert_eq!(temporary.4.as_deref(), Some("2026-09-25T06:00:00.000Z"));
     }
 
+    /// Round 12 (migration 0069): a TEMPORARY halt carries its wake instant in
+    /// the same slot; an ordinary halt declared over it drops the instant; the
+    /// clear drops everything; the boot re-arm sees only open sessions.
     #[tokio::test]
     async fn a_temporary_halt_carries_a_wake_instant_in_the_slot() {
         let s = Storage::memory().await.unwrap();
