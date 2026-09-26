@@ -158,7 +158,10 @@ mod tests {
             ("signaling/bridge/findings.rs", include_str!("../signaling/bridge/findings.rs")),
         ];
         for (name, src) in files {
-            let prod = match src.find("\n#[cfg(test)]") {
+            // Cut at the TEST MODULE, not at the first `#[cfg(test)]`: `pump.rs`
+            // opens with a `#[cfg(test)] use`, and cutting there left 14 of its
+            // 1,770 production lines under this check.
+            let prod = match src.find("\n#[cfg(test)]\nmod tests") {
                 Some(at) => &src[..at],
                 None => src,
             };
