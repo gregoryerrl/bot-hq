@@ -128,7 +128,15 @@ impl ViolationsLog {
 
     /// Synchronous sibling of [`append`](Self::append). Safe in any context,
     /// with or without a tokio runtime present.
-    pub fn append_blocking(&self, rec: ViolationRecord) -> Result<()> {
+    pub fn append_blocking(&self, mut rec: ViolationRecord) -> Result<()> {
+        // F10: the free-text fields — `action` is often the command itself —
+        // are redacted on the RECORD, before it is serialized, never in the
+        // JSON line (EYES 8eea5190: scanning serialized text can cut a line
+        // short, and a line that no longer parses drops out of `read_all`).
+        // The git hooks write here too, as their own `bot-hq` processes, so
+        // their lines are redacted once the app they exec is rebuilt.
+        rec.action = crate::policy::secret_scan::redact_string(rec.action);
+        rec.detail = rec.detail.map(crate::policy::secret_scan::redact_string);
         // Record AND newline in ONE buffer, written with ONE `write_all` (G5).
         //
         // This used to be two `write_all` calls. `write_lock` below is a
@@ -511,5 +519,43 @@ mod tests {
             recs.len(),
             THREADS * PER_THREAD
         );
+    }
+
+    /// F10 (plan C4d): a record's free text is redacted on the RECORD, before
+    /// it is serialized. The line still parses, so `read_all` still returns it,
+    /// and a private key cut short at the end of `detail` cannot swallow the
+    /// JSON after it (EYES 8eea5190).
+    #[tokio::test]
+    async fn a_records_secrets_are_redacted_and_the_line_still_parses() {
+        let dir = tempdir().unwrap();
+        let log = ViolationsLog::new(dir.path());
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let pem = format!(
+            "{}{}",
+            "-----BEGIN RSA ",
+            "PRIVATE KEY-----\nMIIEowIBAAKCAQEA0123456789abcdef\nQWERTYUIOPasdfghjklzxcvbnm012345"
+        );
+        log.record(
+            "s1",
+            "hands",
+            ViolationKind::ToolBlocklist,
+            format!("curl -H 'Authorization: Bearer {token}' https://api.example.com"),
+            ViolationOutcome::Denied,
+            Some(format!("head -3 key.pem printed:\n{pem}")),
+        )
+        .await
+        .unwrap();
+        let all = log.read_all().unwrap();
+        assert_eq!(all.len(), 1, "the line still parses");
+        assert_eq!(
+            all[0].action,
+            "curl -H 'Authorization: Bearer [redacted: a GitHub access token]' https://api.example.com"
+        );
+        assert_eq!(
+            all[0].detail.as_deref(),
+            Some("head -3 key.pem printed:\n[redacted: a PEM private key block]")
+        );
+        let raw = std::fs::read_to_string(log.path()).unwrap();
+        assert!(!raw.contains(&token) && !raw.contains("MIIEow"), "{raw}");
     }
 }
