@@ -201,6 +201,12 @@ impl SignalingBridge {
         phase: Option<&str>,
         append: bool,
     ) -> Result<i64> {
+        // **F10: what an AGENT writes is redacted, before anything else sees it**
+        // — before an append composes `{prev}` + new (so a prefix the user
+        // typed into a custom doc stays as written) and before the archive
+        // step. The user's own save, `session_doc_save_custom`, is not.
+        let body = crate::policy::secret_scan::redact(body);
+        let body: &str = &body;
         let id = {
             let Some(storage) = self.storage.lock().await.clone() else {
                 return Err(anyhow::anyhow!("storage not configured"));
@@ -285,6 +291,8 @@ impl SignalingBridge {
         body: &str,
     ) -> Result<i64> {
         custom_slug_check(slug)?;
+        // F10: stored exactly as the user typed it — the one doc write that is
+        // not redacted (the user's pick `7e3308f1`).
         let id = {
             let Some(storage) = self.storage.lock().await.clone() else {
                 return Err(anyhow::anyhow!("storage not configured"));
@@ -368,6 +376,10 @@ impl SignalingBridge {
         author_slug: &str,
         append: bool,
     ) -> Result<(i64, String)> {
+        // F10: the reviewer's text is redacted like any agent write — first,
+        // before the append composes it under the existing review.
+        let body = crate::policy::secret_scan::redact(body);
+        let body: &str = &body;
         let slug = format!("{phase}-eyes");
         let author = self.participant_display_name(session_id, author_slug).await;
         let heading = match author {
@@ -890,5 +902,53 @@ mod tests {
         assert!(!matches!(sub.try_recv(), Ok(SignalingEvent::DocChanged { .. })));
         assert!(bridge.session_doc_delete_custom("s1", "plan").await.is_err());
         assert!(storage.session_document_by_slug("s1", "plan").await.unwrap().is_some());
+    }
+
+    /// F10 (plan C4b): what an AGENT writes to a session doc is redacted —
+    /// a phase doc, an append, the reviewer's co-doc — while a custom doc the
+    /// USER saves is stored exactly as typed, and an agent's append to it
+    /// leaves the user's text as written.
+    #[tokio::test]
+    async fn an_agents_doc_is_redacted_and_the_users_own_text_is_not() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let marker = "[redacted: a GitHub access token]";
+        let body = |s: &str| {
+            let storage = storage.clone();
+            let slug = s.to_string();
+            async move {
+                storage.session_document_by_slug("s1", &slug).await.unwrap().unwrap().body
+            }
+        };
+
+        bridge
+            .session_doc_write("s1", "plan", &format!("run with {token}"), Some("plan"), false)
+            .await
+            .unwrap();
+        assert_eq!(body("plan").await, format!("run with {marker}"));
+
+        bridge
+            .session_doc_write_eyes("s1", "plan", &format!("the plan prints {token}"), "eyes", false)
+            .await
+            .unwrap();
+        let review = body("plan-eyes").await;
+        assert!(review.ends_with(&format!("the plan prints {marker}")), "{review}");
+        assert!(!review.contains(&token));
+
+        let typed = format!("my deploy token: {token}");
+        bridge.session_doc_save_custom("s1", "notes", &typed).await.unwrap();
+        assert_eq!(body("notes").await, typed, "the user's save is verbatim");
+
+        bridge
+            .session_doc_write("s1", "notes", &format!("agent adds {token}"), None, true)
+            .await
+            .unwrap();
+        let notes = body("notes").await;
+        assert!(notes.starts_with(&typed), "the user's text stays as written: {notes}");
+        assert!(notes.ends_with(&format!("agent adds {marker}")), "{notes}");
+        assert_eq!(notes.matches(&token).count(), 1, "{notes}");
     }
 }
