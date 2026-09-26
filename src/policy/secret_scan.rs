@@ -203,17 +203,46 @@ fn pem_spans(text: &str, out: &mut Vec<SecretSpan>) {
                 line_end(text, header_end + n)
             }
             _ => {
+                // Key lines may be indented (a key pasted into YAML), and an
+                // encrypted key carries `Proc-Type:` / `DEK-Info:` header lines
+                // and one blank line before its body (EYES, C1 review) — all
+                // part of the block. A blank line counts only if key lines
+                // follow it.
                 let mut end = header_end;
+                let mut blank_seen = false;
+                // PEM headers come only BEFORE the body: after the first key
+                // line, a `name: value` line is the text that follows (YAML).
+                let mut body_started = false;
                 while end < text.len() {
                     let next = end + 1;
                     let next_end = line_end(text, next);
-                    let line = text[next..next_end].trim_end_matches('\r');
+                    let line = text[next..next_end].trim_end_matches('\r').trim_start();
                     let base64 = !line.is_empty()
                         && line.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
-                    if !base64 {
+                    let pem_header = !body_started
+                        && line.split_once(": ").is_some_and(|(name, _)| {
+                            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                        });
+                    if base64 || pem_header {
+                        end = next_end;
+                        blank_seen = false;
+                        body_started |= base64;
+                    } else if line.is_empty() && !blank_seen {
+                        // Tentative: taken only if the next line is key.
+                        let after = line_end(text, (next_end + 1).min(text.len()));
+                        let follows = text.get(next_end + 1..after).is_some_and(|l| {
+                            let l = l.trim_end_matches('\r').trim_start();
+                            !l.is_empty()
+                                && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+                        });
+                        if !follows {
+                            break;
+                        }
+                        blank_seen = true;
+                        end = next_end;
+                    } else {
                         break;
                     }
-                    end = next_end;
                 }
                 end
             }
@@ -547,6 +576,23 @@ mod tests {
         let end = fake("-----END RSA ", "PRIVATE KEY-----");
         let whole = format!("key:\n{head}\nMIIEfake\n{end}\nafter the key");
         assert_eq!(redact(&whole), "key:\n[redacted: a PEM private key block]\nafter the key");
+    }
+
+    /// …and a cut-short key that is ENCRYPTED (`Proc-Type:`/`DEK-Info:` lines
+    /// and a blank line before the body) or INDENTED (pasted into YAML) is
+    /// redacted through its body too (EYES, C1 review); what follows survives.
+    #[test]
+    fn an_encrypted_or_indented_cut_key_is_redacted_through_its_body() {
+        let head = fake("-----BEGIN RSA ", "PRIVATE KEY-----");
+        let encrypted = format!(
+            "{head}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0A1B2C\n\nMIIEfakebody+/==\nMIIEfake2\nshown 5 lines"
+        );
+        assert_eq!(redact(&encrypted), "[redacted: a PEM private key block]\nshown 5 lines");
+        let yaml = format!("key: |\n  {head}\n  MIIEfakebody+/==\n  MIIEfake2\nnext: value");
+        assert_eq!(redact(&yaml), "key: |\n  [redacted: a PEM private key block]\nnext: value");
+        // A blank line NOT followed by key lines is not swallowed.
+        let gap = format!("{head}\nMIIEfake\n\nprose after a gap");
+        assert_eq!(redact(&gap), "[redacted: a PEM private key block]\n\nprose after a gap");
     }
 
     #[test]
