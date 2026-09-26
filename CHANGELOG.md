@@ -7,6 +7,8 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+## [1.0.8] — 2026-09-26
+
 Stray turns and two dependency advisories (session s-02101415). No
 migrations.
 
