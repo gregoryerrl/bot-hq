@@ -7,6 +7,59 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+Stray turns and two dependency advisories (session s-02101415). No
+migrations.
+
+### Fixed
+
+- **A second self-started turn in a row no longer takes an old turn
+  number.** claude-code starts a turn by itself when a background task it
+  ran finishes — a push that waited on your approval, for one. The first
+  such turn, completing unbound, wiped the number the next one is checked
+  against, so a second in a row bound itself to a retired turn and kept it
+  through the ring's later deals; the halt that ended it was then reported
+  as an error.
+- **An errored turn's notice no longer says its text was lost.** Everything
+  a turn writes is in the chat before the turn ends; the notice now says the
+  turn ended in an error, quotes its last line, and points up at what it
+  wrote.
+- **A participant still orienting when boot times out stays out of the ring
+  until it is ready.** Boot's timeout notice promised "the rest join the
+  rotation as they finish", but the ring dealt them anyway: their
+  orientation was cut short and reported as a turn while their real turn
+  ran beside the next holder's. The ring now passes over them — in the
+  rotation, for a mention, and for a typed message's interrupt — and deals
+  them as soon as they report ready. When everyone else has voted done or
+  passed, it waits for them with a notice instead of re-dealing a finished
+  participant or yielding on a false "every participant passed".
+
+### Changed
+
+- **A self-started turn is stopped while another participant holds the
+  turn.** A background task waking one participant mid-lap no longer leaves
+  two working at once: the turn is stopped with a notice, and the
+  participant acts on what the task reported at its next turn. A commit,
+  push or migration in flight is never cut — the stop waits for it, and is
+  skipped if it runs long. With nobody else busy, as when the session is
+  waiting on you, nothing changes.
+
+### Security
+
+- **rustls 0.23.45** — RUSTSEC-2026-0285 (TLS 1.3 handshake messages
+  accepted across encryption levels). bot-hq is a TLS client only.
+- **react-router 7.18.4** — an open redirect through a backslash in
+  `<Link>`/`useNavigate`, and constructor injection in `deserializeErrors`.
+  The app renders nothing on a server; `npm audit` now reports no runtime
+  vulnerabilities.
+
+### Deferred
+
+- **glib 0.18** (RUSTSEC-2024-0429, an unsound `VariantStrIter`) is pinned
+  by Tauri's GTK3 stack on Linux; Dependabot's security update fails on
+  every run until Tauri moves to gtk-rs 0.20.
+- A live routing check of react-router 7 in the running app, after the next
+  relaunch.
+
 ## [1.0.7] — 2026-09-25
 
 Fixes for the accumulated agent-feedback queue (items #10–#45, sessions

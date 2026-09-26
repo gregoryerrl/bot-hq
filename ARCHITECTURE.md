@@ -282,6 +282,22 @@ just completed with means every later completion carries a retired number, is
 discarded, and the ring stops on a participant it is waiting on. There is no hold queue and no forward that can be lost:
 policies gate delivery, never persistence.
 
+**A turn nobody dealt stays unbound, and is stopped while someone else holds the
+ring.** claude-code starts a turn by itself when a background task it ran
+finishes. Its events are stragglers: it opens no epoch, and its completion leaves
+the last real epoch in place, so a second one in a row is still recognised. If
+another participant is busy, the pump asks `AppState::stray_turn` to stop it —
+once, and never in the middle of a commit, push or migration — and the
+participant reads what the task reported at its next dealt turn. With nobody else
+busy it runs.
+
+**A participant still orienting when boot times out is not dealt.** Boot ends for
+the session at its timeout, but a shared orienting set — seeded on a first spawn
+only — keeps a late participant out of the rotation, the summons queue and a
+typed message's interrupt until its readiness arrives as
+`SequencerCommand::Oriented`. A ring left with nobody to deal, or only with
+participants that have voted done or passed a lap, holds for it instead.
+
 **How a turn ends** (`TurnEnding`):
 - `Spoke { peer_ack_override }` — substantive output. Steps the ring and RESETS
   the done-tally for the whole session.
