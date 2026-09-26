@@ -754,8 +754,19 @@ pub async fn pump_agent(
                     // finished watcher while the session waits on the user.
                     // **Never while THIS turn is mid commit, push or migration**
                     // (EYES a4821aeb): the ask waits for a later event, after
-                    // the atomic tool's result.
-                    if !stray_stop_asked && atomic_tool_id.is_none() {
+                    // the atomic tool's result. And only on an event of a turn
+                    // still RUNNING: on its own completion, an exit or a health
+                    // report there is nothing left to stop, and the notice
+                    // would say it was stopped when it had already ended.
+                    let still_running = matches!(
+                        event,
+                        AgentEvent::Text(_)
+                            | AgentEvent::Notice(_)
+                            | AgentEvent::ToolUse { .. }
+                            | AgentEvent::ToolResult { .. }
+                            | AgentEvent::Init { .. }
+                    );
+                    if still_running && !stray_stop_asked && atomic_tool_id.is_none() {
                         if let (Some(activity), Some(bridge)) = (&cfg.activity, &cfg.bridge) {
                             if activity.busy_other_than(&cfg.slug).is_some() {
                                 stray_stop_asked = true;
@@ -2372,6 +2383,49 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         panic!("the row {content:?} never persisted");
+    }
+
+    /// D3 (EYES, A5 follow-up review): a stray turn whose first event to find
+    /// someone else busy is its own COMPLETION asks nothing — the turn has
+    /// ended, and "it was stopped" would be false.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stray_turns_own_completion_does_not_ask_to_be_stopped() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(15)));
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let mut events = bridge.subscribe();
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let activity = crate::core::ActivityTracker::new(
+            "s1",
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::clone(&bridge),
+            vec!["hands".to_string(), "eyes".to_string()],
+        );
+        cfg.activity = Some(Arc::clone(&activity));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Text("dealt".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 15);
+        // The stray runs while nobody else is busy…
+        ev_tx.send(AgentEvent::Text("notified".into())).await.unwrap();
+        wait_for_row(&storage, "notified").await;
+        // …and someone takes the ring only as it finishes.
+        activity.set_busy_slug("eyes", true);
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 0);
+        drop(ev_tx);
+        let _ = task.await;
+        let mut asked = 0;
+        while let Ok(ev) = events.try_recv() {
+            if matches!(ev, crate::signaling::SignalingEvent::StrayTurn { .. }) {
+                asked += 1;
+            }
+        }
+        assert_eq!(asked, 0, "a turn that has ended is not stopped");
     }
 
     /// D3: the stop is bot-hq's own interrupt, stamped with the stray's epoch —
