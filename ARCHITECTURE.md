@@ -834,6 +834,92 @@ A hash change between fires logs a `PolicyMutation` violation
 
 ---
 
+## Secret redaction (F10)
+
+What bot-hq stores, shows and hands to a peer does not carry a secret an agent
+produced. The user's rule (tray `7e3308f1`, 2026-09-26): **redact every stored
+row except what the user types, from now on** — rows stored before F10 stay as
+they were.
+
+**One scanner.** `src/policy/secret_scan.rs::find_secrets` finds
+self-identifying shapes only: PEM private-key blocks (a cut-short block ends at
+its last key line), vendor-prefixed tokens, signed JWTs, an AWS secret beside its
+key name, Laravel Sanctum tokens. `redact` replaces each span with
+`[redacted: <what>]` and returns a clean string untouched (exact-match callers
+depend on that). The same finder backs the Context Library push refusal and the
+outward-publish refusal, so they agree on what a secret is.
+
+**Decoded strings, never serialized text** (EYES `8eea5190`): scanning a JSON row
+lets a cut-short key swallow the rest of the line and lets an escape hide a
+token's boundary. So JSON is redacted leaf by leaf before it is serialized.
+
+**Where it happens:**
+- **Messages.** `Storage::post_to_channel` redacts the plain kinds (text, system
+  notice, phase change, boot) through an exhaustive `MessageKind` match;
+  `tool_use` / `tool_result` hold JSON the pump already redacted string by
+  string (`core/pump.rs`) and pass through. The receipt the ring delivers is the
+  stored string.
+- **The verbatim door.** `post_to_channel_verbatim` is the one door that does not
+  redact. Its production callers are pinned by a test to two:
+  `core::broadcast::broadcast_user_message` (the composer and the staged Send)
+  and the tray answer row, which is built from redacted pieces and keeps only the
+  user's own words (a typed pick or rejection reason) as written. A door, not an
+  origin check: approved-gate output is posted as origin `user` too.
+- **The tray.** `ask_user_choice_inner`, which every park goes through, redacts
+  the question and options once, so the in-memory park, the event and the row
+  agree (a pick of a listed option still compares equal); the store redacts them
+  again as the backstop for the close card and the queued outward gate. The
+  re-ask dedupe compares redacted prompts.
+- **Everything else agents write:** session docs (`session_doc_write`,
+  `session_doc_write_eyes` — the new text, before an append is composed), findings
+  (summary, code ref, disposition reason; the re-raise lookup redacts its probe),
+  feedback, retrieval queries, violation records (`action` / `detail` on the
+  record), the halt slot and its banner (`emit_halt_row`), plugin text
+  (`tauri_cmd::plugin_api::plugin_text`), and Context Library writes
+  (`cl_write_file`, `cl_edit_file`'s replacement, an agent's folder description
+  at its tool).
+- **Outward publishes.** A `gh` / `curl` command whose PUBLISHED body carries a
+  secret is refused before any reviewer lookup (`action_gate.rs`); headers and
+  URLs are not published content.
+- A CL write or session-doc write whose text was redacted says so in its reply,
+  and a `cl_edit_file` whose `old_string` quotes a secret the file holds only as
+  its marker is told to match the marker.
+
+**Not redacted, on purpose:**
+- What the user types: the composer and staged sends, a tray free-text answer,
+  a custom session doc saved in the UI, Context Library tab edits and folder
+  descriptions.
+- A gated command's text (`session_tray.command_text`): it runs exactly as
+  written, the approval card and the stale-gate confirm show exactly what runs,
+  and five queries match it exactly. The user's recorded exception (tray
+  `16393946`).
+- The credential store (`models.auth_token`, `agent_configs.auth_token`).
+- Rows stored before F10.
+
+**Limits:**
+- An agent sees its own tool results raw — claude-code hands them over before
+  bot-hq stores anything — and a command the Tool Gate auto-allows through
+  `action_gate` returns its raw output to the agent. Only the stored copies are
+  redacted. A command that waits for the user's approval reaches the agent only
+  through the redacted answer row.
+- The Terminal tab shows raw live output; it is an in-memory ring, never stored.
+- App log files are not redacted (the only agent free text found logged is a
+  reviewer-override reason). Telemetry sends only hashes.
+- The git hooks run the binary the app was launched as, so their violation lines
+  are redacted only after a relaunch onto a build with F10.
+- A secret the user types into a CL file and later removes still reaches the
+  private library remote in history: the push scans the working tree (advisory
+  `909d1150`; the user did not pick a history scan).
+- Two agent questions that differ only in a secret redact to one text, so the
+  second supersedes the first; two options that differ only in a secret show as
+  one label. The close card's decline notice quotes the user's typed words
+  redacted, while their answer row keeps them verbatim. An agent edit that
+  carries a user-typed secret through a CL file rewrites it to its marker.
+- Detection is by shape: a secret with no self-identifying shape (a bare
+  password) is not found.
+
+---
+
 ## Tool Gate
 
 A global, user-configured keyword gate over agent **Bash** tool calls,

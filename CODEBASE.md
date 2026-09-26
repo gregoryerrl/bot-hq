@@ -393,7 +393,7 @@ substring matcher over Bash calls.
 | `src/policy/session_policy.rs` | `.local/session-policies/<sid>.yaml` snapshot write-if-absent (enforced by the caller) / read / purge at boot | S |
 | `src/policy/violations.rs` | append-only `violations.jsonl` (unbounded) | M |
 | `src/policy/audit.rs` | policy-file tamper detection (sha256 cache) | M |
-| `src/policy/secret_scan.rs` | credential-shaped content/filename scan for the CL push | M |
+| `src/policy/secret_scan.rs` | the one secret scanner (F10): `find_secrets` spans, `redact` / `redact_string` / `redact_counting` (`[redacted: <what>]`), plus the credential-shaped content/filename scan for the CL push. Where each store redacts: ARCHITECTURE.md §Secret redaction | M |
 
 **Entry points.** `hooks::run_cli` (from `src/main.rs`; the CLI catch-all turns
 every internal `Err` into exit 0 — audit E1) · `install_hooks` (at session spawn

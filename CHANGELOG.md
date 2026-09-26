@@ -7,11 +7,26 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
-Secrets in what bot-hq stores (F10). In progress: agent text rows, notices
-and the other stores follow once the redaction scope is decided.
+Secrets in what bot-hq stores (F10): every row an agent writes is stored with
+its secrets redacted; what you type stays as you wrote it. Where and why:
+ARCHITECTURE.md §Secret redaction.
 
 ### Security
 
+- **Everything an agent writes is stored with its secrets redacted, from now
+  on**: chat messages, host notices, tray questions and options, session docs,
+  findings, feedback reports, search queries, the violations log, halt reasons,
+  text a plugin sends in, and agent writes to the Context Library. Each secret
+  becomes `[redacted: <what>]`; rows stored before this stay as they were.
+- **What you type is kept as written** — the composer, a staged message, a
+  free-text tray answer or rejection reason, a custom doc you save, and your
+  edits in the Context Library tab — since you may be handing an agent a token
+  on purpose.
+- **A gated command is kept as written**, as a recorded exception: it runs
+  exactly as written, and the approval card shows exactly what will run.
+- **An agent is told when its write was stored with markers** (a Context
+  Library write or a session doc), and an edit that quotes a secret the file
+  holds only as its marker is told to match the marker.
 - **A secret a command printed is no longer stored in plain text.** Tool
   output and every string of a tool call's input are redacted before the
   row is stored — each self-identifying secret becomes `[redacted: <what>]`
