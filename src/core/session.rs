@@ -143,6 +143,10 @@ pub struct SessionHandle {
     /// cleared by `boot_then_start` (rc3 D21). Read by [`Self::preempts`], so
     /// a typed send during boot does not interrupt orientation (feedback #10).
     pub booting: Arc<std::sync::atomic::AtomicBool>,
+    /// Who is still orienting, by id (D4) — the set the ring and the pumps
+    /// share. Read by [`Self::is_orienting`], so a typed Send after a boot
+    /// timeout does not interrupt a participant that is still reading.
+    pub orienting: crate::core::sequencer::OrientingSet,
     /// Each participant's liveness, by slug — the watchdog's own list. Weak,
     /// like the watchdog's, so holding it changes no lifetime; read by the
     /// Pause snapshot (feedback #44(2)).
@@ -157,6 +161,15 @@ impl SessionHandle {
     /// (EYES P4): while the participants orient, nothing preempts.
     pub fn preempts(&self, send: crate::core::state::UserSend) -> bool {
         send.preempts_while(self.booting.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// Is this agent still orienting (D4)? A typed Send's preempt passes over
+    /// it: the interrupt would abort its orientation, and the pump would report
+    /// that as a turn — the 2026-09-24 epoch-1 error.
+    pub fn is_orienting(&self, agent: &SessionAgent) -> bool {
+        agent
+            .participant_id
+            .is_some_and(|id| crate::core::sequencer::lock_orienting(&self.orienting).contains(&id))
     }
 
     /// Agents in turn order.
@@ -918,6 +931,11 @@ async fn spawn_session_handle(
     // so a resumed session's pumps never see it up, even for the moment before
     // the no-boot branch clears it (EYES, C15 review).
     let booting = Arc::new(std::sync::atomic::AtomicBool::new(is_first_spawn));
+    // D4: who is still orienting, by id — the same first-spawn rule as
+    // `booting`, which is the whole contract (see `seed_orienting`). Boot ends
+    // for the session at once, even on a timeout; this set is what keeps a
+    // participant that was still reading out of the ring until it finishes.
+    let orienting = crate::core::sequencer::seed_orienting(is_first_spawn, live.iter().map(|p| p.id));
     let (sequencer_tx, ring_kick) = {
         let mut inputs = std::collections::HashMap::new();
         let mut epochs = std::collections::HashMap::new();
@@ -962,6 +980,7 @@ async fn spawn_session_handle(
             // only thing that can hold the chat-input lock for the whole cycle
             // — see `SequencerDeps::activity`.
             activity: Some(Arc::clone(&activity)),
+            orienting: Some(Arc::clone(&orienting)),
         };
         let (tx, kick) = spawn_ring(deps, &bridge, &session.id).await;
         tracing::info!(
@@ -1006,6 +1025,7 @@ async fn spawn_session_handle(
             // rc3 D21 — orientation is not a turn. See `PumpConfig::booting`.
             booting: Some(Arc::clone(&booting)),
             boot_done: Some(boot_done_tx.clone()),
+            orienting: Some(Arc::clone(&orienting)),
             retry_ladder: crate::core::pump::RETRY_LADDER.to_vec(),
             // The pump identifies its participant by `slug`, and always did
             // (rc3 D10). This used to also pass a two-party `Author`
@@ -1066,6 +1086,7 @@ async fn spawn_session_handle(
         let boot_bridge = Arc::clone(&bridge);
         let boot_session = session.id.clone();
         let boot_flag = Arc::clone(&booting);
+        let boot_orienting = Arc::clone(&orienting);
         // The CLEAR travels with the set above. A pump clears its own flag at
         // turn end and at termination — so a participant that finishes booting
         // clears, and one that crashes clears. A participant that is alive and
@@ -1096,6 +1117,7 @@ async fn spawn_session_handle(
                 boot_inputs,
                 boot_done_rx,
                 boot_flag,
+                boot_orienting,
                 kick,
                 BOOT_TIMEOUT,
                 boot_activity,
@@ -1210,6 +1232,7 @@ async fn spawn_session_handle(
         in_atomic_tool,
         cancel_superseded,
         booting,
+        orienting,
         liveness,
         _mcp_temp: mcp_temp,
     })
@@ -2181,6 +2204,9 @@ async fn boot_then_start(
     inputs: Vec<(i64, crate::agents::ParticipantInput)>,
     mut boot_done: tokio::sync::mpsc::Receiver<i64>,
     booting: Arc<std::sync::atomic::AtomicBool>,
+    // D4: who is still orienting. Each pump takes its own id out as it
+    // finishes; boot takes out the ones that never will (no primer, dead stdin).
+    orienting: crate::core::sequencer::OrientingSet,
     kick: RingKick,
     timeout: std::time::Duration,
     // `activity` + `slugs`: cleared for every participant on the way out — see
@@ -2214,6 +2240,9 @@ async fn boot_then_start(
             // (the helper has already warned about the row).
             tracing::warn!(session_id, "boot primer not persisted; the session waits unbooted");
             booting.store(false, std::sync::atomic::Ordering::Release);
+            // No primer went out, so nobody will ever report: left seeded, the
+            // set would keep every participant out of the ring for good (D4).
+            crate::core::sequencer::lock_orienting(&orienting).clear();
             // This exit skips boot entirely, so no pump will ever end a boot
             // response — nothing else clears what the call site set.
             for slug in &slugs {
@@ -2241,6 +2270,12 @@ async fn boot_then_start(
     let deaf: Vec<i64> = reached.iter().filter(|(_, ok)| !ok).map(|(id, _)| *id).collect();
     if !deaf.is_empty() {
         tracing::warn!(session_id, ?deaf, "boot primer did not reach every participant");
+        // Counted as done below, not waited for — and for the same reason not
+        // left orienting (D4): nothing would ever take them out of the set.
+        let mut set = crate::core::sequencer::lock_orienting(&orienting);
+        for id in &deaf {
+            set.remove(id);
+        }
     }
 
     // Wait for everyone, or time out. A participant whose stdin was already gone
@@ -2283,6 +2318,22 @@ async fn boot_then_start(
                 tracing::warn!(session_id, ready, want, "boot timed out; starting the ring");
                 break;
             }
+        }
+    }
+
+    // **Boot stops listening HERE, and says so** (D4; EYES, plan item 9). A
+    // participant still orienting at a timeout reports later: with the channel
+    // CLOSED its pump's send fails at once, and the pump tells the ring itself
+    // (`SequencerCommand::Oriented`). A report that got in before the close —
+    // while the timeout notice above was being posted — would otherwise sit
+    // unread and be dropped with the receiver, so it is drained and forwarded
+    // the same way. Its pump took its id out of the set before sending, so the
+    // forward is only the ring's wake.
+    boot_done.close();
+    while let Ok(id) = boot_done.try_recv() {
+        if oriented.insert(id) {
+            tracing::info!(session_id, participant_id = id, "boot: oriented after boot stopped counting");
+            kick.oriented(id).await;
         }
     }
 
@@ -2429,6 +2480,20 @@ impl RingKick {
     /// command, so a send lost to a full channel would strand every held
     /// message for the life of the session. It fails only when the ring is
     /// gone, and then there is nothing left to deliver to.
+    /// A participant finished orienting after boot stopped counting (D4):
+    /// wake the ring, which may be holding a turn for exactly this. Awaited for
+    /// the reason `boot_ended` is.
+    async fn oriented(&self, participant_id: i64) {
+        if self
+            ._held
+            .send(crate::core::sequencer::SequencerCommand::Oriented { participant_id })
+            .await
+            .is_err()
+        {
+            tracing::warn!(participant_id, "oriented after boot, but the ring is gone");
+        }
+    }
+
     async fn boot_ended(self) {
         if self
             ._held
@@ -4710,7 +4775,7 @@ mod tests {
         let br = Arc::clone(&bridge);
         let task = tokio::spawn(async move {
             boot_then_start(
-                "s1", &st, &br, inputs, done_rx, flag, RingKick { _held: ring_tx },
+                "s1", &st, &br, inputs, done_rx, flag, crate::core::sequencer::seed_orienting(false, []), RingKick { _held: ring_tx },
                 std::time::Duration::from_secs(30),
                 Arc::clone(&act),
                 vec!["hands".to_string(), "eyes".to_string()],
@@ -4825,7 +4890,7 @@ mod tests {
         let boot_act = Arc::clone(&act);
         tokio::spawn(async move {
             boot_then_start(
-                "s1", &st, &br, inputs, done_rx, flag, RingKick { _held: ring_tx },
+                "s1", &st, &br, inputs, done_rx, flag, crate::core::sequencer::seed_orienting(false, []), RingKick { _held: ring_tx },
                 std::time::Duration::from_millis(150),
                 boot_act,
                 vec!["hands".to_string(), "eyes".to_string()],
@@ -4916,7 +4981,7 @@ mod tests {
         let br = Arc::clone(&bridge);
         tokio::spawn(async move {
             boot_then_start(
-                "s1", &st, &br, inputs, done_rx, booting, RingKick { _held: ring_tx },
+                "s1", &st, &br, inputs, done_rx, booting, crate::core::sequencer::seed_orienting(false, []), RingKick { _held: ring_tx },
                 std::time::Duration::from_secs(30),
                 act,
                 vec!["hands".to_string()],
@@ -4943,6 +5008,65 @@ mod tests {
             seen.push(ev);
         }
         (ready, seen)
+    }
+
+    /// D4 (EYES, plan item 9): a report that reached the boot channel after boot
+    /// stopped counting is not dropped with the receiver — boot forwards it to
+    /// the ring as `Oriented`, ahead of `BootEnded`. The one expected
+    /// participant's report ends the wait; a second is already queued behind
+    /// it. Delete the drain and the first command the ring hears is `BootEnded`.
+    #[tokio::test]
+    async fn a_report_left_in_the_boot_channel_is_forwarded_as_oriented() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(s.clone()).await;
+        let (a_tx, _a_rx) = tokio::sync::mpsc::channel(8);
+        let inputs = vec![(1i64, crate::agents::ParticipantInput::new("s1", a_tx))];
+        let (done_tx, done_rx) = tokio::sync::mpsc::channel::<i64>(8);
+        done_tx.send(1).await.unwrap();
+        done_tx.send(2).await.unwrap();
+        let (ring_tx, mut ring_rx) = tokio::sync::mpsc::channel(8);
+        let act = crate::core::activity::ActivityTracker::new(
+            "s1",
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::clone(&bridge),
+            vec!["hands".to_string()],
+        );
+        let st = s.clone();
+        let br = Arc::clone(&bridge);
+        let task = tokio::spawn(async move {
+            boot_then_start(
+                "s1",
+                &st,
+                &br,
+                inputs,
+                done_rx,
+                Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                crate::core::sequencer::seed_orienting(true, [1, 2]),
+                RingKick { _held: ring_tx },
+                std::time::Duration::from_secs(30),
+                act,
+                vec!["hands".to_string()],
+                0,
+            )
+            .await;
+        });
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), ring_rx.recv())
+            .await
+            .expect("boot sent the ring nothing");
+        assert!(
+            matches!(
+                first,
+                Some(crate::core::sequencer::SequencerCommand::Oriented { participant_id: 2 })
+            ),
+            "the report left in the channel is forwarded as Oriented: {first:?}"
+        );
+        let second = tokio::time::timeout(std::time::Duration::from_secs(2), ring_rx.recv())
+            .await
+            .expect("boot never told the ring it ended");
+        assert!(matches!(second, Some(crate::core::sequencer::SequencerCommand::BootEnded)));
+        task.await.unwrap();
     }
 
     /// EYES E5: boot waits for every PARTICIPANT, not for as many reports. A
@@ -4974,6 +5098,7 @@ mod tests {
             boot_then_start(
                 "s1", &st, &br, inputs, done_rx,
                 Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                crate::core::sequencer::seed_orienting(false, []),
                 RingKick { _held: ring_tx },
                 std::time::Duration::from_secs(30),
                 act,
@@ -5107,6 +5232,43 @@ mod tests {
         assert!(watermark < boot, "the watermark is read before the boot task is spawned");
     }
 
+    /// D4 (EYES, plan item 10): the orienting set is seeded by the SAME
+    /// first-spawn rule as the boot cell — a resumed spawn sends no primer, so a
+    /// set seeded there excludes every participant for good — and the one set
+    /// reaches the ring, every pump, boot and the handle. Pinned at the source
+    /// for the reason the boot latch is: no test can follow the real spawn.
+    #[test]
+    fn the_orienting_set_is_seeded_on_a_first_spawn_only_and_shared() {
+        let src = include_str!("session.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("a split always yields a first part");
+        assert!(
+            prod.contains("seed_orienting(is_first_spawn, live.iter().map(|p| p.id))"),
+            "the set is seeded by the first-spawn rule, from the spawned roster"
+        );
+        assert_eq!(
+            prod.matches("orienting: Some(Arc::clone(&orienting)),").count(),
+            2,
+            "the ring's deps and every pump's config share the one set"
+        );
+        assert!(prod.contains("let boot_orienting = Arc::clone(&orienting);"), "boot gets it too");
+        assert!(prod.contains("        orienting,\n        liveness,"), "and the session handle");
+    }
+
+    /// D4: the handle answers "is this agent still orienting" from the shared
+    /// set, by the agent's participant id — what the typed-Send preempt skips on.
+    #[tokio::test]
+    async fn the_handle_reads_orienting_from_the_shared_set() {
+        let bridge = SignalingBridge::new();
+        let (mut handle, _rx) = stub_session_for_tests("s1", &bridge).await;
+        handle.participants[0].participant_id = Some(7);
+        assert!(!handle.is_orienting(&handle.participants[0]));
+        crate::core::sequencer::lock_orienting(&handle.orienting).insert(7);
+        assert!(handle.is_orienting(&handle.participants[0]));
+    }
+
     /// **The join for the halt.** Starting the ring must register it with the
     /// bridge, or a parked question cannot stop the cycle.
     ///
@@ -5138,6 +5300,7 @@ mod tests {
             bridge: Some(Arc::clone(&bridge)),
             activity: None,
             boots: false,
+            orienting: None,
         };
         let _tx = spawn_ring(deps, &bridge, "s1").await;
 
@@ -5721,6 +5884,7 @@ pub(crate) async fn stub_session_for_tests(
         in_atomic_tool: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cancel_superseded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         booting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        orienting: crate::core::sequencer::seed_orienting(false, []),
         liveness: Vec::new(),
         _mcp_temp: TempDir::new().unwrap(),
     };

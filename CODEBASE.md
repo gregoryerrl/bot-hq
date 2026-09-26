@@ -145,6 +145,8 @@ D15 epilogue, phase advance, tray answers, Stage.
 
 **Entry points.** `run_sequencer` · `SequencerCommand` (TurnComplete, UserMessage,
 MessageStaged/Unstaged, ParticipantJoined, HaltDeclared, GateOpened/Resolved,
+BootEnded, Oriented — a participant still orienting at the boot timeout joins; the ring skips
+everyone in the shared `OrientingSet` until then,
 Pause/Resume — Pause is minted by `cancel_session_turn`; Resume still has NO production producer) · `pump_agent` ·
 `SessionActivity::derive` · `AppState::{broadcast,user_responded,close_session,
 resolve_choice,stage_user_response,deliver_staged}`.

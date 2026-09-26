@@ -174,6 +174,18 @@ pub struct PumpConfig {
     /// exactly this signal — *"when every participant has finished orienting …
     /// the ring starts"*.
     pub boot_done: Option<tokio::sync::mpsc::Sender<i64>>,
+    /// The participants still ORIENTING, by id — one set shared with the ring
+    /// and the session handle (D4, 2026-09-26). Seeded with every participant
+    /// on a first spawn and empty on a resumed one; each pump removes its OWN
+    /// id when its orientation ends.
+    ///
+    /// [`Self::booting`] ends for the whole session at once, including when boot
+    /// TIMES OUT with someone still reading. This is what keeps that participant
+    /// orienting until it actually finishes: its events stay unbound `boot`
+    /// rows, the ring deals it nothing, and its readiness reaches the ring as
+    /// [`SequencerCommand::Oriented`](crate::core::sequencer::SequencerCommand::Oriented)
+    /// once boot has stopped listening. `None` in the pump's own tests.
+    pub orienting: Option<crate::core::sequencer::OrientingSet>,
     /// The transient-error retry ladder (round 12): how long to wait before
     /// re-dealing this participant after an errored turn whose last line is a
     /// transient network/upstream failure — one entry per attempt, then the
@@ -202,17 +214,32 @@ impl PumpConfig {
             )),
             booting: None,
             boot_done: None,
+            orienting: None,
             retry_ladder: RETRY_LADDER.to_vec(),
         }
     }
 
     /// Whether this participant is orienting rather than holding a turn (rc3
-    /// D21). `false` whenever no flag was wired, so every existing caller keeps
+    /// D21). `false` whenever nothing was wired, so every existing caller keeps
     /// today's behaviour exactly.
+    ///
+    /// The session's boot flag OR this participant's own place in
+    /// [`Self::orienting`] (D4): during boot the flag covers everyone, as it
+    /// always did; after a boot TIMEOUT only the set still names the
+    /// participants that were not done reading.
     fn is_booting(&self) -> bool {
         self.booting
             .as_ref()
             .is_some_and(|b| b.load(std::sync::atomic::Ordering::Acquire))
+            || self.still_orienting()
+    }
+
+    /// Is this participant's own id still in [`Self::orienting`]?
+    fn still_orienting(&self) -> bool {
+        match (&self.orienting, self.participant_id) {
+            (Some(set), Some(id)) => crate::core::sequencer::lock_orienting(set).contains(&id),
+            _ => false,
+        }
     }
 
     fn notify_persisted(&self, message_id: i64) {
@@ -1439,15 +1466,40 @@ pub async fn pump_agent(
                 // dropped by the ring and nothing learns this participant is
                 // ready. `boot_done` is the signal D21 §4 starts the ring on.
                 if cfg.is_booting() {
-                    if let (Some(done), Some(participant_id)) =
-                        (&cfg.boot_done, cfg.participant_id)
-                    {
-                        if done.send(participant_id).await.is_err() {
-                            warn!(
-                                agent = %cfg.slug,
-                                "boot completion DROPPED: the boot channel closed — the \
-                                 session starts on its timeout instead"
-                            );
+                    // D4: out of the orienting set FIRST, so whichever way the
+                    // report travels, the ring can deal this participant by the
+                    // time it lands.
+                    if let (Some(set), Some(participant_id)) = (&cfg.orienting, cfg.participant_id) {
+                        crate::core::sequencer::lock_orienting(set).remove(&participant_id);
+                    }
+                    if let Some(participant_id) = cfg.participant_id {
+                        let reported = match &cfg.boot_done {
+                            Some(done) => done.send(participant_id).await.is_ok(),
+                            None => false,
+                        };
+                        // Boot has stopped listening — it timed out and closed
+                        // the channel (D4). The ring hears it directly: it may
+                        // be holding a release or a consensus for exactly this
+                        // participant.
+                        if !reported {
+                            match &cfg.sequencer_tx {
+                                Some(seq) => {
+                                    debug!(agent = %cfg.slug, "oriented after boot ended; joining the rotation");
+                                    if seq
+                                        .send(crate::core::sequencer::SequencerCommand::Oriented {
+                                            participant_id,
+                                        })
+                                        .await
+                                        .is_err()
+                                    {
+                                        warn!(agent = %cfg.slug, "oriented after boot ended, but the ring is gone");
+                                    }
+                                }
+                                None => warn!(
+                                    agent = %cfg.slug,
+                                    "boot completion DROPPED: the boot channel closed and no ring is wired"
+                                ),
+                            }
                         }
                     }
                 } else if let (Some(sequencer_tx), Some(participant_id)) =
@@ -1695,6 +1747,7 @@ mod tests {
             )),
             booting: None,
             boot_done: None,
+            orienting: None,
             retry_ladder: vec![std::time::Duration::from_millis(30); 3],
         }
     }
@@ -2081,6 +2134,68 @@ mod tests {
 
         drop(ev_tx);
         let _ = task.await;
+    }
+
+    /// D4: boot timed out while this participant was still reading. The session
+    /// flag is down, but its id is still in the orienting set, so its events
+    /// stay unbound `boot` rows — even though the ring has already dealt
+    /// others — and its readiness reaches the RING as `Oriented`, because boot
+    /// closed the channel it would have used. Only then does a dealt turn bind.
+    ///
+    /// Delete the `Oriented` send and the first wire read below times out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_participant_orienting_past_the_boot_timeout_tells_the_ring_when_ready() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("eyes");
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        cfg.turn_epoch = Some(Arc::clone(&cell));
+        // Boot is over for the session: it timed out.
+        cfg.booting = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let set = crate::core::sequencer::seed_orienting(true, [1]);
+        cfg.orienting = Some(Arc::clone(&set));
+        // …and boot has stopped listening.
+        let (boot_tx, boot_rx) = mpsc::channel::<i64>(4);
+        drop(boot_rx);
+        cfg.boot_done = Some(boot_tx);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Text("still reading the CL".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        match next_wire(&mut ring_rx).await {
+            crate::core::sequencer::SequencerCommand::Oriented { participant_id } => {
+                assert_eq!(participant_id, 1)
+            }
+            other => panic!("expected Oriented, not a turn completion: {other:?}"),
+        }
+        assert!(
+            crate::core::sequencer::lock_orienting(&set).is_empty(),
+            "the pump took its own id out of the set"
+        );
+
+        // Now dealt: the next turn binds as any other.
+        cell.store(3, std::sync::atomic::Ordering::Release);
+        ev_tx.send(AgentEvent::Text("my turn".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 3);
+        drop(ev_tx);
+        let _ = task.await;
+
+        let kinds: Vec<(String, String)> = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.content, m.kind))
+            .collect();
+        assert!(
+            kinds.contains(&("still reading the CL".into(), MessageKind::Boot.as_str().into())),
+            "orientation after the timeout is still a boot row: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&("my turn".into(), MessageKind::Text.as_str().into())),
+            "{kinds:?}"
+        );
     }
 
     /// rc3 **D24** — the wedge that killed `s-206e8921`.

@@ -1855,8 +1855,13 @@ impl AppState {
         //
         // **Nor does any send while the participants orient** (feedback #10):
         // the handle reads its own boot flag, so no caller can pass a stale one.
+        //
+        // **Nor a participant still orienting after a boot timeout** (D4; EYES,
+        // plan item 5). The boot flag is down by then, so it no longer covers
+        // them — and the abort would end their orientation early, which the
+        // pump reported as a turn: the 2026-09-24 epoch-1 error in s-84c59f27.
         if handle.preempts(send) {
-            for agent in handle.agents() {
+            for agent in handle.agents().filter(|a| !handle.is_orienting(a)) {
                 agent.interrupt("user-preempt");
             }
         }
@@ -3389,6 +3394,12 @@ mod tests {
             "the `if handle.preempts(send)` block CLOSES before the preempt call, so \
              the interrupt is unconditional again and every staged message cuts \
              a turn"
+        );
+        // D4 (EYES, plan item 5): and it passes over every agent still
+        // orienting after a boot timeout, when the boot flag above is down.
+        assert!(
+            before[guard..].contains(".filter(|a| !handle.is_orienting(a))"),
+            "the typed-Send preempt must skip agents still orienting"
         );
         // …and the handle's check consults its boot cell, not a constant.
         let session_code = include_str!("session.rs")

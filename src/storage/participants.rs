@@ -1461,12 +1461,25 @@ impl Storage {
         session_id: &str,
         current: Option<&Participant>,
     ) -> Result<Option<Participant>> {
+        self.next_active_participant_excluding(session_id, current, &std::collections::HashSet::new())
+            .await
+    }
+
+    /// [`Self::next_active_participant`], passing over every participant in
+    /// `exclude` as if it were not in the rotation yet — the ring's use is the
+    /// participants still orienting after a boot timeout (D4).
+    pub async fn next_active_participant_excluding(
+        &self,
+        session_id: &str,
+        current: Option<&Participant>,
+        exclude: &std::collections::HashSet<i64>,
+    ) -> Result<Option<Participant>> {
         let roster = self.participants_for_session(session_id).await?;
         // `participants_for_session` orders by `(turn_position, id)`, so this
         // filter preserves ring order — which is what [`next_in_ring`] assumes.
         let ring: Vec<&Participant> = roster
             .iter()
-            .filter(|p| p.enabled && p.participation_mode == MODE_ACTIVE)
+            .filter(|p| p.enabled && p.participation_mode == MODE_ACTIVE && !exclude.contains(&p.id))
             .collect();
         Ok(next_in_ring(&ring, current).cloned())
     }

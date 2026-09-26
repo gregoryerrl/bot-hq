@@ -845,6 +845,45 @@ fn round_cap_notice(laps: u32) -> String {
 /// (The comparison that used to sit here named `RouterDeps`, which went with the
 /// router in `3adfc68` — a rustdoc link to a deleted type, which resolves to
 /// nothing and reads as a live sibling.)
+/// The participants of one session still ORIENTING, by id (D4, 2026-09-26).
+///
+/// One set per spawn, shared by the ring (who not to deal), every pump (its own
+/// id says it is still reading) and the session handle (whom a typed Send must
+/// not interrupt). A std mutex: every holder takes it for one set operation and
+/// never across an await.
+pub type OrientingSet = Arc<std::sync::Mutex<std::collections::HashSet<i64>>>;
+
+/// The orienting set a spawn starts with: every participant on a FIRST spawn,
+/// nobody on a resumed one.
+///
+/// **The first-spawn rule is the whole contract** (EYES, plan item 10). Boot
+/// runs only on a first spawn (rc3 D29 — `booting` starts at the same value),
+/// so a resumed spawn sends no primer and nobody ever reports ready: seeded
+/// there, the set would exclude every participant forever and every live
+/// session would stop dealing turns after the next relaunch.
+pub fn seed_orienting(first_spawn: bool, ids: impl IntoIterator<Item = i64>) -> OrientingSet {
+    let ids = if first_spawn {
+        ids.into_iter().collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+    Arc::new(std::sync::Mutex::new(ids))
+}
+
+/// Lock an [`OrientingSet`], reading through a poisoned lock rather than
+/// panicking: a panic elsewhere must not also stop the ring dealing turns.
+pub fn lock_orienting(set: &OrientingSet) -> std::sync::MutexGuard<'_, std::collections::HashSet<i64>> {
+    set.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Who is still orienting right now — empty when nothing is wired.
+fn orienting_now(deps: &SequencerDeps) -> std::collections::HashSet<i64> {
+    deps.orienting
+        .as_ref()
+        .map(|set| lock_orienting(set).clone())
+        .unwrap_or_default()
+}
+
 pub struct SequencerDeps {
     /// The session whose turn cycle this task runs. Every ring, cursor and
     /// consensus query is scoped by it.
@@ -942,6 +981,12 @@ pub struct SequencerDeps {
     /// to close. The ring's latch drops only when the ring itself hears
     /// `BootEnded`, which boot sends after READY is posted. `false` in unit rings.
     pub boots: bool,
+    /// Who is still orienting (D4). The ring deals none of them — see
+    /// [`hand_over`] and [`hand_to_summoned`] — and holds rather than re-deal
+    /// when nobody else is left to take the turn; each one's
+    /// [`SequencerCommand::Oriented`] lets it in. `None` in unit rings, which
+    /// is "nobody": the ring behaves exactly as it did before the set existed.
+    pub orienting: Option<OrientingSet>,
 }
 
 /// A wake for the sequencer.
@@ -1101,6 +1146,13 @@ pub enum SequencerCommand {
     /// (feedback #10). Deals nothing when nothing was held: the ring stays
     /// waiting for the user, as rc3 D29 requires.
     BootEnded,
+    /// A participant finished orienting after boot stopped waiting for it — boot
+    /// timed out (D4). Its id is already out of [`SequencerDeps::orienting`], so
+    /// the rotation includes it from here on; this is the WAKE, for a ring that
+    /// is holding because nobody else could take the turn. Sent by the pump
+    /// whose boot report found the channel closed, and by boot itself for
+    /// reports it drained after it stopped counting.
+    Oriented { participant_id: i64 },
     /// The user un-toggled Stage to edit: clear the flag. The content was
     /// already removed from `AppState` by the caller, so a boundary that
     /// races this command finds nothing to deliver and simply yields — an
@@ -1459,6 +1511,12 @@ struct RingState {
     /// Neither is readable without the other: a caller that reads the set and not
     /// this flag is reading "no gates" from "I could not tell".
     gate_seed_failed: bool,
+    /// The ring is HOLDING for a participant still orienting (D4): a step found
+    /// nobody else to deal — everyone left was still orienting, or everyone
+    /// dealable had already voted done. Not a halt for the user: the next
+    /// [`SequencerCommand::Oriented`] steps the ring on from the anchor. Cleared
+    /// by every step, so a user message that deals in the meantime ends it too.
+    held_for_orienting: bool,
 }
 
 impl RingState {
@@ -2042,6 +2100,22 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     deliver_staged_if_pending(&deps, &mut state.staged_pending).await;
                 }
             }
+            SequencerCommand::Oriented { participant_id } => {
+                debug!(
+                    session = %deps.session_id,
+                    participant_id,
+                    held = state.held_for_orienting,
+                    "sequencer: a participant finished orienting after boot ended"
+                );
+                // Its id is already out of the set, so every step from here on
+                // includes it. A ring HOLDING for it steps now — onward from the
+                // anchor, no reset: votes cast while it was reading still stand,
+                // and its own is the one owed.
+                if state.held_for_orienting {
+                    state.held_for_orienting = false;
+                    advance_turn(&deps, &mut rx, &mut state, false, false).await;
+                }
+            }
             SequencerCommand::MessageStaged => {
                 if state.holder.is_none() {
                     // No turn in flight — the ring is parked, yielded, or
@@ -2472,6 +2546,7 @@ async fn advance_turn(
         halted_pending_user,
         open_gates,
         staged_pending,
+        held_for_orienting,
         ..
     } = state;
     // **rc3 D35: nothing is dealt while the session is halted or gated.**
@@ -2510,6 +2585,9 @@ async fn advance_turn(
         halt(deps, holder, epoch).await;
         return;
     }
+    // A hold for an orienting participant (D4) ends with any step that gets
+    // this far; it is re-armed below if this step finds nobody to deal either.
+    *held_for_orienting = false;
     // **Anti-starvation backstop (2026-08-27), second layer.** The root fix is
     // `restarts_rotation` below — answers no longer reset the rotation — but a
     // chain of TYPED messages still resets to the front each time, legitimately,
@@ -2723,7 +2801,24 @@ async fn advance_turn(
         }
         return;
     }
+    // **Everyone the ring could deal has voted done, and someone is still
+    // orienting** (D4; EYES, plan item 8). Consensus cannot form —
+    // `all_active_voted_done` counts the orienting participant too, rightly,
+    // or a session could settle without its reviewer — and a `Done` is not a
+    // pass, so the all-pass yield never fires either. Stepping on would re-deal
+    // the same done participant, one full-context model turn after another,
+    // until the orienting one finished. Hold instead; its `Oriented` deals it.
+    if !user_spoke && dealable_all_voted_done_while_orienting(deps).await {
+        hold_for_orienting(deps, holder, epoch, held_for_orienting, OrientingHold::OthersDone).await;
+        return;
+    }
     match hand_over(deps, current).await {
+        // Nobody left to deal: everyone active is still orienting (D4). The
+        // user's message waits in the channel; the first `Oriented` deals it.
+        Handover::Orienting => {
+            hold_for_orienting(deps, holder, epoch, held_for_orienting, OrientingHold::EveryoneOrienting)
+                .await;
+        }
         // The ring could not be read. Keeping the holder AND the epoch is what
         // makes the retry in `hand_over`'s comment real: the same holder's
         // completion still matches, so it re-attempts the step. Overwriting
@@ -3442,6 +3537,10 @@ enum Handover {
     /// reset path: a user message passes `None` as the current holder, so
     /// "unchanged" and "reset to nobody" would be the same value.
     Held,
+    /// Participants are active, but every one of them is still orienting (D4):
+    /// nobody to deal NOW, which is a hold until one of them is ready — never
+    /// the empty rotation `To(None)` reports.
+    Orienting,
 }
 
 /// Who the user summoned, and where the rotation sits (rc3 D17).
@@ -3480,7 +3579,16 @@ struct Summons {
 /// The ring still moves; the user's message still lands, one turn later, on
 /// whoever the rotation reaches.
 async fn hand_to_summoned(deps: &SequencerDeps, queue: &mut VecDeque<i64>) -> Option<Participant> {
+    // D4: a summoned participant that is still orienting keeps its place in the
+    // queue — the user asked for it by name — and is served once it is ready.
+    let orienting = orienting_now(deps);
+    let mut still_reading: VecDeque<i64> = VecDeque::new();
+    let mut found = None;
     while let Some(id) = queue.pop_front() {
+        if orienting.contains(&id) {
+            still_reading.push_back(id);
+            continue;
+        }
         match deps.storage.participant_by_id(id).await {
             Ok(Some(p)) if *p.session_id == *deps.session_id && p.enabled => {
                 debug!(
@@ -3495,7 +3603,8 @@ async fn hand_to_summoned(deps: &SequencerDeps, queue: &mut VecDeque<i64>) -> Op
                 // on the participant returned here. This used to deal as well,
                 // so a summoned turn wrote the column twice and marked busy
                 // twice (the eager placement `hand_over` also shed, s-f6a441ff).
-                return Some(p);
+                found = Some(p);
+                break;
             }
             // Every remaining case is "the summons cannot be honoured": no such
             // row, another session's row (which delivering into would wire one
@@ -3515,7 +3624,113 @@ async fn hand_to_summoned(deps: &SequencerDeps, queue: &mut VecDeque<i64>) -> Op
             }
         }
     }
-    None
+    // Back at the FRONT, in the order the user named them: they were ahead of
+    // anything still queued behind the one served.
+    while let Some(id) = still_reading.pop_back() {
+        queue.push_front(id);
+    }
+    found
+}
+
+/// Has everyone the ring could deal voted done while someone is still orienting
+/// (D4)? `false` whenever nobody is orienting — the ordinary consensus path —
+/// and on a roster read that fails, where stepping on is the pre-D4 behaviour.
+async fn dealable_all_voted_done_while_orienting(deps: &SequencerDeps) -> bool {
+    let orienting = orienting_now(deps);
+    if orienting.is_empty() {
+        return false;
+    }
+    match deps.storage.participants_for_session(&deps.session_id).await {
+        Ok(roster) => {
+            let dealable: Vec<&Participant> = roster
+                .iter()
+                .filter(|p| {
+                    p.enabled
+                        && p.participation_mode == crate::storage::MODE_ACTIVE
+                        && !orienting.contains(&p.id)
+                })
+                .collect();
+            // At least one, or "all" is vacuous: an all-orienting ring is
+            // `Handover::Orienting`'s case, not a consensus.
+            !dealable.is_empty() && dealable.iter().all(|p| p.done_vote)
+        }
+        Err(e) => {
+            warn!(
+                session = %deps.session_id,
+                error = %e,
+                "sequencer: roster read failed; not holding for an orienting participant"
+            );
+            false
+        }
+    }
+}
+
+/// Why the ring is holding for an orienting participant (D4) — the two cases
+/// say different things to the user.
+enum OrientingHold {
+    /// Everyone active is still orienting: nobody at all can take the turn.
+    EveryoneOrienting,
+    /// Everyone else has voted done; the orienting participant's turn is owed.
+    OthersDone,
+}
+
+/// Hold the turn for a participant still orienting (D4): take it out of flight
+/// like any halt, arm the wake [`SequencerCommand::Oriented`] reads, and say so
+/// once per hold, so the user sees why nothing is moving.
+async fn hold_for_orienting(
+    deps: &SequencerDeps,
+    holder: &mut Option<Participant>,
+    epoch: &mut u64,
+    held: &mut bool,
+    why: OrientingHold,
+) {
+    halt(deps, holder, epoch).await;
+    if *held {
+        return;
+    }
+    *held = true;
+    let waiting: Vec<String> = match deps.storage.participants_for_session(&deps.session_id).await {
+        Ok(roster) => {
+            let orienting = orienting_now(deps);
+            roster
+                .into_iter()
+                .filter(|p| orienting.contains(&p.id))
+                .map(|p| p.slug.to_string())
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    };
+    let who = if waiting.is_empty() {
+        "a participant".to_string()
+    } else {
+        waiting.join(", ")
+    };
+    let notice = match why {
+        OrientingHold::EveryoneOrienting => format!(
+            "[System: every participant is still orienting after boot ({who}) — the next \
+             turn goes to the first one ready.]"
+        ),
+        OrientingHold::OthersDone => format!(
+            "[System: everyone else has voted done; waiting for {who} to finish orienting — \
+             the next turn goes to them when ready. Send a message to go on without waiting.]"
+        ),
+    };
+    if crate::core::post_system_notice(
+        &deps.storage,
+        deps.bridge.as_deref(),
+        &deps.session_id,
+        MessageKind::SystemNotice,
+        notice,
+        None,
+    )
+    .await
+    .is_none()
+    {
+        warn!(
+            session = %deps.session_id,
+            "sequencer: holding for an orienting participant, but the notice was not posted"
+        );
+    }
 }
 
 /// Step the ring past `current`. Delivery is the caller's next move, not this
@@ -3524,9 +3739,12 @@ async fn hand_to_summoned(deps: &SequencerDeps, queue: &mut VecDeque<i64>) -> Op
 /// `current == None` resets to the front of the rotation, which is what a user
 /// message with nobody named does.
 async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Handover {
+    // D4: a participant still orienting is not dealt — the step passes over it
+    // as if it were not in the rotation yet.
+    let orienting = orienting_now(deps);
     let next = match deps
         .storage
-        .next_active_participant(&deps.session_id, current)
+        .next_active_participant_excluding(&deps.session_id, current, &orienting)
         .await
     {
         Ok(next) => next,
@@ -3545,6 +3763,28 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Hando
             return Handover::Held;
         }
     };
+    if next.is_none() && !orienting.is_empty() {
+        // Nobody dealable — but if the full rotation has someone, they are all
+        // still orienting, and that is a hold rather than an empty rotation.
+        match deps.storage.next_active_participant(&deps.session_id, current).await {
+            Ok(Some(_)) => {
+                debug!(
+                    session = %deps.session_id,
+                    "sequencer: everyone active is still orienting; holding the turn"
+                );
+                return Handover::Orienting;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(
+                    session = %deps.session_id,
+                    error = %e,
+                    "sequencer: ring read failed; holding the turn where it is"
+                );
+                return Handover::Held;
+            }
+        }
+    }
     if next.is_none() {
         // Nobody active. NOT a consensus test — see the module doc; consensus
         // is `all_active_voted_done`, asked in `halted_on_consensus` before the
@@ -4647,6 +4887,7 @@ mod tests {
             bridge: None,
             activity: None,
             boots: false,
+            orienting: None,
         };
         (deps, storage, seats)
     }
@@ -6959,6 +7200,179 @@ mod tests {
         deps.boots = true;
         let events = bridge.subscribe();
         (deps, storage, seats, events)
+    }
+
+    /// D4: a participant still orienting after a boot timeout is not dealt —
+    /// the step passes over it to the next one in the rotation. Delete the
+    /// exclusion in `hand_over` and `a` takes the turn mid-orientation.
+    #[tokio::test]
+    async fn a_participant_still_orienting_is_not_dealt() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        deps.orienting = Some(seed_orienting(true, [seats[0].id]));
+        post(&storage, "user", None, "go").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, user_message()).await;
+        assert_eq!(
+            seats[1].expect(1).await,
+            vec!["go"],
+            "the front of the rotation is still orienting; the step passes over it"
+        );
+        seats[0].quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// D4 (EYES, plan item 8): everyone the ring could deal has voted done
+    /// while one participant is still orienting. Consensus cannot form — the
+    /// orienting participant's vote is owed — and stepping on re-deals the
+    /// done participant, whose empty page the ring passes FOR it: that pass
+    /// retracts its vote and yields on "every participant passed", and the
+    /// orienting one then waits for the user. The ring holds instead, keeps
+    /// the vote, and deals the late participant on its `Oriented`.
+    #[tokio::test]
+    async fn the_ring_holds_instead_of_re_dealing_a_done_participant_while_one_orients() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        let set = seed_orienting(true, [a]);
+        deps.orienting = Some(Arc::clone(&set));
+        post(&storage, "user", None, "go").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, user_message()).await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: b,
+                epoch: 1,
+                ending: TurnEnding::Done,
+            },
+        )
+        .await;
+        seats[1].quiet().await;
+        seats[0].quiet().await;
+        assert!(
+            storage.participant_by_id(b).await.unwrap().unwrap().done_vote,
+            "the done participant's vote stands — nothing passed on its behalf"
+        );
+        assert!(
+            !storage.all_active_voted_done("s1").await.unwrap(),
+            "no consensus: the orienting participant has not voted"
+        );
+        let said = notices(&storage).await;
+        assert!(
+            said.iter().any(|n| n.contains("waiting for a to finish orienting")),
+            "the hold says why nothing is moving: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|n| n.contains("Every participant passed")),
+            "no all-pass yield: {said:?}"
+        );
+
+        // `a` finishes: its pump takes it out of the set, then the wake.
+        lock_orienting(&set).remove(&a);
+        send(&tx, SequencerCommand::Oriented { participant_id: a }).await;
+        let got = seats[0].expect(2).await;
+        assert_eq!(got[0], "go", "the held turn goes to the participant that just finished orienting");
+        assert!(got[1].contains("waiting for a to finish orienting"), "and it reads why: {got:?}");
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// D4: a user message while EVERY active participant is still orienting is
+    /// held — not read as an empty rotation — and the first `Oriented` deals it.
+    #[tokio::test]
+    async fn a_release_with_everyone_orienting_waits_for_the_first_one_ready() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        let set = seed_orienting(true, [a, b]);
+        deps.orienting = Some(Arc::clone(&set));
+        post(&storage, "user", None, "go").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, user_message()).await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        let said = notices(&storage).await;
+        assert!(
+            said.iter().any(|n| n.contains("every participant is still orienting")),
+            "{said:?}"
+        );
+
+        lock_orienting(&set).remove(&b);
+        send(&tx, SequencerCommand::Oriented { participant_id: b }).await;
+        let got = seats[1].expect(2).await;
+        assert_eq!(got[0], "go", "the first one ready takes the held turn");
+        assert!(got[1].contains("every participant is still orienting"), "{got:?}");
+        seats[0].quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// D4: the user named a participant that is still orienting. The summons
+    /// keeps its place in the queue and is served once it is ready — ahead of
+    /// the rotation, which would otherwise have gone to `c` next.
+    #[tokio::test]
+    async fn a_summons_for_a_participant_still_orienting_waits_in_the_queue() {
+        let (mut deps, storage, mut seats) =
+            ring(&[("a", "active"), ("c", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[2].id);
+        let set = seed_orienting(true, [b]);
+        deps.orienting = Some(Arc::clone(&set));
+        post(&storage, "user", None, "@b take a look").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, summoning(&[b])).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["@b take a look"],
+            "b is still reading; the rotation deals a meanwhile"
+        );
+        seats[2].quiet().await;
+
+        lock_orienting(&set).remove(&b);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+                ending: TurnEnding::Spoke,
+            },
+        )
+        .await;
+        assert_eq!(
+            seats[2].expect(1).await,
+            vec!["@b take a look"],
+            "the summons kept its place and is served before the rotation moves on"
+        );
+        seats[1].quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// D4 (EYES, plan item 10): a RESUMED spawn sends no primer, so nobody will
+    /// ever report ready — its set must start empty, and the first message
+    /// deals as it always did. Seed it regardless of the spawn and this ring
+    /// deals nothing, which is every live session stopping after a relaunch.
+    #[tokio::test]
+    async fn a_resumed_spawn_orients_nobody_so_the_first_message_deals() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        deps.orienting = Some(seed_orienting(false, [seats[0].id, seats[1].id]));
+        post(&storage, "user", None, "picking up where we left off").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["picking up where we left off"]);
+        drop(tx);
+        assert!(exited(task).await);
+        assert!(lock_orienting(&seed_orienting(false, [1, 2])).is_empty());
+        assert_eq!(lock_orienting(&seed_orienting(true, [1, 2])).len(), 2);
     }
 
     /// Feedback #10: during boot the ring has no holder, but a message the
@@ -11235,6 +11649,7 @@ mod tests {
             bridge: None,
             activity: None,
             boots: false,
+            orienting: None,
         };
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_sequencer(deps, rx));
