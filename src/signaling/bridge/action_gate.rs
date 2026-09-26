@@ -659,6 +659,21 @@ impl SignalingBridge {
                     .into(),
             ));
         }
+        // F10 (EYES): a secret in PUBLISHED content refuses the publish
+        // outright — it would go out under the user's identity, and the
+        // shapes are self-identifying, so a legitimate body almost never
+        // matches. Only the extracted bodies are scanned: a header or a URL
+        // (`curl -H "Authorization: …"`) is not published content.
+        if let Some(reason) = bodies.iter().find_map(|body| {
+            crate::policy::secret_scan::find_secrets(body)
+                .first()
+                .map(|span| span.reason)
+        }) {
+            return Ok(OutwardReview::Refuse(format!(
+                "outward publish held: the body contains {reason} — publishing it would expose \
+                 it under your identity. Remove it and re-issue."
+            )));
+        }
         let cursor = storage.cursor_for(reviewer.id).await?;
         // A TARGETED veto holds its content until the finding is answered: a
         // re-issue of the exact command it withdrew is refused while that
@@ -2703,6 +2718,39 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(err.contains(why), "{cmd} must refuse ({why}); got: {err}");
+        }
+    }
+
+    /// F10 (EYES): a secret in PUBLISHED content refuses the publish; the same
+    /// body without it goes on as before; a secret in a HEADER is not
+    /// published content and this check does not refuse it.
+    #[tokio::test]
+    async fn a_body_carrying_a_secret_is_refused_but_a_header_is_not() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, _storage, _eyes, _path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        // Assembled at runtime: no token-shaped literal in the tree.
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let leaky = repo.path().join("leaky.md");
+        std::fs::write(&leaky, format!("release notes\ntoken: {token}\n")).unwrap();
+        let err = bridge
+            .park_gated_command("s1", "hands", &format!("gh issue comment 5 --body-file {}", posix_path(&leaky)))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("the body contains a GitHub access token"), "got: {err}");
+
+        let clean = repo.path().join("clean.md");
+        std::fs::write(&clean, "release notes\ntoken: rotated\n").unwrap();
+        bridge
+            .park_gated_command("s1", "hands", &format!("gh issue comment 5 --body-file {}", posix_path(&clean)))
+            .await
+            .expect("the same body without the token is not refused");
+
+        let header = format!("curl -sS -H \"Authorization: Bearer {token}\" https://api.example.com/v1/ping");
+        if let Err(e) = bridge.park_gated_command("s1", "hands", &header).await {
+            assert!(!e.to_string().contains("the body contains"), "a header is not a body: {e}");
         }
     }
 
