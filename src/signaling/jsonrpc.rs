@@ -4323,7 +4323,6 @@ mod tests {
         assert_eq!(peer_shaped_reason_pair("a four-eyes check is pending on your side"), None);
     }
 
-
     /// F10 (plan C4h, the user's pick `c2ca371d`): what an AGENT writes to the
     /// Context Library through its tools is redacted — a replace, a
     /// `content_path` body, an append (only the new text), an edit (only the
