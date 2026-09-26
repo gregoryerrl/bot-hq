@@ -11,9 +11,9 @@
 
 cask "bot-hq" do
   # sha256 = shasum -a 256 of the published release's universal .dmg, verified
-  # against the live download URL at publish time (2026-09-09).
-  version "1.0.6"
-  sha256 "698a93bfdd0e3e72a1c615fa5ee80a9cd6e3c0a5ca9408c8f7411c9032b7ee2b"
+  # against the live download URL at publish time (2026-09-26).
+  version "1.0.7"
+  sha256 "37038e64bfb7cb16e4c54e4b87c6fe94fdc0882d481e23eb7f0a17fc46f230ed"
 
   url "https://github.com/gregoryerrl/bot-hq/releases/download/v#{version}/bot-hq_#{version}_universal.dmg",
       verified: "github.com/gregoryerrl/bot-hq/"
