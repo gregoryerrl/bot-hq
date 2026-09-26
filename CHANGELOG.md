@@ -7,6 +7,27 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+Secrets in what bot-hq stores (F10). In progress: agent text rows, notices
+and the other stores follow once the redaction scope is decided.
+
+### Security
+
+- **A secret a command printed is no longer stored in plain text.** Tool
+  output and every string of a tool call's input are redacted before the
+  row is stored — each self-identifying secret becomes `[redacted: <what>]`
+  — and the row stays valid JSON. An approved command's output is redacted
+  before it reaches the chat, so the agent that asked and its peers never
+  receive the secret (a command the Tool Gate runs without asking returns
+  its raw output to the agent, as a plain command does; only the stored copy
+  is redacted).
+- **A Laravel Sanctum API token is recognised as a secret** (the shape of
+  the Laravel Cloud token printed on 2026-09-04), in redaction and in the
+  Context Library push check. AWS's documentation example key is not.
+- **An outward publish whose body carries a secret is refused**, whoever
+  is reviewing — including a session with no reviewer and an approved
+  reviewer override. Only published content is scanned; a secret in a
+  request header is not.
+
 ## [1.0.8] — 2026-09-26
 
 Stray turns and two dependency advisories (session s-02101415). No
