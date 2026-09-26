@@ -1809,6 +1809,41 @@ mod tests {
         );
     }
 
+    /// F10: an approved command's OUTPUT reaches the agent through the answer
+    /// row, so a secret the command printed is redacted in the stored row AND
+    /// the returned body — the agent and its peers never receive it.
+    #[tokio::test]
+    async fn an_approved_commands_printed_secret_is_redacted() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge =
+            SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage
+            .create_session("s1", "t", Some(&repo.path().display().to_string()))
+            .await
+            .unwrap();
+        // The command line holds no token; only its OUTPUT does.
+        let cmd = "printf '%s%s\\n' ghp_ 1234567890abcdefghijABCDEF".to_string();
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let opts = vec!["Approve".to_string(), "Reject".to_string()];
+        storage
+            .insert_tray_entry("s1", "cid-sec", "hands", crate::storage::QuestionKind::Choice, "Run?", Some(&opts), None, Some(&cmd))
+            .await
+            .unwrap();
+        let body = match bridge.resolve_choice_confirmable("cid-sec", "Approve".into(), true).await.unwrap() {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => body,
+            other => panic!("expected DeliveredOutOfBand, got {other:?}"),
+        };
+        assert!(body.contains("Output:"), "it ran: {body}");
+        assert!(!body.contains(&token), "the returned body is redacted: {body}");
+        assert!(body.contains("[redacted: a GitHub access token]"), "{body}");
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(rows.iter().all(|m| !m.content.contains(&token)), "no stored row holds the token");
+        assert!(rows.iter().any(|m| m.content.contains("[redacted: a GitHub access token]")));
+    }
+
     #[tokio::test]
     async fn resolve_twice_executes_gated_command_once() {
         // Durable exactly-once: a duplicate/stale resolve must not re-run the

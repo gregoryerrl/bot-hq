@@ -30,6 +30,38 @@ struct ToolUseRow<'a> {
     tool_use_id: &'a str,
 }
 
+/// `value` with every string leaf passed through
+/// [`redact`](crate::policy::secret_scan::redact) — borrowed, uncopied, when
+/// nothing needed it (the common case; a `Write` input can be a whole file).
+fn redacted_json(value: &serde_json::Value) -> std::borrow::Cow<'_, serde_json::Value> {
+    fn has_secret(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::String(s) => !crate::policy::secret_scan::find_secrets(s).is_empty(),
+            serde_json::Value::Array(items) => items.iter().any(has_secret),
+            serde_json::Value::Object(map) => map.values().any(has_secret),
+            _ => false,
+        }
+    }
+    fn scrub(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::String(s) => {
+                if let std::borrow::Cow::Owned(r) = crate::policy::secret_scan::redact(s) {
+                    *s = r;
+                }
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(scrub),
+            serde_json::Value::Object(map) => map.values_mut().for_each(scrub),
+            _ => {}
+        }
+    }
+    if !has_secret(value) {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    let mut owned = value.clone();
+    scrub(&mut owned);
+    std::borrow::Cow::Owned(owned)
+}
+
 #[derive(serde::Serialize)]
 struct ToolResultRow<'a> {
     content: &'a str,
@@ -957,8 +989,11 @@ pub async fn pump_agent(
                         }
                     }
                 }
+                // F10: redact the DECODED input's strings before the row is
+                // serialized — never the JSON text (EYES 8eea5190).
+                let stored_input = redacted_json(&input);
                 let payload = serde_json::to_string(&ToolUseRow {
-                    input: &input,
+                    input: &stored_input,
                     name: &name,
                     tool_use_id: &id,
                 })
@@ -1011,8 +1046,14 @@ pub async fn pump_agent(
                         }
                     }
                 }
+                // F10: the output is redacted as TEXT, before it is wrapped in
+                // JSON — a token after a newline, a key cut short, a quoted
+                // value all keep their true boundaries (EYES 8eea5190). The
+                // agent itself already saw the raw output; this is what is
+                // stored and shown.
+                let stored_content = crate::policy::secret_scan::redact(&content);
                 let payload = serde_json::to_string(&ToolResultRow {
-                    content: content.as_str(),
+                    content: &stored_content,
                     is_error,
                     tool_use_id: &tool_use_id,
                 })
@@ -2230,6 +2271,77 @@ mod tests {
             kinds.contains(&("my turn".into(), MessageKind::Text.as_str().into())),
             "{kinds:?}"
         );
+    }
+
+    /// F10 (EYES 8eea5190): a tool result is redacted as TEXT before it is
+    /// wrapped in JSON — the stored row still parses, a key cut short does not
+    /// swallow the row's closing fields, a token on a later output line is
+    /// caught, and the prose between survives.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_tool_result_is_stored_redacted_and_still_parses_as_json() {
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(fast_cfg("hands"), ev_rx, storage.clone(), state.clone()));
+        let head = format!("{}{}", "-----BEGIN RSA ", "PRIVATE KEY-----");
+        let token = format!("{}{}", "4412|AbCdEfGhIjKlMnOpQrSt", "UvWxYz01234567890abc0a1b2c3d");
+        let output = format!("{head}\nMIIEfake+/==\nMIIEfake2\n3 lines shown\nok\n{token}\ndone");
+        ev_tx
+            .send(AgentEvent::ToolResult { tool_use_id: "tu_1".into(), content: output, is_error: false })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+        let row = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.kind == "tool_result")
+            .expect("the tool_result row");
+        let json: serde_json::Value = serde_json::from_str(&row.content).expect("the row is still JSON");
+        assert_eq!(json["tool_use_id"], "tu_1");
+        assert_eq!(json["is_error"], false);
+        assert_eq!(
+            json["content"],
+            "[redacted: a PEM private key block]\n3 lines shown\nok\n[redacted: a Laravel Sanctum API token]\ndone"
+        );
+    }
+
+    /// F10: a tool call's input is redacted leaf by leaf — however deep the
+    /// token sits — and the call's other fields are untouched.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_tool_use_input_is_stored_with_every_nested_secret_redacted() {
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(fast_cfg("hands"), ev_rx, storage.clone(), state.clone()));
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let input = serde_json::json!({
+            "command": format!("curl -H 'Authorization: Bearer {token}' https://api.example.com"),
+            "nested": {"list": ["keep me", format!("x {token} y")], "n": 3},
+        });
+        ev_tx
+            .send(AgentEvent::ToolUse { id: "tu_2".into(), name: "Bash".into(), input })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+        let row = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.kind == "tool_use")
+            .expect("the tool_use row");
+        assert!(!row.content.contains(&token), "{}", row.content);
+        let json: serde_json::Value = serde_json::from_str(&row.content).expect("the row is still JSON");
+        assert_eq!(json["name"], "Bash");
+        assert_eq!(
+            json["input"]["command"],
+            "curl -H 'Authorization: Bearer [redacted: a GitHub access token]' https://api.example.com"
+        );
+        assert_eq!(json["input"]["nested"]["list"][0], "keep me");
+        assert_eq!(json["input"]["nested"]["list"][1], "x [redacted: a GitHub access token] y");
+        assert_eq!(json["input"]["nested"]["n"], 3);
     }
 
     /// D3 (the user's pick `0e95f4be`): a turn nobody dealt, arriving while

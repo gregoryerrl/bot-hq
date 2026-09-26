@@ -1169,6 +1169,17 @@ impl SignalingBridge {
             self.maybe_run_gated(&session_id, choice_id, command_text, &picked, &mut body)
                 .await;
         }
+        // F10: this row is how an approved command's OUTPUT reaches the agent
+        // and every peer, so it is redacted before it is stored OR returned — a
+        // secret the command printed reaches neither the channel nor the
+        // agent's context (and so not claude-code's transcript either).
+        let redacted = match crate::policy::secret_scan::redact(&body) {
+            std::borrow::Cow::Owned(r) => Some(r),
+            std::borrow::Cow::Borrowed(_) => None,
+        };
+        if let Some(r) = redacted {
+            body = r;
+        }
         // The phase is read HERE, not in `CoreAppState::resolve_choice` where it
         // used to be. The envelope is part of the row, so it has to be known
         // before the INSERT; reading it after and prepending it to the wire is
