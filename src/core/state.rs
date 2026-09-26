@@ -2633,7 +2633,8 @@ impl AppState {
     ///
     /// Three guards (EYES, plan items 1–2):
     /// - an atomic operation is waited out first — a stray `git commit` or
-    ///   push finishes, exactly as a Pause defers;
+    ///   push finishes, as a Pause defers — and one that outlasts the cap is
+    ///   NOT interrupted at all (EYES a4821aeb);
     /// - at send time this participant's own epoch cell must still read
     ///   `epoch`: claude-code folds a dealt turn into a running one, so an
     ///   abort landing after a deal would eat that turn;
@@ -2654,11 +2655,24 @@ impl AppState {
         };
         if atomic.load(Ordering::Acquire) {
             let (waited_ms, capped) = await_atomic_op_or_cap(&atomic, ATOMIC_OP_DEFERRAL_CAP).await;
+            // **A cap is a reason NOT to stop it** (EYES a4821aeb). Pause may
+            // cut an atomic operation after its cap because the user asked it
+            // to stop; this stop is automatic, and aborting a push waiting on
+            // its gate or a long migration can leave a half-applied change or
+            // a stale `index.lock`. Two turns overlapping is the lesser harm.
+            if capped {
+                tracing::warn!(
+                    session_id,
+                    agent = agent_slug,
+                    waited_ms,
+                    "stray turn: an atomic operation outlasted the cap; not stopping the turn"
+                );
+                return;
+            }
             tracing::info!(
                 session_id,
                 agent = agent_slug,
                 waited_ms,
-                capped,
                 "stray turn: waited out an atomic operation before stopping it"
             );
         }
@@ -3341,6 +3355,28 @@ mod tests {
         atomic.store(false, Ordering::Release);
         task.await.unwrap();
         assert_eq!(stamp.load(Ordering::Acquire), 15, "stopped once it finished");
+    }
+
+    /// D3 (EYES a4821aeb): an atomic operation that outlasts the cap — a push
+    /// waiting on its gate, a long migration — is NOT cut. Pause may cut one
+    /// after its cap because the user asked; this stop is automatic, and an
+    /// aborted migration or push is worse than two turns overlapping.
+    #[tokio::test]
+    async fn a_stray_turn_is_not_stopped_when_an_atomic_operation_outlasts_the_cap() {
+        let (state, storage, stamp, _tmp) = stray_setup(15, true).await;
+        let atomic = {
+            let sessions = state.sessions.lock().await;
+            Arc::clone(&sessions.get("s1").unwrap().in_atomic_tool)
+        };
+        atomic.store(true, Ordering::Release);
+        // Virtual time for the wait only — the storage reads below run on the
+        // real clock again.
+        tokio::time::pause();
+        state.stray_turn("s1", "hands", 15).await;
+        tokio::time::resume();
+        assert!(atomic.load(Ordering::Acquire), "still mid-operation past the cap");
+        assert_eq!(stamp.load(Ordering::Acquire), crate::agents::NO_INTERRUPT_EPOCH);
+        assert!(!said_stopped(&storage).await);
     }
 
     /// **Every host-declared halt interrupts** (round 8, A1b — the reviewer's

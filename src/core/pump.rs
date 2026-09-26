@@ -752,7 +752,10 @@ pub async fn pump_agent(
                     // first finds another participant busy (EYES, plan item 2);
                     // with nobody else busy it runs, the sanctioned path for a
                     // finished watcher while the session waits on the user.
-                    if !stray_stop_asked {
+                    // **Never while THIS turn is mid commit, push or migration**
+                    // (EYES a4821aeb): the ask waits for a later event, after
+                    // the atomic tool's result.
+                    if !stray_stop_asked && atomic_tool_id.is_none() {
                         if let (Some(activity), Some(bridge)) = (&cfg.activity, &cfg.bridge) {
                             if activity.busy_other_than(&cfg.slug).is_some() {
                                 stray_stop_asked = true;
@@ -2276,6 +2279,99 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_stray_turn_with_nobody_else_busy_is_left_to_run() {
         assert!(stray_turn_requests(false).await.is_empty());
+    }
+
+    /// D3 (EYES a4821aeb): a stray turn in the middle of its own commit, push
+    /// or migration does not ask to be stopped; it asks on its first event
+    /// after that tool's result.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stray_turn_does_not_ask_to_be_stopped_mid_atomic_tool() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(15));
+        cfg.turn_epoch = Some(Arc::clone(&cell));
+        let atomic = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cfg.in_atomic_tool = Some(Arc::clone(&atomic));
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let mut events = bridge.subscribe();
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let activity = crate::core::ActivityTracker::new(
+            "s1",
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::clone(&bridge),
+            vec!["hands".to_string(), "eyes".to_string()],
+        );
+        cfg.activity = Some(Arc::clone(&activity));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+        let strays = |events: &mut tokio::sync::broadcast::Receiver<crate::signaling::SignalingEvent>| {
+            let mut n = 0;
+            while let Ok(ev) = events.try_recv() {
+                if matches!(ev, crate::signaling::SignalingEvent::StrayTurn { .. }) {
+                    n += 1;
+                }
+            }
+            n
+        };
+
+        ev_tx.send(AgentEvent::Text("dealt".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 15);
+
+        // A stray turn starts while the session is idle — nobody else busy, so
+        // nothing asks — and opens a commit.
+        ev_tx.send(AgentEvent::Text("notified".into())).await.unwrap();
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_commit".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "git commit -m x"}),
+            })
+            .await
+            .unwrap();
+        // The barrier: the flag goes up only once the pump has processed the
+        // tool call — with nobody else busy yet, so that event asked nothing.
+        for _ in 0..200 {
+            if atomic.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(atomic.load(std::sync::atomic::Ordering::Acquire), "the commit is in flight");
+        // …and only now does another participant take the ring.
+        activity.set_busy_slug("eyes", true);
+        ev_tx.send(AgentEvent::Text("committing".into())).await.unwrap();
+        wait_for_row(&storage, "committing").await;
+        assert_eq!(strays(&mut events), 0, "no ask while the commit is still running");
+
+        ev_tx
+            .send(AgentEvent::ToolResult {
+                tool_use_id: "tu_commit".into(),
+                content: "ok".into(),
+                is_error: false,
+            })
+            .await
+            .unwrap();
+        ev_tx.send(AgentEvent::Text("committed".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 0);
+        drop(ev_tx);
+        let _ = task.await;
+        assert_eq!(strays(&mut events), 1, "asked once, after the commit's result");
+    }
+
+    /// Wait until a row with exactly `content` is persisted — the barrier that
+    /// proves the pump has processed every event sent before it.
+    async fn wait_for_row(storage: &Storage, content: &str) {
+        for _ in 0..200 {
+            let rows = storage.messages_for_session("s1", None).await.unwrap();
+            if rows.iter().any(|m| m.content == content) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the row {content:?} never persisted");
     }
 
     /// D3: the stop is bot-hq's own interrupt, stamped with the stray's epoch —
