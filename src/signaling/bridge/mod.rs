@@ -1624,11 +1624,14 @@ impl SignalingBridge {
             return Ok(existing.choice_id);
         }
         let choice_id = uuid::Uuid::new_v4().to_string();
-        let question = format!(
+        // F10: redacted here as well as at the store, so the card's event and
+        // its row say the same thing (EYES N3). The recap is host-built counts
+        // and flags today; this keeps it true if that ever changes.
+        let question = crate::policy::secret_scan::redact_string(format!(
             "Close this session? {agent} says the work is done.\n\n{recap}\n\n\
              Approve closes it (the close-out epilogue runs as usual); Reject keeps it \
              open — anything you type with the Reject is the next instruction."
-        );
+        ));
         let options = vec!["Approve".to_string(), "Reject".to_string()];
         storage
             .insert_tray_entry(

@@ -4630,6 +4630,28 @@ mod tests {
         assert_eq!(menu, Some(vec!["Approve".to_string(), "Reject".to_string()]));
     }
 
+    /// F10 (EYES N3): the close card's event and its stored row say the same
+    /// redacted thing — the card never passes the park, so it redacts its own.
+    #[tokio::test]
+    async fn a_close_cards_event_and_row_carry_the_same_redacted_question() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "t", None).await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        let mut sub = bridge.subscribe();
+        let recap = format!("2 commits; the token {} was rotated", f10_token());
+        let card = bridge.park_close_card("s1", "hands", &recap).await.unwrap();
+        let event = loop {
+            match sub.recv().await.unwrap() {
+                SignalingEvent::PendingChoice(p) => break p,
+                _ => continue,
+            }
+        };
+        assert_eq!(event.choice_id, card);
+        assert!(event.question.contains(&format!("2 commits; the token {F10_GH} was rotated")), "{}", event.question);
+        assert_eq!(storage.get_tray_entry(&card).await.unwrap().unwrap().prompt, event.question);
+    }
+
     /// F10 (EYES E2): a re-ask that carries a secret still supersedes the first
     /// ask — the G2 dedupe compares REDACTED prompts — and so does a re-ask of
     /// a question a 1.0.7 build stored raw.
