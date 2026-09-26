@@ -155,6 +155,16 @@ pub fn redact(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+/// [`redact`] for a string the caller owns: the same string, moved rather
+/// than copied, when there is nothing to redact.
+pub fn redact_string(text: String) -> String {
+    let redacted = match redact(&text) {
+        std::borrow::Cow::Owned(r) => Some(r),
+        std::borrow::Cow::Borrowed(_) => None,
+    };
+    redacted.unwrap_or(text)
+}
+
 /// The first secret in `body`, if any — what a push refusal names.
 fn content_reason(body: &str) -> Option<&'static str> {
     find_secrets(body).first().map(|span| span.reason)

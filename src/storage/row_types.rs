@@ -48,6 +48,15 @@ impl MessageKind {
         }
     }
 
+    /// The inverse of [`as_str`](Self::as_str); `None` for a string that
+    /// names no kind. Read through the derived `Deserialize`, so a variant
+    /// added later parses without anyone remembering to list it here.
+    pub fn parse(s: &str) -> Option<Self> {
+        use serde::de::IntoDeserializer;
+        let de: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+            s.into_deserializer();
+        Self::deserialize(de).ok()
+    }
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

@@ -94,8 +94,12 @@ pub async fn broadcast_user_message(
     // `origin = "user"` + no slug: what `insert_message(Author::User, ..)`
     // resolves to. Called directly only because the legacy wrapper has nowhere
     // to put an envelope.
+    //
+    // **The verbatim door (F10):** this is what the user typed, the one text
+    // the user's pick `7e3308f1` keeps as written — they may be handing an
+    // agent a token on purpose. Every other row is redacted at the store.
     let persisted = storage
-        .post_to_channel(
+        .post_to_channel_verbatim(
             session_id,
             "user",
             None,
@@ -232,6 +236,21 @@ mod tests {
         // appears only when the row is rendered for a participant.
         assert_eq!(content, "hello");
         assert_eq!(wire, "[PHASE: Apply]\nhello");
+    }
+
+    /// F10: what the user types is the one text stored as written — the user's
+    /// pick `7e3308f1` keeps it verbatim, because they may be handing an agent a
+    /// token on purpose. Every other row is redacted at the store.
+    #[tokio::test]
+    async fn what_the_user_types_is_stored_verbatim_even_with_a_secret() {
+        let s = session("s1").await;
+        let typed = format!("use this token: {}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        broadcast_user_message(&s, "s1", &typed, IpavPhase::Apply, None)
+            .await
+            .unwrap();
+        let (content, wire) = only_row(&s, "s1").await;
+        assert_eq!(content, typed);
+        assert_eq!(wire, format!("[PHASE: Apply]\n{typed}"));
     }
 
     #[tokio::test]

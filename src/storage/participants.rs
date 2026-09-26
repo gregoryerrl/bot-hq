@@ -2903,6 +2903,27 @@ impl PersistedMessage {
     }
 }
 
+/// F10: `content` as it may be stored under `kind`.
+///
+/// Plain-text kinds are redacted here. `tool_use` / `tool_result` hold JSON the
+/// pump already redacted string by string, before serializing (EYES
+/// `8eea5190`: scanning serialized text corrupts rows and misses secrets), so
+/// they pass through untouched. The match names every kind and has no
+/// catch-all, so a kind added later does not compile until someone decides
+/// which it is. A kind string nobody knows is scanned as text: fail closed.
+fn redact_for_storage(kind: &str, content: String) -> String {
+    match MessageKind::parse(kind) {
+        Some(
+            MessageKind::Text
+            | MessageKind::SystemNotice
+            | MessageKind::PhaseChange
+            | MessageKind::Boot,
+        )
+        | None => crate::policy::secret_scan::redact_string(content),
+        Some(MessageKind::ToolUse | MessageKind::ToolResult) => content,
+    }
+}
+
 impl Storage {
     /// Post to the session channel — the write half of "the channel is the
     /// transport". Every wire into a participant goes through here, including
@@ -2923,6 +2944,12 @@ impl Storage {
     /// yet keep working (migration revision 3). `system` rows are stored as
     /// `author = 'user'` because that is exactly how today's system notices are
     /// already persisted — legacy readers must not encounter a new author value.
+    ///
+    /// **Secrets are redacted before the row is written (F10).** The receipt is
+    /// minted from the same string, so what is stored, shown and delivered
+    /// agree. Which kinds are scanned is [`redact_for_storage`]'s call. What the
+    /// user types takes the one door that skips it,
+    /// [`Self::post_to_channel_verbatim`].
     pub async fn post_to_channel(
         &self,
         session_id: impl Into<Arc<str>>,
@@ -2930,6 +2957,46 @@ impl Storage {
         participant_slug: Option<&str>,
         kind: &str,
         content: impl Into<String>,
+        envelope: Option<Envelope>,
+    ) -> Result<PersistedMessage> {
+        let content = redact_for_storage(kind, content.into());
+        self.insert_channel_row(session_id, origin, participant_slug, kind, content, envelope)
+            .await
+    }
+
+    /// [`Self::post_to_channel`] WITHOUT the secret redaction: the door for
+    /// what the user types, and nothing else (F10, the user's pick `7e3308f1`:
+    /// "redact every stored row except what you type yourself").
+    ///
+    /// Its production callers are pinned, by file, by
+    /// `the_verbatim_door_has_only_its_named_production_callers`:
+    /// `core::broadcast::broadcast_user_message` — the composer and the staged
+    /// Send. A plugin's text reaches that function too, and is not the user
+    /// typing: it is to be redacted at the plugin boundary (F10 plan C4f).
+    ///
+    /// A door rather than an origin check: approved-gate output is posted as
+    /// origin `user` too, and must be redacted (EYES, s-02101415).
+    pub async fn post_to_channel_verbatim(
+        &self,
+        session_id: impl Into<Arc<str>>,
+        origin: &str,
+        participant_slug: Option<&str>,
+        kind: &str,
+        content: impl Into<String>,
+        envelope: Option<Envelope>,
+    ) -> Result<PersistedMessage> {
+        self.insert_channel_row(session_id, origin, participant_slug, kind, content.into(), envelope)
+            .await
+    }
+
+    /// The INSERT behind both doors.
+    async fn insert_channel_row(
+        &self,
+        session_id: impl Into<Arc<str>>,
+        origin: &str,
+        participant_slug: Option<&str>,
+        kind: &str,
+        content: String,
         envelope: Option<Envelope>,
     ) -> Result<PersistedMessage> {
         // `impl Into<Arc<str>>` so a caller already holding one — Task 3's do,
@@ -2947,12 +3014,12 @@ impl Storage {
         // `Arc::from(&str)` allocates and copies exactly as `to_string()` does,
         // and delivery is by reference, so nothing ever clones the body.
         //
-        // `content` is `impl Into<String>` so `&str` callers stay ergonomic and
-        // `String` callers pay nothing. `envelope` is a concrete
+        // The doors take `content` as `impl Into<String>` so `&str` callers stay
+        // ergonomic and `String` callers pay nothing (redaction allocates only
+        // when it finds something). `envelope` is a concrete
         // `Option<Envelope>`, not a generic: a bare `None` could not be
         // inferred through `Option<impl Into<_>>` (E0283), which would force a
         // turbofish at every envelope-less call site.
-        let content: String = content.into();
         // Serialised once, here, so the JSON in the column is always what the
         // receipt renders from. `Envelope` is strings and a usize, so this
         // cannot fail in practice; it is still propagated rather than unwrapped,
@@ -7156,5 +7223,166 @@ mod tests {
             "the ring is unchanged by how anyone voted — done is not the same \
              condition as having no next turn"
         );
+    }
+
+    // ---- F10: secrets redacted at the store ---------------------------------
+
+    /// A GitHub-shaped token, assembled at runtime so no contiguous token shape
+    /// sits in the source (GitHub push protection matches fixtures too).
+    fn f10_token() -> String {
+        format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF")
+    }
+
+    const F10_MARKER: &str = "[redacted: a GitHub access token]";
+
+    /// Every plain-text kind is redacted before the INSERT, in the stored row
+    /// AND in the receipt the delivery path wires, and a peer reading the
+    /// channel gets the redacted text.
+    #[tokio::test]
+    async fn plain_rows_are_stored_and_delivered_with_their_secrets_redacted() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.insert_participant("s1", "hands", "HANDS", None, None, "[]", "active", 0)
+            .await
+            .unwrap();
+        let eyes = s
+            .insert_participant("s1", "eyes", "EYES", None, None, "[]", "active", 1)
+            .await
+            .unwrap();
+        let token = f10_token();
+        let body = format!("export GH_TOKEN={token} && gh auth status");
+        for (origin, slug, kind) in [
+            ("participant", Some("hands"), MessageKind::Text),
+            ("system", None, MessageKind::SystemNotice),
+            ("system", None, MessageKind::PhaseChange),
+            ("participant", Some("hands"), MessageKind::Boot),
+        ] {
+            let receipt = s
+                .post_to_channel("s1", origin, slug, kind.as_str(), body.as_str(), None)
+                .await
+                .unwrap();
+            assert!(!receipt.body().contains(&token), "{kind:?}: the receipt is redacted");
+            assert!(receipt.body().contains(F10_MARKER), "{kind:?}: {}", receipt.body());
+        }
+        let stored = s.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(stored.len(), 4);
+        for m in &stored {
+            assert_eq!(
+                m.content,
+                format!("export GH_TOKEN={F10_MARKER} && gh auth status"),
+                "{}: stored redacted, the rest of the text kept",
+                m.kind
+            );
+        }
+        let delivered = s.unread_for_participant(eyes).await.unwrap().rows;
+        assert!(!delivered.is_empty(), "the peer receives the plain rows");
+        assert!(delivered.iter().all(|m| !m.content.contains(&token)));
+    }
+
+    /// `tool_use` / `tool_result` rows are JSON the pump already redacted, string
+    /// by string (EYES 8eea5190). The store must not scan them again — scanning
+    /// serialized text corrupts rows — so even a raw token passes through
+    /// byte-identical. The pump's own tests pin that it never hands one over.
+    #[tokio::test]
+    async fn tool_rows_pass_through_the_store_untouched() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let token = f10_token();
+        let result = format!(r#"{{"tool_use_id":"t1","content":"{token}","is_error":false}}"#);
+        let call = format!(r#"{{"id":"t1","name":"Bash","input":{{"command":"echo {token}"}}}}"#);
+        for (kind, body) in [(MessageKind::ToolResult, &result), (MessageKind::ToolUse, &call)] {
+            s.post_to_channel("s1", "participant", Some("hands"), kind.as_str(), body.as_str(), None)
+                .await
+                .unwrap();
+        }
+        let stored = s.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(stored[0].content, result);
+        assert_eq!(stored[1].content, call);
+    }
+
+    /// Redaction is idempotent at the store (EYES E5): a body that already
+    /// carries a marker — a notice quoting a redacted piece — is stored as is.
+    #[tokio::test]
+    async fn an_already_redacted_body_is_stored_unchanged() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let body = format!("the command printed {F10_MARKER} and exited 0");
+        s.post_to_channel("s1", "system", None, MessageKind::SystemNotice.as_str(), body.as_str(), None)
+            .await
+            .unwrap();
+        assert_eq!(s.messages_for_session("s1", None).await.unwrap()[0].content, body);
+    }
+
+    /// The verbatim door stores exactly what it is given — it exists for what
+    /// the user types. A kind string nobody knows goes through the redacting
+    /// door as text (fail closed).
+    #[tokio::test]
+    async fn the_verbatim_door_keeps_the_text_and_an_unknown_kind_is_redacted() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let token = f10_token();
+        let typed = format!("here is the token you asked for: {token}");
+        let kept = s
+            .post_to_channel_verbatim("s1", "user", None, MessageKind::Text.as_str(), typed.as_str(), None)
+            .await
+            .unwrap();
+        assert_eq!(kept.body(), typed);
+        s.post_to_channel("s1", "user", None, "not_a_kind", typed.as_str(), None)
+            .await
+            .unwrap();
+        let stored = s.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(stored[0].content, typed, "verbatim");
+        assert!(!stored[1].content.contains(&token), "an unknown kind is scanned");
+    }
+
+    /// `MessageKind::parse` inverts `as_str` for every kind the store knows.
+    #[test]
+    fn message_kind_parse_inverts_as_str() {
+        for k in [
+            MessageKind::Text,
+            MessageKind::ToolUse,
+            MessageKind::ToolResult,
+            MessageKind::PhaseChange,
+            MessageKind::SystemNotice,
+            MessageKind::Boot,
+        ] {
+            assert_eq!(MessageKind::parse(k.as_str()), Some(k));
+        }
+        assert_eq!(MessageKind::parse("nope"), None);
+        assert_eq!(MessageKind::parse(""), None);
+    }
+
+    /// **The verbatim door stays narrow** (EYES E8): its production callers,
+    /// across the whole source tree, are exactly the ones named here. A new way
+    /// to store unredacted text then has to be a deliberate edit of this list.
+    /// The production half of a file is everything before its `mod tests`.
+    #[test]
+    fn the_verbatim_door_has_only_its_named_production_callers() {
+        fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let src = std::fs::read_to_string(&path).unwrap();
+                    let prod = match src.find("\n#[cfg(test)]\nmod tests") {
+                        Some(at) => &src[..at],
+                        None => &src[..],
+                    };
+                    let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                    for line in prod.lines() {
+                        let code = line.trim_start();
+                        if !code.starts_with("//") && code.contains(".post_to_channel_verbatim(") {
+                            out.push(rel.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut callers = Vec::new();
+        walk(&root, &root, &mut callers);
+        callers.sort();
+        assert_eq!(callers, ["core/broadcast.rs"]);
     }
 }
