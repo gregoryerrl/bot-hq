@@ -379,10 +379,16 @@ impl SignalingBridge {
     ) -> Option<i64> {
         let storage = self.storage.lock().await.clone()?;
         let rows = storage.tray_entries_for_session(session_id).await.ok()?;
-        let latest = rows
-            .into_iter()
-            .rev()
-            .find(|q| q.agent == agent && q.status == "pending" && q.prompt == prompt)?;
+        // F10: compared REDACTED on both sides. The stored prompt is redacted at
+        // the park (and a row parked on 1.0.7 holds it raw), while `prompt` is
+        // the raw re-ask — a raw compare would never match a question that
+        // carries a secret, and the G2 duplicates would come back (EYES E2).
+        let prompt = crate::policy::secret_scan::redact(prompt);
+        let latest = rows.into_iter().rev().find(|q| {
+            q.agent == agent
+                && q.status == "pending"
+                && crate::policy::secret_scan::redact(&q.prompt) == prompt
+        })?;
         let stale_choice_id = latest.choice_id.clone();
         let stale_internal_id = latest.id;
         let stale_was_gate =
@@ -435,6 +441,18 @@ impl SignalingBridge {
         // item, audited, latching nothing. Ignored when `approval` is None.
         gate: bool,
     ) -> Result<String> {
+        // **F10: the question and its options are redacted ONCE, here** — every
+        // park goes through this function (questions, requests, gates,
+        // supersedes), so the in-memory park, the pending event and the stored
+        // row hold the same strings, and a pick of a listed option compares
+        // equal to the option it came from. A clean string comes back untouched,
+        // so a gate's menu stays byte-identical to `GATE_OPTIONS_JSON`. The
+        // command itself (`command_text`) is not redacted: it runs as written.
+        let question = crate::policy::secret_scan::redact_string(question);
+        let options: Vec<String> = options
+            .into_iter()
+            .map(crate::policy::secret_scan::redact_string)
+            .collect();
         let choice_id = Uuid::new_v4().to_string();
         // Persist the command for an action_gate (ToolBlocklist) approval so it
         // can still execute on approve after the in-memory oneshot is gone
@@ -4535,5 +4553,117 @@ mod tests {
             .resolve_choice(&fresh.choice_id, "x".into())
             .await
             .unwrap();
+    }
+
+    // ---- F10: tray questions redacted at the park --------------------------
+
+    fn f10_token() -> String {
+        format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF")
+    }
+
+    const F10_GH: &str = "[redacted: a GitHub access token]";
+
+    /// F10 (plan C4a): a question and its options are redacted ONCE, at the
+    /// park, so the in-memory park, the pending event and the stored row agree
+    /// — which is what lets a pick of a listed option compare equal to it. A
+    /// gate's constant menu stays byte-identical to `GATE_OPTIONS_JSON`.
+    #[tokio::test]
+    async fn a_parked_question_is_redacted_in_memory_in_the_event_and_in_the_row() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        let token = f10_token();
+        let mut sub = bridge.subscribe();
+        bridge
+            .ask_user_choice(
+                "s1".into(),
+                "hands".into(),
+                format!("Push with {token}?"),
+                vec![format!("Yes, {token}"), "No".into()],
+            )
+            .await
+            .unwrap();
+        let event = loop {
+            match sub.recv().await.unwrap() {
+                SignalingEvent::PendingChoice(p) => break p,
+                _ => continue,
+            }
+        };
+        assert_eq!(event.question, format!("Push with {F10_GH}?"));
+        assert_eq!(event.options, vec![format!("Yes, {F10_GH}"), "No".to_string()]);
+        let parked = bridge
+            .pending
+            .lock()
+            .await
+            .get(&event.choice_id)
+            .map(|p| (p.choice.question.clone(), p.choice.options.clone()))
+            .expect("parked in memory");
+        assert_eq!(parked, (event.question.clone(), event.options.clone()));
+        let row = storage.get_tray_entry(&event.choice_id).await.unwrap().unwrap();
+        assert_eq!(row.prompt, event.question);
+        assert_eq!(row.options_json, Some(serde_json::to_string(&event.options).unwrap()));
+
+        let ctx = ApprovalContext {
+            kind: crate::policy::ViolationKind::GenericApproval,
+            action: "deploy".into(),
+            detail: None,
+            command: None,
+        };
+        bridge
+            .request_approval_parked(
+                "s1".into(),
+                "hands".into(),
+                format!("Deploy with {token}?"),
+                vec!["Approve".into(), "Reject".into()],
+                ctx,
+            )
+            .await
+            .unwrap();
+        let rows = storage.tray_entries_for_session("s1").await.unwrap();
+        let request = rows.iter().find(|r| r.prompt.starts_with("Deploy")).unwrap();
+        assert_eq!(request.prompt, format!("Deploy with {F10_GH}?"));
+        // The Approve/Reject menu passes the park's redaction byte-identical
+        // (a request row stores no options; the storage test pins the stored
+        // gate menu against `GATE_OPTIONS_JSON`).
+        let menu = bridge.pending.lock().await.get(&request.choice_id).map(|p| p.choice.options.clone());
+        assert_eq!(menu, Some(vec!["Approve".to_string(), "Reject".to_string()]));
+    }
+
+    /// F10 (EYES E2): a re-ask that carries a secret still supersedes the first
+    /// ask — the G2 dedupe compares REDACTED prompts — and so does a re-ask of
+    /// a question a 1.0.7 build stored raw.
+    #[tokio::test]
+    async fn a_re_ask_carrying_a_secret_supersedes_the_first_even_on_a_raw_row() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        let question = format!("Push with {}?", f10_token());
+        let opts = vec!["Yes".to_string(), "No".to_string()];
+        async fn statuses(storage: &crate::storage::Storage) -> Vec<String> {
+            sqlx::query_scalar("SELECT status FROM session_tray ORDER BY id")
+                .fetch_all(storage.pool())
+                .await
+                .unwrap()
+        }
+        for _ in 0..2 {
+            bridge
+                .ask_user_choice("s1".into(), "hands".into(), question.clone(), opts.clone())
+                .await
+                .unwrap();
+        }
+        assert_eq!(statuses(&storage).await, ["superseded", "pending"]);
+        // The pending row as a 1.0.7 build stored it: the prompt raw.
+        sqlx::query("UPDATE session_tray SET prompt = ? WHERE status = 'pending'")
+            .bind(&question)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        bridge
+            .ask_user_choice("s1".into(), "hands".into(), question.clone(), opts)
+            .await
+            .unwrap();
+        assert_eq!(statuses(&storage).await, ["superseded", "superseded", "pending"]);
     }
 }

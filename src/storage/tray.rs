@@ -94,9 +94,20 @@ impl Storage {
         supersedes_id: Option<i64>,
         command_text: Option<&str>,
     ) -> Result<i64> {
+        // F10: the prompt and every option are redacted before they are stored
+        // — each option BEFORE the JSON is built, never the JSON text (EYES
+        // 8eea5190). The bridge's park already redacted them so its in-memory
+        // copy agrees; this is the backstop for every other way into the tray
+        // (the close card). `command_text` is stored as written: it runs as
+        // written, and five queries match it exactly.
+        let prompt = crate::policy::secret_scan::redact(prompt);
         let options_json = options
             .filter(|_| matches!(kind, QuestionKind::Choice | QuestionKind::Approval | QuestionKind::Close))
-            .map(|opts| serde_json::to_string(opts).unwrap_or_else(|_| "[]".into()));
+            .map(|opts| {
+                let opts: Vec<std::borrow::Cow<'_, str>> =
+                    opts.iter().map(|o| crate::policy::secret_scan::redact(o)).collect();
+                serde_json::to_string(&opts).unwrap_or_else(|_| "[]".into())
+            });
         let res = sqlx::query(
             "INSERT INTO session_tray \
                 (session_id, choice_id, agent, kind, prompt, options_json, supersedes_id, command_text, asked_at) \
@@ -106,7 +117,7 @@ impl Storage {
         .bind(choice_id)
         .bind(agent)
         .bind(kind.as_str())
-        .bind(prompt)
+        .bind(prompt.as_ref())
         .bind(options_json)
         .bind(supersedes_id)
         .bind(command_text)
@@ -227,6 +238,9 @@ impl Storage {
         prompt: &str,
         command: &str,
     ) -> Result<i64> {
+        // F10: the card's prompt is redacted like every tray prompt; the
+        // command is stored as written (see `insert_tray_entry`).
+        let prompt = crate::policy::secret_scan::redact(prompt);
         let res = sqlx::query(
             "INSERT INTO session_tray \
                 (session_id, choice_id, agent, kind, prompt, options_json, command_text, asked_at, status) \
@@ -236,7 +250,7 @@ impl Storage {
         .bind(choice_id)
         .bind(agent)
         .bind(QuestionKind::Approval.as_str())
-        .bind(prompt)
+        .bind(prompt.as_ref())
         .bind(GATE_OPTIONS_JSON)
         .bind(command)
         .bind(now_utc())
@@ -885,5 +899,38 @@ mod tests {
         let queued = s.queued_gates_for_session("s1").await.unwrap();
         assert_eq!(queued.len(), 1, "the queued row survived the GC");
         assert_eq!(queued[0].choice_id, "c-queued");
+    }
+
+    /// F10: the store redacts a tray row's prompt and each option (before the
+    /// options JSON is built) on every way into the tray — including the close
+    /// card, which never passes the bridge's park — while a gate's menu and the
+    /// command are stored exactly as written.
+    #[tokio::test]
+    async fn a_tray_rows_prompt_and_options_are_redacted_but_its_command_is_not() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-1", "t", None).await.unwrap();
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let marker = "[redacted: a GitHub access token]";
+        let cmd = format!("curl -H 'Authorization: Bearer {token}' https://api.example.com");
+        let gate = ["Approve".to_string(), "Reject".to_string()];
+        s.insert_tray_entry("s-1", "c-1", "hands", QuestionKind::Approval, &format!("Run with {token}?"), Some(&gate), None, Some(&cmd))
+            .await
+            .unwrap();
+        let menu = [format!("use {token}"), "skip".to_string()];
+        s.insert_tray_entry("s-1", "c-2", "hands", QuestionKind::Close, "Close?", Some(&menu), None, None)
+            .await
+            .unwrap();
+        s.insert_queued_gate("s-1", "q-1", "hands", &format!("Publish with {token}?"), &cmd)
+            .await
+            .unwrap();
+        let row = s.get_tray_entry("c-1").await.unwrap().unwrap();
+        assert_eq!(row.prompt, format!("Run with {marker}?"));
+        assert_eq!(row.options_json.as_deref(), Some(GATE_OPTIONS_JSON), "the gate menu is untouched");
+        assert_eq!(row.command_text.as_deref(), Some(cmd.as_str()), "the command runs as written");
+        let row = s.get_tray_entry("c-2").await.unwrap().unwrap();
+        assert_eq!(row.options_json, Some(format!(r#"["use {marker}","skip"]"#)));
+        let row = s.get_tray_entry("q-1").await.unwrap().unwrap();
+        assert_eq!(row.prompt, format!("Publish with {marker}?"));
+        assert_eq!(row.command_text.as_deref(), Some(cmd.as_str()));
     }
 }

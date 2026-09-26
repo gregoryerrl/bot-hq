@@ -1874,9 +1874,19 @@ mod tests {
         let (bridge, storage) = f10_bridge(data.path(), None).await;
         let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
         let opts = vec![format!("Use {token}"), "Skip".to_string()];
+        let question = format!("Push with {token}?");
         for cid in ["cid-typed", "cid-listed"] {
             storage
-                .insert_tray_entry("s1", cid, "hands", crate::storage::QuestionKind::Choice, &format!("Push with {token}?"), Some(&opts), None, None)
+                .insert_tray_entry("s1", cid, "hands", crate::storage::QuestionKind::Choice, &question, Some(&opts), None, None)
+                .await
+                .unwrap();
+            // The store now redacts both at insert, so the 1.0.7 shape — raw
+            // question and options — is written back by hand.
+            sqlx::query("UPDATE session_tray SET prompt = ?, options_json = ? WHERE choice_id = ?")
+                .bind(&question)
+                .bind(serde_json::to_string(&opts).unwrap())
+                .bind(cid)
+                .execute(storage.pool())
                 .await
                 .unwrap();
         }
