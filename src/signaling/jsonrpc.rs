@@ -1622,8 +1622,12 @@ async fn call_tool(
         "cl_register_folder_description" => {
             let project = arg_required_str(&args, "project")?;
             let folder_path = arg_required_str(&args, "folder_path")?;
-            let description = arg_required_str(&args, "description")?;
-            let tags = arg_opt_str(&args, "tags");
+            // F10: an agent's folder description (and tags) is redacted HERE,
+            // at the agent's tool: the bridge function below is shared with the
+            // Context Library tab (`tauri_cmd::cl::cl_set_folder_description`),
+            // which keeps what the user types as written.
+            let description = crate::policy::secret_scan::redact_string(arg_required_str(&args, "description")?);
+            let tags = arg_opt_str(&args, "tags").map(crate::policy::secret_scan::redact_string);
             bridge
                 .cl_register_folder_description(
                     &project,
@@ -4306,4 +4310,71 @@ mod tests {
         assert_eq!(peer_shaped_reason_pair("a four-eyes check is pending on your side"), None);
     }
 
+
+    /// F10 (plan C4h, the user's pick `c2ca371d`): what an AGENT writes to the
+    /// Context Library through its tools is redacted — a replace, a
+    /// `content_path` body, an append (only the new text), an edit (only the
+    /// replacement) and a folder description — while what the user typed into
+    /// the file stays as written, and the Context Library tab's own folder
+    /// editor (the shared bridge function) keeps the user's text.
+    #[tokio::test]
+    async fn an_agents_cl_writes_are_redacted_and_the_users_text_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cl = tmp.path().join("library/projects/bot-hq");
+        std::fs::create_dir_all(&cl).unwrap();
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let marker = "[redacted: a GitHub access token]";
+        // What the user typed into a CL file, as the Library tab writes it.
+        let typed = format!("user token: {token}\n");
+        std::fs::write(cl.join("notes.md"), &typed).unwrap();
+        let body_file = tmp.path().join("body.md");
+        std::fs::write(&body_file, format!("from a path: {token}\n")).unwrap();
+
+        let bridge = SignalingBridge::new_with(None, Some(tmp.path().to_path_buf()));
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.upsert_project("bot-hq", "bot-hq", None, None, None).await.unwrap();
+        storage.create_session("s1", "t", None).await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        let call = |name: &str, arguments: Value| {
+            let bridge = bridge.clone();
+            let request = req("tools/call", json!({"name": name, "arguments": arguments}), 1);
+            async move {
+                let res = dispatch(request, &caller(), &bridge).await.unwrap().unwrap();
+                let v = serde_json::to_value(&res).unwrap();
+                assert!(v["result"]["isError"] != json!(true), "{v}");
+            }
+        };
+
+        call("cl_write_file", json!({"project": "bot-hq", "file_path": "new.md", "content": format!("key {token}\n")})).await;
+        assert_eq!(std::fs::read_to_string(cl.join("new.md")).unwrap(), format!("key {marker}\n"));
+
+        call("cl_write_file", json!({"project": "bot-hq", "file_path": "path.md", "content_path": body_file.to_str().unwrap()})).await;
+        assert_eq!(std::fs::read_to_string(cl.join("path.md")).unwrap(), format!("from a path: {marker}\n"));
+
+        call("cl_write_file", json!({"project": "bot-hq", "file_path": "notes.md", "mode": "append", "content": format!("agent adds {token}\n")})).await;
+        let notes = std::fs::read_to_string(cl.join("notes.md")).unwrap();
+        assert!(notes.starts_with(&typed), "the user's text stays as written: {notes}");
+        assert!(notes.contains(&format!("agent adds {marker}")), "{notes}");
+
+        // An edit matches the file RAW and redacts only its replacement — so
+        // carrying the user's secret through an edit rewrites it (EYES P6).
+        call("cl_edit_file", json!({"project": "bot-hq", "file_path": "notes.md", "old_string": format!("user token: {token}"), "new_string": format!("user token: {token} (rotated)")})).await;
+        let notes = std::fs::read_to_string(cl.join("notes.md")).unwrap();
+        assert!(notes.starts_with(&format!("user token: {marker} (rotated)\n")), "{notes}");
+        assert!(!notes.contains(&token), "{notes}");
+
+        call("cl_register_folder_description", json!({"project": "bot-hq", "folder_path": "", "description": format!("keys live in {token}"), "tags": token.clone()})).await;
+        let folders = storage.cl_folder_search(Some("bot-hq"), None).await.unwrap();
+        assert_eq!(folders[0].description, format!("keys live in {marker}"));
+        assert_eq!(folders[0].tags.as_deref(), Some(marker));
+
+        // The Library tab's folder editor calls the bridge function directly:
+        // what the user types there is kept.
+        bridge
+            .cl_register_folder_description("bot-hq", "", &format!("my key {token}"), None)
+            .await
+            .unwrap();
+        let folders = storage.cl_folder_search(Some("bot-hq"), None).await.unwrap();
+        assert_eq!(folders[0].description, format!("my key {token}"));
+    }
 }

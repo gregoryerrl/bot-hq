@@ -63,6 +63,13 @@ impl SignalingBridge {
         append: bool,
         confirm_shrink: bool,
     ) -> Result<String> {
+        // **F10: what an AGENT writes to the CL is redacted** (the user's pick
+        // `c2ca371d`), so a secret an agent writes never reaches the file, the
+        // library's git history or its remote. On an append only the new text
+        // is redacted — never what the file already holds. The Context Library
+        // tab saves through `tauri_cmd::cl::cl_write_file`, not here, and stays
+        // as the user typed it.
+        let content = crate::policy::secret_scan::redact_string(content);
         let op = if append {
             WriteOp::Append(content)
         } else {
@@ -99,6 +106,11 @@ impl SignalingBridge {
         if expect_occurrences == 0 {
             anyhow::bail!("expect_occurrences must be at least 1");
         }
+        // F10: only the REPLACEMENT is redacted — `old_string` must match the
+        // file as it is, secrets included. So an edit that merely carries a
+        // user-typed secret through (raw in `old_string`, repeated in
+        // `new_string`) rewrites it to its `[redacted: …]` marker.
+        let new_string = crate::policy::secret_scan::redact_string(new_string);
         let op = WriteOp::Edit {
             old: old_string,
             new: new_string,
