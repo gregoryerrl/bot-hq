@@ -69,14 +69,19 @@ impl SignalingBridge {
         // is redacted — never what the file already holds. The Context Library
         // tab saves through `tauri_cmd::cl::cl_write_file`, not here, and stays
         // as the user typed it.
-        let content = crate::policy::secret_scan::redact_string(content);
+        let (content, redacted) = crate::policy::secret_scan::redact_counting(content);
         let op = if append {
             WriteOp::Append(content)
         } else {
             WriteOp::Replace(content)
         };
-        self.write_cl(session_id, agent, project, file_path, op, confirm_shrink)
-            .await
+        let mut msg = self
+            .write_cl(session_id, agent, project, file_path, op, confirm_shrink)
+            .await?;
+        if redacted > 0 {
+            msg.push_str(&crate::policy::secret_scan::redaction_note(redacted));
+        }
+        Ok(msg)
     }
 
     /// Replace `expect_occurrences` occurrences of `old_string` with
@@ -110,14 +115,19 @@ impl SignalingBridge {
         // file as it is, secrets included. So an edit that merely carries a
         // user-typed secret through (raw in `old_string`, repeated in
         // `new_string`) rewrites it to its `[redacted: …]` marker.
-        let new_string = crate::policy::secret_scan::redact_string(new_string);
+        let (new_string, redacted) = crate::policy::secret_scan::redact_counting(new_string);
         let op = WriteOp::Edit {
             old: old_string,
             new: new_string,
             expect: expect_occurrences,
         };
-        self.write_cl(session_id, agent, project, file_path, op, confirm_shrink)
-            .await
+        let mut msg = self
+            .write_cl(session_id, agent, project, file_path, op, confirm_shrink)
+            .await?;
+        if redacted > 0 {
+            msg.push_str(&crate::policy::secret_scan::redaction_note(redacted));
+        }
+        Ok(msg)
     }
 
     /// The one guarded write path both tools share.
@@ -252,9 +262,22 @@ impl SignalingBridge {
                             "found {found} occurrence(s) of old_string in '{fp}', expected \
                              {expect} — {}",
                             if found == 0 {
-                                "check the exact text (whitespace and punctuation included); \
-                                 nothing was changed"
-                                    .to_string()
+                                // F10: an agent's earlier write stored a secret
+                                // as its marker, so an old_string quoting the
+                                // secret can never match — say so, rather than
+                                // "check the exact text", which the agent did.
+                                match crate::policy::secret_scan::redact(old.as_str()) {
+                                    std::borrow::Cow::Owned(marked) if existing.contains(marked.as_str()) => {
+                                        "old_string quotes a secret, but the file holds its \
+                                         `[redacted: …]` marker there (bot-hq redacts secrets in \
+                                         what agents write) — match the marker text instead; \
+                                         nothing was changed"
+                                            .to_string()
+                                    }
+                                    _ => "check the exact text (whitespace and punctuation \
+                                          included); nothing was changed"
+                                        .to_string(),
+                                }
                             } else {
                                 format!(
                                     "widen old_string until it is unique, or pass \

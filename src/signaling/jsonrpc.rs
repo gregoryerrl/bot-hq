@@ -562,6 +562,19 @@ async fn refuse_gated_tool(
     ToolCallResult::error(refusal)
 }
 
+/// The `session_doc_write` reply: `{id, slug}`, plus a `note` when the body
+/// was stored with `redacted` secrets replaced by markers (F10).
+fn doc_write_reply(id: i64, slug: &str, redacted: usize) -> String {
+    if redacted == 0 {
+        return json!({"id": id, "slug": slug}).to_string();
+    }
+    let note = format!(
+        "stored{}",
+        crate::policy::secret_scan::redaction_note(redacted)
+    );
+    json!({"id": id, "slug": slug, "note": note}).to_string()
+}
+
 async fn call_tool(
     name: &str,
     args: Value,
@@ -1215,15 +1228,17 @@ async fn call_tool(
             // extra registrant defuses nothing, while this redirect answers a
             // different question — who is the phase-doc AUTHOR. See
             // `ResolvedCapabilities::reviewer_shaped` for the full argument.
+            // F10: the bridge redacts the body before it is stored; the reply
+            // says so, so an agent reading its doc back is not surprised by a
+            // marker where it wrote a secret.
+            let redacted = crate::policy::secret_scan::find_secrets(&body).len();
             match (caller.capabilities.reviewer_shaped(), phase.as_deref()) {
                 (true, Some(p)) => {
                     let (id, eyes_slug) = bridge
                         .session_doc_write_eyes(&caller.session_id, p, &body, &caller.agent, append)
                         .await
                         .map_err(internal_err_no_prefix)?;
-                    Ok(ToolCallResult::text(
-                        json!({"id": id, "slug": eyes_slug}).to_string(),
-                    ))
+                    Ok(ToolCallResult::text(doc_write_reply(id, &eyes_slug, redacted)))
                 }
                 _ => {
                     let id = bridge
@@ -1236,9 +1251,7 @@ async fn call_tool(
                         )
                         .await
                         .map_err(internal_err_no_prefix)?;
-                    Ok(ToolCallResult::text(
-                        json!({"id": id, "slug": slug}).to_string(),
-                    ))
+                    Ok(ToolCallResult::text(doc_write_reply(id, &slug, redacted)))
                 }
             }
         }
@@ -4376,5 +4389,61 @@ mod tests {
             .unwrap();
         let folders = storage.cl_folder_search(Some("bot-hq"), None).await.unwrap();
         assert_eq!(folders[0].description, format!("my key {token}"));
+    }
+
+    /// F10: a write that stored an agent's secret as a marker SAYS so in its
+    /// reply — a CL write and a session doc — and a clean write does not. An
+    /// edit whose `old_string` quotes a secret the file holds only as its
+    /// marker is refused with that reason instead of "check the exact text",
+    /// which the agent did.
+    #[tokio::test]
+    async fn a_redacting_write_says_so_and_an_edit_quoting_the_secret_names_the_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("library/projects/bot-hq")).unwrap();
+        let bridge = SignalingBridge::new_with(None, Some(tmp.path().to_path_buf()));
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.upsert_project("bot-hq", "bot-hq", None, None, None).await.unwrap();
+        storage.create_session("s1", "t", None).await.unwrap();
+        bridge.set_storage(storage).await;
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let call = |name: &str, arguments: Value| {
+            let bridge = bridge.clone();
+            let request = req("tools/call", json!({"name": name, "arguments": arguments}), 1);
+            async move {
+                // A refusal surfaces either as an error RESULT or as a JSON-RPC
+                // error (`internal_err_no_prefix`); both are "refused".
+                match dispatch(request, &caller(), &bridge).await {
+                    Ok(res) => {
+                        let v = serde_json::to_value(res.unwrap()).unwrap();
+                        (
+                            v["result"]["isError"] == json!(true),
+                            v["result"]["content"][0]["text"].as_str().unwrap_or("").to_string(),
+                        )
+                    }
+                    Err(e) => (true, e.message),
+                }
+            }
+        };
+        let note = "secret-shaped string(s) in it were stored as `[redacted: …]` markers";
+
+        let body = format!("key {token}\n{}\n", "a line of context that the edit keeps. ".repeat(4));
+        let (err, reply) = call("cl_write_file", json!({"project": "bot-hq", "file_path": "a.md", "content": body})).await;
+        assert!(!err && reply.contains(&format!("1 {note}")), "{reply}");
+        let (err, reply) = call("cl_write_file", json!({"project": "bot-hq", "file_path": "b.md", "content": "clean\n"})).await;
+        assert!(!err && !reply.contains("redacted"), "{reply}");
+
+        let (err, reply) = call("cl_edit_file", json!({"project": "bot-hq", "file_path": "a.md", "old_string": format!("key {token}"), "new_string": "key rotated"})).await;
+        assert!(err, "the raw secret is not in the file: {reply}");
+        assert!(reply.contains("holds its `[redacted: …]` marker"), "{reply}");
+        let (err, reply) = call("cl_edit_file", json!({"project": "bot-hq", "file_path": "a.md", "old_string": "key [redacted: a GitHub access token]", "new_string": "key rotated"})).await;
+        assert!(!err && !reply.contains("redacted"), "matching the marker works: {reply}");
+
+        let (err, reply) = call("session_doc_write", json!({"slug": "notes", "body": format!("got {token}")})).await;
+        assert!(!err, "{reply}");
+        let v: Value = serde_json::from_str(&reply).unwrap();
+        assert!(v["note"].as_str().is_some_and(|n| n.contains(note)), "{reply}");
+        let (_, reply) = call("session_doc_write", json!({"slug": "clean", "body": "nothing here"})).await;
+        let v: Value = serde_json::from_str(&reply).unwrap();
+        assert!(v.get("note").is_none(), "{reply}");
     }
 }

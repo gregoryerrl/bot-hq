@@ -165,6 +165,25 @@ pub fn redact_string(text: String) -> String {
     redacted.unwrap_or(text)
 }
 
+/// [`redact_string`], plus how many secrets it replaced — for a writer that
+/// tells the agent its text was stored with markers in it.
+pub fn redact_counting(text: String) -> (String, usize) {
+    match find_secrets(&text).len() {
+        0 => (text, 0),
+        n => (redact_string(text), n),
+    }
+}
+
+/// What a write's reply appends when [`redact_counting`] replaced `n > 0`
+/// secrets, so the agent knows the stored text holds markers where it wrote
+/// secrets — and matches the marker, not the secret, if it edits it later.
+pub fn redaction_note(n: usize) -> String {
+    format!(
+        " — {n} secret-shaped string(s) in it were stored as `[redacted: …]` markers \
+         (bot-hq redacts secrets in what agents write), so it holds the markers, not the secrets"
+    )
+}
+
 /// The first secret in `body`, if any — what a push refusal names.
 fn content_reason(body: &str) -> Option<&'static str> {
     find_secrets(body).first().map(|span| span.reason)
@@ -660,5 +679,16 @@ mod tests {
         assert!(msg.contains("projects/acme/prod.env"));
         assert!(msg.contains("notes.md"));
         assert!(msg.contains("2 credential-shaped file(s)"));
+    }
+
+    /// `redact_counting` reports how many secrets it replaced, and leaves a
+    /// clean string as it was.
+    #[test]
+    fn redact_counting_counts_what_it_replaced() {
+        let gh = fake("ghp_", "1234567890abcdefghijABCDEF");
+        assert_eq!(redact_counting("clean".to_string()), ("clean".to_string(), 0));
+        let (out, n) = redact_counting(format!("{gh} and {gh}"));
+        assert_eq!(n, 2);
+        assert_eq!(out, "[redacted: a GitHub access token] and [redacted: a GitHub access token]");
     }
 }
