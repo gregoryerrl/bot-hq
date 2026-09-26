@@ -661,7 +661,7 @@ pub async fn pump_agent(
     let mut error_halts: Vec<std::time::Instant> = Vec::new();
     let mut last_clean_turn: Option<std::time::Instant> = None;
     // Did THIS turn already post a CLI notice (`AgentEvent::Notice`)? Then the
-    // discarded-turn row must not quote the same line again (EYES, C17 nit).
+    // errored-turn row must not quote the same line again (EYES, C17 nit).
     let mut turn_had_notice = false;
     // B5: the epoch of the turn in flight, snapshotted from `cfg.turn_epoch` on
     // this turn's FIRST event and cleared when it completes. See the field's doc
@@ -1291,8 +1291,15 @@ pub async fn pump_agent(
                         // error text persisted as if the agent had said it
                         // ("Request timed out", twice, 09-03 09:54, with the
                         // user's Resume instruction swallowed). One row says the
-                        // turn produced nothing and what was lost with it; the
+                        // turn ended in an error and the ring moved on; the
                         // second strike's halt below still carries the reason.
+                        //
+                        // **It must not say the turn's text was lost.** Every
+                        // chunk is a channel row before it is buffered (the
+                        // `Text` arm above), so what the turn wrote IS in the
+                        // chat. The old wording said it "did not reach the
+                        // channel" beside the very line it called lost
+                        // (s-b175d9c0, row 121360 vs 121379).
                         if consecutive_errored_turns < 2 {
                             if crate::core::post_system_notice(
                                 &storage,
@@ -1301,23 +1308,21 @@ pub async fn pump_agent(
                                 MessageKind::SystemNotice,
                                 if turn_had_notice {
                                     // The error itself is the notice just above
-                                    // (EYES, C17 nit): say what the discard means,
-                                    // don't quote it twice.
+                                    // (EYES, C17 nit): don't quote it twice.
                                     format!(
-                                        "[System: {}'s turn ended in that error and was discarded — \
-                                         any work it had in progress did not reach the channel. \
-                                         The ring moved on; whatever it was asked on this turn \
-                                         still stands, and a second error in a row halts the \
-                                         session.]",
+                                        "[System: {}'s turn ended in that error. Anything it wrote \
+                                         before the error is above. The ring moved on; whatever it \
+                                         was asked on this turn still stands, and a second error in \
+                                         a row halts the session.]",
                                         cfg.slug
                                     )
                                 } else {
                                     format!(
-                                        "[System: {}'s turn ended in an error and was discarded — \
-                                         nothing it may have been doing reached the channel (last \
-                                         line: \"{last_line}\"). The ring moved on; whatever it was \
-                                         asked on this turn still stands, and a second error in a \
-                                         row halts the session.]",
+                                        "[System: {}'s turn ended in an error (last line: \
+                                         \"{last_line}\"). Anything it wrote before the error is \
+                                         above. The ring moved on; whatever it was asked on this \
+                                         turn still stands, and a second error in a row halts the \
+                                         session.]",
                                         cfg.slug
                                     )
                                 },
@@ -1326,7 +1331,7 @@ pub async fn pump_agent(
                             .await
                             .is_none()
                             {
-                                warn!(agent = %cfg.slug, "the discarded-turn notice was not posted");
+                                warn!(agent = %cfg.slug, "the errored-turn notice was not posted");
                             }
                         }
                     }
@@ -2226,15 +2231,23 @@ mod tests {
             "an errored turn must still report its end, or the ring never steps past it"
         );
         // Persisted for UI visibility even though not forwarded — AND (F11)
-        // followed by one system row saying the turn was discarded, so the
-        // error text no longer reads as the agent's only word on the matter
-        // and the loss is visible to the user and the peer.
+        // followed by one system row saying the turn ended in an error, so the
+        // error text no longer reads as the agent's only word on the matter.
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
-        assert_eq!(msgs.len(), 2, "the error text and the discarded-turn notice: {msgs:?}");
+        assert_eq!(msgs.len(), 2, "the error text and the errored-turn notice: {msgs:?}");
+        assert_eq!(msgs[0].kind, "text", "what the turn wrote is a channel row");
         assert!(msgs[0].content.contains("API Error"));
         assert_eq!(msgs[1].kind, "system_notice");
-        assert!(msgs[1].content.contains("eyes's turn ended in an error and was discarded"), "got: {}", msgs[1].content);
+        assert!(msgs[1].content.contains("eyes's turn ended in an error (last line:"), "got: {}", msgs[1].content);
         assert!(msgs[1].content.contains("unknown variant `system`"), "the notice carries the last line");
+        // s-b175d9c0: the notice said the turn's text "did not reach the
+        // channel" beside the row holding it. The row above is the proof.
+        assert!(
+            !msgs[1].content.contains("reach") && !msgs[1].content.contains("discarded"),
+            "the notice must not say the text was lost: {}",
+            msgs[1].content
+        );
+        assert!(msgs[1].content.contains("Anything it wrote before the error is above"));
     }
 
     /// Feedback #44/#45, the wire: a turn's FIRST event starts the long-turn
@@ -2294,9 +2307,14 @@ mod tests {
             !msgs.iter().any(|m| m.kind == "text" && m.content.contains("API Error")),
             "the error is not stored as the participant's speech: {msgs:?}"
         );
-        // EYES' C17 nit: the discard row does not quote the notice's line again.
-        let discard = msgs.iter().find(|m| m.content.contains("was discarded")).expect("discard row");
-        assert!(!discard.content.contains("could not be parsed"), "no duplicate quote: {}", discard.content);
+        // EYES' C17 nit: the errored-turn row does not quote the notice's line
+        // again — nor claim the turn's text was lost.
+        let ended = msgs
+            .iter()
+            .find(|m| m.content.contains("eyes's turn ended in that error"))
+            .expect("errored-turn row");
+        assert!(!ended.content.contains("could not be parsed"), "no duplicate quote: {}", ended.content);
+        assert!(!ended.content.contains("reach"), "no claim the text was lost: {}", ended.content);
     }
 
     /// Feedback #17/#18: advice follows the error's class — only a context
