@@ -53,6 +53,9 @@ migrations.
   `<Link>`/`useNavigate`, and constructor injection in `deserializeErrors`.
   The app renders nothing on a server; `npm audit` now reports no runtime
   vulnerabilities.
+- **The telemetry worker's deploy tooling** (wrangler, sharp and, through
+  wrangler, miniflare) moves past three high advisories (Dependabot #6). The
+  worker has development dependencies only, so nothing deployed changes.
 
 ### Deferred
 
