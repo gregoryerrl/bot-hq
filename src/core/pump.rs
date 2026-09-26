@@ -1479,7 +1479,15 @@ pub async fn pump_agent(
                 // Opened by the next event, from whatever epoch is live then —
                 // unless the cell has not moved, which means no turn was handed
                 // out and the event is a straggler (rc3 D24).
-                last_completed_epoch = turn_epoch;
+                //
+                // **A stray turn leaves the last epoch alone.** A turn
+                // claude-code starts on its own (a background task's
+                // notification) completes with `turn_epoch` still `None`, and
+                // writing that `None` here switched the straggler check off: a
+                // SECOND stray turn in a row bound the retired epoch, and the
+                // self-halt that ended it read as an error (s-b175d9c0,
+                // 2026-09-25 07:19–07:20Z).
+                last_completed_epoch = turn_epoch.or(last_completed_epoch);
                 turn_epoch = None;
                 // The clock for the NEXT turn's "how long until it spoke"
                 // starts here — the ring hands the next turn out within
@@ -2135,6 +2143,49 @@ mod tests {
             "the second turn completes on the epoch the RING handed it, not on the \
              one a straggler bound it to"
         );
+    }
+
+    /// **Two stray turns in a row both stay unbound** (s-b175d9c0, 2026-09-25).
+    /// A turn claude-code starts by itself — a background task's notification —
+    /// arrives with the cell unmoved since this pump's last completion. The
+    /// first one completed unbound and wiped `last_completed_epoch`, so the
+    /// second opened on the retired epoch and carried it through three of the
+    /// ring's deals.
+    ///
+    /// Put `last_completed_epoch = turn_epoch;` back and the second stray's
+    /// assertion reads 15.
+    #[tokio::test(flavor = "current_thread")]
+    async fn two_stray_turns_in_a_row_both_stay_unbound() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(15));
+        cfg.turn_epoch = Some(Arc::clone(&cell));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        // The dealt turn, on epoch 15.
+        ev_tx.send(AgentEvent::Text("dealt".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 15);
+
+        // Two turns nobody dealt, back to back — the cell stays at 15.
+        for word in ["stray one", "stray two"] {
+            ev_tx.send(AgentEvent::Text(word.into())).await.unwrap();
+            ev_tx.send(turn_end()).await.unwrap();
+            assert_eq!(
+                next_epoch(&mut ring_rx).await,
+                0,
+                "{word:?} completes unbound: no turn was handed out"
+            );
+        }
+
+        // Only now does the ring hand out the next turn.
+        cell.store(20, std::sync::atomic::Ordering::Release);
+        ev_tx.send(AgentEvent::Text("turn two".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 20);
     }
 
     #[tokio::test(flavor = "current_thread")]
