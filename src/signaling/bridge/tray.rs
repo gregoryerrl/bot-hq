@@ -1544,6 +1544,12 @@ impl SignalingBridge {
         halt_ring: bool,
         wake_at: Option<String>,
     ) {
+        // F10: a halt reason is agent (or host) text — a recap often quotes a
+        // command — so it is redacted once, here, and the stored slot and the
+        // banner event carry the same string. Every halt path ends here:
+        // `mark_awaiting_user`, `halt`, the temporary halt, the ring's own halt
+        // and `request_phase_advance`.
+        let text = crate::policy::secret_scan::redact_string(text);
         // **A halt is SESSION state, not a tray row (rc3 D35).** The user:
         // "halt should be complete different, and not even remotely close to
         // parkable items in tray. It is now a session channel feature." One
@@ -4650,6 +4656,33 @@ mod tests {
         assert_eq!(event.choice_id, card);
         assert!(event.question.contains(&format!("2 commits; the token {F10_GH} was rotated")), "{}", event.question);
         assert_eq!(storage.get_tray_entry(&card).await.unwrap().unwrap().prompt, event.question);
+    }
+
+    /// F10 (plan C4e): a halt reason is redacted once, where every halt path
+    /// ends, so the stored slot and the banner event carry the same string.
+    #[tokio::test]
+    async fn a_halt_reason_is_stored_and_shown_redacted() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        let mut events = bridge.subscribe();
+        bridge
+            .mark_awaiting_user(
+                "s1".into(),
+                "hands".into(),
+                format!("run `gh auth login --with-token <<< {}` then say go", f10_token()),
+            )
+            .await;
+        let shown = loop {
+            match events.recv().await.unwrap() {
+                SignalingEvent::AwaitingUser { reason, .. } => break reason,
+                _ => continue,
+            }
+        };
+        assert_eq!(shown, format!("run `gh auth login --with-token <<< {F10_GH}` then say go"));
+        let stored = storage.session_halt("s1").await.unwrap().map(|(_, reason, _)| reason);
+        assert_eq!(stored, Some(shown));
     }
 
     /// F10 (EYES E2): a re-ask that carries a secret still supersedes the first
