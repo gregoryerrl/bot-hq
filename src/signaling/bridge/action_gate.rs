@@ -556,6 +556,30 @@ fn outward_command(command: &str) -> bool {
 }
 
 impl SignalingBridge {
+    /// The first secret in what `command` would PUBLISH — its extracted inline
+    /// bodies and readable body files — or `None`. A body that cannot be
+    /// extracted or read is left to the review that follows, which refuses or
+    /// skips it exactly as before (F10, EYES cbbcab04); a file past 8 MiB is
+    /// not read here.
+    async fn secret_in_published_bodies(&self, session_id: &str, command: &str) -> Option<&'static str> {
+        let extracted = super::outward_body::extract(command).ok()?;
+        let mut bodies = extracted.inline;
+        for p in extracted.files {
+            let resolved = self.resolve_body_path(session_id, &p).await;
+            let small = std::fs::metadata(&resolved).is_ok_and(|m| m.len() <= 8 * 1024 * 1024);
+            if small {
+                if let Ok(body) = std::fs::read_to_string(&resolved) {
+                    bodies.push(body);
+                }
+            }
+        }
+        bodies.iter().find_map(|body| {
+            crate::policy::secret_scan::find_secrets(body)
+                .first()
+                .map(|span| span.reason)
+        })
+    }
+
     /// The C precondition (plan, batch 2): outward parks require the
     /// reviewer to have been DELIVERED the content. Full-body match — raw or
     /// JSON-escaped form (a `session_doc_write`'s tool_use row carries the
@@ -573,6 +597,19 @@ impl SignalingBridge {
     ) -> Result<OutwardReview> {
         if !outward_command(command) {
             return Ok(OutwardReview::Proceed(None));
+        }
+        // F10 (EYES; cbbcab04): a secret in PUBLISHED content refuses the
+        // publish in EVERY roster — scanned before any reviewer lookup, so a
+        // solo session, an approved reviewer override or a reviewer missing
+        // from the roster rows (the unwatched cases the refusal exists for)
+        // cannot skip it. The shapes are self-identifying, so a legitimate
+        // body almost never matches; only extracted bodies are scanned — a
+        // header or URL (`curl -H "Authorization: …"`) is not published.
+        if let Some(reason) = self.secret_in_published_bodies(session_id, command).await {
+            return Ok(OutwardReview::Refuse(format!(
+                "outward publish held: the body contains {reason} — publishing it would expose \
+                 it under your identity. Remove it and re-issue."
+            )));
         }
         let reviewers: Vec<String> = self
             .session_reviewers(session_id)
@@ -658,21 +695,6 @@ impl SignalingBridge {
                  so the reviewer-delivered content can be verified."
                     .into(),
             ));
-        }
-        // F10 (EYES): a secret in PUBLISHED content refuses the publish
-        // outright — it would go out under the user's identity, and the
-        // shapes are self-identifying, so a legitimate body almost never
-        // matches. Only the extracted bodies are scanned: a header or a URL
-        // (`curl -H "Authorization: …"`) is not published content.
-        if let Some(reason) = bodies.iter().find_map(|body| {
-            crate::policy::secret_scan::find_secrets(body)
-                .first()
-                .map(|span| span.reason)
-        }) {
-            return Ok(OutwardReview::Refuse(format!(
-                "outward publish held: the body contains {reason} — publishing it would expose \
-                 it under your identity. Remove it and re-issue."
-            )));
         }
         let cursor = storage.cursor_for(reviewer.id).await?;
         // A TARGETED veto holds its content until the finding is answered: a
@@ -2751,6 +2773,40 @@ mod tests {
         let header = format!("curl -sS -H \"Authorization: Bearer {token}\" https://api.example.com/v1/ping");
         if let Err(e) = bridge.park_gated_command("s1", "hands", &header).await {
             assert!(!e.to_string().contains("the body contains"), "a header is not a body: {e}");
+        }
+    }
+
+    /// F10 (EYES cbbcab04): the refusal holds in the UNWATCHED rosters too — a
+    /// solo session, an approved reviewer override, a reviewer missing from
+    /// the roster rows — the three exits that used to skip review before the
+    /// secret check was reached.
+    #[tokio::test]
+    async fn a_body_carrying_a_secret_is_refused_with_nobody_watching() {
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        for case in ["solo", "override", "missing reviewer"] {
+            let data = tempdir().unwrap();
+            let repo = tempdir().unwrap();
+            let (bridge, _storage, _eyes, _path, _body) = outward_fixture(&data, &repo).await;
+            match case {
+                "solo" => bridge.register_session_reviewers("s1".to_string(), Vec::new()),
+                "override" => {
+                    bridge.notify_agent_health("s1".to_string(), "eyes", "dead");
+                    bridge
+                        .reviewer_override
+                        .lock()
+                        .unwrap()
+                        .insert("s1".to_string(), "user approved".to_string());
+                }
+                _ => bridge.register_session_reviewers("s1".to_string(), vec!["ghost".to_string()]),
+            }
+            let leaky = repo.path().join("leaky.md");
+            std::fs::write(&leaky, format!("notes\ntoken: {token}\n")).unwrap();
+            let err = bridge
+                .park_gated_command("s1", "hands", &format!("gh issue comment 5 --body-file {}", posix_path(&leaky)))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("the body contains a GitHub access token"), "{case}: {err}");
         }
     }
 
