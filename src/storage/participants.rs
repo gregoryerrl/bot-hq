@@ -2974,8 +2974,8 @@ impl Storage {
     /// Send — and the tray answer row (`signaling::bridge::tray::deliver_oob`),
     /// which redacts every piece that is not the user's own words before it
     /// arrives here. A plugin's text reaches `broadcast_user_message` too, and
-    /// is not the user typing: it is to be redacted at the plugin boundary (F10
-    /// plan C4f).
+    /// is not the user typing: it is redacted first, at the plugin boundary
+    /// (`tauri_cmd::plugin_api::plugin_text`).
     ///
     /// A door rather than an origin check: approved-gate output is posted as
     /// origin `user` too, and must be redacted (EYES, s-02101415).

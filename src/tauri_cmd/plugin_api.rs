@@ -113,6 +113,20 @@ fn opt_str(args: &Value, key: &str) -> Option<String> {
     args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
+/// A text argument a PLUGIN supplies for bot-hq to store — a session's first
+/// message, a message sent into it. **F10: a plugin's text is not the user
+/// typing**, so it is redacted here, at the boundary, before it reaches
+/// `core.broadcast` — whose row takes the verbatim door kept for what the user
+/// types in the composer (the user's pick `7e3308f1`).
+fn plugin_text(args: &Value, key: &str) -> Result<String, AppError> {
+    need_str(args, key).map(crate::policy::secret_scan::redact_string)
+}
+
+/// [`plugin_text`] for an optional argument (a session title).
+fn opt_plugin_text(args: &Value, key: &str) -> Option<String> {
+    opt_str(args, key).map(crate::policy::secret_scan::redact_string)
+}
+
 fn opt_i64(args: &Value, key: &str) -> Option<i64> {
     args.get(key).and_then(|v| v.as_i64())
 }
@@ -371,7 +385,7 @@ pub(crate) async fn dispatch(
             // shell's per-spawn confirm dialog before this call is even
             // made). The arm mints a fresh id; there is no path from here
             // to any existing session.
-            let prompt = need_str(args, "prompt")?;
+            let prompt = plugin_text(args, "prompt")?;
             if prompt.trim().is_empty() {
                 return Err(AppError::Validation(
                     "spawn_session: prompt must not be empty".into(),
@@ -385,7 +399,7 @@ pub(crate) async fn dispatch(
                     )));
                 }
             }
-            let title = opt_str(args, "title")
+            let title = opt_plugin_text(args, "title")
                 .filter(|t| !t.trim().is_empty())
                 .unwrap_or_else(|| format!("{plugin_id} session"));
             let core = core.ok_or_else(|| {
@@ -406,7 +420,7 @@ pub(crate) async fn dispatch(
         // `require_owned_session` BEFORE any core access, so a plugin reaches
         // only sessions it created — never the user's own or another plugin's.
         "plugin_session_create" => {
-            let first_message = need_str(args, "first_message")?;
+            let first_message = plugin_text(args, "first_message")?;
             if first_message.trim().is_empty() {
                 return Err(AppError::Validation(
                     "plugin_session_create: first_message must not be empty".into(),
@@ -420,7 +434,7 @@ pub(crate) async fn dispatch(
                     )));
                 }
             }
-            let title = opt_str(args, "title")
+            let title = opt_plugin_text(args, "title")
                 .filter(|t| !t.trim().is_empty())
                 .unwrap_or_else(|| format!("{plugin_id} session"));
             // Solo by default — cheap, predictable, and an honest "one agent"
@@ -469,7 +483,7 @@ pub(crate) async fn dispatch(
         }
         "plugin_session_send" => {
             let session_id = need_str(args, "session_id")?;
-            let text = need_str(args, "text")?;
+            let text = plugin_text(args, "text")?;
             if text.trim().is_empty() {
                 return Err(AppError::Validation(
                     "plugin_session_send: text must not be empty".into(),
@@ -1146,5 +1160,51 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, AppError::Internal(_)), "got {err:?}");
         assert!(storage.list_active_sessions_with_preview().await.unwrap().is_empty());
+    }
+
+    /// F10 (plan C4f): the text a plugin hands bot-hq to store is redacted at
+    /// the boundary — a plugin is not the user typing, and its text reaches the
+    /// same `core.broadcast` door as the composer.
+    #[test]
+    fn plugin_text_is_redacted_at_the_boundary() {
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let args = serde_json::json!({ "text": format!("deploy with {token}"), "title": format!("{token} run") });
+        assert_eq!(
+            plugin_text(&args, "text").unwrap(),
+            "deploy with [redacted: a GitHub access token]"
+        );
+        assert_eq!(
+            opt_plugin_text(&args, "title").as_deref(),
+            Some("[redacted: a GitHub access token] run")
+        );
+        assert!(plugin_text(&args, "missing").is_err());
+        assert_eq!(opt_plugin_text(&args, "missing"), None);
+    }
+
+    /// The wire half of the above: every plugin arm that stores text reads it
+    /// through the redacting helpers — a raw `need_str` / `opt_str` for these
+    /// keys would hand `core.broadcast` or `dispatch_session_inner` the
+    /// plugin's text unredacted (neither arm can run in a test: both need the
+    /// core state).
+    #[test]
+    fn every_plugin_arm_that_stores_text_reads_it_redacted() {
+        let src = include_str!("plugin_api.rs");
+        let prod = &src[..src.find("\n#[cfg(test)]\nmod tests").expect("the test module")];
+        for raw in [
+            r#"need_str(args, "prompt")"#,
+            r#"need_str(args, "first_message")"#,
+            r#"need_str(args, "text")"#,
+            r#"opt_str(args, "title")"#,
+        ] {
+            assert!(!prod.contains(raw), "a plugin's text is read raw: {raw}");
+        }
+        for (redacted, times) in [
+            (r#"plugin_text(args, "prompt")"#, 1),
+            (r#"plugin_text(args, "first_message")"#, 1),
+            (r#"plugin_text(args, "text")"#, 1),
+            (r#"opt_plugin_text(args, "title")"#, 2),
+        ] {
+            assert_eq!(prod.matches(redacted).count(), times, "{redacted}");
+        }
     }
 }
