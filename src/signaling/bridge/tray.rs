@@ -1156,29 +1156,48 @@ impl SignalingBridge {
             self.gates_approved_since(&session_id, choice_id, asked_at.as_deref())
                 .await
         };
+        // **F10: the answer is built from REDACTED pieces, and the user's own
+        // words are kept as written** (the user's pick `7e3308f1`: "redact every
+        // stored row except what you type yourself"). Redacting the composed
+        // body instead redacted a token the user typed into their answer on
+        // purpose.
+        //
+        // Whether the pick is one of the options is decided FIRST, against the
+        // options as they are held: a listed pick is agent text — and a row
+        // parked on 1.0.7 holds its options raw — so it is redacted; an unlisted
+        // pick is the user typing, and is not.
+        use crate::policy::secret_scan::{redact, redact_string};
+        let listed = options.iter().any(|o| *o == picked);
+        let shown_pick = if listed { redact(&picked) } else { std::borrow::Cow::Borrowed(picked.as_str()) };
+        let question = redact(question);
+        let options: Vec<String> = options.iter().map(|o| redact(o).into_owned()).collect();
+        // The WHOLE command is redacted before the body cuts its first line to
+        // 160 characters (EYES 008f1973): cut first, and a token straddling the
+        // cut falls under its pattern's minimum length and survives the scan.
+        let command_shown = command_text.map(redact);
+        let mooting: Vec<(String, String)> = mooting
+            .into_iter()
+            .map(|(command, answered_at)| (redact_string(command), answered_at))
+            .collect();
         let mut body = oob_resolution_body(
             choice_id,
-            question,
-            options,
-            &picked,
+            &question,
+            &options,
+            &shown_pick,
+            listed,
             asked_at.as_deref(),
-            command_text,
+            command_shown.as_deref(),
             &mooting,
         );
         if flipped {
-            self.maybe_run_gated(&session_id, choice_id, command_text, &picked, &mut body)
+            // The gate runs the command and reads the verdict RAW; only what it
+            // writes is redacted — the command's output, which is how a secret
+            // it printed would otherwise reach the agent, every peer and
+            // claude-code's transcript.
+            let mut run = String::new();
+            self.maybe_run_gated(&session_id, choice_id, command_text, &picked, &mut run)
                 .await;
-        }
-        // F10: this row is how an approved command's OUTPUT reaches the agent
-        // and every peer, so it is redacted before it is stored OR returned — a
-        // secret the command printed reaches neither the channel nor the
-        // agent's context (and so not claude-code's transcript either).
-        let redacted = match crate::policy::secret_scan::redact(&body) {
-            std::borrow::Cow::Owned(r) => Some(r),
-            std::borrow::Cow::Borrowed(_) => None,
-        };
-        if let Some(r) = redacted {
-            body = r;
+            body.push_str(&redact(&run));
         }
         // The phase is read HERE, not in `CoreAppState::resolve_choice` where it
         // used to be. The envelope is part of the row, so it has to be known
@@ -1223,8 +1242,11 @@ impl SignalingBridge {
         let receipt = {
             let storage = self.storage.lock().await.clone();
             match storage {
+                // The VERBATIM door (F10): every piece of `body` that is not the
+                // user's own words was redacted above, and the store must not
+                // redact what they typed.
                 Some(storage) => match storage
-                    .post_to_channel(
+                    .post_to_channel_verbatim(
                         session_id.as_str(),
                         // `origin = "user"` + no slug: the OOB replay is the
                         // user's own answer, not a host injection, and this is

@@ -458,11 +458,19 @@ fn mooting_block(mooting: &[(String, String)], asked: Option<chrono::DateTime<ch
 ///
 /// `id8` is the choice id's first eight characters — enough to correlate with
 /// the parked ack (`{status:"parked", choice_id}`) and `gate_status`.
+///
+/// `listed` — whether the pick is one of the options — is the CALLER's
+/// decision, made once (F10, EYES P3): `deliver_oob` decides it against the
+/// options as they are held, before it redacts them, because a listed pick is
+/// agent text to redact and an unlisted one is the user's own words to keep.
+/// Every string here arrives already redacted except the user's words.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn oob_resolution_body(
     choice_id: &str,
     question: &str,
     options: &[String],
     picked: &str,
+    listed: bool,
     asked_at: Option<&str>,
     command: Option<&str>,
     mooting: &[(String, String)],
@@ -507,7 +515,7 @@ pub(super) fn oob_resolution_body(
         // closed on the verdict), and the agent is told to act on the words,
         // as for a question. So the "honor the words" line below never
         // accompanies an execution.
-        let typed = if options.iter().any(|o| o == picked) {
+        let typed = if listed {
             String::new()
         } else {
             "The pick is the user answering in their own words; honor the words, \
@@ -529,7 +537,6 @@ pub(super) fn oob_resolution_body(
         };
         return format!("Gate {id8} {verdict}: `{shown}`\n{full}{typed}{stale_block}{mooting_block}");
     }
-    let listed = options.iter().any(|o| o == picked);
     let free_text_block = if options.is_empty() || listed {
         String::new()
     } else {
@@ -748,6 +755,7 @@ mod tests {
             "Push now?",
             &["Push 9a07930".to_string(), "Hold for review".to_string()],
             "Hold for review",
+            true,
             None,
             None,
             &[],
@@ -770,6 +778,7 @@ mod tests {
             "Push now?",
             &["Push".to_string(), "Hold".to_string()],
             "hold on, let me check something first",
+            false,
             None,
             None,
             &[],
@@ -778,7 +787,7 @@ mod tests {
         assert!(free.contains("Options were: Push | Hold"));
         assert!(free.contains("honor the words, not the menu"));
         // No options at all (halt shapes): nothing to restate.
-        let bare = super::oob_resolution_body("abcdefgh-1", "Anything else?", &[], "done", None, None, &[]);
+        let bare = super::oob_resolution_body("abcdefgh-1", "Anything else?", &[], "done", false, None, None, &[]);
         assert!(!bare.contains("Options were"));
     }
 
@@ -792,6 +801,7 @@ mod tests {
             "Run gated command in this session's repo?\n\n`git push origin main`",
             &["Approve".to_string(), "Reject".to_string()],
             "Approve",
+            true,
             None,
             Some("git push origin main"),
             &[],
@@ -803,6 +813,7 @@ mod tests {
             "Run gated command in this session's repo?",
             &["Approve".to_string(), "Reject".to_string()],
             "Reject",
+            true,
             None,
             Some("git push origin main\n# a second line"),
             &[],
@@ -824,6 +835,7 @@ mod tests {
             "Run gated command in this session's repo?",
             &["Approve".to_string(), "Reject".to_string()],
             "use gh edit instead of a new comment",
+            false,
             None,
             Some("git push origin main"),
             &[],
@@ -832,7 +844,7 @@ mod tests {
         assert!(typed.contains("honor the words, not the menu"));
         // A very long single-line command is truncated at 160 chars.
         let long = "x".repeat(400);
-        let cut = super::oob_resolution_body("id", "q", &[], "Approve", None, Some(&long), &[]);
+        let cut = super::oob_resolution_body("id", "q", &[], "Approve", false, None, Some(&long), &[]);
         assert!(cut.contains(&format!("`{}…`", "x".repeat(160))));
     }
 
@@ -843,13 +855,13 @@ mod tests {
     fn oob_resolution_body_age_stamps_only_stale_answers() {
         // 2.5h-old ask (the s-bb938f62 shape): age + re-verify warning.
         let old = (chrono::Utc::now() - chrono::Duration::minutes(150)).to_rfc3339();
-        let body = super::oob_resolution_body("id", "Re-push to staging?", &[], "discard", Some(&old), None, &[]);
+        let body = super::oob_resolution_body("id", "Re-push to staging?", &[], "discard", false, Some(&old), None, &[]);
         assert!(body.contains("Asked 2h 30m ago"));
         assert!(body.contains("re-verify"));
 
         // Fresh ask: no age line at all.
         let fresh = chrono::Utc::now().to_rfc3339();
-        let quick = super::oob_resolution_body("id", "Close?", &[], "yes", Some(&fresh), None, &[]);
+        let quick = super::oob_resolution_body("id", "Close?", &[], "yes", false, Some(&fresh), None, &[]);
         assert!(!quick.contains("Asked "));
         assert!(!quick.contains("re-verify"));
 
@@ -857,11 +869,11 @@ mod tests {
         let sqlite_ts = (chrono::Utc::now() - chrono::Duration::minutes(75))
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
-        let s = super::oob_resolution_body("id", "Q?", &[], "ok", Some(&sqlite_ts), None, &[]);
+        let s = super::oob_resolution_body("id", "Q?", &[], "ok", false, Some(&sqlite_ts), None, &[]);
         assert!(s.contains("Asked 1h 15m ago"));
 
         // Garbage timestamp: line omitted, body still well-formed.
-        let g = super::oob_resolution_body("id", "Q?", &[], "ok", Some("not-a-time"), None, &[]);
+        let g = super::oob_resolution_body("id", "Q?", &[], "ok", false, Some("not-a-time"), None, &[]);
         assert!(!g.contains("Asked "));
         assert!(g.contains("Picked: ok"));
     }
@@ -877,6 +889,7 @@ mod tests {
             "Re-push to staging?",
             &[],
             "discard",
+            false,
             Some(&asked.to_rfc3339()),
             None,
             &[(
@@ -899,6 +912,7 @@ mod tests {
             "Re-push?",
             &[],
             "discard",
+            false,
             Some(&asked.to_rfc3339()),
             None,
             &[],
@@ -922,6 +936,7 @@ mod tests {
             "Q?",
             &[],
             "ok",
+            false,
             Some(&asked.to_rfc3339()),
             None,
             &many,
@@ -937,6 +952,7 @@ mod tests {
             "Q?",
             &[],
             "ok",
+            false,
             Some(&asked.to_rfc3339()),
             None,
             &[("git push".to_string(), "not-a-time".to_string())],

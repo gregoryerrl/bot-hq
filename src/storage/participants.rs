@@ -2971,8 +2971,11 @@ impl Storage {
     /// Its production callers are pinned, by file, by
     /// `the_verbatim_door_has_only_its_named_production_callers`:
     /// `core::broadcast::broadcast_user_message` — the composer and the staged
-    /// Send. A plugin's text reaches that function too, and is not the user
-    /// typing: it is to be redacted at the plugin boundary (F10 plan C4f).
+    /// Send — and the tray answer row (`signaling::bridge::tray::deliver_oob`),
+    /// which redacts every piece that is not the user's own words before it
+    /// arrives here. A plugin's text reaches `broadcast_user_message` too, and
+    /// is not the user typing: it is to be redacted at the plugin boundary (F10
+    /// plan C4f).
     ///
     /// A door rather than an origin check: approved-gate output is posted as
     /// origin `user` too, and must be redacted (EYES, s-02101415).
@@ -7370,9 +7373,14 @@ mod tests {
                         None => &src[..],
                     };
                     let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                    // Any call form — a method call or `Storage::…(` — counts;
+                    // only the definition itself is skipped (EYES, 2a4de2d nit).
                     for line in prod.lines() {
                         let code = line.trim_start();
-                        if !code.starts_with("//") && code.contains(".post_to_channel_verbatim(") {
+                        if !code.starts_with("//")
+                            && code.contains("post_to_channel_verbatim(")
+                            && !code.contains("fn post_to_channel_verbatim(")
+                        {
                             out.push(rel.clone());
                         }
                     }
@@ -7383,6 +7391,6 @@ mod tests {
         let mut callers = Vec::new();
         walk(&root, &root, &mut callers);
         callers.sort();
-        assert_eq!(callers, ["core/broadcast.rs"]);
+        assert_eq!(callers, ["core/broadcast.rs", "signaling/bridge/tray.rs"]);
     }
 }

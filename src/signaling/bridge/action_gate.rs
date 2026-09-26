@@ -1844,6 +1844,155 @@ mod tests {
         assert!(rows.iter().any(|m| m.content.contains("[redacted: a GitHub access token]")));
     }
 
+    /// A bridge wired to fresh in-memory storage with one session, `s1`, whose
+    /// repo is `repo` (F10 answer-row tests).
+    async fn f10_bridge(data: &std::path::Path, repo: Option<&std::path::Path>) -> (std::sync::Arc<SignalingBridge>, Storage) {
+        let bridge = SignalingBridge::with_policy(ViolationsLog::new(data), data.to_path_buf());
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        let repo = repo.map(|r| r.display().to_string());
+        storage.create_session("s1", "t", repo.as_deref()).await.unwrap();
+        (bridge, storage)
+    }
+
+    async fn f10_answer(bridge: &SignalingBridge, cid: &str, picked: &str) -> String {
+        match bridge.resolve_choice_confirmable(cid, picked.to_string(), true).await.unwrap() {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => body,
+            other => panic!("expected DeliveredOutOfBand, got {other:?}"),
+        }
+    }
+
+    const F10_GH: &str = "[redacted: a GitHub access token]";
+
+    /// F10 (the user's pick `7e3308f1`, EYES E4): the answer row keeps what the
+    /// user TYPED as written — they may hand an agent a token on purpose — and
+    /// redacts what is agent text: the question, the options and a LISTED pick.
+    /// The rows here are shaped as 1.0.7 parked them, question and options raw.
+    #[tokio::test]
+    async fn a_typed_answer_is_kept_and_an_old_rows_agent_text_is_redacted() {
+        let data = tempdir().unwrap();
+        let (bridge, storage) = f10_bridge(data.path(), None).await;
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let opts = vec![format!("Use {token}"), "Skip".to_string()];
+        for cid in ["cid-typed", "cid-listed"] {
+            storage
+                .insert_tray_entry("s1", cid, "hands", crate::storage::QuestionKind::Choice, &format!("Push with {token}?"), Some(&opts), None, None)
+                .await
+                .unwrap();
+        }
+        let typed = format!("no, use my other token {token}");
+        let body = f10_answer(&bridge, "cid-typed", &typed).await;
+        assert!(body.contains(&format!("Picked: {typed}\n")), "the user's words, verbatim: {body}");
+        assert!(body.contains("honor the words"), "{body}");
+        assert!(body.contains(&format!("Q: Push with {F10_GH}?")), "the question is redacted: {body}");
+        assert!(body.contains(&format!("Options were: Use {F10_GH} | Skip")), "{body}");
+        assert_eq!(body.matches(&token).count(), 1, "only the typed copy survives: {body}");
+
+        let listed = f10_answer(&bridge, "cid-listed", &opts[0]).await;
+        assert!(listed.contains(&format!("Picked: Use {F10_GH}\n")), "a listed pick is agent text: {listed}");
+        assert!(!listed.contains(&token), "{listed}");
+        assert!(!listed.contains("honor the words"), "a listed pick is not the user typing: {listed}");
+
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        let answers: Vec<&str> = rows
+            .iter()
+            .map(|m| m.content.as_str())
+            .filter(|c| c.starts_with("Tray answer"))
+            .collect();
+        assert_eq!(answers, [body.as_str(), listed.as_str()], "stored exactly as returned");
+    }
+
+    /// F10 (EYES P4a, P1): an approved gate whose COMMAND carries a token runs
+    /// that command raw, while the verdict line and the fence show it redacted.
+    /// `wc -c` proves what ran: the token is 30 bytes, its marker 33.
+    #[tokio::test]
+    async fn an_approved_gate_runs_its_command_raw_and_shows_it_redacted() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage) = f10_bridge(data.path(), Some(repo.path())).await;
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        assert_eq!(token.len(), 30);
+        let cmd = format!("printf %s '{token}' | wc -c\n# counted");
+        let opts = vec!["Approve".to_string(), "Reject".to_string()];
+        storage
+            .insert_tray_entry("s1", "cid-run", "hands", crate::storage::QuestionKind::Choice, "Run?", Some(&opts), None, Some(&cmd))
+            .await
+            .unwrap();
+        let body = f10_answer(&bridge, "cid-run", "Approve").await;
+        assert!(!body.contains(&token), "{body}");
+        assert!(
+            body.starts_with(&format!("Gate cid-run approved: `printf %s '{F10_GH}' | wc -c`\n")),
+            "the verdict line is redacted: {body}"
+        );
+        assert!(
+            body.contains(&format!("```\nprintf %s '{F10_GH}' | wc -c\n# counted\n```")),
+            "the fence is redacted: {body}"
+        );
+        let output = body.split("Output:\n").nth(1).expect("it ran");
+        assert_eq!(
+            output.lines().next().map(str::trim),
+            Some("30"),
+            "the RAW command ran: {body}"
+        );
+    }
+
+    /// F10 (EYES P1 `008f1973`, P4b, P4c): the command is redacted WHOLE before
+    /// the first line is cut to 160 characters. Cut first, and a Sanctum token
+    /// starting at character 118 kept 39 of its 40 random characters — under
+    /// the pattern's minimum, so the scan missed them. A rejection the user
+    /// typed stays as they wrote it.
+    #[tokio::test]
+    async fn a_rejected_gate_keeps_the_typed_reason_and_redacts_across_the_cut() {
+        let data = tempdir().unwrap();
+        let (bridge, storage) = f10_bridge(data.path(), None).await;
+        let sanctum = format!("{}{}", "12|AbCdEfGhIjKlMnOpQrSt", "UvWxYz0123456789abcd");
+        let lead = format!("echo {} ", "x".repeat(112));
+        let cmd = format!("{lead}{sanctum} https://api.example.com/v1/deployments/latest/status");
+        assert_eq!(cmd.find(&sanctum), Some(118));
+        let opts = vec!["Approve".to_string(), "Reject".to_string()];
+        storage
+            .insert_tray_entry("s1", "cid-cut", "hands", crate::storage::QuestionKind::Choice, "Run?", Some(&opts), None, Some(&cmd))
+            .await
+            .unwrap();
+        let gh = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let reason = format!("no — that header leaks, use {gh} instead");
+        let body = f10_answer(&bridge, "cid-cut", &reason).await;
+        assert!(body.starts_with(&format!("Gate cid-cut rejected ({reason}): `")), "verbatim: {body}");
+        assert!(!body.contains(&sanctum[3..3 + 39]), "no 39-character run of the token: {body}");
+        assert!(body.contains("[redacted: a Laravel Sanctum API token]"), "{body}");
+    }
+
+    /// F10 (EYES P4d): a command in the "approved since you asked" block is
+    /// agent text — `mooting_block` prints each in full — so it is redacted.
+    #[tokio::test]
+    async fn an_approved_since_command_carrying_a_token_is_redacted() {
+        let data = tempdir().unwrap();
+        let (bridge, storage) = f10_bridge(data.path(), None).await;
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let yes_no = vec!["Yes".to_string(), "No".to_string()];
+        storage
+            .insert_tray_entry("s1", "cid-q", "hands", crate::storage::QuestionKind::Choice, "Still push?", Some(&yes_no), None, None)
+            .await
+            .unwrap();
+        let earlier = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        sqlx::query("UPDATE session_tray SET asked_at = ? WHERE choice_id = 'cid-q'")
+            .bind(&earlier)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let gate = vec!["Approve".to_string(), "Reject".to_string()];
+        let push = format!("git push https://x:{token}@github.com/o/r main");
+        storage
+            .insert_tray_entry("s1", "cid-g", "hands", crate::storage::QuestionKind::Choice, "Run?", Some(&gate), None, Some(&push))
+            .await
+            .unwrap();
+        storage.answer_tray_entry("cid-g", "Approve").await.unwrap();
+        let body = f10_answer(&bridge, "cid-q", "Yes").await;
+        assert!(body.contains("**Approved in this session after you asked:**"), "{body}");
+        assert!(body.contains(&format!("`git push https://x:{F10_GH}@github.com/o/r main`")), "{body}");
+        assert!(!body.contains(&token), "{body}");
+    }
+
     #[tokio::test]
     async fn resolve_twice_executes_gated_command_once() {
         // Durable exactly-once: a duplicate/stale resolve must not re-run the
