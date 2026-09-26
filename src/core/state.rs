@@ -2624,6 +2624,95 @@ impl AppState {
         }
     }
 
+    /// **A turn nobody dealt, while another participant holds the ring, is
+    /// stopped** (D3 — the user's pick `0e95f4be`, 2026-09-26). claude-code
+    /// starts a turn by itself when a background task it ran finishes, and the
+    /// pump asks for this when that turn arrives with someone else busy. Left
+    /// running, it works beside the holder — two participants on turns at once
+    /// (s-b175d9c0, 2026-09-25 07:19–07:20Z).
+    ///
+    /// Three guards (EYES, plan items 1–2):
+    /// - an atomic operation is waited out first — a stray `git commit` or
+    ///   push finishes, exactly as a Pause defers;
+    /// - at send time this participant's own epoch cell must still read
+    ///   `epoch`: claude-code folds a dealt turn into a running one, so an
+    ///   abort landing after a deal would eat that turn;
+    /// - and someone else must still hold the ring.
+    ///
+    /// Stamped with `epoch`, so the stray's completion reads as bot-hq's own
+    /// interrupt, never as an error. What claude-code handed the agent stays in
+    /// its transcript; the agent acts on it at its next dealt turn. The window
+    /// between the cell check and the interrupt landing is milliseconds; a deal
+    /// inside it is reported as an errored turn, which says so and moves on.
+    pub async fn stray_turn(&self, session_id: &str, agent_slug: &str, epoch: u64) {
+        let atomic = {
+            let sessions = self.sessions.lock().await;
+            let Some(handle) = sessions.get(session_id) else {
+                return;
+            };
+            Arc::clone(&handle.in_atomic_tool)
+        };
+        if atomic.load(Ordering::Acquire) {
+            let (waited_ms, capped) = await_atomic_op_or_cap(&atomic, ATOMIC_OP_DEFERRAL_CAP).await;
+            tracing::info!(
+                session_id,
+                agent = agent_slug,
+                waited_ms,
+                capped,
+                "stray turn: waited out an atomic operation before stopping it"
+            );
+        }
+        let holder = {
+            let sessions = self.sessions.lock().await;
+            let Some(handle) = sessions.get(session_id) else {
+                return;
+            };
+            let Some(agent) = handle.agents().find(|a| a.slug == agent_slug) else {
+                return;
+            };
+            let cell_now = agent.turn_epoch.as_ref().map(|c| c.load(Ordering::Acquire));
+            if cell_now != Some(epoch) {
+                tracing::debug!(
+                    session_id,
+                    agent = agent_slug,
+                    epoch,
+                    ?cell_now,
+                    "stray turn: the ring has dealt this participant since; not stopping it"
+                );
+                return;
+            }
+            let Some(holder) = handle.activity.busy_other_than(agent_slug) else {
+                tracing::debug!(
+                    session_id,
+                    agent = agent_slug,
+                    "stray turn: nobody else holds the ring now; not stopping it"
+                );
+                return;
+            };
+            agent.handle.interrupt_at("stray-turn", epoch);
+            holder
+        };
+        tracing::info!(
+            session_id,
+            agent = agent_slug,
+            %holder,
+            epoch,
+            "stray turn stopped while another participant held the ring"
+        );
+        crate::core::post_system_notice(
+            &self.storage,
+            Some(&*self.bridge),
+            session_id,
+            MessageKind::SystemNotice,
+            format!(
+                "[System: {agent_slug} started a turn on its own while {holder} held the turn \
+                 — it was stopped, and picks this up at its next turn.]"
+            ),
+            None,
+        )
+        .await;
+    }
+
     pub fn subscribe_signaling(&self) -> broadcast::Receiver<SignalingEvent> {
         self.bridge.subscribe()
     }
@@ -3132,6 +3221,126 @@ mod tests {
             !fwd_block.contains("SignalingEvent::AwaitingUser"),
             "AwaitingUser is not a control event any more"
         );
+    }
+
+    /// D3: `stray_turn` is reached from exactly one arm in main.rs — the
+    /// `StrayTurn` one — and the control forwarder carries that event. Drop the
+    /// arm or the forwarder line and this goes red; nothing else would.
+    #[test]
+    fn the_stray_turn_stop_is_routed_from_its_event() {
+        let main = include_str!("../main.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let calls: Vec<usize> = main.match_indices(".stray_turn(").map(|(i, _)| i).collect();
+        assert_eq!(calls.len(), 1, "stray_turn has exactly one caller in main.rs");
+        let arm_start = main[..calls[0]]
+            .rfind("SignalingEvent::")
+            .expect("the call sits inside a match arm");
+        assert!(
+            main[arm_start..calls[0]].starts_with("SignalingEvent::StrayTurn {"),
+            "stray_turn must be reached from the StrayTurn arm"
+        );
+        let fwd = main
+            .find("ev @ (SignalingEvent::SessionCloseRequest")
+            .expect("the control-event forwarder exists");
+        assert!(
+            main[fwd..fwd + 400].contains("SignalingEvent::StrayTurn { .. }"),
+            "StrayTurn is forwarded to the control worker"
+        );
+    }
+
+    /// D3: the stub's one agent, `hands`, with its epoch cell at `cell` and —
+    /// when `eyes_busy` — `eyes` holding the ring. Returns hands' interrupt
+    /// stamp, which reads `NO_INTERRUPT_EPOCH` until something stops it.
+    async fn stray_setup(
+        cell: u64,
+        eyes_busy: bool,
+    ) -> (
+        Arc<AppState>,
+        Storage,
+        Arc<std::sync::atomic::AtomicU64>,
+        tempfile::TempDir,
+    ) {
+        let (state, storage, tmp) = state_with_stub().await;
+        let stamp = {
+            let mut sessions = state.sessions.lock().await;
+            let h = sessions.get_mut("s1").unwrap();
+            h.participants[0].turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(cell)));
+            if eyes_busy {
+                h.activity.set_busy_slug("eyes", true);
+            }
+            h.participants[0].handle.interrupted_epoch()
+        };
+        (Arc::new(state), storage, stamp, tmp)
+    }
+
+    async fn said_stopped(storage: &Storage) -> bool {
+        storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.content.contains("hands started a turn on its own while eyes held the turn"))
+    }
+
+    /// D3: a stray turn while another participant holds the ring is stopped,
+    /// stamped with its own epoch (so its completion reads as bot-hq's
+    /// interrupt), and a row says so.
+    #[tokio::test]
+    async fn a_stray_turn_is_stopped_while_another_participant_holds_the_turn() {
+        let (state, storage, stamp, _tmp) = stray_setup(15, true).await;
+        state.stray_turn("s1", "hands", 15).await;
+        assert_eq!(stamp.load(Ordering::Acquire), 15);
+        assert!(said_stopped(&storage).await);
+    }
+
+    /// D3 (EYES, plan item 2): the ring dealt this participant after the pump
+    /// asked — claude-code folds a dealt turn into a running one, so stopping
+    /// it now would eat the turn the ring just dealt. Left alone.
+    #[tokio::test]
+    async fn a_stray_turn_the_ring_has_dealt_since_is_left_alone() {
+        let (state, storage, stamp, _tmp) = stray_setup(20, true).await;
+        state.stray_turn("s1", "hands", 15).await;
+        assert_eq!(stamp.load(Ordering::Acquire), crate::agents::NO_INTERRUPT_EPOCH);
+        assert!(!said_stopped(&storage).await);
+    }
+
+    /// D3: nobody else holds the ring by the time the request is handled — the
+    /// holder finished — so there is nothing to protect. Left alone.
+    #[tokio::test]
+    async fn a_stray_turn_with_nobody_else_holding_the_ring_is_left_alone() {
+        let (state, storage, stamp, _tmp) = stray_setup(15, false).await;
+        state.stray_turn("s1", "hands", 15).await;
+        assert_eq!(stamp.load(Ordering::Acquire), crate::agents::NO_INTERRUPT_EPOCH);
+        assert!(!said_stopped(&storage).await);
+    }
+
+    /// D3 (EYES, plan item 1): a stray `git commit` or push finishes before the
+    /// stop lands, exactly as a Pause defers — the interrupt path it reuses has
+    /// no deferral of its own.
+    #[tokio::test]
+    async fn a_stray_turn_waits_out_an_atomic_operation_before_it_is_stopped() {
+        let (state, _storage, stamp, _tmp) = stray_setup(15, true).await;
+        let atomic = {
+            let sessions = state.sessions.lock().await;
+            Arc::clone(&sessions.get("s1").unwrap().in_atomic_tool)
+        };
+        atomic.store(true, Ordering::Release);
+        let task = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { state.stray_turn("s1", "hands", 15).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            stamp.load(Ordering::Acquire),
+            crate::agents::NO_INTERRUPT_EPOCH,
+            "not while the atomic operation runs"
+        );
+        atomic.store(false, Ordering::Release);
+        task.await.unwrap();
+        assert_eq!(stamp.load(Ordering::Acquire), 15, "stopped once it finished");
     }
 
     /// **Every host-declared halt interrupts** (round 8, A1b — the reviewer's

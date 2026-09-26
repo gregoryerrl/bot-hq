@@ -138,7 +138,7 @@ D15 epilogue, phase advance, tray answers, Stage.
 | `src/core/sequencer.rs` | the ring: `run_sequencer`, `SequencerCommand`, `advance_turn`, `start_turn`/`hand_turn_to`, `deliver_backlog`, consensus/spin/cap/all-pass/Stage yields, `TurnEnding` — the long module doc is a design diary, not current behaviour | XL |
 | `src/core/pump.rs` | `pump_agent` + `PumpConfig`: rows, boot rows, provider-limit/error-streak halts, pass row, epoch bind + `TurnComplete` mint | XL |
 | `src/core/activity.rs` | `ActivityTracker` (per-slug busy map + latches) → `SessionActivity` + `session:activity` emit | L |
-| `src/core/state.rs` | `AppState`: open/ensure/restart/`reopen_session`, `cancel_and_escalate` (Pause: decide → interrupt → SIGKILL, atomic-op deferral via `await_atomic_op_or_cap`), resume, `close_session` + epilogue (join arm applies the archive) + `teardown_session`, `broadcast`, `send_user_response`, Stage, `advance_phase`, `resolve_choice`, `halt_declared` | XL |
+| `src/core/state.rs` | `AppState`: open/ensure/restart/`reopen_session`, `cancel_and_escalate` (Pause: decide → interrupt → SIGKILL, atomic-op deferral via `await_atomic_op_or_cap`), resume, `close_session` + epilogue (join arm applies the archive) + `teardown_session`, `broadcast`, `send_user_response`, Stage, `advance_phase`, `resolve_choice`, `halt_declared`, `stray_turn` (stops a turn nobody dealt while another participant holds the ring) | XL |
 | `src/core/broadcast.rs` | `broadcast_user_message`: envelope + `post_to_channel("user")`; writes no stdin (D19) | S |
 | `src/core/mentions.rs` | `parse_mention_slugs` (D17) | S |
 | `src/core/ipav.rs` | `IpavPhase` chip/name/parse/transition notice | S |

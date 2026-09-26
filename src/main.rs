@@ -615,6 +615,18 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
                             // stream there is nothing left to race.
                             core_for_worker.halt_declared(&session_id, &agent).await;
                         }
+                        SignalingEvent::StrayTurn { session_id, agent, epoch } => {
+                            // D3: a turn nobody dealt, while another
+                            // participant holds the ring — stop it; the agent
+                            // picks it up at its next dealt turn. Spawned:
+                            // stopping it may wait out an atomic operation (a
+                            // commit, a push), and this worker must not stall
+                            // behind it.
+                            let core = Arc::clone(&core_for_worker);
+                            tokio::spawn(async move {
+                                core.stray_turn(&session_id, &agent, epoch).await;
+                            });
+                        }
                         SignalingEvent::StagedDeliveryDue { session_id } => {
                             // The ring reached a boundary with a stage
                             // pending: deliver it through the one send path.
@@ -653,6 +665,7 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
                             ev @ (SignalingEvent::SessionCloseRequest { .. }
                             | SignalingEvent::AgentAdvancePhase { .. }
                             | SignalingEvent::HaltAcked { .. }
+                            | SignalingEvent::StrayTurn { .. }
                             | SignalingEvent::StagedDeliveryDue { .. }),
                         ) => {
                             // Unbounded hand-off → never blocks the broadcast drain.

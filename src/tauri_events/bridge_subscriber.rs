@@ -149,6 +149,10 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             // (the D35 self-interrupt). The UI already saw the halt itself via
             // AwaitingUser above.
         }
+        SignalingEvent::StrayTurn { .. } => {
+            // Internal plumbing: main.rs routes this to AppState::stray_turn,
+            // whose notice row is what the UI shows.
+        }
         SignalingEvent::StageDelivered { session_id } => {
             // The staged response landed: the composer clears its Stage
             // toggle + draft and the staged tray picks are consumed.

@@ -284,6 +284,22 @@ impl ActivityTracker {
         )
     }
 
+    /// Who is mid-turn right now OTHER than `slug` — the first such slug in
+    /// name order, or `None`. The ring deals one turn at a time, so this is
+    /// the holder on every ordinary path. Read for a turn nobody dealt (D3): a
+    /// stray turn while someone else holds the ring is stopped.
+    pub fn busy_other_than(&self, slug: &str) -> Option<String> {
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut others: Vec<&String> = g
+            .busy
+            .iter()
+            .filter(|(other, busy)| **busy && other.as_str() != slug)
+            .map(|(other, _)| other)
+            .collect();
+        others.sort();
+        others.first().map(|other| (*other).clone())
+    }
+
     /// Participant-keyed busy read. An unknown slug reads idle, which is the
     /// honest answer for a participant that has never taken a turn.
     pub fn is_busy_slug(&self, slug: &str) -> bool {

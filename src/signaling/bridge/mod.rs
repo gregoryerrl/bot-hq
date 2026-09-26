@@ -201,6 +201,18 @@ pub enum SignalingEvent {
         session_id: String,
         agent: String,
     },
+    /// A participant's pump saw a turn nobody dealt — claude-code started it
+    /// itself, e.g. on a background task's notification — while ANOTHER
+    /// participant held the ring (D3, the user's pick 2026-09-26). Routed by
+    /// main.rs to `AppState::stray_turn`, which stops it. `epoch` is the
+    /// participant's own epoch cell as the pump read it: a ring that has dealt
+    /// this participant since has moved it, and then nothing is stopped.
+    /// Internal plumbing: the UI never sees this.
+    StrayTurn {
+        session_id: String,
+        agent: String,
+        epoch: u64,
+    },
     /// A session document was written/updated (`session_doc_write`). The UI
     /// invalidates its doc queries so a freshly-written phase doc appears
     /// without a manual tab-switch.
@@ -1020,6 +1032,17 @@ impl SignalingBridge {
         let _ = self.event_tx.send(SignalingEvent::HaltAcked {
             session_id: session_id.to_string(),
             agent: agent.to_string(),
+        });
+    }
+
+    /// A turn nobody dealt is running while another participant holds the
+    /// ring (D3). Emitted by the pump; main.rs routes it to
+    /// `AppState::stray_turn`.
+    pub fn notify_stray_turn(&self, session_id: &str, agent: &str, epoch: u64) {
+        let _ = self.event_tx.send(SignalingEvent::StrayTurn {
+            session_id: session_id.to_string(),
+            agent: agent.to_string(),
+            epoch,
         });
     }
 

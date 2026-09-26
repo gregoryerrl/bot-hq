@@ -690,6 +690,9 @@ pub async fn pump_agent(
     // Did THIS turn already post a CLI notice (`AgentEvent::Notice`)? Then the
     // errored-turn row must not quote the same line again (EYES, C17 nit).
     let mut turn_had_notice = false;
+    // D3: has THIS stray turn already asked to be stopped? Once per turn; reset
+    // at completion with the other per-turn flags.
+    let mut stray_stop_asked = false;
     // B5: the epoch of the turn in flight, snapshotted from `cfg.turn_epoch` on
     // this turn's FIRST event and cleared when it completes. See the field's doc
     // for why reading it at completion time instead would defeat the guard it
@@ -741,6 +744,22 @@ pub async fn pump_agent(
                         epoch = live,
                         "straggler event after a completed turn; not opening a turn on it"
                     );
+                    // **D3 — the user's pick `0e95f4be`, 2026-09-26.** A turn
+                    // nobody dealt, while someone ELSE holds the ring, is
+                    // stopped: claude-code started it itself (a background
+                    // task's notification) and it would work beside the holder.
+                    // Asked once per stray turn, on whichever of its events
+                    // first finds another participant busy (EYES, plan item 2);
+                    // with nobody else busy it runs, the sanctioned path for a
+                    // finished watcher while the session waits on the user.
+                    if !stray_stop_asked {
+                        if let (Some(activity), Some(bridge)) = (&cfg.activity, &cfg.bridge) {
+                            if activity.busy_other_than(&cfg.slug).is_some() {
+                                stray_stop_asked = true;
+                                bridge.notify_stray_turn(&cfg.session_id, &cfg.slug, live);
+                            }
+                        }
+                    }
                 } else {
                     turn_epoch = Some(live);
                     // The long-turn notice's clock starts with the turn
@@ -1555,6 +1574,7 @@ pub async fn pump_agent(
                 peer_ack_pending = false;
                 peer_ack_final_pending = false;
                 pass_pending = false;
+                stray_stop_asked = false;
                 // Turn ended → this agent is idle. The ring marks the next
                 // participant busy at handover, so the input does not unlock
                 // for the sub-second gap between two turns.
@@ -2195,6 +2215,109 @@ mod tests {
         assert!(
             kinds.contains(&("my turn".into(), MessageKind::Text.as_str().into())),
             "{kinds:?}"
+        );
+    }
+
+    /// D3 (the user's pick `0e95f4be`): a turn nobody dealt, arriving while
+    /// ANOTHER participant holds the ring, asks to be stopped — once for the
+    /// whole stray turn however many events it has, carrying this pump's own
+    /// epoch as it read it. Returns the `StrayTurn`s the bridge saw.
+    async fn stray_turn_requests(other_busy: bool) -> Vec<(String, u64)> {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(15));
+        cfg.turn_epoch = Some(Arc::clone(&cell));
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let mut events = bridge.subscribe();
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let activity = crate::core::ActivityTracker::new(
+            "s1",
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::clone(&bridge),
+            vec!["hands".to_string(), "eyes".to_string()],
+        );
+        cfg.activity = Some(Arc::clone(&activity));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        // The dealt turn, on 15.
+        ev_tx.send(AgentEvent::Text("dealt".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 15);
+        if other_busy {
+            activity.set_busy_slug("eyes", true);
+        }
+        // A stray turn of three events: the cell has not moved.
+        for word in ["notified", "reading the result", "reporting"] {
+            ev_tx.send(AgentEvent::Text(word.into())).await.unwrap();
+        }
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 0, "the stray completes unbound");
+        drop(ev_tx);
+        let _ = task.await;
+
+        let mut seen = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            if let crate::signaling::SignalingEvent::StrayTurn { agent, epoch, .. } = ev {
+                seen.push((agent, epoch));
+            }
+        }
+        seen
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stray_turn_while_another_participant_holds_the_ring_asks_to_be_stopped_once() {
+        assert_eq!(stray_turn_requests(true).await, vec![("hands".to_string(), 15)]);
+    }
+
+    /// …and with nobody else busy — the session waiting on the user — it runs:
+    /// the sanctioned path for a finished background watcher.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stray_turn_with_nobody_else_busy_is_left_to_run() {
+        assert!(stray_turn_requests(false).await.is_empty());
+    }
+
+    /// D3: the stop is bot-hq's own interrupt, stamped with the stray's epoch —
+    /// its aborted completion must not read as an error. The stray has no bound
+    /// epoch, so the check falls back to the cell, which the stamp matches.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stopped_stray_turn_is_not_reported_as_an_error() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(15));
+        let interrupted = Arc::new(std::sync::atomic::AtomicU64::new(crate::agents::NO_INTERRUPT_EPOCH));
+        cfg.turn_epoch = Some(Arc::clone(&cell));
+        cfg.interrupted_epoch = Arc::clone(&interrupted);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Text("dealt".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 15);
+        // The stray, stopped the way `AppState::stray_turn` stops it.
+        ev_tx.send(AgentEvent::Text("a background task finished".into())).await.unwrap();
+        interrupted.store(15, std::sync::atomic::Ordering::Release);
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: Some("error_during_execution".into()),
+                is_error: true,
+                api_error_status: None,
+                context: ContextReport::none(ContextVerdict::NoWindow),
+            })
+            .await
+            .unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 0);
+        drop(ev_tx);
+        let _ = task.await;
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(
+            !rows.iter().any(|m| m.content.contains("turn ended in")),
+            "a stopped stray is bot-hq's own interrupt, not an error: {rows:?}"
         );
     }
 
