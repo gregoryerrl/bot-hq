@@ -25,6 +25,9 @@ impl Storage {
         title: &str,
         body: &str,
     ) -> Result<i64> {
+        // F10: feedback is filed by agents — redacted before it is stored.
+        let title = crate::policy::secret_scan::redact(title);
+        let body = crate::policy::secret_scan::redact(body);
         let now = now_utc();
         let res = sqlx::query(
             "INSERT INTO agent_feedback \
@@ -35,8 +38,8 @@ impl Storage {
         .bind(project)
         .bind(agent)
         .bind(kind)
-        .bind(title)
-        .bind(body)
+        .bind(title.as_ref())
+        .bind(body.as_ref())
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -180,5 +183,21 @@ mod tests {
             .unwrap();
         let all = s.list_feedback(None).await.unwrap();
         assert_eq!(all[0].title, "second", "newest first");
+    }
+
+    /// F10 (plan C4c): feedback is filed by agents, so its title and body are
+    /// stored redacted.
+    #[tokio::test]
+    async fn filed_feedback_is_stored_redacted() {
+        let s = db().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let marker = "[redacted: a GitHub access token]";
+        s.insert_feedback("s1", None, "hands", "issue", &format!("gate printed {token}"), &format!("output: {token}"))
+            .await
+            .unwrap();
+        let rows = s.list_feedback(None).await.unwrap();
+        assert_eq!(rows[0].title, format!("gate printed {marker}"));
+        assert_eq!(rows[0].body, format!("output: {marker}"));
     }
 }

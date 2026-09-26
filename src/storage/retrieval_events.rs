@@ -32,6 +32,9 @@ impl Storage {
         stale_count: i64,
         returned_atoms: &str,
     ) -> Result<i64> {
+        // F10: the query is an agent's (or a plugin's) search text — redacted
+        // before it is stored.
+        let query = crate::policy::secret_scan::redact(query);
         let now = now_utc();
         let row_id: i64 = sqlx::query_scalar(
             "INSERT INTO retrieval_events \
@@ -43,7 +46,7 @@ impl Storage {
         .bind(session_id)
         .bind(agent)
         .bind(project_id)
-        .bind(query)
+        .bind(query.as_ref())
         .bind(atom_count)
         .bind(tokens_returned)
         .bind(budget_tokens)
@@ -171,5 +174,21 @@ mod tests {
         // A far-past `since` includes it.
         let stats = s.retrieval_stats(Some("p"), Some("2000-01-01T00:00:00Z")).await.unwrap();
         assert_eq!(stats.event_count, 1);
+    }
+
+    /// F10 (plan C4c): a retrieval query is an agent's (or a plugin's) text,
+    /// so it is stored redacted.
+    #[tokio::test]
+    async fn a_retrieval_query_is_stored_redacted() {
+        let s = mem().await;
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        s.log_retrieval_event(Some("s1"), Some("hands"), "p", &format!("where is {token} used"), 0, 0, 3000, 0, "[]")
+            .await
+            .unwrap();
+        let stored: String = sqlx::query_scalar("SELECT query FROM retrieval_events")
+            .fetch_one(s.pool())
+            .await
+            .unwrap();
+        assert_eq!(stored, "where is [redacted: a GitHub access token] used");
     }
 }

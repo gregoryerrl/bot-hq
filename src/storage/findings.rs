@@ -62,6 +62,11 @@ impl Storage {
         code_ref: Option<&str>,
         gate_id: Option<&str>,
     ) -> Result<i64> {
+        // F10: a finding is agent text — its summary and code ref are redacted
+        // before they are stored (and `latest_open_finding_by_summary` redacts
+        // its probe the same way, so a re-raise still dedupes).
+        let summary = crate::policy::secret_scan::redact(summary);
+        let code_ref = code_ref.map(crate::policy::secret_scan::redact);
         let now = now_utc();
         let res = sqlx::query(
             "INSERT INTO findings \
@@ -72,8 +77,8 @@ impl Storage {
         .bind(finding_uid)
         .bind(agent)
         .bind(severity.as_str())
-        .bind(summary)
-        .bind(code_ref)
+        .bind(summary.as_ref())
+        .bind(code_ref.as_deref())
         .bind(&now)
         .bind(&now)
         .bind(gate_id)
@@ -97,13 +102,15 @@ impl Storage {
     ) -> Result<u64> {
         // SESSION-SCOPED (EYES 6f774d93): this write opens a commit gate;
         // scoping is defense in depth under the scoped resolver above.
+        // F10: the reason is the executor's text — redacted before it is stored.
+        let reason = reason.map(crate::policy::secret_scan::redact);
         let res = sqlx::query(
             "UPDATE findings \
              SET status = ?, disposition_reason = ?, disposed_by = ?, updated_at = ? \
              WHERE finding_uid = ? AND session_id = ? AND status = 'open'",
         )
         .bind(status.as_str())
-        .bind(reason)
+        .bind(reason.as_deref())
         .bind(disposed_by)
         .bind(now_utc())
         .bind(finding_uid)
@@ -177,13 +184,15 @@ impl Storage {
         session_id: &str,
         summary: &str,
     ) -> Result<Option<Finding>> {
+        // F10: compared as it was stored — redacted (see `insert_finding_for_gate`).
+        let summary = crate::policy::secret_scan::redact(summary);
         let row = sqlx::query_as::<_, Finding>(&format!(
             "SELECT {FINDING_COLUMNS} FROM findings \
              WHERE session_id = ? AND summary = ? AND status = 'open' \
              ORDER BY id DESC LIMIT 1"
         ))
         .bind(session_id)
-        .bind(summary)
+        .bind(summary.as_ref())
         .fetch_optional(&self.pool)
         .await?;
         Ok(row)

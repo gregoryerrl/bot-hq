@@ -777,4 +777,47 @@ mod tests {
         assert!(res.contains("approved"), "got: {res}");
         assert_eq!(storage.get_finding(&uid).await.unwrap().unwrap().reviewer_approved, 1);
     }
+
+    /// F10 (plan C4c): a finding is agent text — its summary, code ref and
+    /// disposition reason are stored redacted — and a re-raise of the same
+    /// secret-bearing summary still dedupes onto the first row, because the
+    /// lookup redacts its probe the way the insert redacted the row.
+    #[tokio::test]
+    async fn a_findings_text_is_redacted_and_a_re_raise_still_dedupes() {
+        let bridge = SignalingBridge::new();
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        let token = format!("{}{}", "ghp_", "1234567890abcdefghijABCDEF");
+        let marker = "[redacted: a GitHub access token]";
+        let flag = || {
+            bridge.eyes_flag(
+                "s1".into(),
+                "eyes".into(),
+                FindingSeverity::Blocking,
+                format!("the log prints {token}"),
+                Some(format!("deploy.sh:3 {token}")),
+            )
+        };
+        let first = flag().await.unwrap();
+        let again = flag().await.unwrap();
+        assert_eq!(first, again, "a re-raise dedupes onto the first finding");
+        let rows = storage.findings_for_session("s1").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].summary, format!("the log prints {marker}"));
+        assert_eq!(rows[0].code_ref.as_deref(), Some(format!("deploy.sh:3 {marker}").as_str()));
+
+        bridge
+            .disposition_finding(
+                "s1".into(),
+                first.clone(),
+                FindingStatus::Fixed,
+                format!("rotated {token} and removed the echo"),
+                "hands".into(),
+            )
+            .await
+            .unwrap();
+        let row = storage.get_finding(&first).await.unwrap().unwrap();
+        assert_eq!(row.disposition_reason, Some(format!("rotated {marker} and removed the echo")));
+    }
 }
