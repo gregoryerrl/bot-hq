@@ -840,11 +840,6 @@ fn round_cap_notice(laps: u32) -> String {
     )
 }
 
-/// What the sequencer task needs, cloned from the session's own state at spawn.
-///
-/// (The comparison that used to sit here named `RouterDeps`, which went with the
-/// router in `3adfc68` — a rustdoc link to a deleted type, which resolves to
-/// nothing and reads as a live sibling.)
 /// The participants of one session still ORIENTING, by id (D4, 2026-09-26).
 ///
 /// One set per spawn, shared by the ring (who not to deal), every pump (its own
@@ -884,6 +879,11 @@ fn orienting_now(deps: &SequencerDeps) -> std::collections::HashSet<i64> {
         .unwrap_or_default()
 }
 
+/// What the sequencer task needs, cloned from the session's own state at spawn.
+///
+/// (The comparison that used to sit here named `RouterDeps`, which went with the
+/// router in `3adfc68` — a rustdoc link to a deleted type, which resolves to
+/// nothing and reads as a live sibling.)
 pub struct SequencerDeps {
     /// The session whose turn cycle this task runs. Every ring, cursor and
     /// consensus query is scoped by it.
@@ -1517,6 +1517,9 @@ struct RingState {
     /// [`SequencerCommand::Oriented`] steps the ring on from the anchor. Cleared
     /// by every step, so a user message that deals in the meantime ends it too.
     held_for_orienting: bool,
+    /// The participant whose `Oriented` ended that hold: it takes the turn it
+    /// was owed next, directly, as a RING turn (see `advance_turn`).
+    oriented_next: Option<i64>,
 }
 
 impl RingState {
@@ -2108,11 +2111,12 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     "sequencer: a participant finished orienting after boot ended"
                 );
                 // Its id is already out of the set, so every step from here on
-                // includes it. A ring HOLDING for it steps now — onward from the
-                // anchor, no reset: votes cast while it was reading still stand,
-                // and its own is the one owed.
+                // includes it. A ring HOLDING for it deals it now — the turn it
+                // is owed, no reset: votes cast while it was reading still
+                // stand, and its own is the one missing.
                 if state.held_for_orienting {
                     state.held_for_orienting = false;
+                    state.oriented_next = Some(participant_id);
                     advance_turn(&deps, &mut rx, &mut state, false, false).await;
                 }
             }
@@ -2547,6 +2551,7 @@ async fn advance_turn(
         open_gates,
         staged_pending,
         held_for_orienting,
+        oriented_next,
         ..
     } = state;
     // **rc3 D35: nothing is dealt while the session is halted or gated.**
@@ -2785,6 +2790,33 @@ async fn advance_turn(
             );
         }
     }
+    // **The participant whose readiness ended a hold takes the turn it was
+    // owed** (D4; EYES, A3 review) — directly, not whoever sits after the
+    // anchor: they have had their say, and would spend a model turn reading the
+    // hold notice before the rotation reached the late one. A RING turn, so the
+    // anchor moves to it and the rotation carries on after it. A typed message
+    // outranks it; the late participant is in the rotation by then either way.
+    if let Some(id) = oriented_next.take().filter(|_| !user_spoke) {
+        if let Ok(Some(p)) = deps.storage.participant_by_id(id).await {
+            if *p.session_id == *deps.session_id
+                && p.enabled
+                && p.participation_mode == crate::storage::MODE_ACTIVE
+                && !orienting_now(deps).contains(&p.id)
+            {
+                // One turn answers a summons of it too.
+                summons.queue.retain(|queued| *queued != p.id);
+                summons.anchor = Some(p.clone());
+                *holder = Some(p);
+                *epoch += 1;
+                match start_turn(deps, holder, epoch, rx, deferred).await {
+                    Dealt::Live => {}
+                    Dealt::CannotComplete(reason) => unwind_wedged_turn(deps, holder, epoch, reason).await,
+                    Dealt::NothingUnread => pass_empty_turn(deps, holder, *epoch, deferred).await,
+                }
+                return;
+            }
+        }
+    }
     // **A summons pre-empts the ring step, and takes the turn INSTEAD of it.**
     // The step it displaces is not owed to anyone afterwards: the ring resumes
     // from the anchor, which this turn does not move, so nobody's place is lost
@@ -2809,15 +2841,30 @@ async fn advance_turn(
     // the same done participant, one full-context model turn after another,
     // until the orienting one finished. Hold instead; its `Oriented` deals it.
     if !user_spoke && dealable_all_voted_done_while_orienting(deps).await {
-        hold_for_orienting(deps, holder, epoch, held_for_orienting, OrientingHold::OthersDone).await;
+        hold_for_orienting(
+            deps,
+            holder,
+            epoch,
+            held_for_orienting,
+            staged_pending,
+            OrientingHold::OthersIdle,
+        )
+        .await;
         return;
     }
     match hand_over(deps, current).await {
         // Nobody left to deal: everyone active is still orienting (D4). The
         // user's message waits in the channel; the first `Oriented` deals it.
         Handover::Orienting => {
-            hold_for_orienting(deps, holder, epoch, held_for_orienting, OrientingHold::EveryoneOrienting)
-                .await;
+            hold_for_orienting(
+                deps,
+                holder,
+                epoch,
+                held_for_orienting,
+                staged_pending,
+                OrientingHold::EveryoneOrienting,
+            )
+            .await;
         }
         // The ring could not be read. Keeping the holder AND the epoch is what
         // makes the retry in `hand_over`'s comment real: the same holder's
@@ -2918,6 +2965,25 @@ async fn advance_turn(
                 // right now, which ends the LAP. A pass still casts no vote and
                 // still clears nothing.
                 if !*spoke_this_lap {
+                    // **Not while someone is still orienting** (D4; EYES
+                    // 28dca9fc). They have had no turn at all, so "every
+                    // participant passed" is false — and a lone ready
+                    // participant reaches this lap by itself: after its own
+                    // work the ring re-deals it, its empty page is passed FOR
+                    // it, and the lap is all passes. Hold instead; the late
+                    // participant's `Oriented` deals it the work to read.
+                    if !orienting_now(deps).is_empty() {
+                        hold_for_orienting(
+                            deps,
+                            holder,
+                            epoch,
+                            held_for_orienting,
+                            staged_pending,
+                            OrientingHold::OthersIdle,
+                        )
+                        .await;
+                        return;
+                    }
                     halt(deps, holder, epoch).await;
                     announce_all_passed(deps).await;
                     // Every stop is a HALT (2026-08-15: "HALT means the floor
@@ -3043,9 +3109,11 @@ async fn advance_turn(
             }
             *holder = next;
             // **The ring moved, so the anchor moves with it — and this is the
-            // only place it is written.** Every step through the rotation comes
-            // through this arm; a summons deliberately does not, which is the
-            // whole of D17's "resumes where it was".
+            // only place it is written** but one: the turn owed to a participant
+            // that finished orienting (D4), which is a ring turn dealt out of
+            // order. Every other step through the rotation comes through this
+            // arm; a summons deliberately does not, which is the whole of D17's
+            // "resumes where it was".
             summons.anchor = holder.clone();
             // Every step, including a restart that lands on the same
             // participant. That case is exactly why the epoch exists.
@@ -3670,8 +3738,9 @@ async fn dealable_all_voted_done_while_orienting(deps: &SequencerDeps) -> bool {
 enum OrientingHold {
     /// Everyone active is still orienting: nobody at all can take the turn.
     EveryoneOrienting,
-    /// Everyone else has voted done; the orienting participant's turn is owed.
-    OthersDone,
+    /// Everyone else is done for now — voted done, or passed a whole lap; the
+    /// orienting participant's turn is owed.
+    OthersIdle,
 }
 
 /// Hold the turn for a participant still orienting (D4): take it out of flight
@@ -3682,9 +3751,12 @@ async fn hold_for_orienting(
     holder: &mut Option<Participant>,
     epoch: &mut u64,
     held: &mut bool,
+    staged_pending: &mut bool,
     why: OrientingHold,
 ) {
     halt(deps, holder, epoch).await;
+    // A hold is a stop, and a stop with a stage pending delivers it (round 12).
+    deliver_staged_if_pending(deps, staged_pending).await;
     if *held {
         return;
     }
@@ -3710,9 +3782,10 @@ async fn hold_for_orienting(
             "[System: every participant is still orienting after boot ({who}) — the next \
              turn goes to the first one ready.]"
         ),
-        OrientingHold::OthersDone => format!(
-            "[System: everyone else has voted done; waiting for {who} to finish orienting — \
-             the next turn goes to them when ready. Send a message to go on without waiting.]"
+        OrientingHold::OthersIdle => format!(
+            "[System: nobody else has anything to add right now; waiting for {who} to finish \
+             orienting — the next turn goes to them when ready. Send a message to go on without \
+             waiting.]"
         ),
     };
     if crate::core::post_system_notice(
@@ -7278,6 +7351,101 @@ mod tests {
         let got = seats[0].expect(2).await;
         assert_eq!(got[0], "go", "the held turn goes to the participant that just finished orienting");
         assert!(got[1].contains("waiting for a to finish orienting"), "and it reads why: {got:?}");
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// D4, EYES 28dca9fc: the lone ready participant does its work, the ring
+    /// re-deals it (nobody else is dealable), its empty page is passed FOR it,
+    /// and the lap is all passes. That is not "every participant passed" — the
+    /// orienting one has had no turn — so the ring holds, and `Oriented` deals
+    /// the late participant the work to read. Without the hold in the all-pass
+    /// branch the session yields on a false banner and `a` waits for the user.
+    #[tokio::test]
+    async fn a_lone_ready_participants_passed_lap_holds_for_the_orienting_one() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        let set = seed_orienting(true, [a]);
+        deps.orienting = Some(Arc::clone(&set));
+        post(&storage, "user", None, "go").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, user_message()).await;
+        assert_eq!(seats[1].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: b,
+                epoch: 1,
+                ending: TurnEnding::Spoke,
+            },
+        )
+        .await;
+        seats[1].quiet().await;
+        seats[0].quiet().await;
+        let said = notices(&storage).await;
+        assert!(
+            !said.iter().any(|n| n.contains("Every participant passed")),
+            "no all-pass yield while a participant has had no turn: {said:?}"
+        );
+        assert!(
+            said.iter().any(|n| n.contains("waiting for a to finish orienting")),
+            "{said:?}"
+        );
+
+        lock_orienting(&set).remove(&a);
+        send(&tx, SequencerCommand::Oriented { participant_id: a }).await;
+        let got = seats[0].expect(2).await;
+        assert_eq!(got[0], "go", "the late participant is dealt the work: {got:?}");
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// D4 (EYES, A3 review): the turn a hold owes goes to the participant that
+    /// finished orienting, directly — not to whoever sits after the anchor. In
+    /// `[a, c, b]` with `c` orienting, stepping on from `b` would re-deal `a`,
+    /// who has voted done and would spend a model turn reading the notice.
+    #[tokio::test]
+    async fn the_owed_turn_goes_straight_to_the_participant_that_finished_orienting() {
+        let (mut deps, storage, mut seats) =
+            ring(&[("a", "active"), ("c", "active"), ("b", "active")]).await;
+        let (a, c, b) = (seats[0].id, seats[1].id, seats[2].id);
+        let set = seed_orienting(true, [c]);
+        deps.orienting = Some(Arc::clone(&set));
+        post(&storage, "user", None, "go").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["go"]);
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: a,
+                epoch: 1,
+                ending: TurnEnding::Done,
+            },
+        )
+        .await;
+        assert_eq!(seats[2].expect(1).await, vec!["go"], "c is passed over while it orients");
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: b,
+                epoch: 2,
+                ending: TurnEnding::Done,
+            },
+        )
+        .await;
+        seats[0].quiet().await;
+
+        lock_orienting(&set).remove(&c);
+        send(&tx, SequencerCommand::Oriented { participant_id: c }).await;
+        let got = seats[1].expect(2).await;
+        assert_eq!(got[0], "go", "the owed turn is c's: {got:?}");
+        seats[0].quiet().await;
+        seats[2].quiet().await;
         drop(tx);
         assert!(exited(task).await);
     }
