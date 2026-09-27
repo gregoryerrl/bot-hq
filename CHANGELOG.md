@@ -18,6 +18,12 @@ and in `docs/rebuild-archive/`.
   background work running; a notice says why instead.
 - **A helper's messages no longer appear in the chat as the agent's own words,**
   and no longer replace the agent's context-meter reading with the helper's.
+- **A plugin sending to, or waiting on, a session that was closed gets a clear
+  "closed" error** instead of "no live session", which a plugin could not tell
+  from a passing failure. The session's history stays readable.
+- **A participant that passes no longer marks its earlier phase votes as
+  withdrawn.** Only the current round's ballots are retracted; the ones that
+  carried an earlier phase change stay in the audit history as cast.
 
 ## [1.0.8] — 2026-09-27
 

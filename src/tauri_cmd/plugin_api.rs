@@ -193,6 +193,31 @@ async fn require_owned_session(
     }
 }
 
+/// [`require_owned_session`], plus: the session is still OPEN. For the arms
+/// that talk to a live session (send, wait). A closed session has no live
+/// handle, so the core answered "no live session {id}", which a plugin cannot
+/// tell from a transient failure. The Cognotify tutor's reconnect regex looks
+/// for "closed" and retried forever (finding `179ed84b`). Reading a closed
+/// session's history stays allowed; only these arms refuse it.
+async fn require_open_owned_session(
+    storage: &Storage,
+    plugin_id: &str,
+    session_id: &str,
+) -> Result<(), AppError> {
+    require_owned_session(storage, plugin_id, session_id).await?;
+    let closed = storage
+        .get_session(session_id)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?
+        .is_some_and(|s| s.closed_at.is_some());
+    if closed {
+        return Err(AppError::Validation(format!(
+            "session {session_id:?} is closed; start a new session"
+        )));
+    }
+    Ok(())
+}
+
 /// What plugins see for a retrieved CL atom. Local (not the storage
 /// `RetrievedAtom`) so the plugin contract can't drift when storage grows
 /// fields. `stale` is reserved: the storage path always reports `false`
@@ -489,7 +514,7 @@ pub(crate) async fn dispatch(
                     "plugin_session_send: text must not be empty".into(),
                 ));
             }
-            require_owned_session(storage, plugin_id, &session_id).await?;
+            require_open_owned_session(storage, plugin_id, &session_id).await?;
             let core = core.ok_or_else(|| {
                 AppError::Internal("core state unavailable for plugin_session_send".into())
             })?;
@@ -505,7 +530,7 @@ pub(crate) async fn dispatch(
             // timeout); default 25s, hard-clamped so a plugin can't pin a
             // connection open indefinitely.
             let timeout_ms = opt_i64(args, "timeout_ms").unwrap_or(25_000).clamp(100, 60_000) as u64;
-            require_owned_session(storage, plugin_id, &session_id).await?;
+            require_open_owned_session(storage, plugin_id, &session_id).await?;
             let core = core.ok_or_else(|| {
                 AppError::Internal("core state unavailable for plugin_session_wait".into())
             })?;
@@ -1076,6 +1101,41 @@ mod tests {
     /// core: a foreign session fails Validation (fence) even with core absent;
     /// an owned session reaches the core requirement (Internal), proving the
     /// fence ran first. `messages` needs no core, so an owned read succeeds.
+    /// Finding `179ed84b`: a send to, or a wait on, a session the plugin owns
+    /// but that is CLOSED fails with a Validation error that says "closed" —
+    /// before any core access — instead of the core's "no live session {id}",
+    /// which the Cognotify tutor's reconnect regex cannot recognise and so
+    /// retried forever. Reading the closed session's history still works.
+    #[tokio::test]
+    async fn a_closed_plugin_session_says_closed_to_send_and_wait() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::memory().await.unwrap();
+        let bridge = test_bridge(&tmp, &storage).await;
+        storage.create_session("s-done", "t", None).await.unwrap();
+        storage.set_session_created_by("s-done", "deck").await.unwrap();
+        storage.close_session("s-done", false).await.unwrap();
+        for (cmd, args) in [
+            ("plugin_session_send", serde_json::json!({"session_id":"s-done","text":"hi"})),
+            ("plugin_session_wait", serde_json::json!({"session_id":"s-done"})),
+        ] {
+            let err = dispatch(&storage, &bridge, None, "deck", cmd, &args).await.unwrap_err();
+            assert!(
+                matches!(&err, AppError::Validation(m) if m.contains("closed")),
+                "{cmd}: got {err:?}"
+            );
+        }
+        let read = dispatch(
+            &storage,
+            &bridge,
+            None,
+            "deck",
+            "plugin_session_messages",
+            &serde_json::json!({"session_id":"s-done"}),
+        )
+        .await;
+        assert!(read.is_ok(), "history stays readable: {read:?}");
+    }
+
     #[tokio::test]
     async fn plugin_session_arms_fence_ownership_before_core() {
         let tmp = TempDir::new().unwrap();
