@@ -1700,25 +1700,19 @@ impl Storage {
         Ok(row.map(|r| r.0).unwrap_or(0))
     }
 
-    /// Advance the epoch and drop every vote that came before it.
+    /// Advance the epoch. Earlier votes are KEPT, as history (migration 0076).
     ///
-    /// **The two halves do different jobs, and confusing them is a trap.**
-    ///
-    /// The BUMP is what makes the vote correct: it is the only thing separating
+    /// The bump is what makes the vote correct: it is the only thing separating
     /// a vote cast before a phase round trip from one cast after it, an axis a
     /// content fingerprint cannot see. Correctness lives entirely in the epoch
     /// filter on the tally query, which
     /// `a_stale_epoch_vote_is_ignored_even_when_the_row_survives` pins on its
-    /// own precisely so this is checkable without the delete.
+    /// own.
     ///
-    /// The DELETE is HYGIENE, not correctness: a surviving row can never match a
-    /// bumped epoch, so keeping it would change no answer — it would just
-    /// accumulate a row per participant per transition, forever. Read as
-    /// correctness it is the redundant second mechanism that made the first
-    /// mutation check come back green.
-    ///
-    /// Both run in ONE transaction: a bump without its delete leaks rows, and a
-    /// delete without its bump throws away votes the session still needs.
+    /// This used to also DELETE every earlier vote, as hygiene. 0076 stopped
+    /// that so the audit trail survives, which is why `retract_phase_votes` now
+    /// scopes itself to the current epoch: a past round's ballots are history,
+    /// not votes to withdraw.
     pub async fn bump_phase_epoch(&self, session_id: &str) -> Result<i64> {
         let mut tx = self.pool.begin().await.context("begin bump_phase_epoch")?;
         sqlx::query("UPDATE sessions SET phase_epoch = phase_epoch + 1 WHERE id = ?")
@@ -1947,12 +1941,12 @@ impl Storage {
     /// called when someone declines to carry the turn, and that declines every
     /// open question, not the one that happens to be current.
     ///
-    /// **So it filters on `participant_id` ALONE** — every target and every
-    /// epoch, not just the live one. Safe today because one target is live at a
-    /// time (a session votes on the phase it is leaving, and the epoch bump
-    /// clears the rest anyway), and stated rather than left to be re-derived:
-    /// if concurrent targets ever become reachable, this is the line that
-    /// silently withdraws votes for a question nobody asked about.
+    /// **So it filters on `participant_id` and the session's CURRENT epoch** —
+    /// every target, but only the live round. Past epochs are history since
+    /// 0076 (the bump no longer deletes them), and a ballot that carried an
+    /// advance must not read "retracted" because its voter passed later: this
+    /// used to filter on the participant alone, and every pass after an advance
+    /// relabelled the ballots that had carried it (triage A1, s-5482dfff).
     pub async fn retract_phase_votes(&self, participant_id: i64) -> Result<()> {
         // MARK, don't delete (0076): the retraction is itself audit-worthy —
         // "voted, then passed" and "never voted" were indistinguishable when
@@ -1960,7 +1954,9 @@ impl Storage {
         // lands on the same PK via INSERT OR REPLACE, which rewrites
         // retracted_at to its NULL default — an un-retraction, exactly right.
         sqlx::query(
-            "UPDATE phase_votes SET retracted_at = ?              WHERE participant_id = ? AND retracted_at IS NULL",
+            "UPDATE phase_votes SET retracted_at = ? \
+             WHERE participant_id = ? AND retracted_at IS NULL \
+               AND phase_epoch = (SELECT phase_epoch FROM sessions WHERE id = phase_votes.session_id)",
         )
         .bind(now_utc())
         .bind(participant_id)
@@ -7392,5 +7388,34 @@ mod tests {
         walk(&root, &root, &mut callers);
         callers.sort();
         assert_eq!(callers, ["core/broadcast.rs", "signaling/bridge/tray.rs"]);
+    }
+
+    /// Triage A1: a pass retracts only the CURRENT epoch's ballots. The ballot
+    /// that carried an earlier advance keeps `retracted_at` NULL — since 0076
+    /// the epoch bump keeps it as history, and a later pass must not relabel it.
+    #[tokio::test]
+    async fn a_pass_retracts_only_the_current_epochs_ballots() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let hands = s
+            .insert_participant("s1", "hands", "HANDS", None, None, "[]", "active", 0)
+            .await
+            .unwrap();
+        s.cast_phase_vote("s1", hands, "Plan", "fp0", 0).await.unwrap();
+        let epoch = s.bump_phase_epoch("s1").await.unwrap();
+        s.cast_phase_vote("s1", hands, "Apply", "fp1", epoch).await.unwrap();
+        s.retract_phase_votes(hands).await.unwrap();
+        let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT phase_epoch, retracted_at FROM phase_votes WHERE participant_id = ? ORDER BY phase_epoch",
+        )
+        .bind(hands)
+        .fetch_all(s.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, 0);
+        assert!(rows[0].1.is_none(), "the epoch-0 ballot that carried the advance stays unretracted");
+        assert_eq!(rows[1].0, epoch);
+        assert!(rows[1].1.is_some(), "the live round's ballot is retracted");
     }
 }
