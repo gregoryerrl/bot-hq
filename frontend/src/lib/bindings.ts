@@ -2174,12 +2174,6 @@ commit_style?: string;
  */
 round_cap?: number | null }
 /**
- * Resolve a session's project from its repo paths. A registered project
- * whose `working_repo_path` matches wins (matched against the BASE repo
- * first — a worktree session's path ends in the repo basename, not
- * necessarily the project name); the path basename stays as the fallback
- * for unregistered repos. Repo-less sessions resolve to `None` (general
- * policy applies by inheritance).
  * How a session's project name was derived from its repo path — surfaced in
  * the gear tab (policy-origin badge) so the user can see WHY a session
  * inherited a given policy. The 2026-06-11 "why the full forbidden list?"
