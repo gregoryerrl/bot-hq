@@ -7,46 +7,12 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
-Secrets in what bot-hq stores (F10): every row an agent writes is stored with
-its secrets redacted; what you type stays as you wrote it. Where and why:
-ARCHITECTURE.md §Secret redaction.
+## [1.0.8] — 2026-09-27
 
-### Security
-
-- **Everything an agent writes is stored with its secrets redacted, from now
-  on**: chat messages, host notices, tray questions and options, session docs,
-  findings, feedback reports, search queries, the violations log, halt reasons,
-  text a plugin sends in, and agent writes to the Context Library. Each secret
-  becomes `[redacted: <what>]`; rows stored before this stay as they were.
-- **What you type is kept as written** — the composer, a staged message, a
-  free-text tray answer or rejection reason, a custom doc you save, and your
-  edits in the Context Library tab — since you may be handing an agent a token
-  on purpose.
-- **A gated command is kept as written**, as a recorded exception: it runs
-  exactly as written, and the approval card shows exactly what will run.
-- **An agent is told when its write was stored with markers** (a Context
-  Library write or a session doc), and an edit that quotes a secret the file
-  holds only as its marker is told to match the marker.
-- **A secret a command printed is no longer stored in plain text.** Tool
-  output and every string of a tool call's input are redacted before the
-  row is stored — each self-identifying secret becomes `[redacted: <what>]`
-  — and the row stays valid JSON. An approved command's output is redacted
-  before it reaches the chat, so the agent that asked and its peers never
-  receive the secret (a command the Tool Gate runs without asking returns
-  its raw output to the agent, as a plain command does; only the stored copy
-  is redacted).
-- **A Laravel Sanctum API token is recognised as a secret** (the shape of
-  the Laravel Cloud token printed on 2026-09-04), in redaction and in the
-  Context Library push check. AWS's documentation example key is not.
-- **An outward publish whose body carries a secret is refused**, whoever
-  is reviewing — including a session with no reviewer and an approved
-  reviewer override. Only published content is scanned; a secret in a
-  request header is not.
-
-## [1.0.8] — 2026-09-26
-
-Stray turns and two dependency advisories (session s-02101415). No
-migrations.
+Stray turns, secrets in what bot-hq stores (F10), and two dependency
+advisories (sessions s-02101415 and s-5482dfff). No migrations. F10: every
+row an agent writes is stored with its secrets redacted; what you type stays
+as you wrote it. Where and why: ARCHITECTURE.md §Secret redaction.
 
 ### Fixed
 
@@ -83,6 +49,35 @@ migrations.
 
 ### Security
 
+- **Everything an agent writes is stored with its secrets redacted, from now
+  on**: chat messages, host notices, tray questions and options, session docs,
+  findings, feedback reports, search queries, the violations log, halt reasons,
+  text a plugin sends in, and agent writes to the Context Library. Each secret
+  becomes `[redacted: <what>]`; rows stored before this stay as they were.
+- **What you type is kept as written** — the composer, a staged message, a
+  free-text tray answer or rejection reason, a custom doc you save, and your
+  edits in the Context Library tab — since you may be handing an agent a token
+  on purpose.
+- **A gated command is kept as written**, as a recorded exception: it runs
+  exactly as written, and the approval card shows exactly what will run.
+- **An agent is told when its write was stored with markers** (a Context
+  Library write or a session doc), and an edit that quotes a secret the file
+  holds only as its marker is told to match the marker.
+- **A secret a command printed is no longer stored in plain text.** Tool
+  output and every string of a tool call's input are redacted before the
+  row is stored — each self-identifying secret becomes `[redacted: <what>]`
+  — and the row stays valid JSON. An approved command's output is redacted
+  before it reaches the chat, so the agent that asked and its peers never
+  receive the secret (a command the Tool Gate runs without asking returns
+  its raw output to the agent, as a plain command does; only the stored copy
+  is redacted).
+- **A Laravel Sanctum API token is recognised as a secret** (the shape of
+  the Laravel Cloud token printed on 2026-09-04), in redaction and in the
+  Context Library push check. AWS's documentation example key is not.
+- **An outward publish whose body carries a secret is refused**, whoever
+  is reviewing — including a session with no reviewer and an approved
+  reviewer override. Only published content is scanned; a secret in a
+  request header is not.
 - **rustls 0.23.45** — RUSTSEC-2026-0285 (TLS 1.3 handshake messages
   accepted across encryption levels). bot-hq is a TLS client only.
 - **react-router 7.18.4** — an open redirect through a backslash in
