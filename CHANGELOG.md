@@ -93,8 +93,6 @@ as you wrote it. Where and why: ARCHITECTURE.md §Secret redaction.
 - **glib 0.18** (RUSTSEC-2024-0429, an unsound `VariantStrIter`) is pinned
   by Tauri's GTK3 stack on Linux; Dependabot's security update fails on
   every run until Tauri moves to gtk-rs 0.20.
-- A live routing check of react-router 7 in the running app, after the next
-  relaunch.
 
 ## [1.0.7] — 2026-09-25
 
