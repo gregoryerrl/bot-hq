@@ -517,10 +517,11 @@ async fn the_capability_gate_reproduces_the_name_gate_for_every_tool() {
     // on `checked`: subtracting the exemptions is exactly what let the old
     // literal drift every time one was signed off. A tool leaving
     // `tool_descriptors()` is a decision — `declare_working`'s retirement took it
-    // to the 40 that stand today — and a decision should not be able to land as
-    // a refactor that quietly shrinks what this file checks.
+    // to 40, and 41 stand today (2026-09-27; the floor had fallen one behind, so
+    // one deletion passed again — triage `816d86fe`) — and a decision should not
+    // be able to land as a refactor that quietly shrinks what this file checks.
     assert!(
-        registry >= 40,
+        registry >= 41,
         "tool_descriptors() has shrunk to {registry} — deleting a tool is a \
          decision, not a refactor. If it was deliberate, lower this floor in the \
          same commit that removes the tool."

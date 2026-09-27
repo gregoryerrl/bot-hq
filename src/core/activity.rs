@@ -730,7 +730,7 @@ mod tests {
 
         t.set_busy_slug("hands", true); // idle -> busy
         awaiting.store(true, Ordering::Release);
-        t.refresh(); // busy -> awaiting_user, Brian STILL working
+        t.refresh(); // busy -> awaiting_user, hands STILL working
         t.set_busy_slug("hands", false); // stays awaiting_user; flags change only
 
         // The writes are detached (recompute_locked is sync), so let them land.

@@ -1322,14 +1322,6 @@ mod tests {
         (s, b)
     }
 
-    /// `session:created` had exactly one emitter — `AppState::open_session`,
-    /// the external driver's entry point — and that had had no caller since
-    /// the driver was removed, so the event was never emitted in production
-    /// while `Providers.tsx` and `PluginHost.tsx` (which relays it to plugins
-    /// holding `list_sessions` as `sessions_changed`) waited for it. Nothing in
-    /// this crate can build a `CoreAppState` (its constructor binds a port),
-    /// so this pins the source: BOTH create paths call the emitter after the
-    /// spawn attempt. Delete either call and this goes red.
     /// Findings `07e1353d` / `0e5b3774`: both create paths return the session
     /// row RE-READ after the roster is seeded — the only place its
     /// `multi_participant` can be true. Bound before the seed, the row always
@@ -1380,6 +1372,14 @@ mod tests {
         }
     }
 
+    /// `session:created` had exactly one emitter — `AppState::open_session`,
+    /// the external driver's entry point — and that had had no caller since
+    /// the driver was removed, so the event was never emitted in production
+    /// while `Providers.tsx` and `PluginHost.tsx` (which relays it to plugins
+    /// holding `list_sessions` as `sessions_changed`) waited for it. Nothing in
+    /// this crate can build a `CoreAppState` (its constructor binds a port),
+    /// so this pins the source: BOTH create paths call the emitter after the
+    /// spawn attempt. Delete either call and this goes red.
     #[test]
     fn both_create_paths_announce_the_session() {
         let code = include_str!("sessions.rs")

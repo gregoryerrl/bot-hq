@@ -54,10 +54,10 @@ pub fn is_gate_options(options_json: Option<&str>) -> bool {
 ///
 /// `kind = 'approval'` since round 8 — the backend knows at insert whether a
 /// row is policy-initiated, so it says so instead of leaving every reader to
-/// re-derive it from the options string (round 11 dropped the menu-exact half
-/// of that predicate: an agent's `request_approval` with its own labels is a
-/// gate too, and stamping it `choice` left the latch it opened with no lift —
-/// see `bridge/tray.rs`'s insert). The options check
+/// re-derive it from the options string. (Round 11 made an agent's
+/// `request_approval` a gate too; round 12 undid that: it parks as
+/// `kind = 'request'`, a tray item that latches nothing — only the host's
+/// gates are `approval`. See `bridge/tray.rs`'s insert.) The options check
 /// stays as the fallback for rows parked before that (`kind = 'choice'` with
 /// the gate menu). Every reader — the ring's gate reseed, the resolve path's
 /// latch release, the app layer's tray-answer classification, the frontend's

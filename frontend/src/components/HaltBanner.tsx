@@ -35,10 +35,10 @@ export type TrayRow = {
  * carries free-form options. Since round 8 the backend also says so at insert
  * (`kind = "approval"`, `storage::is_gate_row`), so the kind is the primary
  * signal here and the exact-menu check is the fallback for rows parked before
- * that (`kind = "choice"` with the gate menu). Since round 11 the kind is
- * stamped on EVERY approval-context row — an agent's `request_approval` with
- * its own labels included — because it is also the marker that latches and
- * lifts the ring; the gate slot renders such a menu's own labels. Measured on
+ * that (`kind = "choice"` with the gate menu). Since round 12 only the host's
+ * gates are stamped `approval` — the marker that latches and lifts the ring; an
+ * agent's `request_approval` parks as `kind = "request"`, a tray item that
+ * latches nothing (round 11 briefly stamped those `approval` too). Measured on
  * the live DB on
  * 2026-08-17, before the kind existed: 95 rows carried the exact menu, all of
  * them gates (78 with a command, the rest push gates), and 0 command-carrying

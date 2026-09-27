@@ -95,7 +95,7 @@ request body for non-Anthropic gateways when a model has a `base_url`.
 
 **Seams (§14):** 1–7 (prompt compose → file → argv; caps → tools; overrides →
 settings/env; mcp-config; spawn env `BOT_HQ_SESSION_ID`/`BOT_HQ_AGENT` → hooks —
-UNPINNED at the producer; PreToolUse hook), 9 (deal → stdin), 10 (pump), 11
+pinned at both producers, see the seam table; PreToolUse hook), 9 (deal → stdin), 10 (pump), 11
 (epoch cell), 29 (capability ↔ tool gate, DERIVED).
 
 **Gotchas → pointers.** Prompt stack order is documented identically in
@@ -400,7 +400,7 @@ every internal `Err` into exit 0 — audit E1) · `install_hooks` (at session sp
 + `bot-hq install-hooks`) · `run_tool_gate` → `park_gate` → `/hooks/tool-gate` ·
 `check_findings_gate` · `tool_gate::{resolve_keywords,match_keyword}`.
 
-**Seams (§14):** 6 (spawn env → hooks, UNPINNED at producer), 7/15 (PreToolUse
+**Seams (§14):** 6 (spawn env → hooks, pinned at both producers — seam table), 7/15 (PreToolUse
 hook → HTTP park), 16 (findings gate: hook enforces only open-blocking rows; the
 reviewer-down branch lives only in the MCP tool), 17 (`check_commit_message` ↔
 commit-msg hook: ONE fn).
