@@ -854,7 +854,11 @@ pub(crate) async fn dispatch_session_inner(
         None,
     )
     .await;
-    let mut session = storage
+    // The row is NOT bound here (findings `07e1353d`/`0e5b3774`): bound before
+    // any participant exists, its `multi_participant` is necessarily false, and
+    // a binding in scope let the re-read below be deleted with everything still
+    // compiling. The re-read is the only `session` this function has.
+    storage
         .create_session(&id, &title, working.as_deref())
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
@@ -863,7 +867,6 @@ pub(crate) async fn dispatch_session_inner(
             .set_session_base_repo(&id, base.as_deref())
             .await
             .map_err(|e| AppError::DbError(e.to_string()))?;
-        session.base_repo_path = base;
     }
     // **rc3 D13: no setting behind this any more — the product default is ONE
     // participant.** The `rain_disabled_default` toggle this used to read is
@@ -1327,6 +1330,56 @@ mod tests {
     /// this crate can build a `CoreAppState` (its constructor binds a port),
     /// so this pins the source: BOTH create paths call the emitter after the
     /// spawn attempt. Delete either call and this goes red.
+    /// Findings `07e1353d` / `0e5b3774`: both create paths return the session
+    /// row RE-READ after the roster is seeded — the only place its
+    /// `multi_participant` can be true. Bound before the seed, the row always
+    /// says false. The dispatch path no longer binds the pre-seed row at all,
+    /// so deleting the re-read does not compile; this pins the other half, the
+    /// ORDER: a re-read moved above the seed compiles and would report every
+    /// multi-participant session as solo.
+    #[test]
+    fn both_create_paths_re_read_the_session_after_seeding_it() {
+        let code = include_str!("sessions.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body_of = |name: &str| {
+            let at = code
+                .find(&format!("async fn {name}("))
+                .unwrap_or_else(|| panic!("{name} must exist"));
+            let rest = &code[at..];
+            // The NEAREST boundary: the next command, the next crate-private
+            // async fn, or the test module — whichever comes first.
+            let end = ["\n#[tauri::command]", "\npub(crate) async fn ", "\n#[cfg(test)]"]
+                .iter()
+                .filter_map(|b| rest[1..].find(b))
+                .min()
+                .map_or(rest.len(), |n| n + 1);
+            rest[..end].to_string()
+        };
+        for (name, seeds) in [
+            ("create_session", &["seed_session_roster(", "seed_default_roster("][..]),
+            ("dispatch_session_inner", &["seed_dispatch_roster("][..]),
+        ] {
+            let body = body_of(name);
+            let last_seed = seeds
+                .iter()
+                .filter_map(|s| body.rfind(s))
+                .max()
+                .unwrap_or_else(|| panic!("{name} must seed its roster"));
+            let re_read = body
+                .find(".get_session(&id)")
+                .unwrap_or_else(|| panic!("{name} must re-read the session"));
+            assert!(last_seed < re_read, "{name}: the re-read must follow the seed");
+            assert_eq!(
+                body.matches("let session =").count() + body.matches("let mut session =").count(),
+                1,
+                "{name}: the re-read is the only `session` binding"
+            );
+        }
+    }
+
     #[test]
     fn both_create_paths_announce_the_session() {
         let code = include_str!("sessions.rs")
@@ -1339,10 +1392,13 @@ mod tests {
                 .find(&format!("async fn {name}("))
                 .unwrap_or_else(|| panic!("{name} must exist"));
             let rest = &code[at..];
-            let end = rest[1..]
-                .find("\n#[tauri::command]")
-                .or_else(|| rest[1..].find("\npub(crate) async fn "))
-                .or_else(|| rest[1..].find("\n#[cfg(test)]"))
+            // The NEAREST boundary. Taking the first ALTERNATIVE that matched
+            // ran `create_session`'s body on into `dispatch_session_inner`, so
+            // deleting create_session's own call still found dispatch's.
+            let end = ["\n#[tauri::command]", "\npub(crate) async fn ", "\n#[cfg(test)]"]
+                .iter()
+                .filter_map(|b| rest[1..].find(b))
+                .min()
                 .map_or(rest.len(), |n| n + 1);
             rest[..end].to_string()
         };
