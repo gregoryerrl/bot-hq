@@ -174,10 +174,12 @@ pub struct PumpConfig {
     /// a typed-Send preempt or the agent's own halt (D35). claude-code reports
     /// an aborted turn as `is_error:true`; when that completion's epoch equals
     /// this cell the pump knows the failure is bot-hq's doing and keeps it out
-    /// of the back-to-back-error streak. Not optional: a fresh cell (never
-    /// interrupted) is what a pump gets when nothing wires the handle's, so the
-    /// construction site cannot compile with the wiring line missing — the one
-    /// deletion that would silently make every interrupt an error again.
+    /// of the back-to-back-error streak. A REQUIRED argument of
+    /// [`PumpConfig::new`], so the construction site cannot compile without
+    /// naming the cell. It used to be a defaulted field: the site set it in a
+    /// struct literal over `..PumpConfig::new(..)`, which supplied a fresh cell
+    /// when the line was deleted — so deleting it compiled, and every interrupt
+    /// counted as an error again (finding `3de92589`).
     pub interrupted_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// True while this participant is ORIENTING rather than holding a turn
     /// (rc3 **D21**). Set before the primer goes out, cleared before the ring
@@ -227,7 +229,14 @@ pub struct PumpConfig {
 }
 
 impl PumpConfig {
-    pub fn new(session_id: impl Into<Arc<str>>, slug: impl Into<Arc<str>>) -> Self {
+    /// `interrupted_epoch` is the participant's handle cell
+    /// ([`AgentHandle::interrupted_epoch`](crate::agents::AgentHandle::interrupted_epoch)),
+    /// required so no construction can silently fall back to a fresh one.
+    pub fn new(
+        session_id: impl Into<Arc<str>>,
+        slug: impl Into<Arc<str>>,
+        interrupted_epoch: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
         Self {
             session_id: session_id.into(),
             slug: slug.into(),
@@ -241,9 +250,7 @@ impl PumpConfig {
             sequencer_tx: None,
             configured_context_window: None,
             turn_epoch: None,
-            interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(
-                crate::agents::NO_INTERRUPT_EPOCH,
-            )),
+            interrupted_epoch,
             booting: None,
             boot_done: None,
             orienting: None,

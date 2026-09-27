@@ -1006,10 +1006,6 @@ async fn spawn_session_handle(
         let cfg = PumpConfig {
             sequencer_tx: sequencer_tx.clone(),
             turn_epoch: turn_epochs[slot].clone(),
-            // The cell `SessionAgent::interrupt` stamps — same `Arc` as the
-            // handle's, so a host interrupt and the pump's completion read one
-            // number.
-            interrupted_epoch: handles[slot].interrupted_epoch(),
             bridge: Some(Arc::clone(&bridge)),
             activity: Some(Arc::clone(&activity)),
             in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
@@ -1033,7 +1029,11 @@ async fn spawn_session_handle(
             // bilateral forward, slot 1 the `Rain` side — which was constructed
             // per pump, per session, and read by nothing once task 14 deleted
             // the router.
-            ..PumpConfig::new(session.id.clone(), p.slug.clone())
+            // The third argument is the cell `SessionAgent::interrupt` stamps —
+            // the handle's own `Arc`, so a host interrupt and the pump's
+            // completion read one number. Required by `PumpConfig::new`: there is
+            // no default for it to fall back to (finding `3de92589`).
+            ..PumpConfig::new(session.id.clone(), p.slug.clone(), handles[slot].interrupted_epoch())
         };
         let storage_clone = storage.clone();
         let ipav_clone = Arc::clone(&ipav);
@@ -3242,10 +3242,10 @@ mod tests {
     /// `is_error` completion whose epoch equals the handle's stamp, and THIS is
     /// what writes the stamp. Gutting `SessionAgent::interrupt` to a bare
     /// `handle.interrupt` compiled and left the suite green until this pinned
-    /// it (round-7 review); the other two ways to revert the fix silently — an
-    /// `Option` cell the construction site could omit, and a still-`pub`
-    /// `AgentHandle::interrupt` a call site could fall back to — no longer
-    /// compile.
+    /// it (round-7 review); the other two ways to revert the fix silently — a
+    /// construction site that omits the handle's cell (now a required argument
+    /// of `PumpConfig::new`), and a still-`pub` `AgentHandle::interrupt` a call
+    /// site could fall back to — no longer compile.
     #[test]
     fn a_session_agent_interrupt_stamps_the_live_epoch_into_its_handle() {
         use std::sync::atomic::{AtomicU64, Ordering};
