@@ -2709,6 +2709,55 @@ mod tests {
         assert_eq!(code, 1);
     }
 
+    /// Triage `404bdad9`: BOTH hooks consult the findings gate with the hook's
+    /// own session id. With an open blocking finding for `s1`, the pre-commit
+    /// and pre-push hooks run for `s1` exit 1; with none, both exit 0. The
+    /// policy is seeded to let both through (`push_gate: auto`, no forbidden
+    /// words), so each 1 is the gate's and nothing else's (EYES). Passing
+    /// `None` in place of `session_id` at either call site compiled and left
+    /// the suite green, because every other hook test passes `None`.
+    #[test]
+    fn both_hooks_consult_the_findings_gate_for_their_own_session() {
+        let data = tempdir().unwrap();
+        std::fs::create_dir_all(data.path().join("library/projects/p")).unwrap();
+        std::fs::write(
+            data.path().join("library/projects/p/policy.yaml"),
+            "push_gate: auto\nforbidden_in_commits: []\n",
+        )
+        .unwrap();
+        let repo = tempdir().unwrap();
+        git(repo.path(), &["init", "-q"]);
+        let db_path = crate::paths::Paths::for_data_dir(data.path().to_path_buf()).db_path;
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let storage = crate::storage::Storage::open(&db_path).await.unwrap();
+            storage.create_session("s1", "t", None).await.unwrap();
+        });
+        let hooks = || {
+            (
+                run_pre_commit(data.path(), Some("p"), repo.path(), Some("s1")).unwrap(),
+                run_pre_push(data.path(), Some("p"), None, None, Some("s1")).unwrap(),
+            )
+        };
+        assert_eq!(hooks(), (0, 0), "no finding: both hooks let it through");
+        rt.block_on(async {
+            let storage = crate::storage::Storage::open(&db_path).await.unwrap();
+            storage
+                .insert_finding(
+                    "s1",
+                    "f1",
+                    "eyes",
+                    crate::storage::FindingSeverity::Blocking,
+                    "real bug",
+                    Some("a.rs:1"),
+                )
+                .await
+                .unwrap();
+        });
+        assert_eq!(hooks(), (1, 1), "an open blocking finding for this session stops both");
+    }
+
     /// **A push gate that cannot read its policy BLOCKS** (E1).
     ///
     /// Every `?` in this file is mapped to exit 0 by `run_policy_check_cli` —
