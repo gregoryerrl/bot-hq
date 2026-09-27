@@ -7,6 +7,18 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An agent's background helpers are no longer cancelled while another
+  participant holds the turn.** A helper's messages arrived on its parent's
+  output and read as the parent starting a turn of its own, which 1.0.8 stops
+  while someone else holds the turn — and that stop cancelled every helper the
+  parent had running. Helper messages are now recognised and kept out of the
+  chat, and a self-started turn is not stopped while the agent still has
+  background work running; a notice says why instead.
+- **A helper's messages no longer appear in the chat as the agent's own words,**
+  and no longer replace the agent's context-meter reading with the helper's.
+
 ## [1.0.8] — 2026-09-27
 
 Stray turns, secrets in what bot-hq stores (F10), and two dependency

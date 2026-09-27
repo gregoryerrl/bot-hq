@@ -98,8 +98,23 @@ pub fn translate(
             SystemEvent::Init { session_id, .. } => {
                 vec![AgentEvent::Init { session_id }]
             }
+            SystemEvent::BackgroundTasksChanged { tasks } => {
+                vec![AgentEvent::BackgroundTasks { running: tasks.len() }]
+            }
             _ => Vec::new(),
         },
+        // **A helper's messages are not the participant's** (feedback #47).
+        // claude-code streams a background or foreground subagent's assistant
+        // messages and tool results on the PARENT's stdout, tagged with the
+        // Agent call that launched it. Translated, they became the parent's
+        // chat rows (a helper's "I'll start by reading the input file." under
+        // HANDS' name), read as the parent opening a turn — which, while a peer
+        // held the ring, let D3 stop the parent and so cancel every helper it
+        // had running — and overwrote the parent's context reading with the
+        // helper's. The helper's work reaches the parent through the Agent
+        // call's own result; nothing here is the parent's to post.
+        StreamEvent::Assistant(asst) if asst.parent_tool_use_id.is_some() => Vec::new(),
+        StreamEvent::User(u) if u.parent_tool_use_id.is_some() => Vec::new(),
         StreamEvent::Assistant(asst) => {
             // Overwrite rather than accumulate: we want the LAST call's prompt
             // size, which is the turn's final context, not a running total.
@@ -507,6 +522,53 @@ mod tests {
             r#"{"type":"assistant","message":{"id":"m2","model":"claude-opus-5-5","content":[{"type":"text","text":"API Error: that is what the log said"}]}}"#,
         );
         assert!(matches!(translate(quoting, &mut carry).as_slice(), [AgentEvent::Text(_)]));
+    }
+
+    /// A HELPER's messages — claude-code streams a subagent's assistant
+    /// messages and tool results on the parent's stdout, tagged with the Agent
+    /// call that launched it — are not the participant's: no text, no tool row,
+    /// and no overwrite of the parent's context reading. Shapes as probed on CLI
+    /// 2.1.281 (s-5482dfff); the parent's own events carry
+    /// `"parent_tool_use_id":null`.
+    #[test]
+    fn a_helpers_messages_are_not_the_participants() {
+        let parse = |line: &str| -> StreamEvent { serde_json::from_str(line).unwrap() };
+        let mut carry = None;
+        let own = parse(
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"m1","content":[{"type":"text","text":"LAUNCHED"}],"usage":{"input_tokens":1000}}}"#,
+        );
+        assert!(matches!(translate(own, &mut carry).as_slice(), [AgentEvent::Text(t)] if t == "LAUNCHED"));
+        assert_eq!(carry, Some(serde_json::json!({"input_tokens": 1000})));
+        let helper_call = parse(
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_01PY","subagent_type":"general-purpose","message":{"id":"m2","content":[{"type":"text","text":"I'll start by reading the input file."},{"type":"tool_use","id":"t9","name":"Bash","input":{"command":"echo hello-from-helper"}}],"usage":{"input_tokens":12825}}}"#,
+        );
+        assert!(translate(helper_call, &mut carry).is_empty(), "a helper's text and call are not the parent's");
+        assert_eq!(
+            carry,
+            Some(serde_json::json!({"input_tokens": 1000})),
+            "the parent's context reading is not the helper's"
+        );
+        let helper_result = parse(
+            r#"{"type":"user","parent_tool_use_id":"toolu_01PY","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t9","content":"hello-from-helper"}]}}"#,
+        );
+        assert!(translate(helper_result, &mut carry).is_empty());
+        let own_result = parse(
+            r#"{"type":"user","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01PY","content":"Async agent launched successfully."}]}}"#,
+        );
+        assert!(matches!(translate(own_result, &mut carry).as_slice(), [AgentEvent::ToolResult { .. }]));
+    }
+
+    /// claude-code's own count of the process's running background tasks, sent
+    /// whenever the set changes, becomes `BackgroundTasks` — shapes as probed.
+    #[test]
+    fn background_tasks_changed_reports_the_running_count() {
+        let parse = |line: &str| -> StreamEvent { serde_json::from_str(line).unwrap() };
+        let started = parse(
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a360","task_type":"local_agent","description":"probe"}],"uuid":"u1","session_id":"s"}"#,
+        );
+        assert!(matches!(translate(started, &mut None).as_slice(), [AgentEvent::BackgroundTasks { running: 1 }]));
+        let ended = parse(r#"{"type":"system","subtype":"background_tasks_changed","tasks":[],"uuid":"u2","session_id":"s"}"#);
+        assert!(matches!(translate(ended, &mut None).as_slice(), [AgentEvent::BackgroundTasks { running: 0 }]));
     }
 
     #[tokio::test]

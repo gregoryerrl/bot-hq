@@ -47,6 +47,17 @@ pub enum SystemEvent {
         #[serde(default)]
         mcp_servers: Option<Value>,
     },
+    /// claude-code's list of this process's RUNNING background tasks
+    /// (background agents, background shells), sent whenever the set changes:
+    /// one entry at a launch, `[]` once the last one ends — before the
+    /// completion's `task_notification` and the turn it starts. Probed on CLI
+    /// 2.1.281 (s-5482dfff): `{"type":"system","subtype":
+    /// "background_tasks_changed","tasks":[{"task_id":…,"task_type":
+    /// "local_agent","description":…}]}`. Only the count is read.
+    BackgroundTasksChanged {
+        #[serde(default)]
+        tasks: Vec<Value>,
+    },
     /// Forward-compat for new system subtypes.
     #[serde(other)]
     Other,
@@ -55,6 +66,12 @@ pub enum SystemEvent {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AssistantEvent {
     pub message: AssistantMessage,
+    /// Set when the message is a HELPER's — a subagent the participant launched
+    /// with its Agent tool — to that Agent call's `tool_use_id`; `null` for the
+    /// participant's own. claude-code streams a helper's messages on the
+    /// parent's stdout, so without this they read as the parent speaking.
+    #[serde(default)]
+    pub parent_tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +122,10 @@ pub enum ContentBlock {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UserStreamEvent {
     pub message: UserMessageEnvelope,
+    /// See [`AssistantEvent::parent_tool_use_id`]: set on a helper's tool
+    /// results.
+    #[serde(default)]
+    pub parent_tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -175,6 +175,13 @@ pub enum AgentEvent {
     /// (The wire `SystemEvent::Init` also carries `model`/`cwd`, but no
     /// consumer reads them, so they are not forwarded here.)
     Init { session_id: Option<String> },
+    /// How many background tasks the participant's claude-code process has
+    /// RUNNING — its own count, from `background_tasks_changed`, updated
+    /// whenever the set changes. Not speech and not a turn: the pump reads it
+    /// to know when stopping a self-started turn would also cancel live
+    /// background work (claude-code's interrupt cancels the process's
+    /// background agents with the turn).
+    BackgroundTasks { running: usize },
     /// Process exited. Carries exit-status string for log/observability.
     Exited(String),
     /// Retry-supervisor liveness transition (B2), relayed by the participant's

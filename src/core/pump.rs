@@ -725,6 +725,12 @@ pub async fn pump_agent(
     // D3: has THIS stray turn already asked to be stopped? Once per turn; reset
     // at completion with the other per-turn flags.
     let mut stray_stop_asked = false;
+    // How many background tasks (agents, shells) this participant's process has
+    // RUNNING, by claude-code's own count (`AgentEvent::BackgroundTasks`). While
+    // it is non-zero, D3 does not stop a stray turn: claude-code's interrupt
+    // cancels the process's background agents with the turn — measured in
+    // s-5482dfff, where one D3 stop cancelled four running helpers at once.
+    let mut background_tasks: usize = 0;
     // B5: the epoch of the turn in flight, snapshotted from `cfg.turn_epoch` on
     // this turn's FIRST event and cleared when it completes. See the field's doc
     // for why reading it at completion time instead would defeat the guard it
@@ -751,6 +757,14 @@ pub async fn pump_agent(
         // Batch 7: any event means the agent is alive — reset the stall timer.
         if let Some(liveness) = &cfg.liveness {
             liveness.touch();
+        }
+        // claude-code's count of the process's running background tasks: state,
+        // not speech, and no turn — it arrives between turns (a launch, a
+        // completion before the turn it starts), so it must never reach the
+        // turn-opening logic below.
+        if let AgentEvent::BackgroundTasks { running } = event {
+            background_tasks = running;
+            continue;
         }
         // First event of a turn: bind it to whichever epoch the sequencer had
         // handed out when the agent started speaking. Deliberately BEFORE the
@@ -800,9 +814,39 @@ pub async fn pump_agent(
                     );
                     if still_running && !stray_stop_asked && atomic_tool_id.is_none() {
                         if let (Some(activity), Some(bridge)) = (&cfg.activity, &cfg.bridge) {
-                            if activity.busy_other_than(&cfg.slug).is_some() {
+                            if let Some(holder) = activity.busy_other_than(&cfg.slug) {
                                 stray_stop_asked = true;
-                                bridge.notify_stray_turn(&cfg.session_id, &cfg.slug, live);
+                                if background_tasks == 0 {
+                                    bridge.notify_stray_turn(&cfg.session_id, &cfg.slug, live);
+                                } else {
+                                    // **Not stopped while background work runs.**
+                                    // The stop is claude-code's interrupt, which
+                                    // cancels the process's background agents with
+                                    // the turn; one completing helper would take
+                                    // the rest down. So the turn runs beside the
+                                    // holder — the pre-D3 behaviour — and says so.
+                                    tracing::info!(
+                                        agent = %cfg.slug,
+                                        holder = %holder,
+                                        background_tasks,
+                                        "stray turn not stopped: background tasks still running"
+                                    );
+                                    let _ = crate::core::post_system_notice(
+                                        &storage,
+                                        Some(bridge),
+                                        &cfg.session_id,
+                                        MessageKind::SystemNotice,
+                                        format!(
+                                            "[System: {} started a turn on its own while {} held \
+                                             the turn — it was not stopped, because stopping it \
+                                             would also cancel the {} background task(s) it still \
+                                             has running.]",
+                                            cfg.slug, holder, background_tasks
+                                        ),
+                                        None,
+                                    )
+                                    .await;
+                                }
                             }
                         }
                     }
@@ -841,6 +885,8 @@ pub async fn pump_agent(
         }
 
         match event {
+            // Handled before the turn logic, which it must never reach.
+            AgentEvent::BackgroundTasks { .. } => {}
             AgentEvent::Text(text) => {
                 match storage
                     // `text` is read again below (limit detection, buffer), so
@@ -2402,6 +2448,85 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_stray_turn_with_nobody_else_busy_is_left_to_run() {
         assert!(stray_turn_requests(false).await.is_empty());
+    }
+
+    /// D3 with background work: a stray turn while ANOTHER participant holds
+    /// the ring is NOT stopped while this participant's process reports running
+    /// background tasks — the stop is claude-code's interrupt, which cancels
+    /// its background agents too (s-5482dfff: one stop cancelled four helpers).
+    /// `counts` are the `BackgroundTasks` reports sent between the dealt turn
+    /// and the stray one. Returns the stop requests and the notices posted.
+    async fn stray_turn_with_background(counts: &[usize]) -> (Vec<(String, u64)>, Vec<String>) {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(15));
+        cfg.turn_epoch = Some(Arc::clone(&cell));
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let mut events = bridge.subscribe();
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let activity = crate::core::ActivityTracker::new(
+            "s1",
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::clone(&bridge),
+            vec!["hands".to_string(), "eyes".to_string()],
+        );
+        cfg.activity = Some(Arc::clone(&activity));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Text("dealt".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 15);
+        activity.set_busy_slug("eyes", true);
+        for &running in counts {
+            ev_tx.send(AgentEvent::BackgroundTasks { running }).await.unwrap();
+        }
+        for word in ["notified", "reading the result"] {
+            ev_tx.send(AgentEvent::Text(word.into())).await.unwrap();
+        }
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 0, "the stray completes unbound");
+        drop(ev_tx);
+        let _ = task.await;
+
+        let mut stops = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            if let crate::signaling::SignalingEvent::StrayTurn { agent, epoch, .. } = ev {
+                stops.push((agent, epoch));
+            }
+        }
+        let notices = storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == MessageKind::SystemNotice.as_str())
+            .map(|m| m.content)
+            .collect();
+        (stops, notices)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stray_turn_with_background_tasks_running_is_not_stopped_and_says_so() {
+        let (stops, notices) = stray_turn_with_background(&[2]).await;
+        assert!(stops.is_empty(), "stopping it would cancel the running background tasks");
+        assert_eq!(notices.len(), 1, "one notice for the stray turn: {notices:?}");
+        assert!(
+            notices[0].contains("hands started a turn on its own while eyes held the turn")
+                && notices[0].contains("was not stopped")
+                && notices[0].contains("2 background task(s)"),
+            "{notices:?}"
+        );
+    }
+
+    /// …and once claude-code reports the last one ended, D3 stops a stray turn
+    /// again, exactly as before.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stray_turn_after_the_last_background_task_ended_is_stopped() {
+        let (stops, notices) = stray_turn_with_background(&[2, 0]).await;
+        assert_eq!(stops, vec![("hands".to_string(), 15)]);
+        assert!(notices.iter().all(|n| !n.contains("was not stopped")), "{notices:?}");
     }
 
     /// D3 (EYES a4821aeb): a stray turn in the middle of its own commit, push

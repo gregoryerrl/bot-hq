@@ -289,7 +289,18 @@ the last real epoch in place, so a second one in a row is still recognised. If
 another participant is busy, the pump asks `AppState::stray_turn` to stop it —
 once, and never in the middle of a commit, push or migration — and the
 participant reads what the task reported at its next dealt turn. With nobody else
-busy it runs.
+busy it runs. **Nor is it stopped while the participant still has background
+tasks running** (claude-code's own count, the `background_tasks_changed` system
+event → `AgentEvent::BackgroundTasks`): the stop is claude-code's interrupt, which
+cancels the process's background agents with the turn, so the turn runs beside
+the holder and a notice says why.
+
+**A helper's messages are not the participant's.** claude-code streams a
+subagent's assistant messages and tool results on the parent's stdout, tagged
+`parent_tool_use_id` (the parent's own carry `null`). `agents::events::translate`
+drops them: they are neither chat rows under the parent's name, nor a turn the
+parent opened, nor its context reading. The helper's work reaches the parent
+through the Agent call's own result and its completion turn.
 
 **A participant still orienting when boot times out is not dealt.** Boot ends for
 the session at its timeout, but a shared orienting set — seeded on a first spawn
