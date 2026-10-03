@@ -122,11 +122,21 @@ layer. claude-code's own permission prompts would double-gate and hang
 the agent (the bot-hq policy gates already prompt the user). Enforcement
 is provided by the policy layer + git hooks.
 
+One CLI behaviour is switched at spawn because it contradicts the commit policy
+(probed on CLI 2.1.284):
+
+- **The commit attribution.** The CLI tells an agent to end commits with a
+  co-author trailer. When the session's resolved policy forbids a word
+  that trailer or the PR footer contains (`Policy::forbids_cli_attribution` —
+  the hook's own matcher against the CLI's own text), `--settings` carries
+  `"attribution": {"commit": "", "pr": ""}`, written last so no model row or
+  role override brings it back. Otherwise the CLI's default is left alone.
+
 Per-agent model swap via env-vars: `ANTHROPIC_BASE_URL`,
 `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`. A model row may also carry
 `models.cli_settings` (0079): a JSON object merged into the `--settings` argument
-on **both** spawn postures — the read-only posture, which otherwise passes no
-`--settings`, gets one carrying just this fragment. Its first use is
+on **both** spawn postures — the read-only posture's `--settings` otherwise
+carries only the post-compaction handoff hook. Its first use is
 `modelOverrides`: the CLI resolves a model's context window from its own catalog,
 so a model id newer than the installed CLI (`claude-fable-5-1` on 2.1.251) runs at
 the 200k default whatever the registry says; mapping a known id to it restores the
@@ -984,8 +994,10 @@ fabricated-comment incident) with a single list that can also EXECUTE the
 command on approval.
 
 **Scope:** only participants granted `edit_files` — the PreToolUse hook is
-injected via `--settings`, which the read-only spawn posture receives only for a
-model's `cli_settings` fragment (0079), never with a hook. A
+injected via `--settings` on that posture alone. The read-only posture's
+`--settings` carries the post-compaction handoff hook and a model's
+`cli_settings` fragment (0079), never the Tool Gate hook: a role that holds no
+`action_gate` could not answer a gate. A
 reviewer is held by `--disallowedTools` instead, which is **fail-open** for verbs
 a deny-list did not anticipate: `sed -i`, `tee` and `python3 -c` all write files
 and none are denied. bot-hq deliberately relies on that for mutation-based

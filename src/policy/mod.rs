@@ -115,6 +115,25 @@ pub enum ForcePushMode {
     Allowed,
 }
 
+/// The marker a co-author trailer opens with, as the claude CLI writes it.
+///
+/// Spelled in parts on purpose. A policy can forbid this marker in commits —
+/// this repository's own does — and the pre-commit scan reads the staged diff
+/// line by line: it cannot tell a constant in source from an attribution
+/// line, so the source never spells the marker out.
+pub(crate) fn co_author_marker() -> String {
+    ["Co", "Authored", "By"].join("-")
+}
+
+/// The trailer the claude CLI asks an agent to end commit messages with (the
+/// model name varies; the rest is fixed — probed on CLI 2.1.284, s-d43b3630).
+pub fn cli_commit_trailer() -> String {
+    format!("{}: Claude <noreply@anthropic.com>", co_author_marker())
+}
+
+/// The line the claude CLI asks an agent to end pull-request descriptions with.
+pub const CLI_PR_FOOTER: &str = "Generated with [Claude Code](https://claude.com/claude-code)";
+
 impl Policy {
     /// Load + resolve policy for `project` against `data_dir`.
     /// - Reads `<data_dir>/config/general-policy.yaml` as the base.
@@ -199,6 +218,21 @@ impl Policy {
             .iter()
             .find(|w| contains_word(text, w.as_str()))
             .map(String::as_str)
+    }
+
+    /// Does this policy forbid what the claude CLI tells an agent to append to
+    /// its commits and pull requests? True when a forbidden word occurs in
+    /// either text ([`cli_commit_trailer`], [`CLI_PR_FOOTER`]) — the common
+    /// case is a list holding the co-author marker, but a list that refuses the
+    /// tool's or the vendor's name is contradicted by the same instruction.
+    ///
+    /// The spawn path reads this to blank the CLI's attribution (feedback
+    /// #90): otherwise an agent's context holds "end git commit messages with"
+    /// that trailer beside a policy whose hook refuses the commit.
+    pub fn forbids_cli_attribution(&self) -> bool {
+        [cli_commit_trailer().as_str(), CLI_PR_FOOTER]
+            .iter()
+            .any(|text| self.first_forbidden_word(text).is_some())
     }
 
     /// Render the system-prompt directive block. Agents see this prepended
@@ -587,6 +621,30 @@ mod tests {
     /// rename (no truncate-then-fill window), keeps an existing file's mode,
     /// creates missing parents, and leaves no temp behind. Round-tripped
     /// through the real writer + loader.
+    /// Feedback #90: "does this policy forbid the CLI's attribution" is asked
+    /// of the matcher the commit hook itself uses, against the CLI's own text
+    /// — so the answer is exactly "would the hook refuse the commit the CLI
+    /// tells the agent to write".
+    #[test]
+    fn a_policy_forbids_the_clis_attribution_when_its_trailer_would_be_refused() {
+        let with = |words: &[&str]| Policy {
+            forbidden_in_commits: words.iter().map(|w| w.to_string()).collect(),
+            ..Policy::default()
+        };
+        assert!(!Policy::default().forbids_cli_attribution(), "no list, nothing forbidden");
+        let marker = co_author_marker();
+        assert!(with(&[&marker]).forbids_cli_attribution());
+        assert!(with(&[&marker.to_lowercase()]).forbids_cli_attribution(), "the matcher ignores case");
+        assert!(with(&["Claude"]).forbids_cli_attribution(), "a tool-name rule is contradicted too");
+        assert!(with(&["Claude Code"]).forbids_cli_attribution(), "the PR footer counts");
+        // Words the CLI's text does not carry leave its default alone.
+        assert!(!with(&["bot-hq", "Acme"]).forbids_cli_attribution());
+        assert!(!with(&["Author"]).forbids_cli_attribution(), "`Author` is not the word `Authored`");
+        // …and it is the hook's matcher that decides: `-` bounds a word, so a
+        // rule on `Authored` alone already refuses the trailer.
+        assert!(with(&["Authored"]).forbids_cli_attribution());
+    }
+
     #[test]
     fn write_policy_file_is_atomic_and_keeps_the_mode() {
         let dir = tempdir().unwrap();

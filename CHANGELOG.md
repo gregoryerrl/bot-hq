@@ -34,6 +34,11 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **Agents are no longer told to add a co-author trailer your policy
+  forbids.** The claude CLI instructs every agent to end commits with one;
+  when your commit policy forbids it, bot-hq now switches the CLI's
+  attribution off for that session, so the instruction never reaches the agent.
+  A policy that does not forbid it changes nothing.
 - **An agent's background helpers are no longer cancelled while another
   participant holds the turn.** A helper's messages arrived on its parent's
   output and read as the parent starting a turn of its own, which 1.0.8 stops

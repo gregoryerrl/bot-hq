@@ -413,6 +413,13 @@ pub struct SpawnConfig {
     /// key to go stale — and both went stale at once when slugs became
     /// role-derived.
     pub overrides: crate::claude_config::AgentOverride,
+    /// Blank the claude CLI's own commit and PR attribution for this
+    /// participant (feedback #90). Resolved by the caller from the session's
+    /// policy (`Policy::forbids_cli_attribution`): when the policy forbids a
+    /// word the CLI's trailer contains, the CLI would otherwise instruct the
+    /// agent to write a commit the `commit-msg` hook refuses. `false` leaves
+    /// the CLI's default alone.
+    pub blank_cli_attribution: bool,
 }
 
 /// One participant's stdin, reachable only with a receipt for a row in THIS
@@ -1407,6 +1414,23 @@ mod ensure_claude_runnable_tests {
     }
 }
 
+/// Blank the claude CLI's commit and PR attribution when the session's policy
+/// forbids it ([`SpawnConfig::blank_cli_attribution`]). Written LAST into the
+/// `--settings` map, over a role override or a model row that set the key: the
+/// policy is what the `commit-msg` hook enforces, so a setting that brings the
+/// trailer back would only produce commits the hook refuses.
+///
+/// The object form with empty strings is the one every CLI version accepts
+/// (2.1.284's schema: `false` is "the same as {commit: \"\", pr: \"\", …}" but
+/// "older versions reject true or false here"). Probed on 2.1.284: with it, the
+/// "End git commit messages with" a co-author trailer instruction is absent
+/// from the agent's context.
+fn apply_attribution_policy(settings: &mut serde_json::Map<String, serde_json::Value>, cfg: &SpawnConfig) {
+    if cfg.blank_cli_attribution {
+        settings.insert("attribution".into(), serde_json::json!({ "commit": "", "pr": "" }));
+    }
+}
+
 /// The `SessionStart` hook entry every participant is spawned with: after a
 /// compaction (matcher `compact`) claude-code runs this binary's `policy-check
 /// compact-handoff`, which prints the participant's rendered handoff file, and
@@ -1574,6 +1598,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         for (k, v) in model_cli_settings(&cfg.config, &cfg.agent_name) {
             settings.entry(k).or_insert(v);
         }
+        apply_attribution_policy(&mut settings, cfg);
         if !settings.is_empty() {
             cmd.args(["--settings", &serde_json::Value::Object(settings).to_string()]);
         }
@@ -1632,6 +1657,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
                     for (k, v) in model_cli_settings(&cfg.config, &cfg.agent_name) {
                         map.entry(k).or_insert(v);
                     }
+                    apply_attribution_policy(map, cfg);
                 }
                 cmd.args(["--settings", &settings.to_string()]);
             }
@@ -1860,6 +1886,7 @@ mod tests {
                 crate::agents::CapabilitySet::preset_hands(),
             ),
             overrides: crate::claude_config::AgentOverride::default(),
+            blank_cli_attribution: false,
         }
     }
 
@@ -2995,6 +3022,30 @@ mod tests {
         let s = settings_arg_of(&eyes_cfg()).expect("the handoff hook rides --settings");
         assert!(s["hooks"].get("PreToolUse").is_none(), "no Tool Gate hook on a read-only role: {s}");
         assert!(!s.to_string().contains("policy-check tool-gate"), "got {s}");
+    }
+
+    /// Feedback #90: the CLI's "end git commit messages with" a co-author
+    /// trailer instruction is blanked on BOTH postures when — and only when — the
+    /// caller resolved that the session's policy forbids it. Written last, so
+    /// a model row that sets `attribution` cannot bring the trailer back.
+    /// Deleting either `apply_attribution_policy` call turns its half red.
+    #[test]
+    fn the_clis_attribution_is_blanked_only_when_the_policy_forbids_it() {
+        let blank = serde_json::json!({ "commit": "", "pr": "" });
+        for (who, make) in [("the edit-capable role", cfg as fn() -> SpawnConfig), ("the read-only role", eyes_cfg)] {
+            let s = settings_arg_of(&make()).unwrap_or_else(|| panic!("{who} passes --settings"));
+            assert!(s.get("attribution").is_none(), "{who}: the CLI's default is left alone: {s}");
+
+            let mut c = make();
+            c.blank_cli_attribution = true;
+            let s = settings_arg_of(&c).unwrap();
+            assert_eq!(s["attribution"], blank, "{who}: {s}");
+
+            c.config.cli_settings =
+                Some(r#"{"attribution":{"commit":"Made-With: X <x@y>","pr":"made by X"}}"#.into());
+            let s = settings_arg_of(&c).unwrap();
+            assert_eq!(s["attribution"], blank, "{who}: the policy outranks a model row: {s}");
+        }
     }
 
     /// The wire for the post-compaction handoff (`agents::handoff`): BOTH

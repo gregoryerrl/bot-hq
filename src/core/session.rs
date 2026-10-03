@@ -1585,6 +1585,18 @@ async fn participant_spawn_config(
     );
     std::fs::write(&mcp_config_path, json)
         .with_context(|| format!("writing mcp-config to {}", mcp_config_path.display()))?;
+    // The claude CLI tells an agent to end commits with a co-author trailer.
+    // When this session's policy forbids a word that trailer holds,
+    // the `commit-msg` hook would refuse the very commit the CLI asked for, so
+    // the CLI's attribution is blanked at spawn (feedback #90). A policy that
+    // cannot be read leaves the CLI's default alone — the hook still enforces.
+    let blank_cli_attribution = match bridge.resolve_policy_for(session_id).await {
+        Ok(policy) => policy.forbids_cli_attribution(),
+        Err(e) => {
+            warn!(participant = %p.slug, ?e, "resolving the policy for the CLI attribution setting failed");
+            false
+        }
+    };
     // The file the post-compaction hook prints (`agents::handoff`), rendered
     // from the participant's handoff doc as it stands — so it exists from the
     // first spawn (as the "no handoff doc" text) and again after a relaunch.
@@ -1605,6 +1617,7 @@ async fn participant_spawn_config(
         data_dir: paths.data_dir.clone(),
         capabilities,
         overrides,
+        blank_cli_attribution,
     })
 }
 
@@ -3700,6 +3713,60 @@ mod tests {
             let text = std::fs::read_to_string(&file)
                 .unwrap_or_else(|e| panic!("{slug}'s handoff file after the spawn config: {e}"));
             assert_eq!(crate::agents::handoff::injected_doc(&text), Some(has_doc), "{slug}: {text}");
+        }
+    }
+
+    /// The wire for feedback #90: the session's RESOLVED policy decides whether
+    /// a participant is spawned with the CLI's attribution blanked. With a
+    /// general policy that forbids the co-author marker the spawn config says so
+    /// and the child's `--settings` carries the empty attribution; with no
+    /// policy the CLI's default is left alone. Deleting the
+    /// `forbids_cli_attribution` read in `participant_spawn_config` must turn
+    /// this red.
+    #[tokio::test]
+    async fn a_policy_that_forbids_the_trailer_blanks_the_clis_attribution_at_spawn() {
+        let forbidding = format!("forbidden_in_commits:\n  - {}\n", crate::policy::co_author_marker());
+        for (yaml, expect) in [(Some(forbidding.as_str()), true), (None, false)] {
+            let s = Storage::memory().await.unwrap();
+            s.create_session("s1", "t", None).await.unwrap();
+            s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
+            let data_dir = TempDir::new().unwrap();
+            let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
+            if let Some(yaml) = yaml {
+                let path = crate::policy::general_policy_path(data_dir.path());
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, yaml).unwrap();
+            }
+            let mcp_temp = TempDir::new().unwrap();
+            let roster = s.participants_for_session("s1").await.unwrap();
+            let bridge = SignalingBridge::new_with(None, Some(data_dir.path().to_path_buf()));
+            bridge.set_storage(s.clone()).await;
+
+            for slug in ["hands", "eyes"] {
+                let me = roster.iter().find(|p| p.slug == slug).expect("in the roster").clone();
+                let cfg = participant_spawn_config(
+                    &s,
+                    &me,
+                    resolve_participant_config(&s, &me).await,
+                    &paths,
+                    &None,
+                    "prompt".to_string(),
+                    "127.0.0.1:1".parse().unwrap(),
+                    mcp_temp.path(),
+                    None,
+                    &bridge,
+                )
+                .await
+                .expect("spawn config");
+                assert_eq!(cfg.blank_cli_attribution, expect, "{slug}, policy {yaml:?}");
+                let argv = crate::agents::spawn::debug_command(&cfg);
+                let settings = argv.windows(2).find(|w| w[0] == "--settings").map(|w| w[1].clone()).unwrap();
+                assert_eq!(
+                    settings.contains("\"attribution\":{\"commit\":\"\",\"pr\":\"\"}"),
+                    expect,
+                    "{slug}: {settings}"
+                );
+            }
         }
     }
 
