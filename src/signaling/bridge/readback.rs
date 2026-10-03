@@ -278,21 +278,46 @@ fn sha256_hex(s: &str) -> String {
 /// --no-index` (exact, and git is a prerequisite), capped for the message.
 /// `Ok(None)` when they are the same.
 fn unified_diff(old: &str, new: &str) -> Result<Option<String>, String> {
+    unified_diff_with(old, new, &[])
+}
+
+/// [`unified_diff`] with extra environment for git — the seam a test uses to
+/// configure an external diff tool without touching this process's env.
+///
+/// `--no-ext-diff --no-textconv`: a user's `diff.external` (difftastic is a
+/// common one) or `GIT_EXTERNAL_DIFF` makes `git diff --no-index` print
+/// NOTHING and still exit 1, which read as an empty change under "what this
+/// edit changes" (EYES, advisory `268a8c8a`, measured on git 2.50.1).
+fn unified_diff_with(old: &str, new: &str, envs: &[(&str, &str)]) -> Result<Option<String>, String> {
     let dir = tempfile::tempdir().map_err(|e| format!("a temp dir: {e}"))?;
     let (a, b) = (dir.path().join("live"), dir.path().join("approved"));
     std::fs::write(&a, old).map_err(|e| format!("writing the live body: {e}"))?;
     std::fs::write(&b, new).map_err(|e| format!("writing the approved body: {e}"))?;
     let out = std::process::Command::new("git")
-        .args(["diff", "--no-index", "--no-color", "-U3", "--"])
+        .args(["diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "-U3", "--"])
         .arg(&a)
         .arg(&b)
+        .envs(envs.iter().copied())
         .output()
         .map_err(|e| format!("git diff: {e}"))?;
-    match out.status.code() {
+    diff_from_git(
+        out.status.code(),
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+    )
+}
+
+/// What `git diff --no-index` said: exit 0 is "the same", exit 1 is a diff —
+/// shown from its first hunk and capped — and exit 1 with NO hunk is an
+/// error, never an empty change (EYES, `268a8c8a`).
+fn diff_from_git(code: Option<i32>, stdout: &str, stderr: &str) -> Result<Option<String>, String> {
+    match code {
         Some(0) => Ok(None),
         Some(1) => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            let hunks: Vec<&str> = text.lines().skip_while(|l| !l.starts_with("@@")).collect();
+            let hunks: Vec<&str> = stdout.lines().skip_while(|l| !l.starts_with("@@")).collect();
+            if hunks.is_empty() {
+                return Err("git diff reported a difference but printed no hunk".to_string());
+            }
             let mut shown = String::new();
             for (n, line) in hunks.iter().enumerate() {
                 if n >= DIFF_MAX_LINES || shown.len() + line.len() > DIFF_MAX_BYTES {
@@ -304,7 +329,7 @@ fn unified_diff(old: &str, new: &str) -> Result<Option<String>, String> {
             }
             Ok(Some(shown))
         }
-        _ => Err(format!("git diff: {}", String::from_utf8_lossy(&out.stderr).trim())),
+        _ => Err(format!("git diff: {}", stderr.trim())),
     }
 }
 
@@ -637,5 +662,20 @@ mod tests {
         assert!(diff.lines().count() <= DIFF_MAX_LINES + 1 && diff.len() <= DIFF_MAX_BYTES + 200);
         assert!(diff.contains("more diff line(s) not shown"));
         assert_eq!(unified_diff("same\n", "same\n").unwrap(), None);
+    }
+
+    /// EYES, advisory `268a8c8a`: an external diff tool configured for git
+    /// (`GIT_EXTERNAL_DIFF`, `diff.external`) made the diff print nothing and
+    /// exit 1. The diff ignores it, and "exit 1 with no hunk" is an error,
+    /// never an empty change.
+    #[test]
+    fn the_diff_ignores_an_external_diff_tool_and_never_reads_empty_as_a_change() {
+        let diff = unified_diff_with("old\n", "new\n", &[("GIT_EXTERNAL_DIFF", "true")])
+            .unwrap()
+            .expect("they differ");
+        assert!(diff.contains("-old") && diff.contains("+new"), "{diff}");
+        assert!(diff_from_git(Some(1), "", "").is_err());
+        assert!(diff_from_git(Some(1), "diff --git a/x b/x\n", "").is_err());
+        assert_eq!(diff_from_git(Some(0), "", "").unwrap(), None);
     }
 }
