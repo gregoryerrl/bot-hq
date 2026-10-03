@@ -307,14 +307,15 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `cl_folder_search(project, query?)` | Search CL folder descriptions (folder-level parallel to `cl_index_search`). |
 | `cl_register_read(project, file_path)` | Audit insert recording which CL file the agent read. |
 | `cl_register_folder_description(project, folder_path, …)` | Write a CL folder description (needs `write_context_library`). |
-| `cl_write_file(project, file_path, content)` | Create or replace a CL file directly (needs `write_context_library`; auto-rescans). |
+| `cl_write_file(project, file_path, content \| content_path \| session_doc)` | Create, replace or append to a CL file directly (needs `write_context_library`; auto-rescans). `session_doc` copies one of the session's documents byte for byte. |
 | `cl_edit_file(project, file_path, old_string, new_string, expect_occurrences?)` | Correct a passage of an existing CL file in place — exact old→new, the count asserted — behind every `cl_write_file` guard (needs `write_context_library`). |
 | `cl_rescan(project)` | Re-stat a project's CL directory after creating new files. |
 | `advance_phase(target)` | Cast your vote to advance the IPAV phase; it moves when every active participant has voted at the same state of the work (D37). |
 | `request_phase_advance(target, reason)` | Request a user-acknowledged phase advance before an irreversible step. |
-| `session_doc_write(slug, body, phase?)` | Upsert a per-session scratch doc; `phase` surfaces it in the IPAV tabs. |
-| `session_doc_search(query?, phase?)` | List this session's scratch docs; `phase` filter for cross-phase retrieval. |
-| `session_doc_read(slug)` | Read a session doc by slug. |
+| `session_doc_write(slug, body \| content_path, phase?, mode?)` | Upsert a per-session scratch doc (replace or append); `phase` surfaces it in the IPAV tabs; `content_path` takes the body from a file. |
+| `session_doc_edit(slug, old_string, new_string, expect_occurrences?)` | Correct a passage of an existing session doc in place — exact old→new, the count asserted; the previous body is archived. |
+| `session_doc_search(query?, phase?)` | List this session's scratch docs, bodies within a 48 KB budget (a larger doc is listed with its size and headings); `phase` filter for cross-phase retrieval. |
+| `session_doc_read(slug, heading?, lines?, grep?)` | Read a session doc by slug — whole, or one section, a line range, or the matching lines. |
 | `web_search(query, engine?)` | Search the web via a headless webview, so non-first-party models without a server-side search tool can fetch live results. |
 | `terminal_exec(command, wait_ms?, block?)` | Run one command in the session's Terminal subtab PTY (user-visible). Blocking by default: waits for output-settle and returns the captured tail; `block:false` for long-running processes. Gate-matched commands are refused (route via `action_gate`). |
 | `terminal_read(lines?)` | Tail of the session terminal's scrollback as plain text (default 100 lines, max 500) — evidence agents can paste into chat or IPAV docs. |

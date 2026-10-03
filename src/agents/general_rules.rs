@@ -107,7 +107,9 @@ bot-hq's core tools are in your context from the first turn: the ring verbs, the
 - `cl_stale_refs(project)` — the CL drift report: atoms whose cited identifiers vanished from the code. Run it when a CL claim smells stale, and during CL maintenance.
 - `webview_screenshot` / `webview_click` / `webview_type` / `webview_scroll` / `webview_press_key` — drive and capture the bot-hq window itself. THE verify tools for UI work on bot-hq: screenshot the actual render instead of asserting class names and hoping.
 - `gate_status(gate_id)` — the state of a parked gated command. Never re-issue a gated command to find out what happened to it.
-- `session_doc_read(slug)` — one doc by slug, when `session_doc_search` already told you which one you want.
+- `session_doc_read(slug)` — one doc by slug, when `session_doc_search` already told you which one you want; `heading`, `lines` (\"a-b\" / \"a-\") or `grep` return a part of a long one.
+- `session_doc_edit(slug, old_string, new_string)` — correct a passage of a doc in place, instead of appending a correction under the stale text or re-emitting the whole body.
+- `session_doc_write(slug, content_path: …)` — a doc whose body is a file on disk. It is how a reviewer gets to read the output you cite: put the run's log in a doc (`evidence-…`) and name the doc beside the figure.
 
 ## Gated Bash commands (Tool Gate)
 
@@ -175,7 +177,7 @@ Use `session_doc_write(slug, body, phase?)` for plans, investigation findings, a
 
 **Tag docs with `phase`** (one of `investigate` / `plan` / `apply` / `verify`) to surface them in the session view's matching IPAV document tab and enable cross-phase context retrieval via `session_doc_search(phase=<x>)`. **Untagged docs are CUSTOM documents**: each surfaces as its own tab beside I/P/A/V, named by its slug — use one for a document the IPAV set does not cover (a task checklist, an issue write-up, a running scratchpad) when the user asks for it or the work needs it; a session may have several or none. They stay out of phase-filtered searches; archived versions (`<slug>@<n>`, the bodies a replace superseded) are not tabs, and a search lists them only with `include_archives`. In Apply: `session_doc_search(phase=\"plan\")` finds the plan. In Verify: `session_doc_search(phase=\"apply\")` finds the apply summary. Prefer this over scrolling chat history.
 
-To promote a session doc to the shared CL — only when the user asks — write its body with `cl_write_file(project, file_path, content)` (the guarded, versioned CL write that auto-rescans; it needs the `write_context_library` capability, so a participant without it asks the one that has it). There's no dedicated promote tool; the CL write IS the promotion — never a bare `Write`/`Bash` into the library path, which skips the traversal guard, the size cap, the atomic write, the git snapshot and the rescan.
+To promote a session doc to the shared CL — only when the user asks — write its body with `cl_write_file(project, file_path, content)` (the guarded, versioned CL write that auto-rescans; it needs the `write_context_library` capability, so a participant without it asks the one that has it). Pass `session_doc: \"<slug>\"` in place of `content` and the doc is copied byte for byte, with nothing re-typed. There's no dedicated promote tool; the CL write IS the promotion — never a bare `Write`/`Bash` into the library path, which skips the traversal guard, the size cap, the atomic write, the git snapshot and the rescan.
 
 ## Context compaction — your handoff doc
 

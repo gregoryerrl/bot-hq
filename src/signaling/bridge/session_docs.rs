@@ -76,6 +76,97 @@ pub(crate) fn doc_excerpt(
     grep: Option<&str>,
     lines: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
+    doc_excerpt_within(body, grep, lines, DOC_REPLY_BUDGET_BYTES)
+}
+
+/// How many bytes of document BODY one session-doc reply carries at most
+/// (feedback #75 / #77). A bare `session_doc_search` once returned 476,583
+/// characters — every doc's whole body — which overflowed the tool result and
+/// spilled to a one-line JSON file the agent then had to slice by hand; one
+/// rewritable doc per phase means a long build's `plan` or `apply` grows
+/// without bound. Past the budget a reply says what was left out and how to
+/// read it, instead of spilling. About 12k tokens: room for an ordinary plan
+/// whole, not for a day's appended slices.
+pub(crate) const DOC_REPLY_BUDGET_BYTES: usize = 48_000;
+
+/// Headings listed for a doc whose body is not returned.
+const OUTLINE_MAX_HEADINGS: usize = 80;
+
+/// One markdown heading of a doc: its 1-based line, level (1–6) and text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DocHeading {
+    pub line: usize,
+    pub level: usize,
+    pub text: String,
+}
+
+/// The ATX headings of `body` (`#` … `######`, then a space), in order, with
+/// fenced code skipped — a `# comment` inside a code block is not a section.
+pub(crate) fn doc_headings(body: &str) -> Vec<DocHeading> {
+    let mut out = Vec::new();
+    let mut fence: Option<&str> = None;
+    for (i, line) in body.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if let Some(open) = fence {
+            if trimmed.starts_with(open) {
+                fence = None;
+            }
+            continue;
+        }
+        if trimmed.starts_with("```") {
+            fence = Some("```");
+            continue;
+        }
+        if trimmed.starts_with("~~~") {
+            fence = Some("~~~");
+            continue;
+        }
+        let hashes = line.bytes().take_while(|&b| b == b'#').count();
+        if (1..=6).contains(&hashes) {
+            let rest = &line[hashes..];
+            if rest.starts_with(' ') || rest.starts_with('\t') {
+                out.push(DocHeading { line: i + 1, level: hashes, text: rest.trim().to_string() });
+            }
+        }
+    }
+    out
+}
+
+/// A doc's outline as JSON, for a reply that leaves the body out: up to
+/// [`OUTLINE_MAX_HEADINGS`] headings, each `{line, level, text}`.
+pub(crate) fn doc_outline(body: &str) -> Vec<serde_json::Value> {
+    doc_headings(body)
+        .into_iter()
+        .take(OUTLINE_MAX_HEADINGS)
+        .map(|h| serde_json::json!({ "line": h.line, "level": h.level, "text": h.text }))
+        .collect()
+}
+
+/// The section under the first heading whose text contains `needle`
+/// (case-insensitive): its heading, and the 1-based inclusive line range from
+/// that heading to the line before the next heading of the same or a higher
+/// level — so a `##` section takes its `###` children with it.
+pub(crate) fn doc_section(body: &str, needle: &str) -> Option<(DocHeading, usize, usize)> {
+    let headings = doc_headings(body);
+    let needle = needle.trim().to_lowercase();
+    let at = headings.iter().position(|h| h.text.to_lowercase().contains(&needle))?;
+    let start = headings[at].clone();
+    let end = headings[at + 1..]
+        .iter()
+        .find(|h| h.level <= start.level)
+        .map(|h| h.line - 1)
+        .unwrap_or_else(|| body.lines().count().max(start.line));
+    Some((start.clone(), start.line, end))
+}
+
+/// [`doc_excerpt`] with the byte budget as a parameter, so a test can exercise
+/// the cut without a 48 KB fixture.
+pub(crate) fn doc_excerpt_within(
+    body: &str,
+    grep: Option<&str>,
+    lines: Option<&str>,
+    budget: usize,
+) -> anyhow::Result<serde_json::Value> {
     let all: Vec<&str> = body.lines().collect();
     let total = all.len();
     let (from, to) = match lines {
@@ -106,15 +197,55 @@ pub(crate) fn doc_excerpt(
     match grep {
         Some(pattern) => {
             let needle = pattern.to_lowercase();
-            let matches: Vec<serde_json::Value> = window()
-                .filter(|(_, l)| l.to_lowercase().contains(&needle))
-                .map(|(i, l)| serde_json::json!({ "line": i + 1, "text": l }))
-                .collect();
-            Ok(serde_json::json!({ "total_lines": total, "matches": matches }))
+            let mut spent = 0usize;
+            let mut matches: Vec<serde_json::Value> = Vec::new();
+            let mut left_out = 0usize;
+            for (i, l) in window().filter(|(_, l)| l.to_lowercase().contains(&needle)) {
+                if !matches.is_empty() && spent + l.len() > budget {
+                    left_out += 1;
+                    continue;
+                }
+                spent += l.len();
+                matches.push(serde_json::json!({ "line": i + 1, "text": l }));
+            }
+            let mut out = serde_json::json!({ "total_lines": total, "matches": matches });
+            if left_out > 0 {
+                out["note"] = serde_json::json!(format!(
+                    "{left_out} more matching line(s) left out at the reply budget ({budget} \
+                     bytes); narrow the pattern or add `lines`"
+                ));
+            }
+            Ok(out)
         }
         None => {
-            let text = window().map(|(_, l)| *l).collect::<Vec<_>>().join("\n");
-            Ok(serde_json::json!({ "total_lines": total, "lines": format!("{from}-{to}"), "body": text }))
+            // Whole lines up to the budget. The first line of the window is
+            // always returned, however long, so the reply is never empty.
+            let mut text = String::new();
+            let mut last = from.saturating_sub(1);
+            for (i, l) in window() {
+                if last >= from && text.len() + 1 + l.len() > budget {
+                    break;
+                }
+                if last >= from {
+                    text.push('\n');
+                }
+                text.push_str(l);
+                last = i + 1;
+            }
+            let shown_to = if last >= from { last } else { to };
+            let mut out = serde_json::json!({
+                "total_lines": total,
+                "lines": format!("{from}-{shown_to}"),
+                "body": text,
+            });
+            if last >= from && last < to {
+                out["note"] = serde_json::json!(format!(
+                    "cut at the reply budget ({budget} bytes): lines {from}-{last} of the \
+                     {from}-{to} asked for. Continue with lines: \"{}-\"",
+                    last + 1
+                ));
+            }
+            Ok(out)
         }
     }
 }
@@ -127,6 +258,20 @@ pub struct CodocWrite {
     pub slug: String,
     /// The writer had a standing phase vote and this write withdrew it.
     pub vote_withdrawn: bool,
+}
+
+/// What an in-place edit of a session doc did (`session_doc_edit`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocEdit {
+    pub id: i64,
+    pub slug: String,
+    /// The doc's phase tag, unchanged by the edit.
+    pub phase: Option<String>,
+    pub occurrences: usize,
+    pub bytes_before: usize,
+    pub bytes_after: usize,
+    /// Where the body as it was before the edit is kept (`<slug>@<n>`).
+    pub archived_as: Option<String>,
 }
 
 /// How the "review notes landed" row opens, for `who` and one co-doc. The
@@ -511,9 +656,45 @@ impl SignalingBridge {
         let _ = self.event_tx.send(SignalingEvent::DocChanged {
             session_id: session_id.to_string(),
         });
-        // The writer's own vote goes with its write. Best-effort: a failed
-        // retraction leaves the vote standing, which is the pre-existing state
-        // for every other participant and must not fail the doc write.
+        let vote_withdrawn = self
+            .after_codoc_write(&storage, session_id, author_slug, author.as_deref(), &slug)
+            .await;
+        Ok(CodocWrite { id, slug, vote_withdrawn })
+    }
+
+    /// [`Self::after_codoc_write`] for a caller that holds only the session and
+    /// the writer's slug — the in-place edit's handler. `false` when storage
+    /// is not wired.
+    pub(crate) async fn after_session_codoc_write(
+        &self,
+        session_id: &str,
+        author_slug: &str,
+        slug: &str,
+    ) -> bool {
+        let Some(storage) = self.storage.lock().await.clone() else {
+            return false;
+        };
+        let name = self.participant_display_name(session_id, author_slug).await;
+        self.after_codoc_write(&storage, session_id, author_slug, name.as_deref(), slug)
+            .await
+    }
+
+    /// What every write to a reviewer co-doc ends with — a write, an append or
+    /// an in-place edit: the writer's OWN phase vote is withdrawn, and the
+    /// "review notes landed" row is posted once per co-doc per run. Returns
+    /// whether a vote was withdrawn.
+    ///
+    /// Best-effort throughout: a failed retraction leaves the vote standing,
+    /// which is the pre-existing state for every other participant, and
+    /// neither it nor a notice that did not post may fail the doc write.
+    pub(crate) async fn after_codoc_write(
+        &self,
+        storage: &crate::storage::Storage,
+        session_id: &str,
+        author_slug: &str,
+        author_name: Option<&str>,
+        slug: &str,
+    ) -> bool {
         let vote_withdrawn = match storage.participant_by_slug(session_id, author_slug).await {
             Ok(Some(writer)) => match storage.retract_phase_votes(writer.id).await {
                 Ok(withdrawn) => withdrawn > 0,
@@ -524,15 +705,15 @@ impl SignalingBridge {
             },
             _ => false,
         };
-        let who = author.as_deref().unwrap_or(author_slug);
-        let opening = codoc_notice_opening(who, &slug);
-        if !codoc_noticed_this_run(&storage, session_id, author_slug, &opening).await {
+        let who = author_name.unwrap_or(author_slug);
+        let opening = codoc_notice_opening(who, slug);
+        if !codoc_noticed_this_run(storage, session_id, author_slug, &opening).await {
             let notice = format!(
                 "{opening} (read them with session_doc_read). They are notes on the work, not \
                  a change to it: the other participants' phase votes stand.]"
             );
             if crate::core::post_system_notice(
-                &storage,
+                storage,
                 Some(self),
                 session_id,
                 crate::storage::MessageKind::SystemNotice,
@@ -545,7 +726,84 @@ impl SignalingBridge {
                 tracing::warn!(%session_id, %slug, "the review-notes notice was not posted");
             }
         }
-        Ok(CodocWrite { id, slug, vote_withdrawn })
+        vote_withdrawn
+    }
+
+    /// Agent-callable: correct a passage of an EXISTING session doc in place
+    /// (feedback #58 / #77) — `cl_edit_file`'s contract on a session doc:
+    /// exactly `expect` non-overlapping occurrences of `old` become `new`, or
+    /// nothing changes and the error names the count found.
+    ///
+    /// The two ways to change a doc used to be replace and append. On a 121 KB
+    /// plan that meant re-emitting the whole body to fix one table, or
+    /// appending "corrected: replaces the table above" under the wrong one —
+    /// the stale-claim-above-its-correction shape the rules warn against.
+    ///
+    /// **It archives, like a replace** (EYES, plan point 4): an edit destroys
+    /// `old`, and the archive exists to preserve a body about to be replaced
+    /// (feedback #37 — a correction silently reverted with no earlier revision
+    /// to diff against). Append is exempt only because it removes nothing.
+    ///
+    /// The doc keeps its phase tag. `new` is redacted like any agent write
+    /// (F10); `old` is matched against the stored — already redacted — text.
+    /// An archived version (`name@<n>`) is read-only.
+    pub async fn session_doc_edit(
+        &self,
+        session_id: &str,
+        slug: &str,
+        old: &str,
+        new: &str,
+        expect: usize,
+    ) -> Result<DocEdit> {
+        if old.is_empty() {
+            anyhow::bail!("old_string is empty — give the exact text to replace");
+        }
+        if old == new {
+            anyhow::bail!("old_string and new_string are identical — nothing to change");
+        }
+        if expect == 0 {
+            anyhow::bail!("expect_occurrences must be at least 1");
+        }
+        if is_archive_slug(slug) {
+            anyhow::bail!("`{slug}` is an archived version — it is the record of an earlier body and is not edited");
+        }
+        let new = crate::policy::secret_scan::redact(new);
+        let (id, doc_phase, before, after, archived_as) = {
+            let Some(storage) = self.storage.lock().await.clone() else {
+                return Err(anyhow::anyhow!("storage not configured"));
+            };
+            let Some(doc) = storage.session_document_by_slug(session_id, slug).await? else {
+                anyhow::bail!(
+                    "no session doc `{slug}` — session_doc_edit corrects an existing doc; create \
+                     it with session_doc_write"
+                );
+            };
+            let edited = super::util::replace_exactly(&doc.body, old, &new, expect).map_err(|m| {
+                anyhow::anyhow!(
+                    "found {} occurrence(s) of old_string in `{slug}`, expected {expect} — {}",
+                    m.found,
+                    m.hint
+                )
+            })?;
+            let cap = if doc.phase.is_some() { MAX_DOC_ARCHIVES } else { MAX_UNTAGGED_DOC_ARCHIVES };
+            let archived_as = Self::archive_superseded_doc(&storage, session_id, slug, &edited, cap).await;
+            let id = storage
+                .upsert_session_document(session_id, slug, &edited, doc.phase.as_deref())
+                .await?;
+            (id, doc.phase, doc.body.len(), edited.len(), archived_as)
+        };
+        let _ = self.event_tx.send(SignalingEvent::DocChanged {
+            session_id: session_id.to_string(),
+        });
+        Ok(DocEdit {
+            id,
+            slug: slug.to_string(),
+            phase: doc_phase,
+            occurrences: expect,
+            bytes_before: before,
+            bytes_after: after,
+            archived_as,
+        })
     }
 
     /// Agent-callable: search this session's docs (slug + body substring).
@@ -594,6 +852,76 @@ mod tests {
     fn untagged_scratch_keeps_caller_slug() {
         assert_eq!(effective_slug("findings-broadcast", None), "findings-broadcast");
         assert_eq!(effective_slug("notes", None), "notes");
+    }
+
+    const SECTIONS: &str = "# Plan\nintro\n## A. Compaction\na1\n### A1. Detect\na1 detail\n```\n# not a heading\n```\n## B. Tools\nb1\n#nospace\n#### B deep\nb deep\n# Risks\nr1";
+
+    /// The outline a reply carries in place of a body it leaves out: ATX
+    /// headings of every level, in order, with fenced code and `#tag` lines
+    /// left alone.
+    #[test]
+    fn doc_headings_reads_every_level_and_skips_fenced_code() {
+        let got: Vec<(usize, usize, String)> =
+            doc_headings(SECTIONS).into_iter().map(|h| (h.line, h.level, h.text)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, 1, "Plan".to_string()),
+                (3, 2, "A. Compaction".to_string()),
+                (5, 3, "A1. Detect".to_string()),
+                (10, 2, "B. Tools".to_string()),
+                (13, 4, "B deep".to_string()),
+                (15, 1, "Risks".to_string()),
+            ]
+        );
+        assert_eq!(doc_outline(SECTIONS)[1], serde_json::json!({"line": 3, "level": 2, "text": "A. Compaction"}));
+        assert!(doc_headings("no headings here\njust prose").is_empty());
+    }
+
+    /// A section is its heading down to the line before the next heading of
+    /// the same or a higher level — sub-sections ride with it — matched by a
+    /// case-insensitive substring of the heading's text, first match wins.
+    #[test]
+    fn doc_section_takes_its_subsections_and_stops_at_a_sibling() {
+        let (h, from, to) = doc_section(SECTIONS, "compaction").unwrap();
+        assert_eq!((h.text.as_str(), from, to), ("A. Compaction", 3, 9), "takes A1 and the code block");
+        let (h, from, to) = doc_section(SECTIONS, "a1.").unwrap();
+        assert_eq!((h.text.as_str(), from, to), ("A1. Detect", 5, 9));
+        let (h, from, to) = doc_section(SECTIONS, "B. TOOLS").unwrap();
+        assert_eq!((h.text.as_str(), from, to), ("B. Tools", 10, 14), "its deeper heading rides along");
+        let (_, from, to) = doc_section(SECTIONS, "risks").unwrap();
+        assert_eq!((from, to), (15, 16), "the last section runs to the end");
+        let (h, from, to) = doc_section(SECTIONS, "plan").unwrap();
+        assert_eq!((h.text.as_str(), from, to), ("Plan", 1, 14), "an H1 runs to the next H1");
+        assert!(doc_section(SECTIONS, "no such heading").is_none());
+        assert!(doc_section(SECTIONS, "not a heading").is_none(), "code is not a heading");
+    }
+
+    /// Feedback #77: a range that does not fit the reply is cut on a LINE and
+    /// the note names where to continue; an open-ended range runs to the end;
+    /// a single line longer than the budget is still returned.
+    #[test]
+    fn an_excerpt_over_the_budget_is_cut_on_a_line_and_says_where_to_continue() {
+        let body: String = (1..=20).map(|i| format!("line {i:02} ........\n")).collect();
+        let v = doc_excerpt_within(&body, None, Some("3-"), 60).unwrap();
+        assert_eq!(v["lines"], "3-5", "three 16-byte lines and two newlines are 50 bytes; a fourth would be 67: {v}");
+        assert_eq!(v["body"], "line 03 ........\nline 04 ........\nline 05 ........");
+        assert!(
+            v["note"].as_str().unwrap().contains("Continue with lines: \"6-\""),
+            "the note names the next line: {v}"
+        );
+        // Within the budget: no note, and "a-" reaches the last line.
+        let v = doc_excerpt_within(&body, None, Some("18-"), 60).unwrap();
+        assert_eq!(v["lines"], "18-20");
+        assert!(v.get("note").is_none(), "{v}");
+        // One line over the budget is returned whole rather than nothing.
+        let v = doc_excerpt_within("a very long single line that is over budget\nnext", None, Some("1-2"), 10).unwrap();
+        assert_eq!(v["lines"], "1-1");
+        assert_eq!(v["body"], "a very long single line that is over budget");
+        // grep: matches past the budget are counted, not silently dropped.
+        let v = doc_excerpt_within(&body, Some("line"), None, 40).unwrap();
+        assert_eq!(v["matches"].as_array().unwrap().len(), 2, "{v}");
+        assert!(v["note"].as_str().unwrap().starts_with("18 more matching line(s)"), "{v}");
     }
 
     /// The bridge half of EYES' advisory `9a1602f1`: an untagged write whose

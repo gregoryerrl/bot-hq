@@ -596,7 +596,11 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     },
                     "body": {
                         "type": "string",
-                        "description": "The document body, free-form markdown / text."
+                        "description": "The document body, free-form markdown / text. Give either this or content_path."
+                    },
+                    "content_path": {
+                        "type": "string",
+                        "description": "Absolute path of a UTF-8 file on this machine whose text is the body (at most 256 KiB, checked before it is read). Use it for a body that already exists on disk instead of re-emitting it — the output of a run a reviewer should be able to check (`evidence-suite` from a test log), a generated table. Give either this or body."
                     },
                     "phase": {
                         "type": "string",
@@ -609,12 +613,39 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                         "description": "'replace' (default) overwrites the whole body. 'append' adds to it under a timestamped separator — use it when a phase ships in several slices, so the doc stays current instead of going stale between rewrites."
                     }
                 },
-                "required": ["slug", "body"]
+                "required": ["slug"]
+            }),
+        },
+        ToolDescriptor {
+            name: "session_doc_edit",
+            description: "Correct a passage of an EXISTING session document in place: replaces `expect_occurrences` (default 1) exact, non-overlapping occurrences of `old_string` with `new_string` — the same contract as an ordinary file-edit tool and as `cl_edit_file`, without re-emitting the doc and without the stale-claim-above-its-correction shape an append produces. Use it for a fix to something already written; `session_doc_write` replace is for a rewrite and append for a new slice. Refuses, changing nothing, when the count found differs from the count expected (the error names the count: widen old_string until it is unique, or pass expect_occurrences), when the doc does not exist (create it with session_doc_write), when old_string is empty or equal to new_string, or when the slug is an archived version. The doc keeps its phase tag; the body as it was is archived as `<slug>@<n>` like a replace (the reply names it); `new_string` is redacted like any write. A reviewer's edit of a phase doc's name edits ITS `<phase>-eyes` notes (and withdraws its own phase vote, like a write there); an executor cannot edit a `<phase>-eyes` doc; nobody edits another participant's `handoff-<slug>`.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "The doc to edit: a phase doc's name (`plan`) or a custom doc's slug."
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "The exact text to replace, whitespace and punctuation included. Widen it until it matches exactly expect_occurrences times."
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The replacement text. Empty deletes the passage."
+                    },
+                    "expect_occurrences": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "How many occurrences of old_string the doc must contain; every one is replaced. Default 1 — a uniqueness assertion, so a non-unique anchor is refused rather than guessed at."
+                    }
+                },
+                "required": ["slug", "old_string", "new_string"]
             }),
         },
         ToolDescriptor {
             name: "session_doc_search",
-            description: "List this session's scratch documents. Returns lightweight rows {id, slug, body, phase, created_at, updated_at} ordered newest-first. Use BEFORE session_doc_read to find what's worth opening. **Use the `phase` filter to pull prior-phase context (e.g., in Apply: `session_doc_search(phase=\"plan\")` finds the plan to implement; in Verify: `session_doc_search(phase=\"apply\")` finds the apply summary).** Prefer this over scrolling chat history.",
+            description: "List this session's scratch documents, newest first: rows {id, slug, phase, bytes, lines, created_at, updated_at, body}. Bodies ride within a budget (48 KB a reply): a doc that does not fit is listed with its `headings` ({line, level, text}) and a `note` instead of its `body` — read the part you need with session_doc_read (`heading`, `lines` or `grep`). **Use the `phase` filter to pull prior-phase context (e.g., in Apply: `session_doc_search(phase=\"plan\")` finds the plan to implement; in Verify: `session_doc_search(phase=\"apply\")` finds the apply summary).** Prefer this over scrolling chat history.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -637,7 +668,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "session_doc_read",
-            description: "Fetch one session-scratch document by slug. Returns {id, slug, body, created_at, updated_at} or null when the slug isn't in this session. For a mechanical check of a long doc, avoid pulling the whole body: `grep` returns only the matching lines (case-insensitive) with their numbers, `lines` (\"a-b\", 1-based; \"a-\" runs to the end) returns just that range; both together grep inside the range. An earlier version of a rewritten doc is `<slug>@<n>` (see session_doc_search include_archives).",
+            description: "Fetch one session-scratch document by slug. Returns {id, slug, body, created_at, updated_at} or null when the slug isn't in this session. A body over the reply budget (48 KB) is not returned whole: you get its `bytes`, `total_lines` and `headings` instead, and read a part. To read a part of any doc: `heading` returns the section under the first heading containing that text (to the next heading of the same or a higher level); `lines` (\"a-b\", 1-based; \"a-\" runs to the end) returns that range, cut at the budget with a note naming where to continue; `grep` returns only the matching lines (case-insensitive) with their numbers, inside the `lines` or `heading` range when one is given. An earlier version of a rewritten doc is `<slug>@<n>` (see session_doc_search include_archives).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -652,6 +683,10 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     "lines": {
                         "type": "string",
                         "description": "Optional 1-based inclusive range \"a-b\", \"a-\" (from line a to the end) or \"a\": return only those lines."
+                    },
+                    "heading": {
+                        "type": "string",
+                        "description": "Optional. Return the section under the first markdown heading whose text contains this (case-insensitive), with its sub-sections. Not together with `lines`."
                     }
                 },
                 "required": ["slug"]
@@ -718,7 +753,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_write_file",
-            description: gated_by("cl_write_file", "Write a project-scoped Context Library file. Default mode replaces the ENTIRE file; mode:\"append\" adds content to the end instead (no read-modify-write needed). For a small correction inside an existing file use `cl_edit_file` instead — it changes the passage in place without re-emitting the file, and an append that contradicts an earlier line leaves the stale claim standing above its correction. The body is `content` inline, or `content_path`: an absolute path on this machine whose UTF-8 text becomes the body — build a large or mechanically produced body on disk (a script, a `sed` over a copy) and hand over the path instead of re-typing it. Direct write: missing parent folders are created, the write is atomic, the index rescans automatically, and every write is snapshotted into the library's local git history — the reply names the snapshot's short sha (record THAT as your rollback point, never `git log -1 -- <path>`), says `no new snapshot` when the content was already there, and says `NO SNAPSHOT TAKEN` loudly when versioning failed. Replacing a file with empty or >50%-smaller content is refused unless confirm_shrink:true (accidental-truncation guard — pass it when a prune is intentional). Also lifts the session's close-out learnings gate. bot-hq-owned _globals system files (custom-instructions.md, custom-general-rules.md, anything under _globals/agents/) are refused; so is a file the library marks agent-invisible; bodies over 1 MiB are refused. A successful write also pushes the library to its private remote, detached and fail-open."),
+            description: gated_by("cl_write_file", "Write a project-scoped Context Library file. Default mode replaces the ENTIRE file; mode:\"append\" adds content to the end instead (no read-modify-write needed). For a small correction inside an existing file use `cl_edit_file` instead — it changes the passage in place without re-emitting the file, and an append that contradicts an earlier line leaves the stale claim standing above its correction. The body is `content` inline; or `content_path`: an absolute path on this machine whose UTF-8 text becomes the body — build a large or mechanically produced body on disk (a script, a `sed` over a copy) and hand over the path instead of re-typing it; or `session_doc`: the slug of one of this session's documents, copied byte for byte — the way to promote a session doc. Direct write: missing parent folders are created, the write is atomic, the index rescans automatically, and every write is snapshotted into the library's local git history — the reply names the snapshot's short sha (record THAT as your rollback point, never `git log -1 -- <path>`), says `no new snapshot` when the content was already there, and says `NO SNAPSHOT TAKEN` loudly when versioning failed. Replacing a file with empty or >50%-smaller content is refused unless confirm_shrink:true (accidental-truncation guard — pass it when a prune is intentional). Also lifts the session's close-out learnings gate. bot-hq-owned _globals system files (custom-instructions.md, custom-general-rules.md, anything under _globals/agents/) are refused; so is a file the library marks agent-invisible; bodies over 1 MiB are refused. A successful write also pushes the library to its private remote, detached and fail-open."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -732,11 +767,15 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     },
                     "content": {
                         "type": "string",
-                        "description": "The body to write. mode \"replace\": the full new file. mode \"append\": just the addition — it lands at the end of the existing file after a blank line. Give either this or content_path."
+                        "description": "The body to write. mode \"replace\": the full new file. mode \"append\": just the addition — it lands at the end of the existing file after a blank line. Give exactly one of content, content_path and session_doc."
                     },
                     "content_path": {
                         "type": "string",
-                        "description": "Absolute path of a UTF-8 file on this machine whose text is the body (at most 1 MiB, checked before it is read). Use it for a body you built on disk instead of re-emitting it. Give either this or content."
+                        "description": "Absolute path of a UTF-8 file on this machine whose text is the body (at most 1 MiB, checked before it is read). Use it for a body you built on disk instead of re-emitting it. Give exactly one of content, content_path and session_doc."
+                    },
+                    "session_doc": {
+                        "type": "string",
+                        "description": "Slug of one of THIS session's documents (session_doc_search lists them): its body becomes the file's body, byte for byte. This is how a session doc is promoted to the CL — a reviewer's handoff, an approved draft — without re-typing it. Give exactly one of content, content_path and session_doc."
                     },
                     "mode": {
                         "type": "string",
@@ -1092,8 +1131,15 @@ mod tests {
     /// Measured 2026-10-03 (s-d43b3630): 22,755 bytes for the executor preset,
     /// 14,968 for the reviewer, of a 47,879-byte registry — about 5.7k and 3.7k
     /// tokens. The ceilings leave room for a sentence, not for a tool.
-    const HANDS_ALWAYS_LOADED_BUDGET: usize = 24_000;
-    const EYES_ALWAYS_LOADED_BUDGET: usize = 16_000;
+    ///
+    /// Raised once, the same day, and on purpose: the three session-doc tools
+    /// gained `content_path`, `heading` and the reply budget (feedback #75 /
+    /// #77), which took the sets to 24,185 and 16,398 of a 51,767-byte
+    /// registry. Those parameters are how an agent avoids a 476 KB reply, so
+    /// they are worth their ~360 tokens; `session_doc_edit` itself stays
+    /// behind ToolSearch.
+    const HANDS_ALWAYS_LOADED_BUDGET: usize = 25_000;
+    const EYES_ALWAYS_LOADED_BUDGET: usize = 17_000;
 
 
     /// **The canonical docs list every registered tool** (audit M-F10/M-T1).

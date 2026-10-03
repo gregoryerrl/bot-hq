@@ -20,6 +20,21 @@ and in `docs/rebuild-archive/`.
   document was put back, so the other participants know to check that it
   still holds the session's standing instructions.
 
+- **Session documents stay usable when they grow.** Five changes to the
+  document tools agents use:
+  - A document can be corrected in place (`session_doc_edit`), instead of
+    being rewritten whole or having a correction appended under the wrong
+    text. The version before the edit is kept.
+  - Listing a session's documents no longer returns every full body: a reply
+    carries at most 48 KB, and a larger document is listed with its size and
+    its headings.
+  - One section of a document can be read by its heading, or a range of
+    lines; a document too large to return whole answers with its outline.
+  - A document's body can come from a file, so an agent can give the reviewer
+    the test output it cites without re-typing it.
+  - A document can be copied to the Context Library exactly as written, which
+    is how a reviewer's handoff or an approved draft outlives the session.
+
 ### Changed
 
 - **An agent's core bot-hq tools are ready from its first turn.** The turn

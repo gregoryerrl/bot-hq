@@ -697,7 +697,7 @@ submodule tree). Surface:
   tools.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools (41)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (42)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `pass_turn`, `halt`, `advance_phase` (a VOTE
 since D37 — see "The phase-advance vote"),
@@ -705,7 +705,7 @@ since D37 — see "The phase-advance vote"),
 `action_gate`, `gate_status`, `check_commit_message`, `flag_finding` (alias `eyes_flag`),
 `disposition_finding`, `check_open_findings`, `override_reviewer_block`,
 `approve_finding`, `close_session`, `list_my_pending_questions`, `withdraw_question`,
-`supersede_question`, `session_doc_write`, `session_doc_search`,
+`supersede_question`, `session_doc_write`, `session_doc_edit`, `session_doc_search`,
 `session_doc_read`, `cl_index_search`, `cl_retrieve`, `cl_stale_refs`,
 `cl_write_file`, `cl_edit_file`, `cl_register_read`, `cl_rescan`,
 `cl_folder_search`, `cl_register_folder_description`,
@@ -952,7 +952,8 @@ token's boundary. So JSON is redacted leaf by leaf before it is serialized.
   again as the backstop for the close card and the queued outward gate. The
   re-ask dedupe compares redacted prompts.
 - **Everything else agents write:** session docs (`session_doc_write`,
-  `session_doc_write_eyes` — the new text, before an append is composed), findings
+  `session_doc_write_eyes` — the new text, before an append is composed — and
+  `session_doc_edit`'s replacement text), findings
   (summary, code ref, disposition reason; the re-raise lookup redacts its probe),
   feedback, retrieval queries, violation records (`action` / `detail` on the
   record), the halt slot and its banner (`emit_halt_row`), plugin text
@@ -1241,8 +1242,16 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   `session_questions`/`questions` in migration 0010.
 - `session_documents` (id PK, session_id, slug, body, phase, …) —
   per-session docs: one rewritable doc per IPAV phase (`phase` set), the
-  reviewer's co-located `<phase>-eyes` doc, archived phase versions
-  (`<slug>@<n>`, untagged) and custom documents (untagged, own tab).
+  reviewer's co-located `<phase>-eyes` doc, archived versions (`<slug>@<n>`,
+  untagged: what a replace or an in-place edit superseded) and custom
+  documents (untagged, own tab). The MCP tools keep a long doc readable: a
+  reply carries at most 48 KB of body (`DOC_REPLY_BUDGET_BYTES`), a doc past
+  it is listed by its size and headings, and `session_doc_read` returns one
+  section (`heading`), a line range (`lines`) or the matching lines (`grep`).
+  `session_doc_edit` corrects a passage in place with `cl_edit_file`'s
+  contract (one shared `replace_exactly`); `session_doc_write` can take its
+  body from a file (`content_path`, 256 KiB); `cl_write_file(session_doc:)`
+  copies a doc to the Context Library byte for byte.
 - `findings` (id PK, session_id, finding_uid UNIQUE, agent, severity,
   summary, code_ref, status, disposition_reason, disposed_by,
   created_at, updated_at) — EYES review findings backing the commit

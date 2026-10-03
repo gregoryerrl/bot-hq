@@ -207,9 +207,21 @@ pub(crate) fn capability_gated(tool: &str) -> bool {
 /// a multi-gigabyte path into it to discover it is over the cap would take
 /// the UI down with the bridge.
 const CONTENT_PATH_MAX_BYTES: u64 = 1_048_576;
+const CL_CONTENT_PATH_ADVICE: &str = "the CL write cap is 1 MiB. CL files are high-signal study \
+     notes; trim or split instead";
 
-/// Read a `cl_write_file` body from a file on this machine (feedback #30):
-/// absolute, a regular file, at most 1 MiB by stat, UTF-8.
+/// The cap on a SESSION DOC body read from a file (`session_doc_write`'s
+/// `content_path`; EYES, plan point 5). Lower than the CL's: a doc is archived
+/// on every replace (up to 50 versions of a phase doc), delivered whole to the
+/// document pane, and kept with the session, so a 100 MB log read into one
+/// would bloat the database and the archive.
+const DOC_CONTENT_PATH_MAX_BYTES: u64 = 262_144;
+const DOC_CONTENT_PATH_ADVICE: &str = "a session doc body read from a file is capped at 256 KiB. \
+     Attach the part that matters (for a log, its tail) or split it";
+
+/// Read a tool's body from a file on this machine (feedback #30): absolute, a
+/// regular file, at most `max_bytes` by stat, UTF-8. `advice` ends the
+/// over-the-cap error, naming the cap and what to do instead.
 ///
 /// The read runs with bot-hq's own privileges, not the calling agent's: the
 /// path is not confined to the working repo, and a file the agent's sandbox
@@ -218,7 +230,11 @@ const CONTENT_PATH_MAX_BYTES: u64 = 1_048_576;
 /// body lands in a library it could already write with `content` — but the
 /// asymmetry is the thing to revisit if agents ever run under a narrower
 /// identity than the host.
-async fn read_content_path(path: &str) -> std::result::Result<String, String> {
+async fn read_content_path(
+    path: &str,
+    max_bytes: u64,
+    advice: &str,
+) -> std::result::Result<String, String> {
     let p = std::path::Path::new(path);
     if !p.is_absolute() {
         return Err(format!("content_path must be an absolute path, got '{path}'"));
@@ -229,12 +245,8 @@ async fn read_content_path(path: &str) -> std::result::Result<String, String> {
     if !meta.is_file() {
         return Err(format!("content_path '{path}' is not a regular file"));
     }
-    if meta.len() > CONTENT_PATH_MAX_BYTES {
-        return Err(format!(
-            "content_path '{path}' is {} bytes — the CL write cap is 1 MiB. CL files \
-             are high-signal study notes; trim or split instead",
-            meta.len()
-        ));
+    if meta.len() > max_bytes {
+        return Err(format!("content_path '{path}' is {} bytes — {advice}", meta.len()));
     }
     tokio::fs::read_to_string(p)
         .await
@@ -566,6 +578,103 @@ async fn refuse_gated_tool(
 
 /// The `session_doc_write` reply: `{id, slug}`, plus a `note` when the body
 /// was stored with `redacted` secrets replaced by markers (F10).
+/// What a reviewer is told when its own co-doc write withdrew its vote.
+const VOTE_WITHDRAWN_NOTE: &str = "your own phase vote was withdrawn by this write: review notes \
+     changed after you voted. Cast it again with advance_phase if it still stands";
+
+/// Where a session-doc write or edit lands for one caller.
+enum DocTarget {
+    /// The reviewer's co-located `<phase>-eyes` doc of this phase.
+    Codoc(String),
+    /// The doc the caller named (keyed by `phase` when one was passed).
+    Own,
+}
+
+/// Decide where `caller`'s write or edit of `slug` lands.
+///
+/// A REVIEWER-shaped caller's write belongs to its co-doc when it carries a
+/// `phase`, or when the slug itself names a phase doc or a `<phase>-eyes` doc.
+/// EYES' advisory `9a1602f1`: the redirect used to look at the `phase`
+/// ARGUMENT alone, so a reviewer's untagged write to `plan` (or to
+/// `plan-eyes`) took the executor's path and landed in the executor's doc.
+///
+/// The mirror: a co-doc is the reviewer's. Any other caller's untagged write
+/// to a `<phase>-eyes` slug is refused — it would replace the review.
+fn session_doc_target(
+    caller: &CallerIdentity,
+    slug: &str,
+    explicit_phase: Option<&str>,
+) -> Result<DocTarget, JsonRpcError> {
+    if caller.capabilities.reviewer_shaped() {
+        let phase = explicit_phase
+            .or_else(|| crate::storage::reviewer_codoc_phase(slug))
+            .or_else(|| crate::storage::phase_doc_slug(slug));
+        return Ok(match phase {
+            Some(p) => DocTarget::Codoc(p.to_string()),
+            None => DocTarget::Own,
+        });
+    }
+    if explicit_phase.is_none() {
+        if let Some(of_phase) = crate::storage::reviewer_codoc_phase(slug) {
+            return Err(JsonRpcError::new(
+                JsonRpcError::INVALID_PARAMS,
+                format!(
+                    "`{slug}` holds the reviewer's notes on the {of_phase} phase; a write from \
+                     you would replace the review. Answer it in your own phase doc or in the \
+                     channel."
+                ),
+            ));
+        }
+    }
+    Ok(DocTarget::Own)
+}
+
+/// A handoff doc is put back into ITS owner's context after a compaction
+/// (`agents::handoff`), so a peer's write or edit would arrive there as the
+/// owner's own notes. Only the owner changes it; the user edits it in its tab.
+/// `handoff-<anything that is not a participant>` is an ordinary custom doc,
+/// and a phase-tagged write is keyed by its phase, not by this slug.
+async fn refuse_a_peers_handoff_doc(
+    bridge: &Arc<SignalingBridge>,
+    caller: &CallerIdentity,
+    slug: &str,
+    explicit_phase: Option<&str>,
+) -> Result<(), JsonRpcError> {
+    if explicit_phase.is_some() {
+        return Ok(());
+    }
+    let Some(owner) = crate::agents::handoff::participant_of(slug) else {
+        return Ok(());
+    };
+    if owner == caller.agent || !bridge.is_session_participant(&caller.session_id, owner).await {
+        return Ok(());
+    }
+    Err(JsonRpcError::new(
+        JsonRpcError::INVALID_PARAMS,
+        format!(
+            "`{slug}` is {owner}'s handoff doc: bot-hq puts it back into {owner}'s context after \
+             a compaction, so only {owner} writes it (the user can edit it in its tab). Yours is \
+             `{}`.",
+            crate::agents::handoff::doc_slug(&caller.agent)
+        ),
+    ))
+}
+
+/// `expect_occurrences` for the two exact-edit tools: absent or null is 1,
+/// anything but a positive integer is refused.
+fn parse_expect_occurrences(args: &Value) -> Result<usize, JsonRpcError> {
+    match args.get("expect_occurrences") {
+        None | Some(Value::Null) => Ok(1),
+        Some(v) => match v.as_u64() {
+            Some(n) if n >= 1 => Ok(n as usize),
+            _ => Err(JsonRpcError::new(
+                JsonRpcError::INVALID_PARAMS,
+                "expect_occurrences must be a positive integer",
+            )),
+        },
+    }
+}
+
 fn doc_write_reply(id: i64, slug: &str, redacted: usize, extra: Option<&str>) -> String {
     let mut notes: Vec<String> = Vec::new();
     if redacted > 0 {
@@ -1195,7 +1304,30 @@ async fn call_tool(
         }
         "session_doc_write" => {
             let slug = arg_required_str(&args, "slug")?;
-            let body = arg_required_str(&args, "body")?;
+            // `body` inline, or `content_path`: a body that already exists on
+            // disk (feedback #71 / #77) — a test log the reviewer should be
+            // able to read, a generated table. Exactly one of the two.
+            let body = match (
+                args.get("body").and_then(Value::as_str),
+                args.get("content_path").and_then(Value::as_str),
+            ) {
+                (Some(_), Some(_)) => {
+                    return Err(JsonRpcError::new(
+                        JsonRpcError::INVALID_PARAMS,
+                        "pass either `body` or `content_path`, not both",
+                    ))
+                }
+                (None, None) => {
+                    return Err(JsonRpcError::new(
+                        JsonRpcError::INVALID_PARAMS,
+                        "missing `body` (or `content_path` to read the body from a file)",
+                    ))
+                }
+                (Some(b), None) => b.to_string(),
+                (None, Some(path)) => read_content_path(path, DOC_CONTENT_PATH_MAX_BYTES, DOC_CONTENT_PATH_ADVICE)
+                    .await
+                    .map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, e))?,
+            };
             let phase = parse_optional_phase(&args)?;
             // Default "replace" keeps every existing caller unchanged; an
             // unrecognised mode is refused rather than silently replacing, since
@@ -1211,97 +1343,33 @@ async fn call_tool(
                 }
             };
             // A reviewer contributing to a phase doc must not overwrite the
-            // executor's single per-phase doc. Route a phase-tagged REVIEWER
-            // write to a co-located, attributed `<phase>-eyes` doc (same phase
-            // tag → same IPAV tab). Untagged reviewer scratch writes fall
-            // through to the normal overwrite path.
+            // executor's single per-phase doc: its write goes to a co-located,
+            // attributed `<phase>-eyes` doc (same phase tag → same IPAV tab).
+            // Untagged reviewer scratch writes fall through to the normal path.
             //
             // **rc3 D10: the reviewer is whoever holds `file_finding`, not
-            // whoever is called `rain`.** This arm used to read
-            // `caller.agent.as_str() == "rain"`, which under role-derived slugs
-            // matches no participant — so every phase-tagged write took the
-            // fallback arm and clobbered the other participant's phase doc,
-            // silently, while the EYES prompt and migration 0049 both kept
-            // promising the co-located behaviour.
+            // whoever is called `rain`.** **WS2 (2026-08-27): re-keyed to
+            // REVIEWER-SHAPED** — `FileFinding && !EditFiles` — so an EXECUTOR
+            // granted `file_finding` (the reverse review channel) keeps
+            // authoring the primary phase docs. See
+            // `ResolvedCapabilities::reviewer_shaped` for the full argument,
+            // and [`session_doc_target`] for where each write lands.
             //
-            // **WS2 (2026-08-27): re-keyed to REVIEWER-SHAPED** — `FileFinding
-            // && !EditFiles` — so an EXECUTOR granted `file_finding` (the
-            // reverse review channel) keeps authoring the primary phase docs
-            // instead of having every one silently rerouted to the reviewer
-            // co-doc. The commit gate's reviewer registry deliberately does NOT
-            // follow (bare `FileFinding` there): its ANY-down semantics mean an
-            // extra registrant defuses nothing, while this redirect answers a
-            // different question — who is the phase-doc AUTHOR. See
-            // `ResolvedCapabilities::reviewer_shaped` for the full argument.
             // F10: the bridge redacts the body before it is stored; the reply
             // says so, so an agent reading its doc back is not surprised by a
             // marker where it wrote a secret.
             let redacted = crate::policy::secret_scan::find_secrets(&body).len();
-            // A handoff doc is put back into ITS owner's context after a
-            // compaction (`agents::handoff`), so a peer's write to it would
-            // arrive there as the owner's own notes. Only the owner writes it;
-            // the user edits it in its tab. `handoff-<anything that is not a
-            // participant>` stays an ordinary custom doc.
-            if phase.is_none() {
-                if let Some(owner) = crate::agents::handoff::participant_of(&slug) {
-                    if owner != caller.agent
-                        && bridge.is_session_participant(&caller.session_id, owner).await
-                    {
-                        return Err(JsonRpcError::new(
-                            JsonRpcError::INVALID_PARAMS,
-                            format!(
-                                "`{slug}` is {owner}'s handoff doc: bot-hq puts it back into \
-                                 {owner}'s context after a compaction, so only {owner} writes it \
-                                 (the user can edit it in its tab). Yours is `{}`.",
-                                crate::agents::handoff::doc_slug(&caller.agent)
-                            ),
-                        ));
-                    }
-                }
-            }
-            // The phase this write belongs to AS A REVIEW: the explicit tag,
-            // or the one the slug itself names — a bare phase name, or the
-            // reviewer's own `<phase>-eyes`. EYES' advisory `9a1602f1`: the
-            // redirect used to look at the `phase` ARGUMENT alone, so a
-            // reviewer's untagged write to `plan` (or to `plan-eyes`) took the
-            // executor's path and landed in the executor's doc.
-            let reviewer = caller.capabilities.reviewer_shaped();
-            let review_phase: Option<String> = if reviewer {
-                phase.clone().or_else(|| {
-                    crate::storage::reviewer_codoc_phase(&slug)
-                        .or_else(|| crate::storage::phase_doc_slug(&slug))
-                        .map(str::to_string)
-                })
-            } else {
-                None
-            };
-            // …and the mirror: a co-doc is the REVIEWER's. An executor's
-            // untagged write to `plan-eyes` would replace the review.
-            if !reviewer && phase.is_none() {
-                if let Some(of_phase) = crate::storage::reviewer_codoc_phase(&slug) {
-                    return Err(JsonRpcError::new(
-                        JsonRpcError::INVALID_PARAMS,
-                        format!(
-                            "`{slug}` holds the reviewer's notes on the {of_phase} phase; a write \
-                             from you would replace the review. Answer it in your own phase doc \
-                             or in the channel."
-                        ),
-                    ));
-                }
-            }
-            match (review_phase.as_deref(), phase.as_deref()) {
-                (Some(p), _) => {
+            refuse_a_peers_handoff_doc(bridge, caller, &slug, phase.as_deref()).await?;
+            match session_doc_target(caller, &slug, phase.as_deref())? {
+                DocTarget::Codoc(p) => {
                     let written = bridge
-                        .session_doc_write_eyes(&caller.session_id, p, &body, &caller.agent, append)
+                        .session_doc_write_eyes(&caller.session_id, &p, &body, &caller.agent, append)
                         .await
                         .map_err(internal_err_no_prefix)?;
-                    let note = written.vote_withdrawn.then_some(
-                        "your own phase vote was withdrawn by this write: review notes changed \
-                         after you voted. Cast it again with advance_phase if it still stands",
-                    );
+                    let note = written.vote_withdrawn.then_some(VOTE_WITHDRAWN_NOTE);
                     Ok(ToolCallResult::text(doc_write_reply(written.id, &written.slug, redacted, note)))
                 }
-                _ => {
+                DocTarget::Own => {
                     let id = bridge
                         .session_doc_write(
                             &caller.session_id,
@@ -1316,6 +1384,53 @@ async fn call_tool(
                 }
             }
         }
+        "session_doc_edit" => {
+            let slug = arg_required_str(&args, "slug")?;
+            let old_string = arg_required_str(&args, "old_string")?;
+            let new_string = arg_required_str(&args, "new_string")?;
+            let expect = parse_expect_occurrences(&args)?;
+            refuse_a_peers_handoff_doc(bridge, caller, &slug, None).await?;
+            // The same routing as a write: a reviewer's edit of a phase doc's
+            // name is an edit of ITS co-doc, and a co-doc is not the
+            // executor's to edit.
+            let (target, codoc) = match session_doc_target(caller, &slug, None)? {
+                DocTarget::Codoc(phase) => (format!("{phase}-eyes"), true),
+                DocTarget::Own => (slug.clone(), false),
+            };
+            let redacted = crate::policy::secret_scan::find_secrets(&new_string).len();
+            let done = bridge
+                .session_doc_edit(&caller.session_id, &target, &old_string, &new_string, expect)
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, format!("{e:#}")))?;
+            let vote_withdrawn = if codoc {
+                bridge
+                    .after_session_codoc_write(&caller.session_id, &caller.agent, &done.slug)
+                    .await
+            } else {
+                false
+            };
+            let mut reply = json!({
+                "id": done.id,
+                "slug": done.slug,
+                "occurrences": done.occurrences,
+                "bytes_before": done.bytes_before,
+                "bytes_after": done.bytes_after,
+            });
+            if let Some(archive) = &done.archived_as {
+                reply["previous_body"] = json!(archive);
+            }
+            let mut notes: Vec<String> = Vec::new();
+            if redacted > 0 {
+                notes.push(format!("stored{}", crate::policy::secret_scan::redaction_note(redacted)));
+            }
+            if vote_withdrawn {
+                notes.push(VOTE_WITHDRAWN_NOTE.to_string());
+            }
+            if !notes.is_empty() {
+                reply["note"] = json!(notes.join("; "));
+            }
+            Ok(ToolCallResult::text(reply.to_string()))
+        }
         "session_doc_search" => {
             let query = args.get("query").and_then(Value::as_str);
             let phase = parse_optional_phase(&args)?;
@@ -1328,18 +1443,39 @@ async fn call_tool(
                 .session_doc_search(&caller.session_id, query, phase.as_deref())
                 .await
                 .map_err(internal_err_no_prefix)?;
+            // **Bodies, within a budget** (feedback #75). The rows are newest
+            // first; each doc's whole body rides while the reply stays under
+            // `DOC_REPLY_BUDGET_BYTES`, and a doc that does not fit is listed
+            // with its size and outline instead, so the caller reads the part
+            // it needs. Every row says how big the doc is.
+            let budget = crate::signaling::bridge::DOC_REPLY_BUDGET_BYTES;
+            let mut spent = 0usize;
             let trimmed: Vec<Value> = rows
                 .into_iter()
                 .filter(|d| include_archives || !crate::signaling::bridge::is_archive_slug(&d.slug))
                 .map(|d| {
-                    json!({
+                    let bytes = d.body.len();
+                    let mut row = json!({
                         "id": d.id,
                         "slug": d.slug,
-                        "body": d.body,
                         "phase": d.phase,
+                        "bytes": bytes,
+                        "lines": d.body.lines().count(),
                         "created_at": d.created_at,
                         "updated_at": d.updated_at,
-                    })
+                    });
+                    if spent + bytes <= budget {
+                        spent += bytes;
+                        row["body"] = json!(d.body);
+                    } else {
+                        row["headings"] = json!(crate::signaling::bridge::doc_outline(&d.body));
+                        row["note"] = json!(format!(
+                            "body left out: it does not fit this reply's {budget}-byte budget. Read \
+                             it with session_doc_read(slug: \"{}\") plus `heading`, `lines` or `grep`.",
+                            d.slug
+                        ));
+                    }
+                    row
                 })
                 .collect();
             Ok(result_json(&trimmed, "[]"))
@@ -1348,39 +1484,88 @@ async fn call_tool(
             let slug = arg_required_str(&args, "slug")?;
             let grep = args.get("grep").and_then(Value::as_str);
             let lines = args.get("lines").and_then(Value::as_str);
+            let heading = args.get("heading").and_then(Value::as_str);
+            if heading.is_some() && lines.is_some() {
+                return Err(JsonRpcError::new(
+                    JsonRpcError::INVALID_PARAMS,
+                    "pass `heading` or `lines`, not both — a heading already names a line range",
+                ));
+            }
             let row = bridge
                 .session_doc_read(&caller.session_id, &slug)
                 .await
                 .map_err(internal_err_no_prefix)?;
-            match row {
-                // `grep` / `lines`: a selective view, not the whole body
-                // (feedback #37).
-                Some(d) if grep.is_some() || lines.is_some() => {
-                    let excerpt = crate::signaling::bridge::doc_excerpt(&d.body, grep, lines)
-                        .map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, e.to_string()))?;
-                    let mut out = json!({
-                        "id": d.id,
-                        "slug": d.slug,
-                        "created_at": d.created_at,
-                        "updated_at": d.updated_at,
-                    });
-                    if let (Some(o), Some(e)) = (out.as_object_mut(), excerpt.as_object()) {
-                        o.extend(e.clone());
-                    }
-                    Ok(ToolCallResult::text(out.to_string()))
+            let Some(d) = row else {
+                return Ok(ToolCallResult::text("null".to_string()));
+            };
+            let meta = json!({
+                "id": d.id,
+                "slug": d.slug,
+                "created_at": d.created_at,
+                "updated_at": d.updated_at,
+            });
+            let with = |meta: Value, extra: Value| -> String {
+                let mut out = meta;
+                if let (Some(o), Some(e)) = (out.as_object_mut(), extra.as_object()) {
+                    o.extend(e.clone());
                 }
-                Some(d) => Ok(ToolCallResult::text(
-                    json!({
-                        "id": d.id,
-                        "slug": d.slug,
-                        "body": d.body,
-                        "created_at": d.created_at,
-                        "updated_at": d.updated_at,
-                    })
-                    .to_string(),
-                )),
-                None => Ok(ToolCallResult::text("null".to_string())),
+                out.to_string()
+            };
+            // `heading`: one section, as the line range it spans (feedback
+            // #75 / #77 — the latest design in a 130 KB plan was found by
+            // slicing character offsets by hand).
+            let section = match heading {
+                None => None,
+                Some(needle) => match crate::signaling::bridge::doc_section(&d.body, needle) {
+                    Some(found) => Some(found),
+                    None => {
+                        let known: Vec<String> = crate::signaling::bridge::doc_headings(&d.body)
+                            .into_iter()
+                            .take(40)
+                            .map(|h| h.text)
+                            .collect();
+                        return Err(JsonRpcError::new(
+                            JsonRpcError::INVALID_PARAMS,
+                            format!(
+                                "no heading in `{}` contains {needle:?}. Its headings: {}",
+                                d.slug,
+                                if known.is_empty() { "(none)".to_string() } else { known.join(" | ") }
+                            ),
+                        ));
+                    }
+                },
+            };
+            let range = section.as_ref().map(|(_, from, to)| format!("{from}-{to}"));
+            let lines = range.as_deref().or(lines);
+            if grep.is_some() || lines.is_some() {
+                // `grep` / `lines` / `heading`: a selective view, not the whole
+                // body (feedback #37).
+                let mut excerpt = crate::signaling::bridge::doc_excerpt(&d.body, grep, lines)
+                    .map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, e.to_string()))?;
+                if let Some((h, _, _)) = &section {
+                    excerpt["heading"] = json!(h.text);
+                }
+                return Ok(ToolCallResult::text(with(meta, excerpt)));
             }
+            // The whole body — unless it would overflow the reply (feedback
+            // #77: a 121 KB plan spilled to a one-line file). Then the outline,
+            // and the three ways to read a part.
+            let budget = crate::signaling::bridge::DOC_REPLY_BUDGET_BYTES;
+            if d.body.len() > budget {
+                let outline = json!({
+                    "bytes": d.body.len(),
+                    "total_lines": d.body.lines().count(),
+                    "headings": crate::signaling::bridge::doc_outline(&d.body),
+                    "note": format!(
+                        "the body is {} bytes, over this reply's {budget}-byte budget, so it is not \
+                         returned whole. Read a section with `heading`, a range with `lines` \
+                         (\"1-400\", or \"400-\" to the end), or search it with `grep`.",
+                        d.body.len()
+                    ),
+                });
+                return Ok(ToolCallResult::text(with(meta, outline)));
+            }
+            Ok(ToolCallResult::text(with(meta, json!({ "body": d.body }))))
         }
         "cl_index_search" => {
             let project = args.get("project").and_then(Value::as_str);
@@ -1549,29 +1734,53 @@ async fn call_tool(
         "cl_write_file" => {
             let project = arg_required_str(&args, "project")?;
             let file_path = arg_required_str(&args, "file_path")?;
-            // `content` inline, or `content_path`: a body the agent built on
+            // `content` inline; or `content_path`: a body the agent built on
             // disk (feedback #30 — a 610-line file re-emitted seven times to
-            // change a few lines each). Exactly one of the two.
-            let content = match (
+            // change a few lines each); or `session_doc`: one of THIS session's
+            // documents, copied byte for byte (feedback #78 — promoting two
+            // docs at a close meant re-typing 20k characters of TeX by hand,
+            // and nothing could check the copy). Exactly one of the three.
+            let sources = (
                 args.get("content").and_then(Value::as_str),
                 args.get("content_path").and_then(Value::as_str),
-            ) {
-                (Some(_), Some(_)) => {
-                    return Ok(ToolCallResult::error(
-                        "pass either `content` or `content_path`, not both".to_string(),
-                    ))
+                args.get("session_doc").and_then(Value::as_str),
+            );
+            let content = match sources {
+                (Some(c), None, None) => c.to_string(),
+                (None, Some(p), None) => {
+                    match read_content_path(p, CONTENT_PATH_MAX_BYTES, CL_CONTENT_PATH_ADVICE).await {
+                        Ok(c) => c,
+                        Err(e) => return Ok(ToolCallResult::error(e)),
+                    }
                 }
-                (None, None) => {
+                (None, None, Some(slug)) => {
+                    match bridge
+                        .session_doc_read(&caller.session_id, slug)
+                        .await
+                        .map_err(internal_err_no_prefix)?
+                    {
+                        Some(doc) => doc.body,
+                        None => {
+                            return Ok(ToolCallResult::error(format!(
+                                "session_doc `{slug}` is not a document of this session — \
+                                 session_doc_search lists them"
+                            )))
+                        }
+                    }
+                }
+                (None, None, None) => {
                     return Ok(ToolCallResult::error(
-                        "missing `content` (or `content_path` to read the body from a file)"
+                        "missing `content` (or `content_path` to read the body from a file, or \
+                         `session_doc` to copy one of this session's documents)"
                             .to_string(),
                     ))
                 }
-                (Some(c), None) => c.to_string(),
-                (None, Some(p)) => match read_content_path(p).await {
-                    Ok(c) => c,
-                    Err(e) => return Ok(ToolCallResult::error(e)),
-                },
+                _ => {
+                    return Ok(ToolCallResult::error(
+                        "pass exactly one of `content`, `content_path` and `session_doc`"
+                            .to_string(),
+                    ))
+                }
             };
             let append = match args.get("mode").and_then(Value::as_str) {
                 None | Some("replace") => false,
@@ -3252,7 +3461,9 @@ mod tests {
             (
                 json!({"project": "bot-hq", "file_path": "notes.md",
                        "content": "x", "content_path": built.to_str().unwrap()}),
-                "not both",
+                // Three sources since `session_doc` (feedback #78): the
+                // refusal names all three.
+                "exactly one of `content`, `content_path` and `session_doc`",
             ),
             (json!({"project": "bot-hq", "file_path": "notes.md"}), "missing `content`"),
             (
@@ -3920,6 +4131,253 @@ mod tests {
         storage.post_to_channel("s1", "participant", Some("hands"), "text", "Folded in.", None).await.unwrap();
         note("slice 4", "plan").await;
         assert_eq!(rows(storage.clone()).await.len(), 3, "a fresh row after someone else spoke");
+    }
+
+    fn parsed(reply: &str) -> Value {
+        serde_json::from_str(reply).unwrap_or_else(|e| panic!("a JSON reply ({e}): {reply}"))
+    }
+
+    /// Feedback #75: a bare `session_doc_search` returned every doc's whole
+    /// body — 476,583 characters in one session — and overflowed the tool
+    /// result. Bodies now ride within a budget, newest first; a doc that does
+    /// not fit is listed with its size and its outline, and every row says how
+    /// big the doc is.
+    #[tokio::test]
+    async fn session_doc_search_returns_bodies_within_a_budget() {
+        let (bridge, _storage) = two_role_session().await;
+        let big: String = std::iter::once("# Apply\n".to_string())
+            .chain((1..=900).map(|i| format!("## Slice {i}\nwhat slice {i} changed, in a sentence long enough to count\n")))
+            .collect();
+        assert!(big.len() > crate::signaling::bridge::DOC_REPLY_BUDGET_BYTES);
+        tool(&bridge, caller(), "session_doc_write", json!({"slug": "plan", "phase": "plan", "body": "# Plan\nthe plan"})).await.unwrap();
+        tool(&bridge, caller(), "session_doc_write", json!({"slug": "apply", "phase": "apply", "body": big})).await.unwrap();
+        tool(&bridge, caller(), "session_doc_write", json!({"slug": "checklist", "body": "- [ ] one"})).await.unwrap();
+
+        let reply = tool(&bridge, caller(), "session_doc_search", json!({})).await.unwrap();
+        assert!(reply.len() < 2 * crate::signaling::bridge::DOC_REPLY_BUDGET_BYTES, "the reply is bounded: {} bytes", reply.len());
+        let rows = parsed(&reply);
+        let row = |slug: &str| rows.as_array().unwrap().iter().find(|r| r["slug"] == slug).unwrap().clone();
+        for small in ["plan", "checklist"] {
+            assert!(row(small)["body"].is_string(), "{small} rides whole");
+            assert!(row(small).get("note").is_none());
+        }
+        assert_eq!(row("plan")["bytes"], json!("# Plan\nthe plan".len()));
+        assert_eq!(row("plan")["lines"], json!(2));
+        let left_out = row("apply");
+        assert!(left_out.get("body").is_none(), "the doc over the budget carries no body");
+        assert_eq!(left_out["bytes"], json!(big.len()));
+        assert_eq!(left_out["headings"][0], json!({"line": 1, "level": 1, "text": "Apply"}));
+        assert_eq!(left_out["headings"][1]["text"], json!("Slice 1"));
+        assert!(left_out["note"].as_str().unwrap().contains("session_doc_read(slug: \"apply\")"), "{left_out}");
+        // The phase filter is the same rule: the prose that says "search by
+        // phase to pull the plan" still gets the plan's body.
+        let by_phase = parsed(&tool(&bridge, caller(), "session_doc_search", json!({"phase": "plan"})).await.unwrap());
+        assert_eq!(by_phase[0]["body"], json!("# Plan\nthe plan"));
+    }
+
+    /// Feedback #75 / #77: one section by its heading, a line range, or — for a
+    /// body over the budget with no selector — the outline in place of a spill.
+    #[tokio::test]
+    async fn session_doc_read_returns_a_section_a_range_or_the_outline() {
+        let (bridge, _storage) = two_role_session().await;
+        let big: String = std::iter::once("# Plan\nintro\n".to_string())
+            .chain((1..=900).map(|i| format!("## Group {i}\ndesign of group {i}, in a sentence long enough to count\n")))
+            .collect();
+        tool(&bridge, caller(), "session_doc_write", json!({"slug": "plan", "phase": "plan", "body": big})).await.unwrap();
+
+        let section = parsed(&tool(&bridge, caller(), "session_doc_read", json!({"slug": "plan", "heading": "group 7"})).await.unwrap());
+        assert_eq!(section["heading"], json!("Group 7"));
+        assert_eq!(section["lines"], json!("15-16"));
+        assert_eq!(section["body"], json!("## Group 7\ndesign of group 7, in a sentence long enough to count"));
+
+        // grep inside a section.
+        let hits = parsed(&tool(&bridge, caller(), "session_doc_read", json!({"slug": "plan", "heading": "Group 12", "grep": "design"})).await.unwrap());
+        assert_eq!(hits["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(hits["matches"][0]["line"], json!(26));
+
+        let unknown = tool(&bridge, caller(), "session_doc_read", json!({"slug": "plan", "heading": "nonesuch"}))
+            .await
+            .expect_err("an unknown heading is an error, not an empty body");
+        assert!(unknown.message.contains("no heading in `plan` contains \"nonesuch\"") && unknown.message.contains("Group 1"), "{}", unknown.message);
+        let both = tool(&bridge, caller(), "session_doc_read", json!({"slug": "plan", "heading": "Group 7", "lines": "1-3"}))
+            .await
+            .expect_err("heading and lines together are refused");
+        assert!(both.message.contains("not both"), "{}", both.message);
+
+        // No selector on a body over the budget: the outline, not a spill.
+        let outline = parsed(&tool(&bridge, caller(), "session_doc_read", json!({"slug": "plan"})).await.unwrap());
+        assert!(outline.get("body").is_none(), "no whole body over the budget");
+        assert_eq!(outline["bytes"], json!(big.len()));
+        assert_eq!(outline["total_lines"], json!(1802));
+        assert_eq!(outline["headings"][0]["text"], json!("Plan"));
+        assert!(outline["note"].as_str().unwrap().contains("`heading`"), "{outline}");
+
+        // A range larger than the budget is cut on a line, and says where to go on.
+        let cut = parsed(&tool(&bridge, caller(), "session_doc_read", json!({"slug": "plan", "lines": "1-"})).await.unwrap());
+        assert!(cut["body"].as_str().unwrap().len() <= crate::signaling::bridge::DOC_REPLY_BUDGET_BYTES);
+        let shown_to: usize = cut["lines"].as_str().unwrap().split('-').nth(1).unwrap().parse().unwrap();
+        assert!(shown_to < 1802);
+        assert!(cut["note"].as_str().unwrap().contains(&format!("Continue with lines: \"{}-\"", shown_to + 1)), "{cut}");
+
+        // A small doc is still returned whole, as before.
+        tool(&bridge, caller(), "session_doc_write", json!({"slug": "notes", "body": "short"})).await.unwrap();
+        assert_eq!(parsed(&tool(&bridge, caller(), "session_doc_read", json!({"slug": "notes"})).await.unwrap())["body"], json!("short"));
+    }
+
+    /// Feedback #58 / #77: a passage of an existing doc is corrected IN PLACE.
+    /// The count is asserted, the phase tag survives, the body as it was is
+    /// archived (EYES, plan point 4), and the same ownership rules as a write
+    /// hold: a reviewer edits its co-doc, an executor cannot, and nobody edits
+    /// a peer's handoff doc.
+    #[tokio::test]
+    async fn session_doc_edit_corrects_a_passage_in_place_and_archives_the_old_body() {
+        let bridge = SignalingBridge::new();
+        let handoffs = tempfile::tempdir().unwrap();
+        let storage = crate::storage::Storage::memory().await.unwrap().with_handoff_dir(handoffs.path().to_path_buf());
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
+
+        tool(&bridge, caller(), "session_doc_write", json!({"slug": "plan", "phase": "plan", "body": "E2 covers six topics.\nE3 is next.\nE2 again."}))
+            .await
+            .unwrap();
+        let reply = parsed(&tool(&bridge, caller(), "session_doc_edit", json!({"slug": "plan", "old_string": "six topics", "new_string": "four topics"})).await.unwrap());
+        assert_eq!(reply["slug"], json!("plan"));
+        assert_eq!(reply["occurrences"], json!(1));
+        assert_eq!(reply["previous_body"], json!("plan@1"), "the body as it was is archived");
+        let plan = storage.session_document_by_slug("s1", "plan").await.unwrap().unwrap();
+        assert_eq!(plan.body, "E2 covers four topics.\nE3 is next.\nE2 again.");
+        assert_eq!(plan.phase.as_deref(), Some("plan"), "the phase tag survives an edit");
+        assert_eq!(doc_body(&storage, "plan@1").await.as_deref(), Some("E2 covers six topics.\nE3 is next.\nE2 again."));
+
+        // The count is an assertion: two matches for an expected one changes nothing.
+        let two = tool(&bridge, caller(), "session_doc_edit", json!({"slug": "plan", "old_string": "E2", "new_string": "E5"}))
+            .await
+            .expect_err("a non-unique anchor is refused");
+        assert!(two.message.contains("found 2 occurrence(s) of old_string in `plan`, expected 1"), "{}", two.message);
+        assert_eq!(doc_body(&storage, "plan").await.unwrap(), "E2 covers four topics.\nE3 is next.\nE2 again.");
+        tool(&bridge, caller(), "session_doc_edit", json!({"slug": "plan", "old_string": "E2", "new_string": "E5", "expect_occurrences": 2}))
+            .await
+            .unwrap();
+        assert_eq!(doc_body(&storage, "plan").await.unwrap(), "E5 covers four topics.\nE3 is next.\nE5 again.");
+
+        // Refusals that change nothing.
+        for (args, needle) in [
+            (json!({"slug": "nope", "old_string": "a", "new_string": "b"}), "no session doc `nope`"),
+            (json!({"slug": "plan@1", "old_string": "six", "new_string": "6"}), "archived version"),
+            (json!({"slug": "plan", "old_string": "", "new_string": "b"}), "old_string is empty"),
+            (json!({"slug": "plan", "old_string": "E3", "new_string": "E3"}), "identical"),
+            (json!({"slug": "plan", "old_string": "E3", "new_string": "E4", "expect_occurrences": 0}), "positive integer"),
+        ] {
+            let refused = tool(&bridge, caller(), "session_doc_edit", args.clone()).await.expect_err("refused");
+            assert!(refused.message.contains(needle), "{args}: {}", refused.message);
+        }
+
+        // A reviewer's edit of the phase's name is an edit of ITS co-doc, and
+        // counts as a co-doc write: its own vote goes with it.
+        tool(&bridge, eyes_caller(), "session_doc_write", json!({"slug": "r", "phase": "plan", "body": "point 1: the table is wrong"}))
+            .await
+            .unwrap();
+        tool(&bridge, eyes_caller(), "advance_phase", json!({"target": "Plan"})).await.unwrap();
+        let reply = parsed(&tool(&bridge, eyes_caller(), "session_doc_edit", json!({"slug": "plan", "old_string": "is wrong", "new_string": "was fixed"})).await.unwrap());
+        assert_eq!(reply["slug"], json!("plan-eyes"));
+        assert!(reply["note"].as_str().unwrap().contains("your own phase vote was withdrawn"), "{reply}");
+        assert!(doc_body(&storage, "plan-eyes").await.unwrap().contains("the table was fixed"));
+        assert_eq!(doc_body(&storage, "plan").await.unwrap(), "E5 covers four topics.\nE3 is next.\nE5 again.", "not the executor's doc");
+        let refused = tool(&bridge, caller(), "session_doc_edit", json!({"slug": "plan-eyes", "old_string": "point 1", "new_string": "x"}))
+            .await
+            .expect_err("an executor does not edit the review");
+        assert!(refused.message.contains("holds the reviewer's notes"), "{}", refused.message);
+
+        // Handoff docs: the owner's edit reaches its file (the edit passes the
+        // store's one choke point); a peer's edit is refused.
+        tool(&bridge, caller(), "session_doc_write", json!({"slug": "handoff-hands", "body": "Standing order: gate every read."}))
+            .await
+            .unwrap();
+        tool(&bridge, caller(), "session_doc_edit", json!({"slug": "handoff-hands", "old_string": "gate every read", "new_string": "gate every production read"}))
+            .await
+            .unwrap();
+        let file = crate::agents::handoff::file_path(handoffs.path(), "s1", "hands").unwrap();
+        assert!(std::fs::read_to_string(&file).unwrap().contains("gate every production read"), "the file follows an edit");
+        let refused = tool(&bridge, eyes_caller(), "session_doc_edit", json!({"slug": "handoff-hands", "old_string": "Standing", "new_string": "Lifted"}))
+            .await
+            .expect_err("a peer does not edit another's handoff doc");
+        assert!(refused.message.contains("is hands's handoff doc"), "{}", refused.message);
+    }
+
+    /// Feedback #71 / #77: a doc's body can come from a file — a test log the
+    /// reviewer should be able to read, without the model re-emitting it —
+    /// within a cap (EYES, plan point 5), and exactly one of `body` and
+    /// `content_path`.
+    #[tokio::test]
+    async fn session_doc_write_takes_its_body_from_a_file() {
+        let (bridge, storage) = two_role_session().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("suite.log");
+        std::fs::write(&log, "test result: ok. 1642 passed; 0 failed\n").unwrap();
+        tool(&bridge, caller(), "session_doc_write", json!({"slug": "evidence-suite", "content_path": log.to_str().unwrap()}))
+            .await
+            .unwrap();
+        assert_eq!(doc_body(&storage, "evidence-suite").await.as_deref(), Some("test result: ok. 1642 passed; 0 failed\n"));
+        // The reviewer reads it like any doc.
+        let read = parsed(&tool(&bridge, eyes_caller(), "session_doc_read", json!({"slug": "evidence-suite"})).await.unwrap());
+        assert_eq!(read["body"], json!("test result: ok. 1642 passed; 0 failed\n"));
+
+        let too_big = tmp.path().join("huge.log");
+        std::fs::write(&too_big, "x".repeat(300_000)).unwrap();
+        for (args, needle) in [
+            (json!({"slug": "e", "body": "x", "content_path": log.to_str().unwrap()}), "not both"),
+            (json!({"slug": "e"}), "missing `body`"),
+            (json!({"slug": "e", "content_path": "relative/suite.log"}), "absolute path"),
+            (json!({"slug": "e", "content_path": tmp.path().join("absent.log").to_str().unwrap()}), "absent.log"),
+            (json!({"slug": "e", "content_path": too_big.to_str().unwrap()}), "capped at 256 KiB"),
+        ] {
+            let refused = tool(&bridge, caller(), "session_doc_write", args.clone()).await.expect_err("refused");
+            assert!(refused.message.contains(needle), "{args}: {}", refused.message);
+        }
+        assert!(doc_body(&storage, "e").await.is_none(), "a refused write stores nothing");
+    }
+
+    /// Feedback #78: a session doc is promoted to the Context Library byte for
+    /// byte — `cl_write_file(session_doc: slug)` — instead of being re-typed.
+    /// Exactly one body source, and an unknown slug says so.
+    #[tokio::test]
+    async fn cl_write_file_copies_a_session_doc_byte_for_byte() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("library/projects/bot-hq");
+        std::fs::create_dir_all(&proj).unwrap();
+        let log = crate::policy::ViolationsLog::new(tmp.path());
+        let bridge = SignalingBridge::with_policy(log, tmp.path().to_path_buf());
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.upsert_project("bot-hq", "bot-hq", None, None, None).await.unwrap();
+        storage.create_session("s1", "promote", None).await.unwrap();
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+
+        // TeX-heavy text is where hand copies lose backslashes.
+        let body = "## Key questions\n\\begin{align}\n  A\\mathbf{x} &= \\lambda\\mathbf{x} \\\\\n\\end{align}\n— approved 2026-10-02\n";
+        tool(&bridge, eyes_caller(), "session_doc_write", json!({"slug": "eyes-handoff", "body": body})).await.unwrap();
+
+        let reply = tool(
+            &bridge,
+            caller(),
+            "cl_write_file",
+            json!({"project": "bot-hq", "file_path": "plans/eyes-handoff.md", "session_doc": "eyes-handoff"}),
+        )
+        .await
+        .unwrap();
+        assert!(reply.starts_with("created 'plans/eyes-handoff.md'"), "{reply}");
+        assert_eq!(std::fs::read_to_string(proj.join("plans/eyes-handoff.md")).unwrap(), body);
+
+        let unknown = tool(&bridge, caller(), "cl_write_file", json!({"project": "bot-hq", "file_path": "x.md", "session_doc": "nope"}))
+            .await
+            .unwrap();
+        assert!(unknown.contains("`nope` is not a document of this session"), "{unknown}");
+        let two = tool(&bridge, caller(), "cl_write_file", json!({"project": "bot-hq", "file_path": "x.md", "content": "a", "session_doc": "eyes-handoff"}))
+            .await
+            .unwrap();
+        assert!(two.contains("exactly one of `content`, `content_path` and `session_doc`"), "{two}");
+        assert!(!proj.join("x.md").exists());
     }
 
     /// EYES' advisory `d2ced691`: a handoff doc too long to put back whole ends

@@ -5,7 +5,7 @@
 //! rescan and the close-out gate lift, so no separate `cl_rescan` call is
 //! needed and no guard can reach one entry point and not the other.
 
-use super::util::{normalize_cl_path_input, rel_key};
+use super::util::{normalize_cl_path_input, rel_key, replace_exactly};
 use super::*;
 use crate::storage::Project;
 use anyhow::Context;
@@ -256,38 +256,16 @@ impl SignalingBridge {
                     (Done::Replaced, content)
                 }
                 (WriteOp::Edit { old, new, expect }, true, Some(existing)) => {
-                    let found = existing.matches(old.as_str()).count();
-                    if found != expect {
-                        anyhow::bail!(
-                            "found {found} occurrence(s) of old_string in '{fp}', expected \
-                             {expect} — {}",
-                            if found == 0 {
-                                // F10: an agent's earlier write stored a secret
-                                // as its marker, so an old_string quoting the
-                                // secret can never match — say so, rather than
-                                // "check the exact text", which the agent did.
-                                match crate::policy::secret_scan::redact(old.as_str()) {
-                                    std::borrow::Cow::Owned(marked) if existing.contains(marked.as_str()) => {
-                                        "old_string quotes a secret, but the file holds its \
-                                         `[redacted: …]` marker there (bot-hq redacts secrets in \
-                                         what agents write) — match the marker text instead; \
-                                         nothing was changed"
-                                            .to_string()
-                                    }
-                                    _ => "check the exact text (whitespace and punctuation \
-                                          included); nothing was changed"
-                                        .to_string(),
-                                }
-                            } else {
-                                format!(
-                                    "widen old_string until it is unique, or pass \
-                                     expect_occurrences: {found} to replace every one; \
-                                     nothing was changed"
-                                )
-                            }
-                        );
-                    }
-                    let edited = existing.replacen(old.as_str(), new.as_str(), expect);
+                    // The exact-replace core is shared with `session_doc_edit`
+                    // (`util::replace_exactly`), hint text included.
+                    let edited = replace_exactly(existing, old.as_str(), new.as_str(), expect)
+                        .map_err(|m| {
+                            anyhow::anyhow!(
+                                "found {} occurrence(s) of old_string in '{fp}', expected {expect} — {}",
+                                m.found,
+                                m.hint
+                            )
+                        })?;
                     if edited.len() > MAX_WRITE_BYTES {
                         anyhow::bail!(
                             "the edit would grow '{fp}' to {} bytes — the CL write cap \

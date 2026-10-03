@@ -22,6 +22,52 @@ pub(super) struct WalkedFile {
 /// hidden files/dirs (anything starting with '.') and a few well-known noise
 /// directories (`projects` at the CL-dir (`library/`) level is handled by
 /// per-project rescans, not here).
+/// Why [`replace_exactly`] changed nothing: how many occurrences it found, and
+/// what the caller should do about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExactMismatch {
+    pub(super) found: usize,
+    pub(super) hint: String,
+}
+
+/// Replace exactly `expect` non-overlapping occurrences of `old` in `existing`
+/// with `new` — the core of `cl_edit_file` and `session_doc_edit`, which must
+/// not drift apart: the count is an assertion, so a non-unique anchor is
+/// refused rather than guessed at, and nothing changes on a mismatch.
+///
+/// The hint names the two ways out (widen the anchor, or pass the count), and
+/// — F10 — the one case where "check the exact text" would be wrong advice: an
+/// `old` that quotes a secret the stored text holds as its redaction marker.
+pub(super) fn replace_exactly(
+    existing: &str,
+    old: &str,
+    new: &str,
+    expect: usize,
+) -> std::result::Result<String, ExactMismatch> {
+    let found = existing.matches(old).count();
+    if found == expect {
+        return Ok(existing.replacen(old, new, expect));
+    }
+    let hint = if found == 0 {
+        match crate::policy::secret_scan::redact(old) {
+            std::borrow::Cow::Owned(marked) if existing.contains(marked.as_str()) => {
+                "old_string quotes a secret, but the file holds its `[redacted: …]` marker there \
+                 (bot-hq redacts secrets in what agents write) — match the marker text instead; \
+                 nothing was changed"
+                    .to_string()
+            }
+            _ => "check the exact text (whitespace and punctuation included); nothing was changed"
+                .to_string(),
+        }
+    } else {
+        format!(
+            "widen old_string until it is unique, or pass expect_occurrences: {found} to replace \
+             every one; nothing was changed"
+        )
+    };
+    Err(ExactMismatch { found, hint })
+}
+
 /// Normalize a CALLER-SUPPLIED CL path to the stored `/` key form.
 ///
 /// **Direction matters, and it is the OPPOSITE of the superseded design.** An
@@ -554,6 +600,30 @@ pub(super) fn oob_resolution_body(
 
 #[cfg(test)]
 mod tests {
+    /// The exact-replace core `cl_edit_file` and `session_doc_edit` share: the
+    /// count is an assertion, a mismatch changes nothing and says which way
+    /// out, and an anchor that quotes a secret is pointed at its marker.
+    #[test]
+    fn replace_exactly_asserts_the_count_and_names_the_way_out() {
+        use super::replace_exactly;
+        assert_eq!(replace_exactly("a b a", "b", "c", 1).unwrap(), "a c a");
+        assert_eq!(replace_exactly("a b a", "a", "x", 2).unwrap(), "x b x");
+        assert_eq!(replace_exactly("keep", "keep", "", 1).unwrap(), "", "an empty new deletes");
+
+        let two = replace_exactly("a b a", "a", "x", 1).unwrap_err();
+        assert_eq!(two.found, 2);
+        assert!(two.hint.contains("expect_occurrences: 2") && two.hint.ends_with("nothing was changed"), "{}", two.hint);
+        let none = replace_exactly("a b a", "z", "x", 1).unwrap_err();
+        assert_eq!(none.found, 0);
+        assert!(none.hint.starts_with("check the exact text"), "{}", none.hint);
+
+        let secret = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUv-AA";
+        let stored = crate::policy::secret_scan::redact(&format!("token: {secret}")).into_owned();
+        assert_ne!(stored, format!("token: {secret}"), "the fixture must be redacted for this case to mean anything");
+        let quoted = replace_exactly(&stored, &format!("token: {secret}"), "token: rotated", 1).unwrap_err();
+        assert!(quoted.hint.contains("match the marker text instead"), "{}", quoted.hint);
+    }
+
     /// `rel_key` builds a LOGICAL key, not a native path, and must reject
     /// anything that isn't a plain component rather than flattening it.
     ///
