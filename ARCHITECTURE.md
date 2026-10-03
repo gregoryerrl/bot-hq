@@ -277,7 +277,12 @@ delivery is recorded in `participant_deliveries` with a nullable
 `withheld_reason`. **Each wire leads with `[speaker]`** — the peer's slug (the
 same handle `@mention` parses), `user`, or `system` (rc3 D23). Before that the
 wire carried no author at all, and a participant handed four rows had to infer
-which was the task and which was a peer's aside.
+which was the task and which was a peer's aside. **The tag also says when the
+row was posted** — `[eyes · 2026-10-03T05:24Z]`, the row's own `created_at`
+in UTC, to the minute (feedback #58). An agent has no clock; a turn is dealt
+when a row lands, so the newest row's time is the time of the deal, and the
+older rows show their age. It is the stored value rendered, never a line added
+at delivery, so what a participant reads stays derivable from the row.
 
 **A turn's backlog is ONE stdin write.** One outgoing message is one stream-json
 line and claude-code opens a turn on the first line it reads, so delivering rows

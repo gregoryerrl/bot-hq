@@ -23,7 +23,7 @@ Universal conventions every agent follows. Baked into the binary — add your ow
 
 ## How a session runs — the turn ring
 
-The session is a fixed rotation over its active participants. **You act only when the ring hands you a turn.** Everything posted since your last turn arrives at its start as ONE batch, each line tagged `[speaker]` — the LAST line is the freshest, and when the user has spoken it is usually theirs. There is no mid-turn delivery: nothing you write reaches a peer until their next turn, and nothing of theirs reaches you until yours.
+The session is a fixed rotation over its active participants. **You act only when the ring hands you a turn.** Everything posted since your last turn arrives at its start as ONE batch, each line tagged `[speaker · time]` (who wrote it, and when it was posted, in UTC) — the LAST line is the freshest, and when the user has spoken it is usually theirs. There is no mid-turn delivery: nothing you write reaches a peer until their next turn, and nothing of theirs reaches you until yours.
 
 - A **user message restarts the rotation at the front**; `@mentions` summon the named participants for the next turns. An `on_mention` participant sits out the rotation entirely until summoned.
 - **One pass per turn.** If a turn reaches you and nothing is yours to do, `pass_turn` once — a further pass the same turn is refused. A full lap of passes yields the session to the user on its own.
@@ -45,7 +45,7 @@ No house commit style ships by default — commit conventions come from the reso
 
 ## Time and timezones (reason in UTC)
 
-Every timestamp you see — bot-hq's own rows, tool outputs, MCP results, `git`/`gh` output — is UTC. When you reason about elapsed time or staleness, treat \"now\" as UTC; do NOT assume your local timezone. Two clock readings in different zones can be the SAME instant: `07:40 UTC` and `15:40 UTC+8` are identical — that is not staleness. Before calling anything \"stale\", convert both sides to UTC and compare. If you genuinely need the user's local time, fetch it explicitly rather than guessing an offset.
+Every timestamp you see — bot-hq's own rows, tool outputs, MCP results, `git`/`gh` output — is UTC. When you reason about elapsed time or staleness, treat \"now\" as UTC; do NOT assume your local timezone. Two clock readings in different zones can be the SAME instant: `07:40 UTC` and `15:40 UTC+8` are identical — that is not staleness. Before calling anything \"stale\", convert both sides to UTC and compare. **You are told the time:** a turn is dealt when a row lands, so the time on the NEWEST line of your batch is now, to within seconds, and the older lines show their age — read it there instead of estimating (a `date -u` is for when you need the second, or late in a long turn). If you genuinely need the user's local time, fetch it explicitly rather than guessing an offset.
 
 ## Outward actions + truthfulness (load-bearing)
 
@@ -811,6 +811,16 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("that is not staleness"),
             "UTC rule must call out same-instant-different-zone is not staleness"
+        );
+        // Feedback #58: the batch itself carries the time, and the rules say
+        // where to read "now" — an estimated time put wrong labels in handoffs.
+        assert!(
+            GENERAL_RULES.contains("each line tagged `[speaker · time]`"),
+            "the turn-ring paragraph names the time on each line"
+        );
+        assert!(
+            GENERAL_RULES.contains("the time on the NEWEST line of your batch is now"),
+            "and the time section says where now comes from"
         );
     }
 

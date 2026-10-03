@@ -1814,12 +1814,17 @@ mod tests {
             .await
             .unwrap();
         assert!(input.deliver(&from_a).await);
+        // Raw, as the agent's stdin receives it: who wrote it (rc3 D23 —
+        // `[user]` here, and that is the point of the label: a receipt from
+        // another session would arrive looking identical without it) and when
+        // the row was posted, its own `created_at` to the minute (feedback
+        // #58). This is the one delivery test that keeps the time in; the
+        // others strip it to pin structure.
+        let page = storage.channel_after("s-a", 0, 10).await.unwrap();
+        let minute = &page.rows.last().expect("the row this test posted").created_at[..16];
         assert_eq!(
             rx.try_recv().unwrap().message.content,
-            // rc3 D23: the wire says who wrote it. `[user]` here, and that is
-            // the point of the label — a receipt from another session would
-            // arrive looking identical without it.
-            "[user] meant for this session"
+            format!("[user · {minute}Z] meant for this session")
         );
     }
 
@@ -1866,7 +1871,7 @@ mod tests {
         // A scope check, not a blanket refusal.
         assert!(input.deliver_batch(&[mine, also_mine]).await);
         assert_eq!(
-            rx.try_recv().unwrap().message.content,
+            crate::storage::untimed_wire(&rx.try_recv().unwrap().message.content),
             format!("[user] first{}[user] third", crate::storage::WIRE_JOIN),
             "the batch is each row's own wire, joined — no batch-level decoration"
         );

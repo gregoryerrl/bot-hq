@@ -2788,6 +2788,56 @@ pub struct PersistedMessage {
     /// rather than resolved at the write, because the write has no roster and
     /// the row already knows.
     speaker: String,
+    /// The row's `created_at` — when it was posted, RFC3339 UTC. The wire
+    /// carries it to the minute beside the speaker (see [`Self::wire`]).
+    posted_at: String,
+}
+
+/// A row's `created_at` as the wire shows it: ` · 2026-10-03T05:24Z`, to the
+/// minute, or nothing when the stored value is not an RFC3339-Z timestamp (a
+/// row older than `now_utc`, a hand-built fixture) — a wrong time is worse
+/// than none.
+fn wire_time(created_at: &str) -> String {
+    let b = created_at.as_bytes();
+    let shaped = b.len() >= 17
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[10] == b'T'
+        && b[13] == b':'
+        && created_at.ends_with('Z')
+        && created_at.is_char_boundary(16)
+        && b[..16].iter().enumerate().all(|(i, c)| matches!(i, 4 | 7 | 10 | 13) || c.is_ascii_digit());
+    if shaped {
+        format!(" · {}Z", &created_at[..16])
+    } else {
+        String::new()
+    }
+}
+
+/// A wire with the per-row times taken out — ` · 2026-10-03T05:24Z]` back to
+/// `]` — for tests that pin the wire's STRUCTURE and post rows at whatever the
+/// clock says. The time itself is pinned by its own test.
+#[cfg(test)]
+pub(crate) fn untimed_wire(wire: &str) -> String {
+    const STAMP: usize = " · 2026-10-03T05:24Z".len();
+    let mut out = String::with_capacity(wire.len());
+    let mut rest = wire;
+    while let Some(at) = rest.find(" · ") {
+        let candidate = &rest[at..];
+        let is_stamp = candidate.len() > STAMP
+            && candidate.is_char_boundary(STAMP)
+            && candidate[STAMP..].starts_with(']')
+            && !wire_time(&format!("{}:00Z", &candidate[" · ".len()..STAMP - 1])).is_empty();
+        out.push_str(&rest[..at]);
+        if is_stamp {
+            rest = &candidate[STAMP..];
+        } else {
+            out.push_str(" · ");
+            rest = &candidate[" · ".len()..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 impl PersistedMessage {
@@ -2825,13 +2875,26 @@ impl PersistedMessage {
     /// decision can reach it. Clamping at the one place rows become stdin
     /// bytes means no single row can do that again, wherever it came from —
     /// a user paste, an agent's pasted dump, or a replayed backlog.
+    ///
+    /// **Each row says when it was posted** (feedback #58): `[eyes ·
+    /// 2026-10-03T05:24Z] …`, UTC, to the minute. An agent has no clock, and
+    /// estimating "now" put wrong times into handoffs and reports — the rules
+    /// say to reason in UTC but the only way to know it was a `date -u` call.
+    /// A turn is dealt when a row lands (the user's message, a peer's last
+    /// line, a wake or an answer row), so the NEWEST row's time is the time of
+    /// the deal to within seconds, and the older rows show their age.
+    ///
+    /// The time is the row's own `created_at`, not a line added at delivery:
+    /// what a participant reads stays derivable from what is stored, which is
+    /// the rule the row model exists to keep.
     pub fn wire(&self) -> String {
         // **The speaker leads.** Everything else in the wire decorates the
         // message; this says whose message it is, which is the one thing a
         // participant cannot work out for itself.
         format!(
-            "[{}] {}",
+            "[{}{}] {}",
             self.speaker,
+            wire_time(&self.posted_at),
             render_wire(self.envelope.as_ref(), &clamped_body(&self.body))
         )
     }
@@ -2914,6 +2977,7 @@ impl PersistedMessage {
             row.author.as_deref(),
             row.speaker_label.as_deref(),
         ),
+            posted_at: row.created_at.clone(),
         }
     }
 
@@ -3070,6 +3134,9 @@ impl Storage {
         // entirely for those. A slug with no roster row resolves to NULL rather
         // than erroring, which is correct — `author` still carries the
         // attribution, and an unattributed row beats a lost one.
+        // One reading of the clock: the row's `created_at` and the time the
+        // receipt's wire shows are the same value.
+        let posted_at = now_utc();
         let id = sqlx::query(
             "INSERT INTO messages \
              (session_id, participant_id, origin, kind, content, envelope, author, created_at) \
@@ -3100,7 +3167,7 @@ impl Storage {
         // permanently false and silently disarmed the findings re-raise
         // turn-evidence guard. The frontend would also have read every new row
         // as local time: the staleness hallucination `now_utc` exists to stop.
-        .bind(now_utc())
+        .bind(&posted_at)
         .execute(&self.pool)
         .await
         .with_context(|| format!("posting to channel for {session_id}"))?
@@ -3121,6 +3188,7 @@ impl Storage {
             // (`pump.rs`), which only notifies — its peers read the row back
             // through the ring, where the join supplies the label.
             speaker: speaker_of(origin, Some(legacy_author), None),
+            posted_at,
         })
     }
 
@@ -3719,6 +3787,59 @@ mod tests {
         s.upsert_session_document("s1", "apply", "the changelog", Some("apply")).await.unwrap();
         let fp2 = s.phase_artifact_fingerprint("s1").await.unwrap();
         assert_ne!(fp2, fp1, "the executor's next phase doc still moves it");
+    }
+
+    /// Feedback #58: every delivered row says when it was posted — the row's
+    /// own `created_at`, UTC, to the minute, beside the speaker — so an agent
+    /// reads the time instead of estimating it. A stored value that is not an
+    /// RFC3339-Z timestamp shows no time rather than a wrong one.
+    #[test]
+    fn a_rows_wire_time_is_its_created_at_to_the_minute() {
+        assert_eq!(wire_time("2026-10-03T05:24:52.528Z"), " · 2026-10-03T05:24Z");
+        assert_eq!(wire_time("2026-10-03T05:24:00Z"), " · 2026-10-03T05:24Z");
+        for not_a_time in [
+            "",
+            "2026-10-03 05:24:52",       // SQLite's zone-less form: not UTC by contract
+            "2026-10-03T05:24:52+08:00", // an offset is not Z
+            "t0",
+            "yesterday at noon, about",
+            "2026-1O-03T05:24:52.528Z",  // a letter where a digit belongs
+        ] {
+            assert_eq!(wire_time(not_a_time), "", "{not_a_time:?}");
+        }
+    }
+
+    /// The wire of a posted row, end to end: speaker, time, decoration, body.
+    /// And the test helper that takes the time back out leaves everything else
+    /// — including a body that itself contains a middle dot — alone.
+    #[tokio::test]
+    async fn a_delivered_row_carries_its_posting_time_beside_the_speaker() {
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        // The clock is read on both sides of the post, so the minute the wire
+        // shows is one of these two — exactly, whichever side of a minute
+        // boundary the post fell on.
+        let before = now_utc();
+        let posted = s
+            .post_to_channel("s1", "user", None, "text", "ship it · today", Some(Envelope::phase("Apply")))
+            .await
+            .unwrap();
+        let after = now_utc();
+        let wire = posted.wire();
+        let expected: Vec<String> = [&before, &after]
+            .iter()
+            .map(|t| format!("[user · {}Z] [PHASE: Apply]\nship it · today", &t[..16]))
+            .collect();
+        assert!(expected.contains(&wire), "got: {wire}, expected one of {expected:?}");
+        assert_eq!(untimed_wire(&wire), "[user] [PHASE: Apply]\nship it · today");
+        // A batch: each row carries its own.
+        let second = s.post_to_channel("s1", "user", None, "text", "and this", None).await.unwrap();
+        let batch = PersistedMessage::wire_batch(&[posted, second]);
+        assert_eq!(batch.matches(" · 20").count(), 2, "one time per row: {batch}");
+        assert_eq!(
+            untimed_wire(&batch),
+            format!("[user] [PHASE: Apply]\nship it · today{WIRE_JOIN}[user] and this")
+        );
     }
 
     /// The co-doc names are one list (`REVIEWER_CODOC_SLUGS`) read by the
@@ -7096,18 +7217,25 @@ mod tests {
             "receipt envelope IS the persisted envelope"
         );
         // And therefore the wire too — the receipt renders the same bytes the
-        // stored row does, which is the whole of what a delivery may write.
+        // stored row does, which is the whole of what a delivery may write:
+        // the speaker, the row's own `created_at` to the minute, the body.
         assert_eq!(
             pm.wire(),
             format!(
-                "[{}] {}",
+                "[{}{}] {}",
                 speaker_of(
                     &rows[0].origin,
                     rows[0].author.as_deref(),
                     rows[0].speaker_label.as_deref(),
                 ),
+                wire_time(&rows[0].created_at),
                 render_wire(rows[0].envelope.as_ref(), &rows[0].content)
             )
+        );
+        assert!(
+            !wire_time(&rows[0].created_at).is_empty(),
+            "a row posted through the channel carries a time the wire can show: {:?}",
+            rows[0].created_at
         );
         // Spelled out, because "who wrote it" is the half a participant cannot
         // work out for itself (rc3 D23).
@@ -7143,9 +7271,9 @@ mod tests {
         assert_eq!(replayed.message_id(), posted.message_id());
         assert_eq!(replayed.body(), posted.body());
         assert_eq!(replayed.envelope(), posted.envelope());
-        assert_eq!(replayed.wire(), posted.wire());
+        assert_eq!(replayed.wire(), posted.wire(), "the time included: both show the row's created_at");
         assert_eq!(
-            replayed.wire(),
+            untimed_wire(&replayed.wire()),
             "[system] [PHASE: Verify]\n⚠ 3 unresolved reviewer blocking finding(s) — run \
              check_open_findings and disposition each (fix/rebut) before you \
              commit.\ndeclare state"

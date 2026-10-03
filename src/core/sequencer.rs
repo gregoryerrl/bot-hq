@@ -4679,7 +4679,12 @@ mod tests {
     ///
     /// Only a LEADING `[word] ` goes; `[PHASE: Apply]` survives, because the
     /// speaker is always first and a phase tag has a space inside the brackets.
+    ///
+    /// The row's posting time goes with the speaker (`[user · 2026-10-03T05:24Z]`
+    /// is whatever the clock said when the fixture ran); it is pinned in
+    /// `storage`, beside the format.
     fn unlabelled(wire: String) -> String {
+        let wire = crate::storage::untimed_wire(&wire);
         let Some(rest) = wire.strip_prefix('[') else {
             return wire;
         };
@@ -4765,7 +4770,9 @@ mod tests {
                     .await
                     .unwrap_or_else(|_| panic!("raw wire {} of {n} never arrived", i + 1))
                     .expect("the sequencer dropped this participant's stdin");
-                out.push(m.message.content);
+                // Raw in everything but the per-row time, which is whatever
+                // the clock said when the fixture posted; `storage` pins it.
+                out.push(crate::storage::untimed_wire(&m.message.content));
             }
             out
         }

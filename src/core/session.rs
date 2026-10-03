@@ -2817,7 +2817,7 @@ mod tests {
             agent.handle.input().deliver(&from_a).await;
         }
         assert_eq!(
-            a_rx.try_recv().unwrap().message.content,
+            crate::storage::untimed_wire(&a_rx.try_recv().unwrap().message.content),
             // rc3 D23: the wire says who wrote it. `[user]` here, and that is
             // the point of the label — a receipt from another session would
             // arrive looking identical without it.
@@ -2870,7 +2870,7 @@ mod tests {
             .unwrap();
         assert!(agent.handle.input().deliver(&receipt).await, "stdin is open");
 
-        let wire = irx.recv().await.unwrap().message.content;
+        let wire = crate::storage::untimed_wire(&irx.recv().await.unwrap().message.content);
         assert_eq!(
             wire,
             format!(

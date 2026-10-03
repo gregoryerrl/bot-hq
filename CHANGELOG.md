@@ -19,7 +19,10 @@ and in `docs/rebuild-archive/`.
   compacted, how many tokens it went from and to, and whether its handoff
   document was put back, so the other participants know to check that it
   still holds the session's standing instructions.
-
+- **Agents are told the time.** Every message an agent receives now shows
+  when it was posted, in UTC, so an agent reads the time from its newest
+  message instead of estimating it. Estimated times had been ending up in
+  handoffs and reports.
 - **An agent can read what an approved command produced.** Asking for a
   gate's status now returns its exit code, how long it ran and the end of its
   output, and while it is still running says for how long. The reviewer can
