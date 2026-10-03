@@ -31,6 +31,13 @@ and in `docs/rebuild-archive/`.
   had no way to fetch it.
 - **An agent can take back a command it no longer wants** while it is still
   waiting for the reviewer's read, so it does not go on to prompt you.
+- **A zsh command that would not do what it says is stopped before it runs.**
+  Under zsh, `"$name:x"` with certain letters after the colon changes the
+  value instead of adding a colon (`"$R:app/x"` becomes the absolute path of
+  `$R` followed by `pp/x`), and with its errors discarded such a command just
+  prints nothing, which reads as "nothing found". Such a command is now refused
+  with the corrected form — in an agent's own commands, the reviewer's
+  included, in commands you approve, and in the session terminal.
 - **A Context Library replace no longer silently deletes another session's
   lines.** When an agent rewrites a whole file and its new version leaves out
   lines another session (or you) added since that agent last wrote the whole

@@ -68,7 +68,7 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
     let Some(sub) = args.first() else {
         return Err(anyhow!(
             "usage: bot-hq policy-check \
-             {{commit-msg|pre-commit|post-commit|pre-push|tool-gate|compact-handoff}} \
+             {{commit-msg|pre-commit|post-commit|pre-push|tool-gate|shell-lint|compact-handoff}} \
              --data-dir <P> [--project <Q>] [--session <S>] [--msg-file <F>]"
         ));
     };
@@ -156,6 +156,7 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
             run_pre_push(&data_dir, project.as_deref(), remote, push_nonce.as_deref(), sid)
         }
         "tool-gate" => run_tool_gate(&data_dir, sid),
+        "shell-lint" => run_shell_lint(),
         "compact-handoff" => {
             if let Some(text) = compact_handoff_text(&data_dir, sid, &hook_agent()) {
                 print!("{text}");
@@ -1183,6 +1184,13 @@ fn run_tool_gate(data_dir: &Path, session_id: Option<&str>) -> Result<i32> {
     let Some(command) = parse_pretool_bash_command(&buf) else {
         return Ok(0); // not a Bash tool call (or empty command) → allow
     };
+    // The zsh `$var:x` trap (feedback #96) comes FIRST — before the keyword
+    // match and above all before the auto-park below, so a trapped command is
+    // never parked for the user's approval and then run mangled.
+    if let Some(refusal) = shell_trap_refusal(&command) {
+        eprintln!("{refusal}");
+        return Ok(2);
+    }
     // Session-snapshot-first, global-fallback — the shared two-tier resolve
     // (`tool_gate::resolve_keywords`), same list `action_gate` and
     // `terminal_exec` enforce. Fail-open on snapshot read errors, mirroring
@@ -1217,6 +1225,48 @@ fn run_tool_gate(data_dir: &Path, session_id: Option<&str>) -> Result<i32> {
         eprintln!("{m}");
     }
     Ok(code)
+}
+
+/// The read-only posture's PreToolUse Bash hook (feedback #96): the zsh
+/// `$var:x` lint and NOTHING else. Not `tool-gate`: a role that cannot edit
+/// is not subject to the Tool Gate's keywords, and could not route a refusal
+/// to `action_gate` anyway. The trap itself is the reviewer's most of all —
+/// #96 was filed by one, after a `git show "$c:path"` loop printed nothing
+/// and nearly became "the setting did not exist".
+///
+/// **A pass exits 0 and prints NOTHING** (EYES, s-3158eb35): a printed
+/// `allow` decision would skip claude-code's permission layer, and that layer
+/// is what enforces the reviewer's deny list. Fail-open on any read error.
+fn run_shell_lint() -> Result<i32> {
+    use std::io::Read;
+    let mut buf = String::new();
+    if std::io::stdin().read_to_string(&mut buf).is_err() {
+        return Ok(0);
+    }
+    let Some(command) = parse_pretool_bash_command(&buf) else {
+        return Ok(0);
+    };
+    match shell_trap_refusal(&command) {
+        Some(refusal) => {
+            // Exit 2 = claude-code's blocking error, its stderr fed to the
+            // agent — the form honored in every permission mode.
+            eprintln!("{refusal}");
+            Ok(2)
+        }
+        None => Ok(0),
+    }
+}
+
+/// The zsh trap's refusal for an agent's Bash `command` — `None` unless the
+/// agent's shell is zsh and the command carries `$name:` before a modifier
+/// letter (`policy::shell_lint`). Under bash the same text is literal.
+fn shell_trap_refusal(command: &str) -> Option<String> {
+    use crate::policy::shell_lint;
+    if !shell_lint::agent_shell_is_zsh_here() {
+        return None;
+    }
+    let trap = shell_lint::check(command)?;
+    Some(shell_lint::refusal(command, &trap))
 }
 
 /// Pure decision for a parsed Bash `command` against the global keyword list.

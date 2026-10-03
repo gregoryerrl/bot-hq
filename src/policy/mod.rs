@@ -27,6 +27,7 @@ pub mod hooks;
 pub mod presets;
 pub mod secret_scan;
 pub mod session_policy;
+pub mod shell_lint;
 pub mod tool_gate;
 pub mod violations;
 

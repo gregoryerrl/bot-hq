@@ -1473,6 +1473,26 @@ fn compact_handoff_hook(exe: &std::path::Path, cfg: &SpawnConfig) -> serde_json:
     }])
 }
 
+/// The read-only posture's `PreToolUse` entry: before each Bash call,
+/// claude-code runs this binary's `policy-check shell-lint`, which refuses
+/// the zsh `"$var:x"` trap (exit 2, the corrected command on stderr) and
+/// otherwise exits 0 printing nothing (`policy::hooks::run_shell_lint`). An
+/// editing participant gets the same lint inside its Tool Gate hook instead.
+/// An older binary answers the unknown subcommand with exit 0, so a binary
+/// swap under a live session lets the call through rather than failing it.
+fn shell_lint_hook(exe: &std::path::Path, cfg: &SpawnConfig) -> serde_json::Value {
+    let command = format!(
+        "\"{}\" policy-check shell-lint --data-dir \"{}\" --session \"{}\"",
+        exe.display(),
+        cfg.data_dir.display(),
+        cfg.session_id,
+    );
+    serde_json::json!([{
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": command }],
+    }])
+}
+
 fn build_command(cfg: &SpawnConfig) -> Command {
     let bin = cfg.claude_bin.as_deref().unwrap_or("claude");
     let mut cmd = Command::new(bin);
@@ -1596,22 +1616,29 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // CLI's 200k default for the same model. No ENFORCEMENT hook here —
         // the read-only posture is `dontAsk` + the lists above, not a hook.
         //
-        // The one hook this posture does carry is not an enforcement hook: the
+        // The two hooks this posture does carry are not permission hooks: the
         // post-compaction handoff (`agents::handoff`), which every participant
-        // gets because every participant's context is compacted. The model
-        // row's keys fill in around it.
+        // gets because every participant's context is compacted, and the zsh
+        // `$var:x` lint (`policy-check shell-lint`, feedback #96 — filed by a
+        // reviewer whose `git show "$c:path"` loop printed nothing). The lint
+        // is never the Tool Gate, and on a pass it prints nothing, so the
+        // permission layer above still decides. The model row's keys fill in
+        // around them.
         let mut settings = serde_json::Map::new();
         match std::env::current_exe() {
             Ok(exe) => {
                 settings.insert(
                     "hooks".into(),
-                    serde_json::json!({ "SessionStart": compact_handoff_hook(&exe, cfg) }),
+                    serde_json::json!({
+                        "SessionStart": compact_handoff_hook(&exe, cfg),
+                        "PreToolUse": shell_lint_hook(&exe, cfg),
+                    }),
                 );
             }
             Err(e) => warn!(
                 agent = %cfg.agent_name,
                 error = %e,
-                "current_exe() failed — the post-compaction handoff hook was NOT injected"
+                "current_exe() failed — the post-compaction handoff and shell-lint hooks were NOT injected"
             ),
         }
         for (k, v) in model_cli_settings(&cfg.config, &cfg.agent_name) {
@@ -1976,8 +2003,12 @@ mod tests {
             "got {s}"
         );
         assert!(
-            s["hooks"].get("PreToolUse").is_none(),
+            !s.to_string().contains("policy-check tool-gate"),
             "the read-only posture carries no Tool Gate hook — dontAsk + the lists enforce it: {s}"
+        );
+        assert!(
+            s["hooks"]["PreToolUse"].to_string().contains("policy-check shell-lint"),
+            "the shell-lint hook must survive the merge: {s}"
         );
         assert!(
             s["hooks"]["SessionStart"].is_array(),
@@ -2426,12 +2457,12 @@ mod tests {
 
         // The override FRAGMENT (skillOverrides / enabledPlugins / ultracode)
         // rides with the permissive posture, as the tool-gate PreToolUse hook
-        // does; the only thing this role's `--settings` carries is the
-        // post-compaction handoff hook.
+        // does; the only thing this role's `--settings` carries is its two
+        // hooks, the post-compaction handoff and the shell lint.
         let s = settings_arg_of(&c).expect("the handoff hook rides --settings");
         let keys: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, vec!["hooks"], "no override fragment on a role without edit_files: {s}");
-        assert!(s["hooks"].get("PreToolUse").is_none(), "got {s}");
+        assert!(!s.to_string().contains("policy-check tool-gate"), "got {s}");
         // env-based overrides still apply to it.
         let cmd = build_command(&c);
         let has = cmd.as_std().get_envs().any(|(k, v)| {
@@ -3045,11 +3076,28 @@ mod tests {
         // The tool-gate PreToolUse hook is injected in the edit-capable branch
         // only: a read-only role is already mechanically read-only via the deny
         // list, and it could not answer a gate (it holds no `action_gate`). Its
-        // `--settings` carries the post-compaction handoff hook and nothing
-        // else that could block a tool call.
+        // `--settings` carries the post-compaction handoff hook and the shell
+        // lint — which refuses only the zsh `$var:x` trap, never a keyword.
         let s = settings_arg_of(&eyes_cfg()).expect("the handoff hook rides --settings");
-        assert!(s["hooks"].get("PreToolUse").is_none(), "no Tool Gate hook on a read-only role: {s}");
-        assert!(!s.to_string().contains("policy-check tool-gate"), "got {s}");
+        assert!(!s.to_string().contains("policy-check tool-gate"), "no Tool Gate hook on a read-only role: {s}");
+    }
+
+    /// Feedback #96, filed by a reviewer: the read-only posture's ONE
+    /// PreToolUse entry is the shell lint, matched on Bash and bound to the
+    /// session — and the editing posture does not get it, because its Tool
+    /// Gate hook runs the same lint first.
+    #[test]
+    fn a_read_only_role_gets_the_shell_lint_hook_and_nothing_else_before_a_tool() {
+        let s = settings_arg_of(&eyes_cfg()).expect("--settings");
+        let entries = s["hooks"]["PreToolUse"].as_array().expect("a PreToolUse list").clone();
+        assert_eq!(entries.len(), 1, "{s}");
+        assert_eq!(entries[0]["matcher"], serde_json::json!("Bash"), "{s}");
+        let command = entries[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(command.contains("policy-check shell-lint"), "{command}");
+        assert!(command.contains(&format!("--session \"{}\"", eyes_cfg().session_id)), "{command}");
+
+        let hands = settings_arg_of(&cfg()).expect("--settings");
+        assert!(!hands.to_string().contains("policy-check shell-lint"), "the Tool Gate hook lints instead: {hands}");
     }
 
     /// Feedback #90: the CLI's "end git commit messages with" a co-author

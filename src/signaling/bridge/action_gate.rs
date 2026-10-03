@@ -29,6 +29,14 @@ impl SignalingBridge {
         command: String,
         require_approval: bool,
     ) -> Result<String> {
+        // The zsh `$var:x` trap (feedback #96) is refused before anything is
+        // parked or run (s-d43b3630 plan review, point 11): a trapped command
+        // parked for approval would spend the user's Approve and then run
+        // mangled, and its empty-but-exit-0 output reads as "nothing found".
+        // The gate's shell decides — under bash the same text is literal.
+        if let Some(refusal) = crate::policy::shell_lint::zsh_trap(&tool_gate::gate_shell(), &command) {
+            anyhow::bail!("{refusal}");
+        }
         // **`require_approval` parks unconditionally** (round 12, EYES F19):
         // the keyword resolve below runs an unmatched / auto_allow command
         // outright, which is right for a command the Tool Gate blocked and
@@ -1481,6 +1489,36 @@ mod tests {
             .unwrap();
         assert!(out.contains("exit 0"), "{out}");
         assert!(marker.exists());
+    }
+
+    /// Feedback #96: under a zsh gate shell, a command carrying the
+    /// `"$var:x"` trap is refused before it is parked or run — with
+    /// `require_approval` too, so the user's Approve is never spent on a
+    /// command that would run mangled. Skipped where the gate shell is not
+    /// zsh (the same text is literal there; `shell_lint` pins that half).
+    #[tokio::test]
+    async fn a_zsh_trap_is_refused_before_it_parks_or_runs() {
+        if !crate::policy::shell_lint::is_zsh(&tool_gate::gate_shell()) {
+            eprintln!("gate shell is not zsh here — nothing to refuse");
+            return;
+        }
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        let marker = repo.path().join("ran.txt");
+        let cmd = format!("r=x; touch \"{}\" \"$r:tasks.md\"", posix_path(&marker));
+        for require_approval in [false, true] {
+            let err = bridge
+                .action_gate("s1".into(), "hands".into(), cmd.clone(), require_approval)
+                .await
+                .expect_err("the trap is refused");
+            assert!(err.to_string().starts_with("Not a Tool Gate stop"), "{err}");
+            assert!(err.to_string().contains("\"${r}:tasks.md\""), "the corrected form: {err}");
+        }
+        assert!(!marker.exists(), "nothing ran");
+        assert!(rx.try_recv().is_err(), "nothing parked: no gate latched the ring");
     }
 
     #[tokio::test]

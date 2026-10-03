@@ -1016,8 +1016,8 @@ command on approval.
 
 **Scope:** only participants granted `edit_files` — the PreToolUse hook is
 injected via `--settings` on that posture alone. The read-only posture's
-`--settings` carries the post-compaction handoff hook and a model's
-`cli_settings` fragment (0079), never the Tool Gate hook: a role that holds no
+`--settings` carries the post-compaction handoff hook, the zsh-trap lint (below)
+and a model's `cli_settings` fragment (0079), never the Tool Gate hook: a role that holds no
 `action_gate` could not answer a gate. A
 reviewer is held by `--disallowedTools` instead, which is **fail-open** for verbs
 a deny-list did not anticipate: `sed -i`, `tee` and `python3 -c` all write files
@@ -1051,6 +1051,23 @@ hold a reviewer more strictly belonged to the native loop and went with it (D9).
   gate.)
 
 The global list defaults EMPTY (no gating until configured in Settings).
+
+**The zsh `"$var:x"` trap is refused before any of this** (feedback #96,
+`src/policy/shell_lint.rs`). Under zsh, `$name:` followed by a modifier letter
+applies the modifier: `"$R:app/x"` is the absolute path of `$R` followed by
+`pp/x`, and an error discarded with `2>/dev/null` leaves empty output that reads
+as "nothing found". The lint scans the command (quoting, `$(…)`, backticks,
+`${…}`, heredocs; anything it cannot follow passes) and, only when the shell is
+zsh, refuses it with the braced form, `"${R}:app/x"`, which every shell reads
+literally. The refusal opens "Not a Tool Gate stop": rewriting IS the fix. It
+runs in four places:
+- the Tool Gate hook, first, before the keyword match and the auto-park;
+- `policy-check shell-lint`, the read-only posture's only PreToolUse hook. It
+  runs the lint alone, never the keywords, and on a pass exits 0 printing
+  nothing, so the permission layer that enforces a reviewer's deny list still
+  decides;
+- `action_gate`, before it parks or runs, under `gate_shell`;
+- `terminal_exec`, under the terminal's `$SHELL`.
 
 ---
 

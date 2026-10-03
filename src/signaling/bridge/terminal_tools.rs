@@ -69,6 +69,14 @@ impl SignalingBridge {
             ));
         }
 
+        // The zsh `$var:x` trap (feedback #96): the terminal runs the user's
+        // login shell (`TerminalRegistry::default_shell`, `$SHELL`), so the
+        // same check as the agent's own Bash, before anything is typed.
+        let shell = std::env::var("SHELL").unwrap_or_default();
+        if let Some(refusal) = crate::policy::shell_lint::zsh_trap(&shell, command) {
+            return Err(anyhow!("{refusal}"));
+        }
+
         // Tool-Gate parity (two-tier: session snapshot → global fallback).
         if let Some(d) = self.data_dir.as_ref() {
             let keywords = tool_gate::resolve_keywords(d, Some(&session_id));
@@ -193,6 +201,28 @@ mod tests {
             registry.get_any("s1").await.is_none(),
             "a refused command must not have spawned a terminal"
         );
+    }
+
+    /// Feedback #96: the terminal runs the user's `$SHELL`; under zsh a
+    /// command carrying the `"$var:x"` trap is refused before anything is
+    /// typed (or a terminal spawned). Skipped where `$SHELL` is not zsh.
+    #[tokio::test]
+    async fn terminal_exec_refuses_the_zsh_trap_without_spawning() {
+        if !crate::policy::shell_lint::is_zsh(&std::env::var("SHELL").unwrap_or_default()) {
+            eprintln!("$SHELL is not zsh here — nothing to refuse");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let bridge =
+            SignalingBridge::with_policy(ViolationsLog::new(dir.path()), dir.path().to_path_buf());
+        let registry = Arc::new(TerminalRegistry::new());
+        bridge.set_terminal_registry(Arc::clone(&registry));
+        let err = bridge
+            .terminal_exec("s1".into(), r#"git show "$R:app/x""#.into(), None, None)
+            .await
+            .expect_err("the trap is refused");
+        assert!(err.to_string().contains(r#"git show "${R}:app/x""#), "{err}");
+        assert!(registry.get_any("s1").await.is_none(), "nothing was typed, nothing spawned");
     }
 
     #[tokio::test]
