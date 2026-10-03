@@ -1053,6 +1053,19 @@ hold a reviewer more strictly belonged to the native loop and went with it (D9).
   — an action request, not a permission request. (There are no session push grants: a gate-run `git push` meets the
   pre-push hook like any other push, and under `push_gate=ask` that hook is the
   gate.)
+- **An approved publish is read back** (`src/signaling/bridge/readback.rs`,
+  feedback #57 #60 #97). After an approved single `gh issue|pr
+  create|edit|comment` runs:
+  - bot-hq takes the object's URL from the publish's stdout (gh prints its other
+    lines to stderr);
+  - it reads the object with a `gh api --method GET`, built only from checked
+    parts of that URL and run through the same gate shell;
+  - it compares the result with the bytes the approval's hash check read.
+
+  The result row says the body equals what was approved, DIFFERS (with the first
+  differing line), could not be read back, or was not read back and why. A
+  pull request also gets the issues GitHub links it to close. An edit is read
+  once more before a mismatch is reported.
 
 The global list defaults EMPTY (no gating until configured in Settings).
 

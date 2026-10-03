@@ -45,6 +45,7 @@ mod cl_write;
 mod feedback;
 mod findings;
 mod outward_body;
+mod readback;
 mod session_docs;
 pub(crate) use session_docs::{
     doc_excerpt, doc_headings, doc_outline, doc_section, is_archive_slug, DOC_REPLY_BUDGET_BYTES,
@@ -465,6 +466,9 @@ pub struct SignalingBridge {
     /// dispatchers, which don't have CoreAppState. Set-once; `None` in tests
     /// and during the pre-setup window.
     app_handle: std::sync::OnceLock<tauri::AppHandle>,
+    /// The `gh` an approved publish is read back with (`readback`, feedback
+    /// #57 #60 #97): unset, the gate shell's own `gh`; a test sets a fake.
+    gh_program: std::sync::OnceLock<PathBuf>,
     /// Per-session PTY registry shared with `AppState.terminals` — the
     /// `terminal_exec` / `terminal_read` MCP handlers reach the same PTYs the
     /// Terminal subtab renders. Set once at setup, like `app_handle`; `None`
@@ -674,6 +678,7 @@ impl SignalingBridge {
             session_phase: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
+            gh_program: std::sync::OnceLock::new(),
             terminals: std::sync::OnceLock::new(),
             session_close_gate: Mutex::new(HashMap::new()),
             library_push_lock: Arc::new(tokio::sync::Mutex::new(())),

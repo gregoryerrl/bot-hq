@@ -31,6 +31,11 @@ and in `docs/rebuild-archive/`.
   had no way to fetch it.
 - **An agent can take back a command it no longer wants** while it is still
   waiting for the reviewer's read, so it does not go on to prompt you.
+- **A publish you approved is read back.** After an approved `gh` issue, pull
+  request or comment publish runs, bot-hq reads what landed on GitHub and
+  says in the result whether it equals what was reviewed, or where it first
+  differs. A pull request also says which issues GitHub will close with it.
+  Reviewers had been checking every publish by hand.
 - **A zsh command that would not do what it says is stopped before it runs.**
   Under zsh, `"$name:x"` with certain letters after the colon changes the
   value instead of adding a colon (`"$R:app/x"` becomes the absolute path of

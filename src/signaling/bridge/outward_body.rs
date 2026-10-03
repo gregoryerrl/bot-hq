@@ -971,6 +971,198 @@ fn publish_value(flag: &str, carries: Carries, value: String, out: &mut OutwardB
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// The publish an approved command makes — what it is read back against
+// ---------------------------------------------------------------------------
+
+/// Which GitHub object a single `gh` publish writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GhPublishKind {
+    IssueCreate,
+    PrCreate,
+    IssueEdit,
+    PrEdit,
+    IssueComment,
+    PrComment,
+}
+
+impl GhPublishKind {
+    /// It REPLACES a body that exists (`edit`, or a comment's
+    /// `--edit-last`) rather than creating one — what the read-back's retry
+    /// and the reviewer's live-body diff are for.
+    pub(crate) fn replaces(self, edit_last: bool) -> bool {
+        matches!(self, Self::IssueEdit | Self::PrEdit)
+            || (edit_last && matches!(self, Self::IssueComment | Self::PrComment))
+    }
+
+    /// A pull request's own body, whose closing references GitHub reports.
+    pub(crate) fn is_pr_body(self) -> bool {
+        matches!(self, Self::PrCreate | Self::PrEdit)
+    }
+}
+
+/// The body a publish sends: a file's content, or text on the command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PublishedBody {
+    File(String),
+    Inline(String),
+}
+
+/// One `gh issue|pr create|edit|comment`, as an approved command makes it
+/// (feedback #57 #60 #97): what to read back, and what to compare it with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GhPublish {
+    pub kind: GhPublishKind,
+    /// The issue or PR the command names (`5`, a URL, a branch); `None` for
+    /// a create.
+    pub target: Option<String>,
+    /// `--repo` / `-R`.
+    pub repo: Option<String>,
+    pub body: PublishedBody,
+    /// `gh … comment --edit-last`.
+    pub edit_last: bool,
+}
+
+/// The publish `command` makes, when bot-hq can read it back — or the reason
+/// it cannot, which the gate's result says in one line (EYES, s-3158eb35: a
+/// publish with no read-back must not look like one that matched).
+///
+/// Only ONE simple command, and only `gh issue|pr create|edit|comment` with
+/// one body: with a second command in the line (`gh … ; echo <url>`) the
+/// output could name the wrong object, and `gh issue edit 1 2 3` prints its
+/// URLs in no fixed order (gh 2.81 runs the edits in parallel). A command
+/// that sets its own gh environment (`GH_TOKEN=…`, `GH_HOST=…`) publishes as
+/// another identity or host, which a read as the default one may not see.
+pub(crate) fn gh_publish(command: &str) -> Result<GhPublish, String> {
+    const ONLY: &str = "only a single `gh issue|pr create|edit|comment` is read back";
+    let commands = simple_commands(command, 0);
+    let [cmd] = commands.as_slice() else {
+        return Err(if commands.len() > 1 {
+            "the approved command runs more than one command, so its output may name another \
+             object"
+                .to_string()
+        } else {
+            ONLY.to_string()
+        });
+    };
+    if cmd.opaque || cmd.tool != "gh" {
+        return Err(ONLY.to_string());
+    }
+    // Only the words BEFORE `gh` set its environment (`GH_TOKEN=… gh`, `env
+    // GH_HOST=… gh`): a body that mentions `GH_TOKEN=` is not one.
+    let sets_gh_env = segments(command).iter().any(|s| {
+        s.words
+            .iter()
+            .take_while(|w| w.op || basename(&w.text) != "gh")
+            .any(|w| {
+                !w.op
+                    && w.text.split_once('=').is_some_and(|(name, _)| {
+                        name.starts_with("GH_") || name.starts_with("GITHUB_")
+                    })
+            })
+    });
+    if sets_gh_env {
+        return Err(
+            "the command sets its own gh environment (`GH_…=` / `GITHUB_…=`), so a read as the \
+             default identity and host may not see what it published"
+                .to_string(),
+        );
+    }
+    let args = &cmd.args;
+    let mut positional = args.iter().filter(|w| !w.op && !w.text.starts_with('-'));
+    let (group, sub) = (
+        positional.next().map(|w| w.text.as_str()).unwrap_or(""),
+        positional.next().map(|w| w.text.as_str()).unwrap_or(""),
+    );
+    let kind = match (group, sub) {
+        ("issue", "create") => GhPublishKind::IssueCreate,
+        ("pr", "create") => GhPublishKind::PrCreate,
+        ("issue", "edit") => GhPublishKind::IssueEdit,
+        ("pr", "edit") => GhPublishKind::PrEdit,
+        ("issue", "comment") => GhPublishKind::IssueComment,
+        ("pr", "comment") => GhPublishKind::PrComment,
+        _ => return Err(ONLY.to_string()),
+    };
+    let (table, _) = flag_table("gh", group, sub);
+    let takes_value = |flag: &str| table.iter().any(|(f, _)| *f == flag);
+    let mut operands: Vec<String> = Vec::new();
+    let mut bodies: Vec<PublishedBody> = Vec::new();
+    let mut repo = None;
+    let mut edit_last = false;
+    let mut only_operands = false;
+    let mut i = 0;
+    while i < args.len() {
+        let w = &args[i];
+        if w.op {
+            i += 2;
+            continue;
+        }
+        let text = w.text.as_str();
+        if only_operands || !text.starts_with('-') || text == "-" {
+            operands.push(w.text.clone());
+            i += 1;
+            continue;
+        }
+        if text == "--" {
+            only_operands = true;
+            i += 1;
+            continue;
+        }
+        // `--flag=value`, `--flag value`, `-Xvalue`, `-X value`.
+        let (flag, attached) = match text.strip_prefix("--") {
+            Some(long) => match long.split_once('=') {
+                Some((name, value)) => (format!("--{name}"), Some(value.to_string())),
+                None => (text.to_string(), None),
+            },
+            None => {
+                let mut chars = text.chars();
+                chars.next();
+                let first = chars.next().map(|c| format!("-{c}")).unwrap_or_default();
+                let rest: String = chars.collect();
+                (first, (!rest.is_empty()).then_some(rest))
+            }
+        };
+        if flag == "--edit-last" {
+            edit_last = true;
+            i += 1;
+            continue;
+        }
+        if !takes_value(&flag) {
+            i += 1; // a boolean (or a cluster of them)
+            continue;
+        }
+        let (value, consumed) = match attached {
+            Some(v) => (v, 1),
+            None => match args.get(i + 1) {
+                Some(next) if !next.op => (next.text.clone(), 2),
+                _ => (String::new(), 1),
+            },
+        };
+        i += consumed;
+        match flag.as_str() {
+            "--body" | "-b" => bodies.push(PublishedBody::Inline(value)),
+            "--body-file" | "-F" => bodies.push(PublishedBody::File(value)),
+            "--repo" | "-R" => repo = Some(value),
+            _ => {}
+        }
+    }
+    // The first two operands are the group and the subcommand.
+    let targets = operands.get(2..).unwrap_or_default();
+    if targets.len() > 1 {
+        return Err(
+            "the command names several issues or pull requests, whose URLs gh prints in no fixed \
+             order"
+                .to_string(),
+        );
+    }
+    let body = match bodies.len() {
+        1 => bodies.remove(0),
+        0 => return Err("the command publishes no body to compare".to_string()),
+        _ => return Err("the command passes more than one body".to_string()),
+    };
+    Ok(GhPublish { kind, target: targets.first().cloned(), repo, body, edit_last })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1206,5 +1398,57 @@ mod tests {
         assert_eq!(ok("bash -eo pipefail -c 'gh issue comment 5 -b x'").inline, vec!["x"]);
         assert!(is_outward("bash -O extglob -c 'gh pr merge 1'"));
         assert!(is_outward("bash --rcfile r.sh -c 'gh pr merge 1'"));
+    }
+
+    // --- gh_publish: what an approved publish is read back against ---------
+
+    fn publish(command: &str) -> GhPublish {
+        gh_publish(command).unwrap_or_else(|why| panic!("{command:?}: {why}"))
+    }
+
+    #[test]
+    fn every_issue_and_pr_publish_names_its_kind_target_and_body() {
+        use GhPublishKind::*;
+        let cases: &[(&str, GhPublishKind, Option<&str>, PublishedBody)] = &[
+            ("gh issue create --title t --body-file b.md", IssueCreate, None, PublishedBody::File("b.md".into())),
+            ("gh pr create --base main -F b.md", PrCreate, None, PublishedBody::File("b.md".into())),
+            ("gh issue edit 63 --body-file /tmp/x.md", IssueEdit, Some("63"), PublishedBody::File("/tmp/x.md".into())),
+            ("gh pr edit 62 -b \"new text\"", PrEdit, Some("62"), PublishedBody::Inline("new text".into())),
+            ("gh issue comment 5 --body=inline-words", IssueComment, Some("5"), PublishedBody::Inline("inline-words".into())),
+            ("gh pr comment https://github.com/o/r/pull/9 --body-file c.md", PrComment, Some("https://github.com/o/r/pull/9"), PublishedBody::File("c.md".into())),
+            ("./gh issue comment 5 -Fc.md", IssueComment, Some("5"), PublishedBody::File("c.md".into())),
+        ];
+        for (command, kind, target, body) in cases {
+            let p = publish(command);
+            assert_eq!((p.kind, p.target.as_deref(), &p.body), (*kind, *target, body), "{command}");
+        }
+        let p = publish("gh issue comment 5 --edit-last --repo o/r --body-file c.md");
+        assert!(p.edit_last && p.kind.replaces(p.edit_last));
+        assert_eq!(p.repo.as_deref(), Some("o/r"));
+        assert!(!publish("gh issue comment 5 -b x").kind.replaces(false));
+        assert!(publish("gh pr edit 5 -b x").kind.is_pr_body() && !publish("gh pr comment 5 -b x").kind.is_pr_body());
+    }
+
+    /// The forms with no read-back say why (EYES, s-3158eb35): a second
+    /// command, an unsupported tool or subcommand, several targets, no body,
+    /// or a gh environment of its own.
+    #[test]
+    fn what_cannot_be_read_back_says_why() {
+        for (command, why) in [
+            ("gh issue comment 5 --body-file c.md; echo https://github.com/o/r/issues/1", "more than one command"),
+            ("gh release create v1 --notes-file n.md", "only a single"),
+            ("gh pr merge 5 -b x", "only a single"),
+            ("curl -d @b.json https://example.com", "only a single"),
+            ("gh issue edit 1 2 3 --body-file b.md", "several issues"),
+            ("gh pr edit 5 --title t", "no body"),
+            ("gh issue comment 5 -b a --body-file b.md", "more than one body"),
+            ("GH_TOKEN=x gh issue comment 5 --body-file c.md", "own gh environment"),
+            ("env GH_HOST=ghe.example.com gh pr create -F b.md", "own gh environment"),
+        ] {
+            let err = gh_publish(command).expect_err(command);
+            assert!(err.contains(why), "{command}: {err}");
+        }
+        // A body that MENTIONS a gh variable is not one.
+        assert_eq!(publish("gh issue comment 5 -b \"set GH_TOKEN=… first\"").kind, GhPublishKind::IssueComment);
     }
 }

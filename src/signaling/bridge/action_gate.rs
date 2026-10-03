@@ -442,7 +442,7 @@ impl SignalingBridge {
         let mut envs: Vec<(&str, &str)> = session.iter().map(|(k, v)| (*k, v.as_str())).collect();
         envs.extend_from_slice(extra_envs);
         let out = tool_gate::run_in_repo(command, &cwd, timeout, &envs).await;
-        Ok(GatedRun { text: format_command_output(&out), exit_code: out.code })
+        Ok(GatedRun { text: format_command_output(&out), exit_code: out.code, stdout: out.stdout })
     }
 
     /// The session's `working_repo_path` from storage — the source of truth on
@@ -475,12 +475,27 @@ impl SignalingBridge {
         session_id: &str,
         command: &str,
     ) -> Option<Result<String, String>> {
+        Some(self.body_files_snapshot(session_id, command).await?.map(|(sha, _)| sha))
+    }
+
+    /// [`Self::body_files_digest`] with the bytes it hashed: `(digest,
+    /// [(path as written, bytes)])`. ONE read of each file — so when the
+    /// approval's re-check passes, these bytes ARE the content the review
+    /// covered, and the publish's read-back compares with them rather than
+    /// with a later re-read of a path an agent may already be reusing for its
+    /// next draft (EYES, s-3158eb35).
+    pub(crate) async fn body_files_snapshot(
+        &self,
+        session_id: &str,
+        command: &str,
+    ) -> Option<Result<(String, Vec<(String, Vec<u8>)>), String>> {
         use sha2::{Digest, Sha256};
         let files = super::outward_body::extract(command).ok()?.files;
         if files.is_empty() {
             return None;
         }
         let mut hasher = Sha256::new();
+        let mut read = Vec::with_capacity(files.len());
         for p in &files {
             let resolved = self.resolve_body_path(session_id, p).await;
             match std::fs::read(&resolved) {
@@ -489,11 +504,12 @@ impl SignalingBridge {
                     hasher.update([0u8]);
                     hasher.update(&bytes);
                     hasher.update([0u8]);
+                    read.push((p.clone(), bytes));
                 }
                 Err(_) => return Some(Err(p.clone())),
             }
         }
-        Some(Ok(format!("{:x}", hasher.finalize())))
+        Some(Ok((format!("{:x}", hasher.finalize()), read)))
     }
 
     /// Record the body hash on a freshly parked or queued gate (0084).
@@ -552,7 +568,7 @@ impl SignalingBridge {
         path.to_path_buf()
     }
 
-    async fn session_working_repo(&self, session_id: &str) -> Option<PathBuf> {
+    pub(super) async fn session_working_repo(&self, session_id: &str) -> Option<PathBuf> {
         let storage = self.storage.lock().await.clone()?;
         let session = storage.get_session(session_id).await.ok()??;
         session.working_repo_path.map(PathBuf::from)
@@ -1342,6 +1358,9 @@ fn gate_output_excerpt(content: &str, row_id: i64) -> String {
 pub(super) struct GatedRun {
     pub(super) text: String,
     pub(super) exit_code: i32,
+    /// The command's own stdout, apart from its stderr: a publish's read-back
+    /// takes the object's URL from it (gh prints its other lines to stderr).
+    pub(super) stdout: String,
 }
 
 /// Format combined output roughly the way the agent would have seen it from its
@@ -3790,5 +3809,156 @@ mod tests {
             out.contains("tail:gate-depth-9e1"),
             "the last line of a 15-line gated command must execute with line-2 state intact: {out}"
         );
+    }
+
+    // --- feedback #57 #60 #97: an approved publish, read back ---------------
+
+    /// A fake `gh` in `dir`, answering the way gh 2.81 does, from files beside
+    /// it: `printed.txt` is a publish's stdout (exit `exit.txt`, default 0;
+    /// `on-publish.sh` runs first); `api` serves `served.<n>.json` for its
+    /// n-th read, else `served.json`; `issue|pr view` serves `live.json`, and
+    /// `… --json closingIssuesReferences` serves `closing.json`.
+    #[cfg(unix)]
+    fn fake_gh(dir: &std::path::Path) -> std::path::PathBuf {
+        let script = r#"#!/bin/sh
+d=$(dirname "$0")
+case "$*" in
+  *closingIssuesReferences*) cat "$d/closing.json"; exit 0 ;;
+esac
+case "$1 $2" in
+  "issue view"|"pr view") cat "$d/live.json"; exit 0 ;;
+esac
+if [ "$1" = api ]; then
+  n=$(cat "$d/reads" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$d/reads"
+  if [ -f "$d/served.$n.json" ]; then cat "$d/served.$n.json"; else cat "$d/served.json"; fi
+  exit 0
+fi
+if [ -f "$d/on-publish.sh" ]; then . "$d/on-publish.sh"; fi
+if [ -f "$d/printed.txt" ]; then cat "$d/printed.txt"; fi
+exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
+"#;
+        let path = dir.join("gh");
+        std::fs::write(&path, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn serve(dir: &std::path::Path, file: &str, body: &str) {
+        std::fs::write(dir.join(file), serde_json::json!({ "body": body }).to_string()).unwrap();
+    }
+
+    /// Park `command` (no reviewer in the roster, so straight for the user),
+    /// approve it, and return its result row.
+    #[cfg(unix)]
+    async fn approve_publish(bridge: &std::sync::Arc<SignalingBridge>, command: &str) -> String {
+        let (gate_id, _, _) = parked(bridge.park_gated_command("s1", "hands", command).await.unwrap());
+        match bridge.resolve_choice(&gate_id, "Approve".into()).await.unwrap() {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => body,
+            other => panic!("expected the result row, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn readback_fixture() -> (tempfile::TempDir, tempfile::TempDir, std::sync::Arc<SignalingBridge>) {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        bridge.set_gh_program(fake_gh(repo.path()));
+        std::fs::write(repo.path().join("b.md"), "First line.\nSecond line.\n").unwrap();
+        (data, repo, bridge)
+    }
+
+    /// The published comment is read back with a GET of exactly the object gh
+    /// printed, and compared with what was approved — GitHub's lost final
+    /// newline (#57) is not a difference.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_approved_comment_is_read_back_and_equals_what_was_approved() {
+        let (_data, repo, bridge) = readback_fixture().await;
+        std::fs::write(repo.path().join("printed.txt"), "https://github.com/o/r/issues/5#issuecomment-77\n").unwrap();
+        serve(repo.path(), "served.json", "First line.\nSecond line.");
+        let row = approve_publish(&bridge, "./gh issue comment 5 --body-file b.md").await;
+        assert!(
+            row.contains("Read back (`gh api --method GET repos/o/r/issues/comments/77`): the published body equals what was approved (body file `b.md`, 25 bytes)"),
+            "{row}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_published_body_that_differs_is_reported_with_its_first_differing_line() {
+        let (_data, repo, bridge) = readback_fixture().await;
+        std::fs::write(repo.path().join("printed.txt"), "https://github.com/o/r/issues/5#issuecomment-77\n").unwrap();
+        serve(repo.path(), "served.json", "First line.\nSecond line, truncated");
+        let row = approve_publish(&bridge, "./gh issue comment 5 --body-file b.md").await;
+        assert!(row.contains("⚠ the published body DIFFERS"), "{row}");
+        assert!(row.contains(r#"line 2: approved "Second line." / published "Second line, truncated""#), "{row}");
+        assert_eq!(std::fs::read_to_string(repo.path().join("reads")).unwrap().trim(), "1", "a create is read once");
+    }
+
+    /// EYES: an EDIT served stale once is read again before a mismatch is
+    /// reported.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_edit_served_stale_once_is_read_again() {
+        let (_data, repo, bridge) = readback_fixture().await;
+        std::fs::write(repo.path().join("printed.txt"), "https://github.com/o/r/issues/63\n").unwrap();
+        serve(repo.path(), "served.1.json", "the old body");
+        serve(repo.path(), "served.json", "First line.\nSecond line.\n");
+        let row = approve_publish(&bridge, "./gh issue edit 63 --body-file b.md").await;
+        assert!(row.contains("equals what was approved"), "{row}");
+        assert_eq!(std::fs::read_to_string(repo.path().join("reads")).unwrap().trim(), "2");
+    }
+
+    /// #97: a pull request's read-back says which issues GitHub links it to
+    /// close.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pull_request_reports_the_issues_it_closes() {
+        let (_data, repo, bridge) = readback_fixture().await;
+        std::fs::write(repo.path().join("printed.txt"), "https://github.com/o/r/pull/45\n").unwrap();
+        serve(repo.path(), "served.json", "First line.\nSecond line.\n");
+        std::fs::write(
+            repo.path().join("closing.json"),
+            r#"{"closingIssuesReferences":[{"number":12,"repository":{"name":"r","owner":{"login":"o"}}}]}"#,
+        )
+        .unwrap();
+        let row = approve_publish(&bridge, "./gh pr create --base main --body-file b.md").await;
+        assert!(row.contains("equals what was approved"), "{row}");
+        assert!(row.contains("GitHub links it to close: #12."), "{row}");
+    }
+
+    /// EYES: the comparison is with the bytes the approval's hash check read
+    /// — a body file rewritten after that (an agent reusing its draft path)
+    /// does not turn a faithful publish into a false mismatch, and a re-read
+    /// could not tell what was approved.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_read_back_compares_with_the_approved_bytes_not_a_later_rewrite() {
+        let (_data, repo, bridge) = readback_fixture().await;
+        std::fs::write(repo.path().join("printed.txt"), "https://github.com/o/r/issues/5#issuecomment-77\n").unwrap();
+        std::fs::write(repo.path().join("on-publish.sh"), "printf 'the next draft\\n' > \"$d/b.md\"\n").unwrap();
+        serve(repo.path(), "served.json", "First line.\nSecond line.\n");
+        let row = approve_publish(&bridge, "./gh issue comment 5 --body-file b.md").await;
+        assert_eq!(std::fs::read_to_string(repo.path().join("b.md")).unwrap(), "the next draft\n");
+        assert!(row.contains("equals what was approved"), "{row}");
+    }
+
+    /// EYES: an outward command with no read-back says so, and a failed one
+    /// that printed no URL warns that gh may still have published part of it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_publish_with_no_read_back_says_why() {
+        let (_data, repo, bridge) = readback_fixture().await;
+        std::fs::write(repo.path().join("n.md"), "Release notes.\n").unwrap();
+        let row = approve_publish(&bridge, "./gh release create v1 --notes-file n.md").await;
+        assert!(row.contains("Not read back: only a single `gh issue|pr create|edit|comment` is read back."), "{row}");
+
+        std::fs::write(repo.path().join("exit.txt"), "1\n").unwrap();
+        let row = approve_publish(&bridge, "./gh issue create --title t --body-file b.md").await;
+        assert!(row.contains("gh may still have published part of it"), "{row}");
+        assert!(!repo.path().join("reads").exists(), "no URL, no read");
     }
 }

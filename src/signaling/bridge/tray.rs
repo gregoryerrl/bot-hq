@@ -1506,63 +1506,49 @@ impl SignalingBridge {
                 }
             });
         }
+        // The gate's row: the body hash its review covered (0084).
+        let row = match self.storage.lock().await.clone() {
+            Some(storage) => storage.get_tray_entry(choice_id).await.ok().flatten(),
+            None => None,
+        };
         // Feedback #22: the review covered the body FILES as they were when
         // this parked; an edit since then would publish content nobody read.
         // Re-hash and refuse on any change or a missing file (0084). A row
-        // with no recorded hash (parked before 0084) runs, and says so.
-        if let Some(current) = self.body_files_digest(session_id, command).await {
-            let row = match self.storage.lock().await.clone() {
-                Some(storage) => storage.get_tray_entry(choice_id).await.ok().flatten(),
-                None => None,
-            };
+        // with no recorded hash (parked before 0084) runs, and says so. The
+        // bytes hashed here are kept: they are what the publish's read-back
+        // compares with (feedback #57 #60 #97 — never a later re-read).
+        let mut approved_files: Vec<(String, Vec<u8>)> = Vec::new();
+        if let Some(current) = self.body_files_snapshot(session_id, command).await {
             let recorded = row.as_ref().and_then(|r| r.body_sha256.clone());
             let refusal = match (&recorded, &current) {
-                (_, Err(path)) => Some(format!(
-                    "NOT RUN: the body file `{path}` is missing at approval, so nothing was \
-                     published. Re-issue the command once it exists — the reviewer reads it first."
+                (_, Err(path)) => Some((
+                    format!(
+                        "NOT RUN: the body file `{path}` is missing at approval, so nothing was \
+                         published. Re-issue the command once it exists — the reviewer reads it first."
+                    ),
+                    format!("the body file `{path}` was missing at approval"),
                 )),
-                (Some(then), Ok(now)) if then != now => Some(
+                (Some(then), Ok((now, _))) if then != now => Some((
                     "NOT RUN: a body file of this command changed after it was reviewed, so \
                      nothing was published — the approved card no longer matches what would go \
                      out. Re-issue the command; the reviewer reads the new body first."
                         .to_string(),
-                ),
+                    "a body file changed after it was reviewed".to_string(),
+                )),
                 _ => None,
             };
-            if let Some(refusal) = refusal {
-                body.push_str(&refusal);
-                // Audit + durable state (EYES 16629ec7): the row still reads
-                // Approve, so without this `gate_status` would say "executed".
-                if let Some(log) = self.violations.as_ref() {
-                    let _ = log
-                        .record(
-                            session_id.to_string(),
-                            row.as_ref().map(|r| r.agent.clone()).unwrap_or_default(),
-                            crate::policy::ViolationKind::ToolBlocklist,
-                            command.to_string(),
-                            crate::policy::ViolationOutcome::Denied,
-                            Some("approved but NOT RUN: body file changed or missing after review".into()),
-                        )
-                        .await;
-                }
-                if let Some(storage) = self.storage.lock().await.clone() {
-                    let short = match &current {
-                        Err(path) => format!("the body file `{path}` was missing at approval"),
-                        Ok(_) => "a body file changed after it was reviewed".to_string(),
-                    };
-                    if let Err(e) = storage.set_tray_run_refusal(choice_id, &short).await {
-                        tracing::warn!(?e, choice_id, "could not record the run refusal");
-                    }
-                    let _ = crate::core::post_system_notice(
-                        &storage,
-                        Some(self),
-                        session_id,
-                        crate::storage::MessageKind::SystemNotice,
-                        format!("⛔ Approved gate {choice_id} did not run — {refusal}: `{command}`"),
-                        None,
-                    )
-                    .await;
-                }
+            if let Some((refusal, short)) = refusal {
+                self.refuse_approved_run(
+                    session_id,
+                    choice_id,
+                    command,
+                    row.as_ref(),
+                    body,
+                    &refusal,
+                    &short,
+                    "approved but NOT RUN: body file changed or missing after review",
+                )
+                .await;
                 return None;
             }
             if recorded.is_none() {
@@ -1570,6 +1556,9 @@ impl SignalingBridge {
                     "Note: no body hash was recorded when this was parked (it predates the \
                      check), so the body file was not re-checked before running.\n",
                 );
+            }
+            if let Ok((_, files)) = current {
+                approved_files = files;
             }
         }
         // The verdict line above already says "approved" and names the command;
@@ -1579,6 +1568,15 @@ impl SignalingBridge {
         Some(match self.execute_gated(session_id, command).await {
             Ok(run) => {
                 body.push_str(&run.text);
+                // Feedback #57 #60 #97: what landed, read back and compared
+                // with what was approved — or one line saying why not.
+                if super::outward_body::is_outward(command) {
+                    body.push_str(
+                        &self
+                            .read_back_publish(session_id, command, &run.stdout, run.exit_code, &approved_files)
+                            .await,
+                    );
+                }
                 ran(Some(run.exit_code))
             }
             Err(e) => {
@@ -1586,6 +1584,51 @@ impl SignalingBridge {
                 ran(None)
             }
         })
+    }
+
+    /// Refuse an APPROVED gate at run time: the refusal in its result row,
+    /// the audit record, the durable state `gate_status` reads (EYES 16629ec7:
+    /// the row still reads Approve, so without it `gate_status` would say
+    /// "executed"), and a system row in the chat.
+    #[allow(clippy::too_many_arguments)]
+    async fn refuse_approved_run(
+        &self,
+        session_id: &str,
+        choice_id: &str,
+        command: &str,
+        row: Option<&crate::storage::SessionTrayEntry>,
+        body: &mut String,
+        refusal: &str,
+        short: &str,
+        audit: &str,
+    ) {
+        body.push_str(refusal);
+        if let Some(log) = self.violations.as_ref() {
+            let _ = log
+                .record(
+                    session_id.to_string(),
+                    row.map(|r| r.agent.clone()).unwrap_or_default(),
+                    crate::policy::ViolationKind::ToolBlocklist,
+                    command.to_string(),
+                    crate::policy::ViolationOutcome::Denied,
+                    Some(audit.into()),
+                )
+                .await;
+        }
+        if let Some(storage) = self.storage.lock().await.clone() {
+            if let Err(e) = storage.set_tray_run_refusal(choice_id, short).await {
+                tracing::warn!(?e, choice_id, "could not record the run refusal");
+            }
+            let _ = crate::core::post_system_notice(
+                &storage,
+                Some(self),
+                session_id,
+                crate::storage::MessageKind::SystemNotice,
+                format!("⛔ Approved gate {choice_id} did not run — {refusal}: `{command}`"),
+                None,
+            )
+            .await;
+        }
     }
 
     /// If `choice_id` is a PENDING gated command (action_gate / ToolBlocklist)
