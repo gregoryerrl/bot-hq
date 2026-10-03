@@ -433,6 +433,19 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "prod_read",
+            description: "Run a read-only SQL query on the project's production Postgres database — configured in its policy.yaml (`prod_read:`) — parked for the user's approval with the SQL itself on the card. Only SELECT, WITH, EXPLAIN, SHOW, TABLE and VALUES statements (and whole-line `\\d…` / `\\x`); the whole query runs as ONE read-only transaction with a statement timeout, and the password never appears in the command. From the executor it is reviewed first; from the reviewer it parks straight for the user. Returns the gate_id at once; the output arrives as a row on approval (gate_status reports it).",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "sql": { "type": "string", "description": "The query (or the path of a .sql file, via sql_path)." },
+                    "sql_path": { "type": "string", "description": "Absolute path of a file holding the query, instead of `sql`." },
+                    "statement_timeout_ms": { "type": "integer", "description": "Optional; default the project's, else 30000; at most 300000." },
+                    "approve_after": { "type": "string", "description": "Optional: what must happen first; the card shows \"Approve only after: …\"." }
+                }
+            }),
+        },
+        ToolDescriptor {
             name: "read_gate",
             description: "Park ONE read that the project's policy lists (`production_reads` / `staging_reads`) for the user's approval — the reviewer's own path to a production or staging read (a listed read in your Bash is refused and points here). Takes only a single command that runs a listed entry, piped at most into head, tail, jq, grep, wc or cut — no `;`, `&&`, redirection, `$(…)` or wrapper — and refuses one with a write verb (delete, deploy, rm, update, create, set…). From the reviewer it parks straight for the user, the card marked as the reviewer's read; from the executor it is reviewed first, like action_gate. Returns the gate_id at once; on approval the output arrives as a row, and gate_status reports it.",
             input_schema: serde_json::json!({

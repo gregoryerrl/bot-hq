@@ -313,6 +313,12 @@ pub struct SessionTrayEntry {
     #[serde(default)]
     #[sqlx(default)]
     pub live_body_sha256: Option<String>,
+    /// How an approved gate runs (0089): `prod_read`, set only by that
+    /// handler, lets approval pass the database password in the child's
+    /// environment. NULL on every other row.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub exec_kind: Option<String>,
 }
 
 impl SessionTrayEntry {

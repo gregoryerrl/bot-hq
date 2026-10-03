@@ -1596,12 +1596,39 @@ impl SignalingBridge {
         // The verdict line above already says "approved" and names the command;
         // this is the output, headed by one short line so an empty stdout is
         // still visibly a result rather than nothing.
+        // A prod_read (group K, 0089): the database password reaches psql in
+        // its environment, read now from the project's configured file. Only a
+        // row the prod_read handler marked gets it — never on the strength of
+        // the command's text.
+        let prod_read = row.as_ref().and_then(|r| r.exec_kind.as_deref()) == Some("prod_read");
+        let mut envs: Vec<(String, String)> = Vec::new();
+        if prod_read {
+            let cfg = self.resolve_policy_for(session_id).await.ok().and_then(|p| p.prod_read);
+            match cfg.as_ref().map(super::prod_read::password) {
+                Some(Ok(password)) => envs.push(("PGPASSWORD".to_string(), password)),
+                Some(Err(why)) => {
+                    let refusal = format!("NOT RUN: the prod_read password could not be read ({why}).");
+                    self.refuse_approved_run(session_id, choice_id, command, row.as_ref(), body, &refusal, "the prod_read password could not be read", "approved but NOT RUN: prod_read password unreadable").await;
+                    return None;
+                }
+                None => {
+                    self.refuse_approved_run(session_id, choice_id, command, row.as_ref(), body, "NOT RUN: the project no longer configures prod_read.", "prod_read is no longer configured", "approved but NOT RUN: prod_read not configured").await;
+                    return None;
+                }
+            }
+        }
         body.push_str("Output:\n");
-        Some(match self.execute_gated(session_id, command).await {
+        let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let executed = if envs.is_empty() {
+            self.execute_gated(session_id, command).await
+        } else {
+            self.execute_gated_with(session_id, command, crate::policy::tool_gate::DEFAULT_TIMEOUT, &env_refs).await
+        };
+        Some(match executed {
             Ok(run) => {
                 // Group K (EYES): a data read's answer can be megabytes — a
                 // query, a log read. Its row keeps the head and the tail.
-                if self.data_read_in(session_id, command).await.is_some() {
+                if prod_read || self.data_read_in(session_id, command).await.is_some() {
                     body.push_str(&cap_data_read_output(&run.text));
                 } else {
                     body.push_str(&run.text);

@@ -116,6 +116,7 @@ mod tests {
                 per_action_approval: vec!["terraform apply".into()],
                 production_reads: vec!["gcloud logging read".into()],
                 staging_reads: vec!["psql -h staging-".into()],
+                prod_read: None,
                 branch_pattern: "feature/.*".into(),
                 commit_style: "house-style".into(),
                 // Non-default and non-`None` so the round-trip below actually

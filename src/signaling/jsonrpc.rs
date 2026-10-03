@@ -997,6 +997,32 @@ async fn call_tool(
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(parked))
         }
+        "prod_read" => {
+            // Group K (tray `afef06f0`): read-only SQL on the project's
+            // production database. Ungated — its config and SQL check are its
+            // limit, and it always parks for the user.
+            let sql = match (
+                args.get("sql").and_then(Value::as_str),
+                args.get("sql_path").and_then(Value::as_str),
+            ) {
+                (Some(sql), None) => sql.to_string(),
+                (None, Some(path)) => match read_content_path(path, 256 * 1024, "keep a prod_read query under 256 KB").await {
+                    Ok(sql) => sql,
+                    Err(e) => return Ok(ToolCallResult::error(e)),
+                },
+                _ => return Ok(ToolCallResult::error("pass exactly one of `sql` and `sql_path`".to_string())),
+            };
+            let timeout = args
+                .get("statement_timeout_ms")
+                .and_then(Value::as_u64)
+                .map(|t| t.min(u64::from(u32::MAX)) as u32);
+            let approve_after = args.get("approve_after").and_then(Value::as_str).map(str::to_string);
+            let output = bridge
+                .prod_read(caller.session_id.clone(), caller.agent.clone(), sql, timeout, approve_after)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(output))
+        }
         "read_gate" => {
             // Group K (tray `ef8fe5de`): the reviewer's own path to a listed
             // read. Ungated — the project's lists are its limit.

@@ -9,7 +9,7 @@ use super::*;
 /// `tray_entries_for_session` and `get_tray_entry` so the two can't drift.
 const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text, \
-     body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms, live_body_sha256";
+     body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms, live_body_sha256, exec_kind";
 
 /// The statuses a tray row passes through. `queued` (0080) is the one that is
 /// NOT a user-facing item: an outward publish waiting for the reviewer to read
@@ -348,6 +348,19 @@ impl Storage {
             .execute(&self.pool)
             .await
             .with_context(|| format!("recording the body hash of gate {choice_id}"))?;
+        Ok(())
+    }
+
+    /// Mark how an approved gate runs (0089): `prod_read` is the one value,
+    /// set by the prod_read handler alone — the mark that lets approval hand
+    /// the project's database password to psql through its environment.
+    pub async fn set_tray_exec_kind(&self, choice_id: &str, kind: &str) -> Result<()> {
+        sqlx::query("UPDATE session_tray SET exec_kind = ? WHERE choice_id = ?")
+            .bind(kind)
+            .bind(choice_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("marking gate {choice_id} as {kind}"))?;
         Ok(())
     }
 

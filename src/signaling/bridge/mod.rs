@@ -46,6 +46,7 @@ mod feedback;
 mod findings;
 mod outward_body;
 pub(crate) use outward_body::{commands_run, RunCommand};
+mod prod_read;
 mod readback;
 mod session_docs;
 pub(crate) use session_docs::{

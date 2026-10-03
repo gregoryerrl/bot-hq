@@ -2162,6 +2162,12 @@ production_reads?: string[];
  */
 staging_reads?: string[]; 
 /**
+ * The project's production database for `prod_read` (feedback #84; the
+ * user's pick, tray `afef06f0`): a read-only SQL query, parked with its
+ * SQL on the card. `None` = the tool refuses, saying how to configure it.
+ */
+prod_read?: ProdReadConfig | null; 
+/**
  * Regex pattern branch names must match. Empty = no constraint.
  */
 branch_pattern?: string; 
@@ -2188,6 +2194,30 @@ commit_style?: string;
  * file that had never heard of this key would silently disarm the cap.
  */
 round_cap?: number | null }
+/**
+ * Where `prod_read` connects (group K). Postgres only for now. The password
+ * is never in the policy: it is read at approval time from `password_file`,
+ * or from `password_var` in the dotenv file `env_file` — parsed, never
+ * sourced — and handed to `psql` in its environment.
+ */
+export type ProdReadConfig = { 
+/**
+ * `postgres`.
+ */
+engine?: string; host?: string; port?: number | null; database?: string; user?: string; 
+/**
+ * `PGSSLMODE` (`require`, `verify-full`, …).
+ */
+sslmode?: string | null; env_file?: string | null; password_var?: string | null; password_file?: string | null; 
+/**
+ * Default 30000.
+ */
+statement_timeout_ms?: number | null; 
+/**
+ * The `psql` to run, when it is not on the gate shell's PATH (Homebrew's
+ * `libpq` is not linked by default).
+ */
+psql?: string | null }
 /**
  * How a session's project name was derived from its repo path — surfaced in
  * the gear tab (policy-origin badge) so the user can see WHY a session

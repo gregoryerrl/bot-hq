@@ -317,6 +317,7 @@ lives in 14 registries on one struct (12 keyed by session id, 2 by `(session, ag
 | `src/signaling/bridge/tray.rs` | `ask_user_choice_inner` (`kind = approval` for a host GATE = the ring's gate marker; `kind = request` for an agent's `request_approval` — tray, audited, no latch, round 12), `request_approval(_parked)`, supersede/withdraw (owner-scoped), `resolve_choice_confirmable`, `deliver_oob`, `emit_halt_row`/`mark_awaiting_user`, `request_phase_advance` | XL |
 | `src/signaling/bridge/action_gate.rs` | `park_gated_command` (dedupe) / `execute_gated` (`tool_gate::run_in_repo`), `gate_status`; the outward-review hold (coverage over the rows the reviewer RECEIVED, queue + settlement, gate-scoped finding veto) | L |
 | `src/signaling/bridge/outward_body.rs` | what an outward command publishes: quote/wrapper-aware `is_outward` (env assignments, `env`/`command`/`sudo`, `sh -c`/`eval`), per-subcommand body-flag table `extract`; refuses shell-computed, stdin, same-command-written and unknown-file-flag bodies; `gh_publish` (the one `gh issue|pr create|edit|comment` an approved command makes, or why it has no read-back); `commands_run` (group K's matcher input); `single_read_command` + `write_word` (what the reviewer's `read_gate` accepts) | M |
+| `src/signaling/bridge/prod_read.rs` | group K's `prod_read`: `check_sql` (reads only; a whole-line `\d…`/`\x`; refuses what it cannot parse), `build_command` (`psql -1 -f -` under `default_transaction_read_only=on`, no password), `password` (`password_file`, or `password_var` parsed from `env_file`), the bridge method (park, reviewed like a listed read, `exec_kind = prod_read`) | M |
 | `src/signaling/bridge/readback.rs` | an approved publish read back (feedback #57 #60 #97): `object_from_stdout` (checked URL parts only), `read_command` (`gh api --method GET`), `compare` (only the body's end trimmed), `read_back_publish` (the result row's line; one retry for an edit; a PR's closing references), `live_edit_section` / `live_body_sha` (a queued edit's diff against the live body, and its hash re-checked at approval, 0088); reads run through the gate shell; `set_gh_program` is the test seam | M |
 | `src/signaling/bridge/findings.rs` | `eyes_flag`/`approve`/`disposition`/`check_open_findings` + reviewer-down gate + override | M |
 | `src/signaling/bridge/session_docs.rs` | doc write (phase-keyed, `-eyes` twin), search, read, archive-on-rewrite (cap 50) | M |
@@ -465,7 +466,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/projects.rs` | `projects` registry, CL path resolution | M |
 | `src/storage/plugins.rs`, `src/storage/plugin_kv.rs` | plugin registry + per-plugin kv | M / S |
 | `src/storage/cl_index.rs`, `src/storage/cl_atoms.rs` | CL index/folders/reads; FTS5 atoms + `cl_retrieve` | M / M |
-| `migrations/` | 0001…0088 (0056 absent) — append-only | — |
+| `migrations/` | 0001…0089 (0056 absent) — append-only | — |
 | `tests/storage_test.rs` | cross-cutting smoke: empty-DB migration, tray scoping, message since-id, session close/list, config round-trips | M |
 
 **Entry points.** `Storage::open` · `now_utc` · `next_active_participant` ·

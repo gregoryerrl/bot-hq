@@ -194,7 +194,7 @@ impl SignalingBridge {
         }
         let reviewer = self.session_reviewers(&session_id).iter().any(|slug| slug == &agent);
         let outcome = self
-            .park_gated_command_as(&session_id, &agent, &command, approve_after.as_deref(), reviewer)
+            .park_gated_command_as(&session_id, &agent, &command, approve_after.as_deref(), reviewer, None)
             .await?;
         Ok(park_outcome_text(&outcome, &command))
     }
@@ -232,22 +232,28 @@ impl SignalingBridge {
         command: &str,
         approve_after: Option<&str>,
     ) -> Result<ParkOutcome> {
-        self.park_gated_command_as(session_id, agent, command, approve_after, false).await
+        self.park_gated_command_as(session_id, agent, command, approve_after, false, None).await
     }
 
     /// The park, with whose read a listed command is: `reviewer_read` is the
     /// reviewer's own (`read_gate`), whose card says so (EYES).
-    async fn park_gated_command_as(
+    pub(super) async fn park_gated_command_as(
         &self,
         session_id: &str,
         agent: &str,
         command: &str,
         approve_after: Option<&str>,
         reviewer_read: bool,
+        prod_read_card: Option<&str>,
     ) -> Result<ParkOutcome> {
         let listed = self.data_read_in(session_id, command).await;
         let reader = reviewer_read.then_some(agent);
-        let card_extra = card_extra(listed.as_ref(), approve_after, reader);
+        let mut card_extra = card_extra(listed.as_ref(), approve_after, reader);
+        if let Some(card) = prod_read_card {
+            card_extra = format!("\n\n{card}{card_extra}");
+        }
+        // A prod_read is a data read whatever the lists say (group K).
+        let reviewed_read = listed.is_some() || prod_read_card.is_some();
         // **Outward-review precondition (batch 2 C, 2026-08-27).** An OUTWARD
         // command — one that publishes under the user's identity — may park
         // only after the session's reviewer has been DELIVERED its content.
@@ -273,7 +279,7 @@ impl SignalingBridge {
         // A DOWN reviewer is reported before the dedupe (feedback #32): "already
         // queued, nothing to do" would leave the executor waiting on a read
         // that can never happen.
-        if (outward_command(command) || listed.is_some()) && self.reviewer_override_reason(session_id).is_none() {
+        if (outward_command(command) || reviewed_read) && self.reviewer_override_reason(session_id).is_none() {
             if let Some((reviewer, health)) = self.session_reviewer_down(session_id, agent) {
                 let what = if outward_command(command) { "outward publish" } else { "listed data read" };
                 anyhow::bail!(
@@ -294,15 +300,23 @@ impl SignalingBridge {
         }
         // A listed data read is reviewed every time (group K, tray `d9555879`);
         // a command that also publishes takes the publish review.
-        let review = match &listed {
-            Some(_) if !outward_command(command) => self.data_read_review(session_id, agent).await?,
-            _ => self.outward_review_check(session_id, agent, command).await?,
+        let review = if reviewed_read && !outward_command(command) {
+            self.data_read_review(session_id, agent).await?
+        } else {
+            self.outward_review_check(session_id, agent, command).await?
         };
         let (note, covered) = match review {
             OutwardReview::Refuse(text) => return Err(anyhow::anyhow!(text)),
             OutwardReview::Queued { reviewer_id } => {
+                // A prod_read the lists do not name is still a production read.
+                let subject = listed.clone().or_else(|| {
+                    prod_read_card.map(|_| crate::policy::data_reads::DataRead {
+                        kind: crate::policy::data_reads::DataReadKind::Production,
+                        entry: "prod_read".to_string(),
+                    })
+                });
                 let (gate_id, existing) = self
-                    .queue_outward_park(session_id, agent, command, reviewer_id, listed.as_ref(), &card_extra)
+                    .queue_outward_park(session_id, agent, command, reviewer_id, subject.as_ref(), &card_extra)
                     .await?;
                 return Ok(ParkOutcome::Queued { gate_id, existing });
             }
@@ -1527,7 +1541,7 @@ fn covered_rows_text(rows: &[i64]) -> String {
 }
 
 /// The agent-facing text for whatever the park did.
-fn park_outcome_text(outcome: &ParkOutcome, command: &str) -> String {
+pub(super) fn park_outcome_text(outcome: &ParkOutcome, command: &str) -> String {
     match outcome {
         ParkOutcome::Parked { gate_id, existing, note } => {
             parked_gate_text(gate_id, command, *existing, note.as_deref())
@@ -4384,5 +4398,104 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
             .await
             .unwrap();
         assert!(out.contains("QUEUED"), "{out}");
+    }
+
+    /// A general policy with a `prod_read` block whose `psql` is a fake: it
+    /// prints the password it was handed and the options, then the SQL it
+    /// read — 70,000 extra bytes when the SQL says `big`.
+    #[cfg(unix)]
+    fn prod_read_fixture(data: &std::path::Path, repo: &std::path::Path) {
+        let fake = repo.join("psql");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nprintf 'pw=%s opts=%s\\n' \"$PGPASSWORD\" \"$PGOPTIONS\"\nsql=$(cat)\nprintf '%s\\n' \"$sql\"\ncase \"$sql\" in *big*) head -c 70000 /dev/zero | tr '\\000' x ;; esac\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let pw = repo.join("pw");
+        std::fs::write(&pw, "s3cret\n").unwrap();
+        std::fs::create_dir_all(data.join("config")).unwrap();
+        std::fs::write(
+            data.join("config/general-policy.yaml"),
+            format!(
+                "prod_read:\n  engine: postgres\n  host: db.example\n  database: main\n  user: ro\n  password_file: {}\n  psql: {}\n",
+                pw.display(),
+                fake.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    async fn approve(bridge: &std::sync::Arc<SignalingBridge>, gate: &str) -> String {
+        match bridge.resolve_choice(gate, "Approve".into()).await.unwrap() {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => body,
+            other => panic!("expected the result row, got {other:?}"),
+        }
+    }
+
+    /// Group K (tray `afef06f0`): prod_read parks with its SQL on the card,
+    /// marked `prod_read`; approval hands psql the password in its
+    /// environment under the read-only options; the same command parked
+    /// through action_gate gets NO password; a large answer is capped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prod_read_parks_its_sql_and_only_its_own_row_gets_the_password() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        prod_read_fixture(data.path(), repo.path());
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        let storage = bridge.storage.lock().await.clone().unwrap();
+        let out = bridge
+            .prod_read("s1".into(), "hands".into(), "select 42 as answer;".into(), None, None)
+            .await
+            .unwrap();
+        assert!(out.to_lowercase().contains("parked"), "{out}");
+        let gate = gate_id_in(&out);
+        let row = storage.get_tray_entry(&gate).await.unwrap().unwrap();
+        assert!(row.prompt.contains("Production read (prod_read) on db.example/main as ro"), "{}", row.prompt);
+        assert!(row.prompt.contains("```sql\nselect 42 as answer;\n```"), "{}", row.prompt);
+        assert_eq!(row.exec_kind.as_deref(), Some("prod_read"));
+        let result = approve(&bridge, &gate).await;
+        assert!(result.contains("pw=s3cret"), "{result}");
+        assert!(result.contains("default_transaction_read_only=on"), "{result}");
+        assert!(result.contains("select 42 as answer;"), "{result}");
+
+        // A command made to look like one gets nothing: the mark is the row's.
+        let lookalike = row.command_text.clone().unwrap();
+        let out = bridge.action_gate("s1".into(), "hands".into(), lookalike, true).await.unwrap();
+        let result = approve(&bridge, &gate_id_in(&out)).await;
+        assert!(result.contains("pw= ") && !result.contains("s3cret"), "{result}");
+
+        // A big answer is capped (EYES: 48 KB head + 8 KB tail).
+        let out = bridge
+            .prod_read("s1".into(), "hands".into(), "select 'big' as size;".into(), None, None)
+            .await
+            .unwrap();
+        let result = approve(&bridge, &gate_id_in(&out)).await;
+        assert!(result.contains("bytes not shown"), "{} bytes", result.len());
+        assert!(result.len() < 64 * 1024, "{} bytes", result.len());
+    }
+
+    /// prod_read refuses before anything parks: no config, a write.
+    #[tokio::test]
+    async fn prod_read_refuses_without_config_and_on_a_write() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        let err = bridge.prod_read("s1".into(), "hands".into(), "select 1".into(), None, None).await.unwrap_err();
+        assert!(err.to_string().contains("not configured"), "{err}");
+        std::fs::create_dir_all(data.path().join("config")).unwrap();
+        std::fs::write(
+            data.path().join("config/general-policy.yaml"),
+            "prod_read:\n  engine: postgres\n  host: h\n  database: d\n  user: u\n  password_file: /nonexistent\n",
+        )
+        .unwrap();
+        let err = bridge
+            .prod_read("s1".into(), "hands".into(), "update t set a = 1".into(), None, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("`UPDATE`"), "{err}");
     }
 }

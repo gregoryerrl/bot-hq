@@ -1,0 +1,12 @@
+-- 0089_tray_exec_kind.sql — how an approved gate is run (group K, 2026-10-03).
+--
+-- `prod_read` parks a psql command for the user's approval. Its password must
+-- reach psql without ever being in the command text (which the card shows and
+-- the transcript keeps), so it is read at approval time from the project's
+-- configured file and handed to the child in its environment. Only a row that
+-- bot-hq itself marked may receive it: this column is set to 'prod_read' by
+-- the prod_read handler alone, never from anything an agent wrote, so a
+-- command crafted to look like a prod_read cannot be given the password.
+--
+-- NULL on every other gate.
+ALTER TABLE session_tray ADD COLUMN exec_kind TEXT;

@@ -77,6 +77,12 @@ pub struct Policy {
     #[serde(default)]
     pub staging_reads: Vec<String>,
 
+    /// The project's production database for `prod_read` (feedback #84; the
+    /// user's pick, tray `afef06f0`): a read-only SQL query, parked with its
+    /// SQL on the card. `None` = the tool refuses, saying how to configure it.
+    #[serde(default)]
+    pub prod_read: Option<ProdReadConfig>,
+
     /// Regex pattern branch names must match. Empty = no constraint.
     #[serde(default)]
     pub branch_pattern: String,
@@ -103,6 +109,41 @@ pub struct Policy {
     /// file that had never heard of this key would silently disarm the cap.
     #[serde(default)]
     pub round_cap: Option<u32>,
+}
+
+/// Where `prod_read` connects (group K). Postgres only for now. The password
+/// is never in the policy: it is read at approval time from `password_file`,
+/// or from `password_var` in the dotenv file `env_file` — parsed, never
+/// sourced — and handed to `psql` in its environment.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, specta::Type)]
+pub struct ProdReadConfig {
+    /// `postgres`.
+    #[serde(default)]
+    pub engine: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub database: String,
+    #[serde(default)]
+    pub user: String,
+    /// `PGSSLMODE` (`require`, `verify-full`, …).
+    #[serde(default)]
+    pub sslmode: Option<String>,
+    #[serde(default)]
+    pub env_file: Option<String>,
+    #[serde(default)]
+    pub password_var: Option<String>,
+    #[serde(default)]
+    pub password_file: Option<String>,
+    /// Default 30000.
+    #[serde(default)]
+    pub statement_timeout_ms: Option<u32>,
+    /// The `psql` to run, when it is not on the gate shell's PATH (Homebrew's
+    /// `libpq` is not linked by default).
+    #[serde(default)]
+    pub psql: Option<String>,
 }
 
 /// `git push` gate. Set per tier (global/project/session); a session inherits
@@ -332,6 +373,15 @@ impl Policy {
             out.push('\n');
         }
 
+        if let Some(db) = &self.prod_read {
+            out.push_str(&format!(
+                "### Production SQL\n\nFor a read-only SQL query on {}/{}, use `prod_read` (SELECT, \
+                 WITH, EXPLAIN, SHOW, TABLE, VALUES only): it parks with the SQL on the user's \
+                 card and runs as one read-only transaction.\n\n",
+                db.host, db.database
+            ));
+        }
+
         if !self.branch_pattern.is_empty() {
             out.push_str(&format!(
                 "### Branch naming\n\nBranches must match: `{}`\n\n",
@@ -353,6 +403,7 @@ impl Policy {
             && self.per_action_approval.is_empty()
             && self.production_reads.is_empty()
             && self.staging_reads.is_empty()
+            && self.prod_read.is_none()
             && self.branch_pattern.is_empty()
             && self.commit_style.is_empty()
     }
@@ -371,6 +422,7 @@ pub(crate) const POLICY_KNOWN_KEYS: &[&str] = &[
     "per_action_approval",
     "production_reads",
     "staging_reads",
+    "prod_read",
     "branch_pattern",
     "commit_style",
     "round_cap",
@@ -386,6 +438,7 @@ pub(crate) const SESSION_POLICY_KNOWN_KEYS: &[&str] = &[
     "per_action_approval",
     "production_reads",
     "staging_reads",
+    "prod_read",
     "branch_pattern",
     "commit_style",
     "round_cap",
@@ -634,6 +687,7 @@ fn merge(base: Policy, overlay: Option<Policy>) -> Policy {
         } else {
             o.staging_reads
         },
+        prod_read: o.prod_read.or(base.prod_read),
         branch_pattern: if o.branch_pattern.is_empty() {
             base.branch_pattern
         } else {
