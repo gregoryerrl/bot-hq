@@ -1431,9 +1431,9 @@ since this session's last FULL write of the file (a `create` or `replace`; an
 append or an edit never showed the session the whole file), or, when it never
 made one, since the session started. It reads `git blame` from that base and
 the writers from the commit subjects, and lists the lines; `confirm_overwrite`
-lets the drop through. Against the session-start base, "outside" commits do not
-count, because their date is when the content was versioned, not written. No
-repository, a git failure or no base means no guard. The app's own saves
+lets the drop through. Edits made outside the CL tools count like any writer's,
+except the library's first commit (what was on disk before it was a
+repository). No repository, a git failure or no base means no guard. The app's own saves
 (Library tab, a session's Context subtab) take the same lock and commit as
 `cl: <path> (user)`.
 

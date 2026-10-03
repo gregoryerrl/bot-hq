@@ -1457,13 +1457,19 @@ struct DroppedLine {
 /// no repository, a git failure or no base → nothing counts, and the write
 /// proceeds as it did before the guard existed.
 ///
-/// **Against the session-start base, content committed as "outside" does not
-/// count.** Its commit date is when bot-hq first VERSIONED it — at this or
-/// another write — not when it was written: an edit made in an external
-/// editor last week, or a library that had never been a repository, would
-/// otherwise read as written during this session. Against a full-write base
-/// it does count: the file was committed with this session's content at that
-/// write, so anything that changed it since happened after.
+/// **Content committed as "outside" counts like any other writer's**, with
+/// one exception: the library's first commit, which versions everything that
+/// was on disk before the library was a repository and would otherwise read
+/// as written during whichever session made it. An outside commit's date is
+/// when bot-hq VERSIONED the edit, not when it was made — but EYES measured
+/// that gap in the live library (s-3158eb35, advisory `d3082979`): 5 of the
+/// week's 6 outside snapshots were the shared EOD file, each followed by an
+/// agent write the same second, and the library's commits land a median 17 s
+/// apart. Ignoring outside commits against the session-start base (as this
+/// guard first did) dropped the user's own edit of that file, unrefused, on a
+/// session's first replace. Counting them errs the other way only for an
+/// edit made before the session started and versioned after it: a refusal
+/// that lists the lines, which the session can confirm.
 fn dropped_lines(
     library_root: &Path,
     rel: &str,
@@ -1518,6 +1524,11 @@ fn dropped_lines(
         return Vec::new();
     };
     let keep: std::collections::HashSet<&str> = new_body.lines().map(str::trim).collect();
+    // The library's first commit(s): what was on disk before it was a
+    // repository (see the doc above).
+    let roots: std::collections::HashSet<String> = git(&["rev-list", "--max-parents=0", "HEAD"])
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect())
+        .unwrap_or_default();
     let mut subjects: std::collections::HashMap<String, (String, bool)> = Default::default();
     let mut dropped = Vec::new();
     let mut current: Option<(String, usize)> = None;
@@ -1529,7 +1540,7 @@ fn dropped_lines(
             let writer = Writer::parse(subject);
             if *boundary
                 || writer.session() == Some(session_id)
-                || (base.is_none() && writer == Writer::Outside)
+                || (writer == Writer::Outside && roots.contains(&sha))
                 || t.is_empty()
                 || t.chars().all(|c| "-=_*#~|:+.` ".contains(c))
                 || keep.contains(t)
@@ -3127,13 +3138,37 @@ mod tests {
             "a session's own lines never count"
         );
 
+        // An edit made outside the CL tools, versioned at another write,
+        // counts like any writer's (EYES, advisory d3082979: the user's own
+        // edit of the shared EOD file was dropped unrefused).
         std::fs::write(lib.join("projects/bot-hq/shared.md"), "- theirs\n- edited outside\n").unwrap();
         put(&bridge, "s-b", "other.md", "x\n", false).await.unwrap(); // versions it as "outside"
         let outside = dropped_lines(&lib, rel, "s1", Some("2000-01-01T00:00:00Z"), "- theirs\n");
-        assert!(outside.is_empty(), "an outside commit's date is not a write time: {outside:?}");
+        assert_eq!(outside.len(), 1, "{outside:?}");
+        assert_eq!(outside[0].text, "- edited outside");
+        assert_eq!(outside[0].writer, "an edit outside the CL write tools");
 
         let no_git = tempfile::tempdir().unwrap();
         assert!(dropped_lines(no_git.path(), rel, "s1", Some("2000-01-01T00:00:00Z"), "").is_empty());
+    }
+
+    /// The one outside commit that never counts: the library's first, which
+    /// versions whatever was on disk before the library was a repository —
+    /// none of it was written during the session that happened to make it.
+    #[tokio::test]
+    async fn the_librarys_first_commit_never_counts() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let lib = tmp.path().join("library");
+        std::fs::write(lib.join("projects/bot-hq/vision.md"), "- from before the repository\n").unwrap();
+        put(&bridge, "s1", "notes.md", "x\n", false).await.unwrap();
+        assert_eq!(
+            git_out(&lib, &["log", "--reverse", "--format=%s"]).lines().next(),
+            Some("cl: 1 file(s) changed outside an agent write"),
+            "the first write initialised the library with what was on disk"
+        );
+        put(&bridge, "s1", "vision.md", "- the session's own version\n", false)
+            .await
+            .expect("pre-repository content is not another writer's");
     }
 
     /// Feedback #65(c), EYES (s-3158eb35): the app's own save is committed
