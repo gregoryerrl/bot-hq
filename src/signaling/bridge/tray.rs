@@ -70,6 +70,20 @@ fn executable_command(ctx: &super::ApprovalContext) -> Option<String> {
 /// Stated in the OOB row that carries the output.
 const PUSH_RERUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// The `picked_option` a queued gate carries when its own issuer withdrew it
+/// (`withdraw_question`) — `gate_status` shows it as the reason.
+const ISSUER_WITHDRAWAL_REASON: &str = "withdrawn by the participant that issued it";
+
+/// An approved gated command that was actually run: its exit code (`None` when
+/// bot-hq could not start it) and how long it took. It carries the running
+/// mark, so the gate reads "running" until the caller has linked the delivery
+/// row and drops this.
+struct GateRan {
+    exit_code: Option<i32>,
+    ran_ms: u64,
+    _running: super::RunningGateGuard,
+}
+
 impl SignalingBridge {
     /// Flag the session as awaiting the user, and — for a park that YIELDS the
     /// session — tell the ring who is now blocked.
@@ -720,6 +734,21 @@ impl SignalingBridge {
                     tracing::warn!(?e, choice_id, "withdraw_question storage update failed")
                 }
             }
+            // A QUEUED outward publish (0080) is withdrawn by its issuer the
+            // same way (feedback #83): it has no in-memory park and its status
+            // is not `pending`, so the update above matched nothing and the
+            // tool answered "was not pending" for a command nobody wanted any
+            // more — which then summoned the reviewer and prompted the user.
+            // The asker check above already ran: only the issuer gets here
+            // (EYES, plan point 7 — a reviewer's lever stays the finding).
+            if !withdrew_row && row.as_ref().is_some_and(|r| r.status == crate::storage::TRAY_STATUS_QUEUED) {
+                match storage.withdraw_queued_gate(choice_id, ISSUER_WITHDRAWAL_REASON).await {
+                    Ok(rows) => withdrew_row = rows > 0,
+                    Err(e) => {
+                        tracing::warn!(?e, choice_id, "withdrawing a queued gate failed")
+                    }
+                }
+            }
         }
         if let Some(session_id) = gate_session {
             self.notify_ring_gate(&session_id, choice_id, false).await;
@@ -745,6 +774,19 @@ impl SignalingBridge {
         } else {
             Withdrawal::NotPending
         }
+    }
+
+    /// A session's QUEUED outward gates (0080) — never part of the user's tray
+    /// (`list_questions_for_session` leaves them out on purpose), listed for
+    /// the agent that issued them.
+    pub async fn list_queued_gates_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::storage::SessionTrayEntry>> {
+        let Some(storage) = self.storage.lock().await.clone() else {
+            return Ok(Vec::new());
+        };
+        storage.queued_gates_for_session(session_id).await
     }
 
     /// Snapshot the `session_tray` table for a session. Convenience for the UI
@@ -1197,6 +1239,8 @@ impl SignalingBridge {
             .into_iter()
             .map(|(command, answered_at)| (redact_string(command), answered_at))
             .collect();
+        // What the approved command's run produced, when one ran (0087).
+        let mut gate_run: Option<GateRan> = None;
         let mut body = oob_resolution_body(
             choice_id,
             &question,
@@ -1213,7 +1257,8 @@ impl SignalingBridge {
             // it printed would otherwise reach the agent, every peer and
             // claude-code's transcript.
             let mut run = String::new();
-            self.maybe_run_gated(&session_id, choice_id, command_text, &picked, &mut run)
+            gate_run = self
+                .maybe_run_gated(&session_id, choice_id, command_text, &picked, &mut run)
                 .await;
             body.push_str(&redact(&run));
         }
@@ -1304,6 +1349,27 @@ impl SignalingBridge {
         if let Some(receipt) = &receipt {
             self.notify_message_persisted(Arc::from(session_id.as_str()), receipt.message_id());
         }
+        // 0087: link the gate to its run — the delivery row that carries the
+        // (already redacted) output, the exit code and the time — so
+        // `gate_status` can answer with them. The running mark is held until
+        // the link is written, so a status read never falls between "no longer
+        // running" and "linked".
+        if let Some(ran) = gate_run.take() {
+            if let Some(storage) = self.storage.lock().await.clone() {
+                if let Err(e) = storage
+                    .set_tray_run_result(
+                        choice_id,
+                        receipt.as_ref().map(|r| r.message_id()),
+                        ran.exit_code,
+                        ran.ran_ms,
+                    )
+                    .await
+                {
+                    tracing::warn!(?e, choice_id, "could not record the gate's run result");
+                }
+            }
+            drop(ran);
+        }
         // Without this the row flips to `answered` in the DB but the cached
         // pending counts (bell + tray) never invalidate.
         let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
@@ -1372,6 +1438,10 @@ impl SignalingBridge {
     /// or predates a restart. `command` is None for any non-executing tray
     /// item; a no-op unless the pick is Approved. Callers gate this on the
     /// atomic status flip so it runs exactly once.
+    ///
+    /// Returns what ran — `None` when nothing did (no command, not approved, or
+    /// refused at run time) — with the running mark still held, so the caller
+    /// can link the delivery row before the gate stops reading "running".
     async fn maybe_run_gated(
         &self,
         session_id: &str,
@@ -1379,22 +1449,34 @@ impl SignalingBridge {
         command: Option<&str>,
         picked: &str,
         body: &mut String,
-    ) {
-        let Some(command) = command else { return };
+    ) -> Option<GateRan> {
+        let command = command?;
         // Only the LISTED Approve runs a parked command (`gate_verdict`): the
         // user's own words are carried to the agent, never executed as a yes.
         if !matches!(gate_verdict(picked), crate::policy::ViolationOutcome::Approved) {
-            return;
+            return None;
         }
+        let push_rerun = crate::policy::push_rerun_refspecs(command);
+        let limit = if push_rerun.is_some() {
+            PUSH_RERUN_TIMEOUT
+        } else {
+            crate::policy::tool_gate::DEFAULT_TIMEOUT
+        };
         // F9: while this runs the session is WAITING, not idle — the watchdog
         // reads the mark; the guard clears it whichever way we leave.
-        let _running = self.note_gate_running(session_id, choice_id);
+        let running = self.note_gate_running(session_id, choice_id, limit);
+        let started = std::time::Instant::now();
+        let ran = |exit_code: Option<i32>| GateRan {
+            exit_code,
+            ran_ms: started.elapsed().as_millis() as u64,
+            _running: running,
+        };
         // **A push re-run** (round 12): the command is the sha-pinned `git push`
         // the hook's death left unrun. It gets a single-use nonce its own
         // pre-push hook redeems (instead of parking a second gate), a bound
         // sized for a network push rather than a local command (EYES F11), and
         // one line saying so — the agent reads the OOB row.
-        if let Some(refspecs) = crate::policy::push_rerun_refspecs(command) {
+        if let Some(refspecs) = push_rerun {
             let nonce = self.mint_push_nonce(session_id, choice_id, refspecs);
             body.push_str(
                 "Late approval: the hook that asked had already gone (the agent's \
@@ -1413,11 +1495,16 @@ impl SignalingBridge {
             // Redeemed by the hook, or never presented (no hook, or the run died
             // first): either way nothing may redeem it later.
             self.discard_push_nonce(&nonce);
-            match out {
-                Ok(output) => body.push_str(&output),
-                Err(e) => body.push_str(&format!("bot-hq could not re-run `{command}`: {e}")),
-            }
-            return;
+            return Some(match out {
+                Ok(run) => {
+                    body.push_str(&run.text);
+                    ran(Some(run.exit_code))
+                }
+                Err(e) => {
+                    body.push_str(&format!("bot-hq could not re-run `{command}`: {e}"));
+                    ran(None)
+                }
+            });
         }
         // Feedback #22: the review covered the body FILES as they were when
         // this parked; an edit since then would publish content nobody read.
@@ -1476,7 +1563,7 @@ impl SignalingBridge {
                     )
                     .await;
                 }
-                return;
+                return None;
             }
             if recorded.is_none() {
                 body.push_str(
@@ -1489,10 +1576,16 @@ impl SignalingBridge {
         // this is the output, headed by one short line so an empty stdout is
         // still visibly a result rather than nothing.
         body.push_str("Output:\n");
-        match self.execute_gated(session_id, command).await {
-            Ok(output) => body.push_str(&output),
-            Err(e) => body.push_str(&format!("action_gate could not run `{command}`: {e}")),
-        }
+        Some(match self.execute_gated(session_id, command).await {
+            Ok(run) => {
+                body.push_str(&run.text);
+                ran(Some(run.exit_code))
+            }
+            Err(e) => {
+                body.push_str(&format!("action_gate could not run `{command}`: {e}"));
+                ran(None)
+            }
+        })
     }
 
     /// If `choice_id` is a PENDING gated command (action_gate / ToolBlocklist)

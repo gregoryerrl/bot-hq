@@ -9,7 +9,7 @@ use super::*;
 /// `tray_entries_for_session` and `get_tray_entry` so the two can't drift.
 const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text, \
-     body_row_id, body_sha256, run_refusal";
+     body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms";
 
 /// The statuses a tray row passes through. `queued` (0080) is the one that is
 /// NOT a user-facing item: an outward publish waiting for the reviewer to read
@@ -361,6 +361,55 @@ impl Storage {
             .await
             .with_context(|| format!("recording the run refusal of gate {choice_id}"))?;
         Ok(())
+    }
+
+    /// Link an approved gate to what its run produced (0087): the delivery row
+    /// that carries the output, the exit code and the duration. `result_row_id`
+    /// is `None` when the delivery row could not be stored — the code and the
+    /// time are still worth keeping.
+    pub async fn set_tray_run_result(
+        &self,
+        choice_id: &str,
+        result_row_id: Option<i64>,
+        exit_code: Option<i32>,
+        ran_ms: u64,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE session_tray SET result_row_id = ?, exit_code = ?, ran_ms = ? WHERE choice_id = ?",
+        )
+        .bind(result_row_id)
+        .bind(exit_code)
+        .bind(i64::try_from(ran_ms).unwrap_or(i64::MAX))
+        .bind(choice_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("recording the run result of gate {choice_id}"))?;
+        Ok(())
+    }
+
+    /// Tray rows of ONE session whose id starts with `prefix`, any status —
+    /// for resolving the short id participants quote in chat (feedback #68 /
+    /// #93). Session-scoped in the query itself: another session's row is not
+    /// a candidate, so a prefix cannot be used to probe for one. A prefix that
+    /// is not made of id characters (hex and `-`) matches nothing, which also
+    /// keeps `%` and `_` out of the `LIKE`.
+    pub async fn tray_entries_by_id_prefix(
+        &self,
+        session_id: &str,
+        prefix: &str,
+    ) -> Result<Vec<SessionTrayEntry>> {
+        if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, SessionTrayEntry>(&format!(
+            "SELECT {TRAY_COLUMNS} FROM session_tray \
+             WHERE session_id = ? AND choice_id LIKE ? ORDER BY id ASC"
+        ))
+        .bind(session_id)
+        .bind(format!("{}%", prefix.to_ascii_lowercase()))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     /// Was the NEWEST gate for this exact command withdrawn by a reviewer's

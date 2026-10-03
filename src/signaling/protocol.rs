@@ -430,13 +430,13 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "gate_status",
-            description: "Current state of a parked action_gate command by its gate_id: pending (still awaiting the user — do not re-issue), approved (executed; output was delivered as an out-of-band message), or rejected (not run; includes the user's answer text). A `request_approval` choice_id works too — those rows carry no command, so the answer is the user's pick and nothing ran on bot-hq's side. Read-only, callable by any participant. Use this instead of guessing whether a gated command ran.",
+            description: "Current state of a parked action_gate command by its gate_id — the full id, or the short one quoted in chat (a unique prefix of 8+ characters, resolved inside your own session): queued (waiting for the reviewer's read), pending (still awaiting the user — do not re-issue), approved and RUNNING (for how long, and the bound bot-hq runs it under), approved and finished (its exit code, how long it ran, and the tail of its output — read from the delivery row, already redacted; the row itself reaches the issuing agent only at its next turn, so this is how to read a result mid-turn and how a reviewer reads one at all), rejected (not run; includes the user's answer text), or withdrawn (with the reason). A `request_approval` choice_id works too — those rows carry no command, so the answer is the user's pick and nothing ran on bot-hq's side. Read-only, callable by any participant. Use this instead of guessing whether a gated command ran.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "gate_id": {
                         "type": "string",
-                        "description": "The gate_id returned by action_gate when it parked the command."
+                        "description": "The gate_id returned by action_gate when it parked the command, or its first 8+ characters as quoted in chat."
                     }
                 },
                 "required": ["gate_id"]
@@ -539,7 +539,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "list_my_pending_questions",
-            description: "List the questions YOU (this agent) have currently parked for the user in this session: ask_user_choice prompts and request_approval / action_gate gates that haven't been resolved yet. (A halt is not a tray row — `mark_awaiting_user` fills the session's single halt slot, which the user's next message clears.) **Call this BEFORE issuing a new `ask_user_choice` to avoid duplicate retries** — if you already have a pending one on the same topic, supersede or withdraw it first. Returns a JSON array of { choice_id, kind, prompt, options, asked_at, supersedes_id }.",
+            description: "List the questions YOU (this agent) have currently parked for the user in this session: ask_user_choice prompts and request_approval / action_gate gates that haven't been resolved yet — including an outward publish still QUEUED for the reviewer's read (`status: \"queued\"`), which the user's tray does not show. (A halt is not a tray row — `mark_awaiting_user` fills the session's single halt slot, which the user's next message clears.) **Call this BEFORE issuing a new `ask_user_choice` to avoid duplicate retries** — if you already have a pending one on the same topic, supersede or withdraw it first. Returns a JSON array of { choice_id, kind, status, prompt, options, asked_at, supersedes_id }.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -548,7 +548,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "withdraw_question",
-            description: "Abandon a question YOU previously parked for the user (you figured it out, the context changed). Removes the prompt from the user's questions tray + the dashboard counter. If you want to REPLACE the question with a rephrased version, prefer `supersede_question` over withdraw+ask — the former is one tool call AND links the old row to the new via `supersedes_id` so the history is traceable.\n\nYours only: a question another participant parked is not yours to clear out of the user's tray.",
+            description: "Abandon a question or gate YOU previously parked for the user (you figured it out, the context changed) — including a gated command the hook parked for you, and an outward publish still queued for the reviewer's read, so a command you no longer want does not summon the reviewer or prompt the user. Removes the prompt from the user's questions tray + the dashboard counter. If you want to REPLACE the question with a rephrased version, prefer `supersede_question` over withdraw+ask — the former is one tool call AND links the old row to the new via `supersedes_id` so the history is traceable.\n\nYours only: a question another participant parked is not yours to clear out of the user's tray.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

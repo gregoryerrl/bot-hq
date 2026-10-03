@@ -1239,7 +1239,12 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   options_json, command_text, status, supersedes_id, asked_at,
   answered_at, picked_option) — durable awaiting-input tray
   (choices/approvals/gated commands). Survives app restart. Renamed from
-  `session_questions`/`questions` in migration 0010.
+  `session_questions`/`questions` in migration 0010. An approved gate's run
+  is linked back (0087): `result_row_id` is the `messages` row that carries
+  its output, with `exit_code` and `ran_ms`. `gate_status` reads the output
+  from that row — redacted when it was written — instead of from a second
+  copy, and resolves the 8-character id quoted in chat inside the caller's
+  own session.
 - `session_documents` (id PK, session_id, slug, body, phase, …) —
   per-session docs: one rewritable doc per IPAV phase (`phase` set), the
   reviewer's co-located `<phase>-eyes` doc, archived versions (`<slug>@<n>`,

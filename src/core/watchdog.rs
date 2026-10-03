@@ -679,7 +679,7 @@ mod tests {
     fn a_running_gate_counts_as_pending_until_its_guard_drops() {
         let bridge = SignalingBridge::new();
         assert!(!bridge.has_running_gate("s1"));
-        let guard = bridge.note_gate_running("s1", "gate-1");
+        let guard = bridge.note_gate_running("s1", "gate-1", std::time::Duration::from_secs(120));
         assert!(bridge.has_running_gate("s1"));
         assert!(!bridge.has_running_gate("s2"), "per session");
         // What the poll computes with the mark up: pending, so no nudge.

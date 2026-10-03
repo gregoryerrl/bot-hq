@@ -51,7 +51,9 @@ impl SignalingBridge {
             // No keyword, or an explicit auto_allow → run with no prompt. (In
             // normal flow the hook only routes `gate` commands here; auto_allow
             // / no-match are handled defensively so a direct call still works.)
-            None | Some(GateMode::AutoAllow) => self.execute_gated(&session_id, &command).await,
+            None | Some(GateMode::AutoAllow) => {
+                self.execute_gated(&session_id, &command).await.map(|run| run.text)
+            }
             Some(GateMode::Gate) => {
                 let outcome = self.park_gated_command(&session_id, &agent, &command).await?;
                 Ok(park_outcome_text(&outcome, &command))
@@ -243,6 +245,20 @@ impl SignalingBridge {
     /// another session's id could read that session's gate. Another session's
     /// gate answers exactly like a missing one — no oracle. `None` = unscoped
     /// (host / tests).
+    ///
+    /// **`gate_id` may be the short id participants quote in chat** (feedback
+    /// #68 / #93): a unique prefix of 8+ characters, resolved among the
+    /// CALLER'S session's rows only, any status. A reviewer handed "check gate
+    /// `daf915a3`" used to get "no gate with id daf915a3" and lose a ring lap.
+    /// An ambiguous prefix is refused, as `flag_finding`'s is.
+    ///
+    /// **What it reports about a run** (feedback #56 / #83; 0087): a gate that
+    /// is executing says for how long and under which bound; one that has
+    /// finished says its exit code and time and returns the tail of its
+    /// output — read from the delivery row, which is already redacted (F10),
+    /// so nothing is stored twice. The output reaches the issuing agent as a
+    /// row at its NEXT turn; this is how it reads it mid-turn, and how a
+    /// reviewer reads it at all.
     pub async fn gate_status_for(&self, gate_id: &str, session_id: Option<&str>) -> Result<String> {
         let storage = self
             .storage
@@ -250,11 +266,29 @@ impl SignalingBridge {
             .await
             .clone()
             .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
-        let Some(row) = storage.get_tray_entry(gate_id).await? else {
-            return Ok(format!("gate_status: no gate with id {gate_id}"));
+        let no_gate = || format!("gate_status: no gate with id {gate_id}");
+        let row = match storage.get_tray_entry(gate_id).await? {
+            Some(row) => row,
+            None => {
+                // A short id: only inside the caller's own session.
+                let Some(sid) = session_id.filter(|_| gate_id.len() >= GATE_ID_PREFIX_MIN) else {
+                    return Ok(no_gate());
+                };
+                let mut hits = storage.tray_entries_by_id_prefix(sid, gate_id).await?;
+                match hits.len() {
+                    0 => return Ok(no_gate()),
+                    1 => hits.remove(0),
+                    n => {
+                        return Ok(format!(
+                            "gate_status: `{gate_id}` is the start of {n} ids in this session — \
+                             give more of the id"
+                        ))
+                    }
+                }
+            }
         };
         if session_id.is_some_and(|sid| sid != row.session_id) {
-            return Ok(format!("gate_status: no gate with id {gate_id}"));
+            return Ok(no_gate());
         }
         // Only a ToolBlocklist (action_gate) approval carries a command —
         // `ask_user_choice_inner` sets `command_text` for that kind alone. A
@@ -276,31 +310,51 @@ impl SignalingBridge {
             ),
             "answered" => {
                 let picked = row.picked_option.as_deref().unwrap_or("");
-                if let (ViolationOutcome::Approved, Some(refusal)) =
-                    (gate_verdict(picked), row.run_refusal.as_deref())
-                {
+                let approved = matches!(gate_verdict(picked), ViolationOutcome::Approved);
+                if let (true, Some(refusal)) = (approved, row.run_refusal.as_deref()) {
                     // 0085 (EYES 16629ec7): approved, then refused at run time.
                     format!(
                         "approved but NOT RUN — {refusal}, so bot-hq refused to run `{command}` \
                          and nothing was published. Re-issue the command; the reviewer reads \
                          the current body first."
                     )
-                } else if matches!(gate_verdict(picked), ViolationOutcome::Approved)
-                    && self.is_gate_running(&row.session_id, &row.choice_id)
+                } else if let (true, Some(run)) =
+                    (approved, self.gate_run_info(&row.session_id, &row.choice_id))
                 {
                     // Feedback #15: the answer flips before the command ends —
                     // "output delivered" while it is still running sends the
                     // agent looking for a message that has not arrived yet.
+                    // Feedback #56: and "RUNNING" with no times could not be
+                    // told from a hang.
                     format!(
-                        "approved — RUNNING now: bot-hq is executing `{command}`; its output \
-                         arrives as an out-of-band message when it finishes. Do not re-run it."
+                        "approved — RUNNING now for {} s (started {}; bot-hq stops it at {} s): \
+                         bot-hq is executing `{command}`; its output arrives as an out-of-band \
+                         message when it finishes. Do not re-run it.",
+                        run.started.elapsed().as_secs(),
+                        run.started_at,
+                        run.limit.as_secs(),
                     )
-                } else if matches!(gate_verdict(picked), ViolationOutcome::Approved) {
-                    format!(
-                        "approved — bot-hq executed `{command}` at approval time; the \
-                         output was delivered as an out-of-band message (check your \
-                         recent messages). Do not re-run it."
-                    )
+                } else if approved {
+                    let ran = match (row.exit_code, row.ran_ms) {
+                        (Some(code), Some(ms)) => format!(" It exited {code} after {}.", human_ms(ms)),
+                        (None, Some(ms)) => format!(" It could not be started ({}).", human_ms(ms)),
+                        _ => String::new(),
+                    };
+                    let output = match row.result_row_id {
+                        Some(row_id) => match storage.message_content(row_id).await {
+                            Ok(Some(content)) => gate_output_excerpt(&content, row_id),
+                            _ => format!("\nIts output row (message {row_id}) could not be read."),
+                        },
+                        None if row.ran_ms.is_some() => {
+                            "\nIts output row could not be stored; the output is lost.".to_string()
+                        }
+                        // A gate that ran before 0087 has no link to its row.
+                        None => " The output was delivered as an out-of-band message (check your \
+                                 recent messages); this gate ran before bot-hq linked a gate to \
+                                 its output."
+                            .to_string(),
+                    };
+                    format!("approved — bot-hq executed `{command}` at approval time.{ran} Do not re-run it.{output}")
                 } else {
                     format!(
                         "rejected — `{command}` was NOT run. User's answer: \"{picked}\". \
@@ -309,7 +363,14 @@ impl SignalingBridge {
                     )
                 }
             }
-            other => format!("{other} — `{command}` did not run (gate is no longer pending)."),
+            // A withdrawn or superseded gate: say why when the row holds a
+            // reason (a queued publish withdrawn by a finding or by its issuer).
+            other => match row.picked_option.as_deref().filter(|r| !r.is_empty()) {
+                Some(reason) => format!(
+                    "{other} — `{command}` did not run (gate is no longer pending): {reason}."
+                ),
+                None => format!("{other} — `{command}` did not run (gate is no longer pending)."),
+            },
         })
     }
 
@@ -346,7 +407,7 @@ impl SignalingBridge {
     /// run an approved gated command on the receiver-dropped path — when the
     /// agent's `action_gate` tool call timed out client-side, its request future
     /// (which would have called this in-band) was already cancelled.
-    pub(super) async fn execute_gated(&self, session_id: &str, command: &str) -> Result<String> {
+    pub(super) async fn execute_gated(&self, session_id: &str, command: &str) -> Result<GatedRun> {
         self.execute_gated_with(session_id, command, tool_gate::DEFAULT_TIMEOUT, &[])
             .await
     }
@@ -360,7 +421,7 @@ impl SignalingBridge {
         command: &str,
         timeout: std::time::Duration,
         extra_envs: &[(&str, &str)],
-    ) -> Result<String> {
+    ) -> Result<GatedRun> {
         let cwd = self.session_working_repo(session_id).await.ok_or_else(|| {
             anyhow::anyhow!(
                 "action_gate: session {session_id} has no working_repo_path — cannot execute `{command}`"
@@ -373,7 +434,7 @@ impl SignalingBridge {
         let mut envs: Vec<(&str, &str)> = session.iter().map(|(k, v)| (*k, v.as_str())).collect();
         envs.extend_from_slice(extra_envs);
         let out = tool_gate::run_in_repo(command, &cwd, timeout, &envs).await;
-        Ok(format_command_output(&out))
+        Ok(GatedRun { text: format_command_output(&out), exit_code: out.code })
     }
 
     /// The session's `working_repo_path` from storage — the source of truth on
@@ -1227,6 +1288,54 @@ fn park_outcome_text(outcome: &ParkOutcome, command: &str) -> String {
     }
 }
 
+/// The shortest prefix `gate_status` resolves — the eight characters a gate id
+/// is quoted with in chat, the same floor `flag_finding`'s `gate_id` has.
+const GATE_ID_PREFIX_MIN: usize = 8;
+
+/// How much of a finished gate's output `gate_status` returns: the END of it,
+/// where the exit-code footer and the last lines are.
+const GATE_STATUS_OUTPUT_TAIL_BYTES: usize = 6_000;
+
+/// `1250` → `1.3 s`; under a second in milliseconds.
+fn human_ms(ms: i64) -> String {
+    if ms < 1_000 {
+        format!("{ms} ms")
+    } else {
+        format!("{:.1} s", ms as f64 / 1_000.0)
+    }
+}
+
+/// The output part of a gate's delivery row, for `gate_status`: what follows
+/// the row's `Output:` line (the verdict above it restates the command the
+/// caller already has), cut to its last [`GATE_STATUS_OUTPUT_TAIL_BYTES`] on a
+/// char boundary. `content` is the stored row — redacted when it was written.
+fn gate_output_excerpt(content: &str, row_id: i64) -> String {
+    const MARK: &str = "Output:\n";
+    let output = match content.rfind(MARK) {
+        Some(at) if at == 0 || content[..at].ends_with('\n') => &content[at + MARK.len()..],
+        _ => content,
+    };
+    if output.len() <= GATE_STATUS_OUTPUT_TAIL_BYTES {
+        return format!("\nOutput (message {row_id}):\n{output}");
+    }
+    let from = crate::text::ceil_char_boundary(output, output.len() - GATE_STATUS_OUTPUT_TAIL_BYTES);
+    format!(
+        "\nOutput (message {row_id}; the last {} of {} bytes — the whole row is in the channel):\n{}",
+        output.len() - from,
+        output.len(),
+        &output[from..]
+    )
+}
+
+/// What running a gated command produced: the text an agent reads (stdout,
+/// stderr and the footer — see [`format_command_output`]) and the exit code on
+/// its own, so `gate_status` can state it without parsing the footer.
+#[derive(Debug, Clone)]
+pub(super) struct GatedRun {
+    pub(super) text: String,
+    pub(super) exit_code: i32,
+}
+
 /// Format combined output roughly the way the agent would have seen it from its
 /// own Bash call, plus an exit-code footer so a non-zero result is unambiguous.
 ///
@@ -1618,12 +1727,175 @@ mod tests {
         let cid = parked.split("gate_id: ").nth(1).and_then(|s| s.split(')').next()).unwrap().to_string();
         bridge.resolve_choice(&cid, "Approve".into()).await.unwrap();
         {
-            let _running = bridge.note_gate_running("s1", &cid);
+            let _running = bridge.note_gate_running("s1", &cid, std::time::Duration::from_secs(120));
             let status = bridge.gate_status(&cid).await.unwrap();
-            assert!(status.starts_with("approved — RUNNING now"), "got: {status}");
+            assert!(status.starts_with("approved — RUNNING now for 0 s (started 20"), "got: {status}");
+            assert!(status.contains("bot-hq stops it at 120 s"), "feedback #56 — the bound is stated: {status}");
         }
         let status = bridge.gate_status(&cid).await.unwrap();
         assert!(status.starts_with("approved — bot-hq executed"), "after it ends: {status}");
+    }
+
+    /// Park one gated command in `s1`, approve it, and return the bridge and
+    /// the gate id.
+    async fn approved_gate(
+        data: &tempfile::TempDir,
+        repo: &tempfile::TempDir,
+        keyword: &str,
+        command: &str,
+    ) -> (Arc<SignalingBridge>, String) {
+        let bridge = bridge_with(data.path(), &[gk(keyword, GateMode::Gate)], "s1", repo.path()).await;
+        let parked = bridge
+            .action_gate("s1".into(), "hands".into(), command.into(), false)
+            .await
+            .unwrap();
+        let cid = parked.split("gate_id: ").nth(1).and_then(|s| s.split(')').next()).unwrap().to_string();
+        bridge.resolve_choice(&cid, "Approve".into()).await.unwrap();
+        (bridge, cid)
+    }
+
+    /// Feedback #56 / #83 / #93, the wire: a finished gate's status carries
+    /// its exit code, how long it ran, and its output — read from the delivery
+    /// row the approval posted (0087 links the two). The output reaches the
+    /// issuer as a row only at its next turn; this is the mid-turn read, and
+    /// the reviewer's only one. Deleting the `set_tray_run_result` call in
+    /// `deliver_oob` turns this red.
+    #[tokio::test]
+    async fn gate_status_reports_a_finished_gates_exit_code_time_and_output() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, cid) = approved_gate(&data, &repo, "printf", "printf 'rows: 42\\n'; exit 3").await;
+        let storage = bridge.storage.lock().await.clone().unwrap();
+
+        let row = storage.get_tray_entry(&cid).await.unwrap().unwrap();
+        assert_eq!(row.exit_code, Some(3), "the code is stored on its own");
+        assert!(row.ran_ms.is_some());
+        let row_id = row.result_row_id.expect("the gate is linked to its delivery row");
+        assert!(storage.message_content(row_id).await.unwrap().unwrap().contains("rows: 42"));
+
+        let status = bridge.gate_status(&cid).await.unwrap();
+        assert!(status.starts_with("approved — bot-hq executed `printf 'rows: 42\\n'; exit 3`"), "{status}");
+        assert!(status.contains("It exited 3 after "), "{status}");
+        assert!(status.contains(&format!("Output (message {row_id}):\nrows: 42\n[action_gate → exit 3")), "{status}");
+        assert!(status.contains("Do not re-run it."), "{status}");
+
+        // A gate that ran before the link existed says so instead of inventing output.
+        sqlx::query("UPDATE session_tray SET result_row_id = NULL, exit_code = NULL, ran_ms = NULL WHERE choice_id = ?")
+            .bind(&cid)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let old = bridge.gate_status(&cid).await.unwrap();
+        assert!(
+            old.contains("ran before bot-hq linked a gate to its output") && !old.contains("Output (message"),
+            "{old}"
+        );
+    }
+
+    /// EYES' plan point 7: the output `gate_status` returns is the STORED
+    /// row's, which was redacted when it was written — a secret a command
+    /// printed does not come back through this tool. And a long output is
+    /// returned by its END, where the footer and the last lines are.
+    #[tokio::test]
+    async fn gate_status_returns_the_redacted_tail_of_a_long_output() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        // The command text holds the token in two pieces, so only the OUTPUT is secret-shaped.
+        let tail = "ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUv-AA";
+        let command = format!(
+            "i=0; while [ $i -lt 400 ]; do printf 'padding line %s .........................\\n' $i; i=$((i+1)); done; printf '%s%s\\n' 'sk-' '{tail}'; printf 'last line\\n'"
+        );
+        let (bridge, cid) = approved_gate(&data, &repo, "printf", &command).await;
+        let status = bridge.gate_status(&cid).await.unwrap();
+        assert!(!status.contains(&format!("sk-{tail}")), "the printed token must not come back");
+        assert!(status.contains("[redacted"), "its marker does: {}", &status[status.len().saturating_sub(400)..]);
+        assert!(status.contains("; the last ") && status.contains(" bytes — the whole row is in the channel"), "cut to its tail");
+        assert!(status.contains("last line\n[action_gate → exit 0"), "the end is what is kept");
+        assert!(!status.contains("padding line 0 "), "the head is what is dropped");
+    }
+
+    /// Feedback #68 / #93: the id a peer quotes in chat is the first eight
+    /// characters. `gate_status` resolves a unique prefix inside the CALLER'S
+    /// session, refuses an ambiguous one, and answers "no gate" for a prefix
+    /// of another session's gate, exactly as for a missing one.
+    #[tokio::test]
+    async fn gate_status_resolves_the_short_id_quoted_in_chat() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, cid) = approved_gate(&data, &repo, "true", "true").await;
+        let storage = bridge.storage.lock().await.clone().unwrap();
+        let short = &cid[..8];
+        let full = bridge.gate_status_for(&cid, Some("s1")).await.unwrap();
+        assert!(full.starts_with("approved"), "{full}");
+        assert_eq!(bridge.gate_status_for(short, Some("s1")).await.unwrap(), full, "the short id is the same gate");
+        assert_eq!(bridge.gate_status_for(&short.to_uppercase(), Some("s1")).await.unwrap(), full);
+
+        // Under eight characters, another session, or no session: not resolved.
+        for (id, sid) in [(&cid[..7], Some("s1")), (short, Some("s-other")), (short, None)] {
+            assert_eq!(
+                bridge.gate_status_for(id, sid).await.unwrap(),
+                format!("gate_status: no gate with id {id}"),
+                "{id:?} in {sid:?}"
+            );
+        }
+        // Two gates sharing the prefix: refused, not guessed.
+        sqlx::query("UPDATE session_tray SET choice_id = 'abcdef12-0000-4000-8000-000000000001' WHERE choice_id = ?")
+            .bind(&cid)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO session_tray (session_id, choice_id, agent, kind, prompt, options_json, status, asked_at, command_text) \
+             VALUES ('s1', 'abcdef12-0000-4000-8000-000000000002', 'hands', 'approval', 'p', '[\"Approve\",\"Reject\"]', 'pending', '2026-10-03T00:00:00Z', 'true')",
+        )
+        .execute(storage.pool())
+        .await
+        .unwrap();
+        let ambiguous = bridge.gate_status_for("abcdef12", Some("s1")).await.unwrap();
+        assert!(ambiguous.contains("is the start of 2 ids in this session"), "{ambiguous}");
+        assert!(bridge
+            .gate_status_for("abcdef12-0000-4000-8000-000000000002", Some("s1"))
+            .await
+            .unwrap()
+            .starts_with("pending"));
+    }
+
+    /// Feedback #83: a QUEUED outward publish its issuer no longer wants can
+    /// be withdrawn — it used to answer "was not pending", stay queued, summon
+    /// the reviewer and prompt the user. Only the issuer withdraws it (EYES,
+    /// plan point 7: the reviewer's lever is the blocking finding), and the
+    /// status then names the reason.
+    #[tokio::test]
+    async fn the_issuer_withdraws_its_own_queued_gate_and_nobody_else_does() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, _eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let cmd = format!("gh issue edit 5 --body-file {path}");
+        let (gate_id, _) = queued(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
+
+        assert_eq!(bridge.list_queued_gates_for_session("s1").await.unwrap().len(), 1);
+        assert_eq!(
+            bridge.withdraw_question_for(&gate_id, Some("eyes")).await,
+            crate::signaling::bridge::Withdrawal::NotYours,
+            "the reviewer cannot withdraw the executor's publish"
+        );
+        assert_eq!(storage.get_tray_entry(&gate_id).await.unwrap().unwrap().status, "queued");
+
+        assert_eq!(
+            bridge.withdraw_question_for(&gate_id, Some("hands")).await,
+            crate::signaling::bridge::Withdrawal::Withdrawn
+        );
+        assert_eq!(storage.get_tray_entry(&gate_id).await.unwrap().unwrap().status, "withdrawn");
+        assert!(bridge.list_queued_gates_for_session("s1").await.unwrap().is_empty());
+        let status = bridge.gate_status(&gate_id).await.unwrap();
+        assert!(
+            status.starts_with("withdrawn —") && status.contains("withdrawn by the participant that issued it"),
+            "{status}"
+        );
+        // The reviewer's turn ending now promotes nothing.
+        let eyes = storage.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert!(storage.pending_gate_ids("s1").await.unwrap().is_empty());
     }
 
     /// **`gate_status` answers only for the caller's own session** (round 11).
@@ -3449,7 +3721,8 @@ mod tests {
                 &[("EXTRA_ENV", "ride-along")],
             )
             .await
-            .unwrap();
+            .unwrap()
+            .text;
         assert!(out.contains("sid=s-env extra=ride-along"), "{out}");
     }
 
@@ -3473,7 +3746,8 @@ mod tests {
         let out = bridge
             .execute_gated("s-deep", command)
             .await
-            .unwrap();
+            .unwrap()
+            .text;
         assert!(
             out.contains("tail:gate-depth-9e1"),
             "the last line of a 15-line gated command must execute with line-2 state intact: {out}"

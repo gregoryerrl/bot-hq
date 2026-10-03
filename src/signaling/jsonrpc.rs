@@ -1222,15 +1222,29 @@ async fn call_tool(
                 .list_questions_for_session(&caller.session_id)
                 .await
                 .map_err(internal_err_no_prefix)?;
-            // Filter to this agent's still-pending questions and shape into
-            // the documented contract.
+            // A QUEUED outward publish (0080) is the caller's too — parked on
+            // its behalf, waiting for the reviewer's read — and it is exactly
+            // the row an agent may want back (feedback #83: a command nobody
+            // wanted any more stayed queued, summoned the reviewer and
+            // prompted the user). The user's tray never shows a queued row;
+            // its issuer's own list does.
+            let queued = bridge
+                .list_queued_gates_for_session(&caller.session_id)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            // Filter to this agent's still-open questions and shape into the
+            // documented contract. `status` tells a queued gate from a parked
+            // one.
             let mine: Vec<Value> = rows
                 .iter()
-                .filter(|r| r.agent == caller.agent && r.status == "pending")
+                .filter(|r| r.status == "pending")
+                .chain(queued.iter())
+                .filter(|r| r.agent == caller.agent)
                 .map(|r| {
                     json!({
                         "choice_id": r.choice_id,
                         "kind": r.kind,
+                        "status": r.status,
                         "prompt": r.prompt,
                         "options": r.options(),
                         "asked_at": r.asked_at,
@@ -4431,6 +4445,45 @@ mod tests {
         assert_eq!(v["lines"], json!(format!("{resume}-400")));
         // Nothing falls between the file and the call: every earlier line is in the file.
         assert!(rendered.contains(&format!("line {}: — standing instruction number {} —\n", resume - 1, resume - 1)));
+    }
+
+    /// Feedback #83, through the real handlers: a QUEUED outward publish is in
+    /// its issuer's `list_my_pending_questions` (marked `queued` — the user's
+    /// tray never shows it) and `withdraw_question` takes it back. It used to
+    /// be absent from the list and answer "was not pending", so a command
+    /// nobody wanted any more went on to summon the reviewer and prompt the
+    /// user. Another participant neither sees nor withdraws it.
+    #[tokio::test]
+    async fn a_queued_gate_is_listed_for_its_issuer_and_withdrawn_by_it() {
+        let (bridge, storage) = two_role_session().await;
+        sqlx::query(
+            "INSERT INTO session_tray (session_id, choice_id, agent, kind, prompt, options_json, status, asked_at, command_text) \
+             VALUES ('s1', '23e69f96-0000-4000-8000-000000000001', 'hands', 'approval', 'Run gated command?', \
+                     '[\"Approve\",\"Reject\"]', 'queued', '2026-10-03T00:00:00Z', 'gh api repos/o/r/issues/comments/1')",
+        )
+        .execute(storage.pool())
+        .await
+        .unwrap();
+
+        let mine = parsed(&tool(&bridge, caller(), "list_my_pending_questions", json!({})).await.unwrap());
+        assert_eq!(mine.as_array().unwrap().len(), 1, "{mine}");
+        assert_eq!(mine[0]["status"], json!("queued"));
+        assert_eq!(mine[0]["choice_id"], json!("23e69f96-0000-4000-8000-000000000001"));
+        let theirs = parsed(&tool(&bridge, eyes_caller(), "list_my_pending_questions", json!({})).await.unwrap());
+        assert_eq!(theirs, json!([]), "a peer's queued gate is not in the reviewer's list");
+
+        let refused = tool(&bridge, eyes_caller(), "withdraw_question", json!({"choice_id": "23e69f96-0000-4000-8000-000000000001"}))
+            .await
+            .unwrap();
+        assert!(refused.contains("parked by another participant"), "{refused}");
+        let done = tool(&bridge, caller(), "withdraw_question", json!({"choice_id": "23e69f96-0000-4000-8000-000000000001"}))
+            .await
+            .unwrap();
+        assert_eq!(done, "withdrawn");
+        assert_eq!(parsed(&tool(&bridge, caller(), "list_my_pending_questions", json!({})).await.unwrap()), json!([]));
+        // The short id, as a peer would quote it, says what happened to it.
+        let status = tool(&bridge, eyes_caller(), "gate_status", json!({"gate_id": "23e69f96"})).await.unwrap();
+        assert!(status.starts_with("withdrawn —") && status.contains("issued it"), "{status}");
     }
 
     /// A handoff doc is its owner's: bot-hq puts `handoff-<slug>` back into

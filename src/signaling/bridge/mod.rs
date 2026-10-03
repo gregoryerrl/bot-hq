@@ -66,8 +66,19 @@ pub struct CloseRecap {
 /// Clears a running-gate mark on drop (F9) — see
 /// [`SignalingBridge::note_gate_running`].
 pub struct RunningGateGuard {
-    set: Arc<std::sync::Mutex<std::collections::HashSet<(String, String)>>>,
+    set: Arc<std::sync::Mutex<HashMap<(String, String), GateRunInfo>>>,
     key: (String, String),
+}
+
+/// When an approved gated command started, and the bound bot-hq runs it under
+/// — what `gate_status` reports while it is executing (feedback #56: "RUNNING"
+/// with no start and no elapsed time could not be told from a hang).
+#[derive(Debug, Clone)]
+pub struct GateRunInfo {
+    pub started: std::time::Instant,
+    /// The same instant as wall-clock UTC, for the reader.
+    pub started_at: String,
+    pub limit: std::time::Duration,
 }
 
 impl Drop for RunningGateGuard {
@@ -475,7 +486,7 @@ pub struct SignalingBridge {
     /// `secrets-run` that took two minutes after its approval drew an idle
     /// nudge at 09:09:51 while its output was still on its way. Cleared by
     /// the guard's drop, so a panicking execution cannot leave a phantom.
-    running_gates: Arc<std::sync::Mutex<std::collections::HashSet<(String, String)>>>,
+    running_gates: Arc<std::sync::Mutex<HashMap<(String, String), GateRunInfo>>>,
     /// Batch 7: latest health per (session_id, agent) — the wire string from
     /// `AgentHealth::as_str` ("running"/"retrying"/"stalled"/"dead"). Written by
     /// `notify_agent_health`; read by the fail-closed commit gate to block when a
@@ -666,7 +677,7 @@ impl SignalingBridge {
             terminals: std::sync::OnceLock::new(),
             session_close_gate: Mutex::new(HashMap::new()),
             library_push_lock: Arc::new(tokio::sync::Mutex::new(())),
-            running_gates: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            running_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             agent_health: std::sync::Mutex::new(HashMap::new()),
             agent_rpc_seen: std::sync::Mutex::new(HashMap::new()),
             reviewer_override: std::sync::Mutex::new(HashMap::new()),
@@ -817,10 +828,29 @@ impl SignalingBridge {
     /// clears the mark. While any gate of a session is running, the idle
     /// watchdog treats the session as pending — the user approved something
     /// whose output has not landed yet, which is a wait, not a stall.
-    pub fn note_gate_running(&self, session_id: &str, choice_id: &str) -> RunningGateGuard {
+    pub fn note_gate_running(
+        &self,
+        session_id: &str,
+        choice_id: &str,
+        limit: std::time::Duration,
+    ) -> RunningGateGuard {
         let key = (session_id.to_string(), choice_id.to_string());
-        self.running_gates.lock().unwrap_or_else(|p| p.into_inner()).insert(key.clone());
+        let info = GateRunInfo {
+            started: std::time::Instant::now(),
+            started_at: crate::storage::now_utc(),
+            limit,
+        };
+        self.running_gates.lock().unwrap_or_else(|p| p.into_inner()).insert(key.clone(), info);
         RunningGateGuard { set: Arc::clone(&self.running_gates), key }
+    }
+
+    /// The run in flight for this gate, when there is one: its start and bound.
+    pub fn gate_run_info(&self, session_id: &str, choice_id: &str) -> Option<GateRunInfo> {
+        self.running_gates
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&(session_id.to_string(), choice_id.to_string()))
+            .cloned()
     }
 
     /// Is THIS approved gated command still executing? `gate_status` asks, so
@@ -830,7 +860,7 @@ impl SignalingBridge {
         self.running_gates
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .contains(&(session_id.to_string(), choice_id.to_string()))
+            .contains_key(&(session_id.to_string(), choice_id.to_string()))
     }
 
     /// Is any approved gated command of this session still executing?
@@ -838,7 +868,7 @@ impl SignalingBridge {
         self.running_gates
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .iter()
+            .keys()
             .any(|(s, _)| s == session_id)
     }
 
@@ -1250,6 +1280,14 @@ impl SignalingBridge {
         self.session_phase.lock().await.remove(session_id);
         self.session_close_gate.lock().await.remove(session_id);
         self.agent_health
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(s, _), _| s != session_id);
+        // A gate still executing when its session closes: the mark goes with
+        // the session (its guard's own drop is then a no-op). Nothing reads
+        // `gate_status` for a closed session, and the watchdog must not count
+        // a closed session's run as pending work.
+        self.running_gates
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .retain(|(s, _), _| s != session_id);
@@ -2649,6 +2687,16 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(format!("{s}:hands"), "tok".into());
+            // A gate still executing: the mark is inserted directly, so no
+            // guard removes it behind the test's back.
+            b.running_gates.lock().unwrap().insert(
+                (s.into(), "gate".into()),
+                GateRunInfo {
+                    started: std::time::Instant::now(),
+                    started_at: "2026-10-03T00:00:00Z".into(),
+                    limit: std::time::Duration::from_secs(120),
+                },
+            );
         }
 
         b.unregister_session(sid).await;
@@ -2729,11 +2777,16 @@ mod tests {
         check!("mcp_tokens", b.mcp_tokens.lock().unwrap(), |m, s| {
             m.keys().any(|k| k.starts_with(&format!("{s}:")))
         });
+        check!("running_gates", b.running_gates.lock().unwrap(), |m, s| {
+            m.keys().any(|(k, _)| k == s)
+        });
 
         // Tracks THIS test's manual `check!` list, so it moves when a map is
         // legitimately added or removed — 16 until round 6 deleted
-        // `session_open_blocking` with the rest of the router's orphaned cache.
-        assert_eq!(report.len(), 15, "a map was dropped from this test's sweep");
+        // `session_open_blocking` with the rest of the router's orphaned cache,
+        // 16 again since `running_gates` became a map that carries each run's
+        // start (2026-10-03).
+        assert_eq!(report.len(), 16, "a map was dropped from this test's sweep");
         let undrained: Vec<&str> = report
             .iter()
             .filter(|(_, doomed, _)| *doomed)

@@ -115,6 +115,20 @@ impl Storage {
     /// True if any participant OTHER than `author` posted in `session_id` after
     /// `since` (an RFC3339-Z timestamp).
     ///
+    /// The stored content of ONE message row, or `None` when there is no such
+    /// row. For `gate_status`, which returns a finished gate's output from its
+    /// delivery row (0087) instead of from a second copy: the row was redacted
+    /// when it was written, and it is the caller's own session's row — the id
+    /// comes off that session's tray entry.
+    pub async fn message_content(&self, id: i64) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT content FROM messages WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .with_context(|| format!("reading message {id}"))?;
+        Ok(row.map(|r| r.0))
+    }
+
     /// What the findings re-raise guard asks: a reviewer only escalates once its peer
     /// has actually had a turn since the last raise. Scoped to
     /// `origin = 'participant'` so a host `system_notice` or the user's own reply

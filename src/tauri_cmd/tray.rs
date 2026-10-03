@@ -460,6 +460,9 @@ mod tests {
             body_row_id: None,
             body_sha256: None,
             run_refusal: None,
+            result_row_id: None,
+            exit_code: None,
+            ran_ms: None,
         };
         let view: SessionTrayView = entry.into();
         assert_eq!(view.options, vec!["Approve", "Reject"]);

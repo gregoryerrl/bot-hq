@@ -20,6 +20,14 @@ and in `docs/rebuild-archive/`.
   document was put back, so the other participants know to check that it
   still holds the session's standing instructions.
 
+- **An agent can read what an approved command produced.** Asking for a
+  gate's status now returns its exit code, how long it ran and the end of its
+  output, and while it is still running says for how long. The reviewer can
+  ask too, using the short id shown in the chat. Before, the output reached
+  the agent that issued the command only at its next turn, and the reviewer
+  had no way to fetch it.
+- **An agent can take back a command it no longer wants** while it is still
+  waiting for the reviewer's read, so it does not go on to prompt you.
 - **Session documents stay usable when they grow.** Five changes to the
   document tools agents use:
   - A document can be corrected in place (`session_doc_edit`), instead of

@@ -58,7 +58,9 @@ pub use participants::{
 };
 pub use feedback::{FEEDBACK_KINDS, FEEDBACK_STATUSES};
 pub use session_docs::{phase_doc_slug, reviewer_codoc_phase, REVIEWER_CODOC_SLUGS};
-pub use tray::{is_gate_options, is_gate_row, FINDING_WITHDRAWAL_REASON, GATE_OPTIONS_JSON};
+pub use tray::{
+    is_gate_options, is_gate_row, FINDING_WITHDRAWAL_REASON, GATE_OPTIONS_JSON, TRAY_STATUS_QUEUED,
+};
 pub use findings::{FindingUidResolution, OPEN_BLOCKING_FOR_SESSION};
 pub use row_types::{
     AgentConfig, AgentFeedback, CancelEvent, ClFolder, ClIndexEntry, ClRead,

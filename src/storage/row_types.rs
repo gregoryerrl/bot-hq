@@ -292,6 +292,21 @@ pub struct SessionTrayEntry {
     #[serde(default)]
     #[sqlx(default)]
     pub run_refusal: Option<String>,
+    /// The `messages.id` of the delivery row carrying an approved gate's
+    /// output (0087). `gate_status` reads the output from that row — already
+    /// redacted — rather than from a copy. NULL until the gate has run, and on
+    /// gates that ran before 0087.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub result_row_id: Option<i64>,
+    /// The approved command's exit code (0087); 124 when bot-hq timed it out.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub exit_code: Option<i64>,
+    /// How long the approved command ran, in milliseconds (0087).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub ran_ms: Option<i64>,
 }
 
 impl SessionTrayEntry {
