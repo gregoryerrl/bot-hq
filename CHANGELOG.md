@@ -98,6 +98,14 @@ and in `docs/rebuild-archive/`.
 - **A participant that passes no longer marks its earlier phase votes as
   withdrawn.** Only the current round's ballots are retracted; the ones that
   carried an earlier phase change stay in the audit history as cast.
+- **Context Library history says who changed what, and each entry holds only
+  what it names.** Each agent write is now its own commit, named for the
+  session and the kind of write (`cl: _globals/eod-tldr.md (hands, s-43584072,
+  replace)`). Your own edits used to ride the next agent's snapshot under that
+  agent's name; they now get a commit of their own first, and a save from the
+  app's editors is committed as yours straight away. The reply to a write says
+  which lines it changed. Two writes to the same file can no longer interleave
+  between reading it and writing it.
 
 ## [1.0.8] — 2026-09-27
 

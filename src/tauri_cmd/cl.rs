@@ -459,22 +459,22 @@ pub async fn cl_write_file(
         .cl_project_root(&project)
         .await
         .ok_or_else(|| AppError::Internal("bridge data_dir not configured".into()))?;
+    let bridge = Arc::clone(bridge.inner());
 
     tokio::task::spawn_blocking(move || {
         let project_root_real = project_root
             .canonicalize()
             .map_err(|e| AppError::NotFound(format!("project '{project}' not found: {e}")))?;
         let candidate_real = resolve_existing_cl_file(&project_root_real, &file_path)?;
-        // Atomic write: a sibling temp in the SAME directory (intra-filesystem,
-        // no cross-mount EXDEV) then rename into place — so a crash mid-write
-        // can't leave the file truncated or half-written.
-        let mut tmp = candidate_real.clone().into_os_string();
-        tmp.push(".bot-hq-tmp");
-        let tmp = std::path::PathBuf::from(tmp);
-        std::fs::write(&tmp, content.as_bytes())
-            .map_err(|e| AppError::Internal(format!("write temp: {e}")))?;
-        std::fs::rename(&tmp, &candidate_real)
-            .map_err(|e| AppError::Internal(format!("rename temp into place: {e}")))?;
+        // Atomic (a sibling temp in the SAME directory, then a rename — a
+        // crash mid-write can't leave the file half-written), under the
+        // library lock, and snapshotted as the user's own edit (feedback #65):
+        // before, a save waited for the next agent write to sweep it into
+        // that agent's snapshot, and could land between an agent's snapshot
+        // and its write.
+        bridge
+            .cl_save_user_edit_blocking(&candidate_real, &content)
+            .map_err(|e| AppError::Internal(format!("saving '{file_path}': {e}")))?;
         Ok::<(), AppError>(())
     })
     .await

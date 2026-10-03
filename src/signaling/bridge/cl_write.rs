@@ -46,6 +46,33 @@ enum Done {
     },
 }
 
+impl Done {
+    /// The kind of write, as the snapshot subject records it.
+    fn kind(&self) -> &'static str {
+        match self {
+            Done::Created => "create",
+            Done::Replaced => "replace",
+            Done::Appended => "append",
+            Done::Edited { .. } => "edit",
+        }
+    }
+}
+
+/// Everything the blocking half of a write hands back to the reply.
+struct Written {
+    done: Done,
+    lint: Option<String>,
+    retired: Vec<String>,
+    /// The target's never-versioned content, committed before the write.
+    pre: Option<Snapshot>,
+    /// Other files' pending changes, committed apart before the write.
+    outside: Option<Snapshot>,
+    /// The write's own commit.
+    snapshot: Snapshot,
+    /// Which lines the write changed (`changed_lines`), or "no change".
+    changed: Option<String>,
+}
+
 impl SignalingBridge {
     /// Create or replace `file_path` under `project`'s CL root with `content`.
     /// Missing parent folders are created; the write is atomic (tmp+rename in
@@ -130,7 +157,24 @@ impl SignalingBridge {
         Ok(msg)
     }
 
+    /// The library's root (`<data_dir>/library`), when the bridge has a data
+    /// dir — the app's own save (`tauri_cmd::cl::cl_write_file`) snapshots
+    /// through it.
+    pub fn cl_library_root(&self) -> Option<PathBuf> {
+        self.data_dir
+            .as_ref()
+            .map(|d| crate::paths::Paths::for_data_dir(d.clone()).cl_dir)
+    }
+
+    /// The app's own save of an existing CL file, already resolved inside its
+    /// project root by the caller — under the library lock and committed as
+    /// `(user)` ([`save_user_edit`]). Blocking: run it off the async runtime.
+    pub fn cl_save_user_edit_blocking(&self, target: &Path, content: &str) -> Result<()> {
+        save_user_edit(self.cl_library_root().as_deref(), target, content)
+    }
+
     /// The one guarded write path both tools share.
+    #[allow(clippy::too_many_arguments)]
     async fn write_cl(
         self: &Arc<Self>,
         session_id: String,
@@ -188,15 +232,18 @@ impl SignalingBridge {
             .ok_or_else(|| anyhow::anyhow!("bridge data_dir is not configured"))?;
         // The whole library is one local git repo; every agent write snapshots
         // it (see `git_version_library`).
-        let library_root = self
-            .data_dir
-            .as_ref()
-            .map(|d| crate::paths::Paths::for_data_dir(d.clone()).cl_dir);
+        let library_root = self.cl_library_root();
         let fp = file_path.clone();
         let proj = project.clone();
-        let commit_summary = format!("cl: {project}/{file_path} ({agent})");
-        let outcome =
-            tokio::task::spawn_blocking(move || -> Result<(Done, Option<String>, Vec<String>, Option<Snapshot>, Snapshot)> {
+        let writer = (agent.clone(), session_id.clone());
+        let outcome = tokio::task::spawn_blocking(move || -> Result<Written> {
+            // One write at a time, process-wide, from the first read to the
+            // last commit (feedback #27/#28 put the git half under this lock;
+            // since s-3158eb35 the read is under it too). The library is shared
+            // by every project's sessions: a body read BEFORE the lock let an
+            // append or an edit computed from it overwrite a change another
+            // write landed in between.
+            let _library_git = LIBRARY_GIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
             let root_real = project_root.canonicalize().with_context(|| {
                 format!("canonicalizing CL project root {}", project_root.display())
             })?;
@@ -309,11 +356,6 @@ impl SignalingBridge {
                 }
                 _ => Vec::new(),
             };
-            // One library git operation at a time, process-wide: the library
-            // is shared by every project's sessions, and two interleaved
-            // add/commit pairs can each sweep the other's file or collide on
-            // the index lock (feedback #27/#28).
-            let _library_git = LIBRARY_GIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
             // Content on disk that never reached git (a bare Write/Bash) is
             // committed ALONE before this write replaces it — otherwise the
             // "rollback point" an agent records is a generation stale.
@@ -331,16 +373,36 @@ impl SignalingBridge {
                      user; retry once the library's git works again."
                 );
             }
+            // Every OTHER pending change gets its own commit first (feedback
+            // #65): this write's snapshot holds this write and nothing else,
+            // and the user's own edits are still versioned and pushed. Its
+            // failure is reported, never a refusal — this write touches none
+            // of those files.
+            let outside = library_root.as_deref().and_then(snapshot_outside_changes);
             atomic_write(&target, &final_content)?;
+            // The snapshot names the session and the kind of write (feedback
+            // #65, #86): `git log` answers "who wrote this line, from which
+            // session".
+            let summary = format!(
+                "cl: {proj}/{fp} ({}, {}, {})",
+                writer.0,
+                writer.1,
+                done.kind()
+            );
             let snapshot = match library_root.as_deref() {
-                Some(lib) => git_version_library(lib, &commit_summary),
+                Some(lib) => git_version_library(lib, &target, &summary),
                 None => Snapshot::NotARepo,
             };
-            Ok((done, lint, retired, pre, snapshot))
+            let changed = match (&snapshot, library_root.as_deref()) {
+                (Snapshot::Committed(sha), Some(lib)) => changed_lines(lib, sha, &library_rel(lib, &target)),
+                (Snapshot::NothingToCommit, _) => Some("no change".to_string()),
+                _ => None,
+            };
+            Ok(Written { done, lint, retired, pre, outside, snapshot, changed })
         })
         .await
         .context("CL write task panicked")??;
-        let (done, lint, retired, pre, snapshot) = outcome;
+        let Written { done, lint, retired, pre, outside, snapshot, changed } = outcome;
         self.record_retired_terms(&session_id, &project, retired, Some(&file_path)).await;
         self.record_cl_write(&session_id, &project, &file_path).await;
         let library = self
@@ -380,6 +442,12 @@ impl SignalingBridge {
                  replaced, {old_len} → {new_len} bytes"
             ),
         };
+        // Which lines the write changed, from its own commit (feedback #86: a
+        // session co-writing a file ran a comparison script after each of
+        // three edits to prove it had touched only its half).
+        if let Some(changed) = changed {
+            msg.push_str(&format!(" — {changed}"));
+        }
         // The snapshot's OUTCOME rides the reply (feedback #27/#28, week 35): an
         // agent recorded `git log -1 -- <path>` as its rollback point before a
         // full-file replace, and that commit was a generation stale because a
@@ -392,6 +460,17 @@ impl SignalingBridge {
                  this write"
             )),
             _ => {} // a failed pre-snapshot refused the write above
+        }
+        match &outside {
+            Some(Snapshot::Committed(sha)) => msg.push_str(&format!(
+                " — other library files had changes made outside an agent write (the user's, \
+                 or a bare Write); committed them first, apart from this write, as {sha}"
+            )),
+            Some(Snapshot::Failed(why)) => msg.push_str(&format!(
+                " — ⚠ other library files have changes made outside an agent write, and \
+                 committing them failed ({why}): they are on disk, unversioned"
+            )),
+            _ => {}
         }
         msg.push_str(&format!(" — {}", snapshot.describe()));
         if let Some(warning) = concurrent {
@@ -972,13 +1051,9 @@ fn library_git(library_root: &Path, args: &[&str]) -> std::io::Result<std::proce
 /// along under this message. `None` when there is nothing to do.
 fn snapshot_unversioned(library_root: &Path, target: &Path) -> Option<Snapshot> {
     if !library_root.join(".git").exists() {
-        return None; // the first write's `git init` sweeps everything in
+        return None; // nothing was ever versioned, so nothing can be stale
     }
-    let root = library_root.canonicalize().unwrap_or_else(|_| library_root.to_path_buf());
-    let rel = target
-        .strip_prefix(&root)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| target.to_string_lossy().to_string());
+    let rel = library_rel(library_root, target);
     let git = |args: &[&str]| library_git(library_root, args);
     let status = git(&["status", "--porcelain", "--", &rel]).ok()?;
     if !status.status.success() || status.stdout.is_empty() {
@@ -1011,18 +1086,101 @@ fn snapshot_unversioned(library_root: &Path, target: &Path) -> Option<Snapshot> 
     }
 }
 
-fn git_version_library(library_root: &Path, summary: &str) -> Snapshot {
+/// `target`'s path inside the library, `/`-separated — the form git takes.
+fn library_rel(library_root: &Path, target: &Path) -> String {
+    let root = library_root.canonicalize().unwrap_or_else(|_| library_root.to_path_buf());
+    target
+        .strip_prefix(&root)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| target.to_string_lossy().to_string())
+}
+
+/// Commit every pending change in the library, APART from the write about to
+/// happen (feedback #65): until s-3158eb35 each snapshot was `git add -A`
+/// under the writing agent's name, so the user's own edit of one file rode
+/// another session's snapshot of another (`dcd290b`, `163f6a8`), and `git log`
+/// could not say who changed what. Now this commit carries them, named for
+/// what they are, and the write's own commit carries the write alone. Nothing
+/// is dropped from the backup: this is the only thing that versions (and so
+/// pushes) edits made outside a CL write.
+///
+/// A library that is not a repository yet is initialised here, so its first
+/// commit is what was already there, not the first agent write. `None` when
+/// there is nothing pending.
+fn snapshot_outside_changes(library_root: &Path) -> Option<Snapshot> {
     let git = |args: &[&str]| library_git(library_root, args);
     if !library_root.join(".git").exists() {
         match git(&["init", "-q"]) {
             Ok(out) if out.status.success() => {}
             other => {
                 tracing::warn!(?other, root = %library_root.display(), "CL git init failed; library writes are unversioned");
-                return Snapshot::Failed("git init failed".into());
+                return Some(Snapshot::Failed("git init failed".into()));
             }
         }
     }
     match git(&["add", "-A"]) {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            return Some(Snapshot::Failed(format!(
+                "git add: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )))
+        }
+        Err(e) => return Some(Snapshot::Failed(e.to_string())),
+    }
+    let names = match git(&["-c", "core.quotepath=off", "diff", "--cached", "--name-only"]) {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>(),
+        Ok(out) => {
+            return Some(Snapshot::Failed(format!(
+                "git diff --cached: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )))
+        }
+        Err(e) => return Some(Snapshot::Failed(e.to_string())),
+    };
+    if names.is_empty() {
+        return None;
+    }
+    const LISTED: usize = 20;
+    let subject = format!("cl: {} file(s) changed outside an agent write", names.len());
+    let mut body = names.iter().take(LISTED).cloned().collect::<Vec<_>>().join("\n");
+    if names.len() > LISTED {
+        body.push_str(&format!("\n…and {} more", names.len() - LISTED));
+    }
+    match git(&[
+        "-c", "user.name=bot-hq", "-c", "user.email=bot-hq@local",
+        "commit", "-q", "-m", &subject, "-m", &body,
+    ]) {
+        Ok(out) if out.status.success() => Some(match git(&["rev-parse", "--short=7", "HEAD"]) {
+            Ok(rev) if rev.status.success() => {
+                Snapshot::Committed(String::from_utf8_lossy(&rev.stdout).trim().to_string())
+            }
+            _ => Snapshot::Committed("(sha unreadable)".into()),
+        }),
+        Ok(out) => Some(Snapshot::Failed(format!(
+            "git commit: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))),
+        Err(e) => Some(Snapshot::Failed(e.to_string())),
+    }
+}
+
+/// Commit `target` — and only `target` — with `summary` (feedback #65: a
+/// snapshot holds the write it names and nothing else; every other pending
+/// change was committed apart by [`snapshot_outside_changes`] just before).
+/// `git commit -- <path>` records that path's content and ignores anything
+/// else in the index, so a half-finished outside commit cannot ride along.
+fn git_version_library(library_root: &Path, target: &Path, summary: &str) -> Snapshot {
+    let git = |args: &[&str]| library_git(library_root, args);
+    if !library_root.join(".git").exists() {
+        return Snapshot::Failed("the library is not a git repository".into());
+    }
+    let rel = library_rel(library_root, target);
+    match git(&["add", "--", &rel]) {
         Ok(out) if out.status.success() => {}
         other => {
             tracing::warn!(?other, "CL git add failed; skipping version commit");
@@ -1032,7 +1190,7 @@ fn git_version_library(library_root: &Path, summary: &str) -> Snapshot {
     // "Nothing to commit" is decided HERE, by git itself — not inferred from a
     // failed commit, which would report a lock clash or a hook refusal as "the
     // library already held this content" (feedback #27/#28).
-    match git(&["diff", "--cached", "--quiet"]) {
+    match git(&["diff", "--cached", "--quiet", "--", &rel]) {
         Ok(out) if out.status.success() => return Snapshot::NothingToCommit,
         Ok(out) if out.status.code() == Some(1) => {} // staged changes — commit them
         other => {
@@ -1049,6 +1207,8 @@ fn git_version_library(library_root: &Path, summary: &str) -> Snapshot {
         "-q",
         "-m",
         summary,
+        "--",
+        &rel,
     ]) {
         Ok(out) if out.status.success() => match git(&["rev-parse", "--short=7", "HEAD"]) {
             Ok(rev) if rev.status.success() => {
@@ -1100,6 +1260,83 @@ impl Snapshot {
                 .to_string(),
         }
     }
+}
+
+/// Which lines the commit `sha` changed in `rel`, for the reply (feedback
+/// #86): the new-side line ranges of its hunks — at most four, then "and N
+/// more" — and the +/− counts. A range like `after 75` is a pure deletion
+/// following that line. `None` when git cannot say (the reply then just omits
+/// it; the snapshot line already says what was versioned).
+fn changed_lines(library_root: &Path, sha: &str, rel: &str) -> Option<String> {
+    let git = |args: &[&str]| library_git(library_root, args).ok().filter(|o| o.status.success());
+    let numstat = git(&["show", "--format=", "--numstat", "--no-renames", sha, "--", rel])?;
+    let numstat = String::from_utf8_lossy(&numstat.stdout).to_string();
+    let mut fields = numstat.lines().next()?.split('\t');
+    let (added, removed) = (fields.next()?, fields.next()?);
+    if added == "-" {
+        return Some("a binary change".to_string());
+    }
+    let hunks = git(&["show", "--format=", "-U0", "--no-color", "--no-ext-diff", sha, "--", rel])?;
+    let ranges: Vec<String> = String::from_utf8_lossy(&hunks.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("@@ -"))
+        .filter_map(|l| {
+            // `@@ -a[,b] +c[,d] @@`: the new side is `c[,d]`, d defaulting to 1.
+            let new_side = l.split(' ').nth(1)?.strip_prefix('+')?;
+            let (start, len) = match new_side.split_once(',') {
+                Some((s, n)) => (s.parse::<u64>().ok()?, n.parse::<u64>().ok()?),
+                None => (new_side.parse::<u64>().ok()?, 1),
+            };
+            Some(match len {
+                0 => format!("after {start}"),
+                1 => start.to_string(),
+                n => format!("{start}–{}", start + n - 1),
+            })
+        })
+        .collect();
+    if ranges.is_empty() {
+        return Some("no change".to_string());
+    }
+    const SHOWN: usize = 4;
+    let mut listed = ranges.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
+    if ranges.len() > SHOWN {
+        listed.push_str(&format!(" and {} more", ranges.len() - SHOWN));
+    }
+    let noun = if ranges.len() == 1 && !listed.contains('–') && !listed.starts_with("after") {
+        "line"
+    } else {
+        "lines"
+    };
+    Some(format!("{noun} {listed} (+{added} −{removed})"))
+}
+
+/// The app's own save of a CL file — the Library tab and a session's Context
+/// subtab both save through `tauri_cmd::cl::cl_write_file` (feedback #65c).
+///
+/// Under the library lock, so a save cannot land between an agent write's
+/// snapshot and its write and be overwritten unversioned (EYES, s-3158eb35).
+/// What was on disk is committed first if git never saw it, and the save is
+/// committed alone as `(user)`, so `git log` tells the user's edits from an
+/// agent's. Git failures are logged and never refuse the save: the user saw
+/// the file in the editor and chose to save it. A library that is not a
+/// repository is written without a snapshot (the next agent write initialises
+/// it and versions everything).
+pub(crate) fn save_user_edit(library_root: Option<&Path>, target: &Path, content: &str) -> Result<()> {
+    let _library_git = LIBRARY_GIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let lib = library_root.filter(|lib| lib.join(".git").exists());
+    if let Some(lib) = lib {
+        if let Some(Snapshot::Failed(why)) = snapshot_unversioned(lib, target) {
+            tracing::warn!(%why, path = %target.display(), "CL save: could not snapshot the content it replaces");
+        }
+    }
+    atomic_write(target, content)?;
+    if let Some(lib) = lib {
+        let summary = format!("cl: {} (user)", library_rel(lib, target));
+        if let Snapshot::Failed(why) = git_version_library(lib, target, &summary) {
+            tracing::warn!(%why, path = %target.display(), "CL save: snapshot failed; the save is on disk, unversioned");
+        }
+    }
+    Ok(())
 }
 
 /// bot-hq-owned `_globals` paths agents must not write: an agent rewriting
@@ -2200,7 +2437,10 @@ mod tests {
             .unwrap();
         let log = String::from_utf8_lossy(&log.stdout).to_string();
         assert!(log.lines().count() >= 2, "one commit per write, got:\n{log}");
-        assert!(log.contains("cl: bot-hq/draft.md (hands)"), "got:\n{log}");
+        // Feedback #65/#86: the subject names the session and the kind of
+        // write, so `git log` says who wrote what from which session.
+        assert!(log.contains("cl: bot-hq/draft.md (hands, s1, create)"), "got:\n{log}");
+        assert!(log.contains("cl: bot-hq/draft.md (hands, s1, replace)"), "got:\n{log}");
 
         // The destroyed-draft scenario is now recoverable.
         let old = std::process::Command::new("git")
@@ -2454,4 +2694,82 @@ mod tests {
         assert!(bridge.staleness_sweep("s1").await.is_none());
     }
 
+    // --- feedback #65 #86: what a snapshot holds -------------------------
+
+    /// `git` in a test library, stdout as text.
+    fn git_out(lib: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").arg("-C").arg(lib).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    async fn put(bridge: &Arc<SignalingBridge>, session: &str, file: &str, body: &str, append: bool) -> Result<String> {
+        bridge
+            .cl_write_file(session.into(), "hands".into(), "bot-hq".into(), file.into(), body.into(), append, true)
+            .await
+    }
+
+    /// Feedback #65(a): a snapshot holds the write it names and nothing else.
+    /// Another file's pending change — the user's edit, a bare Write — is
+    /// committed first, apart, so it is versioned (and pushed) without riding
+    /// this session's snapshot, and the write's own sha is HEAD.
+    #[tokio::test]
+    async fn each_write_is_committed_alone_and_other_changes_go_first() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let lib = tmp.path().join("library");
+        put(&bridge, "s1", "notes.md", "first\n", false).await.unwrap();
+        std::fs::write(lib.join("projects/bot-hq/other.md"), "the user's own edit\n").unwrap();
+        std::fs::write(lib.join("loose.md"), "a root-level file\n").unwrap();
+
+        let reply = put(&bridge, "s1", "notes.md", "second\n", false).await.unwrap();
+        let subjects = git_out(&lib, &["log", "-2", "--format=%s"]);
+        assert_eq!(
+            subjects,
+            "cl: bot-hq/notes.md (hands, s1, replace)\ncl: 2 file(s) changed outside an agent write",
+            "the write is HEAD; the other changes are the commit before it"
+        );
+        assert_eq!(git_out(&lib, &["show", "--format=", "--name-only", "HEAD"]), "projects/bot-hq/notes.md");
+        assert_eq!(
+            git_out(&lib, &["show", "--format=", "--name-only", "HEAD~1"]),
+            "loose.md\nprojects/bot-hq/other.md"
+        );
+        let head = git_out(&lib, &["rev-parse", "--short=7", "HEAD"]);
+        assert!(reply.contains(&format!("snapshot {head}")), "the rollback point is the write's own commit: {reply}");
+        assert!(reply.contains("committed them first, apart from this write"), "{reply}");
+        assert_eq!(git_out(&lib, &["status", "--porcelain"]), "", "nothing left unversioned");
+    }
+
+    /// Feedback #86: the reply says which lines the write changed, from its
+    /// own commit — and "no change" when there was none.
+    #[tokio::test]
+    async fn a_writes_reply_says_which_lines_it_changed() {
+        let (bridge, _storage, _tmp) = bridge_with_data_dir().await;
+        let created = put(&bridge, "s1", "notes.md", "a\nb\nc\nd\ne\n", false).await.unwrap();
+        assert!(created.contains(" — lines 1–5 (+5 −0) — "), "{created}");
+        let edited = bridge
+            .cl_edit_file("s1".into(), "hands".into(), "bot-hq".into(), "notes.md".into(), "c\n".into(), "C\n".into(), 1, false)
+            .await
+            .unwrap();
+        assert!(edited.contains(" — line 3 (+1 −1) — "), "{edited}");
+        // An append joins after a blank line: lines 6 (blank), 7 and 8.
+        let appended = put(&bridge, "s1", "notes.md", "f\ng\n", true).await.unwrap();
+        assert!(appended.contains(" — lines 6–8 (+3 −0) — "), "{appended}");
+        let same = put(&bridge, "s1", "notes.md", "a\nb\nC\nd\ne\n\nf\ng\n", false).await.unwrap();
+        assert!(same.contains(" — no change — "), "{same}");
+    }
+
+    /// Feedback #65(c), EYES (s-3158eb35): the app's own save is committed
+    /// alone as `(user)`, under the library lock.
+    #[tokio::test]
+    async fn the_apps_own_save_is_committed_as_the_user() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let lib = tmp.path().join("library");
+        put(&bridge, "s1", "notes.md", "- agent line\n", false).await.unwrap();
+        let target = lib.join("projects/bot-hq/notes.md").canonicalize().unwrap();
+        bridge
+            .cl_save_user_edit_blocking(&target, "- agent line\n- the user's line\n")
+            .unwrap();
+        assert_eq!(git_out(&lib, &["log", "-1", "--format=%s"]), "cl: projects/bot-hq/notes.md (user)");
+        assert_eq!(git_out(&lib, &["show", "--format=", "--name-only", "HEAD"]), "projects/bot-hq/notes.md");
+    }
 }

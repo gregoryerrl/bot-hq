@@ -1410,6 +1410,23 @@ human-review-queue predecessor — migrations 0025→0035 — was removed
 friction bought nothing. The user still edits any CL file in the
 Context Library tab.)
 
+**The library is one git repository, and each write is its own commit**
+(`bridge/cl_write.rs`, feedback #65 #86). One process-wide lock,
+`LIBRARY_GIT_LOCK`, covers a write from its first read of the file to its last
+commit, so two writes never interleave. Under it, in order:
+- the target's content git never saw (a bare `Write`) is committed alone;
+- every OTHER pending change is committed apart, as `cl: N file(s) changed
+  outside an agent write` (a fresh library is `git init`-ed here);
+- the write;
+- the write's own commit, of that path only, with the subject
+  `cl: <project>/<file> (<agent>, <session>, <kind>)`, kind being `create`,
+  `replace`, `append` or `edit`.
+
+The reply names that commit's sha as the rollback point and which lines it
+changed (`lines 40–52 (+14 −3)`, or `no change`). The app's own saves
+(Library tab, a session's Context subtab) take the same lock and commit as
+`cl: <path> (user)`.
+
 **First-run init:** `templates/cl/` is baked into the binary. On first
 start (no `version.txt` in the data dir), bot-hq seeds the templates
 under `<data_dir>/library/`. A pre-`library/` install (root-level CL, no
