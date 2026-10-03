@@ -47,7 +47,9 @@ enum Done {
 }
 
 impl Done {
-    /// The kind of write, as the snapshot subject records it.
+    /// The kind of write, as the snapshot subject records it. `create` and
+    /// `replace` showed the writer the whole file; `append` and `edit` did not
+    /// — which is what the replace guard's base turns on ([`dropped_lines`]).
     fn kind(&self) -> &'static str {
         match self {
             Done::Created => "create",
@@ -90,6 +92,26 @@ impl SignalingBridge {
         append: bool,
         confirm_shrink: bool,
     ) -> Result<String> {
+        self.cl_write_file_with(session_id, agent, project, file_path, content, append, confirm_shrink, false)
+            .await
+    }
+
+    /// [`Self::cl_write_file`] with the replace guard's override:
+    /// `confirm_overwrite` lets a replace drop lines another writer added
+    /// since this session last wrote the whole file (feedback #64 — see
+    /// [`dropped_lines`]).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn cl_write_file_with(
+        self: &Arc<Self>,
+        session_id: String,
+        agent: String,
+        project: String,
+        file_path: String,
+        content: String,
+        append: bool,
+        confirm_shrink: bool,
+        confirm_overwrite: bool,
+    ) -> Result<String> {
         // **F10: what an AGENT writes to the CL is redacted** (the user's pick
         // `c2ca371d`), so a secret an agent writes never reaches the file, the
         // library's git history or its remote. On an append only the new text
@@ -103,7 +125,7 @@ impl SignalingBridge {
             WriteOp::Replace(content)
         };
         let mut msg = self
-            .write_cl(session_id, agent, project, file_path, op, confirm_shrink)
+            .write_cl(session_id, agent, project, file_path, op, confirm_shrink, confirm_overwrite)
             .await?;
         if redacted > 0 {
             msg.push_str(&crate::policy::secret_scan::redaction_note(redacted));
@@ -148,8 +170,10 @@ impl SignalingBridge {
             new: new_string,
             expect: expect_occurrences,
         };
+        // An edit names the text it changes, so it cannot drop a line it did
+        // not name: the replace guard is not its business.
         let mut msg = self
-            .write_cl(session_id, agent, project, file_path, op, confirm_shrink)
+            .write_cl(session_id, agent, project, file_path, op, confirm_shrink, false)
             .await?;
         if redacted > 0 {
             msg.push_str(&crate::policy::secret_scan::redaction_note(redacted));
@@ -183,6 +207,7 @@ impl SignalingBridge {
         file_path: String,
         op: WriteOp,
         confirm_shrink: bool,
+        confirm_overwrite: bool,
     ) -> Result<String> {
         if project.trim().is_empty() {
             anyhow::bail!("project is required");
@@ -216,6 +241,9 @@ impl SignalingBridge {
         // that can't see a diary in search must not be able to overwrite it by
         // guessing its path. The Library UI edits bypass this (different path).
         let storage = self.storage.lock().await.clone();
+        // When this session started: the replace guard's base when the session
+        // never wrote the whole file (`dropped_lines`).
+        let mut session_start = None;
         if let Some(storage) = storage {
             if let Ok(Some(row)) = storage.get_cl_index(&project, &file_path).await {
                 if !row.agent_visible {
@@ -225,6 +253,12 @@ impl SignalingBridge {
                     );
                 }
             }
+            session_start = storage
+                .get_session(&session_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|s| s.created_at);
         }
         let project_root = self
             .cl_project_root(&project)
@@ -242,7 +276,8 @@ impl SignalingBridge {
             // since s-3158eb35 the read is under it too). The library is shared
             // by every project's sessions: a body read BEFORE the lock let an
             // append or an edit computed from it overwrite a change another
-            // write landed in between.
+            // write landed in between, and the replace guard must see the file
+            // as it is when the write happens, not as it was a moment before.
             let _library_git = LIBRARY_GIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
             let root_real = project_root.canonicalize().with_context(|| {
                 format!("canonicalizing CL project root {}", project_root.display())
@@ -379,10 +414,26 @@ impl SignalingBridge {
             // failure is reported, never a refusal — this write touches none
             // of those files.
             let outside = library_root.as_deref().and_then(snapshot_outside_changes);
+            // The replace guard (feedback #64): a replace that would drop
+            // lines another writer added since this session last saw the
+            // whole file is refused, unless the caller confirms it.
+            if let (Done::Replaced, false, Some(lib)) = (&done, confirm_overwrite, library_root.as_deref()) {
+                let dropped = dropped_lines(
+                    lib,
+                    &library_rel(lib, &target),
+                    &writer.1,
+                    session_start.as_deref(),
+                    &final_content,
+                );
+                if !dropped.is_empty() {
+                    anyhow::bail!("{}", replace_guard_refusal(&fp, &dropped));
+                }
+            }
             atomic_write(&target, &final_content)?;
             // The snapshot names the session and the kind of write (feedback
             // #65, #86): `git log` answers "who wrote this line, from which
-            // session".
+            // session", and the replace guard reads the kind back to find
+            // this session's last FULL write of the file.
             let summary = format!(
                 "cl: {proj}/{fp} ({}, {}, {})",
                 writer.0,
@@ -1310,6 +1361,238 @@ fn changed_lines(library_root: &Path, sha: &str, rel: &str) -> Option<String> {
     Some(format!("{noun} {listed} (+{added} −{removed})"))
 }
 
+/// Who a library commit's subject says made it — the replace guard's
+/// attribution, read back from the subjects this file writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Writer {
+    /// `cl: <path> (<agent>, <session>, <kind>)` — an agent write since
+    /// s-3158eb35. `full` = the kind was `create` or `replace`.
+    Session { agent: String, session: String, full: bool },
+    /// `cl: <path> (<agent>)` — an agent write from before the session was
+    /// recorded.
+    Agent(String),
+    /// `cl: <path> (user)` — the app's own save.
+    User,
+    /// Content committed by [`snapshot_unversioned`] or
+    /// [`snapshot_outside_changes`]: a bare Write, a script, or an editor
+    /// outside the app.
+    Outside,
+    /// Anything else — a commit made by hand in the library.
+    Other(String),
+}
+
+impl Writer {
+    fn parse(subject: &str) -> Self {
+        if subject.ends_with("(unversioned content found before a write)")
+            || subject.ends_with("changed outside an agent write")
+        {
+            return Writer::Outside;
+        }
+        if subject.starts_with("cl: ") && subject.ends_with(" (user)") {
+            return Writer::User;
+        }
+        let inner = subject
+            .strip_prefix("cl: ")
+            .and_then(|s| s.strip_suffix(')'))
+            .and_then(|s| s.rsplit_once(" (").map(|(_, inner)| inner));
+        match inner.map(|i| i.split(", ").collect::<Vec<_>>()).as_deref() {
+            Some([agent, session, kind]) => Writer::Session {
+                agent: agent.to_string(),
+                session: session.to_string(),
+                full: matches!(*kind, "create" | "replace"),
+            },
+            Some([agent]) => Writer::Agent(agent.to_string()),
+            _ => Writer::Other(subject.to_string()),
+        }
+    }
+
+    fn session(&self) -> Option<&str> {
+        match self {
+            Writer::Session { session, .. } => Some(session),
+            _ => None,
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Writer::Session { agent, session, .. } => format!("{agent}, {session}"),
+            Writer::Agent(agent) => format!("{agent} (session not recorded)"),
+            Writer::User => "the user, saved in the app".to_string(),
+            Writer::Outside => "an edit outside the CL write tools".to_string(),
+            Writer::Other(subject) => format!("commit \"{subject}\""),
+        }
+    }
+}
+
+/// A line another writer added that a replace would drop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DroppedLine {
+    /// 1-based, in the file as it is now.
+    line: usize,
+    text: String,
+    writer: String,
+    commit: String,
+}
+
+/// The replace guard (feedback #64): the lines of `rel` that another writer
+/// added since THIS session last saw the whole file, which `new_body` would
+/// drop.
+///
+/// The incident: a session replaced `_globals/eod-tldr.md` to redraft its half
+/// of an EOD, and the replace silently deleted the other session's half,
+/// written 33 minutes earlier. The shrink guard could not see it (2.5 KB of a
+/// 12 KB file), and that content was already versioned, so nothing else could.
+///
+/// **The base is this session's last FULL write** — a `create` or a `replace`,
+/// read back from the snapshot subjects — because bot-hq never sees an agent
+/// READ a library file, and an append or an edit never showed the writer the
+/// whole file (EYES, s-3158eb35: X appends to its half after Y added lines,
+/// then replaces the file without them — with the append as the base, Y's
+/// lines would not count). With no full write, the base is the session's
+/// start. `git blame` from that base marks every line added after it.
+///
+/// A line counts only if it came after the base, is not this session's own,
+/// is not blank or a bare separator, and appears in no line of the new body
+/// (trimmed, whole-line equality — `- done` is inside many lines). Fail-open:
+/// no repository, a git failure or no base → nothing counts, and the write
+/// proceeds as it did before the guard existed.
+///
+/// **Against the session-start base, content committed as "outside" does not
+/// count.** Its commit date is when bot-hq first VERSIONED it — at this or
+/// another write — not when it was written: an edit made in an external
+/// editor last week, or a library that had never been a repository, would
+/// otherwise read as written during this session. Against a full-write base
+/// it does count: the file was committed with this session's content at that
+/// write, so anything that changed it since happened after.
+fn dropped_lines(
+    library_root: &Path,
+    rel: &str,
+    session_id: &str,
+    session_start: Option<&str>,
+    new_body: &str,
+) -> Vec<DroppedLine> {
+    let git = |args: &[&str]| library_git(library_root, args).ok().filter(|o| o.status.success());
+    if !library_root.join(".git").exists() {
+        return Vec::new();
+    }
+    let Some(log) = git(&["log", "--format=%H%x09%s", "--", rel]) else {
+        return Vec::new();
+    };
+    let log = String::from_utf8_lossy(&log.stdout).to_string();
+    let base = log.lines().find_map(|line| {
+        let (sha, subject) = line.split_once('\t')?;
+        match Writer::parse(subject) {
+            Writer::Session { session, full: true, .. } if session == session_id => Some(sha.to_string()),
+            _ => None,
+        }
+    });
+    // Both bases become a commit, and the blame is `<base>..HEAD`: the lines
+    // that range did not touch are `boundary`. For the session-start base it
+    // is the library's newest commit at or before the start, found with the
+    // start as a Unix epoch (`--before=@<seconds>`): git's own date parser
+    // reads an ISO date it cannot place as nothing at all (year 2999 → no
+    // commit found), and an empty answer here means "every line counts". No
+    // commit that old means the whole history is newer than the session, so
+    // the blame is of HEAD alone, with `--root` — git otherwise marks the
+    // repository's first commit as a boundary whatever its date. Only there:
+    // `--root` also overrides a range's own boundary when the base IS that
+    // first commit, which would count every line of `<root>..HEAD`.
+    let blame = match (&base, session_start) {
+        (Some(sha), _) => git(&["blame", "--porcelain", &format!("{sha}..HEAD"), "--", rel]),
+        (None, Some(start)) => {
+            let Ok(start) = chrono::DateTime::parse_from_rfc3339(start) else {
+                return Vec::new();
+            };
+            let before = format!("--before=@{}", start.timestamp());
+            let Some(found) = git(&["rev-list", "-1", &before, "HEAD"]) else {
+                return Vec::new();
+            };
+            match String::from_utf8_lossy(&found.stdout).trim() {
+                "" => git(&["blame", "--porcelain", "--root", "HEAD", "--", rel]),
+                sha => git(&["blame", "--porcelain", &format!("{sha}..HEAD"), "--", rel]),
+            }
+        }
+        (None, None) => return Vec::new(),
+    };
+    let Some(blame) = blame else {
+        return Vec::new();
+    };
+    let keep: std::collections::HashSet<&str> = new_body.lines().map(str::trim).collect();
+    let mut subjects: std::collections::HashMap<String, (String, bool)> = Default::default();
+    let mut dropped = Vec::new();
+    let mut current: Option<(String, usize)> = None;
+    for line in String::from_utf8_lossy(&blame.stdout).lines() {
+        if let Some(text) = line.strip_prefix('\t') {
+            let Some((sha, line_no)) = current.take() else { continue };
+            let Some((subject, boundary)) = subjects.get(&sha) else { continue };
+            let t = text.trim();
+            let writer = Writer::parse(subject);
+            if *boundary
+                || writer.session() == Some(session_id)
+                || (base.is_none() && writer == Writer::Outside)
+                || t.is_empty()
+                || t.chars().all(|c| "-=_*#~|:+.` ".contains(c))
+                || keep.contains(t)
+            {
+                continue;
+            }
+            dropped.push(DroppedLine {
+                line: line_no,
+                text: t.to_string(),
+                writer: writer.describe(),
+                commit: sha.chars().take(7).collect(),
+            });
+            continue;
+        }
+        let mut words = line.split(' ');
+        let first = words.next().unwrap_or("");
+        if first.len() == 40 && first.bytes().all(|b| b.is_ascii_hexdigit()) {
+            // `<sha> <orig line> <final line> [<lines in group>]`
+            let final_line = words.nth(1).and_then(|n| n.parse().ok()).unwrap_or(0);
+            subjects.entry(first.to_string()).or_insert_with(|| (String::new(), false));
+            current = Some((first.to_string(), final_line));
+        } else if let Some((sha, _)) = &current {
+            if let Some(subject) = line.strip_prefix("summary ") {
+                subjects.entry(sha.clone()).or_default().0 = subject.to_string();
+            } else if line == "boundary" {
+                subjects.entry(sha.clone()).or_default().1 = true;
+            }
+        }
+    }
+    dropped
+}
+
+/// The replace guard's refusal: which lines, whose, and the three ways on.
+fn replace_guard_refusal(file_path: &str, dropped: &[DroppedLine]) -> String {
+    const LISTED: usize = 8;
+    let mut out = format!(
+        "refused: this replace would drop {} line(s) that another writer added to '{file_path}' \
+         after this session last wrote the whole file (or, if it never did, after it started) — \
+         the library's git history says:\n",
+        dropped.len()
+    );
+    for d in dropped.iter().take(LISTED) {
+        let mut text = d.text.clone();
+        if text.len() > 120 {
+            let mut end = 120;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text = format!("{}…", &text[..end]);
+        }
+        out.push_str(&format!("  line {}: \"{text}\" — {}, {}\n", d.line, d.writer, d.commit));
+    }
+    if dropped.len() > LISTED {
+        out.push_str(&format!("  …and {} more\n", dropped.len() - LISTED));
+    }
+    out.push_str(
+        "Nothing was written. Re-read the file and keep those lines; or change only your part \
+         with cl_edit_file; or, if dropping them is intended, repeat the write with \
+         confirm_overwrite: true.",
+    );
+    out
+}
+
 /// The app's own save of a CL file — the Library tab and a session's Context
 /// subtab both save through `tauri_cmd::cl::cl_write_file` (feedback #65c).
 ///
@@ -1638,12 +1921,15 @@ mod tests {
         let (bridge, _storage, tmp) = bridge_with_data_dir().await;
         let lib = tmp.path().join("library");
         let path = lib.join("projects/bot-hq/notes.md");
+        // `confirm_overwrite`: the out-of-band body is another writer's lines
+        // after this session's full write, which the replace guard protects
+        // (its own tests below); this test is about the pre-write snapshot.
         let write = |body: &str| {
             let bridge = bridge.clone();
             let body = body.to_string();
             async move {
                 bridge
-                    .cl_write_file(
+                    .cl_write_file_with(
                         "s1".to_string(),
                         "hands".to_string(),
                         "bot-hq".to_string(),
@@ -1651,6 +1937,7 @@ mod tests {
                         body,
                         false,
                         false,
+                        true,
                     )
                     .await
                     .unwrap()
@@ -2694,7 +2981,7 @@ mod tests {
         assert!(bridge.staleness_sweep("s1").await.is_none());
     }
 
-    // --- feedback #65 #86: what a snapshot holds -------------------------
+    // --- feedback #64 #65 #86: what a snapshot holds, and the replace guard --
 
     /// `git` in a test library, stdout as text.
     fn git_out(lib: &std::path::Path, args: &[&str]) -> String {
@@ -2758,10 +3045,102 @@ mod tests {
         assert!(same.contains(" — no change — "), "{same}");
     }
 
-    /// Feedback #65(c), EYES (s-3158eb35): the app's own save is committed
-    /// alone as `(user)`, under the library lock.
+    /// Feedback #64, the incident's shape: another session added its half;
+    /// this session's replace drops it. Refused, nothing written, the lines
+    /// and their writer named — and the same replace goes through when it
+    /// keeps them, or when the caller confirms the drop.
     #[tokio::test]
-    async fn the_apps_own_save_is_committed_as_the_user() {
+    async fn a_replace_that_drops_another_sessions_lines_is_refused() {
+        let (bridge, storage, tmp) = bridge_with_data_dir().await;
+        storage.create_session("s-b", "exporter", None).await.unwrap();
+        let path = tmp.path().join("library/projects/bot-hq/eod.md");
+        put(&bridge, "s1", "eod.md", "# EOD\n\n## mine\n- shipped A\n", false).await.unwrap();
+        put(&bridge, "s-b", "eod.md", "## theirs\n- exporter shipped X\n---\n", true).await.unwrap();
+
+        let err = put(&bridge, "s1", "eod.md", "# EOD\n\n## mine\n- shipped A, and B\n", false)
+            .await
+            .expect_err("the replace drops the other session's half");
+        let err = err.to_string();
+        assert!(err.contains("drop 2 line(s)"), "the heading and the bullet; not the separator: {err}");
+        assert!(err.contains("\"- exporter shipped X\" — hands, s-b"), "{err}");
+        assert!(err.contains("confirm_overwrite: true"), "{err}");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("exporter shipped X"), "nothing was written");
+
+        let kept = "# EOD\n\n## mine\n- shipped A, and B\n\n## theirs\n- exporter shipped X\n";
+        put(&bridge, "s1", "eod.md", kept, false).await.expect("keeping their lines passes");
+        bridge
+            .cl_write_file_with("s1".into(), "hands".into(), "bot-hq".into(), "eod.md".into(), "# EOD, mine only\n".into(), false, true, true)
+            .await
+            .expect("a confirmed drop passes");
+    }
+
+    /// EYES (s-3158eb35): the base is this session's last FULL write. An
+    /// append never showed the session the whole file, so another session's
+    /// lines that landed before it still count.
+    #[tokio::test]
+    async fn the_guard_base_is_the_last_full_write_not_an_append() {
+        let (bridge, storage, _tmp) = bridge_with_data_dir().await;
+        storage.create_session("s-b", "exporter", None).await.unwrap();
+        put(&bridge, "s1", "eod.md", "- mine\n", false).await.unwrap();
+        put(&bridge, "s-b", "eod.md", "- theirs\n", true).await.unwrap();
+        put(&bridge, "s1", "eod.md", "- mine, two\n", true).await.unwrap();
+        let err = put(&bridge, "s1", "eod.md", "- mine\n- mine, two\n", false)
+            .await
+            .expect_err("their line came after the last full write");
+        assert!(err.to_string().contains("\"- theirs\" — hands, s-b"), "{err}");
+    }
+
+    /// What does NOT count: this session's own lines (any kind of write), and
+    /// lines that were already there at its last full write.
+    #[tokio::test]
+    async fn the_guard_passes_own_lines_and_lines_older_than_the_base() {
+        let (bridge, storage, _tmp) = bridge_with_data_dir().await;
+        storage.create_session("s-b", "exporter", None).await.unwrap();
+        put(&bridge, "s-b", "shared.md", "- an old line of theirs\n", false).await.unwrap();
+        // s1's full write keeps it, so it is older than s1's base from here on.
+        put(&bridge, "s1", "shared.md", "- an old line of theirs\n- mine\n", false).await.unwrap();
+        put(&bridge, "s1", "shared.md", "- mine, appended\n", true).await.unwrap();
+        put(&bridge, "s1", "shared.md", "- all new\n", false)
+            .await
+            .expect("own lines, and a line older than the base, may go");
+    }
+
+    /// The session-start base, driven directly: a session that never wrote
+    /// the whole file counts what other writers added after it started —
+    /// except content that was only VERSIONED since (an "outside" commit's
+    /// date is not when it was written).
+    #[tokio::test]
+    async fn the_guard_uses_the_session_start_when_there_is_no_full_write() {
+        let (bridge, storage, tmp) = bridge_with_data_dir().await;
+        storage.create_session("s-b", "exporter", None).await.unwrap();
+        let lib = tmp.path().join("library");
+        put(&bridge, "s-b", "shared.md", "- theirs\n", false).await.unwrap();
+        let rel = "projects/bot-hq/shared.md";
+        let count = |start: Option<&str>| dropped_lines(&lib, rel, "s1", start, "- mine\n").len();
+        assert_eq!(count(Some("2000-01-01T00:00:00.000Z")), 1, "added after a start long ago");
+        assert_eq!(count(Some("2999-01-01T00:00:00.000Z")), 0, "nothing after a start to come");
+        assert_eq!(count(None), 0, "no base, no guard");
+        assert_eq!(dropped_lines(&lib, rel, "s1", Some("2000-01-01T00:00:00Z"), "- theirs\n").len(), 0, "kept");
+        assert_eq!(
+            dropped_lines(&lib, rel, "s-b", Some("2000-01-01T00:00:00Z"), "- mine\n").len(),
+            0,
+            "a session's own lines never count"
+        );
+
+        std::fs::write(lib.join("projects/bot-hq/shared.md"), "- theirs\n- edited outside\n").unwrap();
+        put(&bridge, "s-b", "other.md", "x\n", false).await.unwrap(); // versions it as "outside"
+        let outside = dropped_lines(&lib, rel, "s1", Some("2000-01-01T00:00:00Z"), "- theirs\n");
+        assert!(outside.is_empty(), "an outside commit's date is not a write time: {outside:?}");
+
+        let no_git = tempfile::tempdir().unwrap();
+        assert!(dropped_lines(no_git.path(), rel, "s1", Some("2000-01-01T00:00:00Z"), "").is_empty());
+    }
+
+    /// Feedback #65(c), EYES (s-3158eb35): the app's own save is committed
+    /// alone as `(user)`, under the library lock — and the replace guard
+    /// protects it like any other writer's lines.
+    #[tokio::test]
+    async fn the_apps_own_save_is_committed_as_the_user_and_guarded() {
         let (bridge, _storage, tmp) = bridge_with_data_dir().await;
         let lib = tmp.path().join("library");
         put(&bridge, "s1", "notes.md", "- agent line\n", false).await.unwrap();
@@ -2771,5 +3150,26 @@ mod tests {
             .unwrap();
         assert_eq!(git_out(&lib, &["log", "-1", "--format=%s"]), "cl: projects/bot-hq/notes.md (user)");
         assert_eq!(git_out(&lib, &["show", "--format=", "--name-only", "HEAD"]), "projects/bot-hq/notes.md");
+        let err = put(&bridge, "s1", "notes.md", "- agent line, rewritten\n", false)
+            .await
+            .expect_err("the user's line would go");
+        assert!(err.to_string().contains("\"- the user's line\" — the user, saved in the app"), "{err}");
+    }
+
+    #[test]
+    fn a_snapshot_subject_says_who_wrote_it() {
+        assert_eq!(
+            Writer::parse("cl: _globals/eod-tldr.md (hands, s-43584072, replace)"),
+            Writer::Session { agent: "hands".into(), session: "s-43584072".into(), full: true }
+        );
+        assert_eq!(
+            Writer::parse("cl: bot-hq/notes (old).md (eyes, s-1, append)"),
+            Writer::Session { agent: "eyes".into(), session: "s-1".into(), full: false }
+        );
+        assert_eq!(Writer::parse("cl: linear-lode/handoff.md (hands)"), Writer::Agent("hands".into()));
+        assert_eq!(Writer::parse("cl: projects/bot-hq/notes.md (user)"), Writer::User);
+        assert_eq!(Writer::parse("cl: x.md (unversioned content found before a write)"), Writer::Outside);
+        assert_eq!(Writer::parse("cl: 3 file(s) changed outside an agent write"), Writer::Outside);
+        assert_eq!(Writer::parse("seed"), Writer::Other("seed".into()));
     }
 }

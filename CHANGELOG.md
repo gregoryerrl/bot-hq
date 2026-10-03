@@ -31,6 +31,13 @@ and in `docs/rebuild-archive/`.
   had no way to fetch it.
 - **An agent can take back a command it no longer wants** while it is still
   waiting for the reviewer's read, so it does not go on to prompt you.
+- **A Context Library replace no longer silently deletes another session's
+  lines.** When an agent rewrites a whole file and its new version leaves out
+  lines another session (or you) added since that agent last wrote the whole
+  file, the write is refused and the lines are listed with who wrote them. The
+  agent keeps them, changes only its own part, or confirms the deletion. This
+  is the shared EOD file's case, where one session's redraft removed the other
+  session's half.
 - **Session documents stay usable when they grow.** Five changes to the
   document tools agents use:
   - A document can be corrected in place (`session_doc_edit`), instead of

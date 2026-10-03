@@ -1411,19 +1411,29 @@ friction bought nothing. The user still edits any CL file in the
 Context Library tab.)
 
 **The library is one git repository, and each write is its own commit**
-(`bridge/cl_write.rs`, feedback #65 #86). One process-wide lock,
+(`bridge/cl_write.rs`, feedback #64 #65 #86). One process-wide lock,
 `LIBRARY_GIT_LOCK`, covers a write from its first read of the file to its last
-commit, so two writes never interleave. Under it, in order:
+commit, so two writes never interleave and the guard below sees the file as it
+is written. Under it, in order:
 - the target's content git never saw (a bare `Write`) is committed alone;
 - every OTHER pending change is committed apart, as `cl: N file(s) changed
   outside an agent write` (a fresh library is `git init`-ed here);
+- the replace guard;
 - the write;
 - the write's own commit, of that path only, with the subject
   `cl: <project>/<file> (<agent>, <session>, <kind>)`, kind being `create`,
   `replace`, `append` or `edit`.
 
 The reply names that commit's sha as the rollback point and which lines it
-changed (`lines 40–52 (+14 −3)`, or `no change`). The app's own saves
+changed (`lines 40–52 (+14 −3)`, or `no change`). **The replace guard**
+(`dropped_lines`) refuses a replace that would drop lines another writer added
+since this session's last FULL write of the file (a `create` or `replace`; an
+append or an edit never showed the session the whole file), or, when it never
+made one, since the session started. It reads `git blame` from that base and
+the writers from the commit subjects, and lists the lines; `confirm_overwrite`
+lets the drop through. Against the session-start base, "outside" commits do not
+count, because their date is when the content was versioned, not written. No
+repository, a git failure or no base means no guard. The app's own saves
 (Library tab, a session's Context subtab) take the same lock and commit as
 `cl: <path> (user)`.
 

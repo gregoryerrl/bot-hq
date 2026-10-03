@@ -322,7 +322,7 @@ lives in 14 registries on one struct (12 keyed by session id, 2 by `(session, ag
 | `src/signaling/bridge/terminal_tools.rs` | `terminal_exec`/`terminal_read` over the PTY registry + Tool-Gate parity | M |
 | `src/signaling/bridge/feedback.rs` | `file_feedback` | S |
 | `src/signaling/bridge/cl_facade.rs` | `cl_index_search`/`cl_retrieve`/`cl_stale_refs`/folder/register/`cl_rescan` | L |
-| `src/signaling/bridge/cl_write.rs` | `cl_write_file` + `cl_edit_file` over one guarded `write_cl` path (`WriteOp`), all under `LIBRARY_GIT_LOCK`: path guards, atomic write, shrink guard, retired-term diff, `snapshot_outside_changes` (other pending changes, their own commit), `git_version_library` (the target alone, subject names agent + session + kind), `changed_lines`, push trigger, `sweep_project`; `save_user_edit` (the app's own save, committed as `(user)`) | L |
+| `src/signaling/bridge/cl_write.rs` | `cl_write_file` + `cl_edit_file` over one guarded `write_cl` path (`WriteOp`), all under `LIBRARY_GIT_LOCK`: path guards, atomic write, shrink guard, retired-term diff, `snapshot_outside_changes` (other pending changes, their own commit), the replace guard (`dropped_lines`, git blame from the session's last full write), `git_version_library` (the target alone, subject names agent + session + kind), `changed_lines`, push trigger, `sweep_project`; `save_user_edit` (the app's own save, committed as `(user)`) | L |
 | `src/signaling/bridge/cl_push.rs` | secret scan of tracked files, then `git push` of the library | M |
 | `src/signaling/bridge/cl_refs.rs` | code refs + sha256 | S |
 | `src/signaling/bridge/cl_staleness.rs` | CL body claims vs repo (P4) | M |
@@ -845,7 +845,7 @@ registry).
    `teardown_session` (kill, `storage.close_session`, withdraw tray, policy
    snapshot cleanup, `unregister_session`, worktree, `SessionClosed`).
 5. **CL write.** `cl_write_file` (MCP) → path guard → `LIBRARY_GIT_LOCK` →
-   `snapshot_outside_changes` → atomic write →
+   `snapshot_outside_changes` → replace guard → atomic write →
    `git_version_library` (the target's own commit) → `cl_rescan` → index/atoms →
    `mark_cl_rescan` (close gate) → detached `scan_then_push` (secret scan, then
    push). UI twin: `src/tauri_cmd/cl.rs` → `cl_save_user_edit_blocking` (same lock, `(user)` commit). fs watcher → `cl:changed` → FE refetch.

@@ -1809,8 +1809,14 @@ async fn call_tool(
                 .get("confirm_shrink")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            // Feedback #64: lets a replace drop lines another writer added
+            // since this session last wrote the whole file.
+            let confirm_overwrite = args
+                .get("confirm_overwrite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let msg = bridge
-                .cl_write_file(
+                .cl_write_file_with(
                     caller.session_id.clone(),
                     caller.agent.clone(),
                     project,
@@ -1818,6 +1824,7 @@ async fn call_tool(
                     content,
                     append,
                     confirm_shrink,
+                    confirm_overwrite,
                 )
                 .await
                 .map_err(internal_err_no_prefix)?;
@@ -3330,6 +3337,54 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("library/projects/bot-hq/notes.md")).unwrap(),
             "a direct learning"
+        );
+    }
+
+    /// Feedback #64, through the dispatch arm: a replace that drops another
+    /// session's lines is refused as a tool error naming them, and the same
+    /// call with `confirm_overwrite: true` goes through — the argument reaches
+    /// the guard.
+    #[tokio::test]
+    async fn cl_write_file_dispatch_carries_confirm_overwrite_to_the_replace_guard() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("library/projects/bot-hq")).unwrap();
+        let log = crate::policy::ViolationsLog::new(tmp.path());
+        let bridge = SignalingBridge::with_policy(log, tmp.path().to_path_buf());
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage
+            .upsert_project("bot-hq", "bot-hq", None, None, None)
+            .await
+            .unwrap();
+        storage.create_session("s1", "CL write", None).await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        bridge
+            .cl_write_file("s1".into(), "hands".into(), "bot-hq".into(), "eod.md".into(), "- mine\n".into(), false, false)
+            .await
+            .unwrap();
+        bridge
+            .cl_write_file("s-b".into(), "hands".into(), "bot-hq".into(), "eod.md".into(), "- theirs\n".into(), true, false)
+            .await
+            .unwrap();
+        let replace = |confirm: Option<bool>, id: i64| {
+            let mut args = json!({"project": "bot-hq", "file_path": "eod.md", "content": "- mine, redrafted\n"});
+            if let Some(c) = confirm {
+                args["confirm_overwrite"] = json!(c);
+            }
+            req("tools/call", json!({"name": "cl_write_file", "arguments": args}), id)
+        };
+        // A bridge refusal comes back as a JSON-RPC error carrying its text.
+        let Err(refusal) = dispatch(replace(None, 1), &caller(), &bridge).await else {
+            panic!("the replace guard refuses a drop the caller did not confirm");
+        };
+        assert!(refusal.message.contains("\"- theirs\" — hands, s-b"), "got: {refusal:?}");
+
+        let res = dispatch(replace(Some(true), 2), &caller(), &bridge).await.unwrap().unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("replaced"), "got: {text}");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("library/projects/bot-hq/eod.md")).unwrap(),
+            "- mine, redrafted\n"
         );
     }
 
