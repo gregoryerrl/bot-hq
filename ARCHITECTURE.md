@@ -698,6 +698,15 @@ since D37 — see "The phase-advance vote"),
 `webview_screenshot`, `webview_click`, `webview_type`, `webview_scroll`,
 `webview_press_key`.
 
+`tools/list` is unfiltered but answered **per caller**: a core set
+(`protocol::ALWAYS_LOADED_TOOLS` — the ring verbs, the session-document tools,
+the Context Library readers, the gates, the commit checks) carries
+`_meta["anthropic/alwaysLoad"]` on the entries that caller can use, so
+claude-code keeps those schemas in context instead of deferring them behind
+`ToolSearch` (feedback #88). The rest of the registry stays deferred; a test
+holds the always-loaded set to a byte budget (about 23 KB for the executor
+preset, 15 KB for the reviewer, of a 48 KB registry).
+
 This list is checked against the live registry by
 `protocol.rs::every_registered_tool_is_documented` — it said 36 for four tools'
 worth of drift before that test existed, and a list nothing compares to the code

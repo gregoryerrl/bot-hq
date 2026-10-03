@@ -22,6 +22,11 @@ and in `docs/rebuild-archive/`.
 
 ### Changed
 
+- **An agent's core bot-hq tools are ready from its first turn.** The turn
+  verbs, the session-document tools, the Context Library readers, the gates
+  and the commit checks no longer need a lookup before their first use, at
+  the start of a session or after a compaction. The less common tools still
+  load on demand.
 - **The context warning repeats after a compaction.** The rows at 85 % and
   95 % used to appear once per session, so a second approach to the limit came
   with no warning. They now appear each time the context fills again, and say

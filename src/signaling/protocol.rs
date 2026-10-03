@@ -154,6 +154,88 @@ fn gated_by(tool: &'static str, rest: &str) -> &'static str {
     Box::leak(format!("Requires the `{}` capability. {rest}", cap.slug()).into_boxed_str())
 }
 
+/// The tools a participant has in its context from its FIRST turn, without a
+/// `ToolSearch` round trip (feedback #88).
+///
+/// claude-code defers an MCP server's tools behind `ToolSearch` once their
+/// descriptions pass a share of the context: the model sees names only and
+/// must fetch a schema before each first call. For bot-hq's own server that
+/// cost every participant its opening call in every session, and again after
+/// every compaction (six fetches in the session that filed #88) — for tools
+/// the rules tell it to use on turn one. A tool whose `tools/list` entry
+/// carries `_meta["anthropic/alwaysLoad"]` is exempt (probed on CLI 2.1.284,
+/// s-d43b3630: with tool search forced on, only the marked tool of twelve had
+/// its description in context).
+///
+/// **A core set, not the registry** (EYES, plan point 6): every schema loaded
+/// is context spent on every turn, which brings the next compaction closer.
+/// The set is the ring verbs, the session documents, the Context Library
+/// readers, the gates and the commit checks — what a turn cannot do without.
+/// [`always_loaded_for`] then drops what the CALLER cannot use, and
+/// `the_always_loaded_set_stays_within_its_budget` holds the total to a byte
+/// budget, so adding a tool here is a decision and never drift.
+pub const ALWAYS_LOADED_TOOLS: &[&str] = &[
+    "pass_turn",
+    "peer_ack",
+    "advance_phase",
+    "halt",
+    "mark_awaiting_user",
+    "ask_user_choice",
+    "session_doc_write",
+    "session_doc_search",
+    "session_doc_read",
+    "cl_index_search",
+    "cl_retrieve",
+    "check_commit_message",
+    "check_open_findings",
+    "disposition_finding",
+    "flag_finding",
+    "action_gate",
+    "gate_status",
+];
+
+/// Ungated tools that serve only a participant that COMMITS. No capability
+/// gates them, so [`always_loaded_for`] asks for `edit_files` instead: a
+/// read-only role never needs the commit checks in its context.
+const COMMITTER_TOOLS: &[&str] = &["check_commit_message", "check_open_findings"];
+
+/// Is `tool` loaded from the first turn for a caller holding `caps`? Only a
+/// core tool ([`ALWAYS_LOADED_TOOLS`]) the caller can actually use: a gated
+/// tool needs its capability, a commit check needs `edit_files`. An unreadable
+/// roster grants nothing, so only the ungated core tools are marked for it.
+pub fn always_loaded_for(tool: &str, caps: &crate::agents::ResolvedCapabilities) -> bool {
+    use crate::agents::capability::{required_for, Capability};
+    if !ALWAYS_LOADED_TOOLS.contains(&tool) {
+        return false;
+    }
+    if required_for(tool).is_some_and(|cap| !caps.grants(cap)) {
+        return false;
+    }
+    !(COMMITTER_TOOLS.contains(&tool) && !caps.grants(Capability::EditFiles))
+}
+
+/// The `tools/list` answer for one caller: every registered tool (the list is
+/// unfiltered — the gate is on the CALL), with the always-load mark on the
+/// core tools this caller can use.
+pub fn tools_list_for(caps: &crate::agents::ResolvedCapabilities) -> Vec<Value> {
+    tool_descriptors()
+        .iter()
+        .map(|tool| {
+            let mut entry = serde_json::to_value(tool).unwrap_or(Value::Null);
+            if always_loaded_for(tool.name, caps) {
+                if let Some(map) = entry.as_object_mut() {
+                    map.insert("_meta".into(), serde_json::json!({ ALWAYS_LOAD_META: true }));
+                }
+            }
+            entry
+        })
+        .collect()
+}
+
+/// The `_meta` key claude-code reads on a `tools/list` entry to load the tool
+/// without `ToolSearch`.
+pub const ALWAYS_LOAD_META: &str = "anthropic/alwaysLoad";
+
 /// Hand-built JSON Schemas for our tools. We don't pull in `schemars`.
 pub fn tool_descriptors() -> &'static [ToolDescriptor] {
     use std::sync::LazyLock;
@@ -909,6 +991,110 @@ impl ToolCallResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn always_loaded(caps: &crate::agents::ResolvedCapabilities) -> Vec<&'static str> {
+        tool_descriptors()
+            .iter()
+            .map(|t| t.name)
+            .filter(|name| always_loaded_for(name, caps))
+            .collect()
+    }
+
+    fn known(set: crate::agents::CapabilitySet) -> crate::agents::ResolvedCapabilities {
+        crate::agents::ResolvedCapabilities::Known(set)
+    }
+
+    /// Feedback #88: the core tools are in context from the first turn — and
+    /// only the ones the caller can use (EYES, plan point 6). The lists are
+    /// spelled out per preset role so that changing the core set, or a role's
+    /// capabilities, shows up here as a decision.
+    #[test]
+    fn the_core_tools_are_always_loaded_for_the_roles_that_can_use_them() {
+        assert_eq!(
+            always_loaded(&known(crate::agents::CapabilitySet::preset_hands())),
+            vec![
+                "ask_user_choice",
+                "mark_awaiting_user",
+                "peer_ack",
+                "pass_turn",
+                "halt",
+                "advance_phase",
+                "action_gate",
+                "gate_status",
+                "check_commit_message",
+                "disposition_finding",
+                "check_open_findings",
+                "session_doc_write",
+                "session_doc_search",
+                "session_doc_read",
+                "cl_index_search",
+                "cl_retrieve",
+            ],
+            "the executor: everything in the core set but the reviewer's `flag_finding`"
+        );
+        assert_eq!(
+            always_loaded(&known(crate::agents::CapabilitySet::preset_eyes())),
+            vec![
+                "peer_ack",
+                "pass_turn",
+                "advance_phase",
+                "gate_status",
+                "flag_finding",
+                "session_doc_write",
+                "session_doc_search",
+                "session_doc_read",
+                "cl_index_search",
+                "cl_retrieve",
+            ],
+            "the reviewer: no user-facing ask, no halt, no gate to park, no commit checks"
+        );
+        // An unreadable roster grants nothing: only the ungated core tools.
+        let unreadable = crate::agents::ResolvedCapabilities::Unreadable { reason: "test" };
+        let loaded = always_loaded(&unreadable);
+        assert!(loaded.contains(&"pass_turn") && loaded.contains(&"session_doc_read"), "{loaded:?}");
+        for gated in ["ask_user_choice", "halt", "action_gate", "flag_finding", "check_commit_message"] {
+            assert!(!loaded.contains(&gated), "{gated} is not marked for an unreadable roster");
+        }
+        // Every name in the set is a registered tool: a typo would silently
+        // mark nothing.
+        let registered: Vec<&str> = tool_descriptors().iter().map(|t| t.name).collect();
+        for name in ALWAYS_LOADED_TOOLS {
+            assert!(registered.contains(name), "`{name}` is in ALWAYS_LOADED_TOOLS but not registered");
+        }
+    }
+
+    /// Every always-loaded schema is context spent on every turn of every
+    /// participant, which is what brings a compaction closer. The budget is a
+    /// ceiling just above today's size: a longer description or a new core
+    /// tool fails here and has to be weighed, not waved through. The rest of
+    /// the registry (the larger half) stays behind `ToolSearch`.
+    #[test]
+    fn the_always_loaded_set_stays_within_its_budget() {
+        let bytes = |caps: &crate::agents::ResolvedCapabilities| -> usize {
+            tools_list_for(caps)
+                .iter()
+                .filter(|t| t.get("_meta").is_some())
+                .map(|t| t.to_string().len())
+                .sum()
+        };
+        let all: usize = tools_list_for(&crate::agents::ResolvedCapabilities::Unreadable { reason: "test" })
+            .iter()
+            .map(|t| t.to_string().len())
+            .sum();
+        let hands = bytes(&known(crate::agents::CapabilitySet::preset_hands()));
+        let eyes = bytes(&known(crate::agents::CapabilitySet::preset_eyes()));
+        eprintln!("always-loaded bytes: hands {hands}, eyes {eyes}; whole registry {all}");
+        assert!(hands <= HANDS_ALWAYS_LOADED_BUDGET, "the executor's always-loaded tools are {hands} bytes");
+        assert!(eyes <= EYES_ALWAYS_LOADED_BUDGET, "the reviewer's always-loaded tools are {eyes} bytes");
+        assert!(eyes < hands && hands < all, "a subset of the registry, smaller for the reviewer");
+    }
+
+    /// Measured 2026-10-03 (s-d43b3630): 22,755 bytes for the executor preset,
+    /// 14,968 for the reviewer, of a 47,879-byte registry — about 5.7k and 3.7k
+    /// tokens. The ceilings leave room for a sentence, not for a tool.
+    const HANDS_ALWAYS_LOADED_BUDGET: usize = 24_000;
+    const EYES_ALWAYS_LOADED_BUDGET: usize = 16_000;
+
 
     /// **The canonical docs list every registered tool** (audit M-F10/M-T1).
     ///

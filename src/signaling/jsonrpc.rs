@@ -117,7 +117,9 @@ pub async fn dispatch(
         ))),
         "ping" => Ok(Some(JsonRpcResponse::ok(id, json!({})))),
         "tools/list" => {
-            let tools = tool_descriptors();
+            // Per caller: the core tools it can use carry the always-load
+            // mark, so they need no `ToolSearch` round trip (feedback #88).
+            let tools = crate::signaling::protocol::tools_list_for(&caller.capabilities);
             Ok(Some(JsonRpcResponse::ok(id, json!({ "tools": tools }))))
         }
         "tools/call" => {
@@ -1874,6 +1876,42 @@ mod tests {
             names.iter().collect::<std::collections::HashSet<_>>().len(),
             "tool names should be unique"
         );
+    }
+
+    /// The wire for feedback #88: `tools/list` answers per CALLER, with the
+    /// always-load mark on the core tools that caller can use, so claude-code
+    /// keeps them in context without a `ToolSearch` round trip. Swapping the
+    /// handler back to the bare `tool_descriptors()` turns this red.
+    #[tokio::test]
+    async fn tools_list_marks_the_callers_core_tools_always_loaded() {
+        let bridge = SignalingBridge::new();
+        let marked = |who: CallerIdentity| {
+            let bridge = &bridge;
+            async move {
+                let res = dispatch(req("tools/list", json!({}), 1), &who, bridge).await.unwrap().unwrap();
+                let v = serde_json::to_value(&res).unwrap();
+                v["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|t| t["_meta"]["anthropic/alwaysLoad"] == json!(true))
+                    .map(|t| t["name"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+        let hands = marked(caller()).await;
+        let eyes = marked(eyes_caller()).await;
+        for core in ["pass_turn", "session_doc_write", "cl_retrieve", "gate_status"] {
+            assert!(hands.iter().any(|n| n == core) && eyes.iter().any(|n| n == core), "{core}");
+        }
+        // What only one of them can use is marked only for that one.
+        assert!(hands.iter().any(|n| n == "action_gate") && !eyes.iter().any(|n| n == "action_gate"));
+        assert!(hands.iter().any(|n| n == "ask_user_choice") && !eyes.iter().any(|n| n == "ask_user_choice"));
+        assert!(eyes.iter().any(|n| n == "flag_finding") && !hands.iter().any(|n| n == "flag_finding"));
+        // The rest of the registry stays deferred for both.
+        for deferred in ["webview_click", "cl_rescan", "close_session", "file_feedback"] {
+            assert!(!hands.iter().any(|n| n == deferred) && !eyes.iter().any(|n| n == deferred), "{deferred}");
+        }
     }
 
     /// **WS3 (2026-08-27): open advisories are surfaced once at close.** 92% of

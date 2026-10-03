@@ -101,7 +101,7 @@ If you receive the **idle nudge** (\"[System: this session went idle with no que
 
 ## Tools that exist and are easy to miss
 
-Loaded on demand like everything else (`ToolSearch` fetches a schema by name) — load the control-plane schemas you expect to need in ONE early batch instead of one-per-park mid-task. Easy to miss because nothing else names them:
+bot-hq's core tools are in your context from the first turn: the ring verbs, the session-document tools, the Context Library readers and — where your capabilities include them — the user-facing asks, the gates and the commit checks. Every other bot-hq tool loads on demand (`ToolSearch` fetches a schema by name): fetch the ones you expect to need in ONE batch instead of one per use. Easy to miss because nothing else names them:
 
 - `file_feedback(kind, title, body)` — file bot-hq HARNESS friction (a tool that lied, a gate that misfired) as a queued item a future bot-hq session works. Any participant may call it; it never interrupts the user. Friction you hit and don't file is friction the next session re-discovers.
 - `cl_stale_refs(project)` — the CL drift report: atoms whose cited identifiers vanished from the code. Run it when a CL claim smells stale, and during CL maintenance.
