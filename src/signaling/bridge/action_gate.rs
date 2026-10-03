@@ -943,7 +943,20 @@ impl SignalingBridge {
             .insert_queued_gate(session_id, &gate_id, agent, &prompt, command)
             .await?;
         self.record_body_digest(session_id, &gate_id, command).await;
-        let body = self.queued_body_text(session_id, command).await;
+        let mut body = self.queued_body_text(session_id, command).await;
+        // Feedback #60: an EDIT shows the reviewer what it changes — the diff
+        // against the live body, not only the full new text (that diff is what
+        // caught an undisclosed change, finding 79aa827f) — and the live body's
+        // hash is re-checked before the approved edit runs (EYES, s-3158eb35).
+        if let Some((section, live_sha)) = self.live_edit_section(session_id, command).await {
+            body.push_str("\n\n");
+            body.push_str(&section);
+            if let Some(sha) = live_sha {
+                if let Err(e) = storage.set_tray_live_body_sha(&gate_id, &sha).await {
+                    tracing::warn!(%gate_id, error = %e, "could not record the live body's hash");
+                }
+            }
+        }
         let notice = format!(
             "📨 Outward publish queued for review (gate {gate_id}) — {agent} wants to run:\n\
              `{command}`\n\n{body}\n\n\
@@ -3960,5 +3973,97 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
         let row = approve_publish(&bridge, "./gh issue create --title t --body-file b.md").await;
         assert!(row.contains("gh may still have published part of it"), "{row}");
         assert!(!repo.path().join("reads").exists(), "no URL, no read");
+    }
+
+    /// Feedback #60's first point and EYES' live-body check: a queued EDIT
+    /// shows the reviewer its diff against the live body and records that
+    /// body's hash; at approval an unchanged live body lets the edit run, and
+    /// a changed one refuses it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_queued_edit_shows_its_live_diff_and_is_refused_if_the_live_body_moved() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        bridge.set_gh_program(fake_gh(repo.path()));
+        std::fs::write(
+            repo.path().join("live.json"),
+            serde_json::json!({"body": "Old first line.\nSecond line.", "url": "https://github.com/o/r/pull/5"}).to_string(),
+        )
+        .unwrap();
+        let command = format!("./gh pr edit 5 --body-file {path}");
+        let promote = |gate: String| {
+            let (storage, bridge) = (storage.clone(), bridge.clone());
+            async move {
+                let row = storage.get_tray_entry(&gate).await.unwrap().unwrap();
+                storage.commit_delivery(eyes, &[(row.body_row_id.unwrap(), None)]).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                bridge.settle_queued_outward("s1", eyes).await;
+                assert_eq!(storage.get_tray_entry(&gate).await.unwrap().unwrap().status, "pending");
+                gate
+            }
+        };
+
+        // Queued: the reviewer's message carries the diff; the hash is kept.
+        let (gate, _) = queued(bridge.park_gated_command("s1", "hands", &command).await.unwrap());
+        let row = storage.get_tray_entry(&gate).await.unwrap().unwrap();
+        let notice = message_by_id(&storage, row.body_row_id.unwrap()).await.content;
+        assert!(notice.contains("what this edit changes against the live body of https://github.com/o/r/pull/5"), "{notice}");
+        assert!(notice.contains("-Old first line.") && notice.contains("+The deletion rule"), "{notice}");
+        assert!(row.live_body_sha256.is_some(), "the live body's hash is recorded");
+
+        // The live body moved before approval: refused, nothing run.
+        std::fs::write(
+            repo.path().join("live.json"),
+            serde_json::json!({"body": "Someone else's edit.", "url": "https://github.com/o/r/pull/5"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(repo.path().join("on-publish.sh"), "touch \"$d/published\"\n").unwrap();
+        let gate = promote(gate).await;
+        let ResolveOutcome::DeliveredOutOfBand { body, .. } = bridge.resolve_choice(&gate, "Approve".into()).await.unwrap() else {
+            panic!("expected the result row");
+        };
+        assert!(body.contains("NOT RUN: the live body this edit replaces changed"), "{body}");
+        assert!(!repo.path().join("published").exists(), "the edit did not run");
+        assert!(bridge.gate_status(&gate).await.unwrap().contains("NOT RUN"), "gate_status says so too");
+    }
+
+    /// The other half: an approved queued edit whose live body did NOT move
+    /// runs, and is read back.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_queued_edit_whose_live_body_held_runs_and_is_read_back() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        bridge.set_gh_program(fake_gh(repo.path()));
+        std::fs::write(
+            repo.path().join("live.json"),
+            serde_json::json!({"body": "Old first line.", "url": "https://github.com/o/r/pull/5"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(repo.path().join("printed.txt"), "https://github.com/o/r/pull/5\n").unwrap();
+        std::fs::write(repo.path().join("closing.json"), r#"{"closingIssuesReferences":[]}"#).unwrap();
+        serve(repo.path(), "served.json", &body);
+        let (gate, _) = queued(
+            bridge
+                .park_gated_command("s1", "hands", &format!("./gh pr edit 5 --body-file {path}"))
+                .await
+                .unwrap(),
+        );
+        let row = storage.get_tray_entry(&gate).await.unwrap().unwrap();
+        storage.commit_delivery(eyes, &[(row.body_row_id.unwrap(), None)]).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        bridge.settle_queued_outward("s1", eyes).await;
+        let ResolveOutcome::DeliveredOutOfBand { body: result, .. } =
+            bridge.resolve_choice(&gate, "Approve".into()).await.unwrap()
+        else {
+            panic!("expected the result row");
+        };
+        assert!(!result.contains("NOT RUN"), "{result}");
+        assert!(result.contains("equals what was approved"), "{result}");
+        assert!(result.contains("GitHub links it to close no issue."), "{result}");
     }
 }

@@ -1,0 +1,14 @@
+-- 0088_tray_live_body_sha.sql — the live body an edit's review saw
+-- (feedback #60, EYES s-3158eb35, 2026-10-03).
+--
+-- A queued `gh issue|pr edit … --body-file F` now shows the reviewer the diff
+-- of F against the issue's or pull request's LIVE body, read at queue time.
+-- The user may approve hours later; if someone changed the live body in
+-- between, running the approved edit would overwrite that change with a body
+-- whose diff nobody saw. This column holds the SHA-256 of the live body the
+-- diff was made against; approval re-reads it and refuses the run on any
+-- change, the same shape as `body_sha256` (0084) for the body files.
+--
+-- NULL on every row that is not such an edit, on an edit whose live body
+-- could not be read at queue time, and on rows from before this migration.
+ALTER TABLE session_tray ADD COLUMN live_body_sha256 TEXT;

@@ -35,7 +35,9 @@ and in `docs/rebuild-archive/`.
   request or comment publish runs, bot-hq reads what landed on GitHub and
   says in the result whether it equals what was reviewed, or where it first
   differs. A pull request also says which issues GitHub will close with it.
-  Reviewers had been checking every publish by hand.
+  Reviewers had been checking every publish by hand. For an edit, the
+  reviewer now sees the diff against the text currently on GitHub, and the
+  approved edit is not run if that text changed after the review.
 - **A zsh command that would not do what it says is stopped before it runs.**
   Under zsh, `"$name:x"` with certain letters after the colon changes the
   value instead of adding a colon (`"$R:app/x"` becomes the absolute path of

@@ -1066,6 +1066,10 @@ hold a reviewer more strictly belonged to the native loop and went with it (D9).
   differing line), could not be read back, or was not read back and why. A
   pull request also gets the issues GitHub links it to close. An edit is read
   once more before a mismatch is reported.
+- **A queued edit is shown against the live body.** The reviewer's message
+  carries the diff against the issue's or PR's live body. That body's hash is
+  stored on the gate (0088), and approval refuses the edit if the live body
+  changed in between, the same shape as the body-file hash check (0084).
 
 The global list defaults EMPTY (no gating until configured in Settings).
 

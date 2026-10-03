@@ -1506,7 +1506,8 @@ impl SignalingBridge {
                 }
             });
         }
-        // The gate's row: the body hash its review covered (0084).
+        // The gate's row: the body hash its review covered (0084) and, for an
+        // edit, the live body its reviewer's diff was made against (0088).
         let row = match self.storage.lock().await.clone() {
             Some(storage) => storage.get_tray_entry(choice_id).await.ok().flatten(),
             None => None,
@@ -1559,6 +1560,37 @@ impl SignalingBridge {
             }
             if let Ok((_, files)) = current {
                 approved_files = files;
+            }
+        }
+        // An approved EDIT replaces a live body. If that body changed after the
+        // reviewer saw this edit's diff against it, running the edit would
+        // overwrite the change with a body whose diff nobody saw — refused,
+        // the same shape as the body-file check (EYES, s-3158eb35; 0088). A
+        // re-read that FAILS is not evidence of a change: the edit runs and
+        // the result says it was not re-checked.
+        if let Some(then) = row.as_ref().and_then(|r| r.live_body_sha256.clone()) {
+            match self.live_body_sha(session_id, command).await {
+                Ok(Some(now)) if now != then => {
+                    self.refuse_approved_run(
+                        session_id,
+                        choice_id,
+                        command,
+                        row.as_ref(),
+                        body,
+                        "NOT RUN: the live body this edit replaces changed after the reviewer saw \
+                         the diff against it, so the edit was not made — it would overwrite that \
+                         change. Re-issue the command; the reviewer reads the new diff first.",
+                        "the live body changed after the review",
+                        "approved but NOT RUN: the live body changed after review",
+                    )
+                    .await;
+                    return None;
+                }
+                Ok(_) => {}
+                Err(why) => body.push_str(&format!(
+                    "Note: the live body could not be re-read before running ({why}), so it was \
+                     not re-checked.\n"
+                )),
             }
         }
         // The verdict line above already says "approved" and names the command;

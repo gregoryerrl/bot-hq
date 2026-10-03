@@ -9,7 +9,7 @@ use super::*;
 /// `tray_entries_for_session` and `get_tray_entry` so the two can't drift.
 const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text, \
-     body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms";
+     body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms, live_body_sha256";
 
 /// The statuses a tray row passes through. `queued` (0080) is the one that is
 /// NOT a user-facing item: an outward publish waiting for the reviewer to read
@@ -348,6 +348,18 @@ impl Storage {
             .execute(&self.pool)
             .await
             .with_context(|| format!("recording the body hash of gate {choice_id}"))?;
+        Ok(())
+    }
+
+    /// Record the SHA-256 of an edit's LIVE body as its reviewer's diff saw
+    /// it (0088) — re-read and compared when the user approves the edit.
+    pub async fn set_tray_live_body_sha(&self, choice_id: &str, sha: &str) -> Result<()> {
+        sqlx::query("UPDATE session_tray SET live_body_sha256 = ? WHERE choice_id = ?")
+            .bind(sha)
+            .bind(choice_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("recording the live-body hash of gate {choice_id}"))?;
         Ok(())
     }
 

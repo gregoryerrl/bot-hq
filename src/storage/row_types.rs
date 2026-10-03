@@ -307,6 +307,12 @@ pub struct SessionTrayEntry {
     #[serde(default)]
     #[sqlx(default)]
     pub ran_ms: Option<i64>,
+    /// SHA-256 of an edit's LIVE body when its reviewer's diff was made
+    /// (0088): approval re-reads the live body and refuses the edit on any
+    /// change. NULL on every other row.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub live_body_sha256: Option<String>,
 }
 
 impl SessionTrayEntry {

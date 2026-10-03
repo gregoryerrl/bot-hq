@@ -10,14 +10,16 @@
 //! reads the object back and compares it with the bytes that were approved,
 //! and the gate's result row says which: equal, DIFFERS (with the first
 //! differing line), could not be read, or not read back (with why). For a pull
-//! request it adds the issues GitHub links it to close.
+//! request it adds the issues GitHub links it to close. For a queued EDIT the
+//! reviewer's message also shows the diff against the live body, and the live
+//! body's hash is re-checked before the approved edit runs.
 //!
 //! Every read is a GET (`gh api` turns into a POST as soon as a field flag is
 //! present — EYES, s-3158eb35), built only from parts of the URL gh printed
 //! that passed a strict character check, and run through the same gate shell
 //! as the publish, so the same rc files and PATH find the same `gh`.
 
-use super::outward_body::{gh_publish, GhPublishKind, PublishedBody};
+use super::outward_body::{gh_publish, GhPublish, GhPublishKind, PublishedBody};
 use super::*;
 use crate::policy::tool_gate;
 
@@ -26,6 +28,10 @@ const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// How long a mismatched EDIT waits before its one re-read (EYES: GitHub may
 /// serve the old body for a moment after an edit).
 const EDIT_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+/// The diff in the reviewer's message stops here (EYES: a PR body can be
+/// 64K characters).
+const DIFF_MAX_LINES: usize = 200;
+const DIFF_MAX_BYTES: usize = 16 * 1024;
 
 /// A GitHub issue, pull request or comment, from a URL gh printed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +234,80 @@ fn clip(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
+/// The view of an edit's TARGET, for its live body: `<gh> issue view <n>
+/// --json body,url [-R owner/repo]`. `None` when the target or the repo is
+/// not something the character check passes — a branch name, an odd repo.
+pub(crate) fn live_view_command(gh: &str, publish: &GhPublish) -> Option<String> {
+    let noun = match publish.kind {
+        GhPublishKind::IssueEdit => "issue",
+        GhPublishKind::PrEdit => "pr",
+        _ => return None,
+    };
+    let target = publish.target.as_deref()?;
+    let target = match (number(target), parse_object_url(target)) {
+        (Some(n), _) => n.to_string(),
+        (None, Some(obj)) if obj.comment.is_none() && obj.pull == (noun == "pr") => obj.object_url(),
+        _ => return None,
+    };
+    let repo = match publish.repo.as_deref() {
+        None => String::new(),
+        Some(r) => {
+            let parts: Vec<&str> = r.split('/').collect();
+            let ok = match parts.as_slice() {
+                [owner, name] => name_ok(owner) && name_ok(name),
+                [host, owner, name] => host_ok(host) && name_ok(owner) && name_ok(name),
+                _ => false,
+            };
+            if !ok {
+                return None;
+            }
+            format!(" -R {r}")
+        }
+    };
+    Some(format!("{} {noun} view {target} --json body,url{repo}", sh_quote(gh)))
+}
+
+/// `sha256` of a live body as read — the queue-time value and the
+/// approval-time value are compared byte for byte.
+fn sha256_hex(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(s.as_bytes()))
+}
+
+/// The unified diff of `old` → `new` from its first hunk, through `git diff
+/// --no-index` (exact, and git is a prerequisite), capped for the message.
+/// `Ok(None)` when they are the same.
+fn unified_diff(old: &str, new: &str) -> Result<Option<String>, String> {
+    let dir = tempfile::tempdir().map_err(|e| format!("a temp dir: {e}"))?;
+    let (a, b) = (dir.path().join("live"), dir.path().join("approved"));
+    std::fs::write(&a, old).map_err(|e| format!("writing the live body: {e}"))?;
+    std::fs::write(&b, new).map_err(|e| format!("writing the approved body: {e}"))?;
+    let out = std::process::Command::new("git")
+        .args(["diff", "--no-index", "--no-color", "-U3", "--"])
+        .arg(&a)
+        .arg(&b)
+        .output()
+        .map_err(|e| format!("git diff: {e}"))?;
+    match out.status.code() {
+        Some(0) => Ok(None),
+        Some(1) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let hunks: Vec<&str> = text.lines().skip_while(|l| !l.starts_with("@@")).collect();
+            let mut shown = String::new();
+            for (n, line) in hunks.iter().enumerate() {
+                if n >= DIFF_MAX_LINES || shown.len() + line.len() > DIFF_MAX_BYTES {
+                    shown.push_str(&format!("… {} more diff line(s) not shown\n", hunks.len() - n));
+                    break;
+                }
+                shown.push_str(line);
+                shown.push('\n');
+            }
+            Ok(Some(shown))
+        }
+        _ => Err(format!("git diff: {}", String::from_utf8_lossy(&out.stderr).trim())),
+    }
+}
+
 impl SignalingBridge {
     /// The `gh` the reads run: the gate shell's own `gh`, or the program a
     /// test set with [`Self::set_gh_program`].
@@ -374,6 +454,75 @@ impl SignalingBridge {
         out
     }
 
+    /// An edit's target, read live: `(body, url)`. `Ok(None)` when `command`
+    /// is not an issue or pull request edit whose target and repo pass the
+    /// character check.
+    async fn live_body(&self, session_id: &str, command: &str) -> Result<Option<(String, String)>, String> {
+        let Ok(publish) = gh_publish(command) else {
+            return Ok(None);
+        };
+        let Some(view) = live_view_command(&self.gh_program(), &publish) else {
+            return Ok(None);
+        };
+        let json = self.gh_read(session_id, &view).await?;
+        let body = body_of(&json)?;
+        let url = serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_string))
+            .unwrap_or_default();
+        Ok(Some((body, url)))
+    }
+
+    /// For a queued EDIT (feedback #60's first point): the section the
+    /// reviewer's message gains — the diff of the approved body against the
+    /// live one — and the live body's hash, re-checked before the approved
+    /// edit runs. `None` for anything that is not such an edit.
+    pub(super) async fn live_edit_section(
+        &self,
+        session_id: &str,
+        command: &str,
+    ) -> Option<(String, Option<String>)> {
+        let publish = gh_publish(command).ok()?;
+        if !matches!(publish.kind, GhPublishKind::IssueEdit | GhPublishKind::PrEdit) {
+            return None;
+        }
+        let approved = match &publish.body {
+            PublishedBody::Inline(text) => text.clone(),
+            PublishedBody::File(path) => {
+                let resolved = self.resolve_body_path(session_id, path).await;
+                std::fs::read_to_string(&resolved).ok()?
+            }
+        };
+        match self.live_body(session_id, command).await {
+            Ok(None) => Some((
+                "--- (the live body was not read: the edit's target is not an issue or pull \
+                 request number or URL bot-hq can check) ---"
+                    .to_string(),
+                None,
+            )),
+            Err(why) => Some((format!("--- (the live body could not be read: {why}) ---"), None)),
+            Ok(Some((live, url))) => {
+                let sha = Some(sha256_hex(&live));
+                let section = match unified_diff(&live, &approved) {
+                    Ok(None) => format!("--- (this edit changes nothing in the live body of {url}) ---"),
+                    Ok(Some(diff)) => format!(
+                        "--- what this edit changes against the live body of {url} (read at queue \
+                         time) ---\n{}",
+                        diff.trim_end()
+                    ),
+                    Err(why) => format!("--- (the diff against the live body of {url} failed: {why}) ---"),
+                };
+                Some((section, sha))
+            }
+        }
+    }
+
+    /// The live body's hash now, for the approval-time re-check of an edit
+    /// whose queue-time hash was recorded.
+    pub(super) async fn live_body_sha(&self, session_id: &str, command: &str) -> Result<Option<String>, String> {
+        Ok(self.live_body(session_id, command).await?.map(|(body, _)| sha256_hex(&body)))
+    }
+
 }
 
 #[cfg(test)]
@@ -432,6 +581,20 @@ mod tests {
     }
 
     #[test]
+    fn the_live_view_runs_only_on_a_checked_edit_target() {
+        let view = |c: &str| live_view_command("gh", &gh_publish(c).unwrap());
+        assert_eq!(view("gh issue edit 63 --body-file b.md").as_deref(), Some("'gh' issue view 63 --json body,url"));
+        assert_eq!(
+            view("gh pr edit https://github.com/o/r/pull/9 -b x -R o/r").as_deref(),
+            Some("'gh' pr view https://github.com/o/r/pull/9 --json body,url -R o/r")
+        );
+        assert_eq!(view("gh pr edit my-branch -b x"), None, "a branch is not checked");
+        assert_eq!(view("gh issue edit 5 -b x -R 'o/r;x'"), None, "an odd repo");
+        assert_eq!(view("gh issue edit https://github.com/o/r/pull/9 -b x"), None, "a PR URL on issue edit");
+        assert_eq!(view("gh issue comment 5 -b x"), None, "not an edit");
+    }
+
+    #[test]
     fn bodies_and_closing_references_read_from_the_raw_json() {
         assert_eq!(body_of(r#"{"body":"line\n","id":1}"#).unwrap(), "line\n");
         assert_eq!(body_of(r#"{"body":null}"#).unwrap(), "");
@@ -463,5 +626,16 @@ mod tests {
             compare("a\nb\nc\n", "a\nb\n"),
             Compared::Differs { line: 3, approved: "c".into(), published: "(the published body ends before it)".into() }
         );
+    }
+
+    #[test]
+    fn a_diff_is_capped_for_the_message() {
+        let old: String = (0..1000).map(|i| format!("old {i}\n")).collect();
+        let new: String = (0..1000).map(|i| format!("new {i}\n")).collect();
+        let diff = unified_diff(&old, &new).unwrap().expect("they differ");
+        assert!(diff.starts_with("@@"), "{}", &diff[..40]);
+        assert!(diff.lines().count() <= DIFF_MAX_LINES + 1 && diff.len() <= DIFF_MAX_BYTES + 200);
+        assert!(diff.contains("more diff line(s) not shown"));
+        assert_eq!(unified_diff("same\n", "same\n").unwrap(), None);
     }
 }
