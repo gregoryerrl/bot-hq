@@ -111,6 +111,56 @@ pub(crate) fn doc_excerpt(
     }
 }
 
+/// What a reviewer's co-doc write did (`session_doc_write_eyes`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodocWrite {
+    pub id: i64,
+    /// The doc that was written: `<phase>-eyes`.
+    pub slug: String,
+    /// The writer had a standing phase vote and this write withdrew it.
+    pub vote_withdrawn: bool,
+}
+
+/// How the "review notes landed" row opens, for `who` and one co-doc. The
+/// dedupe below looks for exactly this, so the two cannot drift.
+fn codoc_notice_opening(who: &str, slug: &str) -> String {
+    format!("[System: {who} wrote review notes to `{slug}`")
+}
+
+/// Has the "review notes landed" row for this co-doc already been posted in
+/// the writer's CURRENT run — its unbroken stretch of rows at the end of the
+/// channel? Host rows do not break a run; another participant's row or the
+/// user's message does, and the next write after one posts a fresh row.
+///
+/// Read from the stored rows rather than kept in memory, so it needs no
+/// turn-boundary signal and survives a relaunch. A failed read answers
+/// `false`: an extra row is the cheaper mistake.
+async fn codoc_noticed_this_run(
+    storage: &crate::storage::Storage,
+    session_id: &str,
+    author_slug: &str,
+    opening: &str,
+) -> bool {
+    use crate::storage::MessageKind;
+    let Ok(tail) = storage.messages_tail(session_id, None, 200).await else {
+        return false;
+    };
+    for row in tail.iter().rev() {
+        let host_row = row.kind == MessageKind::SystemNotice.as_str()
+            || row.kind == MessageKind::PhaseChange.as_str();
+        if host_row {
+            if row.content.starts_with(opening) {
+                return true;
+            }
+            continue;
+        }
+        if row.author != author_slug {
+            return false;
+        }
+    }
+    false
+}
+
 impl SignalingBridge {
     /// How one participant of a session is NAMED (rc3 D10's display rule), or
     /// `None` when storage isn't wired, the roster has no such slug, or the read
@@ -230,9 +280,19 @@ impl SignalingBridge {
             // existing phase-tagged row adopts that row's phase instead of
             // stripping it; genuinely untagged scratch (no such row) is
             // unchanged.
+            //
+            // **An ADOPTED phase keys on the row's OWN slug** (EYES' advisory
+            // `9a1602f1`, s-d43b3630). The adoption used to feed
+            // `effective_slug`, which keys on the PHASE — so an untagged write
+            // to `plan-eyes` (a row tagged `plan`) landed in the `plan` doc:
+            // the reviewer extending its own co-doc appended into the
+            // executor's plan, and the reply still named `plan-eyes`. The row
+            // the slug names is the row to write; only an EXPLICIT phase
+            // re-keys. The round-13 case is unchanged — `apply` keys `apply`
+            // either way.
             let adopted;
-            let phase = match phase {
-                Some(p) => Some(p),
+            let (phase, key) = match phase {
+                Some(p) => (Some(p), effective_slug(slug, Some(p))),
                 None => {
                     adopted = storage
                         .session_document_by_slug(session_id, slug)
@@ -240,10 +300,9 @@ impl SignalingBridge {
                         .ok()
                         .flatten()
                         .and_then(|d| d.phase);
-                    adopted.as_deref()
+                    (adopted.as_deref(), slug)
                 }
             };
-            let key = effective_slug(slug, phase);
             // Append only has meaning against an existing doc; appending to a
             // missing one is just a write.
             let existing = if append {
@@ -378,6 +437,16 @@ impl SignalingBridge {
     /// all, so a reviewer's `mode:"append"` — the mode the descriptor sells to
     /// every caller — silently REPLACED its own findings; the participant the
     /// `<phase>-eyes` redirect exists to protect was the one it destroyed for.
+    ///
+    /// **A co-doc write does not move the phase-vote fingerprint** (feedback
+    /// #70 / #95 — see `Storage::phase_artifact_fingerprint`), so the other
+    /// participants' votes stand. Two things replace what the invalidation
+    /// used to do:
+    /// - the WRITER's own vote is withdrawn, so a reviewer that records a new
+    ///   objection has to vote again before the phase can move;
+    /// - one system row per co-doc per run of the writer's turn tells the
+    ///   others that review notes landed (a reviewer appending five slices
+    ///   posts one row, not five).
     pub async fn session_doc_write_eyes(
         &self,
         session_id: &str,
@@ -385,18 +454,18 @@ impl SignalingBridge {
         body: &str,
         author_slug: &str,
         append: bool,
-    ) -> Result<(i64, String)> {
+    ) -> Result<CodocWrite> {
         // F10: the reviewer's text is redacted like any agent write — first,
         // before the append composes it under the existing review.
         let body = crate::policy::secret_scan::redact(body);
         let body: &str = &body;
         let slug = format!("{phase}-eyes");
         let author = self.participant_display_name(session_id, author_slug).await;
-        let heading = match author {
+        let heading = match &author {
             Some(name) => format!("### Review findings — {name}"),
             None => "### Review findings".to_string(),
         };
-        let id = {
+        let (id, storage) = {
             let Some(storage) = self.storage.lock().await.clone() else {
                 return Err(anyhow::anyhow!("storage not configured"));
             };
@@ -424,14 +493,49 @@ impl SignalingBridge {
                 Self::archive_superseded_doc(&storage, session_id, &slug, &composed, MAX_DOC_ARCHIVES)
                     .await;
             }
-            storage
+            let id = storage
                 .upsert_session_document(session_id, &slug, &composed, Some(phase))
-                .await?
+                .await?;
+            (id, storage)
         };
         let _ = self.event_tx.send(SignalingEvent::DocChanged {
             session_id: session_id.to_string(),
         });
-        Ok((id, slug))
+        // The writer's own vote goes with its write. Best-effort: a failed
+        // retraction leaves the vote standing, which is the pre-existing state
+        // for every other participant and must not fail the doc write.
+        let vote_withdrawn = match storage.participant_by_slug(session_id, author_slug).await {
+            Ok(Some(writer)) => match storage.retract_phase_votes(writer.id).await {
+                Ok(withdrawn) => withdrawn > 0,
+                Err(e) => {
+                    tracing::warn!(%session_id, %author_slug, ?e, "withdrawing the co-doc writer's vote failed");
+                    false
+                }
+            },
+            _ => false,
+        };
+        let who = author.as_deref().unwrap_or(author_slug);
+        let opening = codoc_notice_opening(who, &slug);
+        if !codoc_noticed_this_run(&storage, session_id, author_slug, &opening).await {
+            let notice = format!(
+                "{opening} (read them with session_doc_read). They are notes on the work, not \
+                 a change to it: the other participants' phase votes stand.]"
+            );
+            if crate::core::post_system_notice(
+                &storage,
+                Some(self),
+                session_id,
+                crate::storage::MessageKind::SystemNotice,
+                notice,
+                None,
+            )
+            .await
+            .is_none()
+            {
+                tracing::warn!(%session_id, %slug, "the review-notes notice was not posted");
+            }
+        }
+        Ok(CodocWrite { id, slug, vote_withdrawn })
     }
 
     /// Agent-callable: search this session's docs (slug + body substring).
@@ -482,6 +586,29 @@ mod tests {
         assert_eq!(effective_slug("notes", None), "notes");
     }
 
+    /// The bridge half of EYES' advisory `9a1602f1`: an untagged write whose
+    /// slug names a phase-TAGGED row adopts that row's phase and writes THAT
+    /// row. It used to re-key on the adopted phase, so `plan-eyes` (tagged
+    /// `plan`) resolved to the `plan` doc. Feeding the adopted phase back into
+    /// `effective_slug` turns this red.
+    #[tokio::test]
+    async fn an_adopted_phase_keys_on_the_rows_own_slug() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage.upsert_session_document("s1", "plan", "THE PLAN", Some("plan")).await.unwrap();
+        storage.upsert_session_document("s1", "plan-eyes", "the review", Some("plan")).await.unwrap();
+
+        bridge.session_doc_write("s1", "plan-eyes", "one more point", None, true).await.unwrap();
+
+        let plan = storage.session_document_by_slug("s1", "plan").await.unwrap().unwrap();
+        assert_eq!(plan.body, "THE PLAN", "the executor's doc is not the row that slug names");
+        let review = storage.session_document_by_slug("s1", "plan-eyes").await.unwrap().unwrap();
+        assert!(review.body.starts_with("the review") && review.body.contains("one more point"), "{}", review.body);
+        assert_eq!(review.phase.as_deref(), Some("plan"), "and it keeps its phase tag");
+    }
+
     #[tokio::test]
     async fn the_review_doc_survives_the_executors_rewrite() {
         // The justification for the co-located design over read-append-write: a
@@ -499,10 +626,11 @@ mod tests {
             .session_doc_write("s1", "plan", "executor v1", Some("plan"), false)
             .await
             .unwrap();
-        let (_, eyes_slug) = bridge
+        let eyes_slug = bridge
             .session_doc_write_eyes("s1", "plan", "the reviewer's notes", "eyes", false)
             .await
-            .unwrap();
+            .unwrap()
+            .slug;
         assert_eq!(eyes_slug, "plan-eyes");
 
         // The executor rewrites its plan doc — the review must survive.

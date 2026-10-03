@@ -40,6 +40,16 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **A reviewer writing down its findings no longer cancels the executor's
+  phase vote.** Review notes in a `<phase>-eyes` document used to count as a
+  change to the work, so the executor had to vote again each time, and
+  reviewers kept findings in the chat to avoid that. The notes now withdraw
+  only the reviewer's own vote, and a line in the chat says that notes landed.
+- **A reviewer's document write can no longer land in the executor's phase
+  document.** Writing to `plan-eyes` (or to `plan`) without naming the phase
+  appended the review into the executor's plan while reporting that it had
+  written `plan-eyes`. Such a write now always goes to the reviewer's own
+  document, and an executor's write to a reviewer's document is refused.
 - **Agents are no longer told to add a co-author trailer your policy
   forbids.** The claude CLI instructs every agent to end commits with one;
   when your commit policy forbids it, bot-hq now switches the CLI's

@@ -1742,13 +1742,24 @@ impl Storage {
     /// timestamp ties, and `SUM(LENGTH(body))` is cheap insurance against a
     /// same-millisecond same-length rewrite.
     ///
-    /// **Deliberately spans ALL of the session's phase-tagged docs rather than
-    /// the current phase's**, and that is what keeps this a storage-only
-    /// question: the live phase is in-memory `AppState` and unreachable from
-    /// here. Spanning them is also stricter — editing the Investigate doc while
+    /// **Deliberately spans ALL of the session's phase docs rather than the
+    /// current phase's**, and that is what keeps this a storage-only question:
+    /// the live phase is in-memory `AppState` and unreachable from here.
+    /// Spanning them is also stricter — editing the Investigate doc while
     /// voting to leave Plan still invalidates, which is correct, because the
-    /// votes were cast on a body of work that has since moved. The reviewer's
-    /// co-located `<phase>-eyes` doc is phase-tagged, so it counts.
+    /// votes were cast on a body of work that has since moved.
+    ///
+    /// **The reviewer's co-located `<phase>-eyes` docs do NOT count** (feedback
+    /// #70 / #95), though they carry a phase tag. They are notes ON the work,
+    /// not the work, and counting them made a reviewer's write orphan the
+    /// executor's standing vote — eight re-votes in one day, and reviewers
+    /// keeping findings in chat, which scrolls, to avoid costing a peer its
+    /// vote. Nothing is lost by leaving them out: an advance needs EVERY
+    /// active participant's vote, so the reviewer's own vote is the guard, and
+    /// its co-doc write withdraws that vote (`session_doc_write_eyes`) — a
+    /// reviewer that records a new objection has to vote again before the
+    /// phase can move. (A blocking finding is NOT that guard: findings gate
+    /// commit and push, never the vote.)
     ///
     /// **Untagged scratch docs do NOT count** (round 9). They used to: the
     /// digest ran over every `session_documents` row, so a private scratch note
@@ -1762,10 +1773,18 @@ impl Storage {
     /// the guard against voting through empty work is the reviewer's vote — not
     /// an artificial sentinel.
     pub async fn phase_artifact_fingerprint(&self, session_id: &str) -> Result<String> {
-        let (n, latest, bytes): (i64, String, i64) = sqlx::query_as(
+        // The four co-doc names are compile-time constants, so they are
+        // written into the statement rather than bound.
+        let codocs = super::REVIEWER_CODOC_SLUGS
+            .iter()
+            .map(|slug| format!("'{slug}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (n, latest, bytes): (i64, String, i64) = sqlx::query_as(&format!(
             "SELECT COUNT(*), COALESCE(MAX(updated_at), ''), COALESCE(SUM(LENGTH(body)), 0) \
-             FROM session_documents WHERE session_id = ? AND phase IS NOT NULL",
-        )
+             FROM session_documents \
+             WHERE session_id = ? AND phase IS NOT NULL AND slug NOT IN ({codocs})"
+        ))
         .bind(session_id)
         .fetch_one(&self.pool)
         .await
@@ -1933,9 +1952,14 @@ impl Storage {
     /// A reviewer needs this more than the author does, and that asymmetry is
     /// why it is not optional. The phase-doc author can withdraw by editing the
     /// doc — the fingerprint moves and every vote falls away. A reviewer never
-    /// moves the fingerprint (one author per phase chain), so without an
-    /// explicit retraction its vote could only be undone by somebody else's
-    /// edit, and the tally could complete over a live objection.
+    /// moves the fingerprint (one author per phase chain; its `<phase>-eyes`
+    /// notes are left out of the digest), so without an explicit retraction its
+    /// vote could only be undone by somebody else's edit, and the tally could
+    /// complete over a live objection. Two things retract it: a pass, and the
+    /// reviewer writing its co-doc.
+    ///
+    /// Returns how many votes were withdrawn, so a caller can tell the
+    /// participant its vote is gone.
     ///
     /// Session-wide for the participant rather than keyed to one question: it is
     /// called when someone declines to carry the turn, and that declines every
@@ -1947,7 +1971,7 @@ impl Storage {
     /// advance must not read "retracted" because its voter passed later: this
     /// used to filter on the participant alone, and every pass after an advance
     /// relabelled the ballots that had carried it (triage A1, s-5482dfff).
-    pub async fn retract_phase_votes(&self, participant_id: i64) -> Result<()> {
+    pub async fn retract_phase_votes(&self, participant_id: i64) -> Result<u64> {
         // MARK, don't delete (0076): the retraction is itself audit-worthy —
         // "voted, then passed" and "never voted" were indistinguishable when
         // this row vanished. Every tally filters retracted rows out; a re-vote
@@ -1962,8 +1986,8 @@ impl Storage {
         .bind(participant_id)
         .execute(&self.pool)
         .await
-        .with_context(|| format!("retracting phase votes for participant {participant_id}"))?;
-        Ok(())
+        .with_context(|| format!("retracting phase votes for participant {participant_id}"))
+        .map(|done| done.rows_affected())
     }
 
     /// Has every ACTIVE participant voted to advance to `target_phase` for this
@@ -3661,7 +3685,8 @@ mod tests {
     /// promised "phase documents". Three assertions, because the round-8 lesson
     /// is that a test can pin a falsehood: (a) scratch does not move it, (b) an
     /// executor phase write does, (c) the reviewer's `<phase>-eyes` write does
-    /// too — that one is what keeps reviewer-vote invalidation intact.
+    /// NOT — it used to, and the reviewer's own vote is now withdrawn by the
+    /// write itself instead (`session_doc_write_eyes`).
     #[tokio::test]
     async fn the_fingerprint_moves_on_phase_docs_and_ignores_scratch() {
         let s = storage_with_0044().await;
@@ -3678,10 +3703,46 @@ mod tests {
         let fp1 = s.phase_artifact_fingerprint("s1").await.unwrap();
         assert_ne!(fp1, fp0, "a phase write must move the digest");
 
-        // (c) the reviewer's co-located doc moves it too.
-        s.upsert_session_document("s1", "plan-eyes", "the review", Some("plan")).await.unwrap();
+        // (c) the reviewer's co-located docs do NOT (feedback #70 / #95): they
+        // are notes on the work. Every one of the four, written and rewritten.
+        for codoc in crate::storage::REVIEWER_CODOC_SLUGS {
+            let phase = crate::storage::reviewer_codoc_phase(codoc).unwrap();
+            s.upsert_session_document("s1", codoc, "the review", Some(phase)).await.unwrap();
+            s.upsert_session_document("s1", codoc, "the review, extended", Some(phase)).await.unwrap();
+        }
+        assert_eq!(
+            s.phase_artifact_fingerprint("s1").await.unwrap(),
+            fp1,
+            "a <phase>-eyes write must not move the digest"
+        );
+        // …and only those four names: a phase-tagged doc that merely ends in
+        // `-eyes` is still the work.
+        s.upsert_session_document("s1", "apply", "the changelog", Some("apply")).await.unwrap();
         let fp2 = s.phase_artifact_fingerprint("s1").await.unwrap();
-        assert_ne!(fp2, fp1, "a <phase>-eyes write must move the digest");
+        assert_ne!(fp2, fp1, "the executor's next phase doc still moves it");
+    }
+
+    /// The co-doc names are one list (`REVIEWER_CODOC_SLUGS`) read by the
+    /// redirect that writes them and the fingerprint that skips them. It must
+    /// hold exactly `<tag>-eyes` for every IPAV phase, or a new phase's review
+    /// doc would silently start orphaning votes again.
+    #[test]
+    fn the_reviewer_codoc_names_are_one_per_phase() {
+        use crate::core::ipav::IpavPhase;
+        let expected: Vec<String> = ["Investigate", "Plan", "Apply", "Verify"]
+            .iter()
+            .map(|name| format!("{}-eyes", IpavPhase::parse(name).expect("a phase").tag()))
+            .collect();
+        assert_eq!(crate::storage::REVIEWER_CODOC_SLUGS.to_vec(), expected);
+        assert_eq!(crate::storage::reviewer_codoc_phase("plan-eyes"), Some("plan"));
+        for not_a_codoc in ["plan", "eyes", "handoff-eyes", "plan-eyes@1", "my-plan-eyes"] {
+            assert_eq!(crate::storage::reviewer_codoc_phase(not_a_codoc), None, "{not_a_codoc}");
+        }
+        // A phase doc's own name is exact: the parser's shorthands are not it.
+        assert_eq!(crate::storage::phase_doc_slug("apply"), Some("apply"));
+        for not_a_phase_doc in ["a", "p", "Plan", "APPLY", "apply-eyes", "plans"] {
+            assert_eq!(crate::storage::phase_doc_slug(not_a_phase_doc), None, "{not_a_phase_doc}");
+        }
     }
 
     /// Voting twice for one question is one vote — the tally is a COUNT, so a

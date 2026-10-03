@@ -57,6 +57,7 @@ pub use participants::{
     PARTICIPATION_MODES, UNREAD_BATCH_LIMIT, WIRE_BODY_CLAMP_BYTES, WIRE_JOIN,
 };
 pub use feedback::{FEEDBACK_KINDS, FEEDBACK_STATUSES};
+pub use session_docs::{phase_doc_slug, reviewer_codoc_phase, REVIEWER_CODOC_SLUGS};
 pub use tray::{is_gate_options, is_gate_row, FINDING_WITHDRAWAL_REASON, GATE_OPTIONS_JSON};
 pub use findings::{FindingUidResolution, OPEN_BLOCKING_FOR_SESSION};
 pub use row_types::{

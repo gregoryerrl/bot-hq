@@ -3473,7 +3473,8 @@ async fn halted_on_consensus(
     //
     // The reviewer's case for why this is not optional: the phase-doc AUTHOR can
     // withdraw by editing the doc — the fingerprint moves and every vote falls
-    // away — but a reviewer never moves the fingerprint, since one participant
+    // away — but a reviewer never moves the fingerprint (its `<phase>-eyes`
+    // notes are left out of the digest), since one participant
     // authors a phase chain. Without an explicit retraction a reviewer's vote
     // could be undone only by somebody else's edit, and the tally could complete
     // over a live objection.

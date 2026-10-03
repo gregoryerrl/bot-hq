@@ -3,6 +3,33 @@
 
 use super::*;
 
+/// The reviewer's co-located review docs, one per IPAV phase: `plan-eyes` sits
+/// beside the executor's `plan` under the same phase tag. One list, because
+/// two things must agree on it exactly — the redirect that writes them
+/// (`bridge::session_docs`) and the phase-vote fingerprint that leaves them
+/// out ([`Storage::phase_artifact_fingerprint`]).
+pub const REVIEWER_CODOC_SLUGS: [&str; 4] =
+    ["investigate-eyes", "plan-eyes", "apply-eyes", "verify-eyes"];
+
+/// The phase a reviewer co-doc belongs to (`plan-eyes` → `plan`), or `None`
+/// for any other slug.
+pub fn reviewer_codoc_phase(slug: &str) -> Option<&'static str> {
+    REVIEWER_CODOC_SLUGS
+        .iter()
+        .find(|codoc| **codoc == slug)
+        .and_then(|codoc| codoc.strip_suffix("-eyes"))
+}
+
+/// The phase a slug IS, when it is exactly a phase doc's own name (`plan` →
+/// `plan`). Exact and case-sensitive, unlike the phase-argument parser, which
+/// also takes `p` and `Plan`: a scratch doc called `a` is not the apply doc.
+pub fn phase_doc_slug(slug: &str) -> Option<&'static str> {
+    REVIEWER_CODOC_SLUGS
+        .iter()
+        .filter_map(|codoc| codoc.strip_suffix("-eyes"))
+        .find(|phase| *phase == slug)
+}
+
 /// Full column projection for a `SessionDocument` row — shared by
 /// `session_documents_for` and `session_document_by_slug`.
 const DOCUMENT_COLUMNS: &str = "id, session_id, slug, body, created_at, updated_at, phase";

@@ -566,15 +566,18 @@ async fn refuse_gated_tool(
 
 /// The `session_doc_write` reply: `{id, slug}`, plus a `note` when the body
 /// was stored with `redacted` secrets replaced by markers (F10).
-fn doc_write_reply(id: i64, slug: &str, redacted: usize) -> String {
-    if redacted == 0 {
+fn doc_write_reply(id: i64, slug: &str, redacted: usize, extra: Option<&str>) -> String {
+    let mut notes: Vec<String> = Vec::new();
+    if redacted > 0 {
+        notes.push(format!("stored{}", crate::policy::secret_scan::redaction_note(redacted)));
+    }
+    if let Some(extra) = extra {
+        notes.push(extra.to_string());
+    }
+    if notes.is_empty() {
         return json!({"id": id, "slug": slug}).to_string();
     }
-    let note = format!(
-        "stored{}",
-        crate::policy::secret_scan::redaction_note(redacted)
-    );
-    json!({"id": id, "slug": slug, "note": note}).to_string()
+    json!({"id": id, "slug": slug, "note": notes.join("; ")}).to_string()
 }
 
 async fn call_tool(
@@ -1256,13 +1259,47 @@ async fn call_tool(
                     }
                 }
             }
-            match (caller.capabilities.reviewer_shaped(), phase.as_deref()) {
-                (true, Some(p)) => {
-                    let (id, eyes_slug) = bridge
+            // The phase this write belongs to AS A REVIEW: the explicit tag,
+            // or the one the slug itself names — a bare phase name, or the
+            // reviewer's own `<phase>-eyes`. EYES' advisory `9a1602f1`: the
+            // redirect used to look at the `phase` ARGUMENT alone, so a
+            // reviewer's untagged write to `plan` (or to `plan-eyes`) took the
+            // executor's path and landed in the executor's doc.
+            let reviewer = caller.capabilities.reviewer_shaped();
+            let review_phase: Option<String> = if reviewer {
+                phase.clone().or_else(|| {
+                    crate::storage::reviewer_codoc_phase(&slug)
+                        .or_else(|| crate::storage::phase_doc_slug(&slug))
+                        .map(str::to_string)
+                })
+            } else {
+                None
+            };
+            // …and the mirror: a co-doc is the REVIEWER's. An executor's
+            // untagged write to `plan-eyes` would replace the review.
+            if !reviewer && phase.is_none() {
+                if let Some(of_phase) = crate::storage::reviewer_codoc_phase(&slug) {
+                    return Err(JsonRpcError::new(
+                        JsonRpcError::INVALID_PARAMS,
+                        format!(
+                            "`{slug}` holds the reviewer's notes on the {of_phase} phase; a write \
+                             from you would replace the review. Answer it in your own phase doc \
+                             or in the channel."
+                        ),
+                    ));
+                }
+            }
+            match (review_phase.as_deref(), phase.as_deref()) {
+                (Some(p), _) => {
+                    let written = bridge
                         .session_doc_write_eyes(&caller.session_id, p, &body, &caller.agent, append)
                         .await
                         .map_err(internal_err_no_prefix)?;
-                    Ok(ToolCallResult::text(doc_write_reply(id, &eyes_slug, redacted)))
+                    let note = written.vote_withdrawn.then_some(
+                        "your own phase vote was withdrawn by this write: review notes changed \
+                         after you voted. Cast it again with advance_phase if it still stands",
+                    );
+                    Ok(ToolCallResult::text(doc_write_reply(written.id, &written.slug, redacted, note)))
                 }
                 _ => {
                     let id = bridge
@@ -1275,7 +1312,7 @@ async fn call_tool(
                         )
                         .await
                         .map_err(internal_err_no_prefix)?;
-                    Ok(ToolCallResult::text(doc_write_reply(id, &slug, redacted)))
+                    Ok(ToolCallResult::text(doc_write_reply(id, &slug, redacted, None)))
                 }
             }
         }
@@ -3700,6 +3737,189 @@ mod tests {
         assert!(at.contains("eod@1"), "got: {at}");
         let hit = call("session_doc_read", json!({"slug": "eod@1", "grep": "dug"})).await;
         assert!(hit.contains("\"line\":1") && !hit.contains("second"), "got: {hit}");
+    }
+
+    /// One tool call through the real handler, as `who`. `Ok` is the reply text.
+    async fn tool(
+        bridge: &Arc<SignalingBridge>,
+        who: CallerIdentity,
+        name: &str,
+        args: Value,
+    ) -> Result<String, JsonRpcError> {
+        let r = req("tools/call", json!({ "name": name, "arguments": args }), 1);
+        let out = dispatch(r, &who, bridge).await?.expect("a response");
+        let v = serde_json::to_value(&out).unwrap();
+        Ok(v["result"]["content"][0]["text"].as_str().unwrap_or("").to_string())
+    }
+
+    async fn two_role_session() -> (Arc<SignalingBridge>, crate::storage::Storage) {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+        storage
+            .ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS)
+            .await
+            .unwrap();
+        (bridge, storage)
+    }
+
+    async fn doc_body(storage: &crate::storage::Storage, slug: &str) -> Option<String> {
+        storage.session_document_by_slug("s1", slug).await.unwrap().map(|d| d.body)
+    }
+
+    /// EYES' advisory `9a1602f1` (s-d43b3630), through the real handler: a
+    /// reviewer's write that names a phase doc or its own co-doc WITHOUT a
+    /// `phase` argument used to land in the executor's phase doc while the
+    /// reply named `<phase>-eyes`. Every such write now lands in the co-doc and
+    /// says so; the executor's doc is untouched, and an executor's untagged
+    /// write to a co-doc is refused. The round-13 case — an executor appending
+    /// to its own phase doc without `phase` — still keeps the tag.
+    #[tokio::test]
+    async fn a_reviewers_untagged_write_never_lands_in_the_executors_phase_doc() {
+        let (bridge, storage) = two_role_session().await;
+        tool(&bridge, caller(), "session_doc_write", json!({"slug": "plan", "phase": "plan", "body": "THE PLAN"}))
+            .await
+            .unwrap();
+        tool(&bridge, eyes_caller(), "session_doc_write", json!({"slug": "plan-eyes", "phase": "plan", "body": "review one"}))
+            .await
+            .unwrap();
+
+        // The natural call: extend one's own co-doc by its slug, no `phase`.
+        let reply = tool(
+            &bridge,
+            eyes_caller(),
+            "session_doc_write",
+            json!({"slug": "plan-eyes", "mode": "append", "body": "review two"}),
+        )
+        .await
+        .unwrap();
+        assert!(reply.contains("\"slug\":\"plan-eyes\""), "the reply names where it wrote: {reply}");
+        assert_eq!(doc_body(&storage, "plan").await.as_deref(), Some("THE PLAN"), "the executor's doc is untouched");
+        let review = doc_body(&storage, "plan-eyes").await.unwrap();
+        assert!(review.contains("review one") && review.contains("review two"), "both slices: {review}");
+
+        // The same with the phase doc's own name, in replace mode.
+        let reply = tool(&bridge, eyes_caller(), "session_doc_write", json!({"slug": "plan", "body": "review three"}))
+            .await
+            .unwrap();
+        assert!(reply.contains("\"slug\":\"plan-eyes\""), "redirected, and it says so: {reply}");
+        assert_eq!(doc_body(&storage, "plan").await.as_deref(), Some("THE PLAN"));
+        assert!(doc_body(&storage, "plan-eyes").await.unwrap().contains("review three"));
+
+        // A reviewer's scratch doc whose name is only a parser shorthand stays scratch.
+        tool(&bridge, eyes_caller(), "session_doc_write", json!({"slug": "a", "body": "scratch"})).await.unwrap();
+        assert_eq!(doc_body(&storage, "a").await.as_deref(), Some("scratch"));
+        assert!(doc_body(&storage, "apply-eyes").await.is_none());
+
+        // The mirror: the co-doc is the reviewer's.
+        let refused = tool(&bridge, caller(), "session_doc_write", json!({"slug": "plan-eyes", "body": "mine now"}))
+            .await
+            .expect_err("an executor's untagged write to a co-doc is refused");
+        assert!(refused.message.contains("holds the reviewer's notes on the plan phase"), "{}", refused.message);
+        assert!(doc_body(&storage, "plan-eyes").await.unwrap().contains("review three"));
+
+        // Round 13 stays fixed: an untagged append to one's own phase doc keeps the tag.
+        tool(&bridge, caller(), "session_doc_write", json!({"slug": "plan", "mode": "append", "body": "slice two"}))
+            .await
+            .unwrap();
+        let plan = storage.session_document_by_slug("s1", "plan").await.unwrap().unwrap();
+        assert_eq!(plan.phase.as_deref(), Some("plan"));
+        assert!(plan.body.starts_with("THE PLAN") && plan.body.contains("slice two"));
+    }
+
+    /// Feedback #70 / #95, end to end: review notes are not the work. The
+    /// executor votes; the reviewer records notes through the real handler; the
+    /// reviewer's vote then completes the tally WITHOUT the executor voting
+    /// again. Counting the co-doc in `phase_artifact_fingerprint` again turns
+    /// this red.
+    #[tokio::test]
+    async fn a_reviewers_notes_leave_the_executors_phase_vote_standing() {
+        let (bridge, _storage) = two_role_session().await;
+        tool(&bridge, caller(), "session_doc_write", json!({"slug": "investigate", "phase": "investigate", "body": "findings"}))
+            .await
+            .unwrap();
+        let first = tool(&bridge, caller(), "advance_phase", json!({"target": "Plan"})).await.unwrap();
+        assert!(first.starts_with("NOT ADVANCED") && first.contains("1 of 2"), "{first}");
+
+        tool(&bridge, eyes_caller(), "session_doc_write", json!({"slug": "review", "phase": "investigate", "body": "two points"}))
+            .await
+            .unwrap();
+        let second = tool(&bridge, eyes_caller(), "advance_phase", json!({"target": "Plan"})).await.unwrap();
+        assert!(second.starts_with("ADVANCED"), "the executor's vote still counted: {second}");
+    }
+
+    /// …and what replaces the invalidation: the WRITER's own vote goes with its
+    /// write, so a reviewer that records a new objection after voting has to
+    /// vote again, and the reply tells it so. The executor's vote is not
+    /// touched. Deleting the `retract_phase_votes` call in
+    /// `session_doc_write_eyes` turns this red.
+    #[tokio::test]
+    async fn a_reviewers_own_vote_is_withdrawn_by_its_later_notes() {
+        let (bridge, storage) = two_role_session().await;
+        let hands = storage.participant_by_slug("s1", "hands").await.unwrap().unwrap();
+        let voted = tool(&bridge, eyes_caller(), "advance_phase", json!({"target": "Plan"})).await.unwrap();
+        assert!(voted.contains("1 of 2"), "{voted}");
+
+        let reply = tool(&bridge, eyes_caller(), "session_doc_write", json!({"slug": "x", "phase": "investigate", "body": "wait: a new objection"}))
+            .await
+            .unwrap();
+        assert!(reply.contains("your own phase vote was withdrawn"), "the reviewer is told: {reply}");
+
+        // The executor's vote alone does not complete a tally the reviewer left.
+        let out = tool(&bridge, caller(), "advance_phase", json!({"target": "Plan"})).await.unwrap();
+        assert!(out.starts_with("NOT ADVANCED") && out.contains("1 of 2"), "{out}");
+        // A write with no standing vote says nothing about votes, and the
+        // executor's ballot is still there for the reviewer's fresh one.
+        let reply = tool(&bridge, eyes_caller(), "session_doc_write", json!({"slug": "x", "phase": "investigate", "mode": "append", "body": "resolved"}))
+            .await
+            .unwrap();
+        assert!(!reply.contains("withdrawn"), "{reply}");
+        let _ = hands;
+        let done = tool(&bridge, eyes_caller(), "advance_phase", json!({"target": "Plan"})).await.unwrap();
+        assert!(done.starts_with("ADVANCED"), "{done}");
+    }
+
+    /// EYES' plan point 8: the "review notes landed" row is one per co-doc per
+    /// run of the writer's turn — five appended slices post one row — and a
+    /// fresh one after anybody else has spoken.
+    #[tokio::test]
+    async fn review_notes_are_announced_once_per_codoc_per_run() {
+        let (bridge, storage) = two_role_session().await;
+        let rows = |storage: crate::storage::Storage| async move {
+            storage
+                .messages_for_session("s1", None)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|m| m.kind == "system_notice" && m.content.contains("wrote review notes to"))
+                .map(|m| m.content)
+                .collect::<Vec<_>>()
+        };
+        let note = |body: &'static str, phase: &'static str| {
+            let bridge = &bridge;
+            async move {
+                tool(bridge, eyes_caller(), "session_doc_write", json!({"slug": "r", "phase": phase, "mode": "append", "body": body}))
+                    .await
+                    .unwrap();
+            }
+        };
+        note("slice 1", "plan").await;
+        storage.post_to_channel("s1", "participant", Some("eyes"), "text", "Reviewing.", None).await.unwrap();
+        note("slice 2", "plan").await;
+        note("slice 3", "plan").await;
+        let seen = rows(storage.clone()).await;
+        assert_eq!(seen.len(), 1, "one row for three slices of one run: {seen:?}");
+        assert!(seen[0].contains("wrote review notes to `plan-eyes`") && seen[0].contains("phase votes stand"), "{}", seen[0]);
+
+        // Another co-doc in the same run gets its own row.
+        note("apply notes", "apply").await;
+        assert_eq!(rows(storage.clone()).await.len(), 2);
+
+        // The executor speaks; the reviewer's next slice is a new run.
+        storage.post_to_channel("s1", "participant", Some("hands"), "text", "Folded in.", None).await.unwrap();
+        note("slice 4", "plan").await;
+        assert_eq!(rows(storage.clone()).await.len(), 3, "a fresh row after someone else spoke");
     }
 
     /// A handoff doc is its owner's: bot-hq puts `handoff-<slug>` back into

@@ -820,6 +820,15 @@ was never dealt a turn, and the boundary is where that costs the most.
 - **`artifact_fingerprint`** digests the session's phase documents (count, latest
   `updated_at`, total body length). Talking never invalidates a vote; changing
   the work always does.
+- **The reviewer's co-docs are not the work.** The four `<phase>-eyes` docs are
+  left out of the digest (feedback #70 / #95): counting them made a reviewer's
+  notes orphan the executor's standing vote, and reviewers kept findings in chat
+  to avoid it. What the invalidation did is done directly instead: a co-doc
+  write withdraws the WRITER's own vote, so a reviewer that records a new
+  objection votes again before the phase can move, and one system row per co-doc
+  per run of its turn tells the others that notes landed. The guard on an
+  advance is the reviewer's own vote; a blocking finding gates commit and push,
+  never the vote.
 - **`sessions.phase_epoch`** is monotonic and bumps on every transition. It
   closes the axis a content digest cannot see: phases run backward, so without
   it a Plan-era vote would match again after Plan → Investigate → Plan whenever
