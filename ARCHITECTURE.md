@@ -1103,10 +1103,17 @@ hook refuses a listed read and points at `read_gate`.
 
 **`prod_read`** (`bridge/prod_read.rs`, tray `afef06f0`) runs read-only SQL on the
 project's production Postgres (`policy.yaml` `prod_read:`). `check_sql` admits only
-SELECT, WITH, EXPLAIN, SHOW, TABLE and VALUES statements, plus whole-line `\d…`/`\x`,
-and refuses what it cannot parse. The command runs `psql -1 -f -` under
-`default_transaction_read_only=on` and a statement timeout, so the whole query is one
-read-only transaction. The card shows the SQL. The gate row is marked
+SELECT, WITH, EXPLAIN, SHOW, TABLE and VALUES statements, plus whole-line `\d…`/`\x`.
+It scans the SQL the way PostgreSQL and psql do (`$` inside names, dollar-quotes,
+comments) and refuses wherever the two could disagree about where a string or comment
+ends — a nested `/*`, an `E'…'` or `U&'…'` string, a backslash, a `$` that opens no
+dollar-quote, a carriage return — or anything unterminated (EYES `1e62db22`: a
+disagreement hides a statement). The command runs `psql -1 -q -f -`, and bot-hq's own
+first statements make the transaction read-only, set its timeout and run one query,
+after which PostgreSQL refuses to make it read-write; `PGOPTIONS` repeats the settings.
+A function with side effects outside the transaction (`dblink`, `pg_terminate_backend`)
+is the database role's to refuse: a read-only role is the real boundary. The card
+shows the SQL. The gate row is marked
 `exec_kind = prod_read` (0089) by the handler alone, and only then does approval
 read the password from the configured file (parsed, never sourced) and pass
 `PGPASSWORD` in psql's environment. It is routed like a listed read: reviewed first

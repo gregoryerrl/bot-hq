@@ -4497,5 +4497,12 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
             .await
             .unwrap_err();
         assert!(err.to_string().contains("`UPDATE`"), "{err}");
+        // Windows line ends are made plain before the check, not refused as
+        // carriage returns (EYES `1e62db22`).
+        let out = bridge
+            .prod_read("s1".into(), "hands".into(), "select 1\r\nfrom t".into(), None, None)
+            .await
+            .unwrap();
+        assert!(out.to_lowercase().contains("parked"), "{out}");
     }
 }

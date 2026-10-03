@@ -45,7 +45,11 @@ and in `docs/rebuild-archive/`.
   `prod_read` then parks a query for your approval with the SQL itself on the
   card, not wrapped in shell. Only reading statements are accepted, the whole
   query runs as one read-only transaction with a time limit, and the password
-  is never in the command: it is read from your file when you approve.
+  is never in the command: it is read from your file when you approve. SQL
+  that could be read two ways (a nested comment, an escape string, a
+  backslash) is refused, and bot-hq's own first statements fix the
+  transaction as read-only before yours run. A read-only database user is
+  still the real boundary: a function can reach outside the transaction.
 - **The reviewer can ask for its own production read.** It had no way to park
   a read for your approval, so it either ran production reads directly or
   routed them through the agent it was reviewing. A new `read_gate` tool takes

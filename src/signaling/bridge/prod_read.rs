@@ -10,14 +10,18 @@
 //! reviewing SQL wrapped in shell.
 //!
 //! Now the connection comes from the project's `policy.yaml` (`prod_read:`);
-//! the SQL is checked before anything parks; the command bot-hq builds runs
-//! the whole query as ONE transaction (`psql -1 -f -`) under
-//! `default_transaction_read_only=on` with a statement timeout; the password
-//! is read at approval time — parsed from the configured file, never sourced
-//! — and handed to psql in its environment, so it is never in the text the
-//! card shows or the transcript keeps (EYES, s-3158eb35). The approval row is
-//! marked `exec_kind = prod_read` (0089) by this handler alone, so a command
-//! made to look like one cannot be given the password.
+//! the SQL is checked before anything parks, scanned as PostgreSQL scans it
+//! and refused wherever the two could disagree; the command bot-hq builds runs
+//! the whole query as ONE transaction (`psql -1 -f -`) that bot-hq's own
+//! first statements make read-only, with a statement timeout, before the
+//! agent's SQL runs. That stops a write the SQL spells out; a function with
+//! side effects outside the transaction (`dblink`, `pg_terminate_backend`) is
+//! the database role's to refuse, so a read-only role is the real boundary.
+//! The password is read at approval time — parsed from the configured file,
+//! never sourced — and handed to psql in its environment, so it is never in
+//! the text the card shows or the transcript keeps (EYES, s-3158eb35). The
+//! approval row is marked `exec_kind = prod_read` (0089) by this handler
+//! alone, so a command made to look like one cannot be given the password.
 
 use super::*;
 use crate::policy::ProdReadConfig;
@@ -34,91 +38,171 @@ const MAX_SQL_BYTES: usize = 256 * 1024;
 /// transaction.
 const READ_STATEMENTS: &[&str] = &["select", "with", "explain", "show", "table", "values"];
 
-/// Check that `sql` only reads (EYES, s-3158eb35): every statement — split on
-/// `;` outside quotes, dollar-quotes and comments — starts with one of
-/// [`READ_STATEMENTS`]; a backslash outside quotes is allowed only on a line
-/// that is wholly `\d…` or `\x` (so `SELECT 1 \g |cmd` and `\gexec` are
-/// refused); and anything that cannot be followed (an unterminated quote,
-/// dollar-quote or comment) is refused.
+/// A character PostgreSQL can start a name with: a letter, `_`, or any
+/// non-ASCII character (its bytes are `\200-\377` to PostgreSQL's lexer).
+fn ident_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_' || !c.is_ascii()
+}
+
+/// A character that continues a name. `$` is one, so `a$b$` is a single name
+/// to PostgreSQL and never opens a dollar-quote.
+fn ident_cont(c: char) -> bool {
+    ident_start(c) || c.is_ascii_digit() || c == '$'
+}
+
+/// Check that `sql` only reads (EYES, s-3158eb35). The SQL is scanned the way
+/// PostgreSQL and psql scan it — names (`$` included), numbers, quoted
+/// strings and names, dollar-quotes, `--` and `/* */` comments — and split on
+/// the `;` outside them, and every statement must start with one of
+/// [`READ_STATEMENTS`]. Where this scan and PostgreSQL's could disagree about
+/// where a string or comment ends, the SQL is refused instead (EYES
+/// `1e62db22`: a disagreement hides a statement): a `/*` inside a comment
+/// (PostgreSQL nests them), an `E'…'` or `U&'…'` string, a backslash anywhere
+/// but a whole-line `\d…` or `\x`, a `$` that opens no dollar-quote, a `$`
+/// right after a number, and a carriage return. Anything unterminated is
+/// refused too.
 pub(crate) fn check_sql(sql: &str) -> Result<(), String> {
     if sql.trim().is_empty() {
         return Err("the SQL is empty".to_string());
+    }
+    if sql.contains('\r') {
+        return Err("a carriage return — end lines with a plain newline".to_string());
+    }
+    if sql.contains('\0') {
+        return Err("a NUL character".to_string());
     }
     if sql.lines().any(|l| l.trim() == DELIMITER) {
         return Err(format!("the SQL contains the line `{DELIMITER}`, which ends bot-hq's heredoc"));
     }
     let chars: Vec<char> = sql.chars().collect();
+    let no_backslash = |text: &[char], what: &str| {
+        if text.contains(&'\\') {
+            Err(format!("a backslash inside {what}"))
+        } else {
+            Ok(())
+        }
+    };
     let mut statements: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        if ident_start(c) {
+            let start = i;
+            while i < chars.len() && ident_cont(chars[i]) {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            if word.eq_ignore_ascii_case("e") && chars.get(i) == Some(&'\'') {
+                return Err("an E'…' string, whose backslash escapes this check does not follow".to_string());
+            }
+            if word.eq_ignore_ascii_case("u")
+                && chars.get(i) == Some(&'&')
+                && matches!(chars.get(i + 1), Some('\'' | '"'))
+            {
+                return Err("a U&'…' string or U&\"…\" name".to_string());
+            }
+            current.push_str(&word);
+            continue;
+        }
+        if c.is_ascii_digit() {
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.') {
+                i += 1;
+            }
+            if chars.get(i) == Some(&'$') {
+                return Err("a `$` right after a number".to_string());
+            }
+            current.extend(&chars[start..i]);
+            continue;
+        }
         match c {
             '\'' | '"' => {
-                // A quoted string or identifier; a doubled quote is an escape.
+                // A quoted string or name; a doubled quote is an escape.
                 let quote = c;
-                current.push(c);
+                let start = i;
                 i += 1;
                 loop {
                     let Some(&d) = chars.get(i) else {
                         return Err("an unterminated quote".to_string());
                     };
-                    current.push(d);
                     i += 1;
                     if d == quote {
                         if chars.get(i) == Some(&quote) {
-                            current.push(quote);
                             i += 1;
                             continue;
                         }
                         break;
                     }
                 }
+                no_backslash(&chars[start..i], "a quoted string or name")?;
+                current.extend(&chars[start..i]);
                 continue;
             }
             '$' => {
-                // A dollar-quote: `$$…$$` or `$tag$…$tag$`.
-                let rest: String = chars[i..].iter().collect();
-                let tag_end = rest[1..].find('$').map(|p| p + 1);
-                let tag = tag_end
-                    .map(|e| &rest[..=e])
-                    .filter(|t| t[1..t.len() - 1].chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
-                if let Some(tag) = tag {
-                    let body_start = tag.len();
-                    let Some(close) = rest[body_start..].find(tag) else {
-                        return Err("an unterminated dollar-quote".to_string());
-                    };
-                    let whole = &rest[..body_start + close + tag.len()];
-                    current.push_str(whole);
-                    i += whole.chars().count();
-                    continue;
+                // At the start of a token: `$$…$$` or `$tag$…$tag$`, the tag
+                // shaped like a name without `$`. A `$1` or a lone `$` is
+                // refused.
+                let mut end = i + 1;
+                if chars.get(end).is_some_and(|&t| ident_start(t)) {
+                    while chars.get(end).is_some_and(|&t| ident_start(t) || t.is_ascii_digit()) {
+                        end += 1;
+                    }
                 }
+                if chars.get(end) != Some(&'$') {
+                    return Err("a `$` that opens no dollar-quote (prod_read takes no `$1` parameters)".to_string());
+                }
+                let tag = &chars[i..=end];
+                let body = end + 1;
+                let Some(close) = chars[body..].windows(tag.len()).position(|w| w == tag) else {
+                    return Err("an unterminated dollar-quote".to_string());
+                };
+                let stop = body + close + tag.len();
+                no_backslash(&chars[i..stop], "a dollar-quoted string")?;
+                current.extend(&chars[i..stop]);
+                i = stop;
+                continue;
             }
             '-' if chars.get(i + 1) == Some(&'-') => {
+                let start = i;
                 while i < chars.len() && chars[i] != '\n' {
                     i += 1;
                 }
+                no_backslash(&chars[start..i], "a comment")?;
                 continue;
             }
             '/' if chars.get(i + 1) == Some(&'*') => {
-                let rest: String = chars[i + 2..].iter().collect();
-                let Some(close) = rest.find("*/") else {
-                    return Err("an unterminated /* comment".to_string());
-                };
-                i += 2 + rest[..close].chars().count() + 2;
+                // Scanned left to right as PostgreSQL does: a `/*` before the
+                // first `*/` would open a nested comment.
+                let mut j = i + 2;
+                loop {
+                    match (chars.get(j), chars.get(j + 1)) {
+                        (None, _) | (_, None) => return Err("an unterminated /* comment".to_string()),
+                        (Some('/'), Some('*')) => {
+                            return Err("a /* inside a /* comment — PostgreSQL nests them".to_string());
+                        }
+                        (Some('*'), Some('/')) => break,
+                        (Some('\\'), _) => return Err("a backslash inside a comment".to_string()),
+                        _ => j += 1,
+                    }
+                }
+                i = j + 2;
                 continue;
             }
             '\\' => {
-                // Only a line that is wholly a describe or the expanded toggle.
+                // Only a line that is wholly a describe or the expanded
+                // toggle, made of plain characters: no `;`, quote, `:` or
+                // second backslash psql could read more into.
                 let line_start = current.rfind('\n').map(|p| p + 1).unwrap_or(0);
                 let before = current[line_start..].trim();
                 let line_end = chars[i..].iter().position(|&c| c == '\n').map(|p| i + p).unwrap_or(chars.len());
                 let line: String = chars[i..line_end].iter().collect();
                 let line = line.trim();
                 let allowed = before.is_empty()
-                    && line.matches('\\').count() == 1
-                    && (line == "\\x" || line.starts_with("\\d"))
-                    && !line.contains(['|', '!', '`', '>', '<']);
+                    && (line.starts_with("\\d") || line.starts_with("\\x"))
+                    && line[1..]
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '*' | '?' | '+' | ' ' | '\t'));
                 if !allowed {
                     return Err(format!(
                         "a psql backslash command (`{}`) — only a whole-line `\\d…` or `\\x` is allowed",
@@ -155,9 +239,24 @@ pub(crate) fn check_sql(sql: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// What runs first inside `psql -1`'s transaction, before the agent's SQL:
+/// the transaction made read-only, its time limit and time zone, then one
+/// query. After a query PostgreSQL refuses to make a transaction read-write
+/// ("must be set before any query"), so no statement of the agent's can, and
+/// none of it rests on `PGOPTIONS`, which a connection pooler may drop (EYES
+/// `1e62db22`). The query's one-row result opens the output.
+fn guard(timeout_ms: u32) -> String {
+    format!(
+        "SET TRANSACTION READ ONLY;\nSET LOCAL statement_timeout = {timeout_ms};\nSET LOCAL timezone = 'UTC';\n\
+         SELECT current_setting('transaction_read_only') AS bot_hq_read_only;"
+    )
+}
+
 /// The command approval runs (all values shell-quoted, the password NOT in
-/// it): `psql -1 -f -` reads the heredoc as one script, in one transaction,
-/// under `default_transaction_read_only=on` and a statement timeout.
+/// it): `psql -1 -f -` reads the heredoc as one script, in one transaction —
+/// [`guard`] first, then the agent's SQL — also under
+/// `default_transaction_read_only=on`, quiet (`-q`: no `SET` tags), and in
+/// UTF-8, the encoding [`check_sql`] scanned.
 pub(crate) fn build_command(cfg: &ProdReadConfig, sql: &str, timeout_ms: u32) -> String {
     let q = super::readback::sh_quote;
     let psql = cfg.psql.as_deref().filter(|p| !p.trim().is_empty()).unwrap_or("psql");
@@ -169,12 +268,14 @@ pub(crate) fn build_command(cfg: &ProdReadConfig, sql: &str, timeout_ms: u32) ->
         .unwrap_or_default();
     format!(
         "PGOPTIONS='-c default_transaction_read_only=on -c statement_timeout={timeout_ms} -c timezone=UTC' \
-         {ssl}{} -1 -X -v ON_ERROR_STOP=1 -h {} -p {} -d {} -U {} -f - <<'{DELIMITER}'\n{}\n{DELIMITER}",
+         PGCLIENTENCODING=UTF8 {ssl}{} -1 -X -q -v ON_ERROR_STOP=1 -h {} -p {} -d {} -U {} -f - <<'{DELIMITER}'\n\
+         {}\n{}\n{DELIMITER}",
         q(psql),
         q(&cfg.host),
         cfg.port.unwrap_or(5432),
         q(&cfg.database),
         q(&cfg.user),
+        guard(timeout_ms),
         sql.trim_end()
     )
 }
@@ -240,6 +341,9 @@ impl SignalingBridge {
         if cfg.host.trim().is_empty() || cfg.database.trim().is_empty() || cfg.user.trim().is_empty() {
             anyhow::bail!("the project's prod_read block needs a host, a database and a user");
         }
+        // Windows line ends become plain ones, so the SQL checked is the SQL
+        // run; a lone carriage return is refused by the check.
+        let sql = sql.replace("\r\n", "\n");
         if sql.len() > MAX_SQL_BYTES {
             anyhow::bail!("the SQL is {} bytes — prod_read takes at most 256 KB", sql.len());
         }
@@ -292,6 +396,10 @@ mod tests {
             "\\d failed_jobs\nselect 1;",
             "\\x\nselect * from t limit 1",
             "select 'it''s' as q",
+            "select a$b$ from t",
+            "select café, 1e5, 1.5, t.x from t",
+            "/**/ select 1",
+            "\\dt public.*\nselect 1",
         ] {
             assert_eq!(check_sql(ok), Ok(()), "{ok}");
         }
@@ -310,6 +418,21 @@ mod tests {
             ("select 1 /* open", "unterminated"),
             ("select 1\nBOTHQ_SQL\nrm -rf ~", "BOTHQ_SQL"),
             ("", "empty"),
+            // EYES `1e62db22`: where PostgreSQL would read a string or comment
+            // ending elsewhere than this scan, the SQL is refused.
+            ("/* /* */ select ' */ drop table t; -- '", "inside a /* comment"),
+            ("/*/*/ select ' */ */ drop table t; -- '", "inside a /* comment"),
+            ("select E'\\' \" ' ; drop table t ; -- \"", "E'"),
+            ("select a$b$ from t; drop table t2; -- $b$", "`DROP`"),
+            ("select U&'x'", "U&"),
+            ("select 'a\\b'", "backslash inside a quoted string"),
+            ("select $tag$ a\\b $tag$", "backslash inside a dollar-quoted string"),
+            ("-- a \\ b\nselect 1", "backslash inside a comment"),
+            ("/* a \\ b */ select 1", "backslash inside a comment"),
+            ("select $1", "opens no dollar-quote"),
+            ("select 1$x", "after a number"),
+            ("select 1\rselect 2", "carriage return"),
+            ("\\dt t; drop table t", "backslash command"),
         ] {
             let err = check_sql(bad).expect_err(bad);
             assert!(err.contains(why), "{bad:?}: {err}");
@@ -334,8 +457,10 @@ mod tests {
         assert_eq!(
             command,
             "PGOPTIONS='-c default_transaction_read_only=on -c statement_timeout=30000 -c timezone=UTC' \
-             PGSSLMODE='require' 'psql' -1 -X -v ON_ERROR_STOP=1 -h 'ep-solitary-field-x.aws.pg.laravel.cloud' \
-             -p 5432 -d 'main' -U 'readonly' -f - <<'BOTHQ_SQL'\nselect 1;\nBOTHQ_SQL"
+             PGCLIENTENCODING=UTF8 PGSSLMODE='require' 'psql' -1 -X -q -v ON_ERROR_STOP=1 \
+             -h 'ep-solitary-field-x.aws.pg.laravel.cloud' -p 5432 -d 'main' -U 'readonly' -f - <<'BOTHQ_SQL'\n\
+             SET TRANSACTION READ ONLY;\nSET LOCAL statement_timeout = 30000;\nSET LOCAL timezone = 'UTC';\n\
+             SELECT current_setting('transaction_read_only') AS bot_hq_read_only;\nselect 1;\nBOTHQ_SQL"
         );
         assert!(!command.contains("PGPASSWORD"));
     }
