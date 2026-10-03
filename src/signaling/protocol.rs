@@ -447,7 +447,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "read_gate",
-            description: "Park ONE read that the project's policy lists (`production_reads` / `staging_reads`) for the user's approval — the reviewer's own path to a production or staging read (a listed read in your Bash is refused and points here). Takes only a single command that runs a listed entry, piped at most into head, tail, jq, grep, wc or cut — no `;`, `&&`, redirection, `$(…)` or wrapper — and refuses one with a write verb (delete, deploy, rm, update, create, set…). From the reviewer it parks straight for the user, the card marked as the reviewer's read; from the executor it is reviewed first, like action_gate. Returns the gate_id at once; on approval the output arrives as a row, and gate_status reports it.",
+            description: "Park ONE read that the project's policy lists (`production_reads` / `staging_reads`) for the user's approval — the reviewer's own path to a production or staging read (a listed read in your Bash is refused and points here). Takes only a single command that runs a listed entry, piped at most into head, tail, jq, grep, wc or cut — no `;`, `&&`, redirection, `$(…)` or wrapper — and refuses one with a write verb (delete, deploy, rm, update, create, set…) or a database client like psql (use prod_read for SQL). From the reviewer it parks straight for the user, the card marked as the reviewer's read; from the executor it is reviewed first, like action_gate. Returns the gate_id at once; on approval the output arrives as a row, and gate_status reports it.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

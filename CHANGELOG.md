@@ -55,8 +55,10 @@ and in `docs/rebuild-archive/`.
   routed them through the agent it was reviewing. A new `read_gate` tool takes
   one listed read (piped at most into a read-only filter like `head` or `jq`,
   and with no write verb such as delete or deploy) and parks it for you, marked
-  as the reviewer's read. A listed read typed straight into the reviewer's
-  Bash is stopped and pointed there.
+  as the reviewer's read. It does not take a database client like `psql`, whose
+  own commands it cannot check (`prod_read` is the path for SQL), and takes a
+  `bq query` only as one plain SELECT or WITH. A listed read typed straight
+  into the reviewer's Bash is stopped and pointed there.
 - **A publish you approved is read back.** After an approved `gh` issue, pull
   request or comment publish runs, bot-hq reads what landed on GitHub and
   says in the result whether it equals what was reviewed, or where it first

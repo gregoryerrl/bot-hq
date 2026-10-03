@@ -1096,7 +1096,11 @@ The reviewer has its own path, `read_gate` (tray `ef8fe5de`). It takes ONE
 command that runs a listed entry, piped at most into head, tail, jq, grep, wc
 or cut. It refuses `;`, `&&`, redirection, `$(…)`, wrappers
 (`outward_body::single_read_command`) and write verbs (`write_word`), because
-one list both gates the executor and limits the reviewer. A reviewer's read
+one list both gates the executor and limits the reviewer. It also refuses a
+database client (`database_client`: `psql`, `mysql`, `sqlite3`…, whose own
+command language can write where `write_word` cannot see; SQL goes through
+`prod_read`) and takes a `bq query` only as one plain SELECT or WITH, with no
+`;`, comment or result-storing flag (EYES `a2c4c8df`). A reviewer's read
 parks straight for the user, its card reading "Reviewer's command (slug)"; an
 executor's goes through review first. The read-only posture's `shell-lint`
 hook refuses a listed read and points at `read_gate`.

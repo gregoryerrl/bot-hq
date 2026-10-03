@@ -1068,6 +1068,11 @@ const WRITE_VERBS: &[&str] = &[
     "alter", "apply", "patch", "put", "write", "cp", "mv", "add", "destroy", "import", "replace",
     "cancel", "execute", "restart", "stop", "start", "kill", "enable", "disable", "grant", "revoke",
     "upload", "rollback", "migrate", "scale", "resize", "reset", "undelete", "purge", "prune",
+    // EYES `a2c4c8df`: `gcloud scheduler jobs pause`, `bq load`/`mk`/`extract`,
+    // `gcloud storage objects compose`. A bare `run` cannot be one: `gcloud
+    // run` is a command group.
+    "pause", "resume", "load", "mk", "extract", "compose", "trigger", "invoke", "publish", "submit",
+    "send",
 ];
 
 /// SQL that writes, as the first keyword of an argument that is a statement.
@@ -1084,6 +1089,9 @@ const SQL_WRITES: &[&str] = &[
 /// starts with `severity`).
 pub(crate) fn write_word(command: &str) -> Option<String> {
     let first = simple_commands(command, 0).into_iter().next()?;
+    if let Some(word) = bq_query_write(&first) {
+        return Some(word);
+    }
     for word in first.args.iter().filter(|w| !w.op && !w.text.starts_with('-')) {
         let text = word.text.trim();
         if text.chars().any(char::is_whitespace) {
@@ -1104,6 +1112,55 @@ pub(crate) fn write_word(command: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// For `bq query`, what could make it write (EYES `a2c4c8df`): a flag that
+/// stores or schedules the result (`--destination_table`, `--append_table`,
+/// `--replace`, `--schedule`), a `;` (a script of several statements), a
+/// comment (where a statement's first word could hide), or SQL whose first
+/// word is not SELECT or WITH.
+fn bq_query_write(cmd: &Cmd) -> Option<String> {
+    if cmd.tool != "bq" {
+        return None;
+    }
+    let words: Vec<&str> = cmd.args.iter().filter(|w| !w.op).map(|w| w.text.as_str()).collect();
+    let at = words.iter().position(|w| *w == "query")?;
+    for flag in words.iter().filter(|w| w.starts_with("--")) {
+        let name = flag.trim_start_matches('-').split('=').next().unwrap_or("");
+        if name.starts_with("destination") || matches!(name, "append_table" | "replace" | "schedule") {
+            return Some(format!("--{name}"));
+        }
+    }
+    for word in &words[at + 1..] {
+        if let Some(marker) = [";", "--", "/*", "#"].into_iter().find(|m| word.contains(m) && !word.starts_with("--")) {
+            return Some(marker.to_string());
+        }
+        if word.starts_with('-') || !word.chars().any(char::is_whitespace) {
+            continue;
+        }
+        let lead = word
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .find(|t| !t.is_empty())
+            .map(|t| t.to_ascii_lowercase())?;
+        if lead != "select" && lead != "with" {
+            return Some(lead);
+        }
+    }
+    None
+}
+
+/// Database clients `read_gate` does not take: each runs its own command
+/// language, where a write hides from [`write_word`] — `psql -c 'select 1;
+/// delete …'`, `\!`, `-f x.sql` (EYES `a2c4c8df`). A query on production
+/// Postgres goes through `prod_read`.
+const DATABASE_CLIENTS: &[&str] =
+    &["psql", "mysql", "mariadb", "sqlite3", "mongosh", "mongo", "redis-cli", "sqlcmd"];
+
+/// The database client `command`'s first command runs, if it is one of
+/// [`DATABASE_CLIENTS`].
+pub(crate) fn database_client(command: &str) -> Option<String> {
+    let first = simple_commands(command, 0).into_iter().next()?;
+    DATABASE_CLIENTS.contains(&first.tool.as_str()).then_some(first.tool)
 }
 
 // ---------------------------------------------------------------------------
@@ -1630,6 +1687,15 @@ mod tests {
             ("gcloud run jobs execute export", "execute"),
             ("bq query --use_legacy_sql=false 'DELETE FROM ds.t WHERE 1=1'", "delete"),
             ("psql -h h -c 'update t set a = 1'", "update"),
+            // EYES `a2c4c8df`.
+            ("gcloud scheduler jobs pause export", "pause"),
+            ("bq load ds.t gs://b/x.csv", "load"),
+            ("bq mk -t ds.t", "mk"),
+            ("bq extract ds.t gs://b/x", "extract"),
+            ("bq query 'SELECT 1; DELETE FROM ds.t WHERE true'", ";"),
+            ("bq query '/* x */ DELETE FROM ds.t WHERE true'", "/*"),
+            ("bq query --destination_table=ds.copy 'SELECT * FROM ds.t'", "--destination_table"),
+            ("bq --format json query 'DECLARE x INT64 DEFAULT 1'", "declare"),
         ] {
             assert_eq!(write_word(command).as_deref(), Some(word), "{command}");
         }
@@ -1638,10 +1704,14 @@ mod tests {
             "gcloud run jobs executions list --job export",
             "gcloud logging read 'severity>=ERROR AND textPayload:\"failed to create\"' --limit 5",
             "bq query --use_legacy_sql=false 'SELECT updated_at FROM ds.t'",
+            "bq query --max_rows 10 'WITH x AS (SELECT 1) SELECT * FROM x'",
             "bq show ds.t",
             "psql -h h -c 'select 1'",
         ] {
             assert_eq!(write_word(read), None, "{read}");
         }
+        assert_eq!(database_client("psql -h h -c 'select 1' | head").as_deref(), Some("psql"));
+        assert_eq!(database_client("/usr/bin/sqlite3 db.sqlite .dump").as_deref(), Some("sqlite3"));
+        assert_eq!(database_client("gcloud logging read x"), None);
     }
 }

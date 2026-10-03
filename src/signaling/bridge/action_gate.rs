@@ -184,6 +184,13 @@ impl SignalingBridge {
                  ask the executor to route it through action_gate."
             );
         };
+        if let Some(client) = super::outward_body::database_client(&command) {
+            anyhow::bail!(
+                "read_gate does not take a database client (`{client}`): its own command language \
+                 can write where this check cannot see (`-c 'select 1; delete …'`, `\\!`, `-f file`). \
+                 For production Postgres use `prod_read`; otherwise ask the executor (action_gate)."
+            );
+        }
         if let Some(word) = super::outward_body::write_word(&command) {
             anyhow::bail!(
                 "read_gate refuses a command with `{word}` in it: the {} list entry `{}` can also \
@@ -4300,7 +4307,7 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("general-policy.yaml"),
-            "production_reads:\n  - gcloud logging read\nstaging_reads:\n  - psql -h ep-young-glitter-\n",
+            "production_reads:\n  - gcloud logging read\n  - bq\nstaging_reads:\n  - psql -h ep-young-glitter-\n",
         )
         .unwrap();
     }
@@ -4384,7 +4391,9 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
             ("gcloud logging read x; rm -rf ~/d", "ONE command"),
             ("gcloud logging read x | sort -o ~/.zshrc", "ONE command"),
             ("gcloud auth list", "matches none"),
-            ("psql -h ep-young-glitter-x -c 'delete from t'", "`delete`"),
+            ("psql -h ep-young-glitter-x -c 'select 1'", "database client (`psql`)"),
+            ("bq query --use_legacy_sql=false 'SELECT 1; DELETE FROM ds.t WHERE true'", "`;`"),
+            ("bq load ds.t gs://b/x.csv", "`load`"),
         ] {
             let err = bridge
                 .read_gate("s1".into(), "eyes".into(), command.into(), None)
