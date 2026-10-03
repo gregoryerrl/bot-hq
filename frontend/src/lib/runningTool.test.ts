@@ -98,6 +98,19 @@ describe("runningTool", () => {
     expect(runningTool(messages.slice(0, 2), "eyes")).toBeNull();
   });
 
+  it("reads a row's id without parsing its payload", () => {
+    // A tool result holds a whole tool output; the id is taken from the tail.
+    // The payload here is not even valid JSON, so a parse would have thrown.
+    const huge = `{"content":"${"x".repeat(50_000)} "unbalanced \\" quote","is_error":false,"tool_use_id":"big"}`;
+    const messages = [
+      use("hands", "big", "Bash", { description: "Dump the database" }, 30),
+      row("hands", "tool_result", huge, 20),
+      use("hands", "next", "Bash", { description: "Summarise the dump" }, 10),
+    ];
+    expect(runningTool(messages, "hands")?.label).toBe("Summarise the dump");
+    expect(runningTool(messages.slice(0, 2), "hands")).toBeNull();
+  });
+
   it("ignores rows it cannot read instead of guessing", () => {
     const messages = [
       row("hands", "tool_use", "x", 30),

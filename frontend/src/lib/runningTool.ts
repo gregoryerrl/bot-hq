@@ -52,13 +52,48 @@ export function describeToolCall(name: string, input: unknown): string {
   return clip(tool);
 }
 
-function parsed(content: string): Record<string, unknown> | null {
+// A tool row's content is JSON whose LAST key is `tool_use_id` (the pump
+// writes `{input, name, tool_use_id}` and `{content, is_error, tool_use_id}`).
+// The id is read from the tail without parsing the row: a `tool_result` holds
+// a whole tool output, up to hundreds of kilobytes, and this runs on every
+// render of the status line (EYES, apply review).
+const ID_AT_END = /"tool_use_id"\s*:\s*"([^"\\]+)"\s*\}\s*$/;
+const ID_AT_START = /^\s*\{\s*"tool_use_id"\s*:\s*"([^"\\]+)"/;
+const SMALL_ENOUGH_TO_PARSE = 4096;
+
+/** The `tool_use_id` of a tool row, or null when it cannot be read cheaply. */
+function toolUseId(content: string): string | null {
+  const fast = ID_AT_END.exec(content) ?? ID_AT_START.exec(content);
+  if (fast) return fast[1];
+  if (content.length > SMALL_ENOUGH_TO_PARSE) return null;
   try {
     const value: unknown = JSON.parse(content);
-    return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+    const id = value && typeof value === "object" ? (value as Record<string, unknown>).tool_use_id : null;
+    return typeof id === "string" ? id : null;
   } catch {
     return null;
   }
+}
+
+// The one row that IS parsed is the call in flight, for its label — and only
+// once: rows are immutable, so the label is kept by row id.
+const labels = new Map<number, string>();
+const LABELS_KEPT = 200;
+
+function labelOf(m: AgentMessage): string {
+  const kept = labels.get(m.id);
+  if (kept !== undefined) return kept;
+  let label = "tool";
+  try {
+    const row = JSON.parse(m.content) as Record<string, unknown>;
+    const name = typeof row.name === "string" ? row.name : "tool";
+    label = describeToolCall(name, row.input ?? row.args);
+  } catch {
+    // An unreadable call still counts as running; it just has no better name.
+  }
+  if (labels.size >= LABELS_KEPT) labels.clear();
+  labels.set(m.id, label);
+  return label;
 }
 
 /** The tool call `slug` has in flight: the newest `tool_use` row of its current
@@ -72,25 +107,18 @@ export function runningTool(
 ): RunningTool | null {
   if (!messages) return null;
   const answered = new Set<string>();
-  const open: { label: string; startedAt: number }[] = [];
+  const open: AgentMessage[] = [];
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.kind === "system_notice" || m.kind === "phase_change") continue;
     if (m.author !== slug) break;
     if (m.kind !== "tool_use" && m.kind !== "tool_result") continue;
-    const row = parsed(m.content);
-    const id = typeof row?.tool_use_id === "string" ? row.tool_use_id : null;
-    if (!row || !id) continue;
-    if (m.kind === "tool_result") {
-      answered.add(id);
-    } else if (!answered.has(id)) {
-      const name = typeof row.name === "string" ? row.name : "tool";
-      open.push({
-        label: describeToolCall(name, row.input ?? row.args),
-        startedAt: Date.parse(m.created_at),
-      });
-    }
+    const id = toolUseId(m.content);
+    if (!id) continue;
+    if (m.kind === "tool_result") answered.add(id);
+    else if (!answered.has(id)) open.push(m);
   }
   if (open.length === 0) return null;
-  return { ...open[0], others: open.length - 1 };
+  const newest = open[0];
+  return { label: labelOf(newest), startedAt: Date.parse(newest.created_at), others: open.length - 1 };
 }
