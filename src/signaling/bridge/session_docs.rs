@@ -142,7 +142,9 @@ fn codoc_notice_opening(who: &str, slug: &str) -> String {
 ///
 /// Read from the stored rows rather than kept in memory, so it needs no
 /// turn-boundary signal and survives a relaunch. A failed read answers
-/// `false`: an extra row is the cheaper mistake.
+/// `false`: an extra row is the cheaper mistake. Only the last 200 rows are
+/// read, so a run longer than that since its notice posts a second one —
+/// harmless, and cheaper than an unbounded scan on every co-doc write.
 async fn codoc_noticed_this_run(
     storage: &crate::storage::Storage,
     session_id: &str,

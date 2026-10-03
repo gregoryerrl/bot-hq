@@ -3715,8 +3715,7 @@ mod tests {
             fp1,
             "a <phase>-eyes write must not move the digest"
         );
-        // …and only those four names: a phase-tagged doc that merely ends in
-        // `-eyes` is still the work.
+        // …while the executor's own phase docs still do.
         s.upsert_session_document("s1", "apply", "the changelog", Some("apply")).await.unwrap();
         let fp2 = s.phase_artifact_fingerprint("s1").await.unwrap();
         assert_ne!(fp2, fp1, "the executor's next phase doc still moves it");

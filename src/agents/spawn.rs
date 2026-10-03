@@ -1722,7 +1722,8 @@ fn build_command(cfg: &SpawnConfig) -> Command {
 
     // Per-agent override env (effort / auto-memory / CLAUDE.md suppression).
     // Applied to ALL agents. The skill/plugin `--settings` fragments above are
-    // editing-participant-only (a read-only one gets no --settings), but these
+    // editing-participant-only (a read-only one's `--settings` holds only the
+    // handoff hook, the model row's keys and the attribution policy), but these
     // ENV overrides are the lever to keep it lean now that nothing runs --bare.
     for (k, v) in crate::claude_config::overrides::env_vars(&agent_override) {
         cmd.env(k, v);
