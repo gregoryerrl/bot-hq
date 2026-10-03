@@ -1585,6 +1585,12 @@ async fn participant_spawn_config(
     );
     std::fs::write(&mcp_config_path, json)
         .with_context(|| format!("writing mcp-config to {}", mcp_config_path.display()))?;
+    // The file the post-compaction hook prints (`agents::handoff`), rendered
+    // from the participant's handoff doc as it stands — so it exists from the
+    // first spawn (as the "no handoff doc" text) and again after a relaunch.
+    storage
+        .sync_handoff_file(session_id, &crate::agents::handoff::doc_slug(agent_name))
+        .await;
 
     Ok(SpawnConfig {
         agent_name: agent_name.to_string(),
@@ -3651,6 +3657,50 @@ mod tests {
         );
         assert!(!bridge.mcp_token_matches("s1", "hands", None));
         assert!(!bridge.mcp_token_matches("s1", "eyes", Some(token)), "a peer's pair stays unregistered");
+    }
+
+    /// The wire for the handoff file at spawn (`agents::handoff`): building a
+    /// participant's spawn config renders its file, so the post-compaction hook
+    /// has something to print from the first spawn on — the doc when one
+    /// exists, the "no handoff doc" text when none does — and again after a
+    /// relaunch. Deleting the `sync_handoff_file` call in
+    /// `participant_spawn_config` must turn this red.
+    #[tokio::test]
+    async fn building_a_spawn_config_renders_the_participants_handoff_file() {
+        let handoffs = TempDir::new().unwrap();
+        let s = Storage::memory().await.unwrap().with_handoff_dir(handoffs.path().to_path_buf());
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let data_dir = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
+        let mcp_temp = TempDir::new().unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+        let bridge = SignalingBridge::new();
+        // The reviewer wrote a doc before this (re)spawn; the executor has none.
+        s.upsert_session_document("s1", "handoff-eyes", "Open finding: 9a1602f1.", None).await.unwrap();
+        std::fs::remove_dir_all(handoffs.path().join("s1")).unwrap();
+
+        for (slug, has_doc) in [("hands", false), ("eyes", true)] {
+            let me = roster.iter().find(|p| p.slug == slug).expect("in the roster").clone();
+            participant_spawn_config(
+                &s,
+                &me,
+                resolve_participant_config(&s, &me).await,
+                &paths,
+                &None,
+                "prompt".to_string(),
+                "127.0.0.1:1".parse().unwrap(),
+                mcp_temp.path(),
+                None,
+                &bridge,
+            )
+            .await
+            .expect("spawn config");
+            let file = crate::agents::handoff::file_path(handoffs.path(), "s1", slug).unwrap();
+            let text = std::fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("{slug}'s handoff file after the spawn config: {e}"));
+            assert_eq!(crate::agents::handoff::injected_doc(&text), Some(has_doc), "{slug}: {text}");
+        }
     }
 
     /// Migration 0061: building a spawn config RECORDS the reconciled

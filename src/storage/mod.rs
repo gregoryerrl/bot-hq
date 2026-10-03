@@ -283,6 +283,12 @@ pub(crate) async fn repair_migration_checksums(pool: &SqlitePool) -> Result<usiz
 #[derive(Clone)]
 pub struct Storage {
     pool: SqlitePool,
+    /// Where the rendered handoff files live (`agents::handoff`):
+    /// `<the database's directory>/handoffs`, which for the app is
+    /// `<data_dir>/.local/handoffs` — the path the post-compaction hook reads.
+    /// `None` for an in-memory database, where nothing is mirrored unless a
+    /// test asks with [`Self::with_handoff_dir`].
+    handoff_dir: Option<std::sync::Arc<std::path::PathBuf>>,
 }
 
 impl Storage {
@@ -334,7 +340,12 @@ impl Storage {
             .run(&pool)
             .await
             .context("running sqlite migrations")?;
-        let storage = Self { pool };
+        let storage = Self {
+            pool,
+            handoff_dir: db_path
+                .parent()
+                .map(|local| std::sync::Arc::new(crate::agents::handoff::dir_under(local))),
+        };
         // Windows: rewrite legacy `\`-keyed CL rows to the portable `/` form.
         //
         // ORDERING IS LOAD-BEARING, and it is why this lives here rather than
@@ -403,7 +414,15 @@ impl Storage {
             .run(&pool)
             .await
             .context("running sqlite migrations")?;
-        Ok(Self { pool })
+        Ok(Self { pool, handoff_dir: None })
+    }
+
+    /// Mirror handoff docs to rendered files under `dir` — what [`Self::open`]
+    /// sets up from the database's own directory. For tests of that mirroring
+    /// on an in-memory database.
+    pub fn with_handoff_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.handoff_dir = Some(std::sync::Arc::new(dir));
+        self
     }
 
     pub fn pool(&self) -> &SqlitePool {

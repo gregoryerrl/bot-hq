@@ -36,6 +36,10 @@ pub enum SystemEvent {
         hook_name: Option<String>,
         #[serde(default)]
         outcome: Option<String>,
+        /// What the hook printed. Read for one purpose: recognising bot-hq's
+        /// own post-compaction hook by its marker (`agents::handoff`).
+        #[serde(default)]
+        output: Option<String>,
     },
     Init {
         #[serde(default)]
@@ -58,9 +62,35 @@ pub enum SystemEvent {
         #[serde(default)]
         tasks: Vec<Value>,
     },
+    /// claude-code compacted this process's context: everything before is now
+    /// a summary. Probed on CLI 2.1.284 (s-d43b3630) with `/compact` on a
+    /// stream-json `-p` process; it follows a `status: "compacting"` line and
+    /// the `SessionStart:compact` hook events:
+    /// `{"type":"system","subtype":"compact_boundary","compact_metadata":
+    /// {"trigger":"manual","pre_tokens":23527,"post_tokens":3056,
+    /// "cumulative_dropped_tokens":20471,"duration_ms":11667},…}`. A real
+    /// session's auto-compaction carries `"trigger":"auto"`. The TRANSCRIPT
+    /// spells the same fields in camelCase; stdout does not.
+    CompactBoundary {
+        #[serde(default)]
+        compact_metadata: Option<CompactMetadata>,
+    },
     /// Forward-compat for new system subtypes.
     #[serde(other)]
     Other,
+}
+
+/// The `compact_metadata` of a [`SystemEvent::CompactBoundary`]. Every field
+/// is optional: the boundary itself is the fact, the numbers are detail.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CompactMetadata {
+    /// `"auto"` (the context filled) or `"manual"` (`/compact`).
+    #[serde(default)]
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub pre_tokens: Option<u64>,
+    #[serde(default)]
+    pub post_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -370,6 +400,47 @@ mod tests {
                 assert_eq!(r.subtype.as_deref(), Some("success"));
             }
             other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    /// The stdout line captured from CLI 2.1.284 (s-d43b3630), verbatim.
+    #[test]
+    fn parses_the_compact_boundary_claude_code_writes_to_stdout() {
+        let line = r#"{"type":"system","subtype":"compact_boundary","session_id":"06358c13-6c6d-465e-9c16-4f48d7bf541a","uuid":"181375ae-a3bb-4c41-9f1b-3bec3e875902","compact_metadata":{"trigger":"manual","pre_tokens":23527,"post_tokens":3056,"cumulative_dropped_tokens":20471,"duration_ms":11667},"logical_parent_uuid":"f97e2bd5-9d3c-429f-b5ce-97f99a53d0a9"}"#;
+        match serde_json::from_str::<StreamEvent>(line).unwrap() {
+            StreamEvent::System(SystemEvent::CompactBoundary { compact_metadata: Some(m) }) => {
+                assert_eq!(m.trigger.as_deref(), Some("manual"));
+                assert_eq!(m.pre_tokens, Some(23527));
+                assert_eq!(m.post_tokens, Some(3056));
+            }
+            other => panic!("expected System::CompactBoundary, got {other:?}"),
+        }
+        // A boundary with no metadata is still a boundary.
+        let bare = r#"{"type":"system","subtype":"compact_boundary"}"#;
+        assert!(matches!(
+            serde_json::from_str::<StreamEvent>(bare).unwrap(),
+            StreamEvent::System(SystemEvent::CompactBoundary { compact_metadata: None })
+        ));
+        // The `status` lines around it stay unmodelled.
+        let status = r#"{"type":"system","subtype":"status","status":"compacting","session_id":"s","uuid":"u"}"#;
+        assert!(matches!(
+            serde_json::from_str::<StreamEvent>(status).unwrap(),
+            StreamEvent::System(SystemEvent::Other)
+        ));
+    }
+
+    /// The shape of a `hook_response` on the same capture: the hook's output
+    /// rides `output`.
+    #[test]
+    fn a_hook_response_carries_what_the_hook_printed() {
+        let line = r#"{"type":"system","subtype":"hook_response","hook_id":"16503b8d","hook_name":"SessionStart:compact","hook_event":"SessionStart","output":"MARKER\nbody","stdout":"MARKER\nbody","stderr":"","exit_code":0,"outcome":"success","uuid":"aedda2cc","session_id":"06358c13"}"#;
+        match serde_json::from_str::<StreamEvent>(line).unwrap() {
+            StreamEvent::System(SystemEvent::HookResponse { hook_name, outcome, output }) => {
+                assert_eq!(hook_name.as_deref(), Some("SessionStart:compact"));
+                assert_eq!(outcome.as_deref(), Some("success"));
+                assert_eq!(output.as_deref(), Some("MARKER\nbody"));
+            }
+            other => panic!("expected System::HookResponse, got {other:?}"),
         }
     }
 

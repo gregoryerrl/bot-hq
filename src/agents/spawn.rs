@@ -182,6 +182,23 @@ pub enum AgentEvent {
     /// background work (claude-code's interrupt cancels the process's
     /// background agents with the turn).
     BackgroundTasks { running: usize },
+    /// claude-code compacted the participant's context (`compact_boundary`):
+    /// everything before is now a summary. Not speech and not a turn — it can
+    /// arrive before a dealt turn's first event, in the middle of a turn, or in
+    /// a turn nobody dealt. The pump announces it to the ring and re-arms the
+    /// context warnings. Token counts are claude-code's own, when it sent them.
+    Compacted {
+        /// `"auto"` (the context filled) or `"manual"` (`/compact`).
+        trigger: Option<String>,
+        pre_tokens: Option<u64>,
+        post_tokens: Option<u64>,
+    },
+    /// bot-hq's own post-compaction hook ran and printed this participant's
+    /// handoff file (`agents::handoff`) — the stream's `hook_response` for
+    /// `SessionStart:compact`, recognised by the file's marker. It precedes the
+    /// [`Self::Compacted`] it belongs to. `has_doc` is false when the file was
+    /// the "you have no handoff doc" text.
+    HandoffInjected { has_doc: bool },
     /// Process exited. Carries exit-status string for log/observability.
     Exited(String),
     /// Retry-supervisor liveness transition (B2), relayed by the participant's
@@ -1390,6 +1407,29 @@ mod ensure_claude_runnable_tests {
     }
 }
 
+/// The `SessionStart` hook entry every participant is spawned with: after a
+/// compaction (matcher `compact`) claude-code runs this binary's `policy-check
+/// compact-handoff`, which prints the participant's rendered handoff file, and
+/// puts what it printed into the compacted context (`agents::handoff`;
+/// behaviour probed on CLI 2.1.284, s-d43b3630). The participant is named by
+/// the `BOT_HQ_AGENT` env the hook inherits, as for the Tool Gate hook.
+///
+/// A resume or a fresh start does not match `compact`, so nothing is injected
+/// then. Like the Tool Gate hook it rides `--settings`, so nothing is written
+/// into the working repo, and the user's own hooks still run beside it.
+fn compact_handoff_hook(exe: &std::path::Path, cfg: &SpawnConfig) -> serde_json::Value {
+    let command = format!(
+        "\"{}\" policy-check compact-handoff --data-dir \"{}\" --session \"{}\"",
+        exe.display(),
+        cfg.data_dir.display(),
+        cfg.session_id,
+    );
+    serde_json::json!([{
+        "matcher": "compact",
+        "hooks": [{ "type": "command", "command": command }],
+    }])
+}
+
 fn build_command(cfg: &SpawnConfig) -> Command {
     let bin = cfg.claude_bin.as_deref().unwrap_or("claude");
     let mut cmd = Command::new(bin);
@@ -1510,14 +1550,32 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // too. Until 2026-09-06 only the edit-capable branch passed
         // `--settings` (it carries the Tool-Gate hook), so a `modelOverrides`
         // entry would have reached the executor and left the reviewer on the
-        // CLI's 200k default for the same model. No hook here — the read-only
-        // posture is `dontAsk` + the lists above, not a hook.
-        let model_settings = model_cli_settings(&cfg.config, &cfg.agent_name);
-        if !model_settings.is_empty() {
-            cmd.args([
-                "--settings",
-                &serde_json::Value::Object(model_settings).to_string(),
-            ]);
+        // CLI's 200k default for the same model. No ENFORCEMENT hook here —
+        // the read-only posture is `dontAsk` + the lists above, not a hook.
+        //
+        // The one hook this posture does carry is not an enforcement hook: the
+        // post-compaction handoff (`agents::handoff`), which every participant
+        // gets because every participant's context is compacted. The model
+        // row's keys fill in around it.
+        let mut settings = serde_json::Map::new();
+        match std::env::current_exe() {
+            Ok(exe) => {
+                settings.insert(
+                    "hooks".into(),
+                    serde_json::json!({ "SessionStart": compact_handoff_hook(&exe, cfg) }),
+                );
+            }
+            Err(e) => warn!(
+                agent = %cfg.agent_name,
+                error = %e,
+                "current_exe() failed — the post-compaction handoff hook was NOT injected"
+            ),
+        }
+        for (k, v) in model_cli_settings(&cfg.config, &cfg.agent_name) {
+            settings.entry(k).or_insert(v);
+        }
+        if !settings.is_empty() {
+            cmd.args(["--settings", &serde_json::Value::Object(settings).to_string()]);
         }
     } else {
         cmd.arg("--dangerously-skip-permissions");
@@ -1554,6 +1612,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
                             "matcher": "Bash",
                             "hooks": [{ "type": "command", "command": hook_cmd }],
                         }],
+                        "SessionStart": compact_handoff_hook(&exe, cfg),
                     }
                 });
                 // Fold in the agent's override fragment (skillOverrides /
@@ -1862,18 +1921,23 @@ mod tests {
             "got {s}"
         );
         assert!(
-            s.get("hooks").is_none(),
-            "the read-only posture carries no hook — dontAsk + the lists enforce it: {s}"
+            s["hooks"].get("PreToolUse").is_none(),
+            "the read-only posture carries no Tool Gate hook — dontAsk + the lists enforce it: {s}"
+        );
+        assert!(
+            s["hooks"]["SessionStart"].is_array(),
+            "the post-compaction handoff hook must survive the merge: {s}"
         );
     }
 
-    /// Control for the test above: with no `cli_settings` the read-only branch
-    /// still passes NO `--settings` (nothing changed for a row that carries
-    /// none), and the edit-capable branch's `--settings` carries no
-    /// `modelOverrides` key.
+    /// Control for the test above: with no `cli_settings` neither branch's
+    /// `--settings` carries a `modelOverrides` key — the read-only branch's
+    /// holds its hooks and nothing else.
     #[test]
     fn a_model_without_cli_settings_injects_nothing() {
-        assert!(settings_arg_of(&eyes_cfg()).is_none());
+        let s = settings_arg_of(&eyes_cfg()).expect("the handoff hook rides --settings");
+        let keys: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["hooks"], "got {s}");
         let s = settings_arg_of(&cfg()).expect("hook branch always passes --settings");
         assert!(s.get("modelOverrides").is_none(), "got {s}");
     }
@@ -1921,7 +1985,9 @@ mod tests {
 
             let mut eyes = eyes_cfg();
             eyes.config.cli_settings = Some(bad.into());
-            assert!(settings_arg_of(&eyes).is_none(), "{bad}: read-only branch injected");
+            let s = settings_arg_of(&eyes).expect("the handoff hook rides --settings");
+            assert!(s["hooks"]["SessionStart"].is_array(), "{bad}: hook lost: {s}");
+            assert_eq!(s.as_object().unwrap().len(), 1, "{bad}: read-only branch injected: {s}");
         }
     }
 
@@ -2303,12 +2369,14 @@ mod tests {
         c.data_dir = dir.path().to_path_buf();
         c.overrides = resolve_agent_overrides(&load_overrides(dir.path()), Some("eyes"));
 
-        let args = debug_command(&c);
-        assert!(
-            !args.iter().any(|a| a == "--settings"),
-            "a role without edit_files gets no --settings (the tool-gate PreToolUse hook \
-             rides with the permissive posture)"
-        );
+        // The override FRAGMENT (skillOverrides / enabledPlugins / ultracode)
+        // rides with the permissive posture, as the tool-gate PreToolUse hook
+        // does; the only thing this role's `--settings` carries is the
+        // post-compaction handoff hook.
+        let s = settings_arg_of(&c).expect("the handoff hook rides --settings");
+        let keys: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["hooks"], "no override fragment on a role without edit_files: {s}");
+        assert!(s["hooks"].get("PreToolUse").is_none(), "got {s}");
         // env-based overrides still apply to it.
         let cmd = build_command(&c);
         let has = cmd.as_std().get_envs().any(|(k, v)| {
@@ -2919,14 +2987,40 @@ mod tests {
 
     #[test]
     fn eyes_does_not_get_tool_gate_hook() {
-        // The tool-gate PreToolUse hook is injected via --settings in the HANDS
-        // (Brian) branch only; Rain is already mechanically read-only via the
-        // deny list, so she gets no --settings at all.
-        let c = eyes_cfg();
-        let argv = debug_command(&c);
-        assert!(
-            !argv.iter().any(|a| a == "--settings"),
-            "Rain must NOT get --settings: {argv:?}"
-        );
+        // The tool-gate PreToolUse hook is injected in the edit-capable branch
+        // only: a read-only role is already mechanically read-only via the deny
+        // list, and it could not answer a gate (it holds no `action_gate`). Its
+        // `--settings` carries the post-compaction handoff hook and nothing
+        // else that could block a tool call.
+        let s = settings_arg_of(&eyes_cfg()).expect("the handoff hook rides --settings");
+        assert!(s["hooks"].get("PreToolUse").is_none(), "no Tool Gate hook on a read-only role: {s}");
+        assert!(!s.to_string().contains("policy-check tool-gate"), "got {s}");
+    }
+
+    /// The wire for the post-compaction handoff (`agents::handoff`): BOTH
+    /// postures are spawned with a `SessionStart` hook, matcher `compact`, that
+    /// runs this binary's `policy-check compact-handoff` for the session.
+    /// Deleting the `compact_handoff_hook` entry on either branch turns its
+    /// half red.
+    #[test]
+    fn both_postures_get_the_post_compaction_handoff_hook() {
+        for (who, c) in [("the edit-capable role", cfg()), ("the read-only role", eyes_cfg())] {
+            let s = settings_arg_of(&c).unwrap_or_else(|| panic!("{who} passes --settings"));
+            let entries = s["hooks"]["SessionStart"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{who} has a SessionStart hook: {s}"));
+            assert_eq!(entries.len(), 1, "{who}: {s}");
+            assert_eq!(entries[0]["matcher"], serde_json::json!("compact"), "{who}: only after a compaction");
+            let command = entries[0]["hooks"][0]["command"].as_str().unwrap();
+            assert!(command.contains("policy-check compact-handoff"), "{who}: {command}");
+            assert!(
+                command.contains(&format!("--session \"{}\"", c.session_id)),
+                "{who}: bound to the session: {command}"
+            );
+            assert!(
+                command.contains(&format!("--data-dir \"{}\"", c.data_dir.display())),
+                "{who}: {command}"
+            );
+        }
     }
 }

@@ -81,6 +81,10 @@ fn short_line(s: &str) -> String {
 /// The model name claude-code gives the messages it writes itself.
 pub const SYNTHETIC_MODEL: &str = "<synthetic>";
 
+/// The `hook_name` claude-code reports for a `SessionStart` hook that ran
+/// because of a compaction (probed on CLI 2.1.284, s-d43b3630).
+pub const COMPACT_HOOK_NAME: &str = "SessionStart:compact";
+
 /// Translate a wire `StreamEvent` to zero or more `AgentEvent`s.
 /// `assistant` events with multiple content blocks fan out to multiple events.
 ///
@@ -100,6 +104,26 @@ pub fn translate(
             }
             SystemEvent::BackgroundTasksChanged { tasks } => {
                 vec![AgentEvent::BackgroundTasks { running: tasks.len() }]
+            }
+            SystemEvent::CompactBoundary { compact_metadata } => {
+                let m = compact_metadata.unwrap_or_default();
+                vec![AgentEvent::Compacted {
+                    trigger: m.trigger,
+                    pre_tokens: m.pre_tokens,
+                    post_tokens: m.post_tokens,
+                }]
+            }
+            // Only bot-hq's OWN post-compaction hook: the user's plugins run
+            // `SessionStart:compact` hooks under the same name, so the marker
+            // the handoff file opens with is what tells them apart.
+            SystemEvent::HookResponse { hook_name, output, .. }
+                if hook_name.as_deref() == Some(COMPACT_HOOK_NAME) =>
+            {
+                output
+                    .as_deref()
+                    .and_then(crate::agents::handoff::injected_doc)
+                    .map(|has_doc| vec![AgentEvent::HandoffInjected { has_doc }])
+                    .unwrap_or_default()
             }
             _ => Vec::new(),
         },
@@ -569,6 +593,54 @@ mod tests {
         assert!(matches!(translate(started, &mut None).as_slice(), [AgentEvent::BackgroundTasks { running: 1 }]));
         let ended = parse(r#"{"type":"system","subtype":"background_tasks_changed","tasks":[],"uuid":"u2","session_id":"s"}"#);
         assert!(matches!(translate(ended, &mut None).as_slice(), [AgentEvent::BackgroundTasks { running: 0 }]));
+    }
+
+    /// A compaction, as claude-code 2.1.284 writes it to stdout (s-d43b3630),
+    /// becomes `Compacted` with claude-code's own token counts.
+    #[test]
+    fn a_compact_boundary_becomes_compacted_with_its_token_counts() {
+        let parse = |line: &str| -> StreamEvent { serde_json::from_str(line).unwrap() };
+        let boundary = parse(
+            r#"{"type":"system","subtype":"compact_boundary","session_id":"s","uuid":"u","compact_metadata":{"trigger":"auto","pre_tokens":970716,"post_tokens":17629,"cumulative_dropped_tokens":953087,"duration_ms":70752},"logical_parent_uuid":"p"}"#,
+        );
+        match translate(boundary, &mut None).as_slice() {
+            [AgentEvent::Compacted { trigger, pre_tokens, post_tokens }] => {
+                assert_eq!(trigger.as_deref(), Some("auto"));
+                assert_eq!((*pre_tokens, *post_tokens), (Some(970716), Some(17629)));
+            }
+            other => panic!("expected one Compacted, got {other:?}"),
+        }
+        let bare = parse(r#"{"type":"system","subtype":"compact_boundary"}"#);
+        assert!(matches!(
+            translate(bare, &mut None).as_slice(),
+            [AgentEvent::Compacted { trigger: None, pre_tokens: None, post_tokens: None }]
+        ));
+    }
+
+    /// Of the `SessionStart:compact` hook responses on the stream, only the one
+    /// that printed a rendered handoff file is bot-hq's; a plugin's hook under
+    /// the same name, and bot-hq's file under another hook name, are not.
+    #[test]
+    fn only_bot_hqs_own_post_compaction_hook_reports_a_handoff_injection() {
+        let response = |name: &str, output: &str| -> StreamEvent {
+            serde_json::from_value(serde_json::json!({
+                "type": "system", "subtype": "hook_response", "hook_name": name,
+                "hook_event": "SessionStart", "output": output, "exit_code": 0, "outcome": "success",
+            }))
+            .unwrap()
+        };
+        let doc = crate::agents::handoff::render("s-1", "hands", Some(("keep gating reads", "2026-10-03T05:00:00Z")));
+        let no_doc = crate::agents::handoff::render("s-1", "hands", None);
+        assert!(matches!(
+            translate(response(COMPACT_HOOK_NAME, &doc), &mut None).as_slice(),
+            [AgentEvent::HandoffInjected { has_doc: true }]
+        ));
+        assert!(matches!(
+            translate(response(COMPACT_HOOK_NAME, &no_doc), &mut None).as_slice(),
+            [AgentEvent::HandoffInjected { has_doc: false }]
+        ));
+        assert!(translate(response(COMPACT_HOOK_NAME, "{\"hookSpecificOutput\":{}}"), &mut None).is_empty());
+        assert!(translate(response("SessionStart:startup", &doc), &mut None).is_empty());
     }
 
     #[tokio::test]

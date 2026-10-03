@@ -116,6 +116,16 @@ impl SignalingBridge {
     /// `None` when storage isn't wired, the roster has no such slug, or the read
     /// failed. Every one of those is a reason to write an unattributed heading
     /// rather than to guess a name or to fail the write.
+    /// Is `slug` a participant of `session_id`? `false` on a missing storage or
+    /// a failed read: the caller uses this to REFUSE a write, and a refusal
+    /// must never come from a read that did not happen.
+    pub(crate) async fn is_session_participant(&self, session_id: &str, slug: &str) -> bool {
+        let Some(storage) = self.storage.lock().await.clone() else {
+            return false;
+        };
+        matches!(storage.participant_by_slug(session_id, slug).await, Ok(Some(_)))
+    }
+
     async fn participant_display_name(&self, session_id: &str, slug: &str) -> Option<String> {
         let storage = self.storage.lock().await.clone()?;
         match storage.participant_by_slug(session_id, slug).await {

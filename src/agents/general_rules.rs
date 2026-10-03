@@ -177,6 +177,15 @@ Use `session_doc_write(slug, body, phase?)` for plans, investigation findings, a
 
 To promote a session doc to the shared CL — only when the user asks — write its body with `cl_write_file(project, file_path, content)` (the guarded, versioned CL write that auto-rescans; it needs the `write_context_library` capability, so a participant without it asks the one that has it). There's no dedicated promote tool; the CL write IS the promotion — never a bare `Write`/`Bash` into the library path, which skips the traversal guard, the size cap, the atomic write, the git snapshot and the rescan.
 
+## Context compaction — your handoff doc
+
+claude-code compacts your context when it fills: everything before becomes a summary, and an instruction the user gave an hour ago survives only if the summary kept it. bot-hq does three things about that. It posts a channel row when a participant's context passes 85 % and 95 %, again after each compaction. It posts a row when any participant's context is compacted. And it puts ONE document back into the compacted participant's context: the custom session doc `handoff-<your slug>` (your slug is in the roster block — the name in backticks beside your role).
+
+- **Write it early and keep it current.** `session_doc_write(slug: \"handoff-<your slug>\", body)` with no `phase`. Rewrite it at each phase boundary and when a context row names you. About the first 8 KB is put back inline and the rest is one `session_doc_read` away, so lead with what matters.
+- **What goes in it:** the user's standing instructions and corrections, verbatim; decisions and who made them; what is done and verified, and where the evidence is; what is in flight and the next step; parked questions and gates by id; anything you were told NOT to do.
+- **After a compaction** it opens your context, marked `[bot-hq]`. Trust it over the summary, then check the live state — the phase docs, `focus.md`, git — before acting.
+- **When a compaction row names a peer,** read its next messages against what you know: a compacted participant re-asking a settled question, or acting without a standing instruction, is the failure to catch — say so in the channel. Its handoff doc is its own and the user's; do not write it for it.
+
 ## Production data access
 
 Production databases (live customer / company data) are READ-ONLY for agents. The full rules:
@@ -454,6 +463,38 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("Pass silently."),
             "and that a pass carries no prose"
+        );
+    }
+
+    /// Feedback #54 / #63 / #67 / #74 / #81: the hand-over around a compaction
+    /// was a ritual the user ran by hand in five sessions. The layer every
+    /// participant reads names the mechanism (the doc, by its slug pattern), how
+    /// to write it, what bot-hq does with it, and the peer's part — and it says
+    /// `<your slug>`, never a role's name.
+    #[test]
+    fn the_universal_layer_teaches_the_handoff_doc() {
+        let section = GENERAL_RULES
+            .split("## Context compaction — your handoff doc")
+            .nth(1)
+            .expect("the handoff section")
+            .split("\n## ")
+            .next()
+            .unwrap();
+        for needle in [
+            "`handoff-<your slug>`",
+            "with no `phase`",
+            "85 % and 95 %",
+            "again after each compaction",
+            "marked `[bot-hq]`",
+            "Trust it over the summary",
+            "When a compaction row names a peer",
+            "do not write it for it",
+        ] {
+            assert!(section.contains(needle), "the handoff section lacks {needle:?}");
+        }
+        assert!(
+            !section.contains("handoff-hands") && !section.contains("handoff-eyes"),
+            "the section names the pattern, not one roster's slugs"
         );
     }
 

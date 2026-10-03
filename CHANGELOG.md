@@ -7,6 +7,26 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+### Added
+
+- **A participant keeps its bearings across a context compaction.** Each
+  participant has one handoff document, `handoff-<its name>` (for example
+  `handoff-hands`), which it writes like any session document and you can read
+  and edit in its own tab. When claude-code compacts that participant's
+  context, bot-hq puts the document back into it, so the hand-over no longer
+  depends on you asking for it or on a peer noticing.
+- **A compaction is announced in the chat.** A row says whose context was
+  compacted, how many tokens it went from and to, and whether its handoff
+  document was put back, so the other participants know to check that it
+  still holds the session's standing instructions.
+
+### Changed
+
+- **The context warning repeats after a compaction.** The rows at 85 % and
+  95 % used to appear once per session, so a second approach to the limit came
+  with no warning. They now appear each time the context fills again, and say
+  when the participant's handoff document was last written.
+
 ### Fixed
 
 - **An agent's background helpers are no longer cancelled while another

@@ -1232,6 +1232,28 @@ async fn call_tool(
             // says so, so an agent reading its doc back is not surprised by a
             // marker where it wrote a secret.
             let redacted = crate::policy::secret_scan::find_secrets(&body).len();
+            // A handoff doc is put back into ITS owner's context after a
+            // compaction (`agents::handoff`), so a peer's write to it would
+            // arrive there as the owner's own notes. Only the owner writes it;
+            // the user edits it in its tab. `handoff-<anything that is not a
+            // participant>` stays an ordinary custom doc.
+            if phase.is_none() {
+                if let Some(owner) = crate::agents::handoff::participant_of(&slug) {
+                    if owner != caller.agent
+                        && bridge.is_session_participant(&caller.session_id, owner).await
+                    {
+                        return Err(JsonRpcError::new(
+                            JsonRpcError::INVALID_PARAMS,
+                            format!(
+                                "`{slug}` is {owner}'s handoff doc: bot-hq puts it back into \
+                                 {owner}'s context after a compaction, so only {owner} writes it \
+                                 (the user can edit it in its tab). Yours is `{}`.",
+                                crate::agents::handoff::doc_slug(&caller.agent)
+                            ),
+                        ));
+                    }
+                }
+            }
             match (caller.capabilities.reviewer_shaped(), phase.as_deref()) {
                 (true, Some(p)) => {
                     let (id, eyes_slug) = bridge
@@ -3640,6 +3662,51 @@ mod tests {
         assert!(at.contains("eod@1"), "got: {at}");
         let hit = call("session_doc_read", json!({"slug": "eod@1", "grep": "dug"})).await;
         assert!(hit.contains("\"line\":1") && !hit.contains("second"), "got: {hit}");
+    }
+
+    /// A handoff doc is its owner's: bot-hq puts `handoff-<slug>` back into
+    /// THAT participant's context after a compaction, so a peer's write would
+    /// arrive there as the owner's own notes (EYES, plan point 12). The owner's
+    /// write lands and is mirrored to its file; a slug that names no
+    /// participant is an ordinary custom doc.
+    #[tokio::test]
+    async fn only_its_owner_writes_a_participants_handoff_doc() {
+        let bridge = SignalingBridge::new();
+        let handoffs = tempfile::tempdir().unwrap();
+        let storage = crate::storage::Storage::memory()
+            .await
+            .unwrap()
+            .with_handoff_dir(handoffs.path().to_path_buf());
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+        storage
+            .ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS)
+            .await
+            .unwrap();
+        let write = |who: CallerIdentity, slug: &'static str| {
+            let bridge = &bridge;
+            let r = req(
+                "tools/call",
+                json!({ "name": "session_doc_write", "arguments": {"slug": slug, "body": "notes"} }),
+                1,
+            );
+            async move { dispatch(r, &who, bridge).await.map(|_| ()) }
+        };
+
+        write(caller(), "handoff-hands").await.expect("the owner's write lands");
+        let file = crate::agents::handoff::file_path(handoffs.path(), "s1", "hands").unwrap();
+        assert!(std::fs::read_to_string(&file).unwrap().contains("notes"), "and reaches its file");
+
+        let refused = write(eyes_caller(), "handoff-hands").await.expect_err("a peer's write is refused");
+        assert!(
+            refused.message.contains("is hands's handoff doc")
+                && refused.message.contains("Yours is `handoff-eyes`"),
+            "the refusal names the owner and the caller's own slug: {}",
+            refused.message
+        );
+        write(eyes_caller(), "handoff-eyes").await.expect("its own lands");
+        // `after-compact` is no participant: an ordinary custom doc, as before.
+        write(eyes_caller(), "handoff-after-compact").await.expect("not a handoff doc");
     }
 
     #[tokio::test]

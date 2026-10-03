@@ -82,6 +82,7 @@ request body for non-Anthropic gateways when a model has a `base_url`.
 | `src/agents/input.rs` | `pump_inputs` stdin writer (messages + control/interrupt) | S |
 | `src/agents/prompts.rs` | layer-3 hardcoded role prose (`HANDS_ROLE`/`EYES_ROLE`, keyed by ROLE SLUG) — seeds `roles.description_prompt`; live prose is the DB row | L |
 | `src/agents/general_rules.rs` | layer-1 `GENERAL_RULES` (compiled in) | M |
+| `src/agents/handoff.rs` | the pinned handoff doc put back after a compaction: slug `handoff-<participant>`, the rendered file (byte budget, markers), its path under `.local/handoffs/`; written by `Storage::sync_handoff_file`, printed by `policy-check compact-handoff` | S |
 | `src/agents/capability.rs` | `Capability` (16), `CapabilitySet`, `ResolvedCapabilities`, `required_for` = THE tool→capability map | L |
 | `src/agents/capability_prompt.rs` | layer-2 generator: grants/denials + live roster prose from a `CapabilitySet` (`phrasing()` exhaustive) | L |
 | `src/agents/llm_proxy.rs` | localhost reverse proxy for non-Anthropic gateways (started by `src/main.rs`); forwards only to upstreams a spawn registered via `proxied_base_url`, refuses browser-shaped requests | L |

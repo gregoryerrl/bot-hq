@@ -67,7 +67,8 @@ fn hook_push_nonce() -> Option<String> {
 pub fn run_cli(args: &[String]) -> Result<i32> {
     let Some(sub) = args.first() else {
         return Err(anyhow!(
-            "usage: bot-hq policy-check {{commit-msg|pre-commit|post-commit|pre-push|tool-gate}} \
+            "usage: bot-hq policy-check \
+             {{commit-msg|pre-commit|post-commit|pre-push|tool-gate|compact-handoff}} \
              --data-dir <P> [--project <Q>] [--session <S>] [--msg-file <F>]"
         ));
     };
@@ -155,6 +156,12 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
             run_pre_push(&data_dir, project.as_deref(), remote, push_nonce.as_deref(), sid)
         }
         "tool-gate" => run_tool_gate(&data_dir, sid),
+        "compact-handoff" => {
+            if let Some(text) = compact_handoff_text(&data_dir, sid, &hook_agent()) {
+                print!("{text}");
+            }
+            Ok(0)
+        }
         other => Err(anyhow!("unknown subcommand {other}")),
     }
 }
@@ -543,6 +550,22 @@ fn hook_agent() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "an agent".to_string())
+}
+
+/// What the `SessionStart` hook with matcher `compact` prints after a
+/// compaction: the participant's rendered handoff file (`agents::handoff`),
+/// which claude-code then puts into the compacted context. The app renders the
+/// file on every write of the doc; this only reads it.
+///
+/// `None` — and the hook prints nothing and still exits 0 — when there is no
+/// session id, the names are not path-safe, or the file is missing or
+/// unreadable. A hook that fails here must never get in a compaction's way.
+fn compact_handoff_text(data_dir: &Path, session_id: Option<&str>, agent: &str) -> Option<String> {
+    let dir = crate::agents::handoff::dir_under(
+        &crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).local_dir,
+    );
+    let path = crate::agents::handoff::file_path(&dir, session_id?, agent)?;
+    std::fs::read_to_string(path).ok().filter(|t| !t.is_empty())
 }
 
 /// Build a current-thread runtime to drive async calls from a sync git-hook
@@ -3032,6 +3055,36 @@ mod tests {
     #[test]
     fn pretool_malformed_json_is_none() {
         assert_eq!(parse_pretool_bash_command("not json at all"), None);
+    }
+
+    #[test]
+    fn compact_handoff_prints_the_rendered_file_and_nothing_when_there_is_none() {
+        // The path the hook reads is the path the session-doc store writes:
+        // `<data_dir>/.local/handoffs/<session>/<participant>.md`.
+        let tmp = tempfile::tempdir().unwrap();
+        let local = crate::paths::Paths::for_data_dir(tmp.path().to_path_buf()).local_dir;
+        let dir = crate::agents::handoff::dir_under(&local);
+        let file = crate::agents::handoff::file_path(&dir, "s-1", "hands").unwrap();
+        let rendered = crate::agents::handoff::render("s-1", "hands", Some(("keep gating reads", "2026-10-03T05:00:00Z")));
+        crate::agents::handoff::write_file(&file, &rendered).unwrap();
+
+        assert_eq!(compact_handoff_text(tmp.path(), Some("s-1"), "hands").as_deref(), Some(rendered.as_str()));
+        // No session, another participant, an unsafe name, an empty file: nothing.
+        assert_eq!(compact_handoff_text(tmp.path(), None, "hands"), None);
+        assert_eq!(compact_handoff_text(tmp.path(), Some("s-1"), "eyes"), None);
+        assert_eq!(compact_handoff_text(tmp.path(), Some("s-1"), "an agent"), None);
+        assert_eq!(compact_handoff_text(tmp.path(), Some("../s-1"), "hands"), None);
+        crate::agents::handoff::write_file(&file, "").unwrap();
+        assert_eq!(compact_handoff_text(tmp.path(), Some("s-1"), "hands"), None);
+        // The subcommand itself exits 0 with or without a file.
+        let args = |sid: &str| -> Vec<String> {
+            ["compact-handoff", "--data-dir", tmp.path().to_str().unwrap(), "--session", sid]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        };
+        assert_eq!(run_cli(&args("s-1")).unwrap(), 0);
+        assert_eq!(run_cli(&args("s-none")).unwrap(), 0);
     }
 
     #[test]

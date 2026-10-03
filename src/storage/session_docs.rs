@@ -51,7 +51,64 @@ impl Storage {
         .fetch_one(&self.pool)
         .await
         .with_context(|| format!("upsert session_documents session={session_id} slug={slug}"))?;
+        self.sync_handoff_file(session_id, slug).await;
         Ok(row.0)
+    }
+
+    /// Re-render the handoff FILE of the participant `slug` belongs to, from
+    /// the row as it now is (`agents::handoff`: the file is what the
+    /// post-compaction hook prints into that participant's context).
+    ///
+    /// Called by the write and the delete in this file — the ONE choke point
+    /// every session-doc write passes through (an agent's write, append or
+    /// edit; the reviewer redirect; the user's save or delete; a plugin's), so
+    /// no path can leave the file behind the doc and have a stale handoff put
+    /// back after a compaction. Also called at spawn, so the file exists (as
+    /// the "you have no handoff doc" text) before any doc is written.
+    ///
+    /// A no-op for a slug that is not a handoff doc and for a storage with no
+    /// handoff directory. Best-effort by design: the doc write has already
+    /// succeeded, so a failed mirror is logged and never returned.
+    pub async fn sync_handoff_file(&self, session_id: &str, slug: &str) {
+        let (Some(dir), Some(participant)) =
+            (self.handoff_dir.as_deref(), crate::agents::handoff::participant_of(slug))
+        else {
+            return;
+        };
+        let Some(path) = crate::agents::handoff::file_path(dir, session_id, participant) else {
+            return;
+        };
+        let doc = match self.session_document_by_slug(session_id, slug).await {
+            Ok(doc) => doc,
+            Err(e) => {
+                tracing::warn!(?e, session_id, slug, "reading a handoff doc to mirror it");
+                return;
+            }
+        };
+        let text = crate::agents::handoff::render(
+            session_id,
+            participant,
+            doc.as_ref().map(|d| (d.body.as_str(), d.updated_at.as_str())),
+        );
+        if let Err(e) = crate::agents::handoff::write_file(&path, &text) {
+            tracing::warn!(?e, path = %path.display(), "writing a handoff file");
+        }
+    }
+
+    /// Remove a session's rendered handoff files — at close, when no
+    /// participant is left to be compacted. Best-effort; a reopen re-renders
+    /// them at spawn.
+    pub fn remove_handoff_files(&self, session_id: &str) {
+        let Some(dir) = self.handoff_dir.as_deref() else { return };
+        // The same guard `file_path` applies to a session id.
+        let Some(probe) = crate::agents::handoff::file_path(dir, session_id, "x") else { return };
+        if let Some(session_dir) = probe.parent() {
+            if let Err(e) = std::fs::remove_dir_all(session_dir) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(?e, path = %session_dir.display(), "removing a session's handoff files");
+                }
+            }
+        }
     }
 
     /// Search a session's documents. Optional `query` is a case-insensitive
@@ -182,7 +239,11 @@ impl Storage {
         .execute(&self.pool)
         .await
         .with_context(|| format!("delete session_documents session={session_id} slug={slug}"))?;
-        Ok(res.rows_affected() > 0)
+        let deleted = res.rows_affected() > 0;
+        if deleted {
+            self.sync_handoff_file(session_id, slug).await;
+        }
+        Ok(deleted)
     }
 
     /// Fetch one document by (session_id, slug). None when not found.
@@ -225,6 +286,60 @@ mod session_doc_tests {
         s.upsert_session_document("s2", "checklist", "other", None).await.unwrap();
         assert!(!s.delete_session_document("s1", "checklist").await.unwrap());
         assert!(s.session_document_by_slug("s2", "checklist").await.unwrap().is_some());
+    }
+
+    /// The wire for the handoff mirror: every write and delete of a
+    /// `handoff-<participant>` doc re-renders that participant's file, which is
+    /// what the post-compaction hook prints. Deleting either `sync_handoff_file`
+    /// call in this file turns this red. Other slugs, and the archived versions
+    /// a replace leaves behind, write no file.
+    #[tokio::test]
+    async fn every_write_and_delete_of_a_handoff_doc_re_renders_its_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = crate::agents::handoff::dir_under(tmp.path());
+        let s = Storage::memory().await.unwrap().with_handoff_dir(dir.clone());
+        s.create_session("s1", "t", None).await.unwrap();
+        let file = crate::agents::handoff::file_path(&dir, "s1", "hands").unwrap();
+        let read = || std::fs::read_to_string(&file).unwrap();
+
+        // Spawn renders the file before any doc exists.
+        s.sync_handoff_file("s1", "handoff-hands").await;
+        assert_eq!(crate::agents::handoff::injected_doc(&read()), Some(false), "the no-doc text");
+
+        s.upsert_session_document("s1", "handoff-hands", "Standing order: gate every read.", None)
+            .await
+            .unwrap();
+        assert_eq!(crate::agents::handoff::injected_doc(&read()), Some(true));
+        assert!(read().contains("Standing order: gate every read."));
+
+        // A rewrite replaces what the file says.
+        s.upsert_session_document("s1", "handoff-hands", "The order was lifted at 12:00Z.", None)
+            .await
+            .unwrap();
+        assert!(read().contains("The order was lifted at 12:00Z."));
+        assert!(!read().contains("gate every read"), "a stale handoff must not be put back");
+
+        // The user deleting the doc takes the file back to the no-doc text.
+        assert!(s.delete_session_document("s1", "handoff-hands").await.unwrap());
+        assert_eq!(crate::agents::handoff::injected_doc(&read()), Some(false));
+
+        // Not handoff docs: nothing is written for them.
+        for slug in ["plan", "handoff-eyes@1", "eyes-handoff"] {
+            s.upsert_session_document("s1", slug, "x", None).await.unwrap();
+        }
+        let files: Vec<String> = std::fs::read_dir(dir.join("s1"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(files, vec!["hands.md".to_string()], "only the one participant's file");
+
+        // Close removes the session's files; a storage with no directory mirrors nothing.
+        s.remove_handoff_files("s1");
+        assert!(!dir.join("s1").exists());
+        let plain = Storage::memory().await.unwrap();
+        plain.create_session("s1", "t", None).await.unwrap();
+        plain.upsert_session_document("s1", "handoff-hands", "x", None).await.unwrap();
+        plain.remove_handoff_files("s1");
     }
 
     /// The archive-slot read is one query and reads only THIS slug's numbered

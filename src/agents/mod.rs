@@ -7,6 +7,7 @@ pub mod capability;
 pub mod capability_prompt;
 pub mod events;
 pub mod general_rules;
+pub mod handoff;
 pub mod input;
 pub mod llm_proxy;
 pub mod prompts;

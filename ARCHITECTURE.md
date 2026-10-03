@@ -426,6 +426,42 @@ behaviour it encoded carries a verdict in
 
 ---
 
+## Context compaction — the handoff doc
+
+claude-code compacts a participant's context when it fills: everything before
+becomes a summary, and what the user said an hour ago survives only if the
+summary kept it. bot-hq cannot prevent that, so it makes three things
+mechanical (feedback #54 / #63 / #67 / #74 / #81):
+
+- **A warning before.** At each turn end the pump compares the participant's
+  context reading with two bands (85 % and 95 %, `core/pump.rs`
+  `context_threshold_notice`) and posts one channel row per band. The row ends
+  with the state of the participant's handoff doc. The latch re-arms once a
+  reading falls under 70 %, which only a compaction does, so every fill of the
+  window is announced, not just the first.
+- **A row when it happens.** claude-code writes
+  `{"type":"system","subtype":"compact_boundary","compact_metadata":{…}}` to
+  stdout; `agents/events.rs` turns it into `AgentEvent::Compacted`, and the pump
+  posts one row every participant and the user read: who, the token counts, and
+  whether the handoff doc was put back. It is handled before the turn logic,
+  like the background-task count: a compaction is not the participant speaking.
+- **One document put back.** The custom session doc `handoff-<participant
+  slug>` is the participant's own (a peer's write to it is refused; the user
+  edits it in its tab). The session-doc store mirrors every write and delete of
+  it to `<data_dir>/.local/handoffs/<session>/<participant>.md`, already
+  rendered (`agents/handoff.rs`: a header, the body up to a 9,000-byte budget,
+  and where to read the rest). Every participant is spawned with a
+  `SessionStart` hook, matcher `compact`, that runs `bot-hq policy-check
+  compact-handoff`; it prints that file and claude-code puts a hook's output
+  into the compacted context. Hook output over about 10,000 characters is
+  replaced by a preview, hence the budget. The stream's `hook_response` for
+  that hook is recognised by the file's opening marker, so the compaction row
+  says "put back" only when it was.
+
+The hook fails open: with no file it prints nothing and exits 0. The file is
+rendered at spawn too (as "you have no handoff doc" until one is written) and
+removed when the session closes.
+
 ## Tauri + React UI
 
 **Stack:** Tauri v2 shell + React 18 + TypeScript + Tailwind + minimal
@@ -1344,6 +1380,7 @@ Defaults (env-overridable via `BOT_HQ_DATA_DIR`):
 - **Policy-hash cache:** `<data_dir>/.local/.policy-hashes.json`
 - **Screenshots:** `<data_dir>/.local/screenshots/`
 - **Session policy snapshot:** `<data_dir>/.local/session-policies/<sid>.yaml`
+- **Rendered handoff docs:** `<data_dir>/.local/handoffs/<sid>/<participant>.md`
 
 Top-level dirs are **sync boundaries**: `library/` = user content
 (cloud-syncable), `config/` = portable machine policy, `.local/` =

@@ -438,14 +438,26 @@ pub fn window_mismatch_notice(
 /// has room to be written; 95 is the last call before claude-code compacts.
 pub const CONTEXT_NOTICE_BANDS: [u8; 2] = [85, 95];
 
+/// A context reading below this many percent RE-ARMS the band rows. Only a
+/// compaction (or a fresh process) takes a meter that reached 85 % back under
+/// it, so the latch re-arms once per fill and a session hovering between the
+/// bands cannot make the row repeat.
+pub const CONTEXT_REARM_BELOW: u8 = 70;
+
 /// The one-per-band channel row for a participant whose context has crossed
 /// a [`CONTEXT_NOTICE_BANDS`] threshold. `last_band` is the highest band
-/// already announced by this pump: the row fires when the reading's band is
-/// ABOVE it, and the latch then ratchets up to that band. It is never
-/// lowered — an auto-compaction drops the meter, and re-arming on the drop
-/// would post a fresh row every time a session hovering at 95 % compacts and
-/// climbs back. A respawn starts the latch at zero, which is right: a new
-/// process is a new window.
+/// already announced by this pump for the CURRENT fill: the row fires when the
+/// reading's band is ABOVE it, and the latch then ratchets up to that band.
+///
+/// **The latch re-arms after a compaction** (feedback #81, reversing F2d's
+/// "never lowered"): a reading under [`CONTEXT_REARM_BELOW`] resets it, and so
+/// does the pump on a `Compacted` event. It used to stay up for the life of
+/// the pump, so a session's SECOND approach to the limit arrived with no row at
+/// all — the participant has no other way to read its own context, and the
+/// row is what tells it to bring its handoff doc up to date. Hysteresis rather
+/// than the event alone, so the re-arm does not depend on claude-code sending
+/// the boundary. A respawn starts the latch at zero: a new process is a new
+/// window.
 ///
 /// `None` when there is no usable reading, the reported window is zero (the
 /// non-zero promise on `reported_window` is a doc comment, not a type — a
@@ -456,7 +468,7 @@ pub const CONTEXT_NOTICE_BANDS: [u8; 2] = [85, 95];
 /// instruction: every participant reads the channel, and an imperative
 /// ("write your handoff now") addressed to no one derails whoever is
 /// mid-turn. One line, because the row is charged to the very context it is
-/// warning about.
+/// warning about. The caller appends [`handoff_state_clause`].
 pub fn context_threshold_notice(
     slug: &str,
     report: &crate::agents::spawn::ContextReport,
@@ -467,6 +479,9 @@ pub fn context_threshold_notice(
         return None;
     }
     let pct = (usage.used_tokens.saturating_mul(100) / usage.context_window).min(u8::MAX as u64) as u8;
+    if pct < CONTEXT_REARM_BELOW {
+        *last_band = 0;
+    }
     let band = CONTEXT_NOTICE_BANDS
         .iter()
         .copied()
@@ -477,12 +492,97 @@ pub fn context_threshold_notice(
     }
     *last_band = band;
     Some(format!(
-        "⚠ {slug}'s context is at {pct} % ({used} of {window} tokens) as of its last turn — \
-         the point to hand off to a successor session is near. One notice per band; a \
-         compaction lowers the meter but does not repeat it.",
+        "⚠ {slug}'s context is at {pct} % ({used} of {window} tokens) as of its last turn; \
+         claude-code compacts it when it fills, and this row repeats after each compaction.",
         used = usage.used_tokens,
         window = usage.context_window,
     ))
+}
+
+/// The state of `slug`'s handoff doc (`agents::handoff`), as the sentence a
+/// context row ends with: when it was last written, or that there is none. A
+/// state line for the same reason as the row it follows — the named
+/// participant reads it at its next turn and knows whether its doc is current.
+pub fn handoff_state_clause(slug: &str, last_written: Option<&str>) -> String {
+    let doc = crate::agents::handoff::doc_slug(slug);
+    match last_written {
+        Some(at) => format!(" Its handoff doc `{doc}` was last written {at}."),
+        None => format!(" It has no handoff doc (`{doc}`)."),
+    }
+}
+
+/// When `slug`'s handoff doc was last written, or `None` when it has none (an
+/// empty doc counts as none — nothing would be put back).
+async fn handoff_last_written(storage: &Storage, session_id: &str, slug: &str) -> Option<String> {
+    storage
+        .session_document_by_slug(session_id, &crate::agents::handoff::doc_slug(slug))
+        .await
+        .ok()
+        .flatten()
+        .filter(|d| !d.body.trim().is_empty())
+        .map(|d| d.updated_at)
+}
+
+/// `1234567` as `1,234,567` — token counts in a row the user reads.
+fn group_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The channel row for a participant whose context claude-code just compacted
+/// (feedback #81: "nothing tells the other participants that a peer was just
+/// compacted" — they inferred it from a peer re-asking settled questions).
+///
+/// `handoff` is what bot-hq's post-compaction hook reported on the stream
+/// before the boundary: `Some(true)` it printed the handoff doc, `Some(false)`
+/// it printed the no-doc text, `None` it did not report at all (a participant
+/// spawned by a build without the hook). The row says which, so "the doc was
+/// put back" is an observation and never an assumption.
+///
+/// A state line, like the context rows: it tells the compacted participant and
+/// its peers what is true, and leaves what to do about it to the rules.
+pub fn compaction_notice(
+    slug: &str,
+    trigger: Option<&str>,
+    pre_tokens: Option<u64>,
+    post_tokens: Option<u64>,
+    handoff: Option<bool>,
+) -> String {
+    let how = match trigger {
+        Some("auto") => " because it filled",
+        Some("manual") => " on request",
+        _ => "",
+    };
+    let size = match (pre_tokens, post_tokens) {
+        (Some(pre), Some(post)) => {
+            format!(" ({} → {} tokens)", group_thousands(pre), group_thousands(post))
+        }
+        (Some(pre), None) => format!(" ({} tokens before)", group_thousands(pre)),
+        _ => String::new(),
+    };
+    let doc = crate::agents::handoff::doc_slug(slug);
+    let handoff = match handoff {
+        Some(true) => format!("bot-hq put its handoff doc `{doc}` back into its context."),
+        Some(false) => format!(
+            "It has no handoff doc (`{doc}`), so the summary is all it carries from before."
+        ),
+        None => format!(
+            "No handoff doc was put back: its post-compaction hook did not report (`{doc}` is \
+             read with session_doc_read)."
+        ),
+    };
+    format!(
+        "⚠ {slug}'s context was compacted{how}{size}. It now works from a summary of the session \
+         so far; what it was told before, and the summary dropped, is gone until it re-reads the \
+         session's documents. {handoff}"
+    )
 }
 
 /// Is `last_line` (an errored turn's last non-empty line) a TRANSIENT failure
@@ -701,10 +801,14 @@ pub async fn pump_agent(
     // disagreement does not change between turns, and a row per turn would be
     // the nag the notice exists to replace.
     let mut window_mismatch_noticed = false;
-    // The highest context band (`CONTEXT_NOTICE_BANDS`) this pump has already
-    // announced — a ratchet, never lowered, so a compaction that drops the
-    // meter cannot re-arm the row (see `context_threshold_notice`).
+    // The highest context band (`CONTEXT_NOTICE_BANDS`) this pump has announced
+    // for the CURRENT fill of the window — a ratchet that a compaction resets
+    // (see `context_threshold_notice`).
     let mut context_band_notified: u8 = 0;
+    // What bot-hq's post-compaction hook reported since the last compaction row
+    // (`AgentEvent::HandoffInjected`): it precedes the boundary on the stream,
+    // so it is held here until the `Compacted` it belongs to arrives.
+    let mut handoff_injected: Option<bool> = None;
     // s-f6a441ff: consecutive errored turns for THIS pump. ONE errored turn
     // ends `Spoke` and the ring steps past it — a failure is not a claim there
     // is nothing left to do (see the ending derivation below). But a SECOND in
@@ -771,6 +875,42 @@ pub async fn pump_agent(
         // turn-opening logic below.
         if let AgentEvent::BackgroundTasks { running } = event {
             background_tasks = running;
+            continue;
+        }
+        // A compaction, and the hook response that precedes it: state as well,
+        // for the same reason. claude-code compacts before a dealt turn's first
+        // model call, in the middle of a turn, or in a turn nobody dealt, and
+        // none of those is the participant starting to speak.
+        if let AgentEvent::HandoffInjected { has_doc } = event {
+            handoff_injected = Some(has_doc);
+            continue;
+        }
+        if let AgentEvent::Compacted { trigger, pre_tokens, post_tokens } = event {
+            // The window was just emptied, so the next approach to the limit
+            // is announced again (the hysteresis in `context_threshold_notice`
+            // does the same from the next reading; this does not wait for one).
+            context_band_notified = 0;
+            let notice = compaction_notice(
+                &cfg.slug,
+                trigger.as_deref(),
+                pre_tokens,
+                post_tokens,
+                handoff_injected.take(),
+            );
+            tracing::info!(agent = %cfg.slug, ?trigger, ?pre_tokens, ?post_tokens, "context compacted");
+            if crate::core::post_system_notice(
+                &storage,
+                cfg.bridge.as_deref(),
+                &cfg.session_id,
+                MessageKind::SystemNotice,
+                notice,
+                None,
+            )
+            .await
+            .is_none()
+            {
+                warn!(agent = %cfg.slug, "the compaction notice was not posted");
+            }
             continue;
         }
         // First event of a turn: bind it to whichever epoch the sequencer had
@@ -892,8 +1032,10 @@ pub async fn pump_agent(
         }
 
         match event {
-            // Handled before the turn logic, which it must never reach.
-            AgentEvent::BackgroundTasks { .. } => {}
+            // Handled before the turn logic, which they must never reach.
+            AgentEvent::BackgroundTasks { .. }
+            | AgentEvent::Compacted { .. }
+            | AgentEvent::HandoffInjected { .. } => {}
             AgentEvent::Text(text) => {
                 match storage
                     // `text` is read again below (limit detection, buffer), so
@@ -1197,13 +1339,21 @@ pub async fn pump_agent(
                 // executor past 92 % of its window with nothing in the channel
                 // saying so — the meter is a header pill the user may not be
                 // watching, and "can you compact?" is not something bot-hq can
-                // act on. One row per band, ratcheted, so it is a state
-                // announcement and never a per-turn nag.
-                if let Some(notice) = context_threshold_notice(
+                // act on. One row per band per fill, ratcheted, so it is a
+                // state announcement and never a per-turn nag. It ends with the
+                // state of the participant's handoff doc — the thing it gets
+                // back after the compaction this row says is near.
+                if let Some(mut notice) = context_threshold_notice(
                     &cfg.slug,
                     &context,
                     &mut context_band_notified,
                 ) {
+                    notice.push_str(&handoff_state_clause(
+                        &cfg.slug,
+                        handoff_last_written(&storage, &cfg.session_id, &cfg.slug)
+                            .await
+                            .as_deref(),
+                    ));
                     if crate::core::post_system_notice(
                         &storage,
                         cfg.bridge.as_deref(),
@@ -3124,21 +3274,26 @@ mod tests {
         }
     }
 
-    /// F2d (week 35): one row per band, ratcheted, never re-armed by a
-    /// compaction; nothing on an unusable reading or a zero window (EYES R2 —
-    /// the non-zero promise is a doc comment, and this table builds the report
-    /// field-wise exactly as a caller could).
+    /// One row per band per FILL of the window: ratcheted while the context
+    /// climbs, re-armed once a reading falls under `CONTEXT_REARM_BELOW` — which
+    /// only a compaction does (feedback #81; F2d, week 35, had the latch never
+    /// lower, so a session's second approach to the limit went unannounced).
+    /// Nothing on an unusable reading or a zero window (EYES R2 — the non-zero
+    /// promise is a doc comment, and this table builds the report field-wise
+    /// exactly as a caller could).
     #[test]
-    fn context_threshold_notice_fires_once_per_band_and_never_re_arms() {
+    fn context_threshold_notice_fires_once_per_band_per_fill_and_re_arms_after_a_compaction() {
         let mut band = 0u8;
         assert!(context_threshold_notice("hands", &reading(84, 100), &mut band).is_none());
         assert_eq!(band, 0);
         let n = context_threshold_notice("hands", &reading(850_000, 1_000_000), &mut band)
             .expect("85 % crosses the first band");
-        for needle in ["hands", "85 %", "850000", "1000000", "hand off", "does not repeat"] {
+        for needle in ["hands", "85 %", "850000", "1000000", "compacts it when it fills", "repeats after each compaction"] {
             assert!(n.contains(needle), "notice lacks {needle:?}: {n}");
         }
-        assert!(!n.contains("Write your"), "a state line, not an instruction: {n}");
+        for imperative in ["Write your", "write your", "Update your", "refresh your"] {
+            assert!(!n.contains(imperative), "a state line, not an instruction: {n}");
+        }
         assert_eq!(band, 85);
         // The same band again says nothing.
         assert!(context_threshold_notice("hands", &reading(86, 100), &mut band).is_none());
@@ -3146,10 +3301,19 @@ mod tests {
         let n = context_threshold_notice("hands", &reading(95, 100), &mut band).expect("95 % is the second band");
         assert!(n.contains("95 %"), "got: {n}");
         assert_eq!(band, 95);
-        // A compaction drops the meter; climbing back does NOT re-arm.
-        assert!(context_threshold_notice("hands", &reading(50, 100), &mut band).is_none());
+        // Hovering between the bands does not re-arm: 72 % is not a compaction.
+        assert!(context_threshold_notice("hands", &reading(72, 100), &mut band).is_none());
         assert!(context_threshold_notice("hands", &reading(96, 100), &mut band).is_none());
-        assert_eq!(band, 95, "the latch never lowers");
+        assert_eq!(band, 95, "the latch holds above the re-arm line");
+        // A compaction drops the meter under the re-arm line; the climb back is
+        // announced again, band by band.
+        assert!(context_threshold_notice("hands", &reading(18, 100), &mut band).is_none());
+        assert_eq!(band, 0, "a reading under {CONTEXT_REARM_BELOW} % re-arms");
+        let n = context_threshold_notice("hands", &reading(88, 100), &mut band).expect("the second fill's 85 band");
+        assert!(n.contains("88 %"), "got: {n}");
+        let n = context_threshold_notice("hands", &reading(96, 100), &mut band).expect("the second fill's 95 band");
+        assert!(n.contains("96 %"), "got: {n}");
+        assert_eq!(band, 95);
         // A fresh latch that lands straight at 97 % announces the 95 band only.
         let mut fresh = 0u8;
         let n = context_threshold_notice("eyes", &reading(97, 100), &mut fresh).unwrap();
@@ -3198,6 +3362,144 @@ mod tests {
             .collect();
         assert_eq!(notices.len(), 1, "one row for the 85 band, none for the repeat: {notices:?}");
         assert!(notices[0].contains("hands's context is at 90 %"), "got: {}", notices[0]);
+        assert!(
+            notices[0].ends_with("It has no handoff doc (`handoff-hands`)."),
+            "the row ends with the handoff doc's state: {}",
+            notices[0]
+        );
+    }
+
+    fn turn_at(used: u64) -> AgentEvent {
+        AgentEvent::TurnComplete {
+            stop_reason: None,
+            subtype: Some("success".into()),
+            is_error: false,
+            api_error_status: None,
+            context: reading(used, 1_000_000),
+        }
+    }
+
+    async fn system_rows(storage: &Storage, containing: &str) -> Vec<String> {
+        storage
+            .messages_for_session("s1", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == MessageKind::SystemNotice.as_str() && m.content.contains(containing))
+            .map(|m| m.content)
+            .collect()
+    }
+
+    /// The wire for the clause: with a handoff doc written, the 85 % row says
+    /// when — read from the session-doc store at the moment the row is built.
+    /// An EMPTY doc counts as none: nothing would be put back.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_context_row_says_when_the_handoff_doc_was_last_written() {
+        for (body, expect_written) in [("Standing order: gate every read.", true), ("  \n", false)] {
+            let (storage, state) = setup().await;
+            storage.upsert_session_document("s1", "handoff-hands", body, None).await.unwrap();
+            let written = storage
+                .session_document_by_slug("s1", "handoff-hands")
+                .await
+                .unwrap()
+                .unwrap()
+                .updated_at;
+            let (cfg, _ring_rx) = cfg_with_ring("hands");
+            let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+            let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+            ev_tx.send(turn_at(900_000)).await.unwrap();
+            drop(ev_tx);
+            task.await.unwrap();
+
+            let rows = system_rows(&storage, "context is at").await;
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            if expect_written {
+                assert!(
+                    rows[0].ends_with(&format!("Its handoff doc `handoff-hands` was last written {written}.")),
+                    "got: {}",
+                    rows[0]
+                );
+            } else {
+                assert!(rows[0].ends_with("It has no handoff doc (`handoff-hands`)."), "got: {}", rows[0]);
+            }
+        }
+    }
+
+    /// What the compaction row says, case by case — and that it stays a state
+    /// line, like the context rows.
+    #[test]
+    fn the_compaction_row_states_the_tokens_and_what_happened_to_the_handoff_doc() {
+        let n = compaction_notice("hands", Some("auto"), Some(970_716), Some(17_629), Some(true));
+        for needle in [
+            "⚠ hands's context was compacted because it filled (970,716 → 17,629 tokens).",
+            "works from a summary",
+            "bot-hq put its handoff doc `handoff-hands` back into its context.",
+        ] {
+            assert!(n.contains(needle), "row lacks {needle:?}: {n}");
+        }
+        let n = compaction_notice("eyes", Some("manual"), Some(23_527), None, Some(false));
+        assert!(n.contains("compacted on request (23,527 tokens before)."), "got: {n}");
+        assert!(n.contains("It has no handoff doc (`handoff-eyes`)"), "got: {n}");
+        let n = compaction_notice("hands", None, None, None, None);
+        assert!(n.starts_with("⚠ hands's context was compacted. "), "got: {n}");
+        assert!(n.contains("No handoff doc was put back") && n.contains("did not report"), "got: {n}");
+        for imperative in ["Re-read", "You must", "Check that", "Write "] {
+            assert!(!n.contains(imperative), "a state line, not an instruction: {n}");
+        }
+        for (n, s) in [(0u64, "0"), (999, "999"), (1_000, "1,000"), (17_629, "17,629"), (1_234_567, "1,234,567")] {
+            assert_eq!(group_thousands(n), s);
+        }
+    }
+
+    /// The wire: a compaction posts ONE row carrying what the hook reported
+    /// just before it, and the context warning is armed again without waiting
+    /// for a low reading. A second compaction with no hook report must not
+    /// inherit the first one's. Deleting the `Compacted` intercept in the pump
+    /// loop turns this red.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_compaction_posts_one_row_and_re_arms_the_context_warning() {
+        let (storage, state) = setup().await;
+        let (cfg, _ring_rx) = cfg_with_ring("hands");
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(turn_at(900_000)).await.unwrap();
+        ev_tx.send(AgentEvent::HandoffInjected { has_doc: true }).await.unwrap();
+        ev_tx
+            .send(AgentEvent::Compacted {
+                trigger: Some("auto".into()),
+                pre_tokens: Some(970_716),
+                post_tokens: Some(17_629),
+            })
+            .await
+            .unwrap();
+        ev_tx.send(turn_at(910_000)).await.unwrap();
+        ev_tx
+            .send(AgentEvent::Compacted { trigger: Some("auto".into()), pre_tokens: None, post_tokens: None })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let compactions = system_rows(&storage, "context was compacted").await;
+        assert_eq!(compactions.len(), 2, "one row per compaction: {compactions:?}");
+        assert!(
+            compactions[0].contains("970,716 → 17,629 tokens")
+                && compactions[0].contains("put its handoff doc `handoff-hands` back"),
+            "got: {}",
+            compactions[0]
+        );
+        assert!(
+            compactions[1].contains("did not report"),
+            "the second compaction had no hook report of its own: {}",
+            compactions[1]
+        );
+        let warnings = system_rows(&storage, "context is at").await;
+        assert_eq!(
+            warnings.len(),
+            2,
+            "the 85 band is announced again after the compaction, with no low reading between: {warnings:?}"
+        );
     }
 
     /// Round 12 (the user's Q3): the transient-error classifier — specific

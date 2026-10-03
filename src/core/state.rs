@@ -1517,6 +1517,10 @@ impl AppState {
         if let Err(e) = self.bridge.cleanup_session_policy(id).await {
             tracing::warn!(?e, session_id = %id, "cleanup_session_policy failed");
         }
+        // The rendered handoff files (`agents::handoff`) are for participants
+        // that can still be compacted; none is left. A reopen re-renders them
+        // from the docs, which stay with the session.
+        self.storage.remove_handoff_files(id);
         // Drop the bridge's in-memory per-session state (project map + awaiting
         // flag) so closed sessions don't leak map entries for the process life.
         self.bridge.unregister_session(id).await;
