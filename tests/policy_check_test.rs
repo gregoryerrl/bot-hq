@@ -14,10 +14,15 @@ use std::process::{Command, Stdio};
 /// agent's login shell set to `shell`. Returns (exit code, stdout, stderr).
 fn hook(sub: &str, shell: &str, command: &str) -> (i32, String, String) {
     let data = tempfile::tempdir().unwrap();
+    hook_in(data.path(), sub, shell, command)
+}
+
+/// [`hook`] against a given data dir (one carrying a policy).
+fn hook_in(data: &std::path::Path, sub: &str, shell: &str, command: &str) -> (i32, String, String) {
     let payload =
         serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}}).to_string();
     let mut child = Command::new(env!("CARGO_BIN_EXE_bot-hq"))
-        .args(["policy-check", sub, "--data-dir", data.path().to_str().unwrap()])
+        .args(["policy-check", sub, "--data-dir", data.to_str().unwrap()])
         .env("SHELL", shell)
         // The hook resolves the shell the CLI would use: an override on the
         // test runner's own environment must not decide the case.
@@ -66,4 +71,25 @@ fn the_tool_gate_hook_lints_first_and_still_passes_a_benign_command() {
 
     let (code, out, err) = hook("tool-gate", "/bin/zsh", "echo benign");
     assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""));
+}
+
+/// Group K: the executor's hook stops a command that RUNS a listed read —
+/// with no session to park in, it says to route it through action_gate — and
+/// lets text that only mentions one through.
+#[test]
+fn the_tool_gate_hook_stops_a_listed_read_and_passes_a_mention() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(data.path().join("config")).unwrap();
+    std::fs::write(
+        data.path().join("config/general-policy.yaml"),
+        "production_reads:\n  - gcloud logging read\n",
+    )
+    .unwrap();
+    let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "gcloud logging read 'severity>=ERROR'");
+    assert_eq!(code, 2, "{err}");
+    assert_eq!(out, "");
+    assert!(err.starts_with("A LISTED production read"), "{err}");
+    assert!(err.contains("Call the `action_gate` tool"), "{err}");
+    let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "grep -rn 'gcloud logging read' notes.md");
+    assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "a mention is not a read");
 }

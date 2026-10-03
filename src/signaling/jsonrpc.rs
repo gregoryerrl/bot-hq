@@ -1015,12 +1015,15 @@ async fn call_tool(
                 .get("require_approval")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            // Feedback #94: a line the user's card shows, "approve only after X".
+            let approve_after = args.get("approve_after").and_then(Value::as_str).map(str::to_string);
             let output = bridge
-                .action_gate(
+                .action_gate_with(
                     caller.session_id.clone(),
                     caller.agent.clone(),
                     command,
                     require_approval,
+                    approve_after,
                 )
                 .await
                 .map_err(internal_err_no_prefix)?;

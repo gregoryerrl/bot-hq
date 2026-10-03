@@ -1073,6 +1073,26 @@ hold a reviewer more strictly belonged to the native loop and went with it (D9).
 
 The global list defaults EMPTY (no gating until configured in Settings).
 
+**A project's listed data reads** (group K, `src/policy/data_reads.rs`). A
+project's `policy.yaml` may list `production_reads` and `staging_reads`.
+`data_reads::match_command` matches an entry where a command RUNS
+(`signaling::commands_run`, which sees through quotes, wrappers, `sh -c` and
+`$(…)`):
+- the entry's first word is the tool;
+- flag words are spelling only;
+- middle words are whole words in order;
+- the last word may sit anywhere inside a word, including `NAME=` prefixes, so
+  a host matches in `--host=`, a URL or `PGHOST=`.
+
+A match parks for the user's approval whatever the keyword list says: the
+executor's Tool Gate hook auto-parks it, `action_gate` parks it, and
+`terminal_exec` refuses it. It is reviewed first: `data_read_review` queues it
+for the reviewer every time, with no coverage shortcut, under the outward
+publish's roster rules (no other reviewer → park directly; reviewer down → held
+unless overridden). The card names the matched entry and the executor's
+`approve_after`. A data read's result row keeps the first 48 KB and the last
+8 KB of its output.
+
 **The zsh `"$var:x"` trap is refused before any of this** (feedback #96,
 `src/policy/shell_lint.rs`). Under zsh, `$name:` followed by a modifier letter
 applies the modifier: `"$R:app/x"` is the absolute path of `$R` followed by

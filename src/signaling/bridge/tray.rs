@@ -1599,7 +1599,13 @@ impl SignalingBridge {
         body.push_str("Output:\n");
         Some(match self.execute_gated(session_id, command).await {
             Ok(run) => {
-                body.push_str(&run.text);
+                // Group K (EYES): a data read's answer can be megabytes — a
+                // query, a log read. Its row keeps the head and the tail.
+                if self.data_read_in(session_id, command).await.is_some() {
+                    body.push_str(&cap_data_read_output(&run.text));
+                } else {
+                    body.push_str(&run.text);
+                }
                 // Feedback #57 #60 #97: what landed, read back and compared
                 // with what was approved — or one line saying why not.
                 if super::outward_body::is_outward(command) {
@@ -2134,8 +2140,39 @@ impl SignalingBridge {
     }
 }
 
+/// A data read's output, capped for its result row (group K, EYES): the
+/// first 48 KB and the last 8 KB, with how much was left out between.
+pub(super) fn cap_data_read_output(text: &str) -> String {
+    const HEAD: usize = 48 * 1024;
+    const TAIL: usize = 8 * 1024;
+    if text.len() <= HEAD + TAIL {
+        return text.to_string();
+    }
+    let head_end = crate::text::floor_char_boundary(text, HEAD);
+    let tail_start = crate::text::ceil_char_boundary(text, text.len() - TAIL);
+    format!(
+        "{}\n[… {} bytes not shown …]\n{}",
+        &text[..head_end],
+        tail_start - head_end,
+        &text[tail_start..]
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    /// Group K (EYES): a data read's result row keeps the first 48 KB and
+    /// the last 8 KB, and says how much it left out.
+    #[test]
+    fn a_data_reads_output_is_capped_head_and_tail() {
+        let short = "a\nb\n";
+        assert_eq!(super::cap_data_read_output(short), short);
+        let long = format!("HEAD{}TAIL", "é".repeat(40_000));
+        let capped = super::cap_data_read_output(&long);
+        assert!(capped.starts_with("HEAD") && capped.ends_with("TAIL"), "{}", &capped[..20]);
+        assert!(capped.contains("bytes not shown"));
+        assert!(capped.len() < 60 * 1024, "{}", capped.len());
+    }
+
     use super::*;
     use crate::policy::ViolationOutcome;
 

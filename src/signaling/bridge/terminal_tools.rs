@@ -104,6 +104,18 @@ impl SignalingBridge {
             return Err(anyhow!("{refusal}"));
         }
 
+        // Group K: a command that runs one of the project's listed production
+        // or staging reads is not typed here — it parks for the user's
+        // approval, after the reviewer reads it.
+        if let Some(read) = self.data_read_in(&session_id, command).await {
+            return Err(anyhow!(
+                "this runs a listed {} read (`{}` in the project's policy) — route it through \
+                 action_gate: it parks for the user's approval, after the reviewer reads it",
+                read.kind.label(),
+                read.entry
+            ));
+        }
+
         // Tool-Gate parity (two-tier: session snapshot → global fallback).
         if let Some(d) = self.data_dir.as_ref() {
             let keywords = tool_gate::resolve_keywords(d, Some(&session_id));
@@ -254,6 +266,25 @@ mod tests {
             .expect_err("the trap is refused");
         assert!(err.to_string().contains(r#"git show "${R}:app/x""#), "{err}");
         assert!(registry.get_any("s1").await.is_none(), "nothing was typed, nothing spawned");
+    }
+
+    /// Group K: a listed read is not typed into the terminal — it is routed
+    /// to action_gate, which parks it after the reviewer's read.
+    #[tokio::test]
+    async fn terminal_exec_refuses_a_listed_read_without_spawning() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(dir.path().join("config/general-policy.yaml"), "production_reads:\n  - bq\n").unwrap();
+        let bridge =
+            SignalingBridge::with_policy(ViolationsLog::new(dir.path()), dir.path().to_path_buf());
+        let registry = Arc::new(TerminalRegistry::new());
+        bridge.set_terminal_registry(Arc::clone(&registry));
+        let err = bridge
+            .terminal_exec("s1".into(), "bq ls --max_results 5".into(), None, None)
+            .await
+            .expect_err("a listed read is refused");
+        assert!(err.to_string().contains("listed production read (`bq`"), "{err}");
+        assert!(registry.get_any("s1").await.is_none(), "nothing typed, nothing spawned");
     }
 
     #[tokio::test]

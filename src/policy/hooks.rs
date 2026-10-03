@@ -155,7 +155,7 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
             let remote = positional.first().map(String::as_str);
             run_pre_push(&data_dir, project.as_deref(), remote, push_nonce.as_deref(), sid)
         }
-        "tool-gate" => run_tool_gate(&data_dir, sid),
+        "tool-gate" => run_tool_gate(&data_dir, project.as_deref(), sid),
         "shell-lint" => run_shell_lint(),
         "compact-handoff" => {
             if let Some(text) = compact_handoff_text(&data_dir, sid, &hook_agent()) {
@@ -1175,7 +1175,7 @@ fn classify_push_response(status: reqwest::StatusCode, body: &str) -> PushDecisi
 /// exit 2, NOT JSON.
 /// FAIL-OPEN (exit 0) on any parse/IO error or empty keyword list: a hook bug
 /// must never brick every Bash call; the prompt rules remain as the other layer.
-fn run_tool_gate(data_dir: &Path, session_id: Option<&str>) -> Result<i32> {
+fn run_tool_gate(data_dir: &Path, project: Option<&str>, session_id: Option<&str>) -> Result<i32> {
     use std::io::Read;
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_err() {
@@ -1197,6 +1197,15 @@ fn run_tool_gate(data_dir: &Path, session_id: Option<&str>) -> Result<i32> {
     // the rest of this hook's posture.
     let sid = session_id.map(str::to_string);
     let keywords = crate::policy::tool_gate::resolve_keywords(data_dir, sid.as_deref());
+    // Group K (tray `5660fc1e`): a command that RUNS one of the project's
+    // listed production or staging reads parks for the user's approval — the
+    // reviewer reads it first — whatever the keyword list says. The session's
+    // resolved policy decides (its snapshot is canonical); a policy that cannot
+    // be read leaves the keyword gate in charge alone (fail open, like the rest
+    // of this hook).
+    let listed = Policy::resolve(data_dir, project, session_id)
+        .ok()
+        .and_then(|policy| crate::policy::data_reads::match_command(&policy, &command));
     // Auto-park (issues.md #29): when the command is gated AND we know the
     // session, park the approval here so the refusal IS the approval request —
     // the agent doesn't have to convert it into an `action_gate` call (which
@@ -1205,11 +1214,11 @@ fn run_tool_gate(data_dir: &Path, session_id: Option<&str>) -> Result<i32> {
     // measured refusals did instead of converting). Best-effort: any failure
     // leaves `parked` None and the refusal falls back to the call-action_gate
     // wording. The command stays blocked either way.
-    let parked = match (
-        crate::policy::tool_gate::match_keyword("Bash", &command, &keywords),
-        sid.as_deref(),
-    ) {
-        (Some(crate::policy::tool_gate::GateMode::Gate), Some(session_id)) => match hook_runtime() {
+    let gated = listed.is_some()
+        || crate::policy::tool_gate::match_keyword("Bash", &command, &keywords)
+            == Some(crate::policy::tool_gate::GateMode::Gate);
+    let parked = match (gated, sid.as_deref()) {
+        (true, Some(session_id)) => match hook_runtime() {
             Ok(rt) => rt.block_on(park_gate(data_dir, session_id, &hook_agent(), &command)),
             Err(e) => {
                 tracing::warn!(%e, "tool-gate auto-park: could not start the client");
@@ -1218,7 +1227,10 @@ fn run_tool_gate(data_dir: &Path, session_id: Option<&str>) -> Result<i32> {
         },
         _ => None,
     };
-    let (code, message) = tool_gate_exit(&command, &keywords, parked.as_ref());
+    let (code, message) = match &listed {
+        Some(read) => (2, Some(listed_read_refusal(&command, read, parked.as_ref()))),
+        None => tool_gate_exit(&command, &keywords, parked.as_ref()),
+    };
     if let Some(m) = message {
         // Exit 2 = claude-code "blocking error": stops the tool call and feeds
         // stderr to the agent. The ONLY block form honored under bypass.
@@ -1286,6 +1298,43 @@ fn tool_gate_exit(
         // auto_allow or no match → allow the agent's direct Bash call.
         _ => (0, None),
     }
+}
+
+/// The refusal for a command that runs one of the project's listed data reads
+/// (group K). Its own wording: the publish shape's "OUTWARD" lines would be
+/// wrong, and the card the user sees says the same thing.
+fn listed_read_refusal(
+    command: &str,
+    read: &crate::policy::data_reads::DataRead,
+    parked: Option<&ParkedGate>,
+) -> String {
+    let (kind, entry) = (read.kind.label(), read.entry.as_str());
+    let head = format!(
+        "A LISTED {kind} read (a stop, NOT an error): `{command}` runs the project's {kind} list \
+         entry `{entry}`, so it needs the user's approval — after the reviewer reads it."
+    );
+    let next = match parked {
+        Some(gate) if gate.queued => format!(
+            "bot-hq has QUEUED it for the reviewer (gate_id: {}); after their turn it parks for \
+             the user on its own. Do NOT call action_gate and do NOT re-issue it; \
+             gate_status(\"{}\") reports its state.",
+            gate.gate_id, gate.gate_id
+        ),
+        Some(gate) => format!(
+            "bot-hq has PARKED it for the user's approval (gate_id: {}). Do NOT call action_gate \
+             and do NOT re-issue it; gate_status(\"{}\") reports its state.",
+            gate.gate_id, gate.gate_id
+        ),
+        None => format!(
+            "Call the `action_gate` tool with command=\"{command}\" (add `approve_after` if it \
+             depends on an earlier step): it parks for the user's approval, after the reviewer \
+             reads it."
+        ),
+    };
+    format!(
+        "{head}\n{next}\nDo NOT rewrite the command to get around the list — the list IS the \
+         user's rule, and routing around it silently is the failure it exists to stop."
+    )
 }
 
 /// The refusal an agent reads. Two shapes, one shared spine.

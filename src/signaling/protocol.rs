@@ -423,6 +423,10 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     "require_approval": {
                         "type": "boolean",
                         "description": "Park for the user's approval REGARDLESS of the Tool Gate keyword list (default false = the keyword resolve decides, and an unmatched/auto_allow command runs at once). Pass true for a command YOU judge must not run unapproved — the prod-access rule: every read-only query against a production host goes through here with require_approval=true, so the user sees the exact command and nothing runs before their Approve."
+                    },
+                    "approve_after": {
+                        "type": "string",
+                        "description": "Optional: a step that must happen before this runs (\"after the regions job is dispatched\"). The user's card shows it as \"Approve only after: …\" — for a read whose answer depends on an earlier step."
                     }
                 },
                 "required": ["command"]

@@ -31,6 +31,14 @@ and in `docs/rebuild-archive/`.
   had no way to fetch it.
 - **An agent can take back a command it no longer wants** while it is still
   waiting for the reviewer's read, so it does not go on to prompt you.
+- **A project can list its production and staging reads.** In its policy, a
+  project may list the commands that read production or staging data (for
+  example `gcloud logging read`, `bq`, `psql -h <host>`). A command that runs
+  one of them — in an agent's Bash, an approved command or the terminal — now
+  parks for your approval, after the reviewer reads it, and the card says which
+  entry matched. A mention of the command in other text does not count. An
+  agent can add "approve only after X" to the card when the read depends on an
+  earlier step.
 - **A publish you approved is read back.** After an approved `gh` issue, pull
   request or comment publish runs, bot-hq reads what landed on GitHub and
   says in the result whether it equals what was reviewed, or where it first
