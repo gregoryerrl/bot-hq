@@ -1955,7 +1955,21 @@ impl SignalingBridge {
             }
         }
 
-        let epoch = storage.phase_epoch(&session_id).await.unwrap_or(0);
+        // The same rule for the round (EYES, apply review): a failed epoch read
+        // used to vote at epoch 0, where a stale round-0 ballot with the same
+        // target and fingerprint would count beside it.
+        let epoch = match storage.phase_epoch(&session_id).await {
+            Ok(epoch) => epoch,
+            Err(e) => {
+                tracing::warn!(?e, %session_id, %agent, "reading the phase epoch failed");
+                return PhaseAdvanceOutcome::Refused {
+                    reason: format!(
+                        "the session's phase round could not be read ({e:#}), so no vote was \
+                         recorded. Call advance_phase again; if it keeps failing, tell the user."
+                    ),
+                };
+            }
+        };
         // **A state of the work that cannot be read is not voted on.** This
         // used to fall back to an empty fingerprint, so if the read failed for
         // everyone, every ballot "matched" and the phase could advance on a
@@ -2462,6 +2476,29 @@ mod phase_vote_tests {
                 }
                 other => panic!("{who}: a vote on an unreadable state must be refused, got {other:?}"),
             }
+        }
+        let votes: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM phase_votes WHERE session_id = 's1'")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+        assert_eq!(votes.0, 0, "nothing was cast");
+    }
+
+    /// The same for the ROUND: a failed epoch read used to vote at epoch 0.
+    /// Putting `unwrap_or(0)` back turns this red.
+    #[tokio::test]
+    async fn an_unreadable_phase_round_is_not_voted_on() {
+        let (bridge, storage) = seeded(crate::storage::MAX_SESSION_PARTICIPANTS).await;
+        sqlx::query("ALTER TABLE sessions RENAME COLUMN phase_epoch TO phase_epoch_unreadable")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let out = bridge.agent_advance_phase("s1".into(), "hands".into(), "Plan".into()).await;
+        match out {
+            PhaseAdvanceOutcome::Refused { reason } => {
+                assert!(reason.contains("phase round could not be read") && reason.contains("no vote was"), "{reason}")
+            }
+            other => panic!("a vote in an unreadable round must be refused, got {other:?}"),
         }
         let votes: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM phase_votes WHERE session_id = 's1'")
             .fetch_one(storage.pool())
