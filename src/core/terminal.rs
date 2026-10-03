@@ -115,7 +115,44 @@ pub struct SessionTerminal {
     /// terminal is replaced on the next `ensure()`.
     dead: AtomicBool,
     emit_seq: AtomicU64,
+    /// The shell's pid. It leads its own session and process group (the PTY
+    /// spawn makes it a session leader), so "the shell is in the foreground"
+    /// is `tcgetpgrp(master) == shell_pid` — see [`Self::foreground`].
+    shell_pid: Option<u32>,
+    /// The shell has been seen at its first prompt ([`Self::wait_ready`]).
+    ready: AtomicBool,
 }
+
+/// Who holds a terminal's foreground: the shell itself (at its prompt, or
+/// running a builtin), a job it started, or — where the platform cannot say
+/// (Windows' ConPTY, a failed read) — unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Foreground {
+    Shell,
+    /// The foreground process group's id.
+    Job(i32),
+    Unknown,
+}
+
+/// What [`SessionTerminal::wait_settle`] saw.
+#[derive(Debug)]
+pub struct Settled {
+    /// Everything appended since the offset the wait was given.
+    pub bytes: Vec<u8>,
+    /// The `max_ms` cap ended the wait.
+    pub timed_out: bool,
+    /// On a timeout, the foreground job still holding the terminal — the
+    /// command that has not given the prompt back (a long run, a pager, a
+    /// prompt waiting for input). `None` when the shell held it, or when the
+    /// platform cannot say.
+    pub holder: Option<i32>,
+}
+
+/// How often a settle wait samples the foreground and the output, between
+/// output notifications.
+const SETTLE_TICK: std::time::Duration = std::time::Duration::from_millis(25);
+/// The quiet that counts as "the first prompt has been printed".
+const READY_QUIET: std::time::Duration = std::time::Duration::from_millis(300);
 
 impl SessionTerminal {
     /// Spawn `program` (the user's shell in production; `sh -c …` in tests)
@@ -163,6 +200,7 @@ impl SessionTerminal {
             .spawn_command(cmd)
             .context("PTY shell spawn failed")?;
         let killer = child.clone_killer();
+        let shell_pid = child.process_id();
         // The slave fd stays with the child; dropping our copy is required or
         // reader EOF never fires after the shell exits.
         drop(pair.slave);
@@ -184,6 +222,8 @@ impl SessionTerminal {
             rows: AtomicU16::new(DEFAULT_ROWS),
             dead: AtomicBool::new(false),
             emit_seq: AtomicU64::new(0),
+            shell_pid,
+            ready: AtomicBool::new(false),
         });
 
         // Emit coalescer: reader thread pushes into `pending`, this task
@@ -321,37 +361,155 @@ impl SessionTerminal {
         let _ = self.killer.lock().unwrap().kill();
     }
 
-    /// Await output-settle: resolves once no new bytes have arrived for
-    /// `quiet_ms` (or `max_ms` elapsed / the shell died), returning everything
-    /// appended since `from_offset` plus whether the wait timed out. This is
-    /// the completion signal behind the blocking `terminal_exec` — a quiet
-    /// window heuristic, NOT prompt detection: interactive/TUI programs may
-    /// settle early or ride to the cap.
-    pub async fn wait_settle(&self, from_offset: u64, quiet_ms: u64, max_ms: u64) -> (Vec<u8>, bool) {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(max_ms);
+    /// Who holds the terminal's foreground right now (unix: the master's
+    /// `tcgetpgrp`, compared with the shell's pid — probed on macOS,
+    /// s-3158eb35: the shell's pid at the prompt, the job's group while it
+    /// runs, the shell's again after). Windows' ConPTY has no such call.
+    pub fn foreground(&self) -> Foreground {
+        #[cfg(unix)]
+        {
+            let leader = self.master.lock().unwrap().process_group_leader();
+            match (self.shell_pid, leader) {
+                (Some(shell), Some(group)) if i64::from(shell) == i64::from(group) => Foreground::Shell,
+                (Some(_), Some(group)) => Foreground::Job(group),
+                _ => Foreground::Unknown,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Foreground::Unknown
+        }
+    }
+
+    /// Await the command's end (feedback #48): resolves once `quiet_ms` pass
+    /// with no new output AND no job in the foreground — or at `max_ms`, or
+    /// when the shell dies — returning everything appended since
+    /// `from_offset`. This is the completion signal behind the blocking
+    /// `terminal_exec`.
+    ///
+    /// Quiet alone was the old rule, and a command with a quiet start ended
+    /// it early: `git … && npm test | tail` returned after the git lines,
+    /// while vitest was still starting (#48). A job holding the terminal now
+    /// restarts the quiet clock, and the foreground is sampled every
+    /// [`SETTLE_TICK`] THROUGH the window rather than once at its end, because
+    /// the shell takes the terminal back for a few milliseconds between the
+    /// steps of an `&&` chain (EYES, s-3158eb35). Builtins never leave the
+    /// shell, so they settle on quiet as before; where the foreground is
+    /// unknown (Windows) the rule is the old quiet window exactly.
+    ///
+    /// A command that waits for input — a pager, a prompt — holds the
+    /// foreground until `max_ms`; [`Settled::holder`] names it then.
+    pub async fn wait_settle(&self, from_offset: u64, quiet_ms: u64, max_ms: u64) -> Settled {
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_millis(max_ms);
         let quiet = std::time::Duration::from_millis(quiet_ms);
+        let mut seen = self.current_offset();
+        let mut quiet_since = start;
+        let mut holder = None;
         let mut timed_out = false;
         loop {
             if self.is_dead() {
                 break;
             }
-            let seen = self.current_offset();
-            let woke = tokio::select! {
-                _ = self.output_notify.notified() => true,
-                _ = tokio::time::sleep(quiet) => false,
-            };
-            if !woke && self.current_offset() == seen {
-                break; // quiet window with no growth — settled
+            tokio::select! {
+                _ = self.output_notify.notified() => {}
+                _ = tokio::time::sleep(SETTLE_TICK) => {}
             }
-            if tokio::time::Instant::now() >= deadline {
+            let now = tokio::time::Instant::now();
+            let offset = self.current_offset();
+            if offset != seen {
+                seen = offset;
+                quiet_since = now;
+            }
+            holder = match self.foreground() {
+                Foreground::Job(group) => {
+                    quiet_since = now;
+                    Some(group)
+                }
+                Foreground::Shell | Foreground::Unknown => None,
+            };
+            if now.duration_since(quiet_since) >= quiet {
+                break; // quiet, and the shell holds the terminal — settled
+            }
+            if now >= deadline {
                 timed_out = true;
                 break;
             }
         }
-        (
-            self.scrollback.lock().unwrap().since(from_offset),
+        Settled {
+            bytes: self.scrollback.lock().unwrap().since(from_offset),
             timed_out,
-        )
+            holder: if timed_out { holder } else { None },
+        }
+    }
+
+    /// The shell has been seen at its first prompt.
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Relaxed)
+    }
+
+    /// Wait, at most `max_ms`, for a freshly spawned shell to print its first
+    /// prompt: some output, then [`READY_QUIET`] with no job in the
+    /// foreground. Until then a typed line sits in the buffer while the shell
+    /// reads its startup files — in the foreground and silent, which a settle
+    /// wait would take for a finished command. Returns whether the prompt was
+    /// seen; the terminal counts as ready either way, so the wait is paid once.
+    ///
+    /// Known race: a shell with an "instant prompt" (powerlevel10k) prints
+    /// before its startup files finish. The worst case is the old early
+    /// return, on the first command into that shell only.
+    pub async fn wait_ready(&self, max_ms: u64) -> bool {
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_millis(max_ms);
+        let mut seen = self.current_offset();
+        let mut quiet_since = start;
+        let seen_prompt = loop {
+            if self.is_dead() {
+                break false;
+            }
+            tokio::select! {
+                _ = self.output_notify.notified() => {}
+                _ = tokio::time::sleep(SETTLE_TICK) => {}
+            }
+            let now = tokio::time::Instant::now();
+            let offset = self.current_offset();
+            if offset != seen {
+                seen = offset;
+                quiet_since = now;
+            }
+            if matches!(self.foreground(), Foreground::Job(_)) {
+                quiet_since = now;
+            }
+            if offset > 0 && now.duration_since(quiet_since) >= READY_QUIET {
+                break true;
+            }
+            if now >= deadline {
+                break false;
+            }
+        };
+        self.ready.store(true, Ordering::Relaxed);
+        seen_prompt
+    }
+}
+
+/// The name of process `pid` (`ps -o comm=`, the last path segment), for the
+/// note that says which command holds a terminal. `None` where it cannot be
+/// read.
+pub fn process_name(pid: i32) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "comm=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let base = name.rsplit('/').next().unwrap_or(&name).trim().to_string();
+        (out.status.success() && !base.is_empty()).then_some(base)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        None
     }
 }
 
@@ -703,7 +861,8 @@ mod tests {
             .await
         );
         let offset = term.current_offset();
-        let (out, timed_out) = term.wait_settle(offset, 600, 8_000).await;
+        let settled = term.wait_settle(offset, 600, 8_000).await;
+        let (out, timed_out) = (settled.bytes, settled.timed_out);
         let text = String::from_utf8_lossy(&out);
         assert!(!timed_out, "settle wait should not time out");
         assert!(
@@ -720,9 +879,72 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_settle_times_out_on_endless_output() {
         let term = spawn_shell(script::ENDLESS_OUTPUT);
-        let (out, timed_out) = term.wait_settle(0, 400, 1_200).await;
+        let settled = term.wait_settle(0, 400, 1_200).await;
+        let (out, timed_out) = (settled.bytes, settled.timed_out);
         assert!(timed_out, "endless output must hit the max_ms cap");
         assert!(!out.is_empty());
+        term.kill();
+    }
+
+    /// An interactive POSIX shell, so commands run as jobs in their own
+    /// process group — the terminal the agents type into is one.
+    #[cfg(unix)]
+    fn spawn_interactive_sh() -> Arc<SessionTerminal> {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-i");
+        cmd.env("PS1", "$ ");
+        cmd.env("BASH_SILENCE_DEPRECATION_WARNING", "1");
+        SessionTerminal::spawn("test-session", cmd, None, None).expect("pty spawn")
+    }
+
+    /// Feedback #48: a command that runs quietly for longer than the quiet
+    /// window is waited for while it holds the terminal — one wait captures
+    /// the whole run. Under the old quiet-only rule this returned the echo of
+    /// the typed line and nothing else.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_quiet_job_is_waited_for_until_the_prompt_returns() {
+        let term = spawn_interactive_sh();
+        assert!(term.wait_ready(5_000).await, "the shell printed its prompt");
+        let offset = term.current_offset();
+        // `DO''NE`: the echo of the typed line must not satisfy the check.
+        term.write_input(b"sleep 1.5 && echo DO''NE\n").unwrap();
+        let settled = term.wait_settle(offset, 700, 10_000).await;
+        let text = String::from_utf8_lossy(&settled.bytes).to_string();
+        assert!(!settled.timed_out, "{text:?}");
+        assert!(text.contains("DONE"), "one wait captures the whole run: {text:?}");
+        term.kill();
+    }
+
+    /// A builtin never leaves the shell, so it settles on quiet, as before.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_builtin_settles_on_quiet_as_before() {
+        let term = spawn_interactive_sh();
+        assert!(term.wait_ready(5_000).await);
+        let offset = term.current_offset();
+        let started = std::time::Instant::now();
+        term.write_input(b"echo built''in\n").unwrap();
+        let settled = term.wait_settle(offset, 700, 10_000).await;
+        assert!(!settled.timed_out);
+        assert!(String::from_utf8_lossy(&settled.bytes).contains("builtin"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+        term.kill();
+    }
+
+    /// A job still holding the terminal at the cap — a long run, a pager, a
+    /// prompt waiting for input — is named, so the note can say which.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_job_still_holding_the_terminal_at_the_cap_is_named() {
+        let term = spawn_interactive_sh();
+        assert!(term.wait_ready(5_000).await);
+        let offset = term.current_offset();
+        term.write_input(b"sleep 5\n").unwrap();
+        let settled = term.wait_settle(offset, 700, 1_500).await;
+        assert!(settled.timed_out);
+        let holder = settled.holder.expect("a job holds the terminal");
+        assert_eq!(process_name(holder).as_deref(), Some("sleep"));
         term.kill();
     }
 

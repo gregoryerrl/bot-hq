@@ -80,6 +80,12 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **`terminal_exec` waits for a command to finish.** It returned at the first
+  0.7 s of silence, so a command that starts slowly — a test run after a few
+  quick `git` lines — came back without its results, and a second call was
+  needed to read them. It now waits until the shell is back at its prompt (on
+  macOS and Linux), and when a command still holds the terminal at the time
+  limit, the note names it: a pager or a prompt waiting for input.
 - **A reviewer writing down its findings no longer cancels the executor's
   phase vote.** Review notes in a `<phase>-eyes` document used to count as a
   change to the work, so the executor had to vote again each time, and

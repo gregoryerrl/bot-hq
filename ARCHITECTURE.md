@@ -736,8 +736,12 @@ is a list that is wrong and does not know it.
 shell (`core/terminal.rs`) in its working repo — rendered by the session
 view's Terminal subtab (xterm.js) and shared with the agents through
 `terminal_exec` (needs `run_terminal`; BLOCKING by default — writes the command, awaits
-output-settle via a quiet-window heuristic, returns the captured tail;
-`block:false` for long-running processes) and `terminal_read` (every participant;
+the shell's return to its prompt: 0.7 s with no output and no job in the
+terminal's foreground, the foreground sampled through the window (unix
+`tcgetpgrp` on the PTY master; Windows falls back to the quiet window alone,
+feedback #48), and returns the captured tail — a job still holding the terminal
+at `wait_ms` is named in the note; a just-spawned shell is first given its
+first prompt; `block:false` for long-running processes) and `terminal_read` (every participant;
 scrollback tail as evidence text). `terminal_exec` re-classifies the command
 against the same two-tier Tool-Gate keyword list the PreToolUse hook uses
 (session snapshot → global fallback, `tool_gate::resolve_keywords`) and

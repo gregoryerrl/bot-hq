@@ -317,7 +317,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `session_doc_search(query?, phase?)` | List this session's scratch docs, bodies within a 48 KB budget (a larger doc is listed with its size and headings); `phase` filter for cross-phase retrieval. |
 | `session_doc_read(slug, heading?, lines?, grep?)` | Read a session doc by slug — whole, or one section, a line range, or the matching lines. |
 | `web_search(query, engine?)` | Search the web via a headless webview, so non-first-party models without a server-side search tool can fetch live results. |
-| `terminal_exec(command, wait_ms?, block?)` | Run one command in the session's Terminal subtab PTY (user-visible). Blocking by default: waits for output-settle and returns the captured tail; `block:false` for long-running processes. Gate-matched commands are refused (route via `action_gate`). |
+| `terminal_exec(command, wait_ms?, block?)` | Run one command in the session's Terminal subtab PTY (user-visible). Blocking by default: waits until the shell is back at its prompt and the output is quiet, and returns the captured tail (a command still holding the terminal at `wait_ms` is named); `block:false` for long-running processes. Gate-matched commands are refused (route via `action_gate`). |
 | `terminal_read(lines?)` | Tail of the session terminal's scrollback as plain text (default 100 lines, max 500) — evidence agents can paste into chat or IPAV docs. |
 | `webview_screenshot()` | Capture the bot-hq webview for agent-driven UI testing. |
 | `webview_click(selector)` | Synthesize a click on a DOM element in the webview. |

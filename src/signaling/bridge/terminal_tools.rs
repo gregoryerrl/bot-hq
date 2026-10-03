@@ -17,10 +17,13 @@ use super::SignalingBridge;
 use crate::policy::tool_gate::{self, GateMode};
 use anyhow::{anyhow, Result};
 
-/// Settle heuristic: a command counts as finished once no output arrived for
-/// this long. A heuristic, not prompt detection — interactive/TUI commands
-/// may settle early; `timed_out` marks the capped case.
+/// A command counts as finished once no output arrived for this long AND no
+/// job held the terminal's foreground meanwhile — the shell is back at its
+/// prompt (`SessionTerminal::wait_settle`, feedback #48). Where the platform
+/// cannot report the foreground (Windows) the quiet window alone decides.
 const EXEC_QUIET_MS: u64 = 700;
+/// How long a first command waits for a freshly spawned shell's prompt.
+const EXEC_READY_MAX_MS: u64 = 5_000;
 /// Default / max total wait for the blocking exec.
 const EXEC_DEFAULT_WAIT_MS: u64 = 10_000;
 const EXEC_MAX_WAIT_MS: u64 = 120_000;
@@ -42,6 +45,30 @@ fn capped_tail(output: String) -> String {
     // and a byte-offset slice inside one panics (round 9).
     let start = crate::text::ceil_char_boundary(&output, output.len() - EXEC_OUTPUT_CAP_BYTES);
     format!("[…{start} bytes trimmed…]\n{}", &output[start..])
+}
+
+/// The note a capped `terminal_exec` ends with. When a job still holds the
+/// terminal it is named: a pager or a prompt waiting for input holds it to the
+/// cap, and that is a different fix (`--no-pager`, a non-interactive flag)
+/// from a long run (a larger `wait_ms`).
+fn timeout_note(max_ms: u64, holder: Option<i32>) -> String {
+    match holder {
+        Some(group) => {
+            let name = crate::core::terminal::process_name(group)
+                .map(|n| format!("`{n}`"))
+                .unwrap_or_else(|| format!("process group {group}"));
+            format!(
+                "\n[still running after {max_ms}ms — {name} holds the terminal (the shell is not \
+                 back at its prompt). A pager or an interactive prompt waits for input until it \
+                 gets some; a long run needs time: use terminal_read for later output, or \
+                 terminal_exec with a larger wait_ms]"
+            )
+        }
+        None => format!(
+            "\n[still producing output after {max_ms}ms — command may be long-running; \
+             use terminal_read for later output or terminal_exec with a larger wait_ms]"
+        ),
+    }
 }
 
 impl SignalingBridge {
@@ -107,6 +134,13 @@ impl SignalingBridge {
         let term = registry
             .ensure(&session_id, cwd, self.app_handle().cloned())
             .await?;
+        // A shell not yet seen at its prompt — just spawned — may still be
+        // reading its startup files with the typed line buffered: in the
+        // foreground and silent, which the settle below would take for a
+        // finished command. Paid once per terminal (`wait_ready`).
+        if !term.is_ready() {
+            term.wait_ready(EXEC_READY_MAX_MS).await;
+        }
 
         let offset = term.current_offset();
         // Windows consoles submit a line on CARRIAGE RETURN, not line feed.
@@ -132,13 +166,10 @@ impl SignalingBridge {
         let max_ms = wait_ms
             .unwrap_or(EXEC_DEFAULT_WAIT_MS)
             .clamp(EXEC_QUIET_MS, EXEC_MAX_WAIT_MS);
-        let (bytes, timed_out) = term.wait_settle(offset, EXEC_QUIET_MS, max_ms).await;
-        let mut output = capped_tail(String::from_utf8_lossy(&bytes).into_owned());
-        if timed_out {
-            output.push_str(&format!(
-                "\n[still producing output after {max_ms}ms — command may be long-running; \
-                 use terminal_read for later output or terminal_exec with a larger wait_ms]"
-            ));
+        let settled = term.wait_settle(offset, EXEC_QUIET_MS, max_ms).await;
+        let mut output = capped_tail(String::from_utf8_lossy(&settled.bytes).into_owned());
+        if settled.timed_out {
+            output.push_str(&timeout_note(max_ms, settled.holder));
         }
         Ok(output)
     }
