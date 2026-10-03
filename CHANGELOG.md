@@ -48,8 +48,10 @@ and in `docs/rebuild-archive/`.
   is never in the command: it is read from your file when you approve. SQL
   that could be read two ways (a nested comment, an escape string, a
   backslash) is refused, and bot-hq's own first statements fix the
-  transaction as read-only before yours run. A read-only database user is
-  still the real boundary: a function can reach outside the transaction.
+  transaction as read-only before yours run. Calls to functions that act
+  outside the transaction (ending other sessions, `dblink`, changing settings)
+  are refused. A read-only database user is still the real boundary: a
+  function your database defines can reach outside the transaction.
 - **The reviewer can ask for its own production read.** It had no way to park
   a read for your approval, so it either ran production reads directly or
   routed them through the agent it was reviewing. A new `read_gate` tool takes

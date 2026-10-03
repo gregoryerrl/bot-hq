@@ -1115,8 +1115,9 @@ dollar-quote, a carriage return — or anything unterminated (EYES `1e62db22`: a
 disagreement hides a statement). The command runs `psql -1 -q -f -`, and bot-hq's own
 first statements make the transaction read-only, set its timeout and run one query,
 after which PostgreSQL refuses to make it read-write; `PGOPTIONS` repeats the settings.
-A function with side effects outside the transaction (`dblink`, `pg_terminate_backend`)
-is the database role's to refuse: a read-only role is the real boundary. The card
+A direct call to a known function acting outside the transaction (`OUTSIDE_EFFECTS`:
+`dblink`, `pg_terminate_backend`, `set_config`, `lo_`…) is refused too; a function the
+database defines can still reach them, so a read-only role is the real boundary. The card
 shows the SQL. The gate row is marked
 `exec_kind = prod_read` (0089) by the handler alone, and only then does approval
 read the password from the configured file (parsed, never sourced) and pass

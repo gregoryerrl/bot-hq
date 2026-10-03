@@ -14,9 +14,10 @@
 //! and refused wherever the two could disagree; the command bot-hq builds runs
 //! the whole query as ONE transaction (`psql -1 -f -`) that bot-hq's own
 //! first statements make read-only, with a statement timeout, before the
-//! agent's SQL runs. That stops a write the SQL spells out; a function with
-//! side effects outside the transaction (`dblink`, `pg_terminate_backend`) is
-//! the database role's to refuse, so a read-only role is the real boundary.
+//! agent's SQL runs. That stops a write the SQL spells out, and a direct call
+//! to a known function acting outside the transaction (`dblink`,
+//! `pg_terminate_backend`, `set_config`) is refused; one the database defines
+//! can still reach them, so a read-only role is the real boundary.
 //! The password is read at approval time — parsed from the configured file,
 //! never sourced — and handed to psql in its environment, so it is never in
 //! the text the card shows or the transcript keeps (EYES, s-3158eb35). The
@@ -37,6 +38,22 @@ const MAX_SQL_BYTES: usize = 256 * 1024;
 /// `ROLLBACK` are not among them, so nothing can leave the read-only
 /// transaction.
 const READ_STATEMENTS: &[&str] = &["select", "with", "explain", "show", "table", "values"];
+
+/// Functions that act outside the read-only transaction — on other sessions,
+/// the server's settings and files, or another database — refused when the
+/// SQL CALLS a name equal to or starting with one (`name(`, schema-qualified
+/// or quoted too). `set_config` is here because it can lift the statement
+/// timeout. Not exhaustive: a function the database defines can reach them,
+/// so a read-only database role stays the real boundary (EYES, s-3158eb35).
+const OUTSIDE_EFFECTS: &[&str] = &[
+    "dblink", "lo_", "pg_terminate_backend", "pg_cancel_backend", "pg_reload_conf",
+    "pg_rotate_logfile", "pg_promote", "pg_switch_wal", "pg_create_restore_point",
+    "pg_logical_emit_message", "pg_notify", "set_config", "pg_advisory", "pg_try_advisory",
+    "pg_stat_reset", "pg_replication_origin", "pg_create_physical_replication_slot",
+    "pg_create_logical_replication_slot", "pg_drop_replication_slot", "pg_copy_", "pg_file_",
+    "pg_wal_replay", "pg_backup_", "pg_start_backup", "pg_stop_backup",
+    "pg_import_system_collations",
+];
 
 /// A character PostgreSQL can start a name with: a letter, `_`, or any
 /// non-ASCII character (its bytes are `\200-\377` to PostgreSQL's lexer).
@@ -84,6 +101,9 @@ pub(crate) fn check_sql(sql: &str) -> Result<(), String> {
     };
     let mut statements: Vec<String> = Vec::new();
     let mut current = String::new();
+    // The name just read, while only whitespace or comments follow it: a `(`
+    // next makes it a call.
+    let mut last_name: Option<String> = None;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -103,6 +123,7 @@ pub(crate) fn check_sql(sql: &str) -> Result<(), String> {
                 return Err("a U&'…' string or U&\"…\" name".to_string());
             }
             current.push_str(&word);
+            last_name = Some(word.to_ascii_lowercase());
             continue;
         }
         if c.is_ascii_digit() {
@@ -114,6 +135,7 @@ pub(crate) fn check_sql(sql: &str) -> Result<(), String> {
                 return Err("a `$` right after a number".to_string());
             }
             current.extend(&chars[start..i]);
+            last_name = None;
             continue;
         }
         match c {
@@ -137,6 +159,9 @@ pub(crate) fn check_sql(sql: &str) -> Result<(), String> {
                 }
                 no_backslash(&chars[start..i], "a quoted string or name")?;
                 current.extend(&chars[start..i]);
+                last_name = (quote == '"').then(|| {
+                    chars[start + 1..i - 1].iter().collect::<String>().replace("\"\"", "\"").to_ascii_lowercase()
+                });
                 continue;
             }
             '$' => {
@@ -160,6 +185,7 @@ pub(crate) fn check_sql(sql: &str) -> Result<(), String> {
                 let stop = body + close + tag.len();
                 no_backslash(&chars[i..stop], "a dollar-quoted string")?;
                 current.extend(&chars[i..stop]);
+                last_name = None;
                 i = stop;
                 continue;
             }
@@ -212,12 +238,24 @@ pub(crate) fn check_sql(sql: &str) -> Result<(), String> {
                 i = line_end;
                 continue;
             }
+            '(' => {
+                if let Some(name) = last_name.take() {
+                    if OUTSIDE_EFFECTS.iter().any(|f| name.starts_with(f)) {
+                        return Err(format!(
+                            "a call to `{name}`, which acts outside the read-only transaction — \
+                             prod_read refuses it (a read-only database role is the real boundary)"
+                        ));
+                    }
+                }
+            }
             ';' => {
+                last_name = None;
                 statements.push(std::mem::take(&mut current));
                 i += 1;
                 continue;
             }
-            _ => {}
+            c if c.is_whitespace() => {}
+            _ => last_name = None,
         }
         current.push(c);
         i += 1;
@@ -400,6 +438,7 @@ mod tests {
             "select café, 1e5, 1.5, t.x from t",
             "/**/ select 1",
             "\\dt public.*\nselect 1",
+            "select pid, lo_count, count(*), max(x) from t group by 1, 2",
         ] {
             assert_eq!(check_sql(ok), Ok(()), "{ok}");
         }
@@ -433,6 +472,12 @@ mod tests {
             ("select 1$x", "after a number"),
             ("select 1\rselect 2", "carriage return"),
             ("\\dt t; drop table t", "backslash command"),
+            // Functions that act outside the read-only transaction.
+            ("select pg_terminate_backend(pid) from pg_stat_activity", "`pg_terminate_backend`"),
+            ("select pg_catalog.pg_cancel_backend /* x */ (1)", "`pg_cancel_backend`"),
+            ("select * from dblink('dbname=x', 'select 1') as t(a int)", "`dblink`"),
+            ("select \"set_config\"('statement_timeout', '0', true)", "`set_config`"),
+            ("select pg_terminate_backend\n\\dt\n(1)", "`pg_terminate_backend`"),
         ] {
             let err = check_sql(bad).expect_err(bad);
             assert!(err.contains(why), "{bad:?}: {err}");
