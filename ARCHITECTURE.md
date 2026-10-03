@@ -122,8 +122,8 @@ layer. claude-code's own permission prompts would double-gate and hang
 the agent (the bot-hq policy gates already prompt the user). Enforcement
 is provided by the policy layer + git hooks.
 
-One CLI behaviour is switched at spawn because it contradicts the commit policy
-(probed on CLI 2.1.284):
+Two CLI behaviours are switched at spawn because they work against a ring
+(both probed on CLI 2.1.284):
 
 - **The commit attribution.** The CLI tells an agent to end commits with a
   co-author trailer. When the session's resolved policy forbids a word
@@ -131,6 +131,11 @@ One CLI behaviour is switched at spawn because it contradicts the commit policy
   the hook's own matcher against the CLI's own text), `--settings` carries
   `"attribution": {"commit": "", "pr": ""}`, written last so no model row or
   role override brings it back. Otherwise the CLI's default is left alone.
+- **The check-in reminder.** `CLAUDE_CODE_SILENT_TURN_REMINDER=0` stops the
+  CLI's "the user hasn't heard from you in a while" nudge: every mid-turn line
+  is stored, shown, and delivered to the peers, and the composer's status line
+  shows the tool call in flight instead (`frontend/src/lib/runningTool.ts`).
+  A value already present in bot-hq's own environment is inherited untouched.
 
 Per-agent model swap via env-vars: `ANTHROPIC_BASE_URL`,
 `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`. A model row may also carry

@@ -261,6 +261,37 @@ describe("ChatInput turn-status + Stop", () => {
     );
   });
 
+  it("shows what the busy participant is running, and nothing once the call is answered", () => {
+    // Feedback #79/#91: the liveness the CLI's check-in nudge bought with a
+    // chat line now comes from the tool rows themselves.
+    const at = (secsAgo: number) => new Date(Date.now() - secsAgo * 1000).toISOString();
+    const use = (id: number, tid: string, description: string, secsAgo: number) => ({
+      id, session_id: "s1", author: "hands", kind: "tool_use", created_at: at(secsAgo),
+      content: JSON.stringify({ name: "Bash", input: { command: "cargo test", description }, tool_use_id: tid }),
+    });
+    const answered = (id: number, tid: string, secsAgo: number) => ({
+      id, session_id: "s1", author: "hands", kind: "tool_result", created_at: at(secsAgo),
+      content: JSON.stringify({ tool_use_id: tid, content: "ok", is_error: false }),
+    });
+    const ui = (
+      <ChatInput activity="busy" busy={{ hands: true }} busyLabel={LABEL} sessionId="s1"
+        onSend={() => {}} onStage={() => {}} onCancel={() => {}} />
+    );
+    useChatStore.setState({
+      messages: { s1: [use(1, "t1", "List the open items", 200), answered(2, "t1", 190), use(3, "t2", "Run the full Rust test suite", 125)] },
+    });
+    const { unmount } = render(ui);
+    expect(screen.getByTestId("running-tool")).toHaveTextContent("· Run the full Rust test suite (2m)");
+    unmount();
+
+    useChatStore.setState({
+      messages: { s1: [use(1, "t1", "List the open items", 200), answered(2, "t1", 190)] },
+    });
+    render(ui);
+    expect(screen.queryByTestId("running-tool")).toBeNull();
+    expect(screen.getByTestId("turn-age")).toHaveTextContent("1 tools");
+  });
+
   it("reads a turn's age from the chat, so mounting mid-turn is not '0s'", () => {
     // EYES 172d8082: the clock started at mount — a user coming back to a
     // 45-minute turn saw "· 0s · 0 tools".

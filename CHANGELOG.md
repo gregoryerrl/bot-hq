@@ -27,6 +27,12 @@ and in `docs/rebuild-archive/`.
   and the commit checks no longer need a lookup before their first use, at
   the start of a session or after a compaction. The less common tools still
   load on demand.
+- **The "user hasn't heard from you" reminder is off for agents.** It made
+  agents post short status lines mid-turn that you, and then the other
+  participants, had to read past. The line under the message box now shows
+  what the working participant is running instead, in the tool call's own
+  words, with how long it has run. Launch bot-hq with
+  `CLAUDE_CODE_SILENT_TURN_REMINDER` set to keep the reminder.
 - **The context warning repeats after a compaction.** The rows at 85 % and
   95 % used to appear once per session, so a second approach to the limit came
   with no warning. They now appear each time the context fills again, and say

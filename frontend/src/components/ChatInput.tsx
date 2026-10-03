@@ -9,6 +9,7 @@ import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import { anyBusy, isLocked, type AgentBusy, type SessionActivity } from "../stores/activity";
 import { useChatStore } from "../stores/chat";
 import { uriListToPaths } from "../lib/filePaste";
+import { runningTool } from "../lib/runningTool";
 import {
   expandComposerTokens,
   insideBacktickSpan,
@@ -1049,8 +1050,9 @@ function WorkerLine({
         // Tinting by `key` instead would tint by the busy map's slot key, which
         // no other surface holds — same participant, two colours.
         const shown = label?.(key) ?? UNKNOWN_PARTICIPANT;
+        const running = sessionId ? runningTool(messages, key) : null;
         return (
-          <span key={key} className="flex items-center gap-1.5">
+          <span key={key} className="flex min-w-0 items-center gap-1.5">
             {i > 0 && <span className="text-on-surface-variant/40">·</span>}
             <span className={cn("font-semibold", authorColorClass(shown, hues))}>
               {shown}
@@ -1060,6 +1062,19 @@ function WorkerLine({
               · {formatElapsed(now - (currentRun(key).start ?? since.current[key] ?? now))}
               {sessionId ? ` · ${currentRun(key).tools} tools` : ""}
             </span>
+            {running && (
+              // Feedback #79/#91: what it is running, in the call's own words —
+              // the liveness the CLI's "user hasn't heard from you" nudge used
+              // to buy with a chat line.
+              <span
+                className="min-w-0 max-w-[32rem] truncate text-on-surface-variant/70"
+                data-testid="running-tool"
+                title={running.label}
+              >
+                · {running.label} ({formatElapsed(now - running.startedAt)})
+                {running.others > 0 ? ` +${running.others} more` : ""}
+              </span>
+            )}
           </span>
         );
       })}

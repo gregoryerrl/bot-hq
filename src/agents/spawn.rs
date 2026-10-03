@@ -1431,6 +1431,25 @@ fn apply_attribution_policy(settings: &mut serde_json::Map<String, serde_json::V
     }
 }
 
+/// Whether to set `CLAUDE_CODE_SILENT_TURN_REMINDER` on a spawned agent, and to
+/// what. `inherited` is bot-hq's own environment's value for it.
+///
+/// The CLI nudges a model that has made several tool calls without text ("The
+/// user hasn't heard from you in a while …"). In a bot-hq ring every mid-turn
+/// line is stored, shown, and delivered to the peers as reading material, and
+/// the nudge produced exactly the filler the user's instructions ask agents to
+/// leave out — about 15 times in one session, 7 in half an hour in another
+/// (feedback #79, #91). The session view shows what the participant is running
+/// instead. So it is switched off (`0`; probed on CLI 2.1.284: `0` and `false`
+/// both stop it) — unless bot-hq itself was launched with the variable set,
+/// which is then inherited untouched: the user's way to keep or tune it.
+fn silent_turn_reminder_env(inherited: Option<std::ffi::OsString>) -> Option<&'static str> {
+    inherited.is_none().then_some("0")
+}
+
+/// The CLI's switch for its "user hasn't heard from you" reminder.
+pub const SILENT_TURN_REMINDER_ENV: &str = "CLAUDE_CODE_SILENT_TURN_REMINDER";
+
 /// The `SessionStart` hook entry every participant is spawned with: after a
 /// compaction (matcher `compact`) claude-code runs this binary's `policy-check
 /// compact-handoff`, which prints the participant's rendered handoff file, and
@@ -1679,6 +1698,9 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     // the pushing agent (a read-only participant cannot push).
     // All agents route through build_command, so this lands for every participant.
     cmd.env("BOT_HQ_AGENT", &cfg.agent_name);
+    if let Some(value) = silent_turn_reminder_env(std::env::var_os(SILENT_TURN_REMINDER_ENV)) {
+        cmd.env(SILENT_TURN_REMINDER_ENV, value);
+    }
     if let Some(token) = &cfg.config.auth_token {
         if !token.is_empty() {
             cmd.env("ANTHROPIC_AUTH_TOKEN", token);
@@ -3045,6 +3067,38 @@ mod tests {
                 Some(r#"{"attribution":{"commit":"Made-With: X <x@y>","pr":"made by X"}}"#.into());
             let s = settings_arg_of(&c).unwrap();
             assert_eq!(s["attribution"], blank, "{who}: the policy outranks a model row: {s}");
+        }
+    }
+
+    /// Feedback #79 / #91: the CLI's "user hasn't heard from you" reminder is
+    /// switched off for every spawned agent — unless bot-hq itself was launched
+    /// with the variable set, which the child then inherits untouched. The
+    /// wire half asserts the value the child ends up with, so it holds whether
+    /// the suite runs from a plain shell or from inside a bot-hq agent (whose
+    /// own shell inherits the `0` this code set).
+    #[test]
+    fn the_check_in_reminder_is_off_for_spawned_agents_unless_bot_hq_was_launched_with_it() {
+        assert_eq!(silent_turn_reminder_env(None), Some("0"));
+        assert_eq!(silent_turn_reminder_env(Some("1".into())), None, "the user's value is inherited");
+        assert_eq!(silent_turn_reminder_env(Some("0".into())), None);
+
+        let inherited = std::env::var_os(SILENT_TURN_REMINDER_ENV);
+        for (who, c) in [("the edit-capable role", cfg()), ("the read-only role", eyes_cfg())] {
+            let cmd = build_command(&c);
+            let set = cmd
+                .as_std()
+                .get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new(SILENT_TURN_REMINDER_ENV))
+                .map(|(_, v)| v.map(|v| v.to_os_string()));
+            let effective = match set {
+                Some(explicit) => explicit,
+                None => inherited.clone(),
+            };
+            assert_eq!(
+                effective,
+                Some(inherited.clone().unwrap_or_else(|| "0".into())),
+                "{who}: the child runs with the reminder off, or with what bot-hq inherited"
+            );
         }
     }
 

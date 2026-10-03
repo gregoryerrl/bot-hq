@@ -661,6 +661,7 @@ without polling.
 | `frontend/src/app/SessionTerminalTab.tsx` | xterm.js over the session PTY | S |
 | `frontend/src/components/ChatPane.tsx` | virtualised message list; owns `agent:messages:batch`; renders the compacted rows (a run of passes = one `PassLine`) | M |
 | `frontend/src/lib/chatRows.ts` | `compactRows`: hides `pass_turn` call/result rows and folds consecutive pass lines (`PASS_NOTICE`, mirrored from `pump.rs`) into one row (feedback #13) | S |
+| `frontend/src/lib/runningTool.ts` | `runningTool`: the busy participant's newest unanswered `tool_use` row, as one line (`describeToolCall`: the call's own `description`, else tool + main argument) — the composer's worker line shows it (feedback #79/#91) | S |
 | `frontend/src/components/ChatInput.tsx` | compose / Stage / Send / Pause / Resume, `@`-mention picker | L |
 | `frontend/src/components/ChatMessage.tsx` | one row incl. tool_use/tool_result pills | M |
 | `frontend/src/components/DocumentPane.tsx` | Tray tab + I/P/A/V doc tabs + custom-document tabs (untagged docs, round 11) + Apply-tab colored diff (memoised `groupDiffByFile`); `DocArticle` shared by phase and custom docs | L |
