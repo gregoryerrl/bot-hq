@@ -433,6 +433,18 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "read_gate",
+            description: "Park ONE read that the project's policy lists (`production_reads` / `staging_reads`) for the user's approval — the reviewer's own path to a production or staging read (a listed read in your Bash is refused and points here). Takes only a single command that runs a listed entry, piped at most into head, tail, jq, grep, wc or cut — no `;`, `&&`, redirection, `$(…)` or wrapper — and refuses one with a write verb (delete, deploy, rm, update, create, set…). From the reviewer it parks straight for the user, the card marked as the reviewer's read; from the executor it is reviewed first, like action_gate. Returns the gate_id at once; on approval the output arrives as a row, and gate_status reports it.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "The one listed read to run." },
+                    "approve_after": { "type": "string", "description": "Optional: what must happen first; the card shows \"Approve only after: …\"." }
+                },
+                "required": ["command"]
+            }),
+        },
+        ToolDescriptor {
             name: "gate_status",
             description: "Current state of a parked action_gate command by its gate_id — the full id, or the short one quoted in chat (a unique prefix of 8+ characters, resolved inside your own session): queued (waiting for the reviewer's read), pending (still awaiting the user — do not re-issue), approved and RUNNING (for how long, and the bound bot-hq runs it under), approved and finished (its exit code, how long it ran, and the tail of its output — read from the delivery row, already redacted; the row itself reaches the issuing agent only at its next turn, so this is how to read a result mid-turn and how a reviewer reads one at all), rejected (not run; includes the user's answer text), or withdrawn (with the reason). A `request_approval` choice_id works too — those rows carry no command, so the answer is the user's pick and nothing ran on bot-hq's side. Read-only, callable by any participant. Use this instead of guessing whether a gated command ran.",
             input_schema: serde_json::json!({

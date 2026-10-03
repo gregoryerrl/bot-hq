@@ -326,6 +326,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `webview_press_key(key)` | Dispatch a keypress in the webview. |
 | `pass_turn()` | Decline this turn — recorded in the chat so the user sees you were asked and chose to stay quiet. Not the same as being finished: a pass counts toward nothing and cannot settle the session on its own. |
 | `file_feedback(kind, title, body)` | File an issue or idea about BOT-HQ ITSELF into a queue a later session works through. Never interrupts the user, never surfaces mid-session. |
+| `read_gate(command, approve_after?)` | Park ONE read the project's policy lists (`production_reads` / `staging_reads`) for the user's approval — the reviewer's own path. One command, piped at most into head/tail/jq/grep/wc/cut, no write verb; from the reviewer it parks straight for the user, marked as the reviewer's read. |
 | `gate_status(gate_id)` | Current state of a parked `action_gate` command: pending, approved (with output), or rejected. Read this instead of guessing whether a gated command ran. |
 | `cl_stale_refs(project)` | Report CL claims that name code the repo no longer has. Report-only; never edits. |
 

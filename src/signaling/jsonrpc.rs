@@ -997,6 +997,17 @@ async fn call_tool(
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(parked))
         }
+        "read_gate" => {
+            // Group K (tray `ef8fe5de`): the reviewer's own path to a listed
+            // read. Ungated — the project's lists are its limit.
+            let command = arg_required_str(&args, "command")?;
+            let approve_after = args.get("approve_after").and_then(Value::as_str).map(str::to_string);
+            let output = bridge
+                .read_gate(caller.session_id.clone(), caller.agent.clone(), command, approve_after)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(output))
+        }
         "gate_status" => {
             let gate_id = arg_required_str(&args, "gate_id")?;
             // Scoped to the caller's session (round 11): the row carries the

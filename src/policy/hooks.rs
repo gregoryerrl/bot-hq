@@ -156,7 +156,7 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
             run_pre_push(&data_dir, project.as_deref(), remote, push_nonce.as_deref(), sid)
         }
         "tool-gate" => run_tool_gate(&data_dir, project.as_deref(), sid),
-        "shell-lint" => run_shell_lint(),
+        "shell-lint" => run_shell_lint(&data_dir, sid),
         "compact-handoff" => {
             if let Some(text) = compact_handoff_text(&data_dir, sid, &hook_agent()) {
                 print!("{text}");
@@ -1249,7 +1249,7 @@ fn run_tool_gate(data_dir: &Path, project: Option<&str>, session_id: Option<&str
 /// **A pass exits 0 and prints NOTHING** (EYES, s-3158eb35): a printed
 /// `allow` decision would skip claude-code's permission layer, and that layer
 /// is what enforces the reviewer's deny list. Fail-open on any read error.
-fn run_shell_lint() -> Result<i32> {
+fn run_shell_lint(data_dir: &Path, session_id: Option<&str>) -> Result<i32> {
     use std::io::Read;
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_err() {
@@ -1258,15 +1258,29 @@ fn run_shell_lint() -> Result<i32> {
     let Some(command) = parse_pretool_bash_command(&buf) else {
         return Ok(0);
     };
-    match shell_trap_refusal(&command) {
-        Some(refusal) => {
-            // Exit 2 = claude-code's blocking error, its stderr fed to the
-            // agent — the form honored in every permission mode.
-            eprintln!("{refusal}");
-            Ok(2)
-        }
-        None => Ok(0),
+    if let Some(refusal) = shell_trap_refusal(&command) {
+        // Exit 2 = claude-code's blocking error, its stderr fed to the
+        // agent — the form honored in every permission mode.
+        eprintln!("{refusal}");
+        return Ok(2);
     }
+    // Group K (tray `ef8fe5de`): a listed production or staging read in the
+    // reviewer's own Bash is refused and pointed at its approval path.
+    let listed = Policy::resolve(data_dir, None, session_id)
+        .ok()
+        .and_then(|policy| crate::policy::data_reads::match_command(&policy, &command));
+    if let Some(read) = listed {
+        eprintln!(
+            "A LISTED {kind} read (a stop, NOT an error): `{command}` runs the project's {kind} \
+             list entry `{entry}`, so it needs the user's approval. Use your `read_gate` tool \
+             with this command — it parks it for the user, marked as your read. Do NOT rewrite \
+             it to get around the list.",
+            kind = read.kind.label(),
+            entry = read.entry
+        );
+        return Ok(2);
+    }
+    Ok(0)
 }
 
 /// The zsh trap's refusal for an agent's Bash `command` — `None` unless the

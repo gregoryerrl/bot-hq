@@ -999,6 +999,113 @@ pub(crate) fn commands_run(command: &str) -> Vec<RunCommand> {
         .collect()
 }
 
+/// The filters `read_gate` lets a read pipe into: none of them writes a file
+/// or runs a command. `sort -o FILE` and `uniq IN OUT` write, so neither is
+/// here (EYES, s-3158eb35).
+const READ_FILTERS: &[&str] = &["head", "tail", "jq", "grep", "wc", "cut"];
+
+/// Whether `command` is ONE simple command, optionally piped into
+/// [`READ_FILTERS`] — the only shape the reviewer's `read_gate` takes (group
+/// K, EYES: the lists find a listed command INSIDE a longer line, so
+/// `gcloud logging read x; rm -rf ~/d` would otherwise reach the user's
+/// Approve as "the reviewer's read"). No `;`, `&&`, `||`, `&`, redirection,
+/// heredoc, value the shell computes, wrapper or shell. `Err` says which.
+pub(crate) fn single_read_command(command: &str) -> Result<(), String> {
+    if command.contains('\n') {
+        return Err("more than one line".to_string());
+    }
+    let segs = segments(command);
+    let Some(first) = segs.first() else {
+        return Err("no command".to_string());
+    };
+    for (i, seg) in segs.iter().enumerate() {
+        let Some(head) = seg.words.first() else {
+            return Err("more than one command (`;`, `&&`, `||` or `&`)".to_string());
+        };
+        if !seg.heredocs.is_empty() {
+            return Err("a heredoc".to_string());
+        }
+        if seg.words.iter().any(|w| w.op) {
+            return Err("a redirection".to_string());
+        }
+        if seg.words.iter().any(|w| w.dynamic) {
+            return Err("a value the shell computes (`$VAR`, `$(…)`, backticks)".to_string());
+        }
+        if i > 0 {
+            if !seg.piped_from_prev {
+                return Err("more than one command (`;`, `&&`, `||` or `&`)".to_string());
+            }
+            let tool = basename(&head.text);
+            if !READ_FILTERS.contains(&tool) {
+                return Err(format!(
+                    "a pipe into `{tool}`, which is not one of the read-only filters (head, tail, \
+                     jq, grep, wc, cut)"
+                ));
+            }
+        }
+    }
+    let lead = &first.words[0].text;
+    let tool = basename(lead);
+    if lead.contains('=')
+        || SHELLS.contains(&tool)
+        || matches!(
+            tool,
+            "eval" | "ssh" | "sudo" | "env" | "command" | "exec" | "builtin" | "xargs" | "time"
+                | "nohup" | "timeout" | "nice" | "watch"
+        )
+    {
+        return Err("a wrapper, an assignment or a shell in front of the command".to_string());
+    }
+    Ok(())
+}
+
+/// Verbs that make a command a WRITE, for the reviewer's `read_gate` (EYES:
+/// one list both gates the executor and limits the reviewer, and a broad
+/// entry like `gcloud run` or `bq` also covers `gcloud run deploy` and
+/// `bq rm`). Not exhaustive — cheap.
+const WRITE_VERBS: &[&str] = &[
+    "delete", "deploy", "rm", "remove", "update", "create", "set", "insert", "drop", "truncate",
+    "alter", "apply", "patch", "put", "write", "cp", "mv", "add", "destroy", "import", "replace",
+    "cancel", "execute", "restart", "stop", "start", "kill", "enable", "disable", "grant", "revoke",
+    "upload", "rollback", "migrate", "scale", "resize", "reset", "undelete", "purge", "prune",
+];
+
+/// SQL that writes, as the first keyword of an argument that is a statement.
+const SQL_WRITES: &[&str] = &[
+    "insert", "update", "delete", "drop", "alter", "truncate", "create", "grant", "revoke", "merge",
+    "copy", "call", "vacuum", "reindex", "cluster", "refresh",
+];
+
+/// The first write word in `command`'s first command, if any: a plain
+/// argument word holding one of [`WRITE_VERBS`] (`gcloud run jobs delete x`,
+/// `bq rm t`), or an argument that is a SQL statement starting with a write
+/// (`bq query "DELETE FROM t"`). Flags are skipped, and a filter expression
+/// is not a statement (`severity>=ERROR AND textPayload:"failed to create"`
+/// starts with `severity`).
+pub(crate) fn write_word(command: &str) -> Option<String> {
+    let first = simple_commands(command, 0).into_iter().next()?;
+    for word in first.args.iter().filter(|w| !w.op && !w.text.starts_with('-')) {
+        let text = word.text.trim();
+        if text.chars().any(char::is_whitespace) {
+            let lead = text
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .find(|t| !t.is_empty())
+                .map(|t| t.to_ascii_lowercase())?;
+            if SQL_WRITES.contains(&lead.as_str()) {
+                return Some(lead);
+            }
+            continue;
+        }
+        for token in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+            let token = token.to_ascii_lowercase();
+            if WRITE_VERBS.contains(&token.as_str()) {
+                return Some(token);
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // The publish an approved command makes — what it is read back against
 // ---------------------------------------------------------------------------
@@ -1478,5 +1585,63 @@ mod tests {
         }
         // A body that MENTIONS a gh variable is not one.
         assert_eq!(publish("gh issue comment 5 -b \"set GH_TOKEN=… first\"").kind, GhPublishKind::IssueComment);
+    }
+
+    // --- read_gate's shape (group K) -----------------------------------------
+
+    #[test]
+    fn read_gate_takes_one_command_and_pure_filters_only() {
+        for ok in [
+            "gcloud logging read 'severity>=ERROR' --limit 5",
+            "gcloud logging read x | head -5",
+            "bq ls --format=json | jq '.[].id' | grep prod | wc -l",
+            "psql -h ep-solitary-field-x -c 'select 1' | cut -d, -f1 | tail -3",
+        ] {
+            assert_eq!(single_read_command(ok), Ok(()), "{ok}");
+        }
+        for (bad, why) in [
+            ("gcloud logging read x; rm -rf ~/d", "more than one command"),
+            ("gcloud logging read x && echo done", "more than one command"),
+            ("gcloud logging read x || true", "more than one command"),
+            ("gcloud logging read x &", "more than one command"),
+            ("gcloud logging read x > ~/.zshrc", "redirection"),
+            ("gcloud logging read x | sort -o ~/.zshrc", "`sort`"),
+            ("gcloud logging read x | uniq in out", "`uniq`"),
+            ("gcloud logging read x | sh", "`sh`"),
+            ("gcloud logging read $FILTER", "computes"),
+            ("gcloud logging read $(cat f)", "computes"),
+            ("sh -c 'gcloud logging read x'", "wrapper"),
+            ("env CLOUDSDK_CORE_PROJECT=p gcloud logging read x", "wrapper"),
+            ("CLOUDSDK_CORE_PROJECT=p gcloud logging read x", "wrapper"),
+            ("psql -h h <<'SQL'\nselect 1\nSQL", "line"),
+        ] {
+            let err = single_read_command(bad).expect_err(bad);
+            assert!(err.contains(why), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn write_words_are_found_in_verbs_and_sql_but_not_in_filters() {
+        for (command, word) in [
+            ("gcloud run jobs delete export", "delete"),
+            ("gcloud run deploy web --image x", "deploy"),
+            ("bq rm -t ds.t", "rm"),
+            ("gcloud storage cp gs://a/b .", "cp"),
+            ("gcloud run jobs execute export", "execute"),
+            ("bq query --use_legacy_sql=false 'DELETE FROM ds.t WHERE 1=1'", "delete"),
+            ("psql -h h -c 'update t set a = 1'", "update"),
+        ] {
+            assert_eq!(write_word(command).as_deref(), Some(word), "{command}");
+        }
+        for read in [
+            "gcloud run jobs describe export",
+            "gcloud run jobs executions list --job export",
+            "gcloud logging read 'severity>=ERROR AND textPayload:\"failed to create\"' --limit 5",
+            "bq query --use_legacy_sql=false 'SELECT updated_at FROM ds.t'",
+            "bq show ds.t",
+            "psql -h h -c 'select 1'",
+        ] {
+            assert_eq!(write_word(read), None, "{read}");
+        }
     }
 }

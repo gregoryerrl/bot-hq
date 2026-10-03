@@ -152,6 +152,53 @@ impl SignalingBridge {
         }
     }
 
+    /// The reviewer's own approval path for a listed read (group K; the
+    /// user's pick, tray `ef8fe5de`) — from an executor, the same as
+    /// `action_gate` on a listed read. It takes only ONE command that runs one
+    /// of the project's `production_reads` / `staging_reads` entries, piped at
+    /// most into a read-only filter, with no write verb in it (EYES: one list
+    /// both gates the executor and limits the reviewer, and a broad entry also
+    /// covers writes). The reviewer's read parks straight for the user — the
+    /// reviewer IS the review — and its card says whose it is.
+    pub async fn read_gate(
+        &self,
+        session_id: String,
+        agent: String,
+        command: String,
+        approve_after: Option<String>,
+    ) -> Result<String> {
+        let command = command.trim().to_string();
+        if let Some(refusal) = crate::policy::shell_lint::zsh_trap(&tool_gate::gate_shell(), &command) {
+            anyhow::bail!("{refusal}");
+        }
+        if let Err(why) = super::outward_body::single_read_command(&command) {
+            anyhow::bail!(
+                "read_gate takes ONE command, piped at most into head, tail, jq, grep, wc or cut — \
+                 this one has {why}. Split it, or ask the executor to route it through action_gate."
+            );
+        }
+        let Some(read) = self.data_read_in(&session_id, &command).await else {
+            anyhow::bail!(
+                "read_gate takes only a command that runs one of the project's production_reads / \
+                 staging_reads entries, and this one matches none. If it reads production data, \
+                 ask the executor to route it through action_gate."
+            );
+        };
+        if let Some(word) = super::outward_body::write_word(&command) {
+            anyhow::bail!(
+                "read_gate refuses a command with `{word}` in it: the {} list entry `{}` can also \
+                 cover writes, and this path is for reads. Ask the executor (action_gate) or the user.",
+                read.kind.label(),
+                read.entry
+            );
+        }
+        let reviewer = self.session_reviewers(&session_id).iter().any(|slug| slug == &agent);
+        let outcome = self
+            .park_gated_command_as(&session_id, &agent, &command, approve_after.as_deref(), reviewer)
+            .await?;
+        Ok(park_outcome_text(&outcome, &command))
+    }
+
     /// Park a gated command for the user's approval and return
     /// `(gate_id, already_pending)`.
     ///
@@ -185,8 +232,22 @@ impl SignalingBridge {
         command: &str,
         approve_after: Option<&str>,
     ) -> Result<ParkOutcome> {
+        self.park_gated_command_as(session_id, agent, command, approve_after, false).await
+    }
+
+    /// The park, with whose read a listed command is: `reviewer_read` is the
+    /// reviewer's own (`read_gate`), whose card says so (EYES).
+    async fn park_gated_command_as(
+        &self,
+        session_id: &str,
+        agent: &str,
+        command: &str,
+        approve_after: Option<&str>,
+        reviewer_read: bool,
+    ) -> Result<ParkOutcome> {
         let listed = self.data_read_in(session_id, command).await;
-        let card_extra = card_extra(listed.as_ref(), approve_after);
+        let reader = reviewer_read.then_some(agent);
+        let card_extra = card_extra(listed.as_ref(), approve_after, reader);
         // **Outward-review precondition (batch 2 C, 2026-08-27).** An OUTWARD
         // command — one that publishes under the user's identity — may park
         // only after the session's reviewer has been DELIVERED its content.
@@ -742,11 +803,19 @@ pub(crate) fn queued_gate_text(gate_id: &str, command: &str, existing: bool) -> 
 
 /// The lines a gate's card gains (group K): which list entry a listed data
 /// read matched, and the executor's "approve only after" (feedback #94).
-fn card_extra(listed: Option<&crate::policy::data_reads::DataRead>, approve_after: Option<&str>) -> String {
+fn card_extra(
+    listed: Option<&crate::policy::data_reads::DataRead>,
+    approve_after: Option<&str>,
+    reviewer: Option<&str>,
+) -> String {
     let mut out = String::new();
     if let Some(read) = listed {
+        let whose = match reviewer {
+            Some(slug) => format!("Reviewer's command ({slug})"),
+            None => "A listed command".to_string(),
+        };
         out.push_str(&format!(
-            "\n\nA listed command: it matches the project's {} list entry `{}`.",
+            "\n\n{whose}: it matches the project's {} list entry `{}`.",
             read.kind.label(),
             read.entry
         ));
@@ -4274,5 +4343,46 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
         assert!(!marker.exists(), "parked, not run");
         let row = bridge.storage.lock().await.clone().unwrap().get_tray_entry(&gate_id_in(&out)).await.unwrap().unwrap();
         assert!(row.prompt.contains("the project's staging list entry"), "{}", row.prompt);
+    }
+
+    /// Group K (tray `ef8fe5de`): the reviewer's own listed read parks
+    /// straight for the user, its card marked as the reviewer's — and
+    /// `read_gate` refuses a compound command, an unlisted one and a write.
+    #[tokio::test]
+    async fn the_reviewers_read_gate_parks_its_own_read_and_refuses_the_rest() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        list_reads(data.path());
+        let (bridge, storage, _eyes, _path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let out = bridge
+            .read_gate("s1".into(), "eyes".into(), "gcloud logging read 'severity>=ERROR' | head -5".into(), None)
+            .await
+            .unwrap();
+        assert!(out.to_lowercase().contains("parked"), "straight for the user: {out}");
+        let row = storage.get_tray_entry(&gate_id_in(&out)).await.unwrap().unwrap();
+        assert!(
+            row.prompt.contains("Reviewer's command (eyes): it matches the project's production list entry `gcloud logging read`."),
+            "{}",
+            row.prompt
+        );
+        for (command, why) in [
+            ("gcloud logging read x; rm -rf ~/d", "ONE command"),
+            ("gcloud logging read x | sort -o ~/.zshrc", "ONE command"),
+            ("gcloud auth list", "matches none"),
+            ("psql -h ep-young-glitter-x -c 'delete from t'", "`delete`"),
+        ] {
+            let err = bridge
+                .read_gate("s1".into(), "eyes".into(), command.into(), None)
+                .await
+                .expect_err(command);
+            assert!(err.to_string().contains(why), "{command}: {err}");
+        }
+        // From the executor, the same read is reviewed first.
+        let out = bridge
+            .read_gate("s1".into(), "hands".into(), "gcloud logging read 'severity>=WARNING'".into(), None)
+            .await
+            .unwrap();
+        assert!(out.contains("QUEUED"), "{out}");
     }
 }

@@ -702,12 +702,12 @@ submodule tree). Surface:
   tools.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools (42)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (43)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `pass_turn`, `halt`, `advance_phase` (a VOTE
 since D37 — see "The phase-advance vote"),
 `web_search`, `request_phase_advance`, `file_feedback`, `request_approval`,
-`action_gate`, `gate_status`, `check_commit_message`, `flag_finding` (alias `eyes_flag`),
+`action_gate`, `read_gate` (group K: the reviewer's own path to a listed read), `gate_status`, `check_commit_message`, `flag_finding` (alias `eyes_flag`),
 `disposition_finding`, `check_open_findings`, `override_reviewer_block`,
 `approve_finding`, `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_edit`, `session_doc_search`,
@@ -1090,7 +1090,16 @@ executor's Tool Gate hook auto-parks it, `action_gate` parks it, and
 for the reviewer every time, with no coverage shortcut, under the outward
 publish's roster rules (no other reviewer → park directly; reviewer down → held
 unless overridden). The card names the matched entry and the executor's
-`approve_after`. A data read's result row keeps the first 48 KB and the last
+`approve_after`.
+
+The reviewer has its own path, `read_gate` (tray `ef8fe5de`). It takes ONE
+command that runs a listed entry, piped at most into head, tail, jq, grep, wc
+or cut. It refuses `;`, `&&`, redirection, `$(…)`, wrappers
+(`outward_body::single_read_command`) and write verbs (`write_word`), because
+one list both gates the executor and limits the reviewer. A reviewer's read
+parks straight for the user, its card reading "Reviewer's command (slug)"; an
+executor's goes through review first. The read-only posture's `shell-lint`
+hook refuses a listed read and points at `read_gate`. A data read's result row keeps the first 48 KB and the last
 8 KB of its output.
 
 **The zsh `"$var:x"` trap is refused before any of this** (feedback #96,

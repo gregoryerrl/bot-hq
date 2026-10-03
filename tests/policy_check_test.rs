@@ -93,3 +93,22 @@ fn the_tool_gate_hook_stops_a_listed_read_and_passes_a_mention() {
     let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "grep -rn 'gcloud logging read' notes.md");
     assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "a mention is not a read");
 }
+
+/// Group K (tray `ef8fe5de`): the reviewer's Bash hook refuses a listed read
+/// and points at `read_gate`; a command that is not listed passes silently.
+#[test]
+fn the_reviewers_hook_points_a_listed_read_at_read_gate() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(data.path().join("config")).unwrap();
+    std::fs::write(
+        data.path().join("config/general-policy.yaml"),
+        "production_reads:\n  - gcloud logging read\n",
+    )
+    .unwrap();
+    let (code, out, err) = hook_in(data.path(), "shell-lint", "/bin/bash", "gcloud logging read x");
+    assert_eq!(code, 2, "{err}");
+    assert_eq!(out, "");
+    assert!(err.contains("Use your `read_gate` tool"), "{err}");
+    let (code, out, err) = hook_in(data.path(), "shell-lint", "/bin/bash", "git log -1");
+    assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "a pass prints nothing");
+}
