@@ -2147,6 +2147,21 @@ force_push?: ForcePushMode;
  */
 per_action_approval?: string[]; 
 /**
+ * Commands that read PRODUCTION data (feedback #51 #62; the user's pick,
+ * tray `5660fc1e`). A command that RUNS one of these parks for the user's
+ * approval for every participant, after the reviewer reads it — matched
+ * at command positions by [`data_reads`], never inside quoted text. An
+ * entry's first word is the tool; flag words are spelling only; the last
+ * word may appear anywhere inside a word (a host in `--host=…`, a URL, a
+ * `PGHOST=…` before the command). Empty = none.
+ */
+production_reads?: string[]; 
+/**
+ * The same for STAGING data (#94; tray `d9555879`): parked, and read by
+ * the reviewer first, like a production read.
+ */
+staging_reads?: string[]; 
+/**
  * Regex pattern branch names must match. Empty = no constraint.
  */
 branch_pattern?: string; 

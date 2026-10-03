@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub mod audit;
+pub mod data_reads;
 pub mod hooks;
 pub mod presets;
 pub mod secret_scan;
@@ -60,6 +61,21 @@ pub struct Policy {
     /// kind="per_action", every invocation.
     #[serde(default)]
     pub per_action_approval: Vec<String>,
+
+    /// Commands that read PRODUCTION data (feedback #51 #62; the user's pick,
+    /// tray `5660fc1e`). A command that RUNS one of these parks for the user's
+    /// approval for every participant, after the reviewer reads it — matched
+    /// at command positions by [`data_reads`], never inside quoted text. An
+    /// entry's first word is the tool; flag words are spelling only; the last
+    /// word may appear anywhere inside a word (a host in `--host=…`, a URL, a
+    /// `PGHOST=…` before the command). Empty = none.
+    #[serde(default)]
+    pub production_reads: Vec<String>,
+
+    /// The same for STAGING data (#94; tray `d9555879`): parked, and read by
+    /// the reviewer first, like a production read.
+    #[serde(default)]
+    pub staging_reads: Vec<String>,
 
     /// Regex pattern branch names must match. Empty = no constraint.
     #[serde(default)]
@@ -300,6 +316,22 @@ impl Policy {
             out.push('\n');
         }
 
+        if !self.production_reads.is_empty() || !self.staging_reads.is_empty() {
+            out.push_str("### Data reads (the user's approval, every time)\n\n");
+            out.push_str(
+                "A command that RUNS one of these reads production or staging data. It parks \
+                 for the user's approval, and the reviewer reads it first — from your Bash, \
+                 `action_gate` and the terminal alike. A reviewer parks its own with \
+                 `read_gate`.\n\n",
+            );
+            for (label, list) in [("production", &self.production_reads), ("staging", &self.staging_reads)] {
+                for cmd in list {
+                    out.push_str(&format!("- {label}: `{cmd}`\n"));
+                }
+            }
+            out.push('\n');
+        }
+
         if !self.branch_pattern.is_empty() {
             out.push_str(&format!(
                 "### Branch naming\n\nBranches must match: `{}`\n\n",
@@ -319,6 +351,8 @@ impl Policy {
             && matches!(self.push_gate, PushGateMode::Auto)
             && matches!(self.force_push, ForcePushMode::Allowed)
             && self.per_action_approval.is_empty()
+            && self.production_reads.is_empty()
+            && self.staging_reads.is_empty()
             && self.branch_pattern.is_empty()
             && self.commit_style.is_empty()
     }
@@ -335,6 +369,8 @@ pub(crate) const POLICY_KNOWN_KEYS: &[&str] = &[
     "push_gate",
     "force_push",
     "per_action_approval",
+    "production_reads",
+    "staging_reads",
     "branch_pattern",
     "commit_style",
     "round_cap",
@@ -348,6 +384,8 @@ pub(crate) const SESSION_POLICY_KNOWN_KEYS: &[&str] = &[
     "push_gate",
     "force_push",
     "per_action_approval",
+    "production_reads",
+    "staging_reads",
     "branch_pattern",
     "commit_style",
     "round_cap",
@@ -585,6 +623,16 @@ fn merge(base: Policy, overlay: Option<Policy>) -> Policy {
             base.per_action_approval
         } else {
             o.per_action_approval
+        },
+        production_reads: if o.production_reads.is_empty() {
+            base.production_reads
+        } else {
+            o.production_reads
+        },
+        staging_reads: if o.staging_reads.is_empty() {
+            base.staging_reads
+        } else {
+            o.staging_reads
         },
         branch_pattern: if o.branch_pattern.is_empty() {
             base.branch_pattern

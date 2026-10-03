@@ -72,6 +72,30 @@ export function PolicyForm({
       </Field>
 
       <Field
+        label="Production reads"
+        hint="Commands that read production data. A command that runs one of these parks for your approval, for every participant, after the reviewer reads it. Matched where the command runs, not in quoted text; the last word may be part of a host."
+      >
+        <StringList
+          items={value.production_reads ?? []}
+          disabled={disabled}
+          placeholder="e.g. gcloud logging read, psql -h my-prod-host"
+          onChange={(production_reads) => patch({ production_reads })}
+        />
+      </Field>
+
+      <Field
+        label="Staging reads"
+        hint="The same for staging data: parked for your approval, after the reviewer reads it."
+      >
+        <StringList
+          items={value.staging_reads ?? []}
+          disabled={disabled}
+          placeholder="e.g. psql -h my-staging-host"
+          onChange={(staging_reads) => patch({ staging_reads })}
+        />
+      </Field>
+
+      <Field
         label="Branch pattern"
         hint="Regex the agent is told branch names must match — described to the agent, not mechanically enforced. Empty = no constraint."
       >

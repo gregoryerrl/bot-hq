@@ -414,6 +414,9 @@ struct Cmd {
     tool: String,
     args: Vec<Word>,
     opaque: bool,
+    /// The segment's words before this command's own (assignments like
+    /// `PGHOST=…`, wrappers) — where a data-read entry's host may sit.
+    prefix: Vec<String>,
 }
 
 /// Every simple command `command` runs, as `(tool, args)`, looking through:
@@ -495,7 +498,8 @@ fn simple_commands(command: &str, depth: usize) -> Vec<Cmd> {
                     _ => {}
                 }
             }
-            out.push(Cmd { tool, args, opaque });
+            let prefix = words[..k].iter().filter(|w| !w.op).map(|w| w.text.clone()).collect();
+            out.push(Cmd { tool, args, opaque, prefix });
         }
     }
     out
@@ -969,6 +973,30 @@ fn publish_value(flag: &str, carries: Carries, value: String, out: &mut OutwardB
         Carries::Skip => {}
     }
     Ok(())
+}
+
+/// One command a line runs, as the shell would run it: the tool's basename,
+/// its argument words, and the segment's words before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunCommand {
+    pub tool: String,
+    pub args: Vec<String>,
+    pub prefix: Vec<String>,
+}
+
+/// Every command `command` runs — through quotes, wrappers, `sh -c` and
+/// `$(…)`, as [`simple_commands`] finds them — for the project's data-read
+/// lists (`policy::data_reads`, group K): matched where a command RUNS,
+/// never on text inside a quoted argument.
+pub(crate) fn commands_run(command: &str) -> Vec<RunCommand> {
+    simple_commands(command, 0)
+        .into_iter()
+        .map(|c| RunCommand {
+            tool: c.tool,
+            args: c.args.iter().filter(|w| !w.op).map(|w| w.text.clone()).collect(),
+            prefix: c.prefix,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

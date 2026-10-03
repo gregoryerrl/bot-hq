@@ -23,6 +23,7 @@
 //! decision doc itself flagged HTTP as the "promote if IPC gets hairy" fallback.
 
 mod bridge;
+pub(crate) use bridge::{commands_run, RunCommand};
 mod jsonrpc;
 /// Parity oracle for the session-focused redesign — pins today's tool
 /// authorization so the capability rewrite can be proven not to change it.
