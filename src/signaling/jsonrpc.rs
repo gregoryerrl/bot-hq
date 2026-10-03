@@ -3922,6 +3922,59 @@ mod tests {
         assert_eq!(rows(storage.clone()).await.len(), 3, "a fresh row after someone else spoke");
     }
 
+    /// EYES' advisory `d2ced691`: a handoff doc too long to put back whole ends
+    /// with "read the rest: session_doc_read(slug, lines: \"N-\")" — and that
+    /// open-ended range used to be refused, so the first step a compacted
+    /// participant was told to take returned an error. The test makes the
+    /// EXACT call the rendered file names, through the real handler, and gets
+    /// the rest of the doc from the first line that was not shown whole.
+    #[tokio::test]
+    async fn the_call_a_cut_handoff_docs_footer_names_returns_the_rest() {
+        let bridge = SignalingBridge::new();
+        let handoffs = tempfile::tempdir().unwrap();
+        let storage = crate::storage::Storage::memory()
+            .await
+            .unwrap()
+            .with_handoff_dir(handoffs.path().to_path_buf());
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+        storage
+            .ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS)
+            .await
+            .unwrap();
+        let body: String = (1..=400)
+            .map(|i| format!("line {i}: — standing instruction number {i} —\n"))
+            .collect();
+        tool(&bridge, caller(), "session_doc_write", json!({"slug": "handoff-hands", "body": body}))
+            .await
+            .unwrap();
+
+        let file = crate::agents::handoff::file_path(handoffs.path(), "s1", "hands").unwrap();
+        let rendered = std::fs::read_to_string(&file).unwrap();
+        let footer = rendered.rsplit("[bot-hq]").next().unwrap();
+        assert!(footer.contains("Read the rest: session_doc_read(slug: \"handoff-hands\", lines: \""), "{footer}");
+        let from = footer.find("lines: \"").unwrap() + "lines: \"".len();
+        let lines_arg = &footer[from..from + footer[from..].find('"').unwrap()];
+        assert!(lines_arg.ends_with('-'), "the footer names an open-ended range: {lines_arg:?}");
+        let resume: usize = lines_arg.trim_end_matches('-').parse().unwrap();
+
+        let reply = tool(
+            &bridge,
+            caller(),
+            "session_doc_read",
+            json!({"slug": "handoff-hands", "lines": lines_arg}),
+        )
+        .await
+        .expect("the call the footer names must work");
+        let v: Value = serde_json::from_str(&reply).unwrap();
+        let rest = v["body"].as_str().expect("an excerpt body");
+        assert!(rest.starts_with(&format!("line {resume}: ")), "starts at the resume line: {}", &rest[..60]);
+        assert!(rest.ends_with("number 400 —"), "and runs to the end of the doc");
+        assert_eq!(v["lines"], json!(format!("{resume}-400")));
+        // Nothing falls between the file and the call: every earlier line is in the file.
+        assert!(rendered.contains(&format!("line {}: — standing instruction number {} —\n", resume - 1, resume - 1)));
+    }
+
     /// A handoff doc is its owner's: bot-hq puts `handoff-<slug>` back into
     /// THAT participant's context after a compaction, so a peer's write would
     /// arrive there as the owner's own notes (EYES, plan point 12). The owner's

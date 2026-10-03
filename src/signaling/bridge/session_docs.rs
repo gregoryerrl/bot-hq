@@ -63,8 +63,14 @@ pub(crate) fn is_archive_slug(slug: &str) -> bool {
 
 /// `session_doc_read`'s selective views (feedback #37: every mechanical check
 /// of a doc used to round-trip its whole body through the transcript):
-/// `lines` = "a-b" / "a" (1-based, inclusive) narrows the body; `grep` then
-/// returns only the matching lines, case-insensitively, with their numbers.
+/// `lines` = "a-b" / "a-" / "a" (1-based, inclusive; "a-" runs to the end)
+/// narrows the body; `grep` then returns only the matching lines,
+/// case-insensitively, with their numbers.
+///
+/// The open-ended form is what a cut handoff doc's footer tells a compacted
+/// participant to call (`agents::handoff::render`: `lines: "N-"`). It used to
+/// be refused, so the first step after a compaction returned an error (EYES'
+/// advisory `d2ced691`).
 pub(crate) fn doc_excerpt(
     body: &str,
     grep: Option<&str>,
@@ -77,11 +83,13 @@ pub(crate) fn doc_excerpt(
         Some(spec) => {
             let spec = spec.trim();
             let parse = |n: &str| {
-                n.trim()
-                    .parse::<usize>()
-                    .map_err(|_| anyhow::anyhow!("`lines` must be \"a-b\" or \"a\" (1-based), got {spec:?}"))
+                n.trim().parse::<usize>().map_err(|_| {
+                    anyhow::anyhow!("`lines` must be \"a-b\", \"a-\" or \"a\" (1-based), got {spec:?}")
+                })
             };
             let (a, b) = match spec.split_once('-') {
+                // "a-": from line a to the end of the doc.
+                Some((a, b)) if b.trim().is_empty() => (parse(a)?, usize::MAX),
                 Some((a, b)) => (parse(a)?, parse(b)?),
                 None => {
                     let a = parse(spec)?;

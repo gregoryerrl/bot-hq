@@ -637,7 +637,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "session_doc_read",
-            description: "Fetch one session-scratch document by slug. Returns {id, slug, body, created_at, updated_at} or null when the slug isn't in this session. For a mechanical check of a long doc, avoid pulling the whole body: `grep` returns only the matching lines (case-insensitive) with their numbers, `lines` (\"a-b\", 1-based) returns just that range; both together grep inside the range. An earlier version of a rewritten doc is `<slug>@<n>` (see session_doc_search include_archives).",
+            description: "Fetch one session-scratch document by slug. Returns {id, slug, body, created_at, updated_at} or null when the slug isn't in this session. For a mechanical check of a long doc, avoid pulling the whole body: `grep` returns only the matching lines (case-insensitive) with their numbers, `lines` (\"a-b\", 1-based; \"a-\" runs to the end) returns just that range; both together grep inside the range. An earlier version of a rewritten doc is `<slug>@<n>` (see session_doc_search include_archives).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -651,7 +651,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     },
                     "lines": {
                         "type": "string",
-                        "description": "Optional 1-based inclusive range \"a-b\" (or \"a\"): return only those lines."
+                        "description": "Optional 1-based inclusive range \"a-b\", \"a-\" (from line a to the end) or \"a\": return only those lines."
                     }
                 },
                 "required": ["slug"]
