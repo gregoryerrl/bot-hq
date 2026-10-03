@@ -50,6 +50,8 @@ and in `docs/rebuild-archive/`.
   appended the review into the executor's plan while reporting that it had
   written `plan-eyes`. Such a write now always goes to the reviewer's own
   document, and an executor's write to a reviewer's document is refused.
+- **A phase vote is refused when the state of the work cannot be read,**
+  instead of being cast on an empty state that every other vote would match.
 - **Agents are no longer told to add a co-author trailer your policy
   forbids.** The claude CLI instructs every agent to end commits with one;
   when your commit policy forbids it, bot-hq now switches the CLI's

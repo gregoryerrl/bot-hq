@@ -819,7 +819,8 @@ was never dealt a turn, and the boundary is where that costs the most.
   participants speak between votes, so reusing it livelocks by construction.
 - **`artifact_fingerprint`** digests the session's phase documents (count, latest
   `updated_at`, total body length). Talking never invalidates a vote; changing
-  the work always does.
+  the work always does. A state of the work that cannot be read is not voted on:
+  the vote is refused rather than cast on an empty digest.
 - **The reviewer's co-docs are not the work.** The four `<phase>-eyes` docs are
   left out of the digest (feedback #70 / #95): counting them made a reviewer's
   notes orphan the executor's standing vote, and reviewers kept findings in chat

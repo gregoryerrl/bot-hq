@@ -1956,10 +1956,24 @@ impl SignalingBridge {
         }
 
         let epoch = storage.phase_epoch(&session_id).await.unwrap_or(0);
-        let fingerprint = storage
-            .phase_artifact_fingerprint(&session_id)
-            .await
-            .unwrap_or_default();
+        // **A state of the work that cannot be read is not voted on.** This
+        // used to fall back to an empty fingerprint, so if the read failed for
+        // everyone, every ballot "matched" and the phase could advance on a
+        // tally about nothing (found while kill-testing the fingerprint,
+        // s-d43b3630: a malformed query advanced the phase). Refusing costs the
+        // voter one retry; the alternative is the vote's one guarantee gone.
+        let fingerprint = match storage.phase_artifact_fingerprint(&session_id).await {
+            Ok(fingerprint) => fingerprint,
+            Err(e) => {
+                tracing::warn!(?e, %session_id, %agent, "reading the phase documents' fingerprint failed");
+                return PhaseAdvanceOutcome::Refused {
+                    reason: format!(
+                        "the state of the work could not be read ({e:#}), so no vote was \
+                         recorded. Call advance_phase again; if it keeps failing, tell the user."
+                    ),
+                };
+            }
+        };
         // T6b: a re-vote on CHANGED work replaces an earlier ballot silently —
         // the agents inferred the invalidation by detective work (dissect #6:
         // four Plan votes, each discarded by the voter's own doc write, never
@@ -2430,6 +2444,30 @@ mod phase_vote_tests {
             .agent_advance_phase("s1".into(), "hands".into(), "Plan".into())
             .await;
         assert_eq!(out, PhaseAdvanceOutcome::Advanced { target: "Plan".into() });
+    }
+
+    /// A vote is about a state of the work; when that state cannot be read, no
+    /// ballot is cast. The read used to fall back to an empty fingerprint, on
+    /// which every participant's vote agreed — so a failing read let the phase
+    /// advance. Putting the `unwrap_or_default()` back turns this red.
+    #[tokio::test]
+    async fn an_unreadable_state_of_the_work_is_not_voted_on() {
+        let (bridge, storage) = seeded(crate::storage::MAX_SESSION_PARTICIPANTS).await;
+        sqlx::query("DROP TABLE session_documents").execute(storage.pool()).await.unwrap();
+        for who in ["hands", "eyes"] {
+            let out = bridge.agent_advance_phase("s1".into(), who.into(), "Plan".into()).await;
+            match out {
+                PhaseAdvanceOutcome::Refused { reason } => {
+                    assert!(reason.contains("could not be read") && reason.contains("no vote was"), "{reason}")
+                }
+                other => panic!("{who}: a vote on an unreadable state must be refused, got {other:?}"),
+            }
+        }
+        let votes: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM phase_votes WHERE session_id = 's1'")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+        assert_eq!(votes.0, 0, "nothing was cast");
     }
 
     /// **Editing the work invalidates the votes cast on it** — end to end, not
