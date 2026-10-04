@@ -124,6 +124,13 @@ and in `docs/rebuild-archive/`.
   landed on the shell's command line as stray characters such as `1;2c`. The
   replay now sends nothing to the shell; queries that arrive live are still
   answered.
+- **`terminal_exec` no longer types into a program that holds the terminal.**
+  A command was written into the session terminal whether the shell was at
+  its prompt or not, so a pager left open, a server started in the background
+  of the visible terminal, or a password prompt received it as input. It is
+  now refused, naming the program. An agent can still type a line into a
+  program it started there on purpose (a Python prompt) by saying so
+  (`to_job`), but never into a password prompt such as `sudo` or `ssh`.
 - **`terminal_exec` waits for a command to finish.** It returned at the first
   0.7 s of silence, so a command that starts slowly — a test run after a few
   quick `git` lines — came back without its results, and a second call was

@@ -741,7 +741,10 @@ terminal's foreground, the foreground sampled through the window (unix
 `tcgetpgrp` on the PTY master; Windows falls back to the quiet window alone,
 feedback #48), and returns the captured tail — a job still holding the terminal
 at `wait_ms` is named in the note; a just-spawned shell is first given its
-first prompt; `block:false` for long-running processes) and `terminal_read` (every participant;
+first prompt; `block:false` for long-running processes; while a job holds the
+terminal it refuses and names it — what is typed would go to that job — unless
+`to_job` says so, and never into a credential prompt such as `sudo`, feedback #98)
+and `terminal_read` (every participant;
 scrollback tail as evidence text). `terminal_exec` re-classifies the command
 against the same two-tier Tool-Gate keyword list the PreToolUse hook uses
 (session snapshot → global fallback, `tool_gate::resolve_keywords`) and

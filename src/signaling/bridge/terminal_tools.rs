@@ -71,6 +71,36 @@ fn timeout_note(max_ms: u64, holder: Option<i32>) -> String {
     }
 }
 
+/// Programs whose input is a credential. Nothing is typed into them, even
+/// with `to_job`: a command typed into `sudo` is a password attempt.
+const CREDENTIAL_PROMPTS: &[&str] = &[
+    "sudo", "su", "doas", "passwd", "login", "ssh", "ssh-add", "ssh-keygen", "gpg", "pinentry",
+    "security", "kinit", "op",
+];
+
+/// Why `terminal_exec` will not type while `holder` — a job, not the shell —
+/// holds the terminal (feedback #98): what is typed goes to that program's
+/// input, so a pager, a server started with `block:false`, or a password
+/// prompt the user left open would take the command. `to_job` says the agent
+/// means to type into the job (a REPL it started); a credential prompt is
+/// refused even then.
+fn busy_refusal(holder: &str, to_job: bool) -> Option<String> {
+    if CREDENTIAL_PROMPTS.contains(&holder) {
+        return Some(format!(
+            "busy: `{holder}` holds the terminal and may be waiting for a password — nothing is \
+             typed into it, to_job or not. Answering or ending it is the user's."
+        ));
+    }
+    (!to_job).then(|| {
+        format!(
+            "busy: `{holder}` holds the terminal (the shell is not at its prompt), so the command \
+             would be typed into `{holder}`'s input. terminal_read shows what it is doing; wait \
+             for it to finish. Pass to_job: true only to type a line into a program you started \
+             there on purpose (a REPL)."
+        )
+    })
+}
+
 impl SignalingBridge {
     /// Gated on the `run_terminal` capability (enforced at the dispatch layer;
     /// any role may hold it). Runs `command` in the
@@ -82,6 +112,7 @@ impl SignalingBridge {
         command: String,
         wait_ms: Option<u64>,
         block: Option<bool>,
+        to_job: Option<bool>,
     ) -> Result<String> {
         let command = command.trim();
         if command.is_empty() {
@@ -152,6 +183,15 @@ impl SignalingBridge {
         // finished command. Paid once per terminal (`wait_ready`).
         if !term.is_ready() {
             term.wait_ready(EXEC_READY_MAX_MS).await;
+        }
+
+        // Feedback #98: typed text goes to whatever holds the terminal.
+        if let crate::core::terminal::Foreground::Job(group) = term.foreground() {
+            let holder = crate::core::terminal::process_name(group)
+                .unwrap_or_else(|| format!("process group {group}"));
+            if let Some(refusal) = busy_refusal(&holder, to_job.unwrap_or(false)) {
+                return Err(anyhow!(refusal));
+            }
         }
 
         let offset = term.current_offset();
@@ -233,7 +273,7 @@ mod tests {
         bridge.set_terminal_registry(Arc::clone(&registry));
 
         let err = bridge
-            .terminal_exec("s1".into(), "git push origin main".into(), None, None)
+            .terminal_exec("s1".into(), "git push origin main".into(), None, None, None)
             .await
             .expect_err("gated command must be refused");
         assert!(
@@ -261,7 +301,7 @@ mod tests {
         let registry = Arc::new(TerminalRegistry::new());
         bridge.set_terminal_registry(Arc::clone(&registry));
         let err = bridge
-            .terminal_exec("s1".into(), r#"git show "$R:app/x""#.into(), None, None)
+            .terminal_exec("s1".into(), r#"git show "$R:app/x""#.into(), None, None, None)
             .await
             .expect_err("the trap is refused");
         assert!(err.to_string().contains(r#"git show "${R}:app/x""#), "{err}");
@@ -280,7 +320,7 @@ mod tests {
         let registry = Arc::new(TerminalRegistry::new());
         bridge.set_terminal_registry(Arc::clone(&registry));
         let err = bridge
-            .terminal_exec("s1".into(), "bq ls --max_results 5".into(), None, None)
+            .terminal_exec("s1".into(), "bq ls --max_results 5".into(), None, None, None)
             .await
             .expect_err("a listed read is refused");
         assert!(err.to_string().contains("listed production read (`bq`"), "{err}");
@@ -292,11 +332,11 @@ mod tests {
         let bridge = SignalingBridge::new();
         bridge.set_terminal_registry(Arc::new(TerminalRegistry::new()));
         assert!(bridge
-            .terminal_exec("s1".into(), "  ".into(), None, None)
+            .terminal_exec("s1".into(), "  ".into(), None, None, None)
             .await
             .is_err());
         assert!(bridge
-            .terminal_exec("s1".into(), "echo a\necho b".into(), None, None)
+            .terminal_exec("s1".into(), "echo a\necho b".into(), None, None, None)
             .await
             .is_err());
     }
@@ -323,6 +363,7 @@ mod tests {
                 "s1".into(),
                 "echo bothq-exec-marker".into(),
                 Some(15_000),
+                None,
                 None,
             )
             .await
@@ -357,6 +398,48 @@ mod tests {
             assert!(body.len() <= EXEC_OUTPUT_CAP_BYTES);
             assert!(body.chars().all(|c| c == '━'), "a partial glyph leaked into the tail");
         }
+    }
+
+    /// Feedback #98: a job holding the terminal is not typed into unless the
+    /// agent says it means to (`to_job`), and a credential prompt never is.
+    #[test]
+    fn a_busy_terminal_is_refused_and_a_password_prompt_always() {
+        let refused = super::busy_refusal("less", false).expect("a pager takes no command");
+        assert!(refused.starts_with("busy: `less` holds the terminal"), "{refused}");
+        assert!(refused.contains("to_job: true"), "{refused}");
+        assert_eq!(super::busy_refusal("python3", true), None, "a REPL the agent started");
+        let sudo = super::busy_refusal("sudo", true).expect("never typed into");
+        assert!(sudo.contains("password"), "{sudo}");
+    }
+
+    /// Through a REAL shell: while `sleep` holds the terminal, a command is
+    /// refused and names it; with `to_job` it is typed (into sleep's input).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn terminal_exec_refuses_while_a_job_holds_the_terminal() {
+        let registry = Arc::new(TerminalRegistry::new());
+        let bridge = SignalingBridge::new();
+        bridge.set_terminal_registry(registry.clone());
+        bridge
+            .terminal_exec("s1".into(), "sleep 5".into(), None, Some(false), None)
+            .await
+            .expect("started");
+        let term = registry.get_live("s1").await.expect("a live terminal");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !matches!(term.foreground(), crate::core::terminal::Foreground::Job(_)) {
+            assert!(std::time::Instant::now() < deadline, "sleep never took the terminal");
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let err = bridge
+            .terminal_exec("s1".into(), "echo typed".into(), None, None, None)
+            .await
+            .expect_err("busy");
+        assert!(err.to_string().starts_with("busy: `sleep` holds the terminal"), "{err}");
+        bridge
+            .terminal_exec("s1".into(), "echo typed".into(), None, Some(false), Some(true))
+            .await
+            .expect("typed on purpose");
+        registry.kill_and_remove("s1").await;
     }
 
     #[test]

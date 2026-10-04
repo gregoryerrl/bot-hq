@@ -1342,8 +1342,9 @@ async fn call_tool(
             let command = arg_required_str(&args, "command")?;
             let wait_ms = args.get("wait_ms").and_then(Value::as_u64);
             let block = args.get("block").and_then(Value::as_bool);
+            let to_job = args.get("to_job").and_then(Value::as_bool);
             let output = bridge
-                .terminal_exec(caller.session_id.clone(), command, wait_ms, block)
+                .terminal_exec(caller.session_id.clone(), command, wait_ms, block, to_job)
                 .await
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(output))
