@@ -23,6 +23,7 @@ vi.mock("@xterm/xterm", () => ({
       write: vi.fn((_d: unknown, cb?: () => void) => cb?.()),
       writeln: vi.fn(),
       onData: vi.fn((_cb: (data: string) => void) => ({ dispose: vi.fn() })),
+      onKey: vi.fn((_cb: (e: { key: string }) => void) => ({ dispose: vi.fn() })),
       dispose: vi.fn(),
       cols: 80,
       rows: 24,
