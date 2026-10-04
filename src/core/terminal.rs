@@ -495,6 +495,40 @@ impl SessionTerminal {
 /// The name of process `pid` (`ps -o comm=`, the last path segment), for the
 /// note that says which command holds a terminal. `None` where it cannot be
 /// read.
+/// The basenames of every process in process group `pgid` — the whole
+/// foreground pipeline, not only its leader (`cat x | sudo tee f` is led by
+/// `cat` while `sudo` waits for a password; EYES, s-3158eb35). One `ps -A`
+/// in the form macOS and Linux share, filtered here. Empty off unix or when
+/// `ps` fails.
+pub fn group_process_names(pgid: i32) -> Vec<String> {
+    #[cfg(unix)]
+    {
+        let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pgid=,comm="]).output() else {
+            return Vec::new();
+        };
+        if !out.status.success() {
+            return Vec::new();
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let (group, name) = line.split_once(char::is_whitespace)?;
+                (group.trim().parse::<i32>().ok()? == pgid).then(|| {
+                    let name = name.trim();
+                    name.rsplit('/').next().unwrap_or(name).to_string()
+                })
+            })
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pgid;
+        Vec::new()
+    }
+}
+
 pub fn process_name(pid: i32) -> Option<String> {
     #[cfg(unix)]
     {

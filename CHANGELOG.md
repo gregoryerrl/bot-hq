@@ -130,7 +130,8 @@ and in `docs/rebuild-archive/`.
   of the visible terminal, or a password prompt received it as input. It is
   now refused, naming the program. An agent can still type a line into a
   program it started there on purpose (a Python prompt) by saying so
-  (`to_job`), but never into a password prompt such as `sudo` or `ssh`.
+  (`to_job`), but never into a password prompt such as `sudo` or `ssh`, even
+  one further along a pipeline (`cat x | sudo tee f`).
 - **`terminal_exec` waits for a command to finish.** It returned at the first
   0.7 s of silence, so a command that starts slowly — a test run after a few
   quick `git` lines — came back without its results, and a second call was

@@ -82,12 +82,15 @@ const CREDENTIAL_PROMPTS: &[&str] = &[
 /// holds the terminal (feedback #98): what is typed goes to that program's
 /// input, so a pager, a server started with `block:false`, or a password
 /// prompt the user left open would take the command. `to_job` says the agent
-/// means to type into the job (a REPL it started); a credential prompt is
-/// refused even then.
-fn busy_refusal(holder: &str, to_job: bool) -> Option<String> {
-    if CREDENTIAL_PROMPTS.contains(&holder) {
+/// means to type into the job (a REPL it started); a credential prompt
+/// anywhere in the job's pipeline (`group`) is refused even then.
+fn busy_refusal(holder: &str, group: &[String], to_job: bool) -> Option<String> {
+    if let Some(prompt) = std::iter::once(holder)
+        .chain(group.iter().map(String::as_str))
+        .find(|name| CREDENTIAL_PROMPTS.contains(name))
+    {
         return Some(format!(
-            "busy: `{holder}` holds the terminal and may be waiting for a password — nothing is \
+            "busy: `{prompt}` holds the terminal and may be waiting for a password — nothing is \
              typed into it, to_job or not. Answering or ending it is the user's."
         ));
     }
@@ -189,7 +192,8 @@ impl SignalingBridge {
         if let crate::core::terminal::Foreground::Job(group) = term.foreground() {
             let holder = crate::core::terminal::process_name(group)
                 .unwrap_or_else(|| format!("process group {group}"));
-            if let Some(refusal) = busy_refusal(&holder, to_job.unwrap_or(false)) {
+            let group_names = crate::core::terminal::group_process_names(group);
+            if let Some(refusal) = busy_refusal(&holder, &group_names, to_job.unwrap_or(false)) {
                 return Err(anyhow!(refusal));
             }
         }
@@ -404,12 +408,16 @@ mod tests {
     /// agent says it means to (`to_job`), and a credential prompt never is.
     #[test]
     fn a_busy_terminal_is_refused_and_a_password_prompt_always() {
-        let refused = super::busy_refusal("less", false).expect("a pager takes no command");
+        let none: &[String] = &[];
+        let refused = super::busy_refusal("less", none, false).expect("a pager takes no command");
         assert!(refused.starts_with("busy: `less` holds the terminal"), "{refused}");
         assert!(refused.contains("to_job: true"), "{refused}");
-        assert_eq!(super::busy_refusal("python3", true), None, "a REPL the agent started");
-        let sudo = super::busy_refusal("sudo", true).expect("never typed into");
+        assert_eq!(super::busy_refusal("python3", none, true), None, "a REPL the agent started");
+        let sudo = super::busy_refusal("sudo", none, true).expect("never typed into");
         assert!(sudo.contains("password"), "{sudo}");
+        // A password prompt behind the pipeline's leader (EYES, s-3158eb35).
+        let piped = super::busy_refusal("cat", &["cat".into(), "sudo".into()], true).expect("refused");
+        assert!(piped.starts_with("busy: `sudo` holds the terminal"), "{piped}");
     }
 
     /// Through a REAL shell: while `sleep` holds the terminal, a command is
@@ -430,6 +438,10 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "sleep never took the terminal");
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
+        if let crate::core::terminal::Foreground::Job(group) = term.foreground() {
+            let names = crate::core::terminal::group_process_names(group);
+            assert!(names.iter().any(|n| n == "sleep"), "{names:?}");
+        }
         let err = bridge
             .terminal_exec("s1".into(), "echo typed".into(), None, None, None)
             .await
@@ -439,6 +451,40 @@ mod tests {
             .terminal_exec("s1".into(), "echo typed".into(), None, Some(false), Some(true))
             .await
             .expect("typed on purpose");
+        registry.kill_and_remove("s1").await;
+    }
+
+    /// A password prompt BEHIND a pipeline's leader is still seen: `sleep`
+    /// leads, a program named `sudo` (a symlink to `sleep`, so nothing
+    /// prompts; macOS kills a COPY of a system binary) follows, and even
+    /// `to_job` is refused, naming `sudo`.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn terminal_exec_sees_a_credential_prompt_behind_the_leader() {
+        let dir = tempdir().unwrap();
+        let fake = dir.path().join("sudo");
+        std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
+        let registry = Arc::new(TerminalRegistry::new());
+        let bridge = SignalingBridge::new();
+        bridge.set_terminal_registry(registry.clone());
+        let pipeline = format!("sleep 5 | {} 5", fake.display());
+        bridge.terminal_exec("s1".into(), pipeline, None, Some(false), None).await.expect("started");
+        let term = registry.get_live("s1").await.expect("a live terminal");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let crate::core::terminal::Foreground::Job(group) = term.foreground() {
+                if crate::core::terminal::group_process_names(group).iter().any(|n| n == "sudo") {
+                    break;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "the pipeline never took the terminal");
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let err = bridge
+            .terminal_exec("s1".into(), "echo typed".into(), None, Some(false), Some(true))
+            .await
+            .expect_err("a password prompt is never typed into");
+        assert!(err.to_string().starts_with("busy: `sudo` holds the terminal"), "{err}");
         registry.kill_and_remove("s1").await;
     }
 
