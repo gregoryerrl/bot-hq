@@ -106,6 +106,30 @@ describe("SessionTerminalTab", () => {
     );
   });
 
+  // xterm answers the terminal queries it parses through onData. The
+  // snapshot's queries were answered when they ran; answering them again on
+  // replay typed `ESC[?1;2c` onto the shell's line on every remount.
+  it("does not send what xterm answers while replaying the snapshot", async () => {
+    termInstance.write.mockImplementationOnce((_d: unknown, cb?: () => void) => {
+      const onData = termInstance.onData.mock.calls[0][0] as (d: string) => void;
+      onData("\x1b[?1;2c"); // xterm's answer to an `ESC[c` in the history
+      cb?.();
+    });
+    render(<SessionTerminalTab sessionId="s1" active={true} />);
+    await waitFor(() => expect(termInstance.write).toHaveBeenCalled());
+    const onData = termInstance.onData.mock.calls[0][0] as (d: string) => void;
+    onData("\x1b[?1;2c"); // a live query, after the replay, is answered
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("terminal_input", {
+        sessionId: "s1",
+        data: "\x1b[?1;2c",
+      }),
+    );
+    expect(
+      invokeMock.mock.calls.filter(([cmd]) => cmd === "terminal_input"),
+    ).toHaveLength(1);
+  });
+
   it("writes terminal:output events for this session only, after replay", async () => {
     render(<SessionTerminalTab sessionId="s1" active={true} />);
     await waitFor(() => expect(termInstance.write).toHaveBeenCalled());

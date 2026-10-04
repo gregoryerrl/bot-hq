@@ -117,6 +117,13 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **Opening a session's Terminal tab no longer types onto its command line.**
+  The tab replays the terminal's history when it opens, and the terminal view
+  answered every query a program had left in that history (a CLI asking for
+  the cursor position or the background colour) a second time. The answers
+  landed on the shell's command line as stray characters such as `1;2c`. The
+  replay now sends nothing to the shell; queries that arrive live are still
+  answered.
 - **`terminal_exec` waits for a command to finish.** It returned at the first
   0.7 s of silence, so a command that starts slowly — a test run after a few
   quick `git` lines — came back without its results, and a second call was

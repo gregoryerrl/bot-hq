@@ -52,6 +52,15 @@ export function SessionTerminalTab({
   // live chunks can't render ahead of the history they follow.
   const readyRef = useRef(false);
   const queueRef = useRef<Uint8Array[]>([]);
+  // True while xterm parses the snapshot. xterm answers the terminal queries
+  // it reads (device attributes `ESC[c`, cursor position `ESC[6n`, the OSC
+  // 10/11 colour queries a CLI like `gh` sends) through `onData`, and the
+  // snapshot is HISTORY: each query in it was answered when it ran, or went
+  // unanswered with no view open. Answering again on every remount typed
+  // `ESC[?1;2c` and the like onto the shell's command line (the user's report,
+  // reproduced with a captured tty). Nothing xterm emits during the replay is
+  // sent to the PTY; live chunks queued behind it are answered as usual.
+  const replayingRef = useRef(false);
 
   const fitAndReport = () => {
     const term = termRef.current;
@@ -103,9 +112,11 @@ export function SessionTerminalTab({
       // WebGL unavailable → DOM renderer (the default). Nothing to do.
     }
     readyRef.current = false;
+    replayingRef.current = false;
     queueRef.current = [];
 
     const dataSub = term.onData((data) => {
+      if (replayingRef.current) return;
       invoke("terminal_input", { sessionId, data }).catch(() => {
         // Dead shell: terminal_open on next activation respawns it.
       });
@@ -115,7 +126,9 @@ export function SessionTerminalTab({
     invoke<TerminalOpenView>("terminal_open", { sessionId })
       .then((view) => {
         if (disposed) return;
+        replayingRef.current = true;
         term.write(b64ToBytes(view.snapshot_b64), () => {
+          replayingRef.current = false;
           // Flush any live chunks that raced the replay, in arrival order.
           for (const chunk of queueRef.current) term.write(chunk);
           queueRef.current = [];
