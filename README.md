@@ -318,7 +318,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `session_doc_read(slug, heading?, lines?, grep?)` | Read a session doc by slug — whole, or one section, a line range, or the matching lines. |
 | `web_search(query, engine?)` | Search the web via a headless webview, so non-first-party models without a server-side search tool can fetch live results. |
 | `terminal_exec(command, wait_ms?, block?, to_job?)` | Run one command in the session's Terminal subtab PTY (user-visible). Blocking by default: waits until the shell is back at its prompt and the output is quiet, and returns the captured tail (a command still holding the terminal at `wait_ms` is named); `block:false` for long-running processes. While another program holds the terminal (a pager, a server, a REPL) the command is refused naming it, unless `to_job:true` says to type into that program; a password prompt (`sudo`, `ssh`…) is never typed into. Gate-matched commands are refused (route via `action_gate`). |
-| `terminal_read(lines?)` | Tail of the session terminal's scrollback as plain text (default 100 lines, max 500) — evidence agents can paste into chat or IPAV docs. |
+| `terminal_read(lines?, raw?)` | Tail of the session terminal's scrollback as plain text, as the screen shows it — escape sequences removed, `\r` and backspace redraws applied (default 100 lines, max 500; `raw:true` for the bytes) — evidence agents can paste into chat or IPAV docs. `terminal_exec`'s output is rendered the same way. |
 | `webview_screenshot()` | Capture the bot-hq webview for agent-driven UI testing. |
 | `webview_click(selector)` | Synthesize a click on a DOM element in the webview. |
 | `webview_type(selector, text)` | Type into a webview element. |

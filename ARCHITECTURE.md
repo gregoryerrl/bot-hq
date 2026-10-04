@@ -745,7 +745,9 @@ first prompt; `block:false` for long-running processes; while a job holds the
 terminal it refuses and names it — what is typed would go to that job — unless
 `to_job` says so, and never into a credential prompt such as `sudo`, feedback #98)
 and `terminal_read` (every participant;
-scrollback tail as evidence text). `terminal_exec` re-classifies the command
+scrollback tail as evidence text). Both return the text as the screen shows it
+(`core::term_text::render_plain`: escapes dropped, `\r`/`\b`/erase-in-line
+applied; `terminal_read`'s `raw` keeps the bytes). `terminal_exec` re-classifies the command
 against the same two-tier Tool-Gate keyword list the PreToolUse hook uses
 (session snapshot → global fallback, `tool_gate::resolve_keywords`) and
 refuses gate-matched commands with a route to `action_gate` — the terminal is

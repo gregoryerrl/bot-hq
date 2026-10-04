@@ -101,6 +101,13 @@ and in `docs/rebuild-archive/`.
 
 ### Changed
 
+- **`terminal_read` and `terminal_exec` return the terminal's text as the
+  screen shows it.** They returned the raw bytes: colour and mode codes, the
+  shell's prompt redraws, and its echo of a typed line (`p` + backspace +
+  `python3`), and agents pasted that into chat as evidence. Escape codes are
+  now removed, and carriage returns, backspaces and line erases are applied.
+  `terminal_read` takes `raw: true` for the bytes as they came.
+
 - **An agent's core bot-hq tools are ready from its first turn.** The turn
   verbs, the session-document tools, the Context Library readers, the gates
   and the commit checks no longer need a lookup before their first use, at

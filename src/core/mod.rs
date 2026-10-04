@@ -20,6 +20,7 @@ pub mod sequencer;
 pub mod session;
 pub mod state;
 pub mod telemetry;
+pub mod term_text;
 pub mod terminal;
 pub mod webview_watchdog;
 pub mod updates;

@@ -223,7 +223,7 @@ impl SignalingBridge {
             .unwrap_or(EXEC_DEFAULT_WAIT_MS)
             .clamp(EXEC_QUIET_MS, EXEC_MAX_WAIT_MS);
         let settled = term.wait_settle(offset, EXEC_QUIET_MS, max_ms).await;
-        let mut output = capped_tail(String::from_utf8_lossy(&settled.bytes).into_owned());
+        let mut output = capped_tail(crate::core::term_text::render_plain(&settled.bytes));
         if settled.timed_out {
             output.push_str(&timeout_note(max_ms, settled.holder));
         }
@@ -233,7 +233,7 @@ impl SignalingBridge {
     /// Every participant (ungated). Tail of the terminal scrollback as lossy UTF-8 —
     /// evidence-grade text agents can paste into chat or IPAV docs. Reads a
     /// dead (exited) terminal's retained scrollback too.
-    pub async fn terminal_read(&self, session_id: String, lines: Option<u64>) -> Result<String> {
+    pub async fn terminal_read(&self, session_id: String, lines: Option<u64>, raw: Option<bool>) -> Result<String> {
         let registry = self
             .terminal_registry()
             .ok_or_else(|| anyhow!("terminal registry not initialized (app still starting?)"))?;
@@ -241,7 +241,12 @@ impl SignalingBridge {
             return Ok("no terminal has been started for this session".to_string());
         };
         let (snapshot, _, _) = term.open_view();
-        let text = String::from_utf8_lossy(&snapshot);
+        // As the screen shows it, unless the bytes themselves are wanted.
+        let text = if raw == Some(true) {
+            String::from_utf8_lossy(&snapshot).into_owned()
+        } else {
+            crate::core::term_text::render_plain(&snapshot)
+        };
         let n = lines.unwrap_or(READ_DEFAULT_LINES as u64) as usize;
         let n = n.clamp(1, READ_MAX_LINES);
         let all: Vec<&str> = text.lines().collect();
@@ -349,7 +354,7 @@ mod tests {
     async fn terminal_read_without_terminal_is_clean() {
         let bridge = SignalingBridge::new();
         bridge.set_terminal_registry(Arc::new(TerminalRegistry::new()));
-        let out = bridge.terminal_read("s1".into(), None).await.unwrap();
+        let out = bridge.terminal_read("s1".into(), None, None).await.unwrap();
         assert!(out.contains("no terminal"), "got: {out}");
     }
 
@@ -362,10 +367,12 @@ mod tests {
     async fn terminal_exec_blocking_then_read_round_trip() {
         let bridge = SignalingBridge::new();
         bridge.set_terminal_registry(Arc::new(TerminalRegistry::new()));
+        // The marker is printed bold: both tools return it as the screen
+        // shows it, without the escape bytes; `raw` keeps them.
         let out = bridge
             .terminal_exec(
                 "s1".into(),
-                "echo bothq-exec-marker".into(),
+                r"printf '\033[1mbothq-exec-marker\033[0m\n'".into(),
                 Some(15_000),
                 None,
                 None,
@@ -373,14 +380,16 @@ mod tests {
             .await
             .expect("exec should succeed");
         assert!(
-            out.contains("bothq-exec-marker"),
-            "settled output missing marker: {out:?}"
+            out.contains("bothq-exec-marker") && !out.contains('\u{1b}'),
+            "settled output missing marker, or not plain: {out:?}"
         );
-        let read = bridge.terminal_read("s1".into(), None).await.unwrap();
+        let read = bridge.terminal_read("s1".into(), None, None).await.unwrap();
         assert!(
-            read.contains("bothq-exec-marker"),
-            "terminal_read missing marker: {read:?}"
+            read.contains("bothq-exec-marker") && !read.contains('\u{1b}'),
+            "terminal_read missing marker, or not plain: {read:?}"
         );
+        let raw = bridge.terminal_read("s1".into(), None, Some(true)).await.unwrap();
+        assert!(raw.contains("\u{1b}[1mbothq-exec-marker"), "raw keeps the bytes: {raw:?}");
     }
 
     /// Round 9: the tail cut used to be `&output[len - CAP..]` — a BYTE offset

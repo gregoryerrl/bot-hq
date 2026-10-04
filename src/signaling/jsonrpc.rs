@@ -1351,8 +1351,9 @@ async fn call_tool(
         }
         "terminal_read" => {
             let lines = args.get("lines").and_then(Value::as_u64);
+            let raw = args.get("raw").and_then(Value::as_bool);
             let output = bridge
-                .terminal_read(caller.session_id.clone(), lines)
+                .terminal_read(caller.session_id.clone(), lines, raw)
                 .await
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(output))

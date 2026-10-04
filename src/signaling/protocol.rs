@@ -938,7 +938,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         // where the user can watch. core/terminal.rs + bridge/terminal_tools.rs.
         ToolDescriptor {
             name: "terminal_exec",
-            description: gated_by("terminal_exec", "Run ONE shell command in this session's Terminal subtab (the PTY the user watches — visible evidence, unlike your Bash tool). BLOCKING by default: types the command, waits until the shell is back at its prompt and the output has been quiet ~0.7s (on macOS/Linux the terminal's foreground process is checked, so a command that starts slowly — a test run — is captured whole; elsewhere the quiet window alone), or the wait_ms cap (default 10s), and returns the captured output. At the cap a note says so, and names the command still holding the terminal — a pager or a prompt waiting for input holds it until it gets some (use `--no-pager` / a non-interactive flag). Pass block:false for long-running processes (servers, watchers) and read later with terminal_read. While another program holds the terminal (a pager, a server, a REPL) the command is refused, naming it, because it would be typed into that program; pass to_job:true to type a line into a program you started there on purpose. A password prompt (sudo, ssh…) is never typed into. The shell runs in the session's working repo. Commands matching a gated Tool-Gate keyword are refused — route those through action_gate."),
+            description: gated_by("terminal_exec", "Run ONE shell command in this session's Terminal subtab (the PTY the user watches — visible evidence, unlike your Bash tool). BLOCKING by default: types the command, waits until the shell is back at its prompt and the output has been quiet ~0.7s (on macOS/Linux the terminal's foreground process is checked, so a command that starts slowly — a test run — is captured whole; elsewhere the quiet window alone), or the wait_ms cap (default 10s), and returns the captured output as plain text, as the screen shows it. At the cap a note says so, and names the command still holding the terminal — a pager or a prompt waiting for input holds it until it gets some (use `--no-pager` / a non-interactive flag). Pass block:false for long-running processes (servers, watchers) and read later with terminal_read. While another program holds the terminal (a pager, a server, a REPL) the command is refused, naming it, because it would be typed into that program; pass to_job:true to type a line into a program you started there on purpose. A password prompt (sudo, ssh…) is never typed into. The shell runs in the session's working repo. Commands matching a gated Tool-Gate keyword are refused — route those through action_gate."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -964,13 +964,17 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "terminal_read",
-            description: "Read the tail of this session's Terminal-subtab scrollback as plain text (default 100 lines, max 500) — works even after the shell exited. Paste it into chat or an IPAV session doc as fenced code when presenting terminal results as evidence.",
+            description: "Read the tail of this session's Terminal-subtab scrollback as plain text, as the screen shows it — escape sequences removed, `\\r` and backspace redraws applied (default 100 lines, max 500; raw:true returns the bytes as they came) — works even after the shell exited. Paste it into chat or an IPAV session doc as fenced code when presenting terminal results as evidence.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "lines": {
                         "type": "integer",
                         "description": "How many trailing lines to return. Default 100, max 500."
+                    },
+                    "raw": {
+                        "type": "boolean",
+                        "description": "Default false. true = the scrollback bytes as they came, escape sequences included."
                     }
                 }
             }),
