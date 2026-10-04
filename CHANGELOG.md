@@ -122,8 +122,8 @@ and in `docs/rebuild-archive/`.
   answered every query a program had left in that history (a CLI asking for
   the cursor position or the background colour) a second time. The answers
   landed on the shell's command line as stray characters such as `1;2c`. The
-  replay now sends nothing to the shell; queries that arrive live are still
-  answered.
+  replay now sends nothing to the shell except keys you type meanwhile;
+  queries that arrive live are still answered.
 - **`terminal_exec` no longer types into a program that holds the terminal.**
   A command was written into the session terminal whether the shell was at
   its prompt or not, so a pager left open, a server started in the background

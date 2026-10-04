@@ -9,6 +9,7 @@ const termInstance = {
   write: vi.fn((_d: unknown, cb?: () => void) => cb?.()),
   writeln: vi.fn(),
   onData: vi.fn((_cb: (data: string) => void) => ({ dispose: vi.fn() })),
+  onKey: vi.fn((_cb: (e: { key: string }) => void) => ({ dispose: vi.fn() })),
   dispose: vi.fn(),
   cols: 80,
   rows: 24,
@@ -76,6 +77,7 @@ beforeEach(() => {
   invokeMock.mockClear();
   termInstance.write.mockClear();
   termInstance.onData.mockClear();
+  termInstance.onKey.mockClear();
 });
 
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
@@ -128,6 +130,28 @@ describe("SessionTerminalTab", () => {
     expect(
       invokeMock.mock.calls.filter(([cmd]) => cmd === "terminal_input"),
     ).toHaveLength(1);
+  });
+
+  // A key typed during the replay still reaches the shell (through onKey,
+  // which xterm fires only for the keyboard), while the answers stay muted.
+  it("sends keys typed during the replay, not xterm's answers", async () => {
+    termInstance.write.mockImplementationOnce((_d: unknown, cb?: () => void) => {
+      const onData = termInstance.onData.mock.calls[0][0] as (d: string) => void;
+      const onKey = termInstance.onKey.mock.calls[0][0] as (e: { key: string }) => void;
+      onKey({ key: "l" });
+      onData("l"); // xterm's onData for the same key — muted, not doubled
+      onData("\x1b[?1;2c");
+      cb?.();
+    });
+    render(<SessionTerminalTab sessionId="s1" active={true} />);
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("terminal_input", { sessionId: "s1", data: "l" }),
+    );
+    const onKey = termInstance.onKey.mock.calls[0][0] as (e: { key: string }) => void;
+    onKey({ key: "x" }); // after the replay onData carries keys; onKey sends nothing
+    expect(
+      invokeMock.mock.calls.filter(([cmd]) => cmd === "terminal_input"),
+    ).toEqual([["terminal_input", { sessionId: "s1", data: "l" }]]);
   });
 
   it("writes terminal:output events for this session only, after replay", async () => {

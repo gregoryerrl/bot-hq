@@ -121,6 +121,13 @@ export function SessionTerminalTab({
         // Dead shell: terminal_open on next activation respawns it.
       });
     });
+    // A key the user types while the replay runs: `onData` is muted then,
+    // and `onKey` fires only for the keyboard, never for xterm's answers
+    // (EYES, s-3158eb35). A paste during the replay is still dropped.
+    const keySub = term.onKey(({ key }) => {
+      if (!replayingRef.current) return;
+      invoke("terminal_input", { sessionId, data: key }).catch(() => {});
+    });
 
     let disposed = false;
     invoke<TerminalOpenView>("terminal_open", { sessionId })
@@ -145,6 +152,7 @@ export function SessionTerminalTab({
     return () => {
       disposed = true;
       dataSub.dispose();
+      keySub.dispose();
       webglRef.current?.dispose();
       webglRef.current = null;
       term.dispose();
