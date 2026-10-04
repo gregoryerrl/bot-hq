@@ -1027,7 +1027,6 @@ mod tests {
             "echo \"next: gh api repos/o/r\"",
             "grep -rn 'rm -rf' docs/ | head -5",
             "grep -c 'gh pr merge' notes.md 2>/dev/null",
-            "cd src && grep -rn \"git reset --hard\" .",
             "printf '%s\\n' 'sudo is gated' | wc -l",
             "LC_ALL=C grep 'gh api' notes.md 2>&1 | head",
         ] {
@@ -1057,6 +1056,8 @@ mod tests {
             "sh -c \"$CMD gh api\"",
             "psql -h ep-solitary-field-a5wk.aws -c 'select 1'",
             "cat <<EOF\ngh api\nEOF",
+            // `cd` runs zsh's chpwd hooks, so it is not a data tool (EYES 9392b713).
+            "cd src && grep -rn \"git reset --hard\" .",
             // A known false positive that stays: git is not a data tool.
             "git commit -m \"mention gh api\"",
         ] {
@@ -1072,6 +1073,9 @@ mod tests {
             "grep 'gh api' $(ls)",                            // a command substitution
             "grep 'gh api' notes.md > s.sh",                  // written to a file
             "echo 'gh api' >& out.txt",                       // written to a file
+            "echo 'gh api' &> out.txt",                       // written to a file
+            "echo 'gh api' &>> out.txt",                      // appended to a file
+            "grep -c 'gh api' notes.md 2>&1 > counts.txt",    // a dup, then a file
             "grep 'gh api notes.md",                          // the quotes do not close
             "grep 'gh api' notes.md | git hash-object --stdin", // not every tool is data
             "grep --pre=x 'gh api' notes.md",                 // an option naming an action

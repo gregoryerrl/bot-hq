@@ -996,7 +996,8 @@ fn publish_value(flag: &str, carries: Carries, value: String, out: &mut OutwardB
 /// - diff, cmp, comm: compare, write stdout.
 /// - ls, stat, ps: list or format.
 /// - test, `[`, true, false, basename, dirname, realpath, readlink, which,
-///   type, cd, pwd: evaluate or print paths.
+///   type, pwd: evaluate or print paths. Not `cd`: zsh runs `chpwd` hooks on
+///   every change of directory (direnv, version managers; EYES 9392b713).
 ///
 /// Left out on purpose: rg (`--pre`), ack (`--pager`), ag, less and more
 /// (`!`, `+cmd`), man (`-P`), sort (`-o`, `--compress-program`), uniq (an
@@ -1007,7 +1008,7 @@ const GATE_DATA_TOOLS: &[&str] = &[
     "grep", "egrep", "fgrep", "echo", "printf", "cat", "head", "tail", "wc", "cut", "tr", "nl",
     "fold", "fmt", "column", "od", "hexdump", "jq", "diff", "cmp", "comm", "ls", "stat", "ps",
     "test", "[", "true", "false", "basename", "dirname", "realpath", "readlink", "which", "type",
-    "cd", "pwd",
+    "pwd",
 ];
 
 /// A long option naming an action (`--pre=…`, `--filter`, `--pager`,
@@ -1112,9 +1113,13 @@ fn relaxable(command: &str, cmds: &[Cmd]) -> bool {
                 return false;
             }
             if op.contains('>') {
-                // `>&2`, `2>&1`, `>&-`: an fd duplication; `>&file` and every
-                // other form write a file.
-                let dup = op.split_once('&').is_some_and(|(_, fd)| !fd.is_empty());
+                // `>&2`, `2>&1`, `>&-`: an fd duplication — `[n]>&` and digits
+                // or `-`, nothing else. `>&file`, `&>`, `&>>` (the parser
+                // splits those at the `&`) and every other form write a file
+                // (EYES 9392b713).
+                let dup = op
+                    .split_once(">&")
+                    .is_some_and(|(_, fd)| !fd.is_empty() && fd.chars().all(|c| c.is_ascii_digit() || c == '-'));
                 let target = seg.words.get(k + 1).map(|t| t.text.as_str());
                 if !dup && target != Some("/dev/null") {
                     return false;
