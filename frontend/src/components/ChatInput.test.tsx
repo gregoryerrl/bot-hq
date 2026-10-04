@@ -292,6 +292,29 @@ describe("ChatInput turn-status + Stop", () => {
     expect(screen.getByTestId("turn-age")).toHaveTextContent("1 tools");
   });
 
+  // The live busy map is SLOT-keyed (`#slot0`) while rows are authored by
+  // slug: without `busySlug` the line found no rows ("0 tools", no running
+  // tool) in the app, though the slug-keyed tests above passed (smoke after
+  // relaunch, s-3158eb35).
+  it("reads a slot-keyed busy participant's rows through busySlug", () => {
+    const at = (secsAgo: number) => new Date(Date.now() - secsAgo * 1000).toISOString();
+    useChatStore.setState({
+      messages: {
+        s1: [{
+          id: 1, session_id: "s1", author: "hands", kind: "tool_use", created_at: at(125),
+          content: JSON.stringify({ name: "Bash", input: { command: "cargo test", description: "Run the suite" }, tool_use_id: "t1" }),
+        }],
+      },
+    });
+    render(
+      <ChatInput activity="busy" busy={{ "#slot0": true, "#slot1": false }} busyLabel={LABEL}
+        busySlug={(k) => (k === "#slot0" ? "hands" : k)} sessionId="s1"
+        onSend={() => {}} onStage={() => {}} onCancel={() => {}} />,
+    );
+    expect(screen.getByTestId("running-tool")).toHaveTextContent("· Run the suite (2m)");
+    expect(screen.getByTestId("turn-age")).toHaveTextContent("· 2m · 1 tools");
+  });
+
   it("reads a turn's age from the chat, so mounting mid-turn is not '0s'", () => {
     // EYES 172d8082: the clock started at mount — a user coming back to a
     // 45-minute turn saw "· 0s · 0 tools".

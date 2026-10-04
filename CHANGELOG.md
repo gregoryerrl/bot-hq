@@ -137,6 +137,11 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **The composer's working line now shows what is running.** It reads a
+  turn's age, its tool count and the running tool from the chat, but looked
+  the rows up under the participant's slot rather than its name. In the app it
+  read "0 tools" and named no running tool, and a turn's age counted from when
+  the line appeared. Found in the first live check after the relaunch.
 - **Opening a session's Terminal tab no longer types onto its command line.**
   The tab replays the terminal's history when it opens, and the terminal view
   answered every query a program had left in that history (a CLI asking for

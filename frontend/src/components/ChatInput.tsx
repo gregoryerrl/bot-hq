@@ -160,6 +160,10 @@ interface ChatInputProps {
    *  Without it the status line has no roster to consult and says so, rather
    *  than printing the internal key it happens to hold. */
   busyLabel?: (key: string) => string;
+  /** Busy-map key -> the participant's slug. The busy map is slot-keyed
+   *  (`#slot0`) and chat rows are authored by slug, so the status line's turn
+   *  age, tool count and running tool are looked up through this. */
+  busySlug?: (key: string) => string;
   /** Roster slot -> hue (rc3 D20), so two participants of one role are told
    *  apart by colour as well as by their ordinal. */
   authorHues?: Record<string, string>;
@@ -258,6 +262,7 @@ export function ChatInput({
   busy,
   stagedAnswers = 0,
   busyLabel,
+  busySlug,
   authorHues,
   onCancel,
   onResume,
@@ -895,6 +900,7 @@ export function ChatInput({
                 activity={activity}
                 busy={busy}
                 label={busyLabel}
+                slugOf={busySlug}
                 hues={authorHues}
                 sessionId={sessionId}
               />
@@ -999,11 +1005,13 @@ function formatElapsed(ms: number): string {
 function WorkerLine({
   busy,
   label,
+  slugOf,
   hues,
   sessionId,
 }: {
   busy?: AgentBusy;
   label?: (slug: string) => string;
+  slugOf?: (key: string) => string;
   hues?: Record<string, string>;
   sessionId?: string;
 }) {
@@ -1050,7 +1058,9 @@ function WorkerLine({
         // Tinting by `key` instead would tint by the busy map's slot key, which
         // no other surface holds — same participant, two colours.
         const shown = label?.(key) ?? UNKNOWN_PARTICIPANT;
-        const running = sessionId ? runningTool(messages, key) : null;
+        // The rows are authored by slug; the busy key may be a slot key.
+        const slug = slugOf?.(key) ?? key;
+        const running = sessionId ? runningTool(messages, slug) : null;
         return (
           <span key={key} className="flex min-w-0 items-center gap-1.5">
             {i > 0 && <span className="text-on-surface-variant/40">·</span>}
@@ -1059,8 +1069,8 @@ function WorkerLine({
             </span>
             <span>is working</span>
             <span className="text-on-surface-variant/70" data-testid="turn-age">
-              · {formatElapsed(now - (currentRun(key).start ?? since.current[key] ?? now))}
-              {sessionId ? ` · ${currentRun(key).tools} tools` : ""}
+              · {formatElapsed(now - (currentRun(slug).start ?? since.current[key] ?? now))}
+              {sessionId ? ` · ${currentRun(slug).tools} tools` : ""}
             </span>
             {running && (
               // Feedback #79/#91: what it is running, in the call's own words —
@@ -1126,12 +1136,14 @@ function TurnStatus({
   activity,
   busy,
   label,
+  slugOf,
   hues,
   sessionId,
 }: {
   activity?: SessionActivity;
   busy?: AgentBusy;
   label?: (slug: string) => string;
+  slugOf?: (key: string) => string;
   hues?: Record<string, string>;
   sessionId?: string;
 }) {
@@ -1142,7 +1154,7 @@ function TurnStatus({
   return (
     <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
       {anyBusy(busy) ? (
-        <WorkerLine busy={busy} label={label} hues={hues} sessionId={sessionId} />
+        <WorkerLine busy={busy} label={label} slugOf={slugOf} hues={hues} sessionId={sessionId} />
       ) : (
         // Locked but no per-agent flag yet (e.g. a stale snapshot): stay generic.
         <span>A participant is working</span>

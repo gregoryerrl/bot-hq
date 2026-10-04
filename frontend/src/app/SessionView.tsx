@@ -130,7 +130,7 @@ export function SessionView() {
   // Who is in this session, in turn order — the header roster (rc3 D10) — plus
   // the key → `ROLE · Model` index every author-keyed surface below resolves
   // through (the turn-status line, and the roster row itself).
-  const { participants, labels, hues } = useParticipantLabels(sessionId);
+  const { participants, labels, hues, slugs } = useParticipantLabels(sessionId);
 
   // WS1c (2026-08-27): per-participant delivery lag — the starvation chip's
   // read. Event-driven, NOT a poll (EYES A7 — the refetchInterval polls were
@@ -984,6 +984,8 @@ export function SessionView() {
               // frozen `slot0_busy`/`slot1_busy` pair); `labels` indexes both
               // key spaces, so one lookup names the participant either way.
               busyLabel={(key) => authorLabel(key, labels)}
+              // …and the chat rows the status line reads are authored by slug.
+              busySlug={(key) => (Object.hasOwn(slugs, key) ? slugs[key] : key)}
               authorHues={hues}
               // rc3 D17: typing `@` offers THIS session's participants and
               // nothing else, which is what makes mentioning a non-participant

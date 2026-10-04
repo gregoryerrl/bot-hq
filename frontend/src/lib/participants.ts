@@ -360,12 +360,32 @@ export function authorLabel(
   return UNKNOWN_PARTICIPANT;
 }
 
+/**
+ * Runtime key → the participant's slug, across both key spaces (see
+ * {@link participantRuntimeKeys}). The busy flags arrive slot-keyed
+ * (`#slot0`) while chat rows are authored by slug, and the composer's status
+ * line reads a turn's age, tool count and running tool from those rows — so it
+ * turns the one into the other first. Without it the line found no rows: "0
+ * tools" and no running tool in the live app, while its tests, keyed by slug,
+ * passed (smoke after relaunch, s-3158eb35).
+ */
+export function participantSlugIndex(
+  participants: readonly ParticipantView[],
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const p of participants) {
+    for (const key of participantRuntimeKeys(participants, p)) out[key] = p.slug;
+  }
+  return out;
+}
+
 /** Hook form of {@link participantLabelIndex}, memoised on the roster. */
 export function useParticipantLabels(sessionId: string) {
   const { participants } = useSessionParticipants(sessionId);
   const labels = useMemo(() => participantLabelIndex(participants), [participants]);
   const hues = useMemo(() => participantHueIndex(participants), [participants]);
-  return { participants, labels, hues };
+  const slugs = useMemo(() => participantSlugIndex(participants), [participants]);
+  return { participants, labels, hues, slugs };
 }
 
 /**

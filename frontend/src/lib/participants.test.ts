@@ -7,6 +7,7 @@ import {
   participantLabel,
   participantHueIndex,
   participantRuntime,
+  participantSlugIndex,
   takenColors,
   slugOrdinal,
   slotKey,
@@ -135,6 +136,20 @@ describe("participantLabel — the user's label (rc3 D20)", () => {
       ).toBe("EYES-2 · DeepSeek V4 Pro");
     },
   );
+});
+
+// The busy map is slot-keyed and chat rows are slug-authored: the status line
+// needs the slug behind a slot key (smoke after relaunch, s-3158eb35).
+describe("participantSlugIndex", () => {
+  it("maps both key spaces to the participant's slug", () => {
+    const slugs = participantSlugIndex([
+      p(),
+      p({ id: 2, slug: "eyes", role_display_name: "EYES", turn_position: 1 }),
+    ]);
+    expect(slugs[slotKey(0)]).toBe("hands");
+    expect(slugs[slotKey(1)]).toBe("eyes");
+    expect(slugs.hands).toBe("hands");
+  });
 });
 
 describe("authorLabel", () => {
