@@ -975,6 +975,164 @@ fn publish_value(flag: &str, carries: Carries, value: String, out: &mut OutwardB
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// The Tool Gate's view of a line (L: feedback #50, #62's second half)
+// ---------------------------------------------------------------------------
+
+/// Tools whose arguments are text and never run — the only commands a line
+/// may hold for the Tool Gate to stop matching a keyword inside their quoted
+/// arguments (`grep -E 'gh api|psql'`). EYES' rule (s-3158eb35): no option
+/// that executes, evaluates, or writes to a path named on the command line,
+/// each checked against its man page (macOS, 2026-10-04) and against what the
+/// agent's own Bash runs (`type`): claude-code wraps `grep` over a bundled
+/// ugrep and hands its acting options (`--filter`, `--pager`, `--view`,
+/// `--config`) to `/usr/bin/grep`, and [`names_an_action`] keeps a line with
+/// such an option unrelaxed in any case.
+/// - grep, egrep, fgrep: select and print lines; `-f FILE` reads.
+/// - echo, printf: print their arguments (bash `printf -v` sets a variable).
+/// - cat, head, tail, wc, cut, tr, nl, fold, fmt, column, od, hexdump: read
+///   files or stdin, write stdout.
+/// - jq: a JSON filter with no command execution or file output.
+/// - diff, cmp, comm: compare, write stdout.
+/// - ls, stat, ps: list or format.
+/// - test, `[`, true, false, basename, dirname, realpath, readlink, which,
+///   type, cd, pwd: evaluate or print paths.
+///
+/// Left out on purpose: rg (`--pre`), ack (`--pager`), ag, less and more
+/// (`!`, `+cmd`), man (`-P`), sort (`-o`, `--compress-program`), uniq (an
+/// output operand), yq (`-i`), base64 (`-o`), xxd (an output operand), file
+/// (`-C` writes), date (`-s`), touch, mkdir, tee, sed, awk, find, xargs, git,
+/// env, sudo, ssh, and every shell and interpreter.
+const GATE_DATA_TOOLS: &[&str] = &[
+    "grep", "egrep", "fgrep", "echo", "printf", "cat", "head", "tail", "wc", "cut", "tr", "nl",
+    "fold", "fmt", "column", "od", "hexdump", "jq", "diff", "cmp", "comm", "ls", "stat", "ps",
+    "test", "[", "true", "false", "basename", "dirname", "realpath", "readlink", "which", "type",
+    "cd", "pwd",
+];
+
+/// A long option naming an action (`--pre=…`, `--filter`, `--pager`,
+/// `--exec`): a data tool given one, or a shell alias mapping a data tool's
+/// name onto a tool that has one (`alias grep=rg`), might run or write
+/// something, so the line keeps the whole-line match.
+fn names_an_action(arg: &str) -> bool {
+    let Some(name) = arg.strip_prefix("--") else { return false };
+    let name = name.split('=').next().unwrap_or(name).to_ascii_lowercase();
+    ["pre", "filter", "pager", "view", "config", "exec", "command", "output", "save", "edit"]
+        .iter()
+        .any(|act| name.contains(act))
+}
+
+/// Whether `command`'s quotes close the way a shell would close them. An
+/// ANSI-C `$'…'` string, whose backslash escapes this does not follow, counts
+/// as not closing (the line keeps the whole-line match).
+fn quotes_balance(command: &str) -> bool {
+    if command.contains("$'") {
+        return false;
+    }
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '\'' => {
+                if !chars.by_ref().any(|d| d == '\'') {
+                    return false;
+                }
+            }
+            '"' => loop {
+                match chars.next() {
+                    None => return false,
+                    Some('\\') => {
+                        chars.next();
+                    }
+                    Some('"') => break,
+                    Some(_) => {}
+                }
+            },
+            _ => {}
+        }
+    }
+    true
+}
+
+/// What the Tool Gate matches a Bash line against (L): every command the
+/// line runs, as words (the segment's words before it, its tool, its
+/// arguments), and whether the line is RELAXABLE — the one shape in which a
+/// keyword stops matching as a substring of the whole line:
+/// - the parser accounts for all of it: the quotes close, there is no
+///   heredoc, no script it cannot read (`opaque`), and no command or process
+///   substitution;
+/// - every command is one of [`GATE_DATA_TOOLS`], with nothing but
+///   `NAME=value` assignments before it, and no argument that is a long
+///   option naming an action ([`names_an_action`]);
+/// - nothing is written to a file (`>`, `>>`, `>|`, `<>`, `>&file`; only
+///   `/dev/null` and fd duplications like `2>&1`), since written text can be
+///   run later.
+///
+/// Anything else is not relaxable, and the whole-line match stays exactly as
+/// it was (EYES' conditions, s-3158eb35).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GateSurface {
+    pub commands: Vec<Vec<String>>,
+    pub relaxable: bool,
+}
+
+pub(crate) fn gate_surface(command: &str) -> GateSurface {
+    let cmds = simple_commands(command, 0);
+    let commands = cmds
+        .iter()
+        .map(|c| {
+            let mut words = c.prefix.clone();
+            words.push(c.tool.clone());
+            words.extend(c.args.iter().filter(|w| !w.op).map(|w| w.text.clone()));
+            words
+        })
+        .collect();
+    GateSurface { commands, relaxable: relaxable(command, &cmds) }
+}
+
+fn relaxable(command: &str, cmds: &[Cmd]) -> bool {
+    if cmds.is_empty() || !quotes_balance(command) {
+        return false;
+    }
+    for seg in segments(command) {
+        if !seg.heredocs.is_empty() {
+            return false;
+        }
+        for (k, w) in seg.words.iter().enumerate() {
+            if w.dynamic && !substitution_bodies(&w.text).is_empty() {
+                return false;
+            }
+            if !w.op {
+                continue;
+            }
+            let op = w.text.as_str();
+            if op.starts_with("<<") && !op.starts_with("<<<") {
+                return false;
+            }
+            if op.contains('>') {
+                // `>&2`, `2>&1`, `>&-`: an fd duplication; `>&file` and every
+                // other form write a file.
+                let dup = op.split_once('&').is_some_and(|(_, fd)| !fd.is_empty());
+                let target = seg.words.get(k + 1).map(|t| t.text.as_str());
+                if !dup && target != Some("/dev/null") {
+                    return false;
+                }
+            }
+        }
+    }
+    cmds.iter().all(|c| {
+        !c.opaque
+            && GATE_DATA_TOOLS.contains(&c.tool.as_str())
+            && c.prefix.iter().all(|p| {
+                p.split_once('=')
+                    .is_some_and(|(name, _)| !name.is_empty() && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
+            })
+            && c.args.iter().filter(|w| !w.op).all(|w| !names_an_action(&w.text))
+    })
+}
+
 /// One command a line runs, as the shell would run it: the tool's basename,
 /// its argument words, and the segment's words before it.
 #[derive(Debug, Clone, PartialEq, Eq)]

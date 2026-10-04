@@ -112,3 +112,18 @@ fn the_reviewers_hook_points_a_listed_read_at_read_gate() {
     let (code, out, err) = hook_in(data.path(), "shell-lint", "/bin/bash", "git log -1");
     assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "a pass prints nothing");
 }
+
+/// L (feedback #50): the built hook still stops a command that RUNS a
+/// keyword, and passes one that only quotes it as a grep pattern.
+#[test]
+fn the_tool_gate_hook_passes_a_keyword_quoted_to_grep() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(data.path().join("config")).unwrap();
+    std::fs::write(data.path().join("config/tool-gate.json"), r#"[{"keyword":"gh api","mode":"gate"}]"#).unwrap();
+    let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "gh api repos/o/r");
+    assert_eq!((code, out.as_str()), (2, ""), "{err}");
+    let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "grep -rn 'gh api' src | head -5");
+    assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "a quoted pattern is not a run");
+    let (code, _, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "grep -rn 'gh api' src | sh");
+    assert_eq!(code, 2, "a shell in the line keeps the whole-line match: {err}");
+}

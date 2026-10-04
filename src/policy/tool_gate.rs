@@ -313,35 +313,109 @@ pub fn save(data_dir: &Path, keywords: &[GatedKeyword]) -> Result<()> {
     crate::policy::write_config_atomically(&path, &body)
 }
 
-/// Decide how a Bash call is handled. Case-insensitive substring of each
-/// keyword against `tool_name` OR `command`. **Gate wins over AutoAllow** when
-/// a command matches both (fail-safe: prefer asking over silently running).
+/// Decide how a Bash call is handled. **Gate wins over AutoAllow** when a
+/// command matches both (fail-safe: prefer asking over silently running).
 /// Empty/whitespace-only keywords are ignored (they'd otherwise match
-/// everything). `None` = no keyword matched → run normally.
+/// everything). `None` = no keyword matched → run normally. A keyword hits
+/// per [`keyword_hits`].
 pub fn match_keyword(
     tool_name: &str,
     command: &str,
     keywords: &[GatedKeyword],
 ) -> Option<GateMode> {
-    let tool_lc = tool_name.to_lowercase();
-    let cmd_lc = command.to_lowercase();
-    let hits = |kw: &str| -> bool {
-        let kw_lc = kw.trim().to_lowercase();
-        !kw_lc.is_empty() && (tool_lc.contains(&kw_lc) || cmd_lc.contains(&kw_lc))
-    };
+    let line = Line::new(tool_name, command);
     if keywords
         .iter()
-        .any(|k| k.mode == GateMode::Gate && hits(&k.keyword))
+        .any(|k| k.mode == GateMode::Gate && line.hits(&k.keyword))
     {
         return Some(GateMode::Gate);
     }
     if keywords
         .iter()
-        .any(|k| k.mode == GateMode::AutoAllow && hits(&k.keyword))
+        .any(|k| k.mode == GateMode::AutoAllow && line.hits(&k.keyword))
     {
         return Some(GateMode::AutoAllow);
     }
     None
+}
+
+/// One call, read once for every keyword.
+struct Line {
+    tool_lc: String,
+    cmd_lc: String,
+    surface: crate::signaling::GateSurface,
+}
+
+impl Line {
+    fn new(tool_name: &str, command: &str) -> Self {
+        Self {
+            tool_lc: tool_name.to_lowercase(),
+            cmd_lc: command.to_lowercase(),
+            surface: crate::signaling::gate_surface(command),
+        }
+    }
+
+    /// Whether `keyword` hits (L: feedback #50 and #62's second half; EYES'
+    /// conditions, s-3158eb35). Case-insensitive, and any of:
+    /// - it is a substring of the tool name (a non-Bash tool), as before;
+    /// - its words match consecutive WORDS of a command the line runs
+    ///   ([`words_hit`]) — this only adds hits (`rm -fr`, `"rm" -rf`);
+    /// - it is a substring of the whole line, as before — unless the line is
+    ///   RELAXABLE (`outward_body::gate_surface`: only data tools such as
+    ///   grep and echo, nothing written to a file, nothing it cannot read),
+    ///   where a keyword inside a data tool's quoted argument no longer hits;
+    /// - it holds shell syntax (`|`, `>`, `;`, `$`…) and is a substring of the
+    ///   whole line: such a keyword is about the line, not its words.
+    fn hits(&self, keyword: &str) -> bool {
+        let kw_lc = keyword.trim().to_lowercase();
+        if kw_lc.is_empty() {
+            return false;
+        }
+        if self.tool_lc.contains(&kw_lc) {
+            return true;
+        }
+        let in_line = self.cmd_lc.contains(&kw_lc);
+        if in_line && (!self.surface.relaxable || kw_lc.contains(SHELL_SYNTAX)) {
+            return true;
+        }
+        words_hit(keyword.trim(), &self.surface.commands)
+    }
+}
+
+const SHELL_SYNTAX: [char; 9] = ['|', '>', '<', '&', ';', '$', '`', '(', ')'];
+
+/// Whether `keyword`'s words match consecutive words of one of `commands`:
+/// the first against a word's basename (and a tool such as `mkfs.ext4` for
+/// `mkfs`); a short-flag word (`-rf`) against a flag cluster holding all its
+/// letters (`-fr`, `-rfv`), case-sensitive since `-d` is not `-D`; a last
+/// word ending in a non-alphanumeric character (`if=`, `ep-solitary-field-`)
+/// as a prefix; any other word exactly, case-insensitive.
+fn words_hit(keyword: &str, commands: &[Vec<String>]) -> bool {
+    let kws: Vec<&str> = keyword.split_whitespace().collect();
+    if kws.is_empty() {
+        return false;
+    }
+    commands.iter().any(|words| {
+        (0..words.len()).any(|start| {
+            words.len() - start >= kws.len()
+                && kws
+                    .iter()
+                    .enumerate()
+                    .all(|(n, k)| word_matches(k, &words[start + n], n == 0, n + 1 == kws.len()))
+        })
+    })
+}
+
+fn word_matches(k: &str, w: &str, first: bool, last: bool) -> bool {
+    let w = if first { w.rsplit('/').next().unwrap_or(w) } else { w };
+    let cluster = |s: &str| s.len() >= 2 && s.starts_with('-') && !s.starts_with("--") && s[1..].chars().all(|c| c.is_ascii_alphanumeric());
+    if !first && cluster(k) {
+        return cluster(w) && k[1..].chars().all(|c| w[1..].contains(c));
+    }
+    let (k, w) = (k.to_lowercase(), w.to_lowercase());
+    k == w
+        || (first && w.starts_with(&format!("{k}.")))
+        || (last && k.ends_with(|c: char| !c.is_alphanumeric()) && w.starts_with(&k))
 }
 
 /// WHY a command is gated: the first `gate` keyword that hits it, and the
@@ -349,35 +423,37 @@ pub fn match_keyword(
 /// tool NAME rather than the command). Case-insensitive like [`match_keyword`].
 ///
 /// Exists so the refusal and the approval card can say what matched (feedback
-/// #29, week 35): the match is lexical, so a destructive string appearing as
-/// DATA — `grep -cF "bq rm -r"` inside a read-only verification — parks the
-/// same as the command itself, and a 400-character command gives the user
-/// nothing to approve confidently by. Naming the keyword and where it landed
-/// turns "why is this gated?" into one glance, without loosening the match.
+/// #29, week 35): a destructive string appearing as DATA on a line that is not
+/// relaxable (L, [`Line::hits`]) parks the same as the command itself, and a
+/// 400-character command gives the user nothing to approve confidently by.
+/// Naming the keyword and where it landed turns "why is this gated?" into one
+/// glance.
 pub fn gate_match_detail(
     tool_name: &str,
     command: &str,
     keywords: &[GatedKeyword],
 ) -> Option<GateMatch> {
-    let tool_lc = tool_name.to_lowercase();
-    let cmd_lc = command.to_lowercase();
+    let line = Line::new(tool_name, command);
     keywords
         .iter()
         .filter(|k| k.mode == GateMode::Gate)
         .find_map(|k| {
             let kw_lc = k.keyword.trim().to_lowercase();
-            if kw_lc.is_empty() {
+            if kw_lc.is_empty() || !line.hits(&k.keyword) {
                 return None;
             }
-            if let Some(byte) = cmd_lc.find(&kw_lc) {
+            // Where it landed: the keyword itself, else (a word hit such as
+            // `rm -fr` for `rm -rf`) its first word; `None` = the tool name.
+            let first = kw_lc.split_whitespace().next().unwrap_or(&kw_lc).to_string();
+            let byte = line.cmd_lc.find(&kw_lc).or_else(|| line.cmd_lc.find(&first));
+            let col = match byte {
                 // A char offset, so the number means "column" in what the user
                 // reads even when the command carries multibyte text before it.
-                let col = cmd_lc[..byte].chars().count();
-                return Some(GateMatch { keyword: k.keyword.trim().to_string(), col: Some(col) });
-            }
-            tool_lc
-                .contains(&kw_lc)
-                .then(|| GateMatch { keyword: k.keyword.trim().to_string(), col: None })
+                Some(byte) => Some(line.cmd_lc[..byte].chars().count()),
+                None if line.tool_lc.contains(&kw_lc) => None,
+                None => Some(0),
+            };
+            Some(GateMatch { keyword: k.keyword.trim().to_string(), col })
         })
 }
 
@@ -914,5 +990,117 @@ mod tests {
             resolve_keywords(dir.path(), None),
             vec![kw("push", GateMode::Gate)]
         );
+    }
+
+    /// The global keyword list as it stood on 2026-10-04 (54 `gate` entries,
+    /// `~/.bot-hq/config/tool-gate.json`), for L's table below.
+    const REAL_KEYWORDS: &[&str] = &[
+        "rm -rf", "rm -r", "sudo", "chmod 777", "dd if=", "mkfs", "git reset --hard", "git clean -f",
+        "gh api", "gh issue comment", "gh issue create", "gh issue edit", "gh issue close",
+        "gh issue reopen", "gh issue delete", "gh issue transfer", "gh issue lock", "gh issue unlock",
+        "gh issue pin", "gh issue unpin", "gh pr comment", "gh pr create", "gh pr edit", "gh pr close",
+        "gh pr review", "gh pr merge", "gh release create", "gh release edit", "gh release delete",
+        "gh repo delete", "gh repo archive", "gh secret set", "gh secret delete", "gh gist create",
+        "npm publish", "cargo publish", "psql -h ep-solitary-field-", "gh repo edit", "gh repo create",
+        "gh repo rename", "gh workflow", "gh run rerun", "gh run cancel", "gh variable",
+        "gh release upload", "gh ssh-key", "gh gpg-key", "gh auth token", "git filter-branch",
+        "git filter-repo", "git reflog expire", "git gc --prune", "git remote set-url", "git branch -D",
+    ];
+
+    fn real() -> Vec<GatedKeyword> {
+        REAL_KEYWORDS.iter().map(|k| kw(k, GateMode::Gate)).collect()
+    }
+
+    fn gated(command: &str) -> bool {
+        match_keyword("Bash", command, &real()) == Some(GateMode::Gate)
+    }
+
+    /// L (feedback #50, #62's second half): a keyword that is only TEXT given
+    /// to a data tool, on a line that runs nothing else, no longer parks.
+    #[test]
+    fn a_keyword_given_as_text_to_a_data_tool_no_longer_parks() {
+        assert_eq!(REAL_KEYWORDS.len(), 54);
+        for command in [
+            // #50's two parks (gates 4addadda, 5ed8b955).
+            "grep -n -E 'only through `gh api`, even a GET' conventions.md",
+            "ps -axo pid,etime,command | grep -E 'finalcheck|gcloud|psql|gh api|xargs'",
+            "echo \"next: gh api repos/o/r\"",
+            "grep -rn 'rm -rf' docs/ | head -5",
+            "grep -c 'gh pr merge' notes.md 2>/dev/null",
+            "cd src && grep -rn \"git reset --hard\" .",
+            "printf '%s\\n' 'sudo is gated' | wc -l",
+            "LC_ALL=C grep 'gh api' notes.md 2>&1 | head",
+        ] {
+            assert!(!gated(command), "relaxed: {command}");
+        }
+    }
+
+    /// Every way a keyword RUNS keeps parking: through shells, substitutions,
+    /// wrappers, interpreters, ssh, and wherever the line is not all data.
+    #[test]
+    fn a_keyword_that_runs_still_parks() {
+        for command in [
+            "gh api repos/o/r",
+            "bash -c \"rm -rf x\"",
+            "echo $(gh api x)",
+            "diff <(gh api a) b",
+            "ssh host 'sudo rm -rf /'",
+            "ls | xargs rm -rf",
+            "find . -name x -exec rm -rf {} +",
+            "sudo -u root rm -rf x",
+            "/bin/rm -rf x",
+            "env X=1 gh api x",
+            "timeout 5 gh api x",
+            "python3 -c 'import os; os.system(\"gh api x\")'",
+            "git -c alias.x='!gh api x' x",
+            "python3 <<EOF\nimport os\nos.system('gh api x')\nEOF",
+            "sh -c \"$CMD gh api\"",
+            "psql -h ep-solitary-field-a5wk.aws -c 'select 1'",
+            "cat <<EOF\ngh api\nEOF",
+            // A known false positive that stays: git is not a data tool.
+            "git commit -m \"mention gh api\"",
+        ] {
+            assert!(gated(command), "still gated: {command}");
+        }
+    }
+
+    /// Each relaxed line parks again as soon as one of EYES' conditions fails.
+    #[test]
+    fn a_relaxed_line_parks_again_when_any_condition_fails() {
+        for command in [
+            "grep -rn 'gh api' . | sh",                       // a shell in the pipeline
+            "grep 'gh api' $(ls)",                            // a command substitution
+            "grep 'gh api' notes.md > s.sh",                  // written to a file
+            "echo 'gh api' >& out.txt",                       // written to a file
+            "grep 'gh api notes.md",                          // the quotes do not close
+            "grep 'gh api' notes.md | git hash-object --stdin", // not every tool is data
+            "grep --pre=x 'gh api' notes.md",                 // an option naming an action
+            "nice grep 'gh api' notes.md",                    // a wrapper in front
+            "echo $'gh api'",                                 // an ANSI-C string
+        ] {
+            assert!(gated(command), "not relaxable: {command}");
+        }
+    }
+
+    /// Word matching only adds hits: spellings the substring missed.
+    #[test]
+    fn word_matching_catches_spellings_the_substring_missed() {
+        for command in ["rm -fr x", "\"rm\" -rf x", "git clean -df", "mkfs.ext4 /dev/x", "rm -r -f x"] {
+            assert!(gated(command), "{command}");
+        }
+        // `-D` is not `-d`, on a relaxable line where only words count.
+        let upper = vec![kw("ls -D", GateMode::Gate)];
+        assert_eq!(match_keyword("Bash", "ls -d x", &upper), None);
+        assert_eq!(match_keyword("Bash", "ls -lD x", &upper), Some(GateMode::Gate));
+    }
+
+    /// A keyword holding shell syntax is about the line, so it keeps the
+    /// whole-line match even where words would not see it.
+    #[test]
+    fn a_keyword_with_shell_syntax_matches_the_whole_line() {
+        let kws = vec![kw("> /dev/null", GateMode::Gate)];
+        assert_eq!(match_keyword("Bash", "echo hi > /dev/null", &kws), Some(GateMode::Gate));
+        let detail = gate_match_detail("Bash", "rm -fr x", &real()).unwrap();
+        assert_eq!((detail.keyword.as_str(), detail.col), ("rm -rf", Some(0)));
     }
 }

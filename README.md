@@ -372,7 +372,13 @@ are enforced.
 **Tool Gate.** Beyond `policy.yaml`, a global keyword list (Settings → "Gated Bash
 Keywords") gates agent Bash commands: a `gate` keyword blocks the command and routes
 it to the `action_gate` tool (Approve/Reject → bot-hq executes on approve); an
-`auto_allow` keyword lets it run with no prompt.
+`auto_allow` keyword lets it run with no prompt. A keyword matches a command the line
+runs (`gh api …`, also through `bash -c`, `$(…)`, `ssh` and wrappers, and spelled
+`rm -fr` for `rm -rf`) and, as before, any text of the line — **except** that a
+keyword appearing only as text given to a read-and-print tool (grep, echo, printf,
+cat, head, tail, wc, cut, tr, jq, diff, ls, ps and a few more), on a line that runs
+nothing else and writes no file, **no longer parks**: `grep -rn 'gh api' src` runs
+without a prompt.
 
 **Two layers.** (1) MCP tools (`request_approval`, `action_gate`, …) are
 the primary path — agents call them before the corresponding bash op, and skipping

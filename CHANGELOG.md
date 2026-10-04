@@ -101,6 +101,17 @@ and in `docs/rebuild-archive/`.
 
 ### Changed
 
+- **A Tool Gate keyword that is only text no longer parks.** Keywords were
+  matched anywhere in a command line, so a `grep` for "gh api" in your notes,
+  or an `echo` that mentions `rm -rf`, waited for your approval like the
+  command itself. A keyword appearing only as text given to a read-and-print
+  tool (grep, echo, printf, cat, head, tail, wc, cut, tr, jq, diff, ls, ps
+  and a few more), on a line that runs nothing else and writes no file, no
+  longer parks. Everything else matches as before: a line with a shell, an
+  interpreter, `$(…)`, a heredoc, any other tool or a file write keeps the
+  whole-line match. Keywords now also catch other spellings of the command
+  they name: `rm -fr` for `rm -rf`, and `git clean -df` for `git clean -f`.
+
 - **`terminal_read` and `terminal_exec` return the terminal's text as the
   screen shows it.** They returned the raw bytes: colour and mode codes, the
   shell's prompt redraws, and its echo of a typed line (`p` + backspace +

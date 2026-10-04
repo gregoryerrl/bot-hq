@@ -1039,8 +1039,17 @@ hold a reviewer more strictly belonged to the native loop and went with it (D9).
   `[{keyword, mode}]`, `mode` ∈ `gate | auto_allow`, edited in Settings
   ("Gated Bash Keywords"). NOT per-project, NOT in `policy.yaml` —
   bot-hq-side, so nothing is written into a working repo.
-  Matching is case-insensitive substring against the tool name or command;
-  `gate` wins over `auto_allow` on conflict.
+  Matching (L, feedback #50/#62; `tool_gate::Line::hits`) is case-insensitive: a
+  substring of the tool name; the keyword's words against consecutive words of a
+  command the line runs (`outward_body::gate_surface` over the K parser; basename
+  for the first word, short-flag clusters as letter sets, a trailing `=`/`-` word
+  as a prefix); and a substring of the whole line — UNLESS the line is relaxable:
+  balanced quotes, no heredoc, no substitution, nothing opaque, every command in
+  `GATE_DATA_TOOLS` (grep, echo, cat, jq, ls, ps… — no option that runs, evaluates
+  or writes a named file) with only assignments before it, no long option naming an
+  action, and no output redirection but `/dev/null` and fd dups. A keyword holding
+  shell syntax always keeps the whole-line match. `gate` wins over `auto_allow` on
+  conflict.
 - **Tripwire:** the PreToolUse Bash hook (`policy-check tool-gate`, injected
   at spawn via `--settings` into every participant whose role holds
   `edit_files` — `src/policy/hooks.rs`
