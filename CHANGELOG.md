@@ -45,7 +45,9 @@ and in `docs/rebuild-archive/`.
   `prod_read` then parks a query for your approval with the SQL itself on the
   card, not wrapped in shell. Only reading statements are accepted, the whole
   query runs as one read-only transaction with a time limit, and the password
-  is never in the command: it is read from your file when you approve. SQL
+  is never in the command: it is read from your file when you approve. A
+  setting still holding a `<placeholder>` counts as unset: the call is refused
+  at once, naming the settings to fill in. SQL
   that could be read two ways (a nested comment, an escape string, a
   backslash) is refused, and bot-hq's own first statements fix the
   transaction as read-only before yours run. Calls to functions that act

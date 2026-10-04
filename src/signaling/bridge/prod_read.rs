@@ -290,6 +290,15 @@ fn guard(timeout_ms: u32) -> String {
     )
 }
 
+/// A config value still shaped `<…>` — a placeholder the user has yet to
+/// fill (the drafted `prod_read:` blocks ship them). It parses as a real
+/// string, so without this a call parked, went through review and approval,
+/// and only then failed on the unreadable env file (EYES, s-3158eb35).
+fn is_placeholder(value: &str) -> bool {
+    let value = value.trim();
+    value.len() >= 2 && value.starts_with('<') && value.ends_with('>')
+}
+
 /// The command approval runs (all values shell-quoted, the password NOT in
 /// it): `psql -1 -f -` reads the heredoc as one script, in one transaction —
 /// [`guard`] first, then the agent's SQL — also under
@@ -375,6 +384,27 @@ impl SignalingBridge {
         };
         if !cfg.engine.trim().eq_ignore_ascii_case("postgres") {
             anyhow::bail!("prod_read supports `engine: postgres` only; this project sets `{}`", cfg.engine);
+        }
+        let placeholders: Vec<&str> = [
+            ("host", Some(cfg.host.as_str())),
+            ("database", Some(cfg.database.as_str())),
+            ("user", Some(cfg.user.as_str())),
+            ("sslmode", cfg.sslmode.as_deref()),
+            ("env_file", cfg.env_file.as_deref()),
+            ("password_var", cfg.password_var.as_deref()),
+            ("password_file", cfg.password_file.as_deref()),
+            ("psql", cfg.psql.as_deref()),
+        ]
+        .into_iter()
+        .filter(|(_, value)| value.is_some_and(is_placeholder))
+        .map(|(key, _)| key)
+        .collect();
+        if !placeholders.is_empty() {
+            anyhow::bail!(
+                "the project's prod_read block still has placeholders: {} — the user fills them in \
+                 its policy.yaml before prod_read can run",
+                placeholders.join(", ")
+            );
         }
         if cfg.host.trim().is_empty() || cfg.database.trim().is_empty() || cfg.user.trim().is_empty() {
             anyhow::bail!("the project's prod_read block needs a host, a database and a user");

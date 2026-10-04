@@ -4506,6 +4506,24 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
             .await
             .unwrap_err();
         assert!(err.to_string().contains("`UPDATE`"), "{err}");
+        // A drafted block's `<placeholders>` count as unset: refused at call
+        // time, naming them (EYES, s-3158eb35).
+        std::fs::write(
+            data.path().join("config/general-policy.yaml"),
+            "prod_read:\n  engine: postgres\n  host: h\n  database: <database>\n  user: <read-only user>\n  \
+             env_file: <absolute path>\n  password_var: <variable>\n",
+        )
+        .unwrap();
+        let err = bridge.prod_read("s1".into(), "hands".into(), "select 1".into(), None, None).await.unwrap_err();
+        assert!(
+            err.to_string().contains("still has placeholders: database, user, env_file, password_var"),
+            "{err}"
+        );
+        std::fs::write(
+            data.path().join("config/general-policy.yaml"),
+            "prod_read:\n  engine: postgres\n  host: h\n  database: d\n  user: u\n  password_file: /nonexistent\n",
+        )
+        .unwrap();
         // Windows line ends are made plain before the check, not refused as
         // carriage returns (EYES `1e62db22`).
         let out = bridge
