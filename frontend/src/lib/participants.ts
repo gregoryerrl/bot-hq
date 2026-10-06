@@ -66,8 +66,33 @@ export type ParticipantView = {
    *  a pre-floor row — and without this flag that would be indistinguishable
    *  from a row nothing ever spawned. False means say nothing. */
   spawn_knobs_recorded: boolean;
+  /** The Claude config dir this participant was spawned into (migration
+   *  0090): `""` = the default `~/.claude`; null = not spawned since 0090.
+   *  From the spawn snapshot, never the model row. */
+  account_dir_at_spawn: string | null;
+  /** The account signed in to that dir at spawn, as the CLI reported it —
+   *  what tells two participants on one model id apart by what they bill.
+   *  Null for a gateway participant or when the CLI could not say. */
+  account_email_at_spawn: string | null;
   enabled: boolean;
 };
+
+/** The account chip beside a participant (0090): the email the CLI reported
+ *  at spawn, else the config dir's last segment, else nothing — the model
+ *  name is the same on every account, so without this nobody can tell. */
+export function participantAccount(
+  p: Pick<ParticipantView, "account_dir_at_spawn" | "account_email_at_spawn">,
+): { text: string; title: string } | null {
+  const email = p.account_email_at_spawn?.trim();
+  const dir = p.account_dir_at_spawn?.trim().replace(/[\\/]+$/, "") ?? null;
+  const dirText = dir === null ? null : dir === "" ? "~/.claude" : dir;
+  if (email) {
+    return { text: email, title: `Bills ${email}${dirText ? ` (${dirText})` : ""}` };
+  }
+  if (dir === null || dir === "") return null;
+  const parts = dir.split(/[\\/]/);
+  return { text: parts[parts.length - 1] || dir, title: `Claude config dir: ${dir}` };
+}
 
 /** The roster read (`src/tauri_cmd/sessions.rs`). Named once, here. */
 const LIST_PARTICIPANTS_CMD = "list_session_participants";

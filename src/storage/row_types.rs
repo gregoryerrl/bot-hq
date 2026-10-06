@@ -156,6 +156,13 @@ pub struct AgentConfig {
     #[serde(default)]
     #[sqlx(default)]
     pub cli_settings: Option<String>,
+    /// The Claude config dir this model's subscription is signed in under
+    /// (`CLAUDE_CONFIG_DIR`), copied from the chosen [`Model`]; `None`/blank =
+    /// the CLI's default `~/.claude`. The `agent_configs` fallback tier has no
+    /// such column and always carries `None`.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub claude_config_dir: Option<String>,
 }
 
 /// A saved model in the user-managed registry (`models` table). Bundles the
@@ -190,6 +197,14 @@ pub struct Model {
     #[serde(default)]
     #[sqlx(default)]
     pub cli_settings: Option<String>,
+    /// The Claude config dir (`CLAUDE_CONFIG_DIR`) a participant on this row
+    /// is spawned with — the account it bills, when the row has no gateway
+    /// credential. `None`/blank = the CLI's default `~/.claude`. An absolute
+    /// path, stored as typed (minus a trailing slash): the string IS the
+    /// account's credential slot, so it is never canonicalized (0090).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub claude_config_dir: Option<String>,
 }
 
 /// Surface type of a question parked for the user.

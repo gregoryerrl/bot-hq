@@ -728,6 +728,14 @@ async fn spawn_session_handle(
     // companion notice). Captured here because `cfg` is consumed by
     // `participant_spawn_config` below.
     let mut configured_windows: Vec<Option<u64>> = Vec::with_capacity(live.len());
+    // Per participant, the config dir it spawns into — so a roster whose
+    // subscription-billed participants bill different accounts is announced
+    // once, below the loop (gateway participants are not accounts).
+    let mut accounts: Vec<(String, ParticipantAccount)> = Vec::with_capacity(live.len());
+    // Per participant, the wire model id it spawns on — the pump's limit
+    // mark is per account AND model (0091).
+    let mut model_names: Vec<String> = Vec::with_capacity(live.len());
+    let auth_probe = live_auth_probe();
     for (slot, p) in live.iter().enumerate() {
         // D8's model chain: the participant's own pick (create dialog) wins,
         // then the ROLE's default, then the per-agent row. The middle step is
@@ -775,8 +783,20 @@ async fn spawn_session_handle(
             mcp_temp.path(),
             working_repo_path.clone(),
             &bridge,
+            &*auth_probe,
         )
         .await?;
+        accounts.push((
+            p.slug.clone(),
+            ParticipantAccount {
+                dir: spawn_cfg.account_dir.clone().unwrap_or_default(),
+                email: spawn_cfg.account_email.clone(),
+                org: spawn_cfg.account_org.clone(),
+                subscription: bills_a_subscription(&spawn_cfg.config),
+                console_login: None,
+            },
+        ));
+        model_names.push(spawn_cfg.config.model_name.clone());
         // Supervised: a transient upstream API error (e.g. 529 Overloaded)
         // auto-resumes the agent with capped backoff instead of stranding the
         // session.
@@ -791,6 +811,17 @@ async fn spawn_session_handle(
         let system_prompt_path = spawn_cfg.system_prompt_path.clone();
         let handle = spawn_supervised_agent(spawn_cfg, RetryPolicy::default()).await?;
         spawned.push((handle, system_prompt_path));
+    }
+    if let Some(text) = account_straddle_notice(&accounts) {
+        crate::core::post_system_notice(
+            &storage,
+            Some(&bridge),
+            &session.id,
+            crate::storage::MessageKind::SystemNotice,
+            text,
+            None,
+        )
+        .await;
     }
     // The second slot's spawn model is NULL when this session runs one agent —
     // the header's "no peer" state, which the old code produced by skipping
@@ -1018,6 +1049,22 @@ async fn spawn_session_handle(
             self_nudges: caps.grants(crate::agents::Capability::EditFiles),
             edits_files: caps.grants(crate::agents::Capability::EditFiles),
             configured_context_window: configured_windows.get(slot).copied().flatten(),
+            // 0091: only a subscription-billed participant's limit marks an
+            // account; a gateway's balance error names none.
+            bills_subscription: accounts.get(slot).is_some_and(|(_, a)| a.subscription),
+            // The account answering at THIS spawn and the model it runs — the
+            // pump marks a limit against exactly that pair.
+            account_dir: accounts.get(slot).map(|(_, a)| a.dir.clone()),
+            // The org answering now, else the one the row recorded — the
+            // same fallback `account_limited_notice` reads, so a mark set
+            // while the status was unreadable is found by the next spawn
+            // that can read it (EYES 69979e2f).
+            account_org: accounts
+                .get(slot)
+                .and_then(|(_, a)| a.org.clone())
+                .or_else(|| p.account_org_at_spawn.clone()),
+            account_email: accounts.get(slot).and_then(|(_, a)| a.email.clone()),
+            model_name: model_names.get(slot).cloned().unwrap_or_default(),
             // rc3 D21 — orientation is not a turn. See `PumpConfig::booting`.
             booting: Some(Arc::clone(&booting)),
             boot_done: Some(boot_done_tx.clone()),
@@ -1498,6 +1545,289 @@ async fn display_name_for(storage: &Storage, p: &crate::storage::Participant) ->
 /// here removes the wires rather than testing them, and
 /// `a_participant_spawns_with_the_overrides_its_role_resolves` covers what
 /// remains.
+/// The login-status reader a spawn uses: `Some(dir)` for a custom config dir,
+/// `None` for the default. Injected into [`participant_spawn_config`] so the
+/// test suite never runs the machine's `claude` (or reads its login state);
+/// production passes [`live_auth_probe`].
+pub(crate) type AuthProbeFn =
+    dyn Fn(Option<String>) -> futures::future::BoxFuture<'static, crate::agents::spawn::AuthProbe>
+        + Send
+        + Sync;
+
+/// The production probe: `claude auth status --json` through the dir.
+pub(crate) fn live_auth_probe() -> Box<AuthProbeFn> {
+    Box::new(|dir| Box::pin(async move { crate::agents::spawn::auth_status("claude", dir.as_deref()).await }))
+}
+
+/// A probe that cannot tell (`Unreadable`), for tests that spawn without a
+/// CLI: never a refusal, never an identity.
+#[cfg(test)]
+pub(crate) fn no_auth_probe() -> Box<AuthProbeFn> {
+    Box::new(|_| Box::pin(async { crate::agents::spawn::AuthProbe::Unreadable("no CLI in tests".into()) }))
+}
+
+/// Whether a model configuration bills a Claude subscription (ambient login in
+/// a config dir) rather than a gateway with its own credential. A gateway
+/// participant still spawns into its dir (its session store lives there), but
+/// has no account to check, mark or announce.
+pub(crate) fn bills_a_subscription(cfg: &AgentConfig) -> bool {
+    cfg.auth_token.as_deref().is_none_or(str::is_empty)
+        && cfg.base_url.as_deref().is_none_or(str::is_empty)
+}
+
+/// What [`resolve_participant_account`] decided: the dir the child is spawned
+/// into (`''` = the CLI's default) and, for a subscription-billed participant,
+/// the identity the CLI reported there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParticipantAccount {
+    pub dir: String,
+    pub email: Option<String>,
+    pub org: Option<String>,
+    pub subscription: bool,
+    /// The notice for a dir signed in with something other than the
+    /// subscription login (a Console key), posted by the caller; `None`
+    /// otherwise.
+    pub console_login: Option<String>,
+}
+
+impl ParticipantAccount {
+    /// The `CLAUDE_CONFIG_DIR` to pass, `None` for the default dir.
+    pub fn account_dir(&self) -> Option<String> {
+        (!self.dir.is_empty()).then(|| self.dir.clone())
+    }
+}
+
+/// The one place a participant's account is decided (migration 0090).
+///
+/// The DIR is resolved ONCE, at the first spawn, from the model row, and
+/// recorded on the participant; every later spawn reuses the record and never
+/// consults the row again — claude-code's session store lives inside the dir,
+/// so a `--resume` anywhere else starts blank. This holds for a gateway
+/// participant too (G1): a resume is tied to the dir whatever the billing.
+///
+/// The IDENTITY (email, organisation id) is what `claude auth status` reports
+/// for the dir — the public contract, read at every spawn of a
+/// subscription-billed participant. A dir is a credential slot, not an account:
+/// `/login` swaps the account behind the same dir and a resume crosses over
+/// silently (seen 2026-10-06T13:07Z), so a resume that finds a different email
+/// than the one recorded posts a notice. A row 0090 backfilled (dir `''`, no
+/// identity) just records what it finds, without a notice (G2).
+///
+/// A FIRST spawn into a custom dir that the CLI reports as logged out is
+/// refused with the login command (spec §5 `unavailable`): claude would create
+/// the dir, fail its own auth, and the retry supervisor would retry it. An
+/// UNREADABLE status is a third state and never a refusal (G3): the spawn goes
+/// ahead and the CLI reports its own error. The default dir is never refused —
+/// it is what every participant used before 0090 and claude reports its own
+/// error there, as before.
+///
+/// `probe` is the status reader, injected so the decision can be tested
+/// without a `claude` binary; production passes `agents::spawn::auth_status`.
+pub(crate) async fn resolve_participant_account<F, Fut>(
+    storage: &Storage,
+    p: &crate::storage::Participant,
+    cfg: &AgentConfig,
+    probe: F,
+) -> Result<ParticipantAccount>
+where
+    F: Fn(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = crate::agents::spawn::AuthProbe>,
+{
+    use crate::agents::spawn::{login_command, AuthProbe};
+    let first_spawn = p.account_dir_at_spawn.is_none();
+    let dir = match &p.account_dir_at_spawn {
+        Some(recorded) => recorded.clone(),
+        None => crate::storage::normalize_config_dir(cfg.claude_config_dir.as_deref())
+            .unwrap_or_default(),
+    };
+    let subscription = bills_a_subscription(cfg);
+    let custom = !dir.is_empty();
+    let mut email: Option<String> = None;
+    let mut org: Option<String> = None;
+    let mut console_login: Option<String> = None;
+    if subscription {
+        match probe((custom).then(|| dir.clone())).await {
+            // A signed-in dir whose method is not the claude.ai OAuth login
+            // (the one measured subscription value) is a Console sign-in —
+            // API usage billing, the thing spec goal 4 forbids by accident.
+            // A first spawn into such a custom dir is refused like a
+            // logged-out one; anywhere else it is said once and goes ahead
+            // (EYES 5f2050f8).
+            AuthProbe::LoggedIn {
+                auth_method: Some(method),
+                email: e,
+                ..
+            } if method != SUBSCRIPTION_AUTH_METHOD => {
+                let who = e.as_deref().unwrap_or("an account");
+                let shown = if custom { dir.as_str() } else { "~/.claude" };
+                if first_spawn && custom {
+                    anyhow::bail!(
+                        "{} can't start: {dir} is signed in as {who} with `{method}`, which bills \
+                         API usage, not a subscription. Sign the subscription in and start again: {}",
+                        p.slug,
+                        login_command(&dir)
+                    );
+                }
+                warn!(participant = %p.slug, dir = %shown, %method, "the dir's login is not a subscription login");
+                console_login = Some(format!(
+                    "⚠ [bot-hq] {} runs in {shown}, signed in as {who} with `{method}` — that bills API \
+                     usage, not a subscription.",
+                    p.slug
+                ));
+            }
+            AuthProbe::LoggedIn {
+                email: e, org_id, ..
+            } => {
+                email = e;
+                org = org_id;
+            }
+            AuthProbe::LoggedOut if first_spawn && custom => {
+                let command = login_command(&dir);
+                let text = format!(
+                    "{} can't start: {dir} is not logged in to a Claude account. \
+                     Run this in your terminal, then start the session again: {command}",
+                    p.slug
+                );
+                anyhow::bail!("{text}");
+            }
+            AuthProbe::LoggedOut => {
+                warn!(
+                    participant = %p.slug,
+                    dir = %if custom { dir.as_str() } else { "~/.claude" },
+                    "the participant's config dir is not logged in; the CLI will report its own error"
+                );
+            }
+            AuthProbe::Unreadable(why) => {
+                warn!(participant = %p.slug, %why, "could not confirm the participant's login; spawning anyway");
+            }
+        }
+    }
+    // Record: the dir at the first spawn; the identity whenever the row has
+    // none yet (a backfilled row records at its first resume, G2). A failed
+    // write must not fail the spawn — same posture as `set_spawn_knobs`.
+    let record = first_spawn || (p.account_email_at_spawn.is_none() && email.is_some());
+    if record {
+        if let Err(e) = storage
+            .set_account_at_spawn(p.id, &dir, email.as_deref(), org.as_deref())
+            .await
+        {
+            warn!(participant = %p.slug, ?e, "recording the account at spawn failed");
+        }
+    }
+    info!(
+        participant = %p.slug,
+        dir = %if custom { dir.as_str() } else { "~/.claude" },
+        email = email.as_deref().unwrap_or(if subscription { "unknown" } else { "gateway" }),
+        first_spawn,
+        "participant account"
+    );
+    Ok(ParticipantAccount {
+        dir,
+        email,
+        org,
+        subscription,
+        console_login,
+    })
+}
+
+/// The `authMethod` a subscription login reports (`claude auth status`,
+/// measured on 2.1.284, gate `a7e94fdd`). Anything else that is signed in is
+/// a Console (API-billing) login.
+pub(crate) const SUBSCRIPTION_AUTH_METHOD: &str = "claude.ai";
+
+/// The one-line notice a resume posts when the account behind a participant's
+/// dir is no longer the one it started on, or `None` when nothing changed (or
+/// nothing is known on either side).
+pub(crate) fn account_mismatch_notice(
+    p: &crate::storage::Participant,
+    now: &ParticipantAccount,
+) -> Option<String> {
+    let was = p.account_email_at_spawn.as_deref()?;
+    let is = now.email.as_deref()?;
+    if was == is {
+        return None;
+    }
+    let dir = if now.dir.is_empty() { "~/.claude" } else { now.dir.as_str() };
+    Some(format!(
+        "⚠ [bot-hq] {} resumes in {dir}, which is now signed in as {is}; it was {was} \
+         when this session started. Its usage now bills {is}.",
+        p.slug
+    ))
+}
+
+/// The one-line notice for a spawn onto an account carrying a limit mark
+/// (0091), or `None`: not a subscription participant, no mark for this dir +
+/// organisation, or the mark's reset has passed.
+pub(crate) async fn account_limited_notice(
+    storage: &Storage,
+    p: &crate::storage::Participant,
+    account: &ParticipantAccount,
+    model_name: &str,
+) -> Option<String> {
+    if !account.subscription {
+        return None;
+    }
+    // The organisation answering NOW, else the one recorded; the mark is
+    // per model, so an exhausted Fable says nothing to an Opus spawn.
+    let org = account.org.clone().or_else(|| p.account_org_at_spawn.clone()).unwrap_or_default();
+    let mark = storage.get_account_mark(&account.dir, &org, model_name).await.ok()??;
+    let now = chrono::Utc::now();
+    let until = mark
+        .limited_until
+        .as_deref()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&chrono::Utc));
+    if until.is_some_and(|u| u <= now) {
+        return None;
+    }
+    let who = account
+        .email
+        .clone()
+        .or_else(|| mark.email.clone())
+        .unwrap_or_else(|| if account.dir.is_empty() { "~/.claude".into() } else { account.dir.clone() });
+    let when = match until {
+        Some(u) => format!(
+            "limited until about {}",
+            u.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M %Z")
+        ),
+        None => "no reset time was given".to_string(),
+    };
+    Some(format!(
+        "ℹ [bot-hq] {} starts on {who} with {model_name}, which reported \"{}\" at {} — {when}. It may not answer until then.",
+        p.slug,
+        mark.limited_text.trim(),
+        mark.marked_at
+    ))
+}
+
+/// The one-line notice for a roster whose subscription-billed participants
+/// spawn into different config dirs, or `None` when they share one (gateway
+/// participants are not accounts and are not counted — G1/P4).
+pub(crate) fn account_straddle_notice(accounts: &[(String, ParticipantAccount)]) -> Option<String> {
+    let subs: Vec<&(String, ParticipantAccount)> =
+        accounts.iter().filter(|(_, a)| a.subscription).collect();
+    let mut dirs: Vec<&str> = subs.iter().map(|(_, a)| a.dir.as_str()).collect();
+    dirs.sort_unstable();
+    dirs.dedup();
+    if dirs.len() < 2 {
+        return None;
+    }
+    let who = subs
+        .iter()
+        .map(|(slug, a)| {
+            let dir = if a.dir.is_empty() { "~/.claude" } else { a.dir.as_str() };
+            match &a.email {
+                Some(email) => format!("{slug} on {email} ({dir})"),
+                None => format!("{slug} in {dir}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "ℹ [bot-hq] This session's participants bill different Claude accounts: {who}."
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn participant_spawn_config(
     storage: &Storage,
@@ -1516,6 +1846,7 @@ async fn participant_spawn_config(
     // caller that passes `None` for convenience. The two tests that only want
     // the rendered config build a throwaway bridge, which costs them one line.
     bridge: &Arc<SignalingBridge>,
+    auth_probe: &AuthProbeFn,
 ) -> Result<SpawnConfig> {
     let agent_name = p.slug.as_str();
     // The participant's OWN session, not one passed alongside it. A mismatch
@@ -1523,6 +1854,64 @@ async fn participant_spawn_config(
     // at delivery time; taking it off the row means it cannot arise.
     let session_id = p.session_id.as_str();
     let capabilities = participant_capabilities(p);
+    // The account (config dir + signed-in identity) — decided from the
+    // participant's spawn snapshot, recorded at the first spawn; see
+    // `resolve_participant_account`. A refusal (a logged-out custom dir on a
+    // first spawn) is posted to the channel so the user reads the login
+    // command where the session stopped, then fails the spawn.
+    let account = match resolve_participant_account(storage, p, &config, |dir| auth_probe(dir)).await
+    {
+        Ok(account) => account,
+        Err(e) => {
+            crate::core::post_system_notice(
+                storage,
+                Some(bridge),
+                session_id,
+                crate::storage::MessageKind::SystemNotice,
+                format!("⚠ [bot-hq] {e}"),
+                None,
+            )
+            .await;
+            return Err(e);
+        }
+    };
+    if let Some(text) = &account.console_login {
+        crate::core::post_system_notice(
+            storage,
+            Some(bridge),
+            session_id,
+            crate::storage::MessageKind::SystemNotice,
+            text.clone(),
+            None,
+        )
+        .await;
+    }
+    if let Some(text) = account_mismatch_notice(p, &account) {
+        crate::core::post_system_notice(
+            storage,
+            Some(bridge),
+            session_id,
+            crate::storage::MessageKind::SystemNotice,
+            text,
+            None,
+        )
+        .await;
+    }
+    // Spawning onto an account that reported a limit (0091): say so, once,
+    // where the session starts. Advisory — the spawn goes ahead (the account
+    // may well answer: extra usage, or the reset passed), and nothing here
+    // names another account.
+    if let Some(text) = account_limited_notice(storage, p, &account, &config.model_name).await {
+        crate::core::post_system_notice(
+            storage,
+            Some(bridge),
+            session_id,
+            crate::storage::MessageKind::SystemNotice,
+            text,
+            None,
+        )
+        .await;
+    }
     // Claude-config overrides for the ROLE this participant plays. Resolved
     // HERE, from the participant, so the set that filters the mcp-config below
     // and the set that reaches `SpawnConfig` are the same one — see
@@ -1618,6 +2007,9 @@ async fn participant_spawn_config(
         capabilities,
         overrides,
         blank_cli_attribution,
+        account_dir: account.account_dir(),
+        account_email: account.email.clone(),
+        account_org: account.org.clone(),
     })
 }
 
@@ -2097,6 +2489,7 @@ fn default_agent_config(name: &str) -> AgentConfig {
         updated_at: String::new(),
         context_window: None,
         cli_settings: None,
+        claude_config_dir: None,
     }
 }
 
@@ -2584,6 +2977,7 @@ pub(crate) async fn resolve_spawn_config(
                 updated_at: m.updated_at,
                 context_window: m.context_window,
                 cli_settings: m.cli_settings,
+                claude_config_dir: m.claude_config_dir,
             };
         }
         tracing::warn!(
@@ -2624,6 +3018,7 @@ pub(crate) async fn resolve_spawn_config(
             updated_at: m.updated_at,
             context_window: m.context_window,
             cli_settings: m.cli_settings,
+            claude_config_dir: m.claude_config_dir,
         };
     }
     default_agent_config(agent_name)
@@ -2913,6 +3308,9 @@ mod tests {
             effort_at_spawn: None,
             ultracode_at_spawn: None,
             spawn_knobs_recorded: false,
+            account_dir_at_spawn: None,
+            account_email_at_spawn: None,
+            account_org_at_spawn: None,
             id,
             session_id: "s1".into(),
             slug: slug.into(),
@@ -3317,6 +3715,7 @@ mod tests {
             updated_at: String::new(),
             context_window: None,
             cli_settings: None,
+            claude_config_dir: None,
         };
         cfg.model_name = "kimi-k3".into();
         cfg.base_url = Some("https://gw.example/anthropic".into());
@@ -3517,6 +3916,7 @@ mod tests {
                     &dir,
                     None,
                     &SignalingBridge::new(),
+                    &*no_auth_probe(),
                 )
                 .await
                 .expect("spawn config")
@@ -3596,6 +3996,7 @@ mod tests {
             mcp_temp.path(),
             None,
             &SignalingBridge::new(),
+            &*no_auth_probe(),
         )
         .await
         .expect("spawn config");
@@ -3644,6 +4045,7 @@ mod tests {
             mcp_temp.path(),
             None,
             &bridge,
+            &*no_auth_probe(),
         )
         .await
         .expect("spawn config");
@@ -3706,6 +4108,7 @@ mod tests {
                 mcp_temp.path(),
                 None,
                 &bridge,
+                &*no_auth_probe(),
             )
             .await
             .expect("spawn config");
@@ -3755,6 +4158,7 @@ mod tests {
                     mcp_temp.path(),
                     None,
                     &bridge,
+                    &*no_auth_probe(),
                 )
                 .await
                 .expect("spawn config");
@@ -3827,6 +4231,7 @@ mod tests {
             mcp_temp.path(),
             None,
             &SignalingBridge::new(),
+            &*no_auth_probe(),
         )
         .await
         .expect("spawn config");
@@ -3875,6 +4280,7 @@ mod tests {
             mcp_temp.path(),
             None,
             &SignalingBridge::new(),
+            &*no_auth_probe(),
         )
         .await
         .expect("spawn config");
@@ -3910,6 +4316,7 @@ mod tests {
             updated_at: String::new(),
             context_window: None,
             cli_settings: None,
+            claude_config_dir: None,
         };
         cfg.model_name = "from-the-agent-row".into();
         cfg.auth_token = Some("agent-row-token".into());
@@ -3926,6 +4333,7 @@ mod tests {
             updated_at: String::new(),
             context_window: None,
             cli_settings: None,
+            claude_config_dir: None,
         })
         .await
         .unwrap();
@@ -3953,7 +4361,422 @@ mod tests {
             updated_at: String::new(),
             context_window: Some(1_000_000),
             cli_settings: Some(FABLE_CLI.into()),
+            claude_config_dir: None,
         }
+    }
+
+    // ---- 0090: the participant's account ---------------------------------
+
+    /// A probe that answers the same thing every time and remembers what it
+    /// was asked, so a test can say which dir the spawn consulted.
+    fn fixed_probe(
+        answer: crate::agents::spawn::AuthProbe,
+    ) -> (
+        impl Fn(Option<String>) -> futures::future::BoxFuture<'static, crate::agents::spawn::AuthProbe>,
+        Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    ) {
+        let asked: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+        let seen = Arc::clone(&asked);
+        let probe = move |dir: Option<String>| {
+            seen.lock().unwrap().push(dir);
+            let answer = answer.clone();
+            Box::pin(async move { answer }) as futures::future::BoxFuture<'static, _>
+        };
+        (probe, asked)
+    }
+
+    fn logged_in(email: &str, org: &str) -> crate::agents::spawn::AuthProbe {
+        crate::agents::spawn::AuthProbe::LoggedIn {
+            auth_method: Some("claude.ai".into()),
+            email: Some(email.into()),
+            org_id: Some(org.into()),
+            subscription_type: Some("max".into()),
+        }
+    }
+
+    /// One HANDS participant on model row `model_id`, in session `s1`.
+    async fn seed_hands_on(s: &Storage, model_id: &str) -> crate::storage::Participant {
+        s.create_session("s1", "t", None).await.unwrap();
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        s.seed_session_roster(
+            "s1",
+            &[crate::storage::ParticipantDraft {
+                role_id: hands.id,
+                model_id: Some(model_id.into()),
+                ..Default::default()
+            }],
+        )
+        .await
+        .unwrap();
+        s.participants_for_session("s1").await.unwrap().remove(0)
+    }
+
+    async fn reread(s: &Storage) -> crate::storage::Participant {
+        s.participants_for_session("s1").await.unwrap().remove(0)
+    }
+
+    /// The spawn-snapshot rule, as the multi-spawn fixture the conventions
+    /// ask for: the dir a participant is spawned into is decided ONCE, from
+    /// the model row, at its first spawn — and a later spawn reuses the record
+    /// even after the row was pointed elsewhere, so a `--resume` lands where
+    /// the session store is. The probe is asked about the RECORDED dir, and
+    /// the command built from it carries that dir as `CLAUDE_CONFIG_DIR`.
+    #[tokio::test]
+    async fn the_account_is_recorded_at_first_spawn_and_reused_after_the_model_row_changes() {
+        let s = Storage::memory().await.unwrap();
+        let mut row = fable_row("m-b");
+        row.claude_config_dir = Some("/tmp/bot-hq-acct-b".into());
+        s.upsert_model(&row).await.unwrap();
+        let p = seed_hands_on(&s, "m-b").await;
+        assert_eq!(p.account_dir_at_spawn, None, "nothing recorded before a spawn");
+
+        let cfg = resolve_participant_config(&s, &p).await;
+        assert_eq!(cfg.claude_config_dir.as_deref(), Some("/tmp/bot-hq-acct-b"));
+        let (probe, asked) = fixed_probe(logged_in("b@example.com", "org-b"));
+        let first = resolve_participant_account(&s, &p, &cfg, &probe).await.unwrap();
+        assert_eq!(first.dir, "/tmp/bot-hq-acct-b");
+        assert_eq!(first.email.as_deref(), Some("b@example.com"));
+        assert!(first.subscription);
+        let p = reread(&s).await;
+        assert_eq!(p.account_dir_at_spawn.as_deref(), Some("/tmp/bot-hq-acct-b"));
+        assert_eq!(p.account_email_at_spawn.as_deref(), Some("b@example.com"));
+        assert_eq!(p.account_org_at_spawn.as_deref(), Some("org-b"));
+
+        // The row moves. The participant does not.
+        row.claude_config_dir = Some("/tmp/bot-hq-acct-c".into());
+        s.upsert_model(&row).await.unwrap();
+        let cfg = resolve_participant_config(&s, &p).await;
+        assert_eq!(cfg.claude_config_dir.as_deref(), Some("/tmp/bot-hq-acct-c"), "the row did move");
+        let again = resolve_participant_account(&s, &p, &cfg, &probe).await.unwrap();
+        assert_eq!(again.dir, "/tmp/bot-hq-acct-b", "the recorded dir wins over the row");
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            [Some("/tmp/bot-hq-acct-b".to_string()), Some("/tmp/bot-hq-acct-b".to_string())],
+            "the probe is asked about the recorded dir, both times"
+        );
+        assert_eq!(
+            reread(&s).await.account_dir_at_spawn.as_deref(),
+            Some("/tmp/bot-hq-acct-b"),
+            "a later spawn never rewrites the record"
+        );
+
+        // And the wire to the command: the dir reaches `CLAUDE_CONFIG_DIR`.
+        let data_dir = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
+        let mcp_temp = TempDir::new().unwrap();
+        let spawn_cfg = participant_spawn_config(
+            &s,
+            &p,
+            cfg,
+            &paths,
+            &None,
+            "prompt".into(),
+            "127.0.0.1:1".parse().unwrap(),
+            mcp_temp.path(),
+            None,
+            &SignalingBridge::new(),
+            &probe,
+        )
+        .await
+        .unwrap();
+        assert_eq!(spawn_cfg.account_dir.as_deref(), Some("/tmp/bot-hq-acct-b"));
+        let env = crate::agents::spawn::debug_env(&spawn_cfg);
+        assert!(
+            env.contains(&("CLAUDE_CONFIG_DIR".into(), "/tmp/bot-hq-acct-b".into())),
+            "the recorded dir reaches the child env: {env:?}"
+        );
+    }
+
+    /// G1: a gateway participant (its own token + base URL) is not an account
+    /// — no probe, no identity — but its DIR is recorded and reused all the
+    /// same, because its session store lives there too.
+    #[tokio::test]
+    async fn a_gateway_participant_keeps_its_dir_across_a_model_row_edit() {
+        let s = Storage::memory().await.unwrap();
+        let mut row = fable_row("m-ds");
+        row.base_url = Some("https://api.deepseek.com/anthropic".into());
+        row.auth_token = Some("ds-token".into());
+        row.claude_config_dir = Some("/tmp/bot-hq-acct-b".into());
+        s.upsert_model(&row).await.unwrap();
+        let p = seed_hands_on(&s, "m-ds").await;
+        let cfg = resolve_participant_config(&s, &p).await;
+        let (probe, asked) = fixed_probe(logged_in("b@example.com", "org-b"));
+        let first = resolve_participant_account(&s, &p, &cfg, &probe).await.unwrap();
+        assert!(!first.subscription);
+        assert_eq!(first.dir, "/tmp/bot-hq-acct-b");
+        assert_eq!(first.email, None);
+        assert!(asked.lock().unwrap().is_empty(), "a gateway participant is never probed");
+        let p = reread(&s).await;
+        assert_eq!(p.account_dir_at_spawn.as_deref(), Some("/tmp/bot-hq-acct-b"));
+        assert_eq!(p.account_email_at_spawn, None);
+
+        row.claude_config_dir = None;
+        s.upsert_model(&row).await.unwrap();
+        let cfg = resolve_participant_config(&s, &p).await;
+        let again = resolve_participant_account(&s, &p, &cfg, &probe).await.unwrap();
+        assert_eq!(again.dir, "/tmp/bot-hq-acct-b", "a live gateway participant stays put");
+        assert!(asked.lock().unwrap().is_empty());
+    }
+
+    /// P3 / spec §5: a FIRST spawn into a custom dir the CLI reports as
+    /// logged out is refused, with the login command, and nothing is
+    /// recorded — the user logs in and starts again. The default dir is never
+    /// refused (claude reports its own error there, as before 0090), and a
+    /// RESUME into a dir that went logged-out carries on with a warning.
+    #[tokio::test]
+    async fn a_first_spawn_into_a_logged_out_custom_dir_is_refused_with_the_login_command() {
+        let s = Storage::memory().await.unwrap();
+        let mut row = fable_row("m-b");
+        row.claude_config_dir = Some("/tmp/bot-hq-acct-b".into());
+        s.upsert_model(&row).await.unwrap();
+        let p = seed_hands_on(&s, "m-b").await;
+        let cfg = resolve_participant_config(&s, &p).await;
+        let (probe, _) = fixed_probe(crate::agents::spawn::AuthProbe::LoggedOut);
+        let err = resolve_participant_account(&s, &p, &cfg, &probe)
+            .await
+            .expect_err("a logged-out custom dir refuses the first spawn");
+        let text = err.to_string();
+        assert!(text.contains("/tmp/bot-hq-acct-b"), "{text}");
+        assert!(
+            text.contains("CLAUDE_CONFIG_DIR='/tmp/bot-hq-acct-b' claude auth login --claudeai"),
+            "the refusal names the login command: {text}"
+        );
+        assert_eq!(reread(&s).await.account_dir_at_spawn, None, "nothing recorded");
+
+        // The default dir: logged out is the CLI's problem to report.
+        let mut def = fable_row("m-default");
+        def.claude_config_dir = None;
+        s.upsert_model(&def).await.unwrap();
+        s.set_participant_model(p.id, Some("m-default")).await.unwrap();
+        let p = reread(&s).await;
+        let cfg = resolve_participant_config(&s, &p).await;
+        let ok = resolve_participant_account(&s, &p, &cfg, &probe).await.unwrap();
+        assert_eq!(ok.dir, "");
+        assert_eq!(reread(&s).await.account_dir_at_spawn.as_deref(), Some(""));
+
+        // A resume (dir recorded) into a dir that is logged out now: not refused.
+        s.set_account_at_spawn(p.id, "/tmp/bot-hq-acct-b", Some("b@example.com"), Some("org-b"))
+            .await
+            .unwrap();
+        let p = reread(&s).await;
+        let resumed = resolve_participant_account(&s, &p, &cfg, &probe).await.unwrap();
+        assert_eq!(resumed.dir, "/tmp/bot-hq-acct-b");
+        assert_eq!(resumed.email, None);
+    }
+
+    /// EYES 5f2050f8: a dir signed in with something other than the claude.ai
+    /// login is a Console sign-in — API usage billing. A first spawn into
+    /// such a custom dir is refused like a logged-out one, with the login
+    /// command; a resume (or the default dir) carries on with one notice and
+    /// records no identity for it.
+    #[tokio::test]
+    async fn a_console_login_in_a_custom_dir_is_refused_at_first_spawn_and_noticed_on_resume() {
+        let s = Storage::memory().await.unwrap();
+        let mut row = fable_row("m-b");
+        row.claude_config_dir = Some("/tmp/bot-hq-acct-b".into());
+        s.upsert_model(&row).await.unwrap();
+        let p = seed_hands_on(&s, "m-b").await;
+        let cfg = resolve_participant_config(&s, &p).await;
+        let console = crate::agents::spawn::AuthProbe::LoggedIn {
+            auth_method: Some("console".into()),
+            email: Some("key@example.com".into()),
+            org_id: Some("org-k".into()),
+            subscription_type: None,
+        };
+        let (probe, _) = fixed_probe(console);
+        let err = resolve_participant_account(&s, &p, &cfg, &probe)
+            .await
+            .expect_err("a Console login refuses the first spawn into a custom dir");
+        let text = err.to_string();
+        assert!(text.contains("`console`") && text.contains("API usage"), "{text}");
+        assert!(text.contains("claude auth login --claudeai"), "{text}");
+        assert_eq!(reread(&s).await.account_dir_at_spawn, None);
+
+        // A resume: recorded dir, the login changed to a Console one since.
+        s.set_account_at_spawn(p.id, "/tmp/bot-hq-acct-b", Some("b@example.com"), Some("org-b"))
+            .await
+            .unwrap();
+        let p = reread(&s).await;
+        let resumed = resolve_participant_account(&s, &p, &cfg, &probe).await.unwrap();
+        assert_eq!(resumed.dir, "/tmp/bot-hq-acct-b");
+        assert_eq!(resumed.email, None, "a key is not an account identity");
+        assert_eq!(account_mismatch_notice(&p, &resumed), None);
+        let notice = resumed.console_login.expect("said once");
+        assert!(notice.contains("hands runs in /tmp/bot-hq-acct-b") && notice.contains("`console`"), "{notice}");
+    }
+
+    /// G3: a status the CLI could not give (launch error, timeout, not the
+    /// JSON shape) is a third state, never "logged out": a first spawn goes
+    /// ahead — the dir is recorded, the identity stays unknown — and a resume
+    /// keeps its record untouched and posts no mismatch notice.
+    #[tokio::test]
+    async fn an_unreadable_auth_status_does_not_block_a_resume() {
+        let s = Storage::memory().await.unwrap();
+        let mut row = fable_row("m-b");
+        row.claude_config_dir = Some("/tmp/bot-hq-acct-b".into());
+        s.upsert_model(&row).await.unwrap();
+        let p = seed_hands_on(&s, "m-b").await;
+        let cfg = resolve_participant_config(&s, &p).await;
+        let (probe, _) = fixed_probe(crate::agents::spawn::AuthProbe::Unreadable("timeout".into()));
+        let first = resolve_participant_account(&s, &p, &cfg, &probe).await.unwrap();
+        assert_eq!(first.dir, "/tmp/bot-hq-acct-b");
+        assert_eq!(first.email, None);
+        let p = reread(&s).await;
+        assert_eq!(p.account_dir_at_spawn.as_deref(), Some("/tmp/bot-hq-acct-b"));
+
+        s.set_account_at_spawn(p.id, "/tmp/bot-hq-acct-b", Some("b@example.com"), Some("org-b"))
+            .await
+            .unwrap();
+        let p = reread(&s).await;
+        let resumed = resolve_participant_account(&s, &p, &cfg, &probe).await.unwrap();
+        assert_eq!(resumed.dir, "/tmp/bot-hq-acct-b");
+        assert_eq!(account_mismatch_notice(&p, &resumed), None, "unknown is not a mismatch");
+        let p = reread(&s).await;
+        assert_eq!(
+            p.account_email_at_spawn.as_deref(),
+            Some("b@example.com"),
+            "an unreadable status never overwrites a recorded identity"
+        );
+    }
+
+    /// G2: a row 0090 backfilled (dir `''`, no identity — every participant
+    /// live at the upgrade) records what the CLI reports at its first resume,
+    /// and that first report is not a mismatch. The NEXT resume, finding a
+    /// different account behind the same dir, is.
+    #[tokio::test]
+    async fn a_backfilled_row_records_its_account_at_the_first_resume_without_a_notice() {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_model(&fable_row("m-default")).await.unwrap();
+        let p = seed_hands_on(&s, "m-default").await;
+        sqlx::query("UPDATE session_participants SET account_dir_at_spawn = '', claude_session_id = 'uuid' WHERE id = ?")
+            .bind(p.id)
+            .execute(s.pool())
+            .await
+            .unwrap();
+        let p = reread(&s).await;
+        assert_eq!(p.account_dir_at_spawn.as_deref(), Some(""));
+        assert_eq!(p.account_email_at_spawn, None);
+        let cfg = resolve_participant_config(&s, &p).await;
+
+        let (probe, asked) = fixed_probe(logged_in("one@example.com", "org-1"));
+        let now = resolve_participant_account(&s, &p, &cfg, &probe).await.unwrap();
+        assert_eq!(asked.lock().unwrap().as_slice(), [None], "the default dir is probed as None");
+        assert_eq!(account_mismatch_notice(&p, &now), None, "nothing recorded yet, so no notice");
+        let p = reread(&s).await;
+        assert_eq!(p.account_email_at_spawn.as_deref(), Some("one@example.com"));
+        assert_eq!(p.account_org_at_spawn.as_deref(), Some("org-1"));
+        assert_eq!(p.account_dir_at_spawn.as_deref(), Some(""), "the dir record is untouched");
+
+        let (probe, _) = fixed_probe(logged_in("two@example.com", "org-2"));
+        let later = resolve_participant_account(&s, &p, &cfg, &probe).await.unwrap();
+        let notice = account_mismatch_notice(&p, &later).expect("the account behind ~/.claude changed");
+        assert!(notice.contains("one@example.com") && notice.contains("two@example.com"), "{notice}");
+        assert!(notice.contains("~/.claude"), "{notice}");
+        assert_eq!(
+            reread(&s).await.account_email_at_spawn.as_deref(),
+            Some("one@example.com"),
+            "the recorded identity is history, not a live value"
+        );
+    }
+
+    /// 0091: a spawn onto an account carrying a limit mark posts one advisory
+    /// line — naming the account and the reset, never another account — and
+    /// nothing when the mark's reset has passed, when the mark belongs to a
+    /// different organisation behind the same dir, or for a gateway row.
+    #[tokio::test]
+    async fn a_spawn_onto_a_marked_account_is_told_once_and_names_no_other_account() {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_model(&fable_row("m-default")).await.unwrap();
+        let p = seed_hands_on(&s, "m-default").await;
+        let acct = ParticipantAccount {
+            dir: "".into(),
+            email: Some("one@example.com".into()),
+            org: Some("org-1".into()),
+            subscription: true,
+            console_login: None,
+        };
+        let fable = "claude-fable-5-1";
+        assert_eq!(account_limited_notice(&s, &p, &acct, fable).await, None, "no mark yet");
+        let future = (chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339();
+        s.set_account_mark("", "org-1", fable, Some("one@example.com"), Some(&future), "You've hit your session limit · resets 8pm (Asia/Manila)")
+            .await
+            .unwrap();
+        let notice = account_limited_notice(&s, &p, &acct, fable).await.expect("marked");
+        assert!(notice.contains("hands starts on one@example.com with claude-fable-5-1"), "{notice}");
+        assert!(notice.contains("hit your session limit"), "{notice}");
+        assert!(notice.contains("limited until about"), "{notice}");
+        assert!(!notice.to_lowercase().contains("other account") && !notice.contains("switch"), "{notice}");
+
+        // The same account on another model is not limited (EYES 6c45b98e).
+        assert_eq!(account_limited_notice(&s, &p, &acct, "claude-opus-5-5").await, None);
+        // Another organisation behind the same dir is another account.
+        let other = ParticipantAccount { org: Some("org-2".into()), ..acct.clone() };
+        assert_eq!(account_limited_notice(&s, &p, &other, fable).await, None);
+        // A gateway participant is never told.
+        let gateway = ParticipantAccount { subscription: false, ..acct.clone() };
+        assert_eq!(account_limited_notice(&s, &p, &gateway, fable).await, None);
+        // A reset that has passed is not news.
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        s.set_account_mark("", "org-1", fable, None, Some(&past), "old").await.unwrap();
+        assert_eq!(account_limited_notice(&s, &p, &acct, fable).await, None);
+    }
+
+    /// P4: the "two accounts" notice counts subscription-billed participants
+    /// only. HANDS on a custom dir with EYES on a gateway is ONE account;
+    /// HANDS and EYES on two different dirs is two, named.
+    #[test]
+    fn participants_on_two_accounts_are_announced_once() {
+        let sub = |dir: &str, email: Option<&str>| ParticipantAccount {
+            dir: dir.into(),
+            email: email.map(str::to_string),
+            org: None,
+            subscription: true,
+            console_login: None,
+        };
+        let gateway = |dir: &str| ParticipantAccount {
+            dir: dir.into(),
+            email: None,
+            org: None,
+            subscription: false,
+            console_login: None,
+        };
+        assert_eq!(
+            account_straddle_notice(&[
+                ("hands".into(), sub("/tmp/b", Some("b@example.com"))),
+                ("eyes".into(), gateway("")),
+            ]),
+            None,
+            "a gateway participant is not an account"
+        );
+        assert_eq!(
+            account_straddle_notice(&[
+                ("hands".into(), sub("/tmp/b", None)),
+                ("eyes".into(), sub("/tmp/b", None)),
+            ]),
+            None
+        );
+        let notice = account_straddle_notice(&[
+            ("hands".into(), sub("/tmp/b", Some("b@example.com"))),
+            ("eyes".into(), sub("", Some("a@example.com"))),
+        ])
+        .expect("two dirs");
+        assert!(notice.contains("hands on b@example.com (/tmp/b)"), "{notice}");
+        assert!(notice.contains("eyes on a@example.com (~/.claude)"), "{notice}");
+    }
+
+    /// `bills_a_subscription`: no token and no gateway. A token without a
+    /// base URL (a direct API key) is NOT a subscription either.
+    #[test]
+    fn a_gateway_participant_is_not_counted_as_an_account() {
+        let mut cfg = default_agent_config("hands");
+        assert!(bills_a_subscription(&cfg));
+        cfg.auth_token = Some("".into());
+        assert!(bills_a_subscription(&cfg), "an empty token is no token");
+        cfg.auth_token = Some("sk-ant-…".into());
+        assert!(!bills_a_subscription(&cfg));
+        cfg.auth_token = None;
+        cfg.base_url = Some("https://api.deepseek.com/anthropic".into());
+        assert!(!bills_a_subscription(&cfg));
     }
 
     /// 0079's DB→spawn wire, tier 1 (EYES blocking 2c96a413): the chosen model
@@ -4010,6 +4833,7 @@ mod tests {
             updated_at: String::new(),
             context_window: None,
             cli_settings: None,
+            claude_config_dir: None,
         })
         .await
         .unwrap();
@@ -4029,6 +4853,7 @@ mod tests {
             updated_at: String::new(),
             context_window: None,
             cli_settings: None,
+            claude_config_dir: None,
         })
         .await
         .unwrap();

@@ -502,6 +502,31 @@ async upsertModel(model: ModelView) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Every account's usage-limit mark (0091), for the Models list and the New
+ * Session dialog. Advisory: the UI says "limited until …" on the rows that
+ * bill that account and nothing more — never which other account to use.
+ */
+async listAccountMarks() : Promise<Result<AccountMark[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_account_marks") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The user's manual clear — extra usage was enabled, the reset passed, or
+ * they simply know better than the mark.
+ */
+async clearAccountMark(configDir: string, orgId: string, modelName: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("clear_account_mark", { configDir, orgId, modelName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async deleteModel(id: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_model", { id }) };
@@ -1453,6 +1478,38 @@ async markTelemetryAsked() : Promise<Result<TelemetryStatus, AppError>> {
 
 /** user-defined types **/
 
+export type AccountMark = { 
+/**
+ * The config dir, `''` for the default `~/.claude`.
+ */
+config_dir: string; 
+/**
+ * The organisation id the CLI reported for the dir at spawn, `''` when
+ * unknown.
+ */
+org_id: string; 
+/**
+ * The wire model id the participant that hit the limit ran on —
+ * claude.ai limits are per model.
+ */
+model_name: string; 
+/**
+ * The signed-in email at spawn, for display.
+ */
+email: string | null; 
+/**
+ * RFC 3339 UTC, or `None` when the line carried no reset and no fallback
+ * applied (the credits message).
+ */
+limited_until: string | null; 
+/**
+ * The CLI's own line, verbatim.
+ */
+limited_text: string; 
+/**
+ * RFC 3339 UTC.
+ */
+marked_at: string }
 /**
  * One feedback row, projected for the UI.
  */
@@ -1882,7 +1939,14 @@ context_window: number | null;
  * "claude-fable-5-1"}}` is the shape that gives a model id newer than the
  * installed CLI's catalog its real window.
  */
-cli_settings: string | null }
+cli_settings: string | null; 
+/**
+ * The Claude config dir (`CLAUDE_CONFIG_DIR`) a participant on this row is
+ * spawned with — which subscription it bills when the row has no gateway
+ * credential. `null`/blank = the CLI's default `~/.claude`. An absolute
+ * path; one signed-in account per dir (0090).
+ */
+claude_config_dir: string | null }
 /**
  * One open session's halt, for the cross-session surfaces — the dashboard
  * cards and the header bell (the user, 2026-09-25: a halted session showed
@@ -2053,7 +2117,22 @@ effort_at_spawn: string | null; ultracode_at_spawn: boolean | null;
  * indistinguishable from a row nothing ever spawned, and a badge would
  * have to guess which. `false` means say nothing.
  */
-spawn_knobs_recorded: boolean }
+spawn_knobs_recorded: boolean; 
+/**
+ * The Claude config dir this participant was spawned into (migration
+ * 0090): `""` = the default `~/.claude`; `null` = not spawned since
+ * 0090. From the SPAWN SNAPSHOT, never the model row — the two differ
+ * once the row's dir is edited, and the row is not what the participant
+ * resumes in.
+ */
+account_dir_at_spawn: string | null; 
+/**
+ * The account signed in to that dir when the participant spawned, as the
+ * CLI reported it — the only thing that tells two participants on the
+ * same model id apart by what they bill. `null` for a gateway
+ * participant or when the CLI could not say.
+ */
+account_email_at_spawn: string | null }
 /**
  * Permission posture summary (counts only; bot-hq overrides per agent anyway).
  */

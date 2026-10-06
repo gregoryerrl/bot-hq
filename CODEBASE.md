@@ -462,7 +462,8 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/retrieval_events.rs` | `cl_retrieve` telemetry | S |
 | `src/storage/context_readings.rs` | per-turn context-window readings (P7) | M |
 | `src/storage/feedback.rs` | agent-filed bot-hq feedback | S |
-| `src/storage/models.rs` | `models` registry + `app_settings` kv | M |
+| `src/storage/models.rs` | `models` registry (incl. `claude_config_dir`, 0090) + `app_settings` kv | M |
+| `src/storage/account_marks.rs` | `account_marks` — the advisory usage-limit mark per Claude account (config dir + organisation, 0091) | S |
 | `src/storage/agent_config.rs` | `agent_configs` — read by the spawn chain. Its `emma\|brian\|rain` CHECK made it unreachable for every rc3 role slug until 0060 rebuilt the table without it; the test that pinned the refusal now pins the acceptance | S |
 | `src/storage/projects.rs` | `projects` registry, CL path resolution | M |
 | `src/storage/plugins.rs`, `src/storage/plugin_kv.rs` | plugin registry + per-plugin kv | M / S |

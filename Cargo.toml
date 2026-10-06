@@ -23,6 +23,9 @@ tracing-appender = "0.2"
 anyhow = "1"
 directories = "5"
 chrono = { version = "0.4", features = ["serde"] }
+# The machine's IANA zone name, to read claude-code's wall-clock limit resets
+# (`resets 8pm (Asia/Manila)`) — already a transitive dependency of chrono.
+iana-time-zone = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 futures = "0.3"
 hyper = { version = "1", features = ["server", "http1"] }

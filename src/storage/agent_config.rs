@@ -86,6 +86,7 @@ mod tests {
             updated_at: String::new(),
             context_window: Some(200_000),
             cli_settings: None,
+            claude_config_dir: None,
         };
         storage.upsert_agent_config(&cfg).await.unwrap();
 
@@ -138,6 +139,7 @@ mod tests {
                 updated_at: String::new(),
                 context_window: None,
                 cli_settings: None,
+                claude_config_dir: None,
             };
             storage.upsert_agent_config(&cfg).await.unwrap_or_else(|e| {
                 panic!("`{slug}` was refused ({e}) — the legacy CHECK is back, and \

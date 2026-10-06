@@ -306,6 +306,8 @@ describe("SessionView roster — what a participant was spawned with (0061)", ()
         effort_at_spawn: "high",
         ultracode_at_spawn: null,
         spawn_knobs_recorded: true,
+        account_dir_at_spawn: null,
+        account_email_at_spawn: null,
       },
       {
         ...(roster.default[1] as Record<string, unknown>),
@@ -314,6 +316,8 @@ describe("SessionView roster — what a participant was spawned with (0061)", ()
         effort_at_spawn: null,
         ultracode_at_spawn: null,
         spawn_knobs_recorded: false,
+        account_dir_at_spawn: null,
+        account_email_at_spawn: null,
       },
     ];
     renderSessionView();
@@ -322,6 +326,37 @@ describe("SessionView roster — what a participant was spawned with (0061)", ()
     // ...and the unrecorded one shows nothing rather than guessing "default",
     // which is the distinction `spawn_knobs_recorded` exists to carry.
     expect(screen.queryByText("default")).not.toBeInTheDocument();
+  });
+});
+
+describe("SessionView roster — which account a participant bills (0090)", () => {
+  /**
+   * The same mount argument as the 0061 test above: the chip reads the SPAWN
+   * SNAPSHOT fields off the roster query, so it only exists if SessionView
+   * renders it and the query carries them. Two rows on the same model id
+   * are told apart by it; a row with no snapshot (pre-0090, or a gateway
+   * participant) shows nothing rather than guessing.
+   */
+  it("shows the snapshot's email, else the dir, else nothing", async () => {
+    roster.rows = [
+      {
+        ...(roster.default[0] as Record<string, unknown>),
+        spawn_knobs_recorded: false,
+        account_dir_at_spawn: "/Users/me/.claude-acct-2",
+        account_email_at_spawn: "two@example.com",
+      },
+      {
+        ...(roster.default[1] as Record<string, unknown>),
+        spawn_knobs_recorded: false,
+        account_dir_at_spawn: null,
+        account_email_at_spawn: null,
+      },
+    ];
+    renderSessionView();
+    const chip = await screen.findByTestId("participant-account-eyes");
+    expect(chip).toHaveTextContent("two@example.com");
+    expect(chip).toHaveAttribute("title", "Bills two@example.com (/Users/me/.claude-acct-2)");
+    expect(screen.queryByTestId("participant-account-eyes-2")).not.toBeInTheDocument();
   });
 });
 

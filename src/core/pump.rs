@@ -133,6 +133,23 @@ pub struct PumpConfig {
     /// shows what the CLI said (rc3 P7); this only lets the disagreement be
     /// said out loud once (0079's companion).
     pub configured_context_window: Option<u64>,
+    /// Whether this participant bills a Claude subscription — a model row with
+    /// no gateway token and no base URL (`core::session::bills_a_subscription`).
+    /// Only such a participant's limit notice marks an ACCOUNT (0091); a
+    /// gateway's "insufficient balance" is the gateway's, not a subscription's.
+    /// `false` in test shapes and for every gateway participant.
+    pub bills_subscription: bool,
+    /// The account this participant is running as at THIS spawn — the dir
+    /// (`''` = default; `None` = not recorded, test shapes), the organisation
+    /// and email the CLI reported now — and the wire model id it runs. The
+    /// limit mark is set and cleared against exactly (dir, org, model): the
+    /// org answering now, not the one the row recorded at its first spawn
+    /// (EYES 69979e2f), and the model, because claude.ai limits are per
+    /// model (EYES 6c45b98e).
+    pub account_dir: Option<String>,
+    pub account_org: Option<String>,
+    pub account_email: Option<String>,
+    pub model_name: String,
     /// The epoch of the turn this participant currently holds, written by the
     /// sequencer at handover.
     ///
@@ -249,6 +266,11 @@ impl PumpConfig {
             liveness: None,
             sequencer_tx: None,
             configured_context_window: None,
+            bills_subscription: false,
+            account_dir: None,
+            account_org: None,
+            account_email: None,
+            model_name: String::new(),
             turn_epoch: None,
             interrupted_epoch,
             booting: None,
@@ -720,6 +742,10 @@ fn human_span(d: std::time::Duration) -> String {
 const PROVIDER_LIMIT_PATTERNS: &[&str] = &[
     "out of usage credits",
     "hit your session limit",
+    // The weekly wording (seen 2026-10-01: `You've hit your weekly limit ·
+    // resets Oct 5 at 2pm (Asia/Manila)`) slipped past the two claude.ai
+    // shapes above and was only caught by the errored-turns fallback.
+    "hit your weekly limit",
     "usage limit reached",
     "insufficient balance",
     "payment required",
@@ -748,6 +774,214 @@ fn detect_provider_limit(text: &str) -> Option<String> {
             PROVIDER_LIMIT_PATTERNS.iter().any(|p| ll.contains(p))
         })
         .map(|l| l.trim().to_string())
+}
+
+/// Which limit a claude.ai line reports, for the fallback when its reset
+/// cannot be parsed: the 5-hour window, the weekly window, or none (the
+/// credits message carries no reset; extra usage is the user's call).
+fn limit_fallback(line: &str) -> Option<chrono::Duration> {
+    let l = line.to_lowercase();
+    if l.contains("weekly limit") {
+        Some(chrono::Duration::days(7))
+    } else if l.contains("session limit") || l.contains("usage limit") {
+        Some(chrono::Duration::hours(5))
+    } else {
+        None
+    }
+}
+
+/// The reset instant a claude.ai limit line names, or `None` when it names
+/// none or the line is not readable.
+///
+/// The CLI prints the reset as a WALL-CLOCK time in the machine's own zone —
+/// `resets 8pm (Asia/Manila)`, `resets 6:10am (Asia/Manila)`, `resets Oct 5 at
+/// 2pm (Asia/Manila)` (all four shapes measured 2026-10-01..05) — with no
+/// year and no date for the 5-hour window. It is read against `host_zone`,
+/// the IANA name of the zone `now_local` is in: a line in any OTHER zone is
+/// not converted (no tz database is embedded) and the caller falls back.
+/// "Next occurrence" rules: a time-of-day already past today is tomorrow; a
+/// month-day already past this year is next year.
+pub(crate) fn parse_reset_time(
+    line: &str,
+    now_local: chrono::DateTime<chrono::Local>,
+    host_zone: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{Datelike, TimeZone};
+    let lower = line.to_lowercase();
+    let rest = &lower[lower.find("resets ")? + "resets ".len()..];
+    let (body, zone) = match rest.find('(') {
+        Some(open) => {
+            let close = rest[open..].find(')')? + open;
+            (rest[..open].trim(), rest[open + 1..close].trim())
+        }
+        None => (rest.trim(), ""),
+    };
+    if !zone.is_empty() && !zone.eq_ignore_ascii_case(host_zone) {
+        return None;
+    }
+    let (date, time) = match body.split_once(" at ") {
+        Some((d, t)) => (Some(d.trim()), t.trim()),
+        None => (None, body),
+    };
+    let (hour, minute) = parse_clock(time)?;
+    let candidate = |year: i32, month: u32, day: u32| {
+        chrono::Local
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+    };
+    let local = match date {
+        Some(date) => {
+            let (mon, day) = date.split_once(' ')?;
+            let month = match &mon[..mon.len().min(3)] {
+                "jan" => 1,
+                "feb" => 2,
+                "mar" => 3,
+                "apr" => 4,
+                "may" => 5,
+                "jun" => 6,
+                "jul" => 7,
+                "aug" => 8,
+                "sep" => 9,
+                "oct" => 10,
+                "nov" => 11,
+                "dec" => 12,
+                _ => return None,
+            };
+            let day: u32 = day.trim().parse().ok()?;
+            let this_year = candidate(now_local.year(), month, day)?;
+            if this_year >= now_local {
+                this_year
+            } else {
+                candidate(now_local.year() + 1, month, day)?
+            }
+        }
+        None => {
+            let today = candidate(now_local.year(), now_local.month(), now_local.day())?;
+            if today > now_local {
+                today
+            } else {
+                let tomorrow = now_local.date_naive().succ_opt()?;
+                candidate(tomorrow.year(), tomorrow.month(), tomorrow.day())?
+            }
+        }
+    };
+    Some(local.with_timezone(&chrono::Utc))
+}
+
+/// `8pm` → (20, 0); `6:10am` → (6, 10); `12am` → (0, 0); `12pm` → (12, 0).
+fn parse_clock(text: &str) -> Option<(u32, u32)> {
+    let text = text.trim();
+    let (digits, pm) = if let Some(d) = text.strip_suffix("pm") {
+        (d, true)
+    } else if let Some(d) = text.strip_suffix("am") {
+        (d, false)
+    } else {
+        return None;
+    };
+    let (h, m) = match digits.split_once(':') {
+        Some((h, m)) => (h.trim().parse::<u32>().ok()?, m.trim().parse::<u32>().ok()?),
+        None => (digits.trim().parse::<u32>().ok()?, 0),
+    };
+    if !(1..=12).contains(&h) || m > 59 {
+        return None;
+    }
+    let hour = match (h, pm) {
+        (12, false) => 0,
+        (12, true) => 12,
+        (h, true) => h + 12,
+        (h, false) => h,
+    };
+    Some((hour, m))
+}
+
+/// The IANA name of the machine's zone, or `""` when it cannot be read — then
+/// no line parses and every limit takes the fallback.
+fn host_zone() -> String {
+    iana_time_zone::get_timezone().unwrap_or_default()
+}
+
+/// Mark the participant's ACCOUNT + MODEL limited (0091): the dir and the
+/// organisation answering at this spawn, and the model it runs. Advisory —
+/// read by the next spawn onto that pair and the Models list, never a
+/// refusal.
+async fn mark_account_limited(storage: &Storage, cfg: &PumpConfig, line: &str) {
+    let Some(dir) = cfg.account_dir.as_deref() else {
+        debug!(agent = %cfg.slug, "no account recorded for this spawn; not marking");
+        return;
+    };
+    let org = cfg.account_org.as_deref().unwrap_or("");
+    let now = chrono::Utc::now();
+    let until = parse_reset_time(line, now.with_timezone(&chrono::Local), &host_zone())
+        .or_else(|| limit_fallback(line).map(|d| now + d));
+    if let Err(e) = storage
+        .set_account_mark(
+            dir,
+            org,
+            &cfg.model_name,
+            cfg.account_email.as_deref(),
+            until
+                .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                .as_deref(),
+            line,
+        )
+        .await
+    {
+        warn!(agent = %cfg.slug, ?e, "marking the account limited failed");
+    }
+}
+
+/// Clear the mark for this participant's account + model when a turn that
+/// STARTED after the mark completed cleanly — that model answered again on
+/// that account. A turn already in flight when the mark was set (another
+/// session's request) proves nothing about the limit and leaves it standing.
+async fn clear_account_mark_after(
+    storage: &Storage,
+    cfg: &PumpConfig,
+    turn_started_at: chrono::DateTime<chrono::Utc>,
+) {
+    let Some(dir) = cfg.account_dir.as_deref() else {
+        return;
+    };
+    let org = cfg.account_org.as_deref().unwrap_or("");
+    let Ok(Some(mark)) = storage.get_account_mark(dir, org, &cfg.model_name).await else {
+        return;
+    };
+    let marked_at = chrono::DateTime::parse_from_rfc3339(&mark.marked_at)
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .ok();
+    if marked_at.is_some_and(|m| m >= turn_started_at) {
+        debug!(agent = %cfg.slug, "the turn predates the account mark; leaving it");
+        return;
+    }
+    match storage.clear_account_mark(dir, org, &cfg.model_name).await {
+        Ok(true) => debug!(agent = %cfg.slug, "account answered again; mark cleared"),
+        Ok(false) => {}
+        Err(e) => warn!(agent = %cfg.slug, ?e, "clearing the account mark failed"),
+    }
+}
+
+/// The `apiKeySource` a subscription login reports: `none`, the one value
+/// measured (2.1.284, 2026-10-07 — an OAuth sign-in is not an "API key"
+/// source). Every other value names a KEY: the two env credentials,
+/// `apiKeyHelper`, the OAuth token and its descriptor forms — and `/login
+/// managed key`, which is the Console sign-in's key read from the Keychain
+/// (API usage billing, the exact case spec goal 4 exists for; EYES
+/// 5f2050f8). So the set is the one measured value, nothing inferred.
+const SUBSCRIPTION_KEY_SOURCES: &[&str] = &["none"];
+
+/// The notice for a subscription-billed participant whose CLI reports an API
+/// credential, or `None` when the source is a subscription's (or unreported).
+fn api_key_source_notice(slug: &str, source: Option<&str>) -> Option<String> {
+    let source = source?.trim();
+    if source.is_empty() || SUBSCRIPTION_KEY_SOURCES.iter().any(|s| s.eq_ignore_ascii_case(source)) {
+        return None;
+    }
+    Some(format!(
+        "⚠ [bot-hq] {slug} is not billing its Claude subscription: claude-code took its \
+         credential from `{source}`. An API key reached the agent — check the account's \
+         settings.json for an `apiKeyHelper` or an `env` entry (a shared settings.json \
+         applies to every account that links it)."
+    ))
 }
 
 /// Re-notification window for a single limit incident: a quota death can emit
@@ -795,7 +1029,15 @@ pub async fn pump_agent(
     // last time a notice fired (per-incarnation dedupe — one notice per
     // incident, not one per nudged retry).
     let mut limit_line: Option<String> = None;
+    // Whether `limit_line` came from the CLI's own message (`Notice`), not the
+    // participant's prose: only that marks an ACCOUNT (0091) — an agent
+    // quoting the wording must not mark its account limited for a week.
+    let mut limit_from_notice = false;
     let mut last_limit_notice: Option<std::time::Instant> = None;
+    // When this turn opened, so a clean completion can tell whether it
+    // started after an account mark (and may clear it) or before (and may
+    // not).
+    let mut turn_started_at: Option<chrono::DateTime<chrono::Utc>> = None;
     // 0079's companion: has this pump already said that the CLI's reported
     // context window disagrees with the registry's? Once per incarnation — the
     // disagreement does not change between turns, and a row per turn would be
@@ -999,6 +1241,7 @@ pub async fn pump_agent(
                     }
                 } else {
                     turn_epoch = Some(live);
+                    turn_started_at = Some(chrono::Utc::now());
                     // The long-turn notice's clock starts with the turn
                     // (feedback #44/#45).
                     if let Some(liveness) = &cfg.liveness {
@@ -1092,6 +1335,7 @@ pub async fn pump_agent(
                 }
                 if limit_line.is_none() {
                     limit_line = detect_provider_limit(&text);
+                    limit_from_notice = limit_line.is_some();
                 }
                 buffer.push_str(&text);
                 buffer.push('\n');
@@ -1375,6 +1619,12 @@ pub async fn pump_agent(
                 // when it next reads the channel), then health + a tray halt so the user sees a
                 // needs-input signal instead of a merely-quiet session.
                 if let Some(line) = limit_line.take() {
+                    // The ACCOUNT mark (0091): from the CLI's own message only,
+                    // for a subscription-billed participant only — a gateway's
+                    // balance error names no Claude account.
+                    if std::mem::take(&mut limit_from_notice) && cfg.bills_subscription {
+                        mark_account_limited(&storage, &cfg, &line).await;
+                    }
                     let deduped = last_limit_notice
                         .is_some_and(|t| t.elapsed() < LIMIT_NOTICE_DEDUPE);
                     if !deduped {
@@ -1447,6 +1697,16 @@ pub async fn pump_agent(
                 // read would be a halt built on votes cast about a session the
                 // failed participant never saw. `Spoke` clears the tally, which
                 // is the conservative answer of the two.
+                // A clean turn on a subscription-billed participant whose
+                // account carries a limit mark: the account answered, so a
+                // mark the turn postdates is cleared (0091). A turn that was
+                // already in flight when the mark was set leaves it.
+                if !is_error && cfg.bills_subscription {
+                    if let Some(started) = turn_started_at {
+                        clear_account_mark_after(&storage, &cfg, started).await;
+                    }
+                }
+                turn_started_at = None;
                 let ending = if is_error {
                     crate::core::sequencer::TurnEnding::Spoke
                 } else {
@@ -1862,8 +2122,34 @@ pub async fn pump_agent(
                 // it must not fire on the next turn's unrelated result.
                 halt_tool_id = None;
             }
-            AgentEvent::Init { session_id, .. } => {
-                debug!(agent = %cfg.slug, ?session_id, "init received");
+            AgentEvent::Init {
+                session_id,
+                api_key_source,
+            } => {
+                debug!(agent = %cfg.slug, ?session_id, ?api_key_source, "init received");
+                // Billing proof (0090, spec goal 4): a subscription-billed
+                // participant whose CLI reports a credential from an API key,
+                // a helper or a token descriptor is NOT billing its
+                // subscription — an `apiKeyHelper` or `env` entry in a shared
+                // `settings.json` is the way that happens without any env of
+                // ours. Said once, in the channel; the spawn is not stopped.
+                if cfg.bills_subscription {
+                    if let Some(text) = api_key_source_notice(&cfg.slug, api_key_source.as_deref()) {
+                        if crate::core::post_system_notice(
+                            &storage,
+                            cfg.bridge.as_deref(),
+                            &cfg.session_id,
+                            MessageKind::SystemNotice,
+                            text,
+                            None,
+                        )
+                        .await
+                        .is_none()
+                        {
+                            warn!(agent = %cfg.slug, "the api-key-source notice was not posted");
+                        }
+                    }
+                }
                 // Persist the claude-code session UUID so the next reopen of
                 // this bot-hq session can resume each agent's prior context
                 // via `--resume <uuid>`. Idempotent UPDATE — on a resume spawn
@@ -2019,6 +2305,11 @@ mod tests {
             liveness: None,
             sequencer_tx: None,
             configured_context_window: None,
+            bills_subscription: false,
+            account_dir: None,
+            account_org: None,
+            account_email: None,
+            model_name: String::new(),
             turn_epoch: None,
             interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(
                 crate::agents::NO_INTERRUPT_EPOCH,
@@ -4002,7 +4293,10 @@ mod tests {
         let (ev_tx, ev_rx) = mpsc::channel(4);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
         ev_tx
-            .send(AgentEvent::Init { session_id: Some("cc-uuid-42".into()) })
+            .send(AgentEvent::Init {
+                session_id: Some("cc-uuid-42".into()),
+                api_key_source: Some("none".into()),
+            })
             .await
             .unwrap();
         drop(ev_tx);
@@ -4813,6 +5107,287 @@ mod tests {
         );
         assert!(analysis.len() > PROVIDER_LIMIT_MAX_CHUNK);
         assert_eq!(detect_provider_limit(&analysis), None);
+    }
+
+    /// The weekly wording (2026-10-01) is a limit too — it used to fall through
+    /// to the errored-turns fallback.
+    #[test]
+    fn the_weekly_wording_is_detected() {
+        assert!(detect_provider_limit(
+            "You've hit your weekly limit \u{b7} resets Oct 5 at 2pm (Asia/Manila)"
+        )
+        .is_some());
+        assert_eq!(limit_fallback("You've hit your weekly limit"), Some(chrono::Duration::days(7)));
+        assert_eq!(limit_fallback("You've hit your session limit"), Some(chrono::Duration::hours(5)));
+        assert_eq!(limit_fallback("You're out of usage credits."), None);
+    }
+
+    /// `parse_reset_time` over the four measured shapes, read in the machine's
+    /// own zone (whatever it is on the test box — the expectation is built the
+    /// same way), with the rollovers and the refusals.
+    #[test]
+    fn parse_reset_time_reads_the_cli_shapes_in_the_host_zone() {
+        use chrono::{Datelike, TimeZone};
+        let zone = host_zone();
+        let local = |y: i32, mo: u32, d: u32, h: u32, mi: u32| {
+            chrono::Local.with_ymd_and_hms(y, mo, d, h, mi, 0).single().unwrap()
+        };
+        let now = local(2026, 10, 2, 10, 0);
+        let line = |text: &str| format!("You've hit your session limit \u{b7} resets {text} ({zone})");
+        assert_eq!(
+            parse_reset_time(&line("8pm"), now, &zone),
+            Some(local(2026, 10, 2, 20, 0).with_timezone(&chrono::Utc)),
+            "a time later today"
+        );
+        assert_eq!(
+            parse_reset_time(&line("6:10am"), now, &zone),
+            Some(local(2026, 10, 3, 6, 10).with_timezone(&chrono::Utc)),
+            "a time already past today is tomorrow"
+        );
+        assert_eq!(
+            parse_reset_time(&line("7:50pm"), now, &zone),
+            Some(local(2026, 10, 2, 19, 50).with_timezone(&chrono::Utc))
+        );
+        assert_eq!(
+            parse_reset_time(&line("Oct 5 at 2pm"), now, &zone),
+            Some(local(2026, 10, 5, 14, 0).with_timezone(&chrono::Utc)),
+            "a dated reset this year"
+        );
+        assert_eq!(
+            parse_reset_time(&line("Jan 2 at 2pm"), local(2026, 12, 30, 10, 0), &zone),
+            Some(local(2027, 1, 2, 14, 0).with_timezone(&chrono::Utc)),
+            "a month-day already past rolls into next year"
+        );
+        assert_eq!(now.year(), 2026);
+        // Refusals: another zone (no tz database embedded), no reset, junk.
+        assert_eq!(
+            parse_reset_time("You've hit your session limit \u{b7} resets 8pm (Mars/Olympus)", now, &zone),
+            None
+        );
+        assert_eq!(parse_reset_time("You're out of usage credits.", now, &zone), None);
+        assert_eq!(parse_reset_time(&line("25pm"), now, &zone), None);
+        assert_eq!(parse_clock("12am"), Some((0, 0)));
+        assert_eq!(parse_clock("12pm"), Some((12, 0)));
+        assert_eq!(parse_clock("11:59pm"), Some((23, 59)));
+    }
+
+    /// B4: the CLI's `apiKeySource` on `init` is the billing proof. A
+    /// subscription participant that reports `none` (measured) is fine; one
+    /// that reports an API credential source gets one notice naming it; a
+    /// gateway participant is never checked.
+    #[test]
+    fn an_api_key_source_on_a_subscription_participant_posts_a_notice() {
+        for fine in [None, Some(""), Some("none")] {
+            assert_eq!(api_key_source_notice("hands", fine), None, "{fine:?}");
+        }
+        // `/login managed key` is the Console sign-in's Keychain key — API
+        // billing — not a subscription (EYES 5f2050f8).
+        for bad in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "apiKeyHelper",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "/login managed key",
+        ] {
+            let notice = api_key_source_notice("hands", Some(bad)).expect(bad);
+            assert!(notice.contains("hands is not billing its Claude subscription"), "{notice}");
+            assert!(notice.contains(bad), "{notice}");
+        }
+    }
+
+    /// The same, through the pump: the notice is a system row, posted once per
+    /// init, and only when the pump's participant bills a subscription.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_api_key_source_notice_is_a_system_row_for_subscription_participants_only() {
+        for (bills_subscription, expect_row) in [(true, true), (false, false)] {
+            let (storage, state) = setup().await;
+            let (mut cfg, _ring_rx) = cfg_with_ring("hands");
+            cfg.bills_subscription = bills_subscription;
+            let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+            let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+            ev_tx
+                .send(AgentEvent::Init {
+                    session_id: Some("cc-uuid".into()),
+                    api_key_source: Some("ANTHROPIC_API_KEY".into()),
+                })
+                .await
+                .unwrap();
+            drop(ev_tx);
+            task.await.unwrap();
+            let rows = storage
+                .messages_for_session("s1", None)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|m| m.content.contains("not billing its Claude subscription"))
+                .count();
+            assert_eq!(rows, usize::from(expect_row), "bills_subscription={bills_subscription}");
+        }
+    }
+
+    /// Seed one HANDS participant (the pump needs a row for its other
+    /// bookkeeping) and return its id. The ACCOUNT the pump marks against
+    /// comes from the pump config — the identity resolved at this spawn —
+    /// see `on_account`.
+    async fn seed_marked_participant(storage: &Storage) -> i64 {
+        let hands = storage.role_by_slug("hands").await.unwrap().unwrap();
+        let ids = storage
+            .seed_session_roster(
+                "s1",
+                &[crate::storage::ParticipantDraft {
+                    role_id: hands.id,
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+        ids[0]
+    }
+
+    const FABLE: &str = "claude-fable-5-1";
+
+    /// A subscription-billed pump on the default dir, signed in as `org-1`,
+    /// running `FABLE`.
+    fn on_account(cfg: &mut PumpConfig) {
+        cfg.bills_subscription = true;
+        cfg.account_dir = Some("".into());
+        cfg.account_org = Some("org-1".into());
+        cfg.account_email = Some("a@example.com".into());
+        cfg.model_name = FABLE.into();
+    }
+
+    fn limit_notice() -> AgentEvent {
+        AgentEvent::Notice(
+            "You've hit your weekly limit \u{b7} resets Oct 5 at 2pm (Mars/Olympus)".into(),
+        )
+    }
+
+    fn turn_complete(is_error: bool) -> AgentEvent {
+        AgentEvent::TurnComplete {
+            stop_reason: None,
+            subtype: None,
+            is_error,
+            api_error_status: None,
+            context: ContextReport::none(ContextVerdict::NoWindow),
+        }
+    }
+
+    /// 0091: the CLI's own limit message marks the participant's ACCOUNT
+    /// (dir + org from the spawn snapshot) with a reset — here the fallback,
+    /// since the zone is not the host's — and a clean turn that STARTS after
+    /// the mark clears it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_cli_limit_notice_marks_the_account_and_a_normal_turn_clears_the_mark() {
+        let (storage, state) = setup().await;
+        let id = seed_marked_participant(&storage).await;
+        let (mut cfg, _ring_rx) = cfg_with_ring("hands");
+        cfg.participant_id = Some(id);
+        on_account(&mut cfg);
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        cfg.turn_epoch = Some(Arc::clone(&cell));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+
+        ev_tx.send(limit_notice()).await.unwrap();
+        ev_tx.send(turn_complete(true)).await.unwrap();
+        let mark = loop {
+            if let Some(m) = storage.get_account_mark("", "org-1", FABLE).await.unwrap() {
+                break m;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(mark.email.as_deref(), Some("a@example.com"));
+        assert_eq!(mark.model_name, FABLE);
+        assert!(mark.limited_text.contains("weekly limit"));
+        assert_eq!(
+            storage.get_account_mark("", "org-1", "claude-opus-5-5").await.unwrap(),
+            None,
+            "a Fable limit says nothing about Opus on the same account (6c45b98e)"
+        );
+        let until = chrono::DateTime::parse_from_rfc3339(mark.limited_until.as_deref().unwrap()).unwrap();
+        let days = (until.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_hours();
+        assert!((160..=168).contains(&days), "the weekly fallback is a week out: {days}h");
+
+        // A new turn (the epoch moved), completed cleanly: the account answered.
+        cell.store(2, std::sync::atomic::Ordering::Release);
+        ev_tx.send(AgentEvent::Text("back".into())).await.unwrap();
+        ev_tx.send(turn_complete(false)).await.unwrap();
+        for _ in 0..200 {
+            if storage.get_account_mark("", "org-1", FABLE).await.unwrap().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(storage.get_account_mark("", "org-1", FABLE).await.unwrap(), None, "cleared");
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    /// P5: a clean turn that was already in flight when the mark was set
+    /// (another session's request) proves nothing about the limit and leaves
+    /// the mark standing. Pinned with a mark stamped in the future.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_turn_started_before_the_mark_does_not_clear_it() {
+        let (storage, state) = setup().await;
+        let id = seed_marked_participant(&storage).await;
+        storage
+            .set_account_mark("", "org-1", FABLE, Some("a@example.com"), None, "weekly limit")
+            .await
+            .unwrap();
+        let future = (chrono::Utc::now() + chrono::Duration::seconds(30))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE account_marks SET marked_at = ? WHERE config_dir = '' AND org_id = 'org-1'")
+            .bind(&future)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let (mut cfg, _ring_rx) = cfg_with_ring("hands");
+        cfg.participant_id = Some(id);
+        on_account(&mut cfg);
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(1)));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+        ev_tx.send(AgentEvent::Text("still here".into())).await.unwrap();
+        ev_tx.send(turn_complete(false)).await.unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+        assert!(
+            storage.get_account_mark("", "org-1", FABLE).await.unwrap().is_some(),
+            "a turn that predates the mark leaves it"
+        );
+    }
+
+    /// E2: a participant's OWN prose quoting the wording halts the session as
+    /// before (the net is over text) but never marks an account — and a
+    /// gateway participant's balance error, which IS the CLI's own message,
+    /// marks none either (it is the gateway's, not a subscription's).
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_participants_own_prose_and_a_gateway_error_never_mark_an_account() {
+        for (event, bills_subscription) in [
+            (
+                AgentEvent::Text("You've hit your weekly limit \u{b7} resets Oct 5 at 2pm (Asia/Manila)".into()),
+                true,
+            ),
+            (AgentEvent::Notice("Error: 402 Insufficient Balance".into()), false),
+        ] {
+            let (storage, state) = setup().await;
+            let id = seed_marked_participant(&storage).await;
+            let (mut cfg, _ring_rx) = cfg_with_ring("hands");
+            cfg.participant_id = Some(id);
+            on_account(&mut cfg);
+            cfg.bills_subscription = bills_subscription;
+            cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(1)));
+            let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+            let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+            ev_tx.send(event).await.unwrap();
+            ev_tx.send(turn_complete(true)).await.unwrap();
+            drop(ev_tx);
+            task.await.unwrap();
+            assert_eq!(storage.list_account_marks().await.unwrap(), vec![], "no mark");
+            // The session-level halt is unchanged — pinned by
+            // `provider_limit_turn_notifies_peer_once_and_halts`, which wires
+            // the bridge the halt is written through.
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -168,6 +168,41 @@ context meter divides by the window claude-code reports per turn).
 `BOT_HQ_SESSION_ID` is also injected so git-hook subprocesses can read
 session-scoped state.
 
+**The child's account is explicit (migration 0090).** Before any env of its
+own, every spawn — the live participant (`agents/spawn.rs::build_command`) and
+the one-shot summarizer / Models "Test connection" probe
+(`tauri_cmd/docs.rs::headless_claude_cmd`) — runs
+`agents::spawn::apply_account_env`: the inherited auth/billing variables
+(`AUTH_ENV_SCRUB`: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_PROFILE`, `ANTHROPIC_CONFIG_DIR`,
+`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN` + its refresh / descriptor forms,
+`CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, the Bedrock / Vertex / Foundry switches)
+are removed, then `CLAUDE_CONFIG_DIR` is set when the model row names a
+Claude config dir (`models.claude_config_dir`; blank = the CLI's default
+`~/.claude`). claude-code keeps one credential per config dir, so a second
+subscription runs beside the first only when each has its own dir and a model
+row names it ("Fable 5.1 · acct 2"). The dir is resolved ONCE per participant,
+at its first spawn, and recorded on the row
+(`session_participants.account_dir_at_spawn`, with the signed-in email and
+organisation id `claude auth status --json` reported —
+`core/session.rs::resolve_participant_account`); every later spawn reuses the
+record, because the CLI's session store lives inside the dir and a `--resume`
+anywhere else starts blank. A first spawn into a custom dir the CLI reports as
+logged out is refused with the login command; an unreadable status never is. A
+dir is a credential slot, not an account (`/login` swaps the account behind the
+same dir), so a resume that finds a different email posts a notice, and the
+usage-limit mark (`account_marks`, 0091) is keyed by dir + organisation +
+model (claude.ai limits are per model) against the identity reported at THIS
+spawn: set from the CLI's own limit message for a subscription-billed
+participant, shown as "limited until …" on the Models list and the New Session
+dialog for that model's rows, and cleared by a clean turn on that account and
+model that started after it, or by the user — advisory, never a refusal and
+never a re-route. `init`'s `apiKeySource` is read on every spawn: a
+subscription participant reporting anything but `none` (the measured
+subscription value; `/login managed key` is the Console key) gets one notice,
+and a dir whose `authMethod` is not `claude.ai` is treated as a Console login
+— refused for a first spawn into a custom dir, noticed otherwise.
+
 **LLM proxy (`src/agents/llm_proxy.rs`):** agents pointed at a
 non-Anthropic Anthropic-compatible gateway (e.g. DeepSeek) route
 their `ANTHROPIC_BASE_URL` through a local normalizing reverse-proxy. It

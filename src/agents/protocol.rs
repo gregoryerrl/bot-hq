@@ -50,6 +50,13 @@ pub enum SystemEvent {
         session_id: Option<String>,
         #[serde(default)]
         mcp_servers: Option<Value>,
+        /// Where the CLI took its credential from (`docs/stream-json-events.md`):
+        /// `none` for a subscription login (measured 2026-10-07 on 2.1.284 —
+        /// an OAuth sign-in is not an "API key" source), else the variable,
+        /// helper or descriptor that supplied a key. Read by the pump to say
+        /// when a subscription participant is billing an API key instead.
+        #[serde(default, rename = "apiKeySource")]
+        api_key_source: Option<String>,
     },
     /// claude-code's list of this process's RUNNING background tasks
     /// (background agents, background shells), sent whenever the set changes:

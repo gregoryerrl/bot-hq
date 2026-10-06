@@ -32,6 +32,53 @@ pub struct ModelView {
     /// "claude-fable-5-1"}}` is the shape that gives a model id newer than the
     /// installed CLI's catalog its real window.
     pub cli_settings: Option<String>,
+    /// The Claude config dir (`CLAUDE_CONFIG_DIR`) a participant on this row is
+    /// spawned with — which subscription it bills when the row has no gateway
+    /// credential. `null`/blank = the CLI's default `~/.claude`. An absolute
+    /// path; one signed-in account per dir (0090).
+    pub claude_config_dir: Option<String>,
+}
+
+/// The stored form of a model row's Claude config dir, or a validation error
+/// the dialog shows inline. Blank is the default dir. Otherwise it must be an
+/// absolute path — the CLI keys its credential on the exact string, so `~`
+/// (which the CLI would not expand) and a relative path are refused rather
+/// than guessed at — and never the default dir spelled out: claude-code
+/// treats an explicit `~/.claude` as a CUSTOM dir with its own Keychain item,
+/// which would force a re-login of the account that already lives there (spec
+/// §4). A trailing slash is stripped; nothing else is rewritten, so a
+/// symlinked alias stays the distinct slot the CLI sees it as.
+pub(crate) fn validate_config_dir(
+    raw: Option<&str>,
+    home: Option<&std::path::Path>,
+) -> Result<Option<String>, AppError> {
+    let Some(dir) = crate::storage::normalize_config_dir(raw) else {
+        return Ok(None);
+    };
+    if dir.starts_with('~') {
+        return Err(AppError::Validation(
+            "Claude config dir must be an absolute path — the CLI does not expand `~`; \
+             write /Users/<you>/… in full"
+                .into(),
+        ));
+    }
+    if !std::path::Path::new(&dir).is_absolute() {
+        return Err(AppError::Validation(
+            "Claude config dir must be an absolute path (e.g. /Users/<you>/.claude-acct-2)"
+                .into(),
+        ));
+    }
+    if let Some(home) = home {
+        if std::path::Path::new(&dir) == home.join(".claude") {
+            return Err(AppError::Validation(
+                "That is the CLI's default dir — leave the field blank for it. Naming it \
+                 explicitly makes claude-code treat it as a separate account and ask for a \
+                 new login."
+                    .into(),
+            ));
+        }
+    }
+    Ok(Some(dir))
 }
 
 /// `cli_settings` must be a JSON object (or absent). Anything else would be
@@ -65,6 +112,7 @@ impl From<Model> for ModelView {
             updated_at: m.updated_at,
             context_window: m.context_window,
             cli_settings: m.cli_settings,
+            claude_config_dir: m.claude_config_dir,
         }
     }
 }
@@ -82,6 +130,7 @@ impl From<ModelView> for Model {
             updated_at: v.updated_at,
             context_window: v.context_window,
             cli_settings: v.cli_settings,
+            claude_config_dir: v.claude_config_dir,
         }
     }
 }
@@ -107,6 +156,8 @@ pub async fn upsert_model(
 ) -> Result<(), AppError> {
     let mut m: Model = model.into();
     m.cli_settings = validate_cli_settings(m.cli_settings.take())?;
+    m.claude_config_dir =
+        validate_config_dir(m.claude_config_dir.as_deref(), crate::paths::home_dir().ok().as_deref())?;
     storage
         .upsert_model(&m)
         .await
@@ -128,6 +179,39 @@ pub async fn delete_model(
         .map_err(|e| AppError::DbError(e.to_string()))?;
     let _ = app.emit(crate::tauri_events::types::MODEL_CHANGED, ());
     Ok(())
+}
+
+/// Every account's usage-limit mark (0091), for the Models list and the New
+/// Session dialog. Advisory: the UI says "limited until …" on the rows that
+/// bill that account and nothing more — never which other account to use.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_account_marks(
+    storage: tauri::State<'_, Arc<Storage>>,
+) -> Result<Vec<crate::storage::AccountMark>, AppError> {
+    storage
+        .list_account_marks()
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))
+}
+
+/// The user's manual clear — extra usage was enabled, the reset passed, or
+/// they simply know better than the mark.
+#[tauri::command]
+#[specta::specta]
+pub async fn clear_account_mark(
+    storage: tauri::State<'_, Arc<Storage>>,
+    app: tauri::AppHandle,
+    config_dir: String,
+    org_id: String,
+    model_name: String,
+) -> Result<bool, AppError> {
+    let cleared = storage
+        .clear_account_mark(&config_dir, &org_id, &model_name)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?;
+    let _ = app.emit(crate::tauri_events::types::MODEL_CHANGED, ());
+    Ok(cleared)
 }
 
 #[tauri::command]
@@ -172,9 +256,38 @@ mod tests {
             updated_at: "2026-06-03T00:00:00.000Z".into(),
             context_window: Some(200_000),
             cli_settings: None,
+            claude_config_dir: None,
         };
         let back: ModelView = Model::from(view.clone()).into();
         assert_eq!(back, view);
+    }
+
+    /// 0090: the dialog's config dir is an absolute path or nothing. `~` is
+    /// refused (the CLI would not expand it and would key a credential on the
+    /// literal string), so is a relative path, and so is the default dir
+    /// spelled out (an explicit `~/.claude` is a CUSTOM dir to claude-code —
+    /// a separate Keychain item and a forced re-login). A trailing slash is
+    /// stripped; blank is the default.
+    #[test]
+    fn validate_config_dir_accepts_absolute_paths_only() {
+        let home = std::path::Path::new("/Users/me");
+        assert_eq!(validate_config_dir(None, Some(home)).unwrap(), None);
+        assert_eq!(validate_config_dir(Some("  "), Some(home)).unwrap(), None);
+        assert_eq!(
+            validate_config_dir(Some("/Users/me/.claude-acct-2/"), Some(home))
+                .unwrap()
+                .as_deref(),
+            Some("/Users/me/.claude-acct-2")
+        );
+        for bad in ["~/.claude-acct-2", ".claude-acct-2", "acct/2", "/Users/me/.claude", "/Users/me/.claude/"] {
+            let err = validate_config_dir(Some(bad), Some(home))
+                .expect_err(&format!("{bad:?} must be refused"));
+            assert!(matches!(err, AppError::Validation(_)), "{bad:?}: {err:?}");
+        }
+        // Without a known home the default-dir check cannot run; the absolute
+        // rule still does.
+        assert!(validate_config_dir(Some("/Users/me/.claude"), None).is_ok());
+        assert!(validate_config_dir(Some("relative"), None).is_err());
     }
 
     #[test]

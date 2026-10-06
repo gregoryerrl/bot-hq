@@ -317,20 +317,27 @@ pub async fn summarize_session_doc(
     // `default_model_id` app setting first — a key nothing has WRITTEN since
     // rc3 D8 retired the Agents tab (a role owns its default model), so that
     // branch was dead; dropped rather than kept as a promise.
-    let session_model = storage
+    let slot0 = storage
         .participants_for_session(&session_id)
         .await
         .ok()
-        .and_then(|roster| roster.into_iter().next())
-        .and_then(|p| p.model_id)
+        .and_then(|roster| roster.into_iter().next());
+    let model_id = slot0
+        .as_ref()
+        .and_then(|p| p.model_id.clone())
         .filter(|m| !m.is_empty());
-    let model_id = session_model;
     // The summarizer is a one-off subprocess, not a session participant; the
     // name is only the label `resolve_spawn_config` puts on the config it
     // returns and the `agent_configs` key it may fall back to.
-    let cfg =
+    let mut cfg =
         crate::core::session::resolve_spawn_config(&storage, "doc-summarizer", model_id.as_deref())
             .await;
+    // It bills the SESSION's account (0090): the config dir slot 0 was spawned
+    // into, when recorded, else the model row's. Without this a session on a
+    // second account would have its summaries billed to the default one.
+    if let Some(dir) = slot0.as_ref().and_then(|p| p.account_dir_at_spawn.clone()) {
+        cfg.claude_config_dir = (!dir.is_empty()).then_some(dir);
+    }
 
     let prompt = format!(
         "Summarize the document below in 3-5 concise, plain-English bullet points \
@@ -349,6 +356,12 @@ pub async fn summarize_session_doc(
 /// Shared by the doc summarizer and the model pre-flight probe (B5).
 fn headless_claude_cmd(cfg: &AgentConfig, prompt: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("claude");
+    // The same two scrubs live spawn runs FIRST (`agents::spawn::build_command`):
+    // the AppImage payload's library paths, then the account — inherited
+    // auth/billing variables out and the model row's config dir in — before
+    // the model's own token below, which must survive (0090).
+    crate::appimage_env::scrub_tokio(&mut cmd);
+    crate::agents::spawn::apply_account_env(&mut cmd, cfg.claude_config_dir.as_deref());
     cmd.arg("-p")
         .arg(prompt)
         .args(["--output-format", "text"])
@@ -554,6 +567,7 @@ rename to new";
             updated_at: String::new(),
             context_window: None,
             cli_settings: None,
+            claude_config_dir: None,
         };
         let cmd = headless_claude_cmd(&cfg, "ping");
         let env: std::collections::HashMap<String, String> = cmd
@@ -576,6 +590,60 @@ rename to new";
         );
     }
 
+    /// 0090: the pre-flight runs in the model row's own config dir — so Test
+    /// connection on a `· acct 2` row checks THAT account's login, not the
+    /// default dir's — and the inherited auth variables are removed before
+    /// the row's own token is set, which therefore survives (the ordering pin
+    /// the live-spawn test makes for `build_command`).
+    #[test]
+    fn the_preflight_runs_in_the_models_config_dir() {
+        let cfg = AgentConfig {
+            agent_name: "model-probe".into(),
+            provider: "anthropic".into(),
+            model_name: "claude-fable-5-1".into(),
+            base_url: None,
+            auth_token: None,
+            updated_at: String::new(),
+            context_window: None,
+            cli_settings: None,
+            claude_config_dir: Some("/Users/me/.claude-acct-2".into()),
+        };
+        let cmd = headless_claude_cmd(&cfg, "ping");
+        let ops: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let last_of = |name: &str| ops.iter().rev().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+        assert_eq!(last_of("CLAUDE_CONFIG_DIR"), Some(Some("/Users/me/.claude-acct-2".into())));
+        // `Command`'s env is a map, so the dir's own removal is replaced by the
+        // set above; every other name in the list stays a removal.
+        for name in crate::agents::spawn::AUTH_ENV_SCRUB.iter().filter(|n| **n != "CLAUDE_CONFIG_DIR") {
+            assert!(
+                ops.iter().any(|(k, v)| k == name && v.is_none()),
+                "{name} must be removed: {ops:?}"
+            );
+        }
+        assert_eq!(last_of("ANTHROPIC_AUTH_TOKEN"), Some(None), "no token was invented");
+
+        let mut gateway = cfg;
+        gateway.auth_token = Some("ds-token".into());
+        gateway.base_url = Some("https://api.deepseek.com/anthropic".into());
+        let cmd = headless_claude_cmd(&gateway, "ping");
+        let last = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(k, _)| k.to_string_lossy() == "ANTHROPIC_AUTH_TOKEN")
+            .last()
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(last.as_deref(), Some("ds-token"), "the row's token survives the scrub");
+    }
+
     /// The other half: a model with no explicit credential must NOT have one
     /// invented for it. `ANTHROPIC_AUTH_TOKEN` unset is what lets a first-party
     /// Anthropic model fall through to claude-code's ambient auth — the case
@@ -595,6 +663,7 @@ rename to new";
                 updated_at: String::new(),
                 context_window: None,
                 cli_settings: None,
+                claude_config_dir: None,
             };
             let cmd = headless_claude_cmd(&cfg, "ping");
             let names: Vec<String> = cmd

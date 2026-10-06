@@ -320,6 +320,17 @@ pub struct ParticipantView {
     /// indistinguishable from a row nothing ever spawned, and a badge would
     /// have to guess which. `false` means say nothing.
     pub spawn_knobs_recorded: bool,
+    /// The Claude config dir this participant was spawned into (migration
+    /// 0090): `""` = the default `~/.claude`; `null` = not spawned since
+    /// 0090. From the SPAWN SNAPSHOT, never the model row — the two differ
+    /// once the row's dir is edited, and the row is not what the participant
+    /// resumes in.
+    pub account_dir_at_spawn: Option<String>,
+    /// The account signed in to that dir when the participant spawned, as the
+    /// CLI reported it — the only thing that tells two participants on the
+    /// same model id apart by what they bill. `null` for a gateway
+    /// participant or when the CLI could not say.
+    pub account_email_at_spawn: Option<String>,
 }
 
 /// A session's roster in turn order — the read side of rc3 D10.
@@ -609,6 +620,8 @@ pub(crate) async fn participant_views(
             spawn_knobs_recorded: p.spawn_knobs_recorded,
             effort: p.effort,
             ultracode: p.ultracode,
+            account_dir_at_spawn: p.account_dir_at_spawn,
+            account_email_at_spawn: p.account_email_at_spawn,
         });
     }
     Ok(out)

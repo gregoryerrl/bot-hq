@@ -8,6 +8,7 @@ import { usePointerSwap } from "../hooks/usePointerSwap";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import type {
+  AccountMark,
   ClaudeOverrides,
   ModelView,
   OpenSessionHalt,
@@ -90,6 +91,114 @@ const emptyParticipant = (): ParticipantRow => ({
   color: null,
   label: "",
 });
+
+/** The model a participant row will spawn on: its own pick, else the role's
+ *  default (rc3 D8). `undefined` when neither names a saved model. */
+function effectiveModel(
+  row: Pick<ParticipantRow, "roleId" | "modelId">,
+  roles: RoleView[],
+  models: ModelView[],
+): ModelView | undefined {
+  const id = row.modelId || roles.find((r) => r.id === row.roleId)?.default_model_id || "";
+  return id ? models.find((m) => m.id === id) : undefined;
+}
+
+/** A subscription-billed row: no gateway token, no gateway URL — the account
+ *  it bills is the Claude config dir (blank = the default `~/.claude`). */
+function billsASubscription(m: Pick<ModelView, "auth_token" | "base_url">): boolean {
+  return !(m.auth_token && m.auth_token.length > 0) && !(m.base_url && m.base_url.length > 0);
+}
+
+/** The account label the dialog shows beside a row's model (0090): the
+ *  config dir's last path segment, `default` for the default dir, the
+ *  provider for a gateway row, `—` when no model resolves yet. */
+export function accountLabelFor(
+  row: Pick<ParticipantRow, "roleId" | "modelId">,
+  roles: RoleView[],
+  models: ModelView[],
+): string {
+  const m = effectiveModel(row, roles, models);
+  if (!m) return "—";
+  if (!billsASubscription(m)) return m.provider;
+  const dir = (m.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "");
+  if (!dir) return "default";
+  const parts = dir.split(/[\\/]/);
+  return parts[parts.length - 1] || dir;
+}
+
+/** The row's limit line (0091): the account its model bills carries a mark
+ *  FOR THAT MODEL whose reset is still ahead → "limited until <local time>";
+ *  else null (a Fable limit says nothing about the same account's Opus row).
+ *  It names no other account. */
+export function rowLimit(
+  row: Pick<ParticipantRow, "roleId" | "modelId">,
+  roles: RoleView[],
+  models: ModelView[],
+  marks: AccountMark[],
+): string | null {
+  const m = effectiveModel(row, roles, models);
+  if (!m || !billsASubscription(m)) return null;
+  const key = (m.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "");
+  const live = marks.filter(
+    (mark) =>
+      mark.config_dir === key &&
+      mark.model_name === m.model_name &&
+      (!mark.limited_until || new Date(mark.limited_until).getTime() > Date.now()),
+  );
+  if (live.length === 0) return null;
+  const mark = live[0];
+  return mark.limited_until
+    ? `limited until about ${new Date(mark.limited_until).toLocaleString()}`
+    : "limited (no reset time given)";
+}
+
+/** The distinct Claude accounts the saved subscription rows can bill, for
+ *  the dialog's quick-select: `""` is the default dir, else a config dir. */
+export function accountChoices(models: ModelView[]): { dir: string; label: string }[] {
+  const seen = new Map<string, string>();
+  for (const m of models) {
+    if (!billsASubscription(m)) continue;
+    const dir = (m.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "");
+    if (!seen.has(dir)) {
+      const parts = dir.split(/[\\/]/);
+      seen.set(dir, dir ? parts[parts.length - 1] || dir : "default (~/.claude)");
+    }
+  }
+  return [...seen.entries()].map(([dir, label]) => ({ dir, label }));
+}
+
+/** Move every subscription-billed row onto `dir`: a row whose effective model
+ *  has a saved twin (same provider + model id) on that account gets that
+ *  twin as its pick; a row with no twin is returned in `missing` and left as
+ *  it was. Gateway rows are not accounts and are left alone. */
+export function remapRowsToAccount(
+  rows: ParticipantRow[],
+  dir: string,
+  roles: RoleView[],
+  models: ModelView[],
+): { rows: ParticipantRow[]; missing: number[] } {
+  const want = dir.trim().replace(/[\\/]+$/, "");
+  const missing: number[] = [];
+  const next = rows.map((row, index) => {
+    const current = effectiveModel(row, roles, models);
+    if (!current || !billsASubscription(current)) return row;
+    const currentDir = (current.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "");
+    if (currentDir === want) return row;
+    const twin = models.find(
+      (m) =>
+        billsASubscription(m) &&
+        m.provider === current.provider &&
+        m.model_name === current.model_name &&
+        (m.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "") === want,
+    );
+    if (!twin) {
+      missing.push(index);
+      return row;
+    }
+    return { ...row, modelId: twin.id };
+  });
+  return { rows: next, missing };
+}
 
 // Quickview liveness throttle: collapse bursts of agent:messages:batch into at
 // most one dashboard refetch per this window (see onMessageBatch in Dashboard).
@@ -198,6 +307,14 @@ export function Dashboard() {
   // `model:changed` event (upsert/delete) — no poll needed.
   const { data: models = [] } = useTauriQuery<ModelView[]>(
     "list_models",
+    {},
+  );
+  // 0091: usage-limit marks, shown on the row of a model that bills a marked
+  // account — "limited until …" and nothing more. Deliberately NOT beside the
+  // Account quick-select above the rows: switching accounts is not the answer
+  // to a limit (spec §8), so the limit text offers no switch.
+  const { data: accountMarks = [] } = useTauriQuery<AccountMark[]>(
+    "list_account_marks",
     {},
   );
   // The roles a participant can be invited from. Archived ones are excluded by
@@ -374,6 +491,10 @@ export function Dashboard() {
   const rosterReady =
     participants.length > 0 && participants.every((p) => p.roleId !== null);
 
+  // The quick-select's answer: rows it could not move (no saved twin of
+  // their model on that account), by 1-based position. Cleared by any row
+  // edit — the user is then choosing by hand.
+  const [accountMissing, setAccountMissing] = useState<number[]>([]);
   const patchParticipant = (index: number, patch: Partial<ParticipantRow>) =>
     setParticipants((rows) =>
       rows.map((row, i) => (i === index ? { ...row, ...patch } : row)),
@@ -672,14 +793,59 @@ export function Dashboard() {
               )}
               </div>
               <div className="flex min-h-0 min-w-0 flex-col md:flex-1">
-                <div className="mb-1 flex shrink-0 items-center justify-between">
+                <div className="mb-1 flex shrink-0 items-center justify-between gap-2">
                   <span className="font-label-caps text-label-caps text-on-surface-variant">
                     Participants
                   </span>
+                  {/* 0090: which Claude account the session bills, as a
+                      quick-select over the saved subscription rows — it
+                      swaps every row to the same model on that account where
+                      one is saved, and names the rows it could not move. It
+                      never shows a limit: switching accounts is not the answer
+                      to a limit (spec §8), so no limit text sits beside it. */}
+                  {accountChoices(models).length > 1 && (
+                    <label className="flex min-w-0 items-center gap-1 font-code-sm text-code-sm text-on-surface-variant">
+                      <span className="shrink-0">Account</span>
+                      <select
+                        aria-label="Account for every participant"
+                        value=""
+                        onChange={(e) => {
+                          if (!e.target.value) return;
+                          const dir = e.target.value === "default" ? "" : e.target.value;
+                          const { rows, missing } = remapRowsToAccount(
+                            participants,
+                            dir,
+                            roles,
+                            models,
+                          );
+                          setParticipants(rows);
+                          setAccountMissing(missing.map((i) => i + 1));
+                        }}
+                        className={cn(selectClass, "min-w-0 max-w-[12rem]")}
+                      >
+                        <option value="">(pick for all rows)</option>
+                        {accountChoices(models).map((a) => (
+                          <option key={a.dir || "default"} value={a.dir || "default"}>
+                            {a.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   <span className="font-code-sm text-code-sm text-on-surface-variant">
                     {participants.length} of {MAX_PARTICIPANTS}
                   </span>
                 </div>
+                {accountMissing.length > 0 && (
+                  <p
+                    role="status"
+                    className="mb-1 break-words font-code-sm text-code-sm text-on-surface-variant"
+                  >
+                    No saved model on that account for participant{" "}
+                    {accountMissing.join(", ")} — add one in Settings → Models or
+                    pick a model by hand.
+                  </p>
+                )}
                 {/* The one scroller on md+: overflow lands here, never on the
                     frame — the footer stays reachable at any roster size. No
                     flex-1: the list takes its natural height and SHRINKS
@@ -817,9 +983,10 @@ export function Dashboard() {
                           <select
                             aria-label={`Participant ${index + 1} model`}
                             value={row.modelId}
-                            onChange={(e) =>
-                              patchParticipant(index, { modelId: e.target.value })
-                            }
+                            onChange={(e) => {
+                              setAccountMissing([]);
+                              patchParticipant(index, { modelId: e.target.value });
+                            }}
                             className={selectClass}
                           >
                             <option value="">(role default)</option>
@@ -829,6 +996,25 @@ export function Dashboard() {
                               </option>
                             ))}
                           </select>
+                          {/* 0090: the account this row bills — the model's
+                              config dir (`default` = ~/.claude), or the
+                              provider for a gateway row. The model name alone
+                              cannot say: the same model id runs on both. */}
+                          <span
+                            data-testid={`participant-${index + 1}-account`}
+                            className="mt-0.5 block truncate font-code-sm text-code-sm text-on-surface-variant"
+                            title="Which account this participant bills"
+                          >
+                            bills: {accountLabelFor(row, roles, models)}
+                          </span>
+                          {rowLimit(row, roles, models, accountMarks) && (
+                            <span
+                              data-testid={`participant-${index + 1}-limit`}
+                              className="mt-0.5 block break-words font-code-sm text-code-sm text-on-surface-variant"
+                            >
+                              {rowLimit(row, roles, models, accountMarks)}
+                            </span>
+                          )}
                         </label>
                         {/* rc3 D12: effort belongs to the PARTICIPANT, next to
                             the role and model it applies to. One select since

@@ -99,8 +99,15 @@ pub fn translate(
 ) -> Vec<AgentEvent> {
     match ev {
         StreamEvent::System(sys) => match sys {
-            SystemEvent::Init { session_id, .. } => {
-                vec![AgentEvent::Init { session_id }]
+            SystemEvent::Init {
+                session_id,
+                api_key_source,
+                ..
+            } => {
+                vec![AgentEvent::Init {
+                    session_id,
+                    api_key_source,
+                }]
             }
             SystemEvent::BackgroundTasksChanged { tasks } => {
                 vec![AgentEvent::BackgroundTasks { running: tasks.len() }]
@@ -531,6 +538,27 @@ mod tests {
     /// Feedback #17(3): claude-code's own messages carry the model
     /// `<synthetic>`; their text is a Notice, not the participant's prose. A
     /// real model's text that merely starts "API Error:" stays Text.
+    /// `init` carries `apiKeySource` (B4): parsed by its camelCase wire name
+    /// and carried on the event; absent on an older CLI → `None`.
+    #[test]
+    fn init_carries_the_api_key_source() {
+        let parse = |line: &str| -> StreamEvent { serde_json::from_str(line).unwrap() };
+        let mut carry = None;
+        let ev = parse(
+            r#"{"type":"system","subtype":"init","session_id":"cc-1","model":"claude-fable-5-1","apiKeySource":"none"}"#,
+        );
+        assert!(matches!(
+            translate(ev, &mut carry).as_slice(),
+            [AgentEvent::Init { session_id: Some(id), api_key_source: Some(src) }]
+                if id == "cc-1" && src == "none"
+        ));
+        let ev = parse(r#"{"type":"system","subtype":"init","session_id":"cc-2"}"#);
+        assert!(matches!(
+            translate(ev, &mut carry).as_slice(),
+            [AgentEvent::Init { session_id: Some(_), api_key_source: None }]
+        ));
+    }
+
     #[test]
     fn synthetic_messages_become_notices_and_real_prose_stays_text() {
         let mut carry = None;

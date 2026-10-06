@@ -332,6 +332,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "iana-time-zone",
  "libc",
  "notify-debouncer-mini",
  "portable-pty",

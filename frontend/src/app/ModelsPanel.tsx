@@ -8,7 +8,7 @@ import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
 import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
 import { SaveIcon } from "../components/icons";
-import type { ModelView, ValidateResult } from "../lib/bindings";
+import type { AccountMark, ModelView, ValidateResult } from "../lib/bindings";
 import { invoke } from "@tauri-apps/api/core";
 import { selectClass } from "../components/ui/Select";
 import { Skeleton } from "../components/ui/Skeleton";
@@ -37,6 +37,15 @@ export function ModelsPanel() {
   const { data: models = [], refetch, isLoading } =
     useTauriQuery<ModelView[]>("list_models");
   const del = useTauriMutation<void, { id: string }>("delete_model");
+  // 0091: the usage-limit marks, one per account (config dir + organisation).
+  // A row shows the mark for its dir — "limited until …" and a Clear — and
+  // nothing else: no pointer at another account (spec §8).
+  const { data: marks = [], refetch: refetchMarks } =
+    useTauriQuery<AccountMark[]>("list_account_marks");
+  const clearMark = useTauriMutation<
+    boolean,
+    { configDir: string; orgId: string; modelName: string }
+  >("clear_account_mark");
 
   const [dialog, setDialog] = useState<
     { mode: "create" } | { mode: "edit"; model: ModelView } | null
@@ -134,6 +143,15 @@ export function ModelsPanel() {
                     title={m.model_name}
                   >
                     <span className="truncate">{m.model_name || "—"}</span>
+                    {m.claude_config_dir && !m.auth_token && !m.base_url && (
+                      <span
+                        data-testid="model-account"
+                        className="shrink-0 rounded border border-outline-variant px-1 font-label-caps text-label-caps text-on-surface-variant"
+                        title={`Claude config dir: ${m.claude_config_dir}`}
+                      >
+                        {accountLabelOf(m)}
+                      </span>
+                    )}
                   </span>
                   <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
                     {m.updated_at ? formatTimestamp(m.updated_at) : "—"}
@@ -166,6 +184,33 @@ export function ModelsPanel() {
                     </Button>
                   </div>
                 </div>
+                {marksFor(m, marks).map((mark) => (
+                  <div
+                    key={`${mark.config_dir}|${mark.org_id}|${mark.model_name}`}
+                    data-testid="model-limit"
+                    className="flex flex-wrap items-center gap-2 px-4 pb-2 font-code-sm text-code-sm text-on-surface-variant"
+                  >
+                    <span className="break-words">
+                      {limitLine(mark)}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={clearMark.isPending}
+                      title="Forget this limit — e.g. you enabled extra usage, or the reset passed"
+                      onClick={async () => {
+                        await clearMark.mutateAsync({
+                          configDir: mark.config_dir,
+                          orgId: mark.org_id,
+                          modelName: mark.model_name,
+                        });
+                        await refetchMarks();
+                      }}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                ))}
                 {testResult[m.id] && (
                   <div
                     className={cn(
@@ -245,7 +290,74 @@ function emptyDraft(): ModelView {
     updated_at: "",
     context_window: null,
     cli_settings: null,
+    claude_config_dir: null,
   };
+}
+
+/** The one-time login for a second subscription's config dir, as the user
+ *  runs it in their own terminal. `auth login --claudeai` is the subscription
+ *  sign-in; the interactive `/login` menu also offers the Console path, which
+ *  bills API usage. bot-hq never runs this itself. */
+export function accountSetupCommand(dir: string): string {
+  return `mkdir -p '${dir}' && CLAUDE_CONFIG_DIR='${dir}' claude auth login --claudeai`;
+}
+
+/** The optional second step: share the default dir's user config with the
+ *  new dir by symlink, so a participant there has the same CLAUDE.md,
+ *  settings (plugins, model overrides), skills and commands. `projects/` is
+ *  never shared — session history and auto-memory stay per account. */
+export function accountShareCommand(dir: string): string {
+  return [
+    `B='${dir}'`,
+    "for item in CLAUDE.md settings.json agents commands skills plugins; do",
+    '  src="$HOME/.claude/$item"; dst="$B/$item"',
+    '  [ -e "$src" ] || continue',
+    '  if [ -e "$dst" ] && [ ! -L "$dst" ]; then mv "$dst" "$dst.bak"; fi',
+    '  ln -sfn "$src" "$dst"',
+    "done",
+  ].join("\n");
+}
+
+/** The dir key a subscription row's marks are stored under (`""` = default). */
+function dirKeyOf(m: Pick<ModelView, "claude_config_dir">): string {
+  return (m.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "");
+}
+
+/** The limit marks that apply to a row: a subscription row's dir AND model
+ *  (claude.ai limits are per model — a Fable limit says nothing about the
+ *  same account's Opus row), whatever organisation was signed in there. A
+ *  gateway row has no account. */
+export function marksFor(
+  m: Pick<ModelView, "claude_config_dir" | "auth_token" | "base_url" | "model_name">,
+  marks: AccountMark[],
+): AccountMark[] {
+  if ((m.auth_token && m.auth_token.length > 0) || (m.base_url && m.base_url.length > 0)) {
+    return [];
+  }
+  const key = dirKeyOf(m);
+  return marks.filter((mark) => mark.config_dir === key && mark.model_name === m.model_name);
+}
+
+/** "limited until <local time> — <the CLI's line>", and only that. */
+export function limitLine(mark: AccountMark): string {
+  const who = mark.email ? `${mark.email}: ` : "";
+  const until = mark.limited_until
+    ? `limited until about ${new Date(mark.limited_until).toLocaleString()}`
+    : "limited (no reset time given)";
+  return `${who}${until} — "${mark.limited_text}"`;
+}
+
+/** How the dialog and the list name the account a row bills: blank dir =
+ *  the default `~/.claude`; a gateway row (its own token or base URL) bills
+ *  its provider, not a Claude account. */
+export function accountLabelOf(m: Pick<ModelView, "claude_config_dir" | "auth_token" | "base_url" | "provider">): string {
+  if ((m.auth_token && m.auth_token.length > 0) || (m.base_url && m.base_url.length > 0)) {
+    return m.provider;
+  }
+  const dir = (m.claude_config_dir ?? "").trim();
+  if (!dir) return "default";
+  const parts = dir.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return parts[parts.length - 1] || dir;
 }
 
 // ============================================================================
@@ -447,6 +559,52 @@ function ModelDialog({
               Claude-config override wins on any key both set.
             </span>
           </label>
+
+          <label className="block">
+            <FieldLabel>Claude config dir (second account)</FieldLabel>
+            <input
+              type="text"
+              value={draft.claude_config_dir ?? ""}
+              onChange={(e) =>
+                setDraft({ ...draft, claude_config_dir: e.target.value || null })
+              }
+              placeholder="(blank = the default ~/.claude)"
+              spellCheck={false}
+              className={terminalInputClass}
+            />
+            <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
+              Which Claude subscription a participant on this model bills. Leave
+              it blank for the account signed in to <code>~/.claude</code>. To run
+              a second subscription beside it, give it its own absolute path (one
+              signed-in account per dir); a participant is spawned into that dir
+              and stays there for its whole life. Ignored for a gateway model —
+              its token bills the gateway.
+            </span>
+          </label>
+
+          {draft.claude_config_dir && draft.claude_config_dir.trim() && !draft.auth_token && !draft.base_url && (
+            <div className="rounded border border-outline-variant/60 bg-surface-container-lowest p-2">
+              <p className="mb-1 break-words font-body text-code-sm text-on-surface-variant">
+                One-time setup, in your own terminal — sign the second account in
+                to this dir (bot-hq never runs it), then press <strong>Test</strong>{" "}
+                on the saved row to confirm:
+              </p>
+              <pre
+                data-testid="account-setup-command"
+                className="select-all overflow-x-hidden whitespace-pre-wrap break-all rounded bg-surface-container p-2 font-code-sm text-code-sm text-on-surface"
+              >
+                {accountSetupCommand(draft.claude_config_dir.trim())}
+              </pre>
+              <p className="mb-1 mt-2 break-words font-body text-code-sm text-on-surface-variant">
+                Optional: share the default dir&apos;s CLAUDE.md, settings
+                (plugins, model overrides), skills and commands with it. Session
+                history and memory stay per account.
+              </p>
+              <pre className="select-all overflow-x-hidden whitespace-pre-wrap break-all rounded bg-surface-container p-2 font-code-sm text-code-sm text-on-surface">
+                {accountShareCommand(draft.claude_config_dir.trim())}
+              </pre>
+            </div>
+          )}
 
           {/* The "Native loop" checkbox lived here until rc3 D9. bot-hq now has
               one connector, so there is no runtime to choose — but the choice it

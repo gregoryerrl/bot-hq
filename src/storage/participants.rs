@@ -175,6 +175,18 @@ pub struct Participant {
     /// a pre-floor row; the flag still separates that from a row nothing ever
     /// spawned.
     pub spawn_knobs_recorded: bool,
+    /// The Claude config dir this participant was spawned into (migration
+    /// 0090): `''` = the CLI's default `~/.claude`, else the absolute path the
+    /// model row named at the FIRST spawn. `None` = never spawned since 0090.
+    /// Recorded once and reused on every later spawn — claude-code's session
+    /// store lives inside the dir, so a `--resume` anywhere else starts blank.
+    pub account_dir_at_spawn: Option<String>,
+    /// The signed-in identity `claude auth status` reported for that dir at
+    /// spawn (email + organisation id), for a subscription-billed participant.
+    /// `None` for a gateway participant, for a row backfilled by 0090, and
+    /// when the status could not be read.
+    pub account_email_at_spawn: Option<String>,
+    pub account_org_at_spawn: Option<String>,
 }
 
 /// One participant a session is created with: **a role and a model**.
@@ -213,7 +225,8 @@ const ROLE_COLUMNS: &str = "id, slug, display_name, description_prompt, capabili
 const PARTICIPANT_COLUMNS: &str = "id, session_id, slug, display_name, role_id, model_id, \
      runtime, capabilities, participation_mode, turn_position, done_vote, enabled, \
      effort, ultracode, claude_session_id, color, label, \
-     effort_at_spawn, ultracode_at_spawn, spawn_knobs_recorded";
+     effort_at_spawn, ultracode_at_spawn, spawn_knobs_recorded, \
+     account_dir_at_spawn, account_email_at_spawn, account_org_at_spawn";
 
 fn role_from_row(r: &sqlx::sqlite::SqliteRow) -> Role {
     use sqlx::Row;
@@ -260,6 +273,9 @@ fn participant_from_row(r: &sqlx::sqlite::SqliteRow) -> Participant {
         effort_at_spawn: r.get("effort_at_spawn"),
         ultracode_at_spawn: r.get("ultracode_at_spawn"),
         spawn_knobs_recorded: r.get::<i64, _>("spawn_knobs_recorded") != 0,
+        account_dir_at_spawn: r.get("account_dir_at_spawn"),
+        account_email_at_spawn: r.get("account_email_at_spawn"),
+        account_org_at_spawn: r.get("account_org_at_spawn"),
     }
 }
 
@@ -1593,6 +1609,33 @@ impl Storage {
         .execute(&self.pool)
         .await
         .with_context(|| format!("recording spawn knobs for participant {participant_id}"))?;
+        Ok(())
+    }
+
+    /// Record the Claude config dir this participant spawns into and the
+    /// signed-in identity the CLI reported there (migration 0090). Written at
+    /// the FIRST spawn — the dir is then reused on every later spawn, never
+    /// re-read from the model row — and again on a later spawn only to fill
+    /// an identity the row does not have yet (a row 0090 backfilled).
+    pub async fn set_account_at_spawn(
+        &self,
+        participant_id: i64,
+        dir: &str,
+        email: Option<&str>,
+        org_id: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE session_participants \
+             SET account_dir_at_spawn = ?, account_email_at_spawn = ?, account_org_at_spawn = ? \
+             WHERE id = ?",
+        )
+        .bind(dir)
+        .bind(email)
+        .bind(org_id)
+        .bind(participant_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("recording the account at spawn for participant {participant_id}"))?;
         Ok(())
     }
 
@@ -5308,6 +5351,9 @@ mod tests {
             effort_at_spawn: None,
             ultracode_at_spawn: None,
             spawn_knobs_recorded: false,
+            account_dir_at_spawn: None,
+            account_email_at_spawn: None,
+            account_org_at_spawn: None,
             id,
             session_id: "s1".into(),
             slug: slug.into(),
@@ -6769,6 +6815,14 @@ mod tests {
                 "effort_at_spawn",
                 "ultracode_at_spawn",
                 "spawn_knobs_recorded",
+                // Migration 0090 — the config dir and signed-in identity a
+                // participant was spawned with. Written at SPAWN like the three
+                // above, so both roster paths must leave them NULL: a roster
+                // that arrived with a dir already recorded would pin a resume
+                // to a dir nothing ever spawned into.
+                "account_dir_at_spawn",
+                "account_email_at_spawn",
+                "account_org_at_spawn",
             ],
             "session_participants grew a column; roster parity has to cover it"
         );
@@ -7605,5 +7659,68 @@ mod tests {
         assert!(rows[0].1.is_none(), "the epoch-0 ballot that carried the advance stays unretracted");
         assert_eq!(rows[1].0, epoch);
         assert!(rows[1].1.is_some(), "the live round's ballot is retracted");
+    }
+
+    /// Migration 0090's backfill, run as a real upgrade: a database at 0089
+    /// with a participant that has already spawned (`claude_session_id` set)
+    /// and one that never has. After 0090 the spawned row's dir is the
+    /// default (`''`) — it was spawned with no `CLAUDE_CONFIG_DIR`, and a
+    /// NULL would let a later spawn re-read a model row pointed at another
+    /// dir and `--resume` there blank — while the never-spawned row stays
+    /// NULL (its first spawn decides) and neither carries an identity.
+    #[tokio::test]
+    async fn the_backfill_marks_every_resumed_row_as_the_default_dir() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::from_str("sqlite::memory:")
+                    .unwrap()
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        let mut applied_90 = false;
+        let mut seeded = false;
+        for m in crate::storage::MIGRATOR.iter() {
+            if m.version == 90 && !seeded {
+                sqlx::raw_sql(
+                    "INSERT INTO sessions (id, title, created_at, sort_key) VALUES ('s1', 't', 'now', 1); \
+                     INSERT INTO session_participants \
+                        (session_id, slug, display_name, runtime, capabilities, participation_mode, turn_position, claude_session_id) \
+                     VALUES ('s1', 'hands', 'HANDS', 'claude', '', 'active', 0, 'uuid-spawned'); \
+                     INSERT INTO session_participants \
+                        (session_id, slug, display_name, runtime, capabilities, participation_mode, turn_position) \
+                     VALUES ('s1', 'eyes', 'EYES', 'claude', '', 'active', 1);",
+                )
+                .execute(&pool)
+                .await
+                .expect("seeding rows at 0089");
+                seeded = true;
+            }
+            sqlx::raw_sql(&m.sql)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("migration {} failed: {e}", m.version));
+            if m.version == 90 {
+                applied_90 = true;
+            }
+        }
+        assert!(applied_90 && seeded, "the fixture must straddle 0090");
+        let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT slug, account_dir_at_spawn, account_email_at_spawn, account_org_at_spawn \
+             FROM session_participants ORDER BY turn_position",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("hands".into(), Some("".into()), None, None),
+                ("eyes".into(), None, None, None),
+            ]
+        );
     }
 }

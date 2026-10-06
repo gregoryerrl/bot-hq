@@ -9,7 +9,7 @@ use super::*;
 /// upsert now leaves it at the column default. Dropping it needs a migration
 /// this phase does not write.
 const MODEL_COLUMNS: &str = "id, display_name, provider, model_name, base_url, auth_token, \
-     created_at, updated_at, context_window, cli_settings";
+     created_at, updated_at, context_window, cli_settings, claude_config_dir";
 
 /// Key in `app_settings`: "0" = repo-backed sessions run directly in the repo
 /// by default instead of an isolated git worktree. Resolved via
@@ -29,6 +29,26 @@ pub const DEFAULT_SPAWN_MODEL_NAME: &str = "claude-opus-5";
 /// unset or any value but "0" → nudges ON (the default). Resolved via
 /// [`Storage::adherence_nudges_enabled`].
 pub const ADHERENCE_NUDGES_KEY: &str = "adherence_nudges";
+
+/// The stored form of a model row's Claude config dir: `None` for blank, else
+/// the path as typed with any trailing slashes removed. The string is the
+/// account's credential slot (claude-code keys its Keychain item on it), so
+/// it is deliberately NOT canonicalized — `~/x` and `/Users/me/x` are two
+/// different slots to the CLI even when they are one directory on disk;
+/// `tauri_cmd::models::validate_config_dir` refuses the relative forms.
+pub fn normalize_config_dir(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stripped = trimmed.trim_end_matches(['/', '\\']);
+    // A bare root (`/`) would strip to nothing; keep it as typed so the
+    // validator can name it rather than treating it as "default".
+    if stripped.is_empty() {
+        return Some(trimmed.to_string());
+    }
+    Some(stripped.to_string())
+}
 
 impl Storage {
     // ---- models ----------------------------------------------------------
@@ -61,8 +81,8 @@ impl Storage {
         sqlx::query(
             "INSERT INTO models \
                 (id, display_name, provider, model_name, base_url, auth_token, created_at, updated_at, \
-                 context_window, cli_settings) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 context_window, cli_settings, claude_config_dir) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
                 display_name = excluded.display_name, \
                 provider = excluded.provider, \
@@ -71,7 +91,8 @@ impl Storage {
                 auth_token = excluded.auth_token, \
                 updated_at = excluded.updated_at, \
                 context_window = excluded.context_window, \
-                cli_settings = excluded.cli_settings",
+                cli_settings = excluded.cli_settings, \
+                claude_config_dir = excluded.claude_config_dir",
         )
         .bind(&m.id)
         .bind(&m.display_name)
@@ -83,6 +104,7 @@ impl Storage {
         .bind(&now)
         .bind(m.context_window)
         .bind(&m.cli_settings)
+        .bind(normalize_config_dir(m.claude_config_dir.as_deref()))
         .execute(&self.pool)
         .await
         .with_context(|| format!("upserting model {}", m.id))?;
@@ -220,6 +242,7 @@ mod tests {
             updated_at: String::new(),
             context_window: None,
             cli_settings: None,
+            claude_config_dir: None,
         }
     }
 
@@ -324,6 +347,48 @@ mod tests {
         let after = s.get_model("m1").await.unwrap().unwrap();
         assert_eq!(after.display_name, "Opus Renamed");
         assert_eq!(after.created_at, first.created_at, "created_at must persist");
+    }
+
+    /// 0090: the config dir round-trips through upsert → get / list, stored
+    /// in its normalized form (trailing slash off, blank → NULL), and `SELECT *`
+    /// still decodes (the `sqlx(default)` belt).
+    #[tokio::test]
+    async fn config_dir_roundtrips_normalized() {
+        let s = Storage::memory().await.unwrap();
+        let mut m = model("m1", "Fable · acct 2");
+        m.claude_config_dir = Some("/Users/me/.claude-acct-2/".into());
+        s.upsert_model(&m).await.unwrap();
+        assert_eq!(
+            s.get_model("m1").await.unwrap().unwrap().claude_config_dir.as_deref(),
+            Some("/Users/me/.claude-acct-2"),
+            "stored without the trailing slash"
+        );
+        let star = sqlx::query_as::<_, Model>("SELECT * FROM models WHERE id = 'm1'")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(star.claude_config_dir.as_deref(), Some("/Users/me/.claude-acct-2"));
+        m.claude_config_dir = Some("   ".into());
+        s.upsert_model(&m).await.unwrap();
+        assert_eq!(
+            s.get_model("m1").await.unwrap().unwrap().claude_config_dir,
+            None,
+            "blank is the default dir, stored as NULL"
+        );
+    }
+
+    #[test]
+    fn normalize_config_dir_strips_only_trailing_slashes() {
+        assert_eq!(normalize_config_dir(None), None);
+        assert_eq!(normalize_config_dir(Some("")), None);
+        assert_eq!(normalize_config_dir(Some(" \n")), None);
+        assert_eq!(normalize_config_dir(Some("/a/b/")).as_deref(), Some("/a/b"));
+        assert_eq!(normalize_config_dir(Some("/a/b//")).as_deref(), Some("/a/b"));
+        assert_eq!(normalize_config_dir(Some(" /a/b ")).as_deref(), Some("/a/b"));
+        // Not canonicalized: a `~` or a relative path is kept for the validator
+        // to refuse by name, never silently expanded.
+        assert_eq!(normalize_config_dir(Some("~/x/")).as_deref(), Some("~/x"));
+        assert_eq!(normalize_config_dir(Some("/")).as_deref(), Some("/"));
     }
 
     #[tokio::test]

@@ -174,7 +174,11 @@ pub enum AgentEvent {
     /// System/init event — agent is ready and reporting its session metadata.
     /// (The wire `SystemEvent::Init` also carries `model`/`cwd`, but no
     /// consumer reads them, so they are not forwarded here.)
-    Init { session_id: Option<String> },
+    Init {
+        session_id: Option<String>,
+        /// The CLI's `apiKeySource` — `none` for a subscription login.
+        api_key_source: Option<String>,
+    },
     /// How many background tasks the participant's claude-code process has
     /// RUNNING — its own count, from `background_tasks_changed`, updated
     /// whenever the set changes. Not speech and not a turn: the pump reads it
@@ -420,6 +424,149 @@ pub struct SpawnConfig {
     /// agent to write a commit the `commit-msg` hook refuses. `false` leaves
     /// the CLI's default alone.
     pub blank_cli_attribution: bool,
+    /// The Claude config dir this participant is spawned into — the child's
+    /// `CLAUDE_CONFIG_DIR` — or `None` for the CLI's default `~/.claude`.
+    /// Decided by the caller from the participant's spawn snapshot
+    /// (`core::session::resolve_participant_account`), never from the model
+    /// row at resume time: claude-code's session store lives inside the dir,
+    /// so a `--resume` anywhere else starts blank.
+    pub account_dir: Option<String>,
+    /// The account signed in to that dir at THIS spawn (email, organisation
+    /// id), as the CLI reported it — carried to the pump so a usage limit is
+    /// marked against the account answering now, not the one recorded at
+    /// the participant's first spawn (a `/login` swap in between would land
+    /// the new account's limit on the old one — EYES 69979e2f). `None` for a
+    /// gateway participant or when the status could not be read.
+    pub account_email: Option<String>,
+    pub account_org: Option<String>,
+}
+
+/// Inherited environment that would pick the child's credential or billing
+/// for it, cleared from every spawn before bot-hq sets its own (spec §6: build
+/// the child env explicitly, never inherit auth-related variables blindly).
+/// Names, never a prefix: `CLAUDE_CODE_SILENT_TURN_REMINDER` is deliberately
+/// inherited, and a user may export `CLAUDE_CODE_MAX_OUTPUT_TOKENS`. The list
+/// is what the 2.1.284 binary reads for auth/billing (EYES, strings over the
+/// binary): the two API credentials and the OAuth token (+ its refresh and
+/// file-descriptor forms), the config-dir pointer itself, the Console-profile
+/// sign-in (`ANTHROPIC_PROFILE` / `ANTHROPIC_CONFIG_DIR` — API billing), the
+/// cloud-provider switches (billing off the subscription), and the base URL,
+/// which `build_command` sets only for a gateway model and which an
+/// inherited value would otherwise reach a first-party participant through.
+pub const AUTH_ENV_SCRUB: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_PROFILE",
+    "ANTHROPIC_CONFIG_DIR",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+    "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+];
+
+/// Make the child's account explicit: clear every inherited auth/billing
+/// variable ([`AUTH_ENV_SCRUB`]), then point `CLAUDE_CONFIG_DIR` at the
+/// account's dir when it is not the default. **Call it before any env of
+/// bot-hq's own** — `Command`'s env is last-write-wins, so a scrub that ran
+/// after the model row's `ANTHROPIC_AUTH_TOKEN` would delete the gateway
+/// credential (pinned by `a_gateway_models_token_survives_the_account_scrub`).
+pub fn apply_account_env(cmd: &mut Command, account_dir: Option<&str>) {
+    for name in AUTH_ENV_SCRUB {
+        cmd.env_remove(name);
+    }
+    if let Some(dir) = account_dir.filter(|d| !d.is_empty()) {
+        cmd.env("CLAUDE_CONFIG_DIR", dir);
+    }
+}
+
+/// The login command for a config dir, as the user runs it in their own
+/// terminal. `--claudeai` is the subscription sign-in; the interactive `/login`
+/// menu also offers the Console path, which is API billing (spec goal 4).
+pub fn login_command(account_dir: &str) -> String {
+    format!("CLAUDE_CONFIG_DIR='{account_dir}' claude auth login --claudeai")
+}
+
+/// What `claude auth status --json` said about a config dir.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthProbe {
+    /// A signed-in account. `auth_method` is the CLI's word (`claude.ai` for a
+    /// subscription); the identity fields are what it reported.
+    LoggedIn {
+        auth_method: Option<String>,
+        email: Option<String>,
+        org_id: Option<String>,
+        subscription_type: Option<String>,
+    },
+    /// The CLI answered and the dir holds no credential.
+    LoggedOut,
+    /// The CLI could not be asked, or its answer could not be read: a launch
+    /// error, the timeout, or a body that is not the JSON shape. **Never
+    /// "logged out"** — a spawn goes ahead and the CLI reports its own error.
+    Unreadable(String),
+}
+
+/// How long `claude auth status` may take before the spawn stops waiting on
+/// it. The probe is a CLI start with no model call (about a second measured);
+/// a hung probe must not keep a session from starting.
+pub const AUTH_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Read a dir's sign-in state from the CLI's own report. `claude auth status
+/// --json` makes no model call and costs no quota (probed on 2.1.284, gate
+/// `a7e94fdd`), which is why it is the login check: a `claude -p` ping cannot
+/// tell a limited account from a logged-out one. The dir is checked to exist
+/// first — the CLI creates a missing one on contact.
+pub async fn auth_status(claude_bin: &str, account_dir: Option<&str>) -> AuthProbe {
+    if let Some(dir) = account_dir.filter(|d| !d.is_empty()) {
+        if !std::path::Path::new(dir).is_dir() {
+            return AuthProbe::LoggedOut;
+        }
+    }
+    let mut cmd = Command::new(claude_bin);
+    crate::appimage_env::scrub_tokio(&mut cmd);
+    apply_account_env(&mut cmd, account_dir);
+    cmd.args(["auth", "status", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    match tokio::time::timeout(AUTH_STATUS_TIMEOUT, cmd.output()).await {
+        Ok(Ok(out)) => parse_auth_status(&String::from_utf8_lossy(&out.stdout)),
+        Ok(Err(e)) => AuthProbe::Unreadable(format!("couldn't launch claude: {e}")),
+        Err(_) => AuthProbe::Unreadable(format!(
+            "claude auth status did not answer within {}s",
+            AUTH_STATUS_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// The JSON half of [`auth_status`], decided from the fields `loggedIn` and
+/// `authMethod` — never from the process exit code, which a shell pipeline
+/// reported wrongly in the probe that measured this shape. Anything that is
+/// not the shape is [`AuthProbe::Unreadable`].
+pub fn parse_auth_status(body: &str) -> AuthProbe {
+    let v: serde_json::Value = match serde_json::from_str(body.trim()) {
+        Ok(v) => v,
+        Err(e) => return AuthProbe::Unreadable(format!("claude auth status: {e}")),
+    };
+    let Some(logged_in) = v.get("loggedIn").and_then(|b| b.as_bool()) else {
+        return AuthProbe::Unreadable("claude auth status: no loggedIn field".into());
+    };
+    let field = |k: &str| v.get(k).and_then(|s| s.as_str()).map(str::to_string);
+    let auth_method = field("authMethod");
+    if !logged_in || auth_method.as_deref() == Some("none") {
+        return AuthProbe::LoggedOut;
+    }
+    AuthProbe::LoggedIn {
+        auth_method,
+        email: field("email"),
+        org_id: field("orgId"),
+        subscription_type: field("subscriptionType"),
+    }
 }
 
 /// One participant's stdin, reachable only with a receipt for a row in THIS
@@ -1050,7 +1197,7 @@ async fn supervise<S, Fut>(
                         }
                         Some(ev) => {
                             match &ev {
-                                AgentEvent::Init { session_id: Some(id) } => {
+                                AgentEvent::Init { session_id: Some(id), .. } => {
                                     cfg.resume_session_id = Some(id.clone());
                                 }
                                 AgentEvent::TurnComplete { is_error, api_error_status, .. } => {
@@ -1501,6 +1648,10 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     // `git` over HTTPS, `curl` and `python3` in the agent's own shell. A no-op
     // when bot-hq is not running from a payload. See `appimage_env`.
     crate::appimage_env::scrub_tokio(&mut cmd);
+    // Then the account: inherited auth/billing variables out, the participant's
+    // own config dir in — still before any env of ours, so the model row's
+    // gateway token below is never the thing that gets scrubbed.
+    apply_account_env(&mut cmd, cfg.account_dir.as_deref());
     cmd.arg("-p")
         .args(["--input-format", "stream-json"])
         .args(["--output-format", "stream-json"])
@@ -1928,6 +2079,7 @@ mod tests {
                 updated_at: String::new(),
                 context_window: None,
                 cli_settings: None,
+                claude_config_dir: None,
             },
             system_prompt_path: Path::new("/tmp/bot-hq-test-prompt.txt").to_path_buf(),
             mcp_config_path: Some(Path::new("/tmp/mcp.json").to_path_buf()),
@@ -1942,7 +2094,147 @@ mod tests {
             ),
             overrides: crate::claude_config::AgentOverride::default(),
             blank_cli_attribution: false,
+            account_dir: None,
+            account_email: None,
+            account_org: None,
         }
+    }
+
+    /// The child's env as `build_command` sets it, REMOVALS included — the
+    /// `(name, None)` pairs `debug_env` drops. An inherited credential is only
+    /// provably gone when its removal is in this list.
+    fn env_ops(c: &SpawnConfig) -> Vec<(String, Option<String>)> {
+        build_command(c)
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    /// 0090: the account is explicit. Every inherited auth/billing variable in
+    /// [`AUTH_ENV_SCRUB`] is REMOVED from the child (the app may have been
+    /// launched from a shell that exports an API key, which would move the
+    /// participant off the subscription silently), and `CLAUDE_CONFIG_DIR` is
+    /// set only for a custom account — the default dir is left to the CLI, an
+    /// explicit `~/.claude` being a different Keychain item.
+    #[test]
+    fn apply_account_env_scrubs_the_auth_list_and_sets_the_dir_only_for_a_custom_account() {
+        let mut c = cfg();
+        c.config.auth_token = None;
+        let ops = env_ops(&c);
+        for name in AUTH_ENV_SCRUB {
+            assert!(
+                ops.iter().any(|(k, v)| k == name && v.is_none()),
+                "{name} must be removed from the child env: {ops:?}"
+            );
+        }
+        assert!(
+            !ops.iter().any(|(k, v)| k == "CLAUDE_CONFIG_DIR" && v.is_some()),
+            "the default account sets no CLAUDE_CONFIG_DIR: {ops:?}"
+        );
+
+        c.account_dir = Some("/Users/me/.claude-acct-2".into());
+        let ops = env_ops(&c);
+        assert!(
+            ops.iter()
+                .any(|(k, v)| k == "CLAUDE_CONFIG_DIR" && v.as_deref() == Some("/Users/me/.claude-acct-2")),
+            "a custom account sets CLAUDE_CONFIG_DIR: {ops:?}"
+        );
+        // The dir is set AFTER its own removal (last write wins), so the env
+        // the child sees carries the value, not the removal.
+        let last = ops.iter().rev().find(|(k, _)| k == "CLAUDE_CONFIG_DIR").unwrap();
+        assert_eq!(last.1.as_deref(), Some("/Users/me/.claude-acct-2"));
+    }
+
+    /// The ordering pin (E4): the scrub runs BEFORE bot-hq's own env, so a
+    /// gateway model's credential and base URL — set by `build_command` from
+    /// the model row — survive it, on a custom account too. Move
+    /// `apply_account_env` below `cmd.env("ANTHROPIC_AUTH_TOKEN", …)` and this
+    /// goes red: the removal would be the last write.
+    #[test]
+    fn a_gateway_models_token_survives_the_account_scrub() {
+        let mut c = cfg();
+        c.config.auth_token = Some("ds-token".into());
+        c.config.base_url = Some("https://api.deepseek.com/anthropic".into());
+        c.account_dir = Some("/Users/me/.claude-acct-2".into());
+        let ops = env_ops(&c);
+        let last_of = |name: &str| ops.iter().rev().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+        assert_eq!(last_of("ANTHROPIC_AUTH_TOKEN"), Some(Some("ds-token".into())));
+        assert!(
+            last_of("ANTHROPIC_BASE_URL").flatten().is_some(),
+            "the gateway base URL is still set: {ops:?}"
+        );
+        assert_eq!(
+            last_of("CLAUDE_CONFIG_DIR"),
+            Some(Some("/Users/me/.claude-acct-2".into()))
+        );
+    }
+
+    /// `parse_auth_status` over the two bodies gate `a7e94fdd` measured on
+    /// 2.1.284 (the default dir signed in; an empty custom dir), plus the
+    /// shapes that are NOT an answer. Decided from the JSON — the exit code
+    /// was never read.
+    #[test]
+    fn auth_status_json_decides_login() {
+        let signed_in = r#"{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/Users/me/.claude/projects",
+  "configDirectory": "/Users/me/.claude",
+  "email": "me@example.com",
+  "orgId": "a0e69d15-18db-47fd-9b4a-9f05a248ad41",
+  "orgName": "me@example.com's Organization",
+  "subscriptionType": "max"
+}"#;
+        assert_eq!(
+            parse_auth_status(signed_in),
+            AuthProbe::LoggedIn {
+                auth_method: Some("claude.ai".into()),
+                email: Some("me@example.com".into()),
+                org_id: Some("a0e69d15-18db-47fd-9b4a-9f05a248ad41".into()),
+                subscription_type: Some("max".into()),
+            }
+        );
+        let empty_dir = r#"{
+  "loggedIn": false,
+  "authMethod": "none",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/tmp/x/projects",
+  "configDirectory": "/tmp/x"
+}"#;
+        assert_eq!(parse_auth_status(empty_dir), AuthProbe::LoggedOut);
+        for not_an_answer in ["", "not json", "[]", r#"{"email":"me@example.com"}"#] {
+            assert!(
+                matches!(parse_auth_status(not_an_answer), AuthProbe::Unreadable(_)),
+                "{not_an_answer:?} is not an answer"
+            );
+        }
+    }
+
+    /// A missing custom dir is "logged out" without asking the CLI — which
+    /// would create it on contact.
+    #[tokio::test]
+    async fn auth_status_reports_a_missing_custom_dir_as_logged_out_without_launching() {
+        let probe = auth_status("/definitely/not/a/claude/binary", Some("/no/such/dir/for/bot-hq")).await;
+        assert_eq!(probe, AuthProbe::LoggedOut);
+    }
+
+    /// The login command the refusal names: the subscription sign-in,
+    /// never the interactive menu that also offers Console (API billing).
+    #[test]
+    fn login_command_uses_the_subscription_sign_in() {
+        assert_eq!(
+            login_command("/Users/me/.claude-acct-2"),
+            "CLAUDE_CONFIG_DIR='/Users/me/.claude-acct-2' claude auth login --claudeai"
+        );
     }
 
     /// A config for a role WITHOUT `edit_files` — the read-only spawn posture.

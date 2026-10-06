@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   authorLabel,
+  participantAccount,
   capabilityGapWarning,
   rosterAdvisory,
   participantLabelIndex,
@@ -32,10 +33,31 @@ function p(over: Partial<ParticipantView> = {}): ParticipantView {
     effort_at_spawn: null,
     ultracode_at_spawn: null,
     spawn_knobs_recorded: false,
+    account_dir_at_spawn: null,
+    account_email_at_spawn: null,
     enabled: true,
     ...over,
   };
 }
+
+describe("participantAccount — the account chip (0090)", () => {
+  it("prefers the email, falls back to the dir's last segment, says nothing without a snapshot", () => {
+    expect(participantAccount(p())).toBeNull();
+    expect(participantAccount(p({ account_dir_at_spawn: "" }))).toBeNull();
+    expect(participantAccount(p({ account_dir_at_spawn: "/Users/me/.claude-acct-2/" }))).toEqual({
+      text: ".claude-acct-2",
+      title: "Claude config dir: /Users/me/.claude-acct-2",
+    });
+    expect(
+      participantAccount(p({ account_dir_at_spawn: "", account_email_at_spawn: "one@example.com" })),
+    ).toEqual({ text: "one@example.com", title: "Bills one@example.com (~/.claude)" });
+    expect(
+      participantAccount(
+        p({ account_dir_at_spawn: "/Users/me/.claude-acct-2", account_email_at_spawn: "two@example.com" }),
+      ),
+    ).toEqual({ text: "two@example.com", title: "Bills two@example.com (/Users/me/.claude-acct-2)" });
+  });
+});
 
 describe("participantLabel — the contract's display rule", () => {
   it("joins role and model with a middle dot", () => {

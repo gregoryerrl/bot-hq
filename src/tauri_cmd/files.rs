@@ -139,6 +139,27 @@ fn claude_tool_results_dirs(config_dir: &Path, claude_session_ids: &[String]) ->
     out
 }
 
+/// [`claude_tool_results_dirs`] over each participant's own config dir
+/// (0090): the ids are grouped by dir so a dir is scanned once per id set,
+/// and the result is deduplicated — two participants in one dir share a
+/// scan, a participant on another account adds its dir.
+fn participants_tool_results_dirs(claude_ids: &[(PathBuf, String)]) -> Vec<PathBuf> {
+    let mut by_dir: std::collections::BTreeMap<&Path, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (dir, id) in claude_ids {
+        by_dir.entry(dir.as_path()).or_default().push(id.clone());
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for (dir, ids) in by_dir {
+        for found in claude_tool_results_dirs(dir, &ids) {
+            if !out.contains(&found) {
+                out.push(found);
+            }
+        }
+    }
+    out
+}
+
 /// True when `candidate` sits under `root` AND some component BELOW the root
 /// starts with a dot. The root itself is typically `~/.bot-hq/library` — a
 /// dotted path — so the check must strip the root first or it would refuse
@@ -262,21 +283,37 @@ pub async fn read_workspace_file(
         .and_then(|s| s.working_repo_path);
     let library = core.paths.cl_dir.clone();
     // This session's participants' claude session ids — the keys to the
-    // claude-code tool-results dirs the viewer may open (and only those).
-    let claude_ids: Vec<String> = core
+    // claude-code tool-results dirs the viewer may open (and only those) —
+    // each paired with the config dir that participant was spawned into
+    // (0090): a participant on a second account keeps its tool-results under
+    // ITS dir, not the app's own, so the lookup follows the spawn snapshot.
+    // `''` / NULL = the CLI's default `~/.claude` — not the app's own
+    // `claude_config::config_dir()`, which honours a `CLAUDE_CONFIG_DIR` the
+    // app was launched with; agents are spawned with that variable cleared
+    // (EYES ac7e6326).
+    let app_config_dir = crate::paths::home_dir()
+        .map(|h| h.join(".claude"))
+        .unwrap_or_else(|_| crate::claude_config::config_dir());
+    let claude_ids: Vec<(PathBuf, String)> = core
         .storage
         .participants_for_session(&session_id)
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|p| p.claude_session_id)
+        .filter_map(|p| {
+            let id = p.claude_session_id?;
+            let dir = match p.account_dir_at_spawn.as_deref() {
+                Some(d) if !d.is_empty() => PathBuf::from(d),
+                _ => app_config_dir.clone(),
+            };
+            Some((dir, id))
+        })
         .collect();
     // Everything below is filesystem work — canonicalize, stat, and a read of
     // up to `MAX_VIEWABLE_BYTES` — so it runs off the reactor, like its
     // sibling `cl_read_file_inner` (round 9: it ran on the 2-worker reactor).
     tokio::task::spawn_blocking(move || {
-        let tool_results =
-            claude_tool_results_dirs(&crate::claude_config::config_dir(), &claude_ids);
+        let tool_results = participants_tool_results_dirs(&claude_ids);
         read_workspace_file_blocking(repo, &path, Some(&library), &tool_results)
     })
     .await
@@ -807,6 +844,39 @@ mod tests {
             let err = read(&refused).expect_err(&refused.display().to_string());
             assert!(matches!(err, AppError::Unauthorized(_)), "{}: {err:?}", refused.display());
         }
+    }
+
+    /// 0090: a participant spawned into a second account's config dir keeps
+    /// its tool-results under THAT dir. The viewer follows each participant's
+    /// own dir — the default-dir participant's results are found under the
+    /// app's dir, the other account's under its own — and a dir scanned for
+    /// two participants is scanned once.
+    #[test]
+    fn tool_results_are_found_under_a_participants_own_config_dir() {
+        let default_dir = tempfile::tempdir().unwrap();
+        let acct_b = tempfile::tempdir().unwrap();
+        let hands = "473f70b0-e9f6-49b8-ba7e-e9e685a55199";
+        let eyes = "e325640a-c6a7-4b37-a12e-5566334c80f5";
+        let place = |root: &Path, id: &str| {
+            let d = root.join("projects").join("-Users-u-Projects-app").join(id).join("tool-results");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("r.txt"), id).unwrap();
+            d
+        };
+        let hands_dir = place(default_dir.path(), hands);
+        let eyes_dir = place(acct_b.path(), eyes);
+        // EYES's id under the DEFAULT dir would be another account's session
+        // of the same id — not this participant's, so not viewable.
+        let decoy = place(default_dir.path(), eyes);
+
+        let dirs = participants_tool_results_dirs(&[
+            (default_dir.path().to_path_buf(), hands.to_string()),
+            (acct_b.path().to_path_buf(), eyes.to_string()),
+            (default_dir.path().to_path_buf(), hands.to_string()),
+        ]);
+        assert_eq!(dirs.len(), 2, "deduplicated: {dirs:?}");
+        assert!(dirs.contains(&hands_dir) && dirs.contains(&eyes_dir), "{dirs:?}");
+        assert!(!dirs.contains(&decoy), "another account's same-id dir is not this participant's: {dirs:?}");
     }
 
     #[test]

@@ -3,9 +3,15 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { Dashboard, MAX_PARTICIPANTS } from "./Dashboard";
+import {
+  Dashboard,
+  MAX_PARTICIPANTS,
+  accountChoices,
+  accountLabelFor,
+  remapRowsToAccount,
+} from "./Dashboard";
 import { invoke } from "@tauri-apps/api/core";
-import type { ClaudeOverrides, ModelView, RoleView } from "../lib/bindings";
+import type { AccountMark, ClaudeOverrides, ModelView, RoleView } from "../lib/bindings";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 // The dashboard subscribes to `agent:messages:batch` for Quickview liveness.
@@ -26,6 +32,7 @@ const MODELS: ModelView[] = [
     updated_at: "",
     context_window: null,
     cli_settings: null,
+    claude_config_dir: null,
   },
 ];
 
@@ -53,6 +60,8 @@ const EYES = role({ id: 2, slug: "eyes", display_name: "EYES" });
 function mockBackend(
   roles: RoleView[] = [role(), EYES],
   overrides: ClaudeOverrides | Record<string, never> = {},
+  models: ModelView[] = MODELS,
+  marks: AccountMark[] = [],
 ) {
   mockInvoke.mockImplementation(async (cmd: string) => {
     switch (cmd) {
@@ -63,7 +72,9 @@ function mockBackend(
       case "list_projects":
         return [];
       case "list_models":
-        return MODELS;
+        return models;
+      case "list_account_marks":
+        return marks;
       case "list_roles":
         return roles;
       case "get_app_setting":
@@ -271,6 +282,151 @@ describe("New session dialog — participants", () => {
 // ===========================================================================
 // rc3 D12 — effort is per participant
 // ===========================================================================
+
+describe("New session dialog — which account a participant bills (0090)", () => {
+  /** Opus on the default dir, Opus on a second account, and a gateway row. */
+  const TWO_ACCOUNTS: ModelView[] = [
+    MODELS[0],
+    { ...MODELS[0], id: "m-opus-b", display_name: "Opus · acct 2", claude_config_dir: "/Users/me/.claude-acct-2" },
+    {
+      ...MODELS[0],
+      id: "m-deepseek",
+      display_name: "DeepSeek",
+      provider: "deepseek",
+      model_name: "deepseek-v4-pro",
+      base_url: "https://api.deepseek.com/anthropic",
+      auth_token: "ds-token",
+    },
+  ];
+
+  it("labels each row with the account its model bills — the dir, default, or the gateway's provider", async () => {
+    mockBackend([role({ default_model_id: "m-opus" }), EYES], {}, TWO_ACCOUNTS);
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    const label = () => screen.getByTestId("participant-1-account").textContent;
+    expect(label()).toBe("bills: —");
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+    expect(label()).toBe("bills: default");
+    fireEvent.change(modelSelect(1), { target: { value: "m-opus-b" } });
+    expect(label()).toBe("bills: .claude-acct-2");
+    fireEvent.change(modelSelect(1), { target: { value: "m-deepseek" } });
+    expect(label()).toBe("bills: deepseek");
+  });
+
+  it("the Account quick-select moves every subscription row to that account's twin and names the rows it cannot", async () => {
+    mockBackend([role({ default_model_id: "m-opus" }), EYES], {}, TWO_ACCOUNTS);
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: /add participant/i }));
+    fireEvent.change(roleSelect(2), { target: { value: "2" } });
+    fireEvent.change(modelSelect(2), { target: { value: "m-deepseek" } });
+
+    const quick = screen.getByRole("combobox", { name: /account for every participant/i });
+    fireEvent.change(quick, { target: { value: "/Users/me/.claude-acct-2" } });
+    // Row 1 (Opus by role default) moved to its twin; the gateway row is not
+    // an account and stays.
+    expect(modelSelect(1)).toHaveValue("m-opus-b");
+    expect(modelSelect(2)).toHaveValue("m-deepseek");
+    expect(screen.queryByText(/no saved model on that account/i)).toBeNull();
+
+    // Back to the default: the twin the other way. A row with no twin on the
+    // chosen account is the helper test's case (`remapRowsToAccount`).
+    fireEvent.change(quick, { target: { value: "default" } });
+    expect(modelSelect(1)).toHaveValue("m-opus");
+    expect(modelSelect(2)).toHaveValue("m-deepseek");
+  });
+
+  it("shows a limit on the row of a model that bills a marked account — and names no other account", async () => {
+    const until = new Date(Date.now() + 3 * 3600 * 1000).toISOString();
+    const marks: AccountMark[] = [
+      {
+        config_dir: "/Users/me/.claude-acct-2",
+        org_id: "org-2",
+        model_name: "claude-opus",
+        email: "two@example.com",
+        limited_until: until,
+        limited_text: "You've hit your session limit · resets 8pm (Asia/Manila)",
+        marked_at: new Date().toISOString(),
+      },
+      // A mark whose reset has passed is not news.
+      {
+        config_dir: "",
+        org_id: "org-1",
+        model_name: "claude-opus",
+        email: "one@example.com",
+        limited_until: new Date(Date.now() - 1000).toISOString(),
+        limited_text: "old",
+        marked_at: new Date(Date.now() - 7200 * 1000).toISOString(),
+      },
+      // The same account, another model: not this row's limit.
+      {
+        config_dir: "/Users/me/.claude-acct-2",
+        org_id: "org-2",
+        model_name: "claude-fable-5-1",
+        email: "two@example.com",
+        limited_until: until,
+        limited_text: "You've hit your weekly limit · resets Oct 5 at 2pm (Asia/Manila)",
+        marked_at: new Date().toISOString(),
+      },
+    ];
+    mockBackend([role({ default_model_id: "m-opus" }), EYES], {}, TWO_ACCOUNTS, marks);
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    fireEvent.change(roleSelect(1), { target: { value: "1" } });
+    expect(screen.queryByTestId("participant-1-limit")).toBeNull();
+    fireEvent.change(modelSelect(1), { target: { value: "m-opus-b" } });
+    const limit = screen.getByTestId("participant-1-limit");
+    expect(limit.textContent).toMatch(/^limited until about /);
+    expect(limit.textContent).not.toMatch(/acct|default|switch|other/i);
+    // Exactly one line: the Fable mark on the same account is not Opus's.
+    expect(screen.getAllByTestId("participant-1-limit")).toHaveLength(1);
+    // The quick-select carries no limit information.
+    const quick = screen.getByRole("combobox", { name: /account for every participant/i });
+    expect(quick.textContent).not.toMatch(/limit/i);
+  });
+
+  it("never offers the quick-select with one account, and shows no limit text beside it", async () => {
+    mockBackend([role({ default_model_id: "m-opus" }), EYES]);
+    await openDialog();
+    await waitFor(() => expect(roleSelect(1)).toHaveValue(""));
+    expect(screen.queryByRole("combobox", { name: /account for every participant/i })).toBeNull();
+    expect(screen.queryByText(/limited until/i)).toBeNull();
+  });
+});
+
+describe("account helpers (0090)", () => {
+  const opus = MODELS[0];
+  const opusB: ModelView = { ...opus, id: "m-opus-b", claude_config_dir: "/Users/me/.claude-acct-2/" };
+  const gateway: ModelView = { ...opus, id: "m-ds", provider: "deepseek", model_name: "deepseek-v4-pro", auth_token: "t", base_url: "https://x" };
+  const roles = [role({ default_model_id: "m-opus" }), EYES];
+
+  it("accountChoices lists each subscription dir once, trailing slash stripped, gateways excluded", () => {
+    expect(accountChoices([opus, opusB, gateway, opusB])).toEqual([
+      { dir: "", label: "default (~/.claude)" },
+      { dir: "/Users/me/.claude-acct-2", label: ".claude-acct-2" },
+    ]);
+  });
+
+  it("remapRowsToAccount swaps to the twin, reports a row with none, and leaves gateway rows alone", () => {
+    const rows = [
+      { key: 1, roleId: 1, modelId: "", effort: null, ultracode: null, color: null, label: "" },
+      { key: 2, roleId: 2, modelId: "m-ds", effort: null, ultracode: null, color: null, label: "" },
+      { key: 3, roleId: 2, modelId: "m-opus-b", effort: null, ultracode: null, color: null, label: "" },
+    ];
+    const toB = remapRowsToAccount(rows, "/Users/me/.claude-acct-2", roles, [opus, opusB, gateway]);
+    expect(toB.rows.map((r) => r.modelId)).toEqual(["m-opus-b", "m-ds", "m-opus-b"]);
+    expect(toB.missing).toEqual([]);
+    const back = remapRowsToAccount(toB.rows, "", roles, [opus, opusB, gateway]);
+    expect(back.rows.map((r) => r.modelId)).toEqual(["m-opus", "m-ds", "m-opus"]);
+    const noTwin = remapRowsToAccount(rows, "/Users/me/.claude-acct-3", roles, [opus, opusB, gateway]);
+    expect(noTwin.rows.map((r) => r.modelId)).toEqual(["", "m-ds", "m-opus-b"]);
+    expect(noTwin.missing).toEqual([0, 2]);
+    expect(accountLabelFor(rows[0], roles, [opus, opusB, gateway])).toBe("default");
+    expect(accountLabelFor(rows[2], roles, [opus, opusB, gateway])).toBe(".claude-acct-2");
+    expect(accountLabelFor(rows[1], roles, [opus, opusB, gateway])).toBe("deepseek");
+  });
+});
 
 describe("New session dialog — per-participant effort (D12)", () => {
   beforeEach(() => mockInvoke.mockReset());

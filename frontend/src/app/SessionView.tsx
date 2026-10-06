@@ -39,6 +39,7 @@ import {
 } from "../lib/attention";
 import {
   authorLabel,
+  participantAccount,
   participantLabel,
   participantRuntime,
   useParticipantLabels,
@@ -740,6 +741,23 @@ export function SessionView() {
                       spawned with is a fact about the spawn, while the dot and
                       the meter are facts about the process. */}
                   <SpawnBadge participant={p} />{" "}
+                  {/* 0090: which Claude account this participant bills, from
+                      the SPAWN SNAPSHOT (the email the CLI reported, else the
+                      config dir's last segment). The model name cannot say —
+                      it is the same on every account. Nothing when the row
+                      predates 0090 or the participant bills a gateway. */}
+                  {(() => {
+                    const account = participantAccount(p);
+                    return account ? (
+                      <span
+                        data-testid={`participant-account-${p.slug}`}
+                        title={account.title}
+                        className="mr-1 rounded border border-outline-variant px-1 font-label-caps text-label-caps text-on-surface-variant"
+                      >
+                        {account.text}
+                      </span>
+                    ) : null;
+                  })()}
                   {/* Both stores hold TWO key spaces: the live
                       `session:agent_health` / `session:agent_context` events
                       key by the participant's slug, while the mount backfill

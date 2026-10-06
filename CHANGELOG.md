@@ -9,6 +9,44 @@ and in `docs/rebuild-archive/`.
 
 ### Added
 
+- **A second Claude subscription can run beside the first.** A saved model
+  can name a Claude config dir (Settings → Models → "Claude config dir"), the
+  folder a second account is signed in to; leave it blank for the account in
+  `~/.claude`. A participant on that model is started in that folder and bills
+  that account, so one session can run on account 2 while another runs on
+  account 1 at the same time — pick the "· acct 2" rows in the New Session
+  dialog, or set them as a role's default for the day. The dialog shows which
+  account each participant will bill, and an "Account" pick above the rows
+  moves every participant to the same model on that account where one is
+  saved (and names the rows it could not move). A participant keeps the folder
+  it started in for its whole life, so resuming never crosses accounts; the
+  session header shows the account each participant is on. The Model dialog
+  shows the one-time terminal command that signs the account in to its
+  folder (`claude auth login --claudeai`) — bot-hq never runs it — and "Test
+  connection" on such a row checks that folder's login. Nothing moves work to
+  another account on its own.
+- **A usage limit is remembered per account and model.** When claude-code
+  reports a limit, the account and model that hit it are marked with the
+  reset time it gave
+  (`resets 8pm`, `resets Oct 5 at 2pm`, read in your machine's time zone). The
+  Models list and the New Session dialog say "limited until …" on the rows
+  that bill that account on that model (an exhausted Fable says nothing
+  about the same account's Opus), a session that starts on it is told once,
+  and the mark clears by itself when a later turn on that account and model
+  completes — or with a click. It is only ever a warning: nothing is refused and nothing is
+  re-routed. The weekly-limit wording is now recognised too (it used to slip
+  past the detector).
+- **A participant that is not billing its subscription is called out.** If
+  claude-code reports that an API key reached a subscription participant (an
+  `apiKeyHelper` or an `env` entry in a shared settings file, say), the chat
+  says so once at start. A folder signed in through the Console (API-usage
+  billing) rather than the claude.ai login is refused for a new participant
+  and called out for a resumed one. Known limit: the check accepts only the
+  values claude-code 2.1.284 was measured to report for a subscription
+  (`authMethod` `claude.ai`, `apiKeySource` `none`); if a later CLI renames
+  them, a new participant's start in a second folder is refused and every
+  other start gets the notice — each names the value it saw, so the cause is
+  visible rather than silent.
 - **A participant keeps its bearings across a context compaction.** Each
   participant has one handoff document, `handoff-<its name>` (for example
   `handoff-hands`), which it writes like any session document and you can read
@@ -101,6 +139,17 @@ and in `docs/rebuild-archive/`.
 
 ### Changed
 
+- **An agent's credentials are explicit.** Every agent, and the one-shot
+  summarizer and "Test connection" probe, now starts with the inherited
+  auth and billing variables cleared (`ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, the OAuth token variables, the
+  Bedrock / Vertex / Foundry switches, `CLAUDE_CONFIG_DIR`) before bot-hq sets
+  its own. A key exported in the shell that launched bot-hq used to reach the
+  agents and bill it silently. A gateway model's own token and URL are set
+  after the clearing and are unaffected.
+- **The file viewer follows a participant to its folder.** Tool results of a
+  participant on a second account live under that account's folder; the
+  viewer now looks there.
 - **A Tool Gate keyword that is only text no longer parks.** Keywords were
   matched anywhere in a command line, so a `grep` for "gh api" in your notes,
   or an `echo` that mentions `rm -rf`, waited for your approval like the

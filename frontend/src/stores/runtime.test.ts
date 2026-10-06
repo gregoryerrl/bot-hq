@@ -24,6 +24,8 @@ const ROSTER: ParticipantView[] = [
     effort_at_spawn: null,
     ultracode_at_spawn: null,
     spawn_knobs_recorded: false,
+    account_dir_at_spawn: null,
+    account_email_at_spawn: null,
     enabled: true,
   },
   {
@@ -40,6 +42,8 @@ const ROSTER: ParticipantView[] = [
     effort_at_spawn: null,
     ultracode_at_spawn: null,
     spawn_knobs_recorded: false,
+    account_dir_at_spawn: null,
+    account_email_at_spawn: null,
     enabled: true,
   },
 ];

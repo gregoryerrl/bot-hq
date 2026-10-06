@@ -97,7 +97,10 @@ const PROJECT_KEYS = ["list_projects"] as const;
 const SESSION_LIST_KEYS = ["list_sessions"] as const;
 // Saved-model registry (upsert/delete) — DB-only, watcher-invisible; the Dashboard
 // picker is a cross-view consumer so it needs an explicit event.
-const MODEL_KEYS = ["list_models"] as const;
+// `list_account_marks` rides the same event: a mark is set by the pump (no
+// event of its own — the next model-changed or mount refreshes it) and
+// cleared by `clear_account_mark`, which emits `model:changed`.
+const MODEL_KEYS = ["list_models", "list_account_marks"] as const;
 // EYES-sign-off findings — the session-header banner refetches when the bridge
 // fires `session:findings_changed` (eyes_flag / disposition_finding / approve_finding).
 const FINDINGS_KEYS = ["list_session_findings"] as const;

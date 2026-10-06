@@ -223,6 +223,7 @@ async fn upsert_agent_config_overwrites() {
         updated_at: String::new(),
         context_window: None,
         cli_settings: None,
+        claude_config_dir: None,
     };
     s.upsert_agent_config(&cfg).await.unwrap();
     let mut cfg = s.get_agent_config("hands").await.unwrap().unwrap();
@@ -248,6 +249,7 @@ async fn upsert_agent_config_inserts_new_via_constructor() {
         updated_at: String::new(), // ignored on insert/upsert
         context_window: None,
         cli_settings: None,
+        claude_config_dir: None,
     };
     s.upsert_agent_config(&cfg).await.unwrap();
     let got = s.get_agent_config("eyes").await.unwrap().unwrap();
@@ -272,6 +274,7 @@ async fn agent_config_round_trips_every_column_it_still_projects() {
         updated_at: String::new(),
         context_window: Some(1_000_000),
         cli_settings: None,
+        claude_config_dir: None,
     };
     s.upsert_agent_config(&cfg).await.unwrap();
 
@@ -313,6 +316,7 @@ async fn model_round_trips_every_column_it_still_projects() {
         updated_at: String::new(),
         context_window: Some(1_000_000),
         cli_settings: None,
+        claude_config_dir: None,
     };
     s.upsert_model(&m).await.unwrap();
 
