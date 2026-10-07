@@ -268,26 +268,55 @@ mod tests {
     /// spelled out (an explicit `~/.claude` is a CUSTOM dir to claude-code —
     /// a separate Keychain item and a forced re-login). A trailing slash is
     /// stripped; blank is the default.
+    ///
+    /// The home is absolute on THIS platform: `/Users/me` has a root but no
+    /// drive, which Windows does not count as absolute — the windows CI job
+    /// failed on exactly that (run 37559284918). Each refusal is matched to
+    /// the rule that made it, so a fixture refused for the wrong reason cannot
+    /// pass: under the unix home, the default-dir rule had never run on
+    /// Windows.
     #[test]
     fn validate_config_dir_accepts_absolute_paths_only() {
-        let home = std::path::Path::new("/Users/me");
+        let home = if cfg!(windows) {
+            std::path::Path::new(r"C:\Users\me")
+        } else {
+            std::path::Path::new("/Users/me")
+        };
+        let acct2 = home.join(".claude-acct-2");
+        let acct2 = acct2.to_str().unwrap();
+        let default_dir = home.join(".claude");
+        let default_dir = default_dir.to_str().unwrap();
+        let refusal = |dir: &str, home: Option<&std::path::Path>| match validate_config_dir(Some(dir), home) {
+            Err(AppError::Validation(msg)) => msg,
+            other => panic!("{dir:?} must be refused, got {other:?}"),
+        };
+
         assert_eq!(validate_config_dir(None, Some(home)).unwrap(), None);
         assert_eq!(validate_config_dir(Some("  "), Some(home)).unwrap(), None);
         assert_eq!(
-            validate_config_dir(Some("/Users/me/.claude-acct-2/"), Some(home))
+            validate_config_dir(Some(&format!("{acct2}/")), Some(home))
                 .unwrap()
                 .as_deref(),
-            Some("/Users/me/.claude-acct-2")
+            Some(acct2)
         );
-        for bad in ["~/.claude-acct-2", ".claude-acct-2", "acct/2", "/Users/me/.claude", "/Users/me/.claude/"] {
-            let err = validate_config_dir(Some(bad), Some(home))
-                .expect_err(&format!("{bad:?} must be refused"));
-            assert!(matches!(err, AppError::Validation(_)), "{bad:?}: {err:?}");
+        assert!(refusal("~/.claude-acct-2", Some(home)).contains("does not expand `~`"));
+        let mut relative = vec![".claude-acct-2", "acct/2"];
+        // Rooted but drive-less: relative to the current drive on Windows.
+        if cfg!(windows) {
+            relative.push("/Users/me/.claude-acct-2");
+        }
+        for dir in relative {
+            let msg = refusal(dir, Some(home));
+            assert!(msg.contains("must be an absolute path"), "{dir:?}: {msg}");
+        }
+        for dir in [default_dir.to_string(), format!("{default_dir}/")] {
+            let msg = refusal(&dir, Some(home));
+            assert!(msg.contains("the CLI's default dir"), "{dir:?}: {msg}");
         }
         // Without a known home the default-dir check cannot run; the absolute
         // rule still does.
-        assert!(validate_config_dir(Some("/Users/me/.claude"), None).is_ok());
-        assert!(validate_config_dir(Some("relative"), None).is_err());
+        assert!(validate_config_dir(Some(default_dir), None).is_ok());
+        assert!(refusal("relative", None).contains("must be an absolute path"));
     }
 
     #[test]
