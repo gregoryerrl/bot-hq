@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { keepPreviousData } from "@tanstack/react-query";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -8,7 +9,7 @@ import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
 import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
 import { SaveIcon } from "../components/icons";
-import type { AccountMark, ModelView, ValidateResult } from "../lib/bindings";
+import type { AccountMark, AccountSetupCommands, ModelView, ValidateResult } from "../lib/bindings";
 import { invoke } from "@tauri-apps/api/core";
 import { selectClass } from "../components/ui/Select";
 import { wideDialogClass } from "../components/ui/Dialog";
@@ -295,30 +296,6 @@ function emptyDraft(): ModelView {
   };
 }
 
-/** The one-time login for a second subscription's config dir, as the user
- *  runs it in their own terminal. `auth login --claudeai` is the subscription
- *  sign-in; the interactive `/login` menu also offers the Console path, which
- *  bills API usage. bot-hq never runs this itself. */
-export function accountSetupCommand(dir: string): string {
-  return `mkdir -p '${dir}' && CLAUDE_CONFIG_DIR='${dir}' claude auth login --claudeai`;
-}
-
-/** The optional second step: share the default dir's user config with the
- *  new dir by symlink, so a participant there has the same CLAUDE.md,
- *  settings (plugins, model overrides), skills and commands. `projects/` is
- *  never shared — session history and auto-memory stay per account. */
-export function accountShareCommand(dir: string): string {
-  return [
-    `B='${dir}'`,
-    "for item in CLAUDE.md settings.json agents commands skills plugins; do",
-    '  src="$HOME/.claude/$item"; dst="$B/$item"',
-    '  [ -e "$src" ] || continue',
-    '  if [ -e "$dst" ] && [ ! -L "$dst" ]; then mv "$dst" "$dst.bak"; fi',
-    '  ln -sfn "$src" "$dst"',
-    "done",
-  ].join("\n");
-}
-
 /** The dir key a subscription row's marks are stored under (`""` = default). */
 function dirKeyOf(m: Pick<ModelView, "claude_config_dir">): string {
   return (m.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "");
@@ -388,6 +365,21 @@ function ModelDialog({
     draft.provider as (typeof PROVIDERS)[number],
   );
   const canSave = !upsert.isPending && draft.display_name.trim().length > 0;
+
+  // The one-time setup for a second account's dir, written by the backend in
+  // this machine's shell (sh, or PowerShell on Windows) and checked by Save's
+  // rules first — a `~` path comes back as the refusal, not a command. The
+  // block shows on `wantsSetup` alone: with the previous dir's commands kept
+  // while the next resolve (no flashing per keystroke), `data` can outlive a
+  // cleared field or a token typed since.
+  const setupDir = (draft.claude_config_dir ?? "").trim();
+  const wantsSetup = setupDir.length > 0 && !draft.auth_token && !draft.base_url;
+  const setup = useTauriQuery<AccountSetupCommands>(
+    "account_setup_commands",
+    { dir: setupDir },
+    { enabled: wantsSetup, placeholderData: keepPreviousData, retry: false },
+  );
+  const powershell = setup.data?.shell === "powershell";
 
   const submit = async () => {
     if (!canSave) return;
@@ -601,26 +593,45 @@ function ModelDialog({
               </span>
             </label>
 
-            {draft.claude_config_dir && draft.claude_config_dir.trim() && !draft.auth_token && !draft.base_url && (
+            {wantsSetup && setup.isError && (
+              <p
+                data-testid="account-setup-refusal"
+                className="break-words font-code-sm text-code-sm text-error"
+              >
+                {errorMessage(setup.error)}
+              </p>
+            )}
+            {wantsSetup && !setup.isError && setup.data && (
               <div className="rounded border border-outline-variant/60 bg-surface-container-lowest p-2">
                 <p className="mb-1 break-words font-body text-code-sm text-on-surface-variant">
-                  One-time setup, in your own terminal — sign the second account in
-                  to this dir (bot-hq never runs it), then press <strong>Test</strong>{" "}
-                  on the saved row to confirm:
+                  One-time setup, in {powershell ? "PowerShell" : "your own terminal"} —
+                  sign the second account in to this dir (bot-hq never runs it), then
+                  press <strong>Test</strong> on the saved row to confirm:
                 </p>
                 <pre
                   data-testid="account-setup-command"
                   className="select-all overflow-x-hidden whitespace-pre-wrap break-all rounded bg-surface-container p-2 font-code-sm text-code-sm text-on-surface"
                 >
-                  {accountSetupCommand(draft.claude_config_dir.trim())}
+                  {setup.data.setup}
                 </pre>
                 <p className="mb-1 mt-2 break-words font-body text-code-sm text-on-surface-variant">
                   Optional: share the default dir&apos;s CLAUDE.md, settings
                   (plugins, model overrides), skills and commands with it. Session
-                  history and memory stay per account.
+                  history and memory stay per account, and a re-run skips what is
+                  already linked.
+                  {powershell && (
+                    <>
+                      {" "}The folders link as junctions; CLAUDE.md and settings.json
+                      need Developer Mode (search “For developers” in Settings) or an
+                      administrator PowerShell.
+                    </>
+                  )}
                 </p>
-                <pre className="select-all overflow-x-hidden whitespace-pre-wrap break-all rounded bg-surface-container p-2 font-code-sm text-code-sm text-on-surface">
-                  {accountShareCommand(draft.claude_config_dir.trim())}
+                <pre
+                  data-testid="account-share-command"
+                  className="select-all overflow-x-hidden whitespace-pre-wrap break-all rounded bg-surface-container p-2 font-code-sm text-code-sm text-on-surface"
+                >
+                  {setup.data.share}
                 </pre>
               </div>
             )}

@@ -1685,8 +1685,9 @@ where
                 let command = login_command(&dir);
                 let text = format!(
                     "{} can't start: {dir} is not logged in to a Claude account. \
-                     Run this in your terminal, then start the session again: {command}",
-                    p.slug
+                     Run this in {}, then start the session again: {command}",
+                    p.slug,
+                    crate::agents::account_setup::Shell::host().terminal()
                 );
                 anyhow::bail!("{text}");
             }
@@ -4537,10 +4538,14 @@ mod tests {
             .expect_err("a logged-out custom dir refuses the first spawn");
         let text = err.to_string();
         assert!(text.contains("/tmp/bot-hq-acct-b"), "{text}");
+        // In this machine's shell, and named as such ("your terminal" /
+        // "PowerShell"); each shell's exact text is pinned in `account_setup`.
+        let shell = crate::agents::account_setup::Shell::host();
         assert!(
-            text.contains("CLAUDE_CONFIG_DIR='/tmp/bot-hq-acct-b' claude auth login --claudeai"),
+            text.contains(&crate::agents::account_setup::login_command(shell, "/tmp/bot-hq-acct-b")),
             "the refusal names the login command: {text}"
         );
+        assert!(text.contains(&format!("Run this in {}", shell.terminal())), "{text}");
         assert_eq!(reread(&s).await.account_dir_at_spawn, None, "nothing recorded");
 
         // The default dir: logged out is the CLI's problem to report.

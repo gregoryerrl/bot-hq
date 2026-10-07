@@ -75,6 +75,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         // Models registry + default-model setting
         models::list_models,
         models::upsert_model,
+        models::account_setup_commands,
         models::list_account_marks,
         models::clear_account_mark,
         models::delete_model,

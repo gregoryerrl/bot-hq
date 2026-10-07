@@ -485,10 +485,12 @@ pub fn apply_account_env(cmd: &mut Command, account_dir: Option<&str>) {
 }
 
 /// The login command for a config dir, as the user runs it in their own
-/// terminal. `--claudeai` is the subscription sign-in; the interactive `/login`
-/// menu also offers the Console path, which is API billing (spec goal 4).
+/// terminal — in this machine's shell (`agents::account_setup`, which the
+/// Model dialog's commands come from too). `--claudeai` is the subscription
+/// sign-in; the interactive `/login` menu also offers the Console path, which
+/// is API billing (spec goal 4).
 pub fn login_command(account_dir: &str) -> String {
-    format!("CLAUDE_CONFIG_DIR='{account_dir}' claude auth login --claudeai")
+    crate::agents::account_setup::login_command(crate::agents::account_setup::Shell::host(), account_dir)
 }
 
 /// What `claude auth status --json` said about a config dir.
@@ -2227,14 +2229,16 @@ mod tests {
         assert_eq!(probe, AuthProbe::LoggedOut);
     }
 
-    /// The login command the refusal names: the subscription sign-in,
-    /// never the interactive menu that also offers Console (API billing).
+    /// The login command the refusal names: the subscription sign-in in this
+    /// machine's shell, never the interactive menu that also offers Console
+    /// (API billing). Each shell's exact text is pinned in `account_setup`.
     #[test]
     fn login_command_uses_the_subscription_sign_in() {
-        assert_eq!(
-            login_command("/Users/me/.claude-acct-2"),
-            "CLAUDE_CONFIG_DIR='/Users/me/.claude-acct-2' claude auth login --claudeai"
-        );
+        use crate::agents::account_setup::{self, Shell};
+        let command = login_command("/Users/me/.claude-acct-2");
+        assert_eq!(command, account_setup::login_command(Shell::host(), "/Users/me/.claude-acct-2"));
+        assert!(command.contains("claude auth login --claudeai"), "{command}");
+        assert!(!command.contains("/login"), "{command}");
     }
 
     /// A config for a role WITHOUT `edit_files` — the read-only spawn posture.

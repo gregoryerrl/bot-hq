@@ -1,16 +1,9 @@
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  ModelsPanel,
-  accountLabelOf,
-  accountSetupCommand,
-  accountShareCommand,
-  limitLine,
-  marksFor,
-} from "./ModelsPanel";
+import { ModelsPanel, accountLabelOf, limitLine, marksFor } from "./ModelsPanel";
 import { invoke } from "@tauri-apps/api/core";
-import type { AccountMark, ModelView } from "../lib/bindings";
+import type { AccountMark, AccountSetupCommands, ModelView } from "../lib/bindings";
 import { wideDialogClass } from "../components/ui/Dialog";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -30,13 +23,26 @@ const OPUS: ModelView = {
   claude_config_dir: null,
 };
 
-function mockBackend(models: ModelView[], marks: AccountMark[] = []) {
-  mockInvoke.mockImplementation(async (cmd: string) => {
+/** What the backend's `account_setup_commands` returns for a dir — the text
+ *  itself is the backend's (agents::account_setup, pinned in Rust); here it is
+ *  only something recognisable per dir and shell. */
+function setupFor(dir: string, shell: AccountSetupCommands["shell"] = "sh"): AccountSetupCommands {
+  return { shell, setup: `SETUP ${shell} ${dir}`, share: `SHARE ${shell} ${dir}` };
+}
+
+function mockBackend(
+  models: ModelView[],
+  marks: AccountMark[] = [],
+  shell: AccountSetupCommands["shell"] = "sh",
+) {
+  mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
     switch (cmd) {
       case "list_models":
         return models;
       case "list_account_marks":
         return marks;
+      case "account_setup_commands":
+        return setupFor((args as { dir: string }).dir, shell);
       case "clear_account_mark":
         return true;
       case "upsert_model":
@@ -48,8 +54,10 @@ function mockBackend(models: ModelView[], marks: AccountMark[] = []) {
   });
 }
 
-function renderPanel() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+/** `retry` defaults to off here; pass the app's own default (`Providers.tsx`:
+ *  1) where a query's own retry setting is what is under test. */
+function renderPanel(retry: number | false = false) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry } } });
   return render(
     <QueryClientProvider client={qc}>
       <ModelsPanel />
@@ -84,7 +92,7 @@ describe("Settings → Models — a model row's Claude config dir (0090)", () =>
     expect(chips[0]).toHaveAttribute("title", "Claude config dir: /Users/me/.claude-acct-2");
   });
 
-  it("the dialog's dir field shows the one-time login command for the dir typed, and sends the dir on save", async () => {
+  it("the dialog's dir field shows the backend's setup commands for the dir typed, and sends the dir on save", async () => {
     mockBackend([]);
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /add model/i }));
@@ -94,9 +102,14 @@ describe("Settings → Models — a model row's Claude config dir (0090)", () =>
     fireEvent.change(screen.getByLabelText(/claude config dir/i), {
       target: { value: "/Users/me/.claude-acct-2" },
     });
-    expect(screen.getByTestId("account-setup-command")).toHaveTextContent(
-      "mkdir -p '/Users/me/.claude-acct-2' && CLAUDE_CONFIG_DIR='/Users/me/.claude-acct-2' claude auth login --claudeai",
+    // The backend writes them, in this machine's shell.
+    expect(await screen.findByTestId("account-setup-command")).toHaveTextContent(
+      "SETUP sh /Users/me/.claude-acct-2",
     );
+    expect(screen.getByTestId("account-share-command")).toHaveTextContent("SHARE sh /Users/me/.claude-acct-2");
+    expect(mockInvoke).toHaveBeenCalledWith("account_setup_commands", { dir: "/Users/me/.claude-acct-2" });
+    expect(dialog.textContent).toContain("in your own terminal");
+    expect(dialog.textContent).not.toMatch(/Developer Mode/);
     // The subscription sign-in, never the interactive menu (which offers
     // Console = API billing), and nothing bot-hq runs itself.
     expect(dialog.textContent).not.toMatch(/\/login\b/);
@@ -264,13 +277,55 @@ describe("account helpers", () => {
     expect(accountLabelOf({ ...OPUS, provider: "OpenRouter", base_url: "https://openrouter.ai/api" })).toBe("OpenRouter");
   });
 
-  it("the setup commands quote the dir and never share projects/", () => {
-    expect(accountSetupCommand("/Users/me/.claude-acct-2")).toBe(
-      "mkdir -p '/Users/me/.claude-acct-2' && CLAUDE_CONFIG_DIR='/Users/me/.claude-acct-2' claude auth login --claudeai",
+});
+
+describe("Settings → Models — the second account's setup commands", () => {
+  async function openWithDir(dir: string, retry: number | false = false) {
+    renderPanel(retry);
+    fireEvent.click(await screen.findByRole("button", { name: /add model/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(screen.getByLabelText(/claude config dir/i), { target: { value: dir } });
+    return dialog;
+  }
+
+  it("on Windows names PowerShell and what its links need", async () => {
+    mockBackend([], [], "powershell");
+    const dialog = await openWithDir("C:\\Users\\me\\.claude-acct-2");
+    expect(await screen.findByTestId("account-setup-command")).toHaveTextContent(
+      "SETUP powershell C:\\Users\\me\\.claude-acct-2",
     );
-    const share = accountShareCommand("/Users/me/.claude-acct-2");
-    expect(share).toContain("B='/Users/me/.claude-acct-2'");
-    expect(share).toContain("for item in CLAUDE.md settings.json agents commands skills plugins; do");
-    expect(share).not.toMatch(/projects/);
+    expect(dialog.textContent).toContain("in PowerShell");
+    expect(dialog.textContent).not.toContain("in your own terminal");
+    expect(dialog.textContent).toMatch(/junctions; CLAUDE\.md and settings\.json\s+need Developer Mode/);
+  });
+
+  it("shows the backend's refusal instead of a command for a dir Save would refuse", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_models") return [];
+      if (cmd === "account_setup_commands") {
+        throw { kind: "validation", message: "Claude config dir must be an absolute path — the CLI does not expand `~`" };
+      }
+      return undefined;
+    });
+    // Under the app's default retry (1): the refusal still shows at once.
+    await openWithDir("~/.claude-acct-2", 1);
+    expect(await screen.findByTestId("account-setup-refusal")).toHaveTextContent("does not expand `~`");
+    expect(screen.queryByTestId("account-setup-command")).toBeNull();
+    // Asked once: a refusal is final, not retried after a back-off.
+    expect(mockInvoke.mock.calls.filter((c) => c[0] === "account_setup_commands")).toHaveLength(1);
+  });
+
+  it("hides the commands once a token is typed or the dir is cleared, though the last ones are still cached", async () => {
+    mockBackend([]);
+    await openWithDir("/Users/me/.claude-acct-2");
+    expect(await screen.findByTestId("account-setup-command")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/auth token/i), { target: { value: "sk-gateway" } });
+    expect(screen.queryByTestId("account-setup-command")).toBeNull();
+    fireEvent.change(screen.getByLabelText(/auth token/i), { target: { value: "" } });
+    expect(await screen.findByTestId("account-setup-command")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/claude config dir/i), { target: { value: "" } });
+    expect(screen.queryByTestId("account-setup-command")).toBeNull();
   });
 });

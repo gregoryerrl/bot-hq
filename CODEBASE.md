@@ -77,6 +77,7 @@ request body for non-Anthropic gateways when a model has a `base_url`.
 |---|---|---|
 | `src/agents/mod.rs` | re-export hub | S |
 | `src/agents/spawn.rs` | `SpawnConfig`/`AgentHandle`/`AgentEvent`; `build_command` (argv/env/settings, permission posture by capability); `spawn_supervised_agent` retry supervisor; `ParticipantInput::{deliver,deliver_batch}` (receipt-gated stdin); child reaping (`CHILD_PIDS`) | XL |
+| `src/agents/account_setup.rs` | the second account's terminal commands — sign-in (spawn refusal + Model dialog) and the optional config share — in the host's shell (`Shell::host()`: sh, or Windows PowerShell 5.1); pure generators + tests that RUN them (unix in `sh`, Windows in `powershell.exe`) | M |
 | `src/agents/events.rs` | stdout/stderr pumps; `translate` stream-json → `AgentEvent`; context-window arithmetic (`parse_context_usage`) | L |
 | `src/agents/protocol.rs` | stream-json wire types both directions | M |
 | `src/agents/input.rs` | `pump_inputs` stdin writer (messages + control/interrupt) | S |

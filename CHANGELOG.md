@@ -187,6 +187,16 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **On Windows, the second account's setup commands are PowerShell.** The
+  Model dialog's sign-in and share commands, and the command bot-hq names
+  when it refuses to start a participant in a logged-out folder, were written
+  for macOS/Linux shells and did not run on Windows. They now come from one
+  place in the shell of your machine: on Windows, PowerShell 5.1 commands
+  that put `CLAUDE_CONFIG_DIR` back afterwards (even if you press Ctrl+C) and
+  share the folders as junctions. On every platform the share step never
+  deletes anything, and running it again skips what is already linked. The
+  dialog also checks the folder before it shows any command, so a `~` path
+  shows the reason instead of a command that would sign in somewhere else.
 - **The Add/Edit model dialog fits the window.** It had no height limit, and
   once the Claude config dir field and its setup commands were added it grew
   taller than the window: the title and Save were cut off and nothing

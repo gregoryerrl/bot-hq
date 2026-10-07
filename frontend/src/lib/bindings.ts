@@ -503,6 +503,21 @@ async upsertModel(model: ModelView) : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * The Model dialog's one-time commands for a second account's config dir, in
+ * this machine's shell (`agents::account_setup`). The dir is checked by the
+ * same rules as Save first, so a `~` path or the default dir spelled out gets
+ * Save's refusal, never a command that signs the account in somewhere else
+ * before Save is pressed (a quoted `~` is a literal folder name).
+ */
+async accountSetupCommands(dir: string) : Promise<Result<AccountSetupCommands, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("account_setup_commands", { dir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Every account's usage-limit mark (0091), for the Models list and the New
  * Session dialog. Advisory: the UI says "limited until …" on the rows that
  * bill that account and nothing more — never which other account to use.
@@ -1510,6 +1525,22 @@ limited_text: string;
  * RFC 3339 UTC.
  */
 marked_at: string }
+/**
+ * The Model dialog's one-time commands for one config dir.
+ */
+export type AccountSetupCommands = { 
+/**
+ * The shell both commands are written for.
+ */
+shell: Shell; 
+/**
+ * Create the dir, then sign the account in to it.
+ */
+setup: string; 
+/**
+ * Optional: link the default dir's user config into it.
+ */
+share: string }
 /**
  * One feedback row, projected for the UI.
  */
@@ -2540,6 +2571,10 @@ value: string | null;
  * Where the value resolved from, or "unset (default)".
  */
 source: string; inheritance: Inheritance }
+/**
+ * The shell a command is written for.
+ */
+export type Shell = "sh" | "powershell"
 /**
  * One skill (user-dir skill or plugin-bundled skill).
  */

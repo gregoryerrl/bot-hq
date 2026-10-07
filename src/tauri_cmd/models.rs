@@ -55,18 +55,22 @@ pub(crate) fn validate_config_dir(
     let Some(dir) = crate::storage::normalize_config_dir(raw) else {
         return Ok(None);
     };
+    // The examples are this platform's: a Windows path needs its drive.
+    let (home_example, dir_example) = if cfg!(windows) {
+        (r"C:\Users\<you>\…", r"C:\Users\<you>\.claude-acct-2")
+    } else {
+        ("/Users/<you>/…", "/Users/<you>/.claude-acct-2")
+    };
     if dir.starts_with('~') {
-        return Err(AppError::Validation(
+        return Err(AppError::Validation(format!(
             "Claude config dir must be an absolute path — the CLI does not expand `~`; \
-             write /Users/<you>/… in full"
-                .into(),
-        ));
+             write {home_example} in full"
+        )));
     }
     if !std::path::Path::new(&dir).is_absolute() {
-        return Err(AppError::Validation(
-            "Claude config dir must be an absolute path (e.g. /Users/<you>/.claude-acct-2)"
-                .into(),
-        ));
+        return Err(AppError::Validation(format!(
+            "Claude config dir must be an absolute path (e.g. {dir_example})"
+        )));
     }
     if let Some(home) = home {
         if std::path::Path::new(&dir) == home.join(".claude") {
@@ -164,6 +168,33 @@ pub async fn upsert_model(
         .map_err(|e| AppError::DbError(e.to_string()))?;
     let _ = app.emit(crate::tauri_events::types::MODEL_CHANGED, ());
     Ok(())
+}
+
+/// The Model dialog's one-time commands for a second account's config dir, in
+/// this machine's shell (`agents::account_setup`). The dir is checked by the
+/// same rules as Save first, so a `~` path or the default dir spelled out gets
+/// Save's refusal, never a command that signs the account in somewhere else
+/// before Save is pressed (a quoted `~` is a literal folder name).
+#[tauri::command]
+#[specta::specta]
+pub async fn account_setup_commands(
+    dir: String,
+) -> Result<crate::agents::account_setup::AccountSetupCommands, AppError> {
+    let home = crate::paths::home_dir()
+        .map_err(|e| AppError::Internal(format!("can't find your home folder: {e:#}")))?;
+    account_setup_commands_for(&dir, &home)
+}
+
+fn account_setup_commands_for(
+    dir: &str,
+    home: &std::path::Path,
+) -> Result<crate::agents::account_setup::AccountSetupCommands, AppError> {
+    use crate::agents::account_setup::{commands, Shell};
+    let Some(dir) = validate_config_dir(Some(dir), Some(home))? else {
+        return Err(AppError::Validation("Type the Claude config dir first".into()));
+    };
+    let default_dir = home.join(".claude");
+    Ok(commands(Shell::host(), &dir, &default_dir.to_string_lossy()))
 }
 
 #[tauri::command]
@@ -317,6 +348,35 @@ mod tests {
         // rule still does.
         assert!(validate_config_dir(Some(default_dir), None).is_ok());
         assert!(refusal("relative", None).contains("must be an absolute path"));
+    }
+
+    /// The dialog's commands pass Save's rules first: a `~` path or the default
+    /// dir spelled out gets the refusal, not a command (a quoted `~` would
+    /// create a folder literally named `~` wherever the terminal stands, and
+    /// sign the account in there).
+    #[test]
+    fn account_setup_commands_refuse_what_save_refuses() {
+        use crate::agents::account_setup::Shell;
+        let home = if cfg!(windows) {
+            std::path::Path::new(r"C:\Users\me")
+        } else {
+            std::path::Path::new("/Users/me")
+        };
+        let refused = |dir: &str| match account_setup_commands_for(dir, home) {
+            Err(AppError::Validation(msg)) => msg,
+            other => panic!("{dir:?} must be refused, got {other:?}"),
+        };
+        assert!(refused("~/.claude-acct-2").contains("does not expand `~`"));
+        assert!(refused(home.join(".claude").to_str().unwrap()).contains("the CLI's default dir"));
+        assert!(refused("  ").contains("Type the Claude config dir first"));
+
+        let acct2 = home.join(".claude-acct-2");
+        let ok = account_setup_commands_for(&format!("{}/", acct2.display()), home).unwrap();
+        assert_eq!(ok.shell, Shell::host());
+        let quoted = crate::agents::account_setup::quote(ok.shell, acct2.to_str().unwrap());
+        assert!(ok.setup.contains(&quoted), "the trailing slash is stripped: {}", ok.setup);
+        let default_dir = crate::agents::account_setup::quote(ok.shell, home.join(".claude").to_str().unwrap());
+        assert!(ok.share.contains(&default_dir), "{}", ok.share);
     }
 
     #[test]

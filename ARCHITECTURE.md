@@ -188,7 +188,12 @@ organisation id `claude auth status --json` reported —
 `core/session.rs::resolve_participant_account`); every later spawn reuses the
 record, because the CLI's session store lives inside the dir and a `--resume`
 anywhere else starts blank. A first spawn into a custom dir the CLI reports as
-logged out is refused with the login command; an unreadable status never is. A
+logged out is refused with the login command; an unreadable status never is.
+That command, and the Model dialog's setup + optional config-share commands
+(`account_setup_commands`, which checks the dir by Save's rules first), come
+from one generator, `agents::account_setup`, in the shell of the machine bot-hq
+runs on: POSIX sh, or Windows PowerShell 5.1 on Windows (junctions for the
+shared folders, `mklink` for the two files, nothing ever deleted). A
 dir is a credential slot, not an account (`/login` swaps the account behind the
 same dir), so a resume that finds a different email posts a notice, and the
 usage-limit mark (`account_marks`, 0091) is keyed by dir + organisation +

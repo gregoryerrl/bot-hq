@@ -3,6 +3,7 @@
 //! See `docs/stream-json-events.md` for the empirical schema this code is
 //! built against, and `docs/decisions.md#mcp-server` for transport choices.
 
+pub mod account_setup;
 pub mod capability;
 pub mod capability_prompt;
 pub mod events;
