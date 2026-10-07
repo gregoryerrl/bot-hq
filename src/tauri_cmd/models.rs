@@ -22,15 +22,20 @@ pub struct ModelView {
     pub updated_at: String,
     /// Context window in tokens, or `null` when unknown.
     ///
+    /// Spawn hands it to the CLI as `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, which the
+    /// CLI takes as the window of a model id it does not recognise as Claude's
+    /// own (a gateway model); for a Claude id the CLI keeps its own catalog.
     /// The meter still takes its denominator from the CLI's own `contextWindow`
-    /// report; this value is what the pump compares that report AGAINST, so a
-    /// model the CLI does not recognise (200k by default) is called out in the
-    /// channel instead of silently compacting every few turns.
+    /// report; the pump compares that report against this value and calls a
+    /// disagreement (or a gateway model with no value here) out in the channel
+    /// instead of letting the model silently compact every few turns.
     pub context_window: Option<i64>,
     /// claude-code settings merged into every participant's `--settings` at
     /// spawn — a JSON object as text, or `null`. `{"modelOverrides":{"claude-fable-5":
-    /// "claude-fable-5-1"}}` is the shape that gives a model id newer than the
-    /// installed CLI's catalog its real window.
+    /// "claude-fable-5-1"}}` is the shape that gives a CLAUDE id newer than the
+    /// installed CLI's catalog its real window; a gateway model mapped this way
+    /// gets the Claude model's request profile instead, which its gateway
+    /// rejects — its window comes from `context_window`.
     pub cli_settings: Option<String>,
     /// The Claude config dir (`CLAUDE_CONFIG_DIR`) a participant on this row is
     /// spawned with — which subscription it bills when the row has no gateway

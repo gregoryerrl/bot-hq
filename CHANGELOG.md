@@ -187,6 +187,23 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **A model the claude CLI does not know runs at the window the registry
+  says.** For a model id that is not Claude's own (OpenRouter, DeepSeek, …)
+  the CLI only ever used its own 200k default, whatever the model row's
+  Context window said — `xiaomi/mimo-v2.6-pro` on a 1.1M row compacted four
+  times in one afternoon (2026-10-07). The row's Context window now reaches
+  the CLI at spawn (as `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, which the CLI
+  honours exactly for such ids and ignores for Claude ids), on both the
+  executor's and the reviewer's spawn and in "Test connection". The DeepSeek
+  V4 Pro row (1,000,000) moves off the 200k default with it. The channel
+  notice and the Model dialog no longer recommend `modelOverrides` for a
+  gateway model: mapping one onto a Claude id makes the CLI send that Claude
+  model's request profile, and OpenRouter answers `400 Mid-conversation
+  reasoning effort (configuration_update) is not supported` — the 1.0.8
+  advice was right only for a Claude id newer than the CLI's catalog (the
+  Fable case), which the notice now says, with what the mapping's key is. A
+  gateway model with no Context window on its row is now called out once per
+  spawn instead of silently running at the default.
 - **On Windows, the second account's setup commands are PowerShell.** The
   Model dialog's sign-in and share commands, and the command bot-hq names
   when it refuses to start a participant in a logged-out folder, were written

@@ -424,34 +424,80 @@ pub const RETRY_LADDER: [std::time::Duration; 3] = [
 /// against a 1M row is.
 pub const WINDOW_MISMATCH_TOLERANCE: f64 = 0.20;
 
+/// Whether the CLI treats this model id as one of Claude's own — the same
+/// test claude-code makes (2.1.291 `fv`: the lowercased id starts with
+/// `claude-`). Its own catalog decides the window for such an id, so the
+/// registry's value is advisory there; for any other id the registry's value
+/// IS the window (`build_command` hands it over as
+/// CLAUDE_CODE_MAX_CONTEXT_TOKENS).
+fn is_claude_model_id(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().starts_with("claude-")
+}
+
 /// The one-time channel notice for a participant whose CLI reports a context
-/// window that disagrees with the registry's (`models.context_window`). `None`
-/// when there is nothing to compare (no configured value, no usable reading)
-/// or the two agree within [`WINDOW_MISMATCH_TOLERANCE`]. Pure, so the
-/// wording and the threshold are pinned by tests instead of by a live spawn.
+/// window that disagrees with the registry's (`models.context_window`), or —
+/// for a model id the CLI does not know as Claude's own — a registry row with
+/// no window at all, which is the silent-200k case. `None` when the two agree
+/// within [`WINDOW_MISMATCH_TOLERANCE`], when the row is zero, when there is
+/// no usable reading, or when a Claude id has no registry value (the CLI
+/// knows its own ids). Pure, so the wording and the threshold are pinned by
+/// tests instead of by a live spawn.
+///
+/// Two fixes, by id: a Claude id the installed CLI does not know yet is
+/// mapped with `modelOverrides` (the key is a Claude id it does know); any
+/// other id takes its window from the row's Context window field — mapping
+/// it onto a Claude id makes the CLI send THAT model's request profile, and
+/// OpenRouter answered `xiaomi/mimo-v2.6-pro` with `400 … configuration_update
+/// is not supported` (2026-10-07).
 pub fn window_mismatch_notice(
     slug: &str,
     configured: Option<u64>,
     report: &crate::agents::spawn::ContextReport,
 ) -> Option<String> {
-    let configured = configured?;
     let usage = report.usable()?;
+    let model = &usage.model;
+    let reported = usage.context_window;
+    let claude_id = is_claude_model_id(model);
+    let Some(configured) = configured else {
+        if claude_id {
+            return None;
+        }
+        return Some(format!(
+            "⚠ {slug}'s CLI reports a {reported}-token context window for `{model}`, and the \
+             registry row has no Context window, so the CLI is running a model it does not \
+             recognise at its own default. If the provider's limit is larger, set Context \
+             window on the row (Settings → Models → this model) — bot-hq hands it to the CLI \
+             as CLAUDE_CODE_MAX_CONTEXT_TOKENS — then respawn. Every participant on this \
+             model is affected."
+        ));
+    };
     if configured == 0 {
         return None;
     }
-    let diff = (usage.context_window as f64 - configured as f64).abs();
+    let diff = (reported as f64 - configured as f64).abs();
     if diff <= configured as f64 * WINDOW_MISMATCH_TOLERANCE {
         return None;
     }
+    if claude_id {
+        return Some(format!(
+            "⚠ {slug}'s CLI reports a {reported}-token context window for `{model}`, but the \
+             registry row says {configured}. The installed claude CLI does not recognise this \
+             Claude model id and is using its default window — the meter above is right, the \
+             registry is not what the agent has. Fix: Settings → Models → this model → \"Claude \
+             CLI settings\" → {{\"modelOverrides\":{{\"<known id>\":\"{model}\"}}}}, where \
+             <known id> is a Claude model id the installed CLI already knows, ideally the same \
+             family (`claude-fable-5` for `claude-fable-5-1`), then respawn. Every participant \
+             on this model is affected."
+        ));
+    }
     Some(format!(
         "⚠ {slug}'s CLI reports a {reported}-token context window for `{model}`, but the \
-         registry row says {configured}. The installed claude CLI does not recognise this \
-         model id and is using its default window — the meter above is right, the registry \
-         is not what the agent has. Fix: Settings → Models → this model → \"Claude CLI \
-         settings\" → {{\"modelOverrides\":{{\"<a model id the CLI knows>\":\"{model}\"}}}}, \
-         then respawn. Every participant on this model is affected.",
-        reported = usage.context_window,
-        model = usage.model,
+         registry row says {configured}. bot-hq hands the row's Context window to the CLI as \
+         CLAUDE_CODE_MAX_CONTEXT_TOKENS, so this CLI did not honour it: the row's \"Claude CLI \
+         settings\" may set that variable to another value under `env`, the number may be \
+         invalid, or the installed claude predates the variable. Fix the row in Settings → \
+         Models (clear that `env` entry, or correct the number to the provider's published \
+         limit), then respawn. Every participant on this model is affected."
     ))
 }
 
@@ -3535,25 +3581,69 @@ mod tests {
     }
 
     /// 0079's companion: the registry says 1M, the CLI reports 200k — the
-    /// exact shape of 2026-09-03 (`claude-fable-5-1`, s-e919d08c). The notice
-    /// names both numbers, the model, and the fix; agreement within the
-    /// tolerance, a missing registry value, or an unusable reading say nothing.
+    /// exact shape of 2026-09-03 (`claude-fable-5-1`, s-e919d08c). For a
+    /// CLAUDE id the fix is still `modelOverrides` (the CLI keeps its own
+    /// catalog for its own ids), and the notice says what the key is — the
+    /// 2026-10-07 user filled the old `<a model id the CLI knows>` placeholder
+    /// with the row's own id. Agreement within the tolerance, a zero registry
+    /// value, or an unusable reading say nothing.
     #[test]
     fn window_mismatch_notice_fires_on_a_real_disagreement_only() {
         let n = window_mismatch_notice("hands", Some(1_000_000), &usable_report("claude-fable-5-1", 200_000))
             .expect("200k against a 1M row is a mismatch");
-        for needle in ["hands", "200000", "1000000", "claude-fable-5-1", "modelOverrides", "Settings → Models"] {
+        for needle in ["hands", "200000", "1000000", "claude-fable-5-1", "modelOverrides", "Settings → Models", "already knows"] {
             assert!(n.contains(needle), "notice lacks {needle:?}: {n}");
         }
+        assert!(!n.contains("<a model id"), "no placeholder a user can paste verbatim: {n}");
         // A provider rounding to a power of two is not a misconfiguration.
         assert!(window_mismatch_notice("hands", Some(1_000_000), &usable_report("m", 1_048_576)).is_none());
         // Exactly at the tolerance edge stays quiet; one token past it speaks.
         assert!(window_mismatch_notice("hands", Some(1_000_000), &usable_report("m", 800_000)).is_none());
         assert!(window_mismatch_notice("hands", Some(1_000_000), &usable_report("m", 799_999)).is_some());
-        // Nothing to compare against, or nothing usable to compare.
-        assert!(window_mismatch_notice("hands", None, &usable_report("m", 200_000)).is_none());
+        // A Claude id with no registry value: the CLI knows its own ids, so
+        // there is nothing to say. Zero, or nothing usable to compare: quiet.
+        assert!(window_mismatch_notice("hands", None, &usable_report("claude-opus-5-5", 200_000)).is_none());
         assert!(window_mismatch_notice("hands", Some(0), &usable_report("m", 200_000)).is_none());
         assert!(window_mismatch_notice("hands", Some(1_000_000), &ContextReport::none(ContextVerdict::NoWindow)).is_none());
+    }
+
+    /// A NON-Claude id gets its window from the row (`build_command` hands
+    /// `models.context_window` to the CLI as CLAUDE_CODE_MAX_CONTEXT_TOKENS),
+    /// so a disagreement means the CLI did not honour it — the row's own CLI
+    /// settings may set that variable under `env` (the 2026-10-07 stop-gap),
+    /// the number may be invalid, or the claude is too old. `modelOverrides`
+    /// must NOT be the advice: mapping `xiaomi/mimo-v2.6-pro` onto a Claude id
+    /// made the CLI send that model's request profile and OpenRouter answered
+    /// `400 … configuration_update is not supported` (measured 2026-10-07).
+    #[test]
+    fn window_mismatch_notice_tells_a_non_claude_id_about_the_rows_window() {
+        let n = window_mismatch_notice("eyes", Some(1_000_000), &usable_report("xiaomi/mimo-v2.6-pro", 200_000))
+            .expect("200k against a 1M row is a mismatch");
+        for needle in ["eyes", "200000", "1000000", "xiaomi/mimo-v2.6-pro", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "Claude CLI settings", "Settings → Models"] {
+            assert!(n.contains(needle), "notice lacks {needle:?}: {n}");
+        }
+        assert!(!n.contains("modelOverrides"), "the Claude-id fix breaks a gateway model: {n}");
+        // The CLI lowercases before its own `claude-` test; so do we.
+        assert!(window_mismatch_notice("eyes", Some(1_000_000), &usable_report("Claude-Opus-5-5", 200_000))
+            .expect("still a mismatch")
+            .contains("modelOverrides"));
+    }
+
+    /// A non-Claude row with NO window is the silent-200k case 0079 promised to
+    /// end: the CLI runs the model at its default and nothing used to say so.
+    /// The notice names the reported number without assuming what the default
+    /// is, and points at the row's Context window field.
+    #[test]
+    fn a_non_claude_row_without_a_window_is_told_to_set_one() {
+        let n = window_mismatch_notice("hands", None, &usable_report("xiaomi/mimo-v2.6-pro", 200_000))
+            .expect("no registry value for a model the CLI does not know is worth a row");
+        for needle in ["hands", "200000", "xiaomi/mimo-v2.6-pro", "no Context window", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "Settings → Models"] {
+            assert!(n.contains(needle), "notice lacks {needle:?}: {n}");
+        }
+        assert!(!n.contains("modelOverrides"), "got: {n}");
+        let n = window_mismatch_notice("hands", None, &usable_report("deepseek-v4-pro", 131_072)).expect("any default");
+        assert!(n.contains("131072"), "the reported number, not an assumed default: {n}");
+        assert!(window_mismatch_notice("hands", None, &ContextReport::none(ContextVerdict::NoWindow)).is_none());
     }
 
     fn reading(used: u64, window: u64) -> ContextReport {

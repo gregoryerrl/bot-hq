@@ -1871,6 +1871,18 @@ fn build_command(cfg: &SpawnConfig) -> Command {
 
     // Env-vars per ARCHITECTURE.md "Agents" section.
     cmd.env("ANTHROPIC_MODEL", &cfg.config.model_name);
+    // The registry's window is the CLI's window for a model id it does not
+    // recognise as Claude's own (OpenRouter, DeepSeek, …): claude-code
+    // 2.1.291 reads CLAUDE_CODE_MAX_CONTEXT_TOKENS only for such ids and
+    // keeps its own catalog for Claude ids, so this is inert on an Anthropic
+    // row. It is the lever `modelOverrides` is not — that one makes the CLI
+    // send the mapped Claude model's request profile, which a gateway serving
+    // a different model rejects (OpenRouter 400 `configuration_update`,
+    // 2026-10-07). Zero and NULL hand the CLI nothing; the pump's mismatch
+    // notice then names the row.
+    if let Some(window) = cfg.config.context_window.filter(|w| *w > 0) {
+        cmd.env("CLAUDE_CODE_MAX_CONTEXT_TOKENS", window.to_string());
+    }
     // BOT_HQ_SESSION_ID is read by the git pre-push hook to overlay
     // session-scoped approvals onto the resolved policy.
     cmd.env("BOT_HQ_SESSION_ID", &cfg.session_id);
@@ -2310,6 +2322,45 @@ mod tests {
             s["hooks"]["SessionStart"].is_array(),
             "the post-compaction handoff hook must survive the merge: {s}"
         );
+    }
+
+    /// The registry's `models.context_window` reaches the CLI as
+    /// `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, on both postures. The CLI (2.1.291)
+    /// takes that variable as the window of a model id it does not recognise
+    /// as Claude's own — the only lever it has for one: `modelOverrides` makes
+    /// it send the mapped Claude model's request profile, which OpenRouter
+    /// answered with `400 … configuration_update is not supported on
+    /// xiaomi/mimo-v2.6-pro` (2026-10-07). Until this, the column had no reader
+    /// at spawn and a 1.1M row ran at the CLI's 200k default. Kill-test: drop
+    /// the `cmd.env("CLAUDE_CODE_MAX_CONTEXT_TOKENS", …)` line.
+    #[test]
+    fn the_registry_window_reaches_the_cli_env_on_both_postures() {
+        for mut c in [cfg(), eyes_cfg()] {
+            c.config.model_name = "xiaomi/mimo-v2.6-pro".into();
+            c.config.context_window = Some(1_000_000);
+            let env = debug_env(&c);
+            assert!(
+                env.contains(&("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "1000000".into())),
+                "{}: {env:?}",
+                c.agent_name
+            );
+        }
+    }
+
+    /// No window on the row, or a zero (the dialog cannot save one, but a row
+    /// written any other way can carry it), hands the CLI nothing — its own
+    /// default stays, and the pump's mismatch notice says so.
+    #[test]
+    fn a_row_without_a_window_sets_no_max_context_env() {
+        for window in [None, Some(0)] {
+            let mut c = cfg();
+            c.config.context_window = window;
+            let env = debug_env(&c);
+            assert!(
+                !env.iter().any(|(k, _)| k == "CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+                "{window:?}: {env:?}"
+            );
+        }
     }
 
     /// Control for the test above: with no `cli_settings` neither branch's

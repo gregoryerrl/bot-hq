@@ -514,10 +514,14 @@ function ModelDialog({
                 className={terminalInputClass}
               />
               <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
-                Total tokens this specific model accepts. The context meter still
-                takes its window from claude-code, which reports one per turn; this
-                value is what that report is checked <strong>against</strong> — when
-                the two disagree, the session gets a notice naming both numbers.
+                The provider&apos;s published limit for this model, in tokens. For a
+                model id that is not Claude&apos;s own (OpenRouter, DeepSeek, …) this
+                IS the window the claude CLI runs it at — bot-hq hands it over as{" "}
+                <code>CLAUDE_CODE_MAX_CONTEXT_TOKENS</code>; leave it blank and the
+                CLI uses its own default. For a Claude id the CLI keeps its own
+                catalog and this value is only checked against what it reports:
+                when the two disagree, the session gets a notice naming both
+                numbers.
               </span>
             </label>
 
@@ -650,11 +654,16 @@ function ModelDialog({
               />
               <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
                 Merged into every participant&apos;s <code>--settings</code> at
-                spawn, executor and reviewer alike. Use it when the installed claude
-                CLI does not know this model id and runs it at its 200k default:
-                map a model id the CLI does know to this one under{" "}
-                <code>modelOverrides</code>. Must be a JSON object; a role&apos;s own
-                Claude-config override wins on any key both set.
+                spawn, executor and reviewer alike. Use it for a <em>Claude</em> id
+                the installed claude CLI does not know yet: under{" "}
+                <code>modelOverrides</code>, map a Claude id the CLI does know
+                (ideally the same family) to this one, and the CLI applies that
+                model&apos;s window. Not for a gateway model — the CLI would send the
+                mapped Claude model&apos;s request profile, which the gateway rejects
+                (OpenRouter: <code>400 configuration_update is not supported</code>);
+                a non-Claude model gets its window from the row&apos;s own limit
+                field instead (the number on the left). Must be a JSON object; a
+                role&apos;s own Claude-config override wins on any key both set.
               </span>
             </label>
           </div>

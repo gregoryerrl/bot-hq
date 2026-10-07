@@ -372,6 +372,11 @@ fn headless_claude_cmd(cfg: &AgentConfig, prompt: &str) -> tokio::process::Comma
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    // The registry window, as live spawn passes it (see `build_command`): the
+    // CLI's window for a model id it does not recognise as Claude's own.
+    if let Some(window) = cfg.context_window.filter(|w| *w > 0) {
+        cmd.env("CLAUDE_CODE_MAX_CONTEXT_TOKENS", window.to_string());
+    }
     if let Some(token) = cfg.auth_token.as_deref().filter(|t| !t.is_empty()) {
         cmd.env("ANTHROPIC_AUTH_TOKEN", token);
     }
@@ -565,7 +570,7 @@ rename to new";
             base_url: Some("https://api.deepseek.com/anthropic".into()),
             auth_token: Some("ds-token".into()),
             updated_at: String::new(),
-            context_window: None,
+            context_window: Some(1_000_000),
             cli_settings: None,
             claude_config_dir: None,
         };
@@ -580,6 +585,12 @@ rename to new";
 
         assert_eq!(env.get("ANTHROPIC_MODEL").map(String::as_str), Some("deepseek-v4-pro"));
         assert_eq!(env.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str), Some("ds-token"));
+        // The registry window rides along exactly as live spawn passes it, so
+        // the probe and the agent see the same window for a non-Claude id.
+        assert_eq!(
+            env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS").map(String::as_str),
+            Some("1000000")
+        );
         // Routed through the same `proxied_base_url` the live spawn uses, so
         // the probe meets the gateway the same way the agent will. The
         // proxy is not running under test, which is exactly the fall-through

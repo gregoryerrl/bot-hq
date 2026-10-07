@@ -54,12 +54,14 @@ pub async fn pump_stderr<R: AsyncRead + Unpin>(reader: R, agent_name: String) {
     let mut lines = buf.lines();
     while let Ok(Some(line)) = lines.next_line().await {
         // The CLI announces a model id its catalog does not know on stderr
-        // (`[claude-code:unrecognized_model] {"model":…}`, 2.1.251) and then
-        // runs it at the 200k default window. Worth a WARN, not a DEBUG: it is
-        // the first and most direct sign of the 0079 misconfiguration, minutes
-        // before the first context reading can compare numbers.
+        // (`[claude-code:unrecognized_model] {"model":…}`, 2.1.251). For a
+        // non-Claude id it still prints this with the row's window applied
+        // (CLAUDE_CODE_MAX_CONTEXT_TOKENS, measured 2.1.291), so the line
+        // alone does not mean 200k; the pump's window notice compares the
+        // numbers. Worth a WARN, not a DEBUG: it is the first sign that the
+        // CLI is on its own catalog for this id.
         if line.contains("unrecognized_model") {
-            warn!(target: "agent_stderr", agent = %agent_name, msg = %line, "claude CLI does not recognise the model id — expect its default context window; set the model row's CLI settings (modelOverrides)");
+            warn!(target: "agent_stderr", agent = %agent_name, msg = %line, "claude CLI does not recognise the model id — a non-Claude id runs at the model row's Context window (nothing set = the CLI default); a Claude id it does not know yet needs the row's CLI settings (modelOverrides)");
         } else {
             debug!(target: "agent_stderr", agent = %agent_name, msg = %line);
         }
