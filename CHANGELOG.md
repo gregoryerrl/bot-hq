@@ -187,6 +187,12 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **The Add/Edit model dialog fits the window.** It had no height limit, and
+  once the Claude config dir field and its setup commands were added it grew
+  taller than the window: the title and Save were cut off and nothing
+  scrolled. It now opens at the New session dialog's size, in two columns
+  that scroll on their own, with Cancel, Save and any error always in view.
+  A text selection dragged out of the dialog no longer closes it.
 - **The composer's working line now shows what is running.** It reads a
   turn's age, its tool count and the running tool from the chat, but looked
   the rows up under the participant's slot rather than its name. In the app it

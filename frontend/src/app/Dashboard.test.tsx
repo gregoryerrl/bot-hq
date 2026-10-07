@@ -12,6 +12,7 @@ import {
 } from "./Dashboard";
 import { invoke } from "@tauri-apps/api/core";
 import type { AccountMark, ClaudeOverrides, ModelView, RoleView } from "../lib/bindings";
+import { wideDialogClass } from "../components/ui/Dialog";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 // The dashboard subscribes to `agent:messages:batch` for Quickview liveness.
@@ -734,6 +735,18 @@ describe("New session dialog — no agent names (D10)", () => {
     // …and the roles the user DID pick from are still offered by their own
     // display names, so this is not passing by rendering nothing.
     expect(dialog.textContent).toMatch(/HANDS/);
+  });
+});
+
+describe("New session dialog — the frame", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  // The Add/Edit model dialog was made "wide like the New session dialog" by
+  // sharing this one frame; this keeps the two from drifting apart.
+  it("is the shared wide frame", async () => {
+    mockBackend();
+    await openDialog();
+    expect(screen.getByRole("dialog", { name: /new session/i }).className).toBe(wideDialogClass);
   });
 });
 

@@ -11,6 +11,7 @@ import {
 } from "./ModelsPanel";
 import { invoke } from "@tauri-apps/api/core";
 import type { AccountMark, ModelView } from "../lib/bindings";
+import { wideDialogClass } from "../components/ui/Dialog";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const mockInvoke = vi.mocked(invoke);
@@ -128,7 +129,71 @@ describe("Settings → Models — a model row's Claude config dir (0090)", () =>
     fireEvent.change(screen.getByLabelText(/^model id$/i), { target: { value: "y" } });
     fireEvent.change(screen.getByLabelText(/claude config dir/i), { target: { value: "~/.claude-acct-2" } });
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
-    expect(await screen.findByText(/must be an absolute path/i)).toBeInTheDocument();
+    const refusal = await screen.findByText(/must be an absolute path/i);
+    // Beside Save, outside the scrolling body: a refusal below the fold would
+    // leave Save looking dead.
+    expect(screen.getByTestId("model-dialog-body")).not.toContainElement(refusal);
+  });
+});
+
+describe("Settings → Models — the dialog fits the window", () => {
+  // jsdom has no layout, so this pins the classes that make it fit: a frame
+  // with a fixed, viewport-clamped height (the New session frame), a body that
+  // can shrink (min-h-0) and scrolls, and actions outside the scroller.
+  // Before this, the dialog was a centred card with no height bound — taller
+  // than the window once the config dir's setup commands showed, with Save
+  // pushed off-screen and nothing to scroll.
+  const tokens = (el: Element) => el.className.split(/\s+/);
+
+  it("is the New session frame, its fields scroll, and Cancel/Save never do", async () => {
+    mockBackend([]);
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /add model/i }));
+    const dialog = await screen.findByRole("dialog", { name: /add model/i });
+    expect(dialog.className).toBe(wideDialogClass);
+    expect(tokens(dialog)).toEqual(
+      expect.arrayContaining(["flex", "flex-col", "overflow-hidden", "h-[min(760px,90vh)]"]),
+    );
+
+    // Below md the body is the one scroller; on md+ each column scrolls itself.
+    const body = within(dialog).getByTestId("model-dialog-body");
+    expect(tokens(body)).toEqual(expect.arrayContaining(["min-h-0", "flex-1", "max-md:overflow-y-auto"]));
+    const columns = Array.from(body.children);
+    expect(columns).toHaveLength(2);
+    for (const column of columns) {
+      expect(tokens(column)).toEqual(expect.arrayContaining(["min-h-0", "md:overflow-y-auto"]));
+    }
+
+    for (const label of [/display name/i, /^model id$/i, /context window/i, /claude config dir/i, /claude cli settings/i]) {
+      expect(body).toContainElement(within(dialog).getByLabelText(label));
+    }
+    expect(body).not.toContainElement(within(dialog).getByRole("button", { name: /^save$/i }));
+    expect(body).not.toContainElement(within(dialog).getByRole("button", { name: /^cancel$/i }));
+  });
+
+  it("a selection dragged out of the dialog leaves it open; the backdrop and × close it", async () => {
+    mockBackend([]);
+    renderPanel();
+    const open = async () => {
+      fireEvent.click(await screen.findByRole("button", { name: /add model/i }));
+      return screen.findByRole("dialog", { name: /add model/i });
+    };
+    const dialog = await open();
+    // A drag that starts inside the dialog and is released over the backdrop
+    // sends its click to the nearest element holding both — the dialog's
+    // parent. When that parent was a closing overlay, the drag closed the
+    // dialog and dropped the draft.
+    fireEvent.click(dialog.parentElement!);
+    expect(screen.getByRole("dialog", { name: /add model/i })).toBeInTheDocument();
+
+    const backdrop = dialog.previousElementSibling!;
+    expect(backdrop).toHaveAttribute("aria-hidden");
+    fireEvent.click(backdrop);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    const reopened = await open();
+    fireEvent.click(within(reopened).getByRole("button", { name: /^close$/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 });
 

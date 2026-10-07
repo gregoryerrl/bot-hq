@@ -32,6 +32,7 @@ import { useTauriEvent } from "../hooks/useTauriEvent";
 import { pickFolder } from "./contextLibraryShared";
 import { Skeleton } from "../components/ui/Skeleton";
 import { selectClass } from "../components/ui/Select";
+import { wideDialogClass } from "../components/ui/Dialog";
 import {
   rosterAdvisory,
   EDIT_FILES,
@@ -656,22 +657,16 @@ export function Dashboard() {
             onClick={() => setCreating(false)}
             aria-hidden
           />
+          {/* FIXED frame (user 2026-08-25), shared with the model dialog:
+              adding participants scrolls the roster list instead of growing
+              the dialog — the full rationale sits on `wideDialogClass`. */}
           <div
             ref={dialogRef}
             tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-label="New session"
-            className={cn(
-              // FIXED frame (user 2026-08-25): the size is the viewport-clamped
-              // constant, never the content — adding participants scrolls the
-              // roster list instead of growing the dialog, and removing them
-              // does not shrink it. The min() clamp keeps both edges on-screen
-              // for short/narrow windows (a fixed+translated box cannot be
-              // scrolled back into view by the page).
-              "fixed left-1/2 top-1/2 z-50 flex h-[min(760px,90vh)] w-[min(1100px,92vw)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden",
-              "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
-            )}
+            className={wideDialogClass}
           >
             <div className="mb-4 flex shrink-0 items-center justify-between">
               <h2 className="font-headline-md text-headline-md text-on-surface">
