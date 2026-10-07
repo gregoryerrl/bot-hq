@@ -601,6 +601,32 @@ rename to new";
         );
     }
 
+    /// A row with no window, or a zero, hands the probe's CLI nothing — the
+    /// same rule as live spawn, so the probe never reports a window the agent
+    /// would not get.
+    #[test]
+    fn the_preflight_sets_no_max_context_env_without_a_window() {
+        for window in [None, Some(0)] {
+            let cfg = AgentConfig {
+                agent_name: "hands".into(),
+                provider: "OpenRouter".into(),
+                model_name: "xiaomi/mimo-v2.6-pro".into(),
+                base_url: Some("https://openrouter.ai/api".into()),
+                auth_token: Some("or-token".into()),
+                updated_at: String::new(),
+                context_window: window,
+                cli_settings: None,
+                claude_config_dir: None,
+            };
+            let cmd = headless_claude_cmd(&cfg, "ping");
+            let set = cmd
+                .as_std()
+                .get_envs()
+                .any(|(k, _)| k.to_string_lossy() == "CLAUDE_CODE_MAX_CONTEXT_TOKENS");
+            assert!(!set, "{window:?} must not reach the CLI");
+        }
+    }
+
     /// 0090: the pre-flight runs in the model row's own config dir — so Test
     /// connection on a `· acct 2` row checks THAT account's login, not the
     /// default dir's — and the inherited auth variables are removed before
