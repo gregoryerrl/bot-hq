@@ -25,9 +25,13 @@
 //! (`http://127.0.0.1:<port>/<hex(real-upstream)>`); for each request it
 //! rewrites the JSON body — hoisting any `role:"system"` message out of
 //! `messages[]` and into the top-level `system` field (which every gateway
-//! accepts) — then forwards to the real upstream over TLS and streams the
-//! response straight back. Source-agnostic: it strips the alien role no
-//! matter which hook/mechanism injected it.
+//! accepts), and replacing any tool call the gateway cannot replay (a
+//! `tool_use` with an empty id or name, plus the `tool_result` that answers
+//! it — the model's own malformed output, which claude-code replays on every
+//! later request until the conversation dies of `400 … non-empty string
+//! tool_call_id`; OpenRouter → MiMo, 2026-10-07) — then forwards to the real
+//! upstream over TLS and streams the response straight back. Source-agnostic:
+//! it strips the alien role no matter which hook/mechanism injected it.
 //!
 //! Only participants whose model has a custom `base_url` route through it; a
 //! participant on the first-party API hits it directly and never touches the
@@ -340,12 +344,18 @@ fn text_resp(status: StatusCode, msg: &str) -> Response<ProxyBody> {
         })
 }
 
-/// Rewrite an Anthropic `/v1/messages` request body so no `messages[]` entry
-/// has `role:"system"`: each such entry's text is hoisted into the top-level
-/// `system` field and the entry is removed. Returns the input unchanged
-/// (borrowed) when it isn't a JSON object, has no `messages` array, or has no
-/// system-role messages — so non-message requests (token counting, model
-/// listing) and already-clean bodies pass through untouched.
+/// Rewrite an Anthropic `/v1/messages` request body for a gateway stricter
+/// than Anthropic's API. Two independent passes over one parse:
+///
+/// 1. no `messages[]` entry keeps `role:"system"` — each such entry's text is
+///    hoisted into the top-level `system` field and the entry is removed;
+/// 2. no tool call the gateway cannot replay survives — see
+///    [`strip_unrunnable_tool_calls`].
+///
+/// Returns the input unchanged (borrowed) when it isn't a JSON object, has no
+/// `messages` array, or neither pass changed anything — so non-message
+/// requests (token counting, model listing) and already-clean bodies pass
+/// through untouched, byte for byte.
 fn normalize_messages_body(raw: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     let Ok(mut v) = serde_json::from_slice::<Value>(raw) else {
         return std::borrow::Cow::Borrowed(raw);
@@ -353,19 +363,36 @@ fn normalize_messages_body(raw: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     let Some(obj) = v.as_object_mut() else {
         return std::borrow::Cow::Borrowed(raw);
     };
-    let has_system = obj
-        .get("messages")
-        .and_then(|m| m.as_array())
-        .map(|arr| {
-            arr.iter()
-                .any(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
-        })
-        .unwrap_or(false);
-    if !has_system {
+    if !obj.get("messages").is_some_and(Value::is_array) {
         return std::borrow::Cow::Borrowed(raw);
     }
 
+    let hoisted = hoist_system_messages(obj);
+    let stripped = strip_unrunnable_tool_calls(obj);
+    if !hoisted && stripped == 0 {
+        return std::borrow::Cow::Borrowed(raw);
+    }
+    if stripped > 0 {
+        // Once per request, and the pair stays in the transcript, so this
+        // repeats on every later request of that conversation: a state line,
+        // not an alarm.
+        info!(
+            stripped,
+            "proxy: replaced tool call(s) with no id or name that the gateway could not replay"
+        );
+    }
+
+    match serde_json::to_vec(&v) {
+        Ok(bytes) => std::borrow::Cow::Owned(bytes),
+        Err(_) => std::borrow::Cow::Borrowed(raw),
+    }
+}
+
+/// Pass 1: hoist every `role:"system"` entry out of `messages[]` into the
+/// top-level `system` field. `true` when at least one entry moved.
+fn hoist_system_messages(obj: &mut Map<String, Value>) -> bool {
     let mut hoisted: Vec<String> = Vec::new();
+    let mut moved = false;
     if let Some(arr) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
         arr.retain(|m| {
             if m.get("role").and_then(|r| r.as_str()) == Some("system") {
@@ -373,6 +400,7 @@ fn normalize_messages_body(raw: &[u8]) -> std::borrow::Cow<'_, [u8]> {
                 if !text.is_empty() {
                     hoisted.push(text);
                 }
+                moved = true;
                 false
             } else {
                 true
@@ -380,11 +408,109 @@ fn normalize_messages_body(raw: &[u8]) -> std::borrow::Cow<'_, [u8]> {
         });
     }
     merge_into_system(obj, &hoisted);
+    moved
+}
 
-    match serde_json::to_vec(&v) {
-        Ok(bytes) => std::borrow::Cow::Owned(bytes),
-        Err(_) => std::borrow::Cow::Borrowed(raw),
+/// What the replaced `tool_result` says in its place. The model has to learn
+/// that its call did not run: at the moment of the 2026-10-07 poisoning the
+/// participant believed it had halted the session.
+const UNRUNNABLE_CALL_RESULT: &str = "[bot-hq] Your previous tool call carried no id or name, \
+     so it did not run";
+
+/// What an assistant message left with no block the API accepts alone says.
+const UNRUNNABLE_CALL_PLACEHOLDER: &str =
+    "[bot-hq] (a tool call with no id or name was removed here)";
+
+/// Pass 2: remove every `tool_use` block whose `id` or `name` is empty or
+/// missing, and turn the `tool_result` blocks that answer them — an empty
+/// `tool_use_id`, or one naming a removed call — into text that says the call
+/// did not run. Returns how many blocks changed.
+///
+/// Why: a gateway that translates to the OpenAI shape turns a `tool_result`
+/// into a `tool` message whose `tool_call_id` must be a non-empty string that
+/// matches an earlier call, and rejects the whole request otherwise (`400
+/// messages[N]: tool messages must include a non-empty string tool_call_id`,
+/// OpenRouter → xiaomi/mimo-v2.6-pro, 2026-10-07). claude-code faithfully
+/// replays the pair the model produced, so the request fails for the rest of
+/// the conversation; this is the only seam between the transcript and the
+/// gateway.
+///
+/// Shape rules, both measured against gateway 400s: the replacement text goes
+/// AFTER the surviving `tool_result` blocks of its message (tool results must
+/// come first), and no message is left with `content: []` or with only
+/// `thinking` blocks — such an assistant message gets one text block.
+fn strip_unrunnable_tool_calls(obj: &mut Map<String, Value>) -> usize {
+    let Some(arr) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return 0;
+    };
+    let mut changed = 0usize;
+    let mut dropped_ids: Vec<String> = Vec::new();
+    for msg in arr.iter_mut() {
+        let role = msg
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .to_string();
+        let Some(blocks) = msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
+            continue;
+        };
+        match role.as_str() {
+            "assistant" => {
+                let before = blocks.len();
+                blocks.retain(|b| {
+                    if b.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                        return true;
+                    }
+                    let id = b.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    if id.is_empty() || name.is_empty() {
+                        dropped_ids.push(id.to_string());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                let removed = before - blocks.len();
+                changed += removed;
+                let accepted_alone = blocks.iter().any(|b| {
+                    !matches!(
+                        b.get("type").and_then(|t| t.as_str()),
+                        Some("thinking") | Some("redacted_thinking")
+                    )
+                });
+                if removed > 0 && !accepted_alone {
+                    blocks.push(json!({ "type": "text", "text": UNRUNNABLE_CALL_PLACEHOLDER }));
+                }
+            }
+            "user" => {
+                let mut replacements: Vec<Value> = Vec::new();
+                blocks.retain(|b| {
+                    if b.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                        return true;
+                    }
+                    let id = b.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+                    if !id.is_empty() && !dropped_ids.iter().any(|d| d == id) {
+                        return true;
+                    }
+                    let original = extract_text(b.get("content"));
+                    let text = if original.is_empty() {
+                        format!("{UNRUNNABLE_CALL_RESULT}. Issue it again as a complete tool call.")
+                    } else {
+                        format!(
+                            "{UNRUNNABLE_CALL_RESULT} ({original}). Issue it again as a complete \
+                             tool call."
+                        )
+                    };
+                    replacements.push(json!({ "type": "text", "text": text }));
+                    false
+                });
+                changed += replacements.len();
+                blocks.extend(replacements);
+            }
+            _ => {}
+        }
     }
+    changed
 }
 
 /// Extract the plain text of a message `content` field — either a bare string
@@ -595,6 +721,174 @@ mod tests {
         let raw = b"not json at all";
         let out = normalize_messages_body(raw);
         assert_eq!(out.as_ref(), raw);
+    }
+
+    /// The 2026-10-07 poisoning, as the request carried it: MiMo (OpenRouter →
+    /// Novita) answered with a `tool_use` whose id AND name were empty,
+    /// claude-code replied with a `tool_result` whose `tool_use_id` was "", and
+    /// every later request replayed the pair — the gateway's OpenAI translation
+    /// answered `400 messages[43]: tool messages must include a non-empty string
+    /// tool_call_id` until the session died. The proxy drops the call and turns
+    /// its result into text that says it did not run, so the model learns that
+    /// and the request never ends on an assistant message (prefill semantics
+    /// through a gateway are unknown).
+    ///
+    /// No `role:"system"` message in this body on purpose: the hoist used to
+    /// return early when there was none, and a strip placed after that return
+    /// would never have run on a normal request.
+    #[test]
+    fn normalize_replaces_a_tool_call_with_no_id_and_its_result() {
+        let body = json!({
+            "model": "xiaomi/mimo-v2.6-pro",
+            "messages": [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "…", "signature": "sig"},
+                    {"type": "text", "text": "<tool_call><function=mark_awaiting_user</parameter>…"},
+                    {"type": "tool_use", "id": "", "name": "", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "", "is_error": true,
+                     "content": "<tool_use_error>Error: No such tool available: </tool_use_error>"}
+                ]}
+            ]
+        });
+        let raw = body.to_string();
+        let out = normalize_messages_body(raw.as_bytes());
+        assert!(matches!(out, std::borrow::Cow::Owned(_)), "the body was rewritten");
+        let parsed: Value = serde_json::from_slice(&out).unwrap();
+        let msgs = parsed["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "no message is dropped: {parsed}");
+        let assistant = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(assistant.len(), 2, "only the empty tool_use left the assistant message: {parsed}");
+        assert!(assistant.iter().all(|b| b["type"] != "tool_use"));
+        let user = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0]["type"], "text", "the result became text, not an empty message: {parsed}");
+        let text = user[0]["text"].as_str().unwrap();
+        for needle in ["[bot-hq]", "no id or name", "did not run", "No such tool available", "again"] {
+            assert!(text.contains(needle), "the model must learn the call did not run — lacks {needle:?}: {text}");
+        }
+        assert!(msgs[2]["role"] == "user", "the request still ends on a user message");
+        assert!(!out.windows(16).any(|w| w == br#""tool_use_id":"""#), "no empty tool_use_id survives");
+    }
+
+    /// A call with an id but no name is just as unrunnable, and the gateway
+    /// would 400 on its orphaned result (`tool_call_id` with no matching call)
+    /// once the call is gone — so the result that NAMES a dropped id goes too.
+    /// The placeholder text lands AFTER the surviving `tool_result` blocks:
+    /// Anthropic requires tool_results first in a user message, and through
+    /// OpenRouter a text block between an assistant's tool_calls and their
+    /// `tool` messages is a 400 of its own.
+    #[test]
+    fn normalize_drops_a_nameless_call_and_keeps_its_results_order() {
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "call_bad", "name": "", "input": {}},
+                    {"type": "tool_use", "id": "call_ok", "name": "Read", "input": {"file_path": "x"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "call_bad", "content": "err"},
+                    {"type": "tool_result", "tool_use_id": "call_ok", "content": "file body"}
+                ]}
+            ]
+        });
+        let raw = body.to_string();
+        let out = normalize_messages_body(raw.as_bytes());
+        let parsed: Value = serde_json::from_slice(&out).unwrap();
+        let assistant = parsed["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(assistant.len(), 1);
+        assert_eq!(assistant[0]["id"], "call_ok", "the healthy call stays: {parsed}");
+        let user = parsed["messages"][2]["content"].as_array().unwrap();
+        assert_eq!(user.len(), 2, "one result kept, one turned to text: {parsed}");
+        assert_eq!(user[0]["type"], "tool_result");
+        assert_eq!(user[0]["tool_use_id"], "call_ok");
+        assert_eq!(user[1]["type"], "text", "the text goes AFTER the tool_results: {parsed}");
+        assert!(user[1]["text"].as_str().unwrap().contains("err"));
+    }
+
+    /// An assistant message left with nothing — or with only thinking blocks,
+    /// which the API will not accept alone — gets one text block saying what
+    /// was there; `content: []` is a 400 of its own.
+    #[test]
+    fn normalize_never_leaves_an_assistant_message_empty() {
+        for content in [
+            json!([{"type": "tool_use", "id": "", "name": "", "input": {}}]),
+            json!([
+                {"type": "thinking", "thinking": "…", "signature": "s"},
+                {"type": "tool_use", "id": "", "name": "x", "input": {}}
+            ]),
+        ] {
+            let body = json!({
+                "messages": [
+                    {"role": "user", "content": "go"},
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "", "content": "e"}
+                    ]}
+                ]
+            });
+            let raw = body.to_string();
+            let out = normalize_messages_body(raw.as_bytes());
+            let parsed: Value = serde_json::from_slice(&out).unwrap();
+            let assistant = parsed["messages"][1]["content"].as_array().unwrap();
+            assert!(
+                assistant.iter().any(|b| b["type"] == "text" && b["text"].as_str().unwrap().contains("[bot-hq]")),
+                "a placeholder text block, not an empty or thinking-only message: {parsed}"
+            );
+            assert!(assistant.iter().all(|b| b["type"] != "tool_use"));
+        }
+    }
+
+    /// Healthy tool pairs are not touched, and a body that needs both fixes
+    /// gets both: the hoist and the strip are independent passes over one
+    /// parse, and the body is serialised once.
+    #[test]
+    fn normalize_keeps_healthy_tool_pairs_and_combines_with_the_hoist() {
+        let body = json!({
+            "messages": [
+                {"role": "system", "content": "INJECTED"},
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "call_ok", "name": "Read", "input": {}},
+                    {"type": "tool_use", "id": "", "name": "", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "call_ok", "content": "fine"},
+                    {"type": "tool_result", "tool_use_id": "", "content": "bad"}
+                ]}
+            ]
+        });
+        let raw = body.to_string();
+        let out = normalize_messages_body(raw.as_bytes());
+        let parsed: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(parsed["system"], json!("INJECTED"), "hoisted");
+        let msgs = parsed["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[1]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(msgs[1]["content"][0]["id"], "call_ok");
+        let user = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(user[0]["tool_use_id"], "call_ok", "the healthy result is untouched");
+        assert_eq!(user[1]["type"], "text");
+
+        // Control: a healthy pair alone comes back byte for byte.
+        let healthy = json!({
+            "messages": [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "call_ok", "name": "Read", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "call_ok", "content": "fine"}
+                ]}
+            ]
+        })
+        .to_string();
+        let out = normalize_messages_body(healthy.as_bytes());
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)), "no copy when clean");
+        assert_eq!(out.as_ref(), healthy.as_bytes());
     }
 
     #[test]

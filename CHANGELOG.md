@@ -204,6 +204,17 @@ and in `docs/rebuild-archive/`.
   Fable case), which the notice now says, with what the mapping's key is. A
   gateway model with no Context window on its row is now called out once per
   spawn instead of silently running at the default.
+- **A session on a gateway model survives a tool call the model got wrong.**
+  Through OpenRouter, MiMo once answered with a tool call that had no id and
+  no name; claude-code dutifully recorded a result for it, and from then on
+  every request replayed the pair and the gateway refused the whole
+  conversation (`400 messages[43]: tool messages must include a non-empty
+  string tool_call_id`) until the session was halted. The gateway proxy now
+  removes such a call before forwarding and turns its result into a note that
+  the call did not run (after the message's remaining tool results, never
+  leaving a message empty), so the next request goes through and the
+  participant can issue the call again. The transcript is left as it was; a
+  conversation already poisoned heals on its next request.
 - **On Windows, the second account's setup commands are PowerShell.** The
   Model dialog's sign-in and share commands, and the command bot-hq names
   when it refuses to start a participant in a logged-out folder, were written
