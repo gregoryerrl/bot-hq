@@ -39,9 +39,10 @@ and in `docs/rebuild-archive/`.
 - **A participant that is not billing its subscription is called out.** If
   claude-code reports that an API key reached a subscription participant (an
   `apiKeyHelper` or an `env` entry in a shared settings file, say), the chat
-  says so once at start. A folder signed in through the Console (API-usage
-  billing) rather than the claude.ai login is refused for a new participant
-  and called out for a resumed one. Known limit: the check accepts only the
+  says so once at start. A second folder signed in through the Console
+  (API-usage billing) rather than the claude.ai login is refused for a new
+  participant; in `~/.claude`, or for a resumed participant, it is called out
+  instead. Known limit: the check accepts only the
   values claude-code 2.1.284 was measured to report for a subscription
   (`authMethod` `claude.ai`, `apiKeySource` `none`); if a later CLI renames
   them, a new participant's start in a second folder is refused and every
