@@ -10,7 +10,7 @@ use super::*;
 const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text, \
      body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms, live_body_sha256, exec_kind, \
-     run_timeout_secs";
+     run_timeout_secs, pinned_scripts";
 
 /// The statuses a tray row passes through. `queued` (0080) is the one that is
 /// NOT a user-facing item: an outward publish waiting for the reviewer to read
@@ -362,6 +362,19 @@ impl Storage {
             .execute(&self.pool)
             .await
             .with_context(|| format!("marking gate {choice_id} as {kind}"))?;
+        Ok(())
+    }
+
+    /// Record the scripts a gate's command runs that were readable at park,
+    /// with their hashes (0096, feedback #55) — `json` is the object the
+    /// approval re-checks.
+    pub async fn set_tray_pinned_scripts(&self, choice_id: &str, json: &str) -> Result<()> {
+        sqlx::query("UPDATE session_tray SET pinned_scripts = ? WHERE choice_id = ?")
+            .bind(json)
+            .bind(choice_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("recording gate {choice_id}'s pinned scripts"))?;
         Ok(())
     }
 

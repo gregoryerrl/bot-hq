@@ -253,10 +253,14 @@ and in `docs/rebuild-archive/`.
   path.** `bash /tmp/check.sh` used to show you one line and run whatever the
   file held when you approved. The scripts a command runs (`bash X`, `sh X`,
   `python3 X`, `source X`, `./X` and the like) are now hashed when the gate
-  parks — the card names them — and re-hashed at approval: a script changed
-  in between is refused ("NOT RUN: the script changed after it was parked";
-  re-issue to pin the new version), and a missing one is named. Inline
-  `-c` text, modules and stdin scripts are not files and are not pinned.
+  parks — the card names them with their hash — and re-hashed at approval: a
+  script changed in between is refused ("NOT RUN: the script changed after it
+  was parked"; re-issue to pin the new version), and a pinned one that went
+  missing is named. A script that could not be read when the gate parked — one
+  the command itself creates, a path only the command's `cd` resolves — is not
+  pinned: the card says so and it runs as it is, with a note. `~/x` means your
+  home. Inline `-c` text, modules and stdin scripts are not files and are not
+  pinned.
 - **A session's gates have a ledger.** `gate_history` lists the session's
   gated commands newest first — each one's short id, time, issuer, state
   (queued for the reviewer, pending your approval, approved with its exit code,

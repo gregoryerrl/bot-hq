@@ -340,6 +340,12 @@ pub struct SessionTrayEntry {
     #[serde(default)]
     #[sqlx(default)]
     pub run_timeout_secs: Option<i64>,
+    /// The scripts the command runs that were readable when the gate parked,
+    /// as a JSON object `{"<path as written>": "<sha256>"}` (0096, feedback
+    /// #55); re-hashed at approval. NULL when none were, or before the column.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub pinned_scripts: Option<String>,
 }
 
 impl SessionTrayEntry {

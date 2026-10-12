@@ -433,7 +433,8 @@ impl SignalingBridge {
     ) -> Result<ParkOutcome> {
         let listed = self.data_read_in(session_id, command).await;
         let reader = reviewer_read.then_some(agent);
-        let mut card_extra = card_extra(command, listed.as_ref(), approve_after, reader);
+        let scripts = self.script_pins(session_id, command).await;
+        let mut card_extra = card_extra(command, scripts, listed.as_ref(), approve_after, reader);
         if let Some(card) = prod_read_card {
             card_extra = format!("\n\n{card}{card_extra}");
         }
@@ -644,7 +645,10 @@ impl SignalingBridge {
                 }
             }
             let id8: String = row.choice_id.chars().take(8).collect();
-            let shown = crate::policy::secret_scan::redact_string(super::util::command_excerpt(command).into_owned());
+            // Redacted BEFORE the excerpt cuts it (EYES f1dc5d11): a token
+            // straddling the cut would otherwise survive the scan.
+            let redacted = crate::policy::secret_scan::redact_string(command.to_string());
+            let shown = super::util::command_excerpt(&redacted).into_owned();
             let shown = if shown.contains('\n') { format!("\n    {}", shown.replace('\n', "\n    ")) } else { format!(" `{shown}`") };
             lines.push(format!("- {id8} · {} · {} · {state}{shown}", row.asked_at, row.agent));
             if lines.len() >= limit {
@@ -960,15 +964,7 @@ impl SignalingBridge {
         command: &str,
     ) -> Option<Result<(String, Vec<(String, Vec<u8>)>), String>> {
         use sha2::{Digest, Sha256};
-        let mut files = super::outward_body::extract(command).map(|b| b.files).unwrap_or_default();
-        // The scripts the command RUNS are pinned the same way (feedback #55):
-        // `bash /tmp/check.sh` approved a path, not the commands in it, and
-        // nothing stopped the file changing between park and approval.
-        for script in super::outward_body::executed_scripts(command) {
-            if !files.contains(&script) {
-                files.push(script);
-            }
-        }
+        let files = super::outward_body::extract(command).ok()?.files;
         if files.is_empty() {
             return None;
         }
@@ -990,8 +986,10 @@ impl SignalingBridge {
         Some(Ok((format!("{:x}", hasher.finalize()), read)))
     }
 
-    /// Record the body hash on a freshly parked or queued gate (0084).
+    /// Record the body hash on a freshly parked or queued gate (0084), and the
+    /// pins of the scripts it runs (0096).
     async fn record_body_digest(&self, session_id: &str, gate_id: &str, command: &str) {
+        self.record_script_pins(session_id, gate_id, command).await;
         let Some(Ok(sha)) = self.body_files_digest(session_id, command).await else { return };
         let storage = self.storage.lock().await.clone();
         if let Some(storage) = storage {
@@ -999,6 +997,97 @@ impl SignalingBridge {
                 tracing::warn!(%gate_id, error = %e, "could not record the gate's body hash");
             }
         }
+    }
+
+    /// The scripts `command` runs, split into those readable now — each with
+    /// its sha256, the PINNED set — and those not (a file the command itself
+    /// creates, a path only its `cd` resolves): feedback #55 / EYES d8c8c3a4.
+    pub(super) async fn script_pins(
+        &self,
+        session_id: &str,
+        command: &str,
+    ) -> (std::collections::BTreeMap<String, String>, Vec<String>) {
+        use sha2::{Digest, Sha256};
+        let mut pinned = std::collections::BTreeMap::new();
+        let mut unpinned = Vec::new();
+        for script in super::outward_body::executed_scripts(command) {
+            let resolved = self.resolve_body_path(session_id, &script).await;
+            match std::fs::read(&resolved) {
+                Ok(bytes) => {
+                    pinned.insert(script, format!("{:x}", Sha256::digest(&bytes)));
+                }
+                Err(_) => unpinned.push(script),
+            }
+        }
+        (pinned, unpinned)
+    }
+
+    /// Record the pinned scripts of a freshly parked or queued gate (0096).
+    pub(super) async fn record_script_pins(&self, session_id: &str, gate_id: &str, command: &str) {
+        let (pinned, _) = self.script_pins(session_id, command).await;
+        if pinned.is_empty() {
+            return;
+        }
+        let Ok(json) = serde_json::to_string(&pinned) else { return };
+        let storage = self.storage.lock().await.clone();
+        if let Some(storage) = storage {
+            if let Err(e) = storage.set_tray_pinned_scripts(gate_id, &json).await {
+                tracing::warn!(%gate_id, error = %e, "could not record the gate's pinned scripts");
+            }
+        }
+    }
+
+    /// The approval-time check of a gate's pinned scripts (feedback #55):
+    /// `Ok(notes)` to run — with a note for each script the command runs that
+    /// was not pinned at park — or `Err((refusal, short))` when a pinned
+    /// script is missing or changed.
+    pub(super) async fn check_script_pins(
+        &self,
+        session_id: &str,
+        command: &str,
+        pinned_json: Option<&str>,
+    ) -> Result<Vec<String>, (String, String)> {
+        use sha2::{Digest, Sha256};
+        let pinned: std::collections::BTreeMap<String, String> = pinned_json
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+        for (script, then) in &pinned {
+            let resolved = self.resolve_body_path(session_id, script).await;
+            match std::fs::read(&resolved) {
+                Err(_) => {
+                    return Err((
+                        format!(
+                            "NOT RUN: the script `{script}` this command runs is missing at approval (it was \
+                             pinned when the gate parked). Re-issue the command once it exists."
+                        ),
+                        format!("the script `{script}` was missing at approval"),
+                    ))
+                }
+                Ok(bytes) => {
+                    if format!("{:x}", Sha256::digest(&bytes)) != *then {
+                        return Err((
+                            format!(
+                                "NOT RUN: the script `{script}` changed after it was parked, so the approved card \
+                                 no longer matches what would run. Re-issue the command to park the script as \
+                                 it is now."
+                            ),
+                            "the script changed after it was parked".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        let notes = super::outward_body::executed_scripts(command)
+            .into_iter()
+            .filter(|s| !pinned.contains_key(s))
+            .map(|s| {
+                format!(
+                    "Note: the script `{s}` could not be read when this parked (not yet created, or a \
+                     path only the command resolves), so it was not pinned — it ran as it was at approval."
+                )
+            })
+            .collect();
+        Ok(notes)
     }
 
     /// The card question for a gated command — built ONCE for the direct
@@ -1037,6 +1126,13 @@ impl SignalingBridge {
     /// A body path as the command will read it: relative paths resolve
     /// against the session's working repo — where `execute_gated` runs it.
     pub(super) async fn resolve_body_path(&self, session_id: &str, p: &str) -> PathBuf {
+        // `~/x` is the user's home (EYES d8c8c3a4: it used to resolve to
+        // `<repo>/~/x`, which no file ever matched).
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            if let Some(expanded) = expand_home(p, &home) {
+                return expanded;
+            }
+        }
         let path = std::path::Path::new(p);
         if path.is_relative() {
             if let Some(repo) = self.session_working_repo(session_id).await {
@@ -1116,6 +1212,7 @@ pub(crate) fn queued_gate_text(gate_id: &str, command: &str, existing: bool) -> 
 /// read matched, and the executor's "approve only after" (feedback #94).
 fn card_extra(
     command: &str,
+    scripts: (std::collections::BTreeMap<String, String>, Vec<String>),
     listed: Option<&crate::policy::data_reads::DataRead>,
     approve_after: Option<&str>,
     reviewer: Option<&str>,
@@ -1133,16 +1230,28 @@ fn card_extra(
         ));
     }
     // Feedback #55: the scripts the command runs are named, so the approver
-    // knows the Approve is for the file as it is NOW — bot-hq re-hashes it at
-    // approval and refuses to run a changed one.
-    let scripts = super::outward_body::executed_scripts(command);
-    if !scripts.is_empty() {
+    // knows what the Approve is for — the file as it is NOW when it could be
+    // read (pinned: a change before the Approve is refused at run time), or
+    // whatever the path holds at run time when it could not (a script the
+    // command creates).
+    let (pinned, unpinned) = scripts;
+    if !pinned.is_empty() {
         out.push_str(&format!(
             "\n\nRuns the script{} {} as {} now — pinned by hash when this parked; a change before \
              your Approve is refused at run time.",
-            if scripts.len() == 1 { "" } else { "s" },
-            scripts.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", "),
-            if scripts.len() == 1 { "it is" } else { "they are" },
+            if pinned.len() == 1 { "" } else { "s" },
+            pinned.iter().map(|(s, sha)| format!("`{s}` (sha256 {}…)", &sha[..12])).collect::<Vec<_>>().join(", "),
+            if pinned.len() == 1 { "it is" } else { "they are" },
+        ));
+    }
+    if !unpinned.is_empty() {
+        out.push_str(&format!(
+            "\n\nRuns the script{} {} that could not be read now (not yet created, or a path only the \
+             command resolves), so {} NOT pinned: approving runs whatever {} at run time.",
+            if unpinned.len() == 1 { "" } else { "s" },
+            unpinned.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", "),
+            if unpinned.len() == 1 { "it is" } else { "they are" },
+            if unpinned.len() == 1 { "it holds" } else { "they hold" },
         ));
     }
     if let Some(read) = listed {
@@ -1160,6 +1269,15 @@ fn card_extra(
         out.push_str(&format!("\n\n⚠ Approve only after: {after}"));
     }
     out
+}
+
+/// `~` and `~/x` as a path under `home`; `None` for any other spelling
+/// (`~user/x` is not expanded).
+fn expand_home(p: &str, home: &std::path::Path) -> Option<PathBuf> {
+    if p == "~" {
+        return Some(home.to_path_buf());
+    }
+    p.strip_prefix("~/").map(|rest| home.join(rest))
 }
 
 /// OUTWARD classifier — see [`super::outward_body::is_outward`]: a simple
@@ -2317,14 +2435,17 @@ mod tests {
         let cmd = format!("bash {}", posix_path(&script));
         let gate = park(cmd.clone()).await;
         let row = storage.get_tray_entry(&gate).await.unwrap().unwrap();
-        assert!(row.body_sha256.is_some(), "the script is hashed at park");
-        assert!(row.prompt.contains(&format!("Runs the script `{}` as it is now — pinned by hash", posix_path(&script))), "{}", row.prompt);
+        let pins: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(row.pinned_scripts.as_deref().expect("the script is pinned at park")).unwrap();
+        assert_eq!(pins.keys().collect::<Vec<_>>(), [&posix_path(&script)]);
+        assert!(row.body_sha256.is_none(), "a script is not a publish body");
+        assert!(row.prompt.contains(&format!("Runs the script `{}` (sha256 ", posix_path(&script))) && row.prompt.contains("pinned by hash"), "{}", row.prompt);
         // The script changes before the Approve: refused, nothing runs.
         let other = repo.path().join("ran-v2.txt");
         std::fs::write(&script, format!("touch {}\n", posix_path(&other))).unwrap();
         match bridge.resolve_choice(&gate, "Approve".into()).await.unwrap() {
             ResolveOutcome::DeliveredOutOfBand { body, .. } => {
-                assert!(body.contains("NOT RUN: the script changed after it was parked"), "{body}");
+                assert!(body.contains("NOT RUN: the script `") && body.contains("` changed after it was parked"), "{body}");
             }
             other => panic!("{other:?}"),
         }
@@ -2340,7 +2461,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(other.exists(), "the re-pinned script ran");
-        // A script missing at approval is named.
+        // A pinned script missing at approval is named.
         let gate3 = park(cmd).await;
         std::fs::remove_file(&script).unwrap();
         match bridge.resolve_choice(&gate3, "Approve".into()).await.unwrap() {
@@ -2349,6 +2470,60 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// EYES d8c8c3a4: a script the command itself creates (a heredoc, then
+    /// `bash` on it), or one whose path only the command resolves (`cd sub &&
+    /// ./run.sh`), could not be read at park — it is NOT pinned, the card says
+    /// so, and the approval runs it with a note instead of refusing. `~/x`
+    /// resolves to the home directory.
+    #[tokio::test]
+    async fn a_script_the_command_creates_is_not_pinned_and_runs() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        let storage = bridge.storage.lock().await.clone().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        let marker = repo.path().join("made.txt");
+        let script = repo.path().join("made.sh");
+        let cmd = format!(
+            "cat > {s} <<'EOF'\ntouch {m}\nEOF\nbash {s}",
+            s = posix_path(&script),
+            m = posix_path(&marker)
+        );
+        let reply = bridge.action_gate("s1".into(), "hands".into(), cmd, true).await.unwrap();
+        let gate = reply.split("gate_id: ").nth(1).and_then(|r| r.split(')').next()).unwrap().to_string();
+        let row = storage.get_tray_entry(&gate).await.unwrap().unwrap();
+        assert!(row.pinned_scripts.is_none(), "nothing readable to pin: {:?}", row.pinned_scripts);
+        assert!(row.prompt.contains(&format!("Runs the script `{}` that could not be read now", posix_path(&script))) && row.prompt.contains("NOT pinned"), "{}", row.prompt);
+        match bridge.resolve_choice(&gate, "Approve".into()).await.unwrap() {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => {
+                assert!(body.contains("exit 0"), "{body}");
+                assert!(body.contains("was not pinned — it ran as it was at approval"), "{body}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(marker.exists(), "the command ran: it created the script and ran it");
+        // `cd sub && ./run.sh`: the path is the sub-folder's, unreadable from the
+        // repo root at park — not pinned, and the command still runs.
+        std::fs::create_dir_all(repo.path().join("sub")).unwrap();
+        let sub_marker = repo.path().join("sub-ran.txt");
+        std::fs::write(repo.path().join("sub/run.sh"), format!("touch {}\n", posix_path(&sub_marker))).unwrap();
+        let reply = bridge.action_gate("s1".into(), "hands".into(), "cd sub && bash ./run.sh".into(), true).await.unwrap();
+        let gate = reply.split("gate_id: ").nth(1).and_then(|r| r.split(')').next()).unwrap().to_string();
+        assert!(storage.get_tray_entry(&gate).await.unwrap().unwrap().pinned_scripts.is_none());
+        match bridge.resolve_choice(&gate, "Approve".into()).await.unwrap() {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => assert!(body.contains("exit 0"), "{body}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(sub_marker.exists());
+        // `~` expansion, on the pure helper (the real home is not written to).
+        let home = std::path::Path::new("/Users/me");
+        assert_eq!(expand_home("~/bin/x.sh", home), Some(home.join("bin/x.sh")));
+        assert_eq!(expand_home("~", home), Some(home.to_path_buf()));
+        assert_eq!(expand_home("~other/x", home), None);
+        assert_eq!(expand_home("./x", home), None);
     }
 
     /// Feedback #88: the ledger lists the session's gates newest first with
