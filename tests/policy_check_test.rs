@@ -120,8 +120,14 @@ fn the_tool_gate_hook_passes_a_keyword_quoted_to_grep() {
     let data = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(data.path().join("config")).unwrap();
     std::fs::write(data.path().join("config/tool-gate.json"), r#"[{"keyword":"gh api","mode":"gate"}]"#).unwrap();
-    let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "gh api repos/o/r");
+    let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "gh api repos/o/r -f title=x");
     assert_eq!((code, out.as_str()), (2, ""), "{err}");
+    // Feedback #83, the user's decision: a pure `gh api` GET passes the built
+    // hook even with the `gh api` keyword gated; a write beside it does not.
+    let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "gh api repos/o/r/issues --paginate | jq '.[].title'");
+    assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "a GET read runs unapproved");
+    let (code, _, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "gh api repos/o/r && gh issue comment 5 -b x");
+    assert_eq!(code, 2, "a write on the same line keeps the stop: {err}");
     let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "grep -rn 'gh api' src | head -5");
     assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "a quoted pattern is not a run");
     let (code, _, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "grep -rn 'gh api' src | sh");
